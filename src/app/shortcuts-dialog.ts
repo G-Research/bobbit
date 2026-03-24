@@ -59,6 +59,7 @@ export function showShortcutsDialog(): void {
 export function hideShortcutsDialog(): void {
 	if (!dialogContainer) return;
 	resetRebindState();
+	window.removeEventListener("keydown", handleRebindKeydown, true);
 	render(html``, dialogContainer);
 	dialogContainer.remove();
 	dialogContainer = null;
