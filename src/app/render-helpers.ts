@@ -335,8 +335,21 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 /** Track in-flight team start/stop (shared across desktop and mobile). */
 const teamLoading = new Set<string>();
 
-/** Render a compact gate status badge like (2/3) for goals with workflows. */
-function renderGatesBadge(goalId: string) {
+/** Render a PR icon or gate status badge next to a goal in the sidebar. */
+function renderGoalBadge(goalId: string) {
+	// PR status takes priority over gate counts
+	const pr = state.prStatusCache.get(goalId);
+	if (pr) {
+		const color = pr.state === "OPEN" ? "#22c55e" : pr.state === "MERGED" ? "#a855f7" : "#ef4444";
+		const label = pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`;
+		const icon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
+		if (pr.url) {
+			return html`<a class="shrink-0 flex items-center" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${icon}</a>`;
+		}
+		return html`<span class="shrink-0 flex items-center" title=${label}>${icon}</span>`;
+	}
+
+	// Fall back to gate status
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
 	const hasTeam = state.gatewaySessions.some(s => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead" && s.status !== "terminated");
@@ -434,7 +447,7 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="shrink-0 text-muted-foreground">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
-				${renderGatesBadge(goal.id)}
+				${renderGoalBadge(goal.id)}
 				${mobile
 					? dashboardBtn
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">

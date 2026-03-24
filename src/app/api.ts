@@ -138,8 +138,9 @@ export async function refreshSessions(): Promise<void> {
 
 		state.sessionsError = "";
 
-		// Fetch gate status for goals with workflows (fire-and-forget, updates on completion)
+		// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion)
 		refreshGateStatusCache();
+		refreshPrStatusCache();
 	} catch (err) {
 		if (isInitial) {
 			state.sessionsError = err instanceof Error ? err.message : String(err);
@@ -170,6 +171,40 @@ async function refreshGateStatusCache() {
 		const prev = state.gateStatusCache.get(goalId);
 		if (!prev || prev.passed !== passed || prev.total !== total) {
 			state.gateStatusCache.set(goalId, { passed, total });
+			changed = true;
+		}
+	}
+	if (changed) renderApp();
+}
+
+/** Fetch PR status for all goals with branches and update the cache. */
+async function refreshPrStatusCache() {
+	const goalsWithBranch = state.goals.filter(g => g.branch);
+	if (goalsWithBranch.length === 0) return;
+
+	const results = await Promise.all(
+		goalsWithBranch.map(async (g) => {
+			try {
+				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status`);
+				if (!res.ok) return { goalId: g.id, pr: null };
+				const data = await res.json();
+				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number } };
+			} catch {
+				return { goalId: g.id, pr: null };
+			}
+		})
+	);
+
+	let changed = false;
+	for (const { goalId, pr } of results) {
+		const prev = state.prStatusCache.get(goalId);
+		if (pr) {
+			if (!prev || prev.state !== pr.state) {
+				state.prStatusCache.set(goalId, pr);
+				changed = true;
+			}
+		} else if (prev) {
+			state.prStatusCache.delete(goalId);
 			changed = true;
 		}
 	}

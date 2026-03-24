@@ -98,6 +98,8 @@ export const state = {
 	goals: [] as Goal[],
 	/** Gate status cache: goalId → { passed, total } */
 	gateStatusCache: new Map<string, { passed: number; total: number }>(),
+	/** PR status cache: goalId → { state, url, number } */
+	prStatusCache: new Map<string, { state: string; url?: string; number?: number }>(),
 	sessionsLoading: false,
 	sessionsError: "",
 	creatingSession: false,
