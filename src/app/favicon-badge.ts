@@ -8,8 +8,8 @@
  * Also sets the PWA app badge via the Badging API when available.
  */
 
-const BADGE_RADIUS_RATIO = 0.22; // dot radius relative to icon size
-const BADGE_COLOR = "#d4a017";   // warm amber/gold — matches user-message accent
+const BADGE_RADIUS_RATIO = 0.18; // dot radius relative to icon size
+const BADGE_COLOR = "#2dd4bf";   // turquoise
 const OUTLINE_COLOR = "#000000";
 const OUTLINE_WIDTH_RATIO = 0.12; // outline width relative to dot radius
 const ICON_SIZE = 32;            // rendered favicon size in px
