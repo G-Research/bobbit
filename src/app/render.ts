@@ -1596,6 +1596,38 @@ export function doRenderApp(): void {
 	const desktop = isDesktop();
 	const connected = hasActiveSession();
 
+	// Session action buttons (shared between headerLeft mobile and headerRight desktop)
+	const sessionTitle = connected && state.remoteAgent ? (state.remoteAgent.title || "New session") : "";
+	const activeSid = activeSessionId();
+	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
+	const editLabel = activeStaffAgent ? "Edit" : "Modify";
+	const editDeleteBtns = (connected && state.remoteAgent && activeSid) ? html`
+		<div class="flex items-center gap-1 shrink-0">
+			${Button({
+				variant: "ghost",
+				size: "sm",
+				onClick: () => {
+					if (activeStaffAgent) {
+						window.location.hash = `#/staff/${activeStaffAgent.id}`;
+					} else {
+						showRenameDialog(activeSid, sessionTitle);
+					}
+				},
+				children: html`<span class="inline-flex items-center gap-1">${icon(Pencil, "xs")}<span class="text-xs">${editLabel}</span></span>`,
+				className: "h-7 px-2 text-muted-foreground",
+				title: activeStaffAgent ? "Edit staff agent" : "Rename session",
+			})}
+			${Button({
+				variant: "ghost",
+				size: "sm",
+				onClick: () => terminateSession(activeSid),
+				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs">Terminate</span></span>`,
+				className: "h-7 px-2 text-muted-foreground hover:text-destructive",
+				title: "Terminate session",
+			})}
+		</div>
+	` : "";
+
 	const headerLeft = () => {
 		if (connected && state.remoteAgent) {
 			const model = state.remoteAgent.state.model;
@@ -1609,38 +1641,8 @@ export function doRenderApp(): void {
 				className: "h-10 pl-3 pr-3",
 			}) : "";
 
-			const sessionTitle = state.remoteAgent.title || "New session";
-			const sid = activeSessionId();
-			const staffAgent = sid ? state.staffList.find(s => s.currentSessionId === sid) : undefined;
-			const editDeleteBtns = sid ? html`
-				<div class="flex items-center shrink-0">
-					${Button({
-						variant: "ghost",
-						size: "sm",
-						onClick: () => {
-							if (staffAgent) {
-								window.location.hash = `#/staff/${staffAgent.id}`;
-							} else {
-								showRenameDialog(sid, sessionTitle);
-							}
-						},
-						children: icon(Pencil, "xs"),
-						className: "h-7 w-7 text-muted-foreground",
-						title: staffAgent ? "Edit staff agent" : "Rename session",
-					})}
-					${Button({
-						variant: "ghost",
-						size: "sm",
-						onClick: () => terminateSession(sid),
-						children: icon(Trash2, "xs"),
-						className: "h-7 w-7 text-muted-foreground hover:text-destructive",
-						title: "Terminate session",
-					})}
-				</div>
-			` : "";
-
 			if (!desktop) {
-				const activeSession = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
+				const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 				const goalId = activeSession?.goalId || activeSession?.teamGoalId;
 				const goalTitle = goalId ? state.goals.find(g => g.id === goalId)?.title : undefined;
 				return html`
@@ -1654,7 +1656,7 @@ export function doRenderApp(): void {
 					</div>
 				`;
 			}
-			const deskSession = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
+			const deskSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 			const deskGoalId = deskSession?.goalId || deskSession?.teamGoalId;
 			const deskGoalTitle = deskGoalId ? state.goals.find(g => g.id === deskGoalId)?.title : undefined;
 			return html`
@@ -1663,7 +1665,6 @@ export function doRenderApp(): void {
 						<span class="text-sm font-medium text-foreground truncate max-w-[320px]" title=${sessionTitle}>${sessionTitle}</span>
 						${deskGoalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate max-w-[320px] uppercase tracking-wider">${deskGoalTitle}</span>` : ""}
 					</div>
-					${editDeleteBtns}
 				</div>
 			`;
 		}
@@ -1679,7 +1680,7 @@ export function doRenderApp(): void {
 
 	const headerRight = () => {
 		if (desktop) {
-			return html``;
+			return editDeleteBtns ? html`<div class="flex items-center gap-1 px-2">${editDeleteBtns}</div>` : html``;
 		}
 		if (connected && state.remoteAgent) {
 			return html``;
@@ -1950,14 +1951,14 @@ export function doRenderApp(): void {
 							${bobbitIcon}
 							<span class="text-base font-semibold text-foreground">Bobbit</span>
 						</div>
-						<div class="flex items-center gap-0.5">
+						<div class="flex items-center" style="gap:1px;margin-right:-4px">
 							${Button({
 								variant: "ghost",
 								size: "sm",
 								children: html`${icon(QrCode, "xs")}`,
 								onClick: showQrCodeDialog,
 								title: "Show QR code",
-								className: "h-7 w-7 text-muted-foreground",
+								className: "h-6 w-6 text-muted-foreground",
 							})}
 							<theme-toggle></theme-toggle>
 						</div>
