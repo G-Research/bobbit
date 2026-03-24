@@ -1083,7 +1083,7 @@ export class SessionManager {
 		return true;
 	}
 
-t// ── Draft storage ──────────────────────────────────────────────
+	// ── Draft storage ──────────────────────────────────────────────
 
 	/** Get a draft for a session by type. */
 	getDraft(id: string, type: string): unknown | undefined {

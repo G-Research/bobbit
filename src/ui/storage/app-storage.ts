@@ -1,8 +1,5 @@
 import type { CommandHistoryStore } from "./stores/command-history-store.js";
 import type { CustomProvidersStore } from "./stores/custom-providers-store.js";
-import type { GoalDraftStore } from "./stores/goal-draft-store.js";
-import type { RoleDraftStore } from "./stores/role-draft-store.js";
-import type { PersonalityDraftStore } from "./stores/personality-draft-store.js";
 import type { ProviderKeysStore } from "./stores/provider-keys-store.js";
 import type { SessionsStore } from "./stores/sessions-store.js";
 import type { SettingsStore } from "./stores/settings-store.js";
@@ -18,9 +15,6 @@ export class AppStorage {
 	readonly providerKeys: ProviderKeysStore;
 	readonly sessions: SessionsStore;
 	readonly customProviders: CustomProvidersStore;
-	readonly goalDrafts: GoalDraftStore;
-	readonly roleDrafts: RoleDraftStore;
-	readonly personalityDrafts: PersonalityDraftStore;
 	readonly commandHistory: CommandHistoryStore;
 
 	constructor(
@@ -28,9 +22,6 @@ export class AppStorage {
 		providerKeys: ProviderKeysStore,
 		sessions: SessionsStore,
 		customProviders: CustomProvidersStore,
-		goalDrafts: GoalDraftStore,
-		roleDrafts: RoleDraftStore,
-		personalityDrafts: PersonalityDraftStore,
 		commandHistory: CommandHistoryStore,
 		backend: StorageBackend,
 	) {
@@ -38,9 +29,6 @@ export class AppStorage {
 		this.providerKeys = providerKeys;
 		this.sessions = sessions;
 		this.customProviders = customProviders;
-		this.goalDrafts = goalDrafts;
-		this.roleDrafts = roleDrafts;
-		this.personalityDrafts = personalityDrafts;
 		this.commandHistory = commandHistory;
 		this.backend = backend;
 	}
