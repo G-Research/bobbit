@@ -96,6 +96,8 @@ export const state = {
 
 	gatewaySessions: [] as GatewaySession[],
 	goals: [] as Goal[],
+	/** Gate status cache: goalId → { passed, total } */
+	gateStatusCache: new Map<string, { passed: number; total: number }>(),
 	sessionsLoading: false,
 	sessionsError: "",
 	creatingSession: false,

@@ -81,7 +81,7 @@ let costPollTimer: ReturnType<typeof setInterval> | null = null;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Current dashboard tab */
-let dashboardTab: "tasks" | "agents" | "commits" | "gates" = "gates";
+let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
 
 /** Role picker dropdown state */
 let roleDropdownOpen = false;
@@ -535,7 +535,6 @@ const svgPlay = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"
 const svgStop = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>`;
 const svgPlus = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>`;
 const svgChevronDown = html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
-const svgTeam = html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`;
 const svgDollar = html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`;
 const svgFolder = html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
 const svgTasks = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m9 12 2 2 4-4"/></svg>`;
@@ -544,6 +543,7 @@ const svgCommit = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="non
 const svgGate = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22V2"/><path d="M5 12H2"/><path d="M22 12h-3"/><circle cx="12" cy="12" r="4"/><path d="m15 9 2-2"/><path d="m7 15 2-2"/></svg>`;
 const svgClock = html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>`;
 const svgPhaseArrow = html`<svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M0 6h16M13 2l4 4-4 4"/></svg>`;
+const svgDoc = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>`;
 
 // ============================================================================
 // RENDER: NAV BAR
@@ -695,20 +695,15 @@ function renderMetaRows(goal: Goal): TemplateResult {
 
 	return html`
 		<div class="meta-rows">
+			${goalCost && goalCost.totalCost > 0 ? html`
 			<div class="meta-row">
-				<div class="meta-item">
-					${svgTeam}
-					<span class="meta-tag ${isTeamGoal ? "team-on" : "solo"}">${isTeamGoal ? "Team Mode" : "Solo Mode"}</span>
+				<div class="meta-item" title="Input: ${formatTokens(goalCost.inputTokens)} | Output: ${formatTokens(goalCost.outputTokens)} | Cache read: ${formatTokens(goalCost.cacheReadTokens)} | Cache write: ${formatTokens(goalCost.cacheWriteTokens)}">
+					${svgDollar}
+					<span class="meta-tag cost-tag">${formatCost(goalCost.totalCost)}</span>
+					<span class="meta-label">${formatTokens(goalCost.inputTokens + goalCost.outputTokens)} tokens</span>
 				</div>
-				${goalCost && goalCost.totalCost > 0 ? html`
-					<span class="meta-sep">\u00B7</span>
-					<div class="meta-item" title="Input: ${formatTokens(goalCost.inputTokens)} | Output: ${formatTokens(goalCost.outputTokens)} | Cache read: ${formatTokens(goalCost.cacheReadTokens)} | Cache write: ${formatTokens(goalCost.cacheWriteTokens)}">
-						${svgDollar}
-						<span class="meta-tag cost-tag">${formatCost(goalCost.totalCost)}</span>
-						<span class="meta-label">${formatTokens(goalCost.inputTokens + goalCost.outputTokens)} tokens</span>
-					</div>
-				` : nothing}
 			</div>
+			` : nothing}
 			${branch || gs ? html`
 				<div class="meta-row dashboard-git-row">
 					<git-status-widget
@@ -893,6 +888,7 @@ function renderTabBar(): TemplateResult {
 	const gateCountStr = wfTotal > 0 ? `${passedCount}/${wfTotal}` : String(gates.length);
 
 	const tabs: Array<{ id: typeof dashboardTab; label: string; icon: TemplateResult; countStr: string }> = [
+		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
 		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
 		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length) },
@@ -905,7 +901,7 @@ function renderTabBar(): TemplateResult {
 				<div class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)}>
 					${t.icon}
 					<span class="tab-label">${t.label}</span>
-					<span class="tab-count">${t.countStr}</span>
+					${t.countStr ? html`<span class="tab-count">${t.countStr}</span>` : nothing}
 				</div>
 			`)}
 		</div>
@@ -1088,6 +1084,24 @@ function renderCommitsTab(): TemplateResult {
 }
 
 // ============================================================================
+// RENDER: SPEC TAB
+// ============================================================================
+
+function renderSpecTab(): TemplateResult {
+	const spec = currentGoal?.spec;
+	if (!spec) {
+		return html`<div class="tab-empty">${svgDoc}<span>No spec defined</span></div>`;
+	}
+	return html`
+		<div class="tab-panel-inner">
+			<div class="spec-content">
+				<markdown-block .content=${spec}></markdown-block>
+			</div>
+		</div>
+	`;
+}
+
+// ============================================================================
 // RENDER: GATES TAB
 // ============================================================================
 
@@ -1099,7 +1113,7 @@ function renderGatesTab(): TemplateResult {
 	}
 
 	return html`
-		<div class="tab-panel-inner" style="padding-top:0;">
+		<div class="tab-panel-inner">
 			${renderGateChecklist()}
 		</div>
 	`;
@@ -1142,7 +1156,6 @@ function renderGateChecklist(): TemplateResult {
 			${sorted.map(wfGate => {
 				const gs = statusMap.get(wfGate.id);
 				const status = gs?.status ?? "pending";
-				const indent = wfGate.dependsOn.length > 0 ? "padding-left:20px;" : "";
 				const isExpanded = expandedGateIds.has(wfGate.id);
 				const signalCount = gs?.signals?.length ?? 0;
 
@@ -1167,7 +1180,7 @@ function renderGateChecklist(): TemplateResult {
 				}
 
 				return html`
-					<div class="wf-checklist-item" style="${indent}" @click=${() => toggleGateExpand(wfGate.id)}>
+					<div class="wf-checklist-item" @click=${() => toggleGateExpand(wfGate.id)}>
 						<span class="${dotClass}">${dotContent}</span>
 						<div class="wf-checklist-info">
 							<span class="wf-checklist-name">${wfGate.name}</span>
@@ -1195,10 +1208,9 @@ function renderGateDetail(
 	gs: GateState | undefined,
 ): TemplateResult {
 	const signals = gs?.signals ?? [];
-	const indent = wfGate.dependsOn.length > 0 ? "padding-left:20px;" : "";
 
 	return html`
-		<div class="gate-detail-panel" style="${indent}">
+		<div class="gate-detail-panel">
 			${/* Metadata section */ ""}
 			${gs?.currentMetadata && Object.keys(gs.currentMetadata).length > 0 ? html`
 				<div class="gate-detail-section">
@@ -1334,6 +1346,7 @@ export function renderGoalDashboard(): TemplateResult {
 			${renderGatePipeline()}
 			${renderTabBar()}
 			<div class="tab-content">
+				<div class="tab-panel ${activeTab === "spec" ? "active" : ""}">${activeTab === "spec" ? renderSpecTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "gates" ? "active" : ""}">${activeTab === "gates" ? renderGatesTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "tasks" ? "active" : ""}">${activeTab === "tasks" ? renderTasksTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "agents" ? "active" : ""}">${activeTab === "agents" ? renderAgentsTab() : nothing}</div>

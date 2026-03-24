@@ -137,6 +137,9 @@ export async function refreshSessions(): Promise<void> {
 		}
 
 		state.sessionsError = "";
+
+		// Fetch gate status for goals with workflows (fire-and-forget, updates on completion)
+		refreshGateStatusCache();
 	} catch (err) {
 		if (isInitial) {
 			state.sessionsError = err instanceof Error ? err.message : String(err);
@@ -146,6 +149,31 @@ export async function refreshSessions(): Promise<void> {
 		state.sessionsLoading = false;
 		renderApp();
 	}
+}
+
+/** Fetch gate statuses for all goals with workflows and update the cache. */
+async function refreshGateStatusCache() {
+	const goalsWithWorkflow = state.goals.filter(g => g.workflow && g.workflow.gates.length > 0);
+	if (goalsWithWorkflow.length === 0) return;
+
+	const results = await Promise.all(
+		goalsWithWorkflow.map(async (g) => {
+			const gates = await fetchGoalGates(g.id);
+			const passed = gates.filter(gs => gs.status === "passed").length;
+			const total = g.workflow!.gates.length;
+			return { goalId: g.id, passed, total };
+		})
+	);
+
+	let changed = false;
+	for (const { goalId, passed, total } of results) {
+		const prev = state.gateStatusCache.get(goalId);
+		if (!prev || prev.passed !== passed || prev.total !== total) {
+			state.gateStatusCache.set(goalId, { passed, total });
+			changed = true;
+		}
+	}
+	if (changed) renderApp();
 }
 
 // ============================================================================

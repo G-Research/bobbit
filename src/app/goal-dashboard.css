@@ -213,8 +213,7 @@
 	text-transform: uppercase;
 	letter-spacing: 0.04em;
 }
-.meta-tag.team-on { background: oklch(0.55 0.15 290 / 0.15); color: oklch(0.72 0.15 290); }
-.meta-tag.solo { background: color-mix(in oklch, var(--muted-foreground) 15%, transparent); color: var(--muted-foreground); }
+
 /* Dashboard git status widget — larger than the input-area version */
 .dashboard-git-row git-status-widget { font-size: 13px; }
 .dashboard-git-row git-status-widget button { font-size: 13px; padding: 2px 10px; }
@@ -903,6 +902,13 @@
 	font-weight: 500;
 	margin-left: 8px;
 	white-space: nowrap;
+}
+
+/* ── Spec Tab ── */
+.spec-content {
+	font-size: 14px;
+	line-height: 1.7;
+	color: var(--foreground);
 }
 
 /* ── Workflow Checklist in Artifacts Tab ── */
