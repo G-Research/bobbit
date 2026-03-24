@@ -78,7 +78,7 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 				content: html`
 					<div class="space-y-3">
 						${renderHeader(state, AppWindow, headerText)}
-						<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
 					</div>
 				`,
 				isCustom: false,

@@ -15,7 +15,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 		params: GetCurrentTimeParams | undefined,
 		result: ToolResultMessage<undefined> | undefined,
 	): ToolRenderResult {
-		const state = getToolState(result);
+		const state = getToolState(result, !result);
 
 		// Full params + full result
 		if (result && params) {
@@ -34,7 +34,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Clock, headerText)}
-							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,
@@ -59,7 +59,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Clock, i18n("Getting current date and time"))}
-							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,

@@ -29,7 +29,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 		isStreaming?: boolean,
 	): ToolRenderResult {
 		const summary = params ? summarize(params) : "background process";
-		const state = getToolState(result);
+		const state = getToolState(result, !result);
 
 		const output = typeof result?.content === "string"
 			? result.content

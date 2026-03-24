@@ -279,7 +279,7 @@ export class TeamAbortRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, AlertTriangle, skipped ? html`Aborted abort ${sid ? renderSessionLink(sid) : ""} — skipped due to queued message` : html`Abort failed ${sid ? renderSessionLink(sid) : ""}`)}
+					${renderHeader(state, AlertTriangle, skipped ? html`Skipped abort of ${sid ? renderSessionLink(sid) : ""} — queued message` : html`Abort failed ${sid ? renderSessionLink(sid) : ""}`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,

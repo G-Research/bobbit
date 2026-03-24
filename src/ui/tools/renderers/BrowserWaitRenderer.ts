@@ -32,7 +32,7 @@ export class BrowserWaitRenderer implements ToolRenderer<BrowserWaitParams, any>
 				content: html`
 					<div class="space-y-2">
 						${renderHeader(state, Clock, headerText)}
-						<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
 					</div>
 				`,
 				isCustom: false,

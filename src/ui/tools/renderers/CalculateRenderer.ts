@@ -12,7 +12,7 @@ interface CalculateParams {
 // Calculate tool has undefined details (only uses output)
 export class CalculateRenderer implements ToolRenderer<CalculateParams, undefined> {
 	render(params: CalculateParams | undefined, result: ToolResultMessage<undefined> | undefined): ToolRenderResult {
-		const state = getToolState(result);
+		const state = getToolState(result, !result);
 
 		// Full params + full result
 		if (result && params?.expression) {
@@ -28,7 +28,7 @@ export class CalculateRenderer implements ToolRenderer<CalculateParams, undefine
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Calculator, params.expression)}
-							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,
