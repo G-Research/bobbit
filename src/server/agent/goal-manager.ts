@@ -208,7 +208,7 @@ export class GoalManager {
 		return this.store.getAll();
 	}
 
-	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string }): Promise<boolean> {
+	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string; prUrl?: string }): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
 

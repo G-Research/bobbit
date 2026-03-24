@@ -18,7 +18,17 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Array }) statusFiles: Array<{ file: string; status: string }> = [];
     @property({ type: Boolean }) loading = false;
 
+    // PR status properties
+    @property() prState?: string; // "OPEN" | "MERGED" | "CLOSED"
+    @property() prUrl?: string;
+    @property({ type: Number }) prNumber?: number;
+    @property() prTitle?: string;
+    @property({ type: Boolean }) prMergeable?: boolean;
+
     @state() private expanded = false;
+    @state() private merging = false;
+    @state() private mergeError = '';
+    @state() private mergeMethod: 'merge' | 'squash' | 'rebase' = 'merge';
 
     private _onDocumentClick = (e: MouseEvent) => {
         if (this.expanded && !this.contains(e.target as Node)) {
@@ -137,6 +147,87 @@ export class GitStatusWidget extends LitElement {
         return nothing;
     }
 
+    /** Small PR status dot for the pill */
+    private _prPillIcon() {
+        if (!this.prState) return nothing;
+        const colorClass = this.prState === 'OPEN' ? 'text-green-400'
+            : this.prState === 'MERGED' ? 'text-purple-400'
+            : 'text-red-400';
+        const dot = html`<span class="${colorClass} shrink-0" style="font-size:10px" title="PR ${this.prState.toLowerCase()}">⦿</span>`;
+        if (this.prUrl) {
+            return html`<a href=${this.prUrl} target="_blank" rel="noopener" @click=${(e: Event) => e.stopPropagation()} style="display:inline-flex;align-items:center">${dot}</a>`;
+        }
+        return dot;
+    }
+
+    /** PR section for the expanded dropdown */
+    private _renderPrSection() {
+        if (!this.prState) return nothing;
+
+        const badgeColor = this.prState === 'OPEN' ? 'oklch(0.72 0.19 145)'
+            : this.prState === 'MERGED' ? 'oklch(0.65 0.20 300)'
+            : 'oklch(0.65 0.22 25)';
+        const badgeBg = this.prState === 'OPEN' ? 'oklch(0.72 0.19 145 / 0.15)'
+            : this.prState === 'MERGED' ? 'oklch(0.65 0.20 300 / 0.15)'
+            : 'oklch(0.65 0.22 25 / 0.15)';
+
+        return html`
+            <div class="border-t border-border pt-2 mt-2">
+                <div class="text-muted-foreground mb-1 font-medium">Pull Request</div>
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    ${this.prUrl ? html`
+                        <a href=${this.prUrl} target="_blank" rel="noopener"
+                           class="text-blue-400 hover:underline" style="font-size:12px">
+                            #${this.prNumber} ${this.prTitle}
+                        </a>
+                    ` : html`<span style="font-size:12px">#${this.prNumber} ${this.prTitle}</span>`}
+                    <span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:${badgeColor};background:${badgeBg}">
+                        ${this.prState}
+                    </span>
+                </div>
+                ${this.prState === 'OPEN' ? html`
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+                        <select
+                            style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--foreground)"
+                            .value=${this.mergeMethod}
+                            @change=${(e: Event) => { this.mergeMethod = (e.target as HTMLSelectElement).value as any; }}
+                            ?disabled=${this.merging}
+                        >
+                            <option value="merge">Merge</option>
+                            <option value="squash">Squash</option>
+                            <option value="rebase">Rebase</option>
+                        </select>
+                        <button
+                            style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.72 0.19 145 / 0.15);color:oklch(0.72 0.19 145);cursor:pointer;font-weight:500"
+                            ?disabled=${this.merging || !this.prMergeable}
+                            @click=${this._handleMerge}
+                        >
+                            ${this.merging ? 'Merging\u2026' : 'Merge PR'}
+                        </button>
+                        ${!this.prMergeable && !this.merging ? html`<span style="font-size:10px;color:var(--destructive)">Not mergeable</span>` : nothing}
+                    </div>
+                    ${this.mergeError ? html`<div style="font-size:11px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : nothing}
+                ` : nothing}
+            </div>
+        `;
+    }
+
+    private _handleMerge() {
+        this.merging = true;
+        this.mergeError = '';
+        this.dispatchEvent(new CustomEvent('pr-merge', {
+            bubbles: true,
+            composed: true,
+            detail: { method: this.mergeMethod },
+        }));
+    }
+
+    /** Called by the parent after merge completes or fails */
+    public setMergeResult(error?: string) {
+        this.merging = false;
+        this.mergeError = error || '';
+    }
+
     render() {
         if (!this.branch && !this.loading) return nothing;
 
@@ -156,6 +247,7 @@ export class GitStatusWidget extends LitElement {
                     ? html`<span class="${summaryColor} font-medium shrink-0">${this.summary}</span>`
                     : nothing}
                 ${this._pillIndicator()}
+                ${this._prPillIcon()}
             </button>
 
             ${this.expanded
@@ -179,6 +271,8 @@ export class GitStatusWidget extends LitElement {
                               </div>
                               ${this._renderPrimaryStatus()}
                           </div>
+
+                          ${this._renderPrSection()}
 
                           ${this.statusFiles.length > 0
                               ? html`

@@ -34,6 +34,8 @@ export interface PersistedGoal {
 	setupStatus?: "ready" | "preparing" | "error";
 	/** Error message when setupStatus === "error" */
 	setupError?: string;
+	/** GitHub PR URL (set by team lead after creating PR) */
+	prUrl?: string;
 }
 
 const STORE_DIR = bobbitStateDir();
