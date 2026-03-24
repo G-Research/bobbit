@@ -147,17 +147,17 @@ export class GitStatusWidget extends LitElement {
         return nothing;
     }
 
-    /** Small PR status dot for the pill */
+    /** Small PR status icon + number for the pill */
     private _prPillIcon() {
         if (!this.prState) return nothing;
         const colorClass = this.prState === 'OPEN' ? 'text-green-600/70 dark:text-green-400/70'
             : this.prState === 'MERGED' ? 'text-purple-600/70 dark:text-purple-400/70'
             : 'text-red-600/70 dark:text-red-400/70';
-        const dot = html`<span class="${colorClass} shrink-0" style="font-size:10px" title="PR ${this.prState.toLowerCase()}">⦿</span>`;
+        const icon = html`<span class="${colorClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title="PR #${this.prNumber} ${this.prState.toLowerCase()}"><span style="font-size:10px">⦿</span>${this.prNumber != null ? html`<span style="font-size:10px">#${this.prNumber}</span>` : nothing}</span>`;
         if (this.prUrl) {
-            return html`<a href=${this.prUrl} target="_blank" rel="noopener" @click=${(e: Event) => e.stopPropagation()} style="display:inline-flex;align-items:center">${dot}</a>`;
+            return html`<a href=${this.prUrl} target="_blank" rel="noopener" @click=${(e: Event) => e.stopPropagation()} style="display:inline-flex;align-items:center">${icon}</a>`;
         }
-        return dot;
+        return icon;
     }
 
     /** PR section for the expanded dropdown */
