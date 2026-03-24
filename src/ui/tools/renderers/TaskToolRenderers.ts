@@ -75,7 +75,7 @@ export class TaskListRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, ListTodo, skipped ? "Aborted task list — skipped due to queued message" : "Task list failed")}
+					${renderHeader(state, ListTodo, skipped ? "Aborted task list" : "Task list failed")}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -127,7 +127,7 @@ export class TaskCreateRenderer implements ToolRenderer {
 			// Highlight 409 gate requirement errors
 			const is409 = text.includes("409") || text.toLowerCase().includes("gate");
 			const headerText = skipped
-				? html`Aborted creation of task — <span class="font-medium text-xs">${truncate(title)}</span> — skipped due to queued message`
+				? html`Aborted creation of task — <span class="font-medium text-xs">${truncate(title)}</span>`
 				: html`Failed to create task — <span class="font-medium text-xs">${truncate(title)}</span>`;
 			const textCls = skipped ? "text-amber-600 dark:text-amber-400" : is409 ? "text-amber-600 dark:text-amber-400" : "text-destructive";
 			return {
@@ -176,7 +176,7 @@ export class TaskUpdateRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, SquarePen, skipped ? html`Aborted update of <span class="font-mono text-xs">${taskId}</span> — skipped due to queued message` : html`Failed to update <span class="font-mono text-xs">${taskId}</span>`)}
+					${renderHeader(state, SquarePen, skipped ? html`Aborted update of <span class="font-mono text-xs">${taskId}</span>` : html`Failed to update <span class="font-mono text-xs">${taskId}</span>`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,

@@ -35,7 +35,7 @@ export class PersonalitiesListRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Sparkles, skipped ? "Aborted personality list — skipped due to queued message" : "Personality list failed")}
+					${renderHeader(state, Sparkles, skipped ? "Aborted personality list" : "Personality list failed")}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -89,7 +89,7 @@ export class PersonalitiesCreateRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Plus, skipped ? html`Aborted creation of personality <span class="font-medium text-xs">${name}</span> — skipped due to queued message` : html`Failed to create personality <span class="font-medium text-xs">${name}</span>`)}
+					${renderHeader(state, Plus, skipped ? html`Aborted creation of personality <span class="font-medium text-xs">${name}</span>` : html`Failed to create personality <span class="font-medium text-xs">${name}</span>`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
