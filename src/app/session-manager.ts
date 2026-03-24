@@ -16,7 +16,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus } from "./api.js";
 import { startTimeRefresh } from "./render-helpers.js";
-import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, saveDraft, loadDraft } from "./routing.js";
+import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, saveDraft, loadDraft, clearDraft } from "./routing.js";
 import { sessionHueRotation } from "./session-colors.js";
 import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog, showGoalEditDialogFromProposal } from "./dialogs.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
@@ -666,6 +666,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				editor.onInput = (val: string) => {
 					origOnInput?.(val);
 					saveDraft(sessionId, val);
+				};
+				const origOnSend = editor.onSend;
+				editor.onSend = (text: string, attachments: any[]) => {
+					clearDraft(sessionId);
+					origOnSend?.(text, attachments);
 				};
 				const textarea = editor.querySelector("textarea");
 				if (textarea) textarea.focus();
