@@ -35,3 +35,32 @@ docs: |
   grep("TODO", "src\\server")                            # WRONG
   grep("import", "src\\server\\agent")                   # WRONG
   ```
+
+  ## Known Issue: Patterns Starting with `--`
+
+  **The grep tool cannot search for patterns that start with `--`** (e.g. `--extension`, `--verbose`). Ripgrep interprets these as command-line flags, producing errors like:
+
+  ```
+  rg: unrecognized flag --extension
+  ```
+
+  This is a bug in how the grep tool passes patterns to ripgrep — it does not insert a `--` end-of-options separator before the pattern argument. The `literal: true` parameter does NOT fix this, because CLI argument parsing happens before pattern interpretation.
+
+  ### Workaround
+
+  When you need to search for a pattern starting with `--`, use the `bash` tool with ripgrep directly, adding the `--` separator:
+
+  ```
+  bash(command="rg -- '--extension' src/server")
+  bash(command="rg -n -- '--verbose' src/")
+  ```
+
+  The `--` tells ripgrep that everything after it is a positional argument (the pattern), not a flag.
+
+  ### Quick Reference
+
+  | Scenario | What to use |
+  |----------|-------------|
+  | Normal pattern (no leading dashes) | `grep(pattern="myFunction")` — works fine |
+  | Pattern starts with `--` | `bash(command="rg -- '--extension' src/")` — must use bash workaround |
+  | Pattern starts with single `-` | `bash(command="rg -- '-v' src/")` — use bash workaround to be safe |

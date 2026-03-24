@@ -74,4 +74,4 @@ docs: |-
   - **Exit code** — reported alongside output. Check it to detect failures in chained commands.
   - **Platform** — runs in Git Bash on Windows. Most Unix commands work, but some platform-specific tools may differ. `$TEMP` is available for temp files (not `/tmp`).
   - **Timeout** — if set, the command is killed after the specified seconds. Use for commands that might hang (network operations, potentially infinite loops).
-  - **Pipes and redirects** — full bash syntax is supported including pipes (`|`), redirects (`>`, `>>`, `2>&1`), subshells, and command substitution (`$()`).
+  - **Pipes and redirects** — full bash syntax is supported including pipes (`|`), redirects (`>`, `>>`, `2>&1`), subshells, and command substitution (`$()`).\n- **`rg`/`grep` with dash-prefixed patterns** — when searching for patterns that start with `--` (e.g. `--extension`), ripgrep and grep interpret them as flags. Always use the `--` end-of-options separator before the pattern: `rg -- '--extension' src/`. Without `--`, you get `rg: unrecognized flag --extension`.
