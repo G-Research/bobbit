@@ -1,0 +1,31 @@
+name: ls
+description: "List directory contents"
+summary: "List directory contents with entries sorted alphabetically."
+provider:
+  type: builtin
+  tool: ls
+group: File System
+renderer: src/ui/tools/renderers/LsRenderer.ts
+docs: |
+  List the contents of a directory. Returns entries sorted alphabetically, with
+  directories suffixed with `/`. Includes dotfiles. Respects `.gitignore`.
+
+  **All paths must use forward slashes (`/`), even on Windows.** Never use backslashes.
+
+  Parameters:
+  - `path` (optional): Directory to list (default: working directory). Forward slashes only.
+  - `limit` (optional): Maximum number of entries to return.
+
+  Examples — correct:
+  ```
+  ls("src/server/agent")
+  ls("src/ui/components")
+  ls("C:/Users/jsubr/w/bobbit/tools")
+  ls()  # lists working directory
+  ```
+
+  Examples — WRONG (backslashes):
+  ```
+  ls("src\\server\\agent")                               # WRONG
+  ls("C:\\Users\\jsubr\\w\\bobbit\\tools")               # WRONG
+  ```

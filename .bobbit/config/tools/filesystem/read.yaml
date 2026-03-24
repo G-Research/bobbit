@@ -1,0 +1,68 @@
+name: read
+description: "Read file contents (text or images)"
+summary: "Read file contents (text or images). Truncated to 2000 lines or 50KB;
+  use offset/limit for large files."
+provider:
+  type: builtin
+  tool: read
+group: File System
+renderer: src/ui/tools/renderers/ReadRenderer.ts
+docs: |-
+  ## Purpose
+
+  Read the contents of a file from disk into the conversation context. This is the primary tool for examining existing code, configuration, and documentation before making changes.
+
+  The tool handles both text files and images. For text files, contents are returned as plain text with line numbers available for reference. For images (jpg, png, gif, webp), the file is sent as a visual attachment that can be analyzed directly.
+
+  Output is automatically truncated to **2000 lines or 50KB** (whichever limit is hit first). For files exceeding these limits, use the `offset` and `limit` parameters to paginate through the content in chunks.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `path` | string | **Yes** | Path to the file to read. Can be relative (resolved from session working directory) or absolute. Supports forward slashes on all platforms. |
+  | `offset` | number | No | Line number to start reading from (**1-indexed**). Omit to start from the beginning. Use with `limit` for pagination. |
+  | `limit` | number | No | Maximum number of lines to return. Omit to read until truncation limit. Combine with `offset` to read specific ranges. |
+
+  ## When to Use
+
+  - **Before editing a file** — always read the file (or the relevant section) first to get the exact text for the `oldText` parameter in `edit`.
+  - **Exploring unfamiliar codebases** — read entry points, config files, and key modules to understand structure.
+  - **Checking current state** — verify file contents after a write or edit to confirm the change took effect.
+  - **Reading large files in chunks** — use `offset`/`limit` to paginate through files that exceed the 2000-line truncation.
+  - **Examining images** — read screenshots, diagrams, or UI assets to understand visual context.
+
+  ## When NOT to Use
+
+  - **Searching across many files** — use `bash` with `rg` (ripgrep) or `grep` instead. Reading files one by one to find a pattern is extremely slow.
+  - **Getting a directory listing** — use `bash` with `ls` or `find` instead.
+  - **Reading command output** — use `bash` directly; don't write to a file then read it.
+  - **Binary files** (other than supported images) — the output will be garbled. Use `bash` with `xxd` or `file` for binary inspection.
+
+  ## Examples
+
+  ```
+  # Read a full source file before making edits
+  read(path="src/server/server.ts")
+
+  # Read a specific function in a large file (lines 150-200)
+  read(path="src/app/remote-agent.ts", offset=150, limit=50)
+
+  # Continue reading a truncated file from where it left off
+  read(path="src/app/main.ts", offset=2001, limit=2000)
+
+  # Read a config file to check current settings
+  read(path="tsconfig.server.json")
+
+  # Read a screenshot to analyze UI state
+  read(path="tests/screenshots/error-state.png")
+  ```
+
+  ## Notes / Gotchas
+
+  - **Truncation is silent** — if the file is longer than 2000 lines, you only see the first 2000. Always check if the output seems cut off and continue with `offset` if needed.
+  - **Offset is 1-indexed** — line 1 is the first line of the file, not line 0.
+  - **Prefer `read` over `bash` with `cat`** — `read` handles encoding, pagination, and image detection automatically. Using `cat` in bash loses these features.
+  - **Parallel reads are fast** — if you need to read multiple files, launch all `read` calls in a single message rather than sequentially. This is much faster than delegating file reads.
+  - **Image support** — only jpg, png, gif, and webp are supported as visual attachments. Other formats (svg, pdf) are returned as text.
+  - **Path resolution** — relative paths resolve from the session's working directory. Use forward slashes even on Windows (bash-style paths work everywhere).

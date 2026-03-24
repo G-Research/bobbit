@@ -1,0 +1,44 @@
+name: team_abort
+description: "Force-abort a stuck agent that won't respond to steering"
+summary: "Force-abort a stuck agent that won't respond to steering."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Team
+renderer: src/ui/tools/renderers/TeamToolRenderers.ts
+docs: |-
+  # team_abort
+
+  Force-abort a stuck team agent that won't respond to steering.
+
+  ## When to use
+
+  Use `team_abort` when an agent is stuck in a long-running tool call (e.g. a bash command that hangs, or a tool that never returns) and `team_steer` has no effect because the agent can't process steering messages while blocked inside a tool.
+
+  ## How it works
+
+  1. Attempts a graceful abort via RPC
+  2. Waits 3 seconds for the agent to stop
+  3. If still stuck, kills the agent process
+  4. Restarts a fresh agent on the same session (preserving conversation history)
+  5. Agent is now idle and ready for new prompts via `team_prompt`
+
+  ## Parameters
+
+  | Parameter | Type | Required | Description |
+  |-----------|------|----------|-------------|
+  | session_id | string | yes | Session ID of the agent to abort |
+
+  ## Example
+
+  ```
+  team_abort(session_id: "abc-123-def")
+  ? { ok: true, status: "idle" }
+  ```
+
+  ## Error cases
+
+  - **400** � Missing sessionId
+  - **403** � Session is not a member of this team
+  - **404** � Session not found
+  - **500** � Abort failed (internal error)

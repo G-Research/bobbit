@@ -1,0 +1,54 @@
+name: team_steer
+description: "Send a mid-turn redirect to a running agent"
+summary: "Send a mid-turn redirect to a running agent to change its direction."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Team
+renderer: src/ui/tools/renderers/TeamToolRenderers.ts
+docs: |-
+  ## Purpose
+
+  Send a mid-turn redirect message to an agent that is currently active (streaming/processing). The message is injected into the agent's context as a system-level instruction, causing it to change course without waiting for its current turn to finish.
+
+  This is the "course correction" tool — use it when you can see an agent heading in the wrong direction and want to redirect it immediately rather than waiting for it to finish and then giving feedback.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `session_id` | string | **Yes** | Session ID of the agent to steer (from `team_list`). |
+  | `message` | string | **Yes** | Steering instruction to inject. Should be clear and directive — tell the agent exactly what to do differently. |
+
+  ## When to Use
+
+  - **Agent is going the wrong direction** — it's implementing the wrong approach, editing the wrong files, or misunderstanding the task.
+  - **New information arrived** — a design doc was updated, a dependency was added, or requirements changed while the agent is working.
+  - **Preventing wasted work** — catching a mistake early before the agent builds on top of it.
+
+  ## When NOT to Use
+
+  - **Agent is idle** — use `team_prompt` for agents that have finished their turn. `team_steer` fails with an error if the agent is not actively streaming.
+  - **Routine follow-up tasks** — if the agent finished correctly and you want to assign more work, use `team_prompt`.
+  - **Non-urgent feedback** — if the agent is on the right track and you just have minor suggestions, wait for it to finish and use `team_prompt`.
+
+  ## Examples
+
+  ```
+  # Redirect an agent that's editing the wrong file
+  team_steer(session_id="abc123", message="STOP — you're editing server.ts but the route handlers moved to router.ts in the last refactor. Check src/server/router.ts instead.")
+
+  # Update an agent with new requirements
+  team_steer(session_id="abc123", message="The design doc was just updated. The API should return 404 for unknown tools, not 200 with empty object. Check the latest gate content.")
+
+  # Prevent over-engineering
+  team_steer(session_id="abc123", message="Keep it simple — don't add caching yet. Just implement the basic GET/PUT endpoints per the spec. We'll optimize later.")
+  ```
+
+  ## Notes / Gotchas
+
+  - **Team lead only** — only team lead sessions can steer agents.
+  - **Agent must be active** — steering an idle agent fails with an error. Check `team_list` status first and confirm the agent's status is `streaming` before steering.
+  - **Injected as system message** — the steer message has high priority in the agent's context. The agent should see and respond to it promptly.
+  - **No guarantee of immediate effect** — the agent may be mid-tool-call when the steer arrives. It will pick up the message when it next reads from its context.
+  - **Be directive** — vague steering messages are less effective. Tell the agent exactly what to stop doing and what to do instead.

@@ -1,0 +1,66 @@
+name: browser_wait
+description: "Wait for an element to appear"
+summary: "Wait for an element matching a CSS selector to appear (default 10s timeout)."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Browser
+renderer: src/ui/tools/renderers/BrowserWaitRenderer.ts
+docs: |-
+  ## Purpose
+
+  Wait for a DOM element matching a CSS selector to become **visible** on the page. Polls until the element exists in the DOM and is visible (not hidden by CSS), or the timeout expires. Essential for handling asynchronous content loading, page transitions, and dynamic UI updates.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `selector` | string | **Yes** | CSS selector of the element to wait for. |
+  | `timeout` | number | No | Maximum time to wait in **milliseconds**. Default: **10000** (10 seconds). |
+
+  ## When to Use
+
+  - **After navigation** — waiting for the new page's content to render (especially in SPAs where the URL changes but content loads asynchronously).
+  - **Before clicking dynamic elements** — ensuring a button, link, or menu item is visible before attempting to click it.
+  - **After triggering async operations** — waiting for loading spinners to disappear, results to appear, modals to open.
+  - **Form submission results** — waiting for success/error messages after submitting a form.
+
+  ## When NOT to Use
+
+  - **For static pages** — if the page is server-rendered and fully loaded after `browser_navigate`, no wait is needed.
+  - **For time-based delays** — don't use `browser_wait` as a sleep. If you need a fixed delay, use `browser_eval` with `new Promise(r => setTimeout(r, 1000))`.
+  - **When the element will never appear** — if the condition can't be met, you'll just waste time hitting the timeout.
+
+  ## Examples
+
+  ```
+  # Wait for a dashboard to load after login
+  browser_click(selector="button[type='submit']")
+  browser_wait(selector=".dashboard-content")
+
+  # Wait for search results after typing
+  browser_type(selector="input[name='search']", text="typescript")
+  browser_wait(selector=".search-results li")
+
+  # Wait for a modal dialog to open (5 second timeout)
+  browser_click(selector=".open-settings")
+  browser_wait(selector="dialog[open]", timeout=5000)
+
+  # Wait for a loading spinner to disappear (wait for content instead)
+  browser_wait(selector=".data-table tbody tr")
+
+  # Wait for an error message with short timeout (3 seconds)
+  browser_wait(selector=".validation-error", timeout=3000)
+
+  # Long wait for slow API response (30 seconds)
+  browser_wait(selector=".api-results", timeout=30000)
+  ```
+
+  ## Notes / Gotchas
+
+  - **Throws on timeout** — if the element doesn't become visible within the timeout period, the tool returns an error. Handle this case in your workflow.
+  - **Default 10 seconds (10000ms)** — sufficient for most async loads. Increase for slow API calls or complex page renders. Decrease for quick checks where you want to fail fast.
+  - **Waits for visibility, not just DOM presence** — the element must exist in the DOM AND be visible (not hidden with `display: none`, `visibility: hidden`, or zero dimensions). This uses Playwright's `state: "visible"` internally.
+  - **Timeout is in milliseconds** — pass `5000` for 5 seconds, `30000` for 30 seconds. Do NOT pass `5` or `30` — those are 5ms and 30ms, effectively instant.
+  - **Use before `browser_click`** — this is the most common pattern: wait for the element to be visible, then click it. Clicking without waiting on dynamic content is a race condition.
+  - **Polling-based** — the tool polls the DOM at intervals, so there may be a slight delay between the element appearing and the tool detecting it.
