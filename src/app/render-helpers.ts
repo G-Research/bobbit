@@ -127,12 +127,22 @@ export function markSessionVisited(sessionId: string): void {
 }
 
 /** Returns true if the session has activity the user hasn't seen yet.
- *  "Unseen" means: session is idle/terminated AND lastActivity > last visit time. */
+ *  "Unseen" means: session is idle/terminated AND lastActivity > last visit time.
+ *  For team agents (team leads and members), the dot only shows when the
+ *  associated goal is complete — humans don't need to check on agents mid-work. */
 export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Active sessions don't show unseen — user will see it when they connect
 	if (session.status === "streaming" || session.status === "busy") return false;
 	// Currently viewed session is never unseen
 	if (activeSessionId() === session.id) return false;
+
+	// Team agents: suppress the unseen dot unless the goal is complete
+	const teamGoal = session.teamGoalId || (session.role === "team-lead" ? session.goalId : undefined);
+	if (teamGoal) {
+		const goal = state.goals.find(g => g.id === teamGoal);
+		if (!goal || goal.state !== "complete") return false;
+	}
+
 	const map = loadVisitedMap();
 	const lastVisit = map[session.id] || 0;
 	return session.lastActivity > lastVisit;
@@ -326,6 +336,16 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 /** Track in-flight team start/stop (shared across desktop and mobile). */
 const teamLoading = new Set<string>();
 
+/** Render a compact gate status badge like (2/3) for goals with workflows. */
+function renderGatesBadge(goalId: string) {
+	const gs = state.gateStatusCache.get(goalId);
+	if (!gs) return "";
+	const hasTeam = state.gatewaySessions.some(s => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead" && s.status !== "terminated");
+	const allPassed = gs.passed === gs.total;
+	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : "#3b82f6";
+	return html`<span class="shrink-0" style="font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
+}
+
 /**
  * Expandable goal group used by both desktop sidebar and mobile landing.
  *
@@ -415,6 +435,7 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="shrink-0 text-muted-foreground">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
+				${renderGatesBadge(goal.id)}
 				${mobile
 					? dashboardBtn
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
