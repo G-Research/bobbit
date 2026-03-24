@@ -7,7 +7,7 @@
  */
 
 const BADGE_RADIUS_RATIO = 0.22; // dot radius relative to icon size
-const BADGE_COLOR = "#ef4444";   // red-500
+const BADGE_COLOR = "#d4a017";   // warm amber/gold — matches user-message accent
 const ICON_SIZE = 32;            // rendered favicon size in px
 
 let _originalHref: string | null = null;
