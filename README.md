@@ -81,7 +81,6 @@ bobbit [options]
 | `index.ts` | Barrel export of the server's public API (`createGateway`, `SessionManager`, `RpcBridge`, etc.). |
 | `bobbit-dir.ts` | Resolves `.bobbit/` directory paths (config, state, global auth). Override via `BOBBIT_DIR` env var for test isolation. |
 | `scaffold.ts` | First-run scaffolding — creates `.bobbit/` with default configs. |
-| `pi-dir.ts` | @deprecated — use `bobbit-dir.ts` instead. |
 | `watchdog.ts` | Process health watchdog. |
 | `harness.ts` | Dev server wrapper. Watches sentinel file for restart signals, auto-restarts on crash. |
 | `harness-signal.ts` | Touches the sentinel file to trigger a harness restart. |
@@ -109,8 +108,7 @@ bobbit [options]
 | `role-manager.ts` | Role definitions CRUD. Maintains built-in tool registry (`AVAILABLE_TOOLS`). |
 | `role-store.ts` | Persists roles as YAML files under `.bobbit/config/roles/`. |
 | `role-assistant.ts` | System prompt for role creation assistant sessions. |
-| `tool-manager.ts` | Manages tool definitions from `tools/<group>/*.yaml`. Reads, writes, and serves tool metadata. |
-| `tool-manager.ts` | Merges base tool definitions (from YAML) with store overrides. Detects tool renderers in `src/ui/tools/renderers/`. |
+| `tool-manager.ts` | Manages tool definitions from `.bobbit/config/tools/<group>/*.yaml`. Reads, writes, and serves tool metadata. Detects tool renderers in `src/ui/tools/renderers/`. |
 | `tool-assistant.ts` | System prompt for tool management assistant sessions. |
 | `personality-manager.ts` | Personality CRUD and resolution (maps personality names to prompt fragments). |
 | `personality-store.ts` | Persists personalities as YAML files under `.bobbit/config/personalities/`. |
