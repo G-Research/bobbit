@@ -16,11 +16,11 @@ import {
 	type Goal,
 	type GoalState,
 } from "./state.js";
-import { gatewayFetch, createGoal, updateGoal } from "./api.js";
+import { gatewayFetch, updateGoal } from "./api.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
-import { clearSessionModel, setHashRoute } from "./routing.js";
+import { setHashRoute } from "./routing.js";
 import { fetchPersonalities, type PersonalityData } from "./api.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
@@ -828,165 +828,6 @@ async function createGoalAssistantSession(): Promise<void> {
 		state.creatingSession = false;
 		renderApp();
 	}
-}
-
-export function showGoalEditDialogFromProposal(proposal: { title: string; spec: string; cwd?: string; workflow?: string }): void {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
-
-	let titleValue = proposal.title;
-	let cwdValue = proposal.cwd || "";
-	let specValue = proposal.spec;
-	let saving = false;
-	let teamValue = true;
-	let worktreeValue = true;
-	let cwdDropdownOpen = false;
-	let cwdHighlightIndex = -1;
-	let workflowId = proposal.workflow || "general";
-	let _proposalWorkflows: Array<{ id: string; name: string; gates: any[] }> = [];
-
-	// Load workflows for the selector
-	import("./api.js").then(({ fetchWorkflows }) => {
-		fetchWorkflows().then((wfs) => { _proposalWorkflows = wfs; renderProposalDialog(); });
-	});
-
-	const cleanup = () => {
-		render(html``, container);
-		container.remove();
-	};
-
-	const doSave = async () => {
-		const trimmedTitle = titleValue.trim();
-		if (!trimmedTitle) return;
-		saving = true;
-		renderProposalDialog();
-
-		try {
-			const sessionId = activeSessionId();
-			const goal = await createGoal(trimmedTitle, cwdValue.trim(), { spec: specValue, team: teamValue, worktree: worktreeValue, workflowId: workflowId || undefined });
-			state.activeGoalProposal = null;
-			// Only terminate goal-assistant sessions — regular sessions that suggested a goal should keep running.
-			if (sessionId && state.assistantType === "goal") {
-				// Silent cleanup — no confirmation dialog
-				if (state.remoteAgent) {
-					state.remoteAgent.disconnect();
-					state.remoteAgent = null;
-					state.connectionStatus = "disconnected";
-				}
-				state.assistantType = null;
-				await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-				clearSessionModel(sessionId);
-				const { deleteGoalDraft } = await import("./session-manager.js");
-				deleteGoalDraft(sessionId);
-			}
-			if (goal) {
-				setHashRoute("goal-dashboard", goal.id);
-				renderApp();
-			}
-		} finally {
-			saving = false;
-			cleanup();
-		}
-	};
-
-	const renderProposalDialog = () => {
-		render(
-			Dialog({
-				isOpen: true,
-				onClose: cleanup,
-				width: "min(540px, 92vw)",
-				height: "auto",
-				className: "max-h-[90vh]",
-				backdropClassName: "bg-black/50 backdrop-blur-sm",
-				children: html`
-					${DialogContent({
-						className: "overflow-y-auto",
-						children: html`
-							${DialogHeader({ title: "Create Goal from Proposal" })}
-							<div class="mt-4 flex flex-col gap-4">
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Title</label>
-									${Input({
-										type: "text",
-										value: titleValue,
-										onInput: (e: Event) => { titleValue = (e.target as HTMLInputElement).value; renderProposalDialog(); },
-									})}
-								</div>
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Working Directory</label>
-									${cwdCombobox({
-										value: cwdValue,
-										placeholder: "(server default)",
-										onInput: (v) => { cwdValue = v; renderProposalDialog(); },
-										onSelect: (v) => { cwdValue = v; renderProposalDialog(); },
-										dropdownOpen: cwdDropdownOpen,
-										onToggle: (open) => { cwdDropdownOpen = open; renderProposalDialog(); },
-										highlightedIndex: cwdHighlightIndex,
-										onHighlight: (i) => { cwdHighlightIndex = i; renderProposalDialog(); },
-									})}
-									<div class="mt-2">
-										${worktreeToggle({
-											checked: worktreeValue,
-											onChange: (v) => { worktreeValue = v; renderProposalDialog(); },
-											id: "worktree-toggle",
-										})}
-									</div>
-								</div>
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Goal Spec (Markdown)</label>
-									<textarea
-										class="w-full min-h-[160px] max-h-[300px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-										.value=${specValue}
-										@input=${(e: Event) => { specValue = (e.target as HTMLTextAreaElement).value; }}
-									></textarea>
-								</div>
-								${_proposalWorkflows.length > 0 ? html`
-									<div>
-										<label class="text-xs text-muted-foreground mb-1 block">Workflow</label>
-										<select
-											class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
-											.value=${workflowId}
-											@change=${(e: Event) => { workflowId = (e.target as HTMLSelectElement).value; renderProposalDialog(); }}
-										>
-											${_proposalWorkflows.map((wf) => html`
-												<option value=${wf.id} ?selected=${workflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
-											`)}
-										</select>
-									</div>
-								` : ""}
-								<div class="flex items-center gap-2.5">
-									<input type="checkbox" id="team-toggle"
-										.checked=${teamValue}
-										@change=${(e: Event) => { teamValue = (e.target as HTMLInputElement).checked; if (teamValue) worktreeValue = true; renderProposalDialog(); }}
-										class="toggle-switch" />
-									<label for="team-toggle" class="text-xs text-muted-foreground cursor-pointer">
-										🐝 Team mode — Team Lead auto-spawns role agents
-									</label>
-								</div>
-							</div>
-						`,
-					})}
-					${DialogFooter({
-						className: "px-6 pb-4",
-						children: html`
-							<div class="flex gap-2 justify-end">
-								${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
-								${Button({
-									variant: "default",
-									onClick: doSave,
-									disabled: !titleValue.trim() || saving,
-									children: saving ? "Creating…" : "Create Goal",
-								})}
-							</div>
-						`,
-					})}
-				`,
-			}),
-			container,
-		);
-	};
-
-	renderProposalDialog();
 }
 
 function showGoalEditDialog(existingGoal: Goal): void {
