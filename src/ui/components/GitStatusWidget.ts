@@ -320,7 +320,20 @@ export class GitStatusWidget extends LitElement {
         const dropdown = this.querySelector('#git-status-dropdown') as HTMLElement;
         if (!btn || !dropdown) return;
         const rect = btn.getBoundingClientRect();
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const spaceAbove = rect.top;
+
+        // Anchor right edge to button's right edge
         dropdown.style.right = `${window.innerWidth - rect.right}px`;
-        dropdown.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+
+        if (spaceAbove > spaceBelow) {
+            // Open upward (default for chat input area)
+            dropdown.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+            dropdown.style.top = '';
+        } else {
+            // Open downward (goal dashboard, near top of page)
+            dropdown.style.top = `${rect.bottom + 4}px`;
+            dropdown.style.bottom = '';
+        }
     }
 }
