@@ -397,9 +397,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onWorkflowUpdate = () => renderApp();
 
-		remote.onGoalSetupEvent = () => {
+		remote.onGoalSetupEvent = async () => {
 			// Refresh sessions and goals to pick up setupStatus changes
 			refreshSessions();
+			// Also refresh the goal dashboard's local state so the banner dismisses
+			const { refreshDashboardGoal } = await import("./goal-dashboard.js");
+			refreshDashboardGoal();
 		};
 
 		remote.onBgProcessEvent = (msg) => {

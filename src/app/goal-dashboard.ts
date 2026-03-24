@@ -193,6 +193,22 @@ export function clearDashboardState(): void {
 	stopGitStatusPolling();
 }
 
+/**
+ * Refresh just the goal metadata for the currently-displayed dashboard.
+ * Called when a goal_setup_complete/error event arrives so the "Setting up
+ * worktree…" banner dismisses without a full page reload.
+ */
+export async function refreshDashboardGoal(): Promise<void> {
+	if (!currentGoalId) return;
+	try {
+		const res = await gatewayFetch(`/api/goals/${currentGoalId}`);
+		if (res.ok) {
+			currentGoal = await res.json();
+			renderApp();
+		}
+	} catch { /* ignore — polling will catch up */ }
+}
+
 // ============================================================================
 // AGENT TYPES & POLLING
 // ============================================================================
