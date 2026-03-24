@@ -4,15 +4,29 @@
  * Tests run against a real gateway (started by Playwright webServer on port 3099).
  * They verify the extended GET /api/tools, GET /api/tools/:name,
  * PUT /api/tools/:name endpoints, and backward compatibility.
+ *
+ * PUT tests modify YAML files in tools/<group>/. We backup and restore
+ * the specific YAML files that are modified by PUT tests.
  */
 import { test, expect } from "@playwright/test";
-import { existsSync, copyFileSync, unlinkSync } from "node:fs";
+import { existsSync, copyFileSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readE2EToken, E2E_PI_DIR, BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE } from "./e2e-setup.js";
 
 const TOKEN = readE2EToken();
-const TOOLS_JSON = join(E2E_PI_DIR, "gateway-tools.json");
-const TOOLS_BACKUP = join(E2E_PI_DIR, "gateway-tools.json.bak-e2e");
+
+/**
+ * YAML files modified by PUT tests — we backup/restore these.
+ * Paths are relative to the repo root (process.cwd()).
+ */
+const MODIFIED_YAMLS = [
+	"tools/shell/bash.yaml",
+	"tools/filesystem/read.yaml",
+	"tools/filesystem/edit.yaml",
+	"tools/agent/delegate.yaml",
+];
+
+const yamlBackups = new Map<string, string>();
 
 /** Authenticated fetch helper */
 function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
@@ -26,20 +40,20 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	});
 }
 
-// Back up and restore gateway-tools.json around the test suite
+// Back up and restore YAML files around the test suite
 test.beforeAll(() => {
-	if (existsSync(TOOLS_JSON)) {
-		copyFileSync(TOOLS_JSON, TOOLS_BACKUP);
+	for (const yamlPath of MODIFIED_YAMLS) {
+		const abs = join(process.cwd(), yamlPath);
+		if (existsSync(abs)) {
+			yamlBackups.set(yamlPath, readFileSync(abs, "utf-8"));
+		}
 	}
 });
 
 test.afterAll(() => {
-	if (existsSync(TOOLS_BACKUP)) {
-		copyFileSync(TOOLS_BACKUP, TOOLS_JSON);
-		unlinkSync(TOOLS_BACKUP);
-	} else {
-		// No backup means it didn't exist before — remove any file we created
-		try { unlinkSync(TOOLS_JSON); } catch { /* ignore */ }
+	for (const [yamlPath, content] of yamlBackups) {
+		const abs = join(process.cwd(), yamlPath);
+		writeFileSync(abs, content, "utf-8");
 	}
 });
 
