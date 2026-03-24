@@ -11,6 +11,7 @@ import {
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
+import { showFaviconBadge } from "./favicon-badge.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -102,6 +103,7 @@ export async function refreshSessions(): Promise<void> {
 			const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
 			if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
 				RemoteAgent.playNotificationBeep();
+				showFaviconBadge();
 			}
 		}
 		for (const s of newSessions) {

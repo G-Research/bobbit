@@ -1,6 +1,7 @@
 import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { state } from "./state.js";
+import { showFaviconBadge } from "./favicon-badge.js";
 
 /**
  * A remote agent adapter that connects to the Pi Gateway via WebSocket.
@@ -719,8 +720,9 @@ export class RemoteAgent {
 				this._state.streamMessage = null;
 				this._state.pendingToolCalls = new Set();
 
-				// Beep so the user hears task completion
+				// Notify: beep + favicon badge
 				RemoteAgent.playNotificationBeep();
+				showFaviconBadge();
 
 				this._taskStartTime = null;
 				this._state.turnStartTime = null;
