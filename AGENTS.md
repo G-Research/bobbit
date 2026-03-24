@@ -18,7 +18,6 @@ src/
 │   ├── index.ts     # Server barrel export
 │   ├── bobbit-dir.ts # Resolves .bobbit/ directory paths (config, state, global auth)
 │   ├── scaffold.ts  # First-run scaffolding — creates .bobbit/ with defaults
-│   ├── pi-dir.ts    # @deprecated — use bobbit-dir.ts instead
 │   ├── watchdog.ts  # Process health watchdog
 │   ├── defaults/    # Bundled default templates (roles, workflows, personalities, system-prompt)
 │   ├── agent/       # Session lifecycle, RPC bridge, persistence, goals, teams, title generation
@@ -53,7 +52,6 @@ src/
 │   │   ├── title-generator.ts          # Auto-generate session titles via Claude Haiku
 │   │   ├── tool-activation.ts          # Tool activation/deactivation logic
 │   │   ├── tool-assistant.ts           # System prompt for tool management assistant
-│   │   ├── tool-manager.ts             # Tool CRUD with renderer discovery
 │   │   ├── tool-manager.ts              # Tool CRUD, YAML scanning from .bobbit/config/tools/<group>/*.yaml
 │   │   ├── personality-manager.ts       # Personality definitions and management
 │   │   ├── personality-store.ts        # Personality persistence (YAML files in personalities/)
@@ -143,6 +141,7 @@ src/
 │   │   │   ├── DelegateRenderer.ts        # Delegate/sub-agent renderer
 │   │   │   ├── EditRenderer.ts            # File edit renderer with diff
 │   │   │   ├── FindRenderer.ts            # File find renderer
+│   │   │   ├── GateToolRenderers.ts       # Gate management tool renderers
 │   │   │   ├── GetCurrentTimeRenderer.ts  # Time tool renderer
 │   │   │   ├── GrepRenderer.ts            # Grep results renderer
 │   │   │   ├── HtmlRenderer.ts            # HTML preview renderer
@@ -183,11 +182,8 @@ src/
 │   │   └── stores/
 │   │       ├── command-history-store.ts          # Command history persistence
 │   │       ├── custom-providers-store.ts         # Custom AI provider persistence
-│   │       ├── goal-draft-store.ts              # Goal draft persistence
 │   │       ├── provider-keys-store.ts           # API key persistence
-│   │       ├── role-draft-store.ts              # Role draft persistence
 │   │       ├── sessions-store.ts                # Session metadata persistence
-│   │       ├── personality-draft-store.ts        # Personality draft persistence
 │   │       └── settings-store.ts                # App settings persistence
 │   └── utils/       # Formatting, auth token, model discovery, i18n
 │       ├── ansi.ts              # ANSI escape code processing
@@ -233,6 +229,7 @@ src/
 │   └── workflow-page.css        # Workflow page styles
 docs/
 ├── bobbit-sprites.md    # Bobbit pixel art, animation & accessory system reference
+├── coverage.md          # Code coverage setup and scripts
 ├── dev-workflow.md      # Development workflow guide
 ├── goals-workflows-tasks.md  # Goals, workflows, tasks & gates architecture
 └── prompt-queue.md      # Prompt queue architecture
@@ -374,9 +371,9 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `desec.json` | `desec.ts` | deSEC dynDNS config (domain + API token) |
 | `rpc-debug.log` | `rpc-bridge.ts` | Debug log of all RPC events |
 
-### `.bobbit/extensions/` — pi-coding-agent extension resolution directory
+### `.bobbit/config/tools/<group>/` — tool definitions and extensions
 
-Retained for pi-coding-agent's `user-extension` resolution (delegate, browser, web tools). Bobbit-owned tool extensions and YAML definitions are co-located in `.bobbit/config/tools/<group>/` (scaffolded from `src/server/defaults/tools/`).
+Tool YAML definitions and extension code, organized by group (agent, browser, filesystem, shell, tasks, team, web). Scaffolded from `src/server/defaults/tools/`. Each group contains `*.yaml` tool definitions and optionally an `extension.ts` for custom tool logic.
 
 ### Global state (not per-project)
 

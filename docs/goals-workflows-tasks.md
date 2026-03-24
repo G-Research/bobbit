@@ -285,7 +285,7 @@ Here's the typical flow for a team goal with a workflow:
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
-| `.bobbit/extensions/goal-tools.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `task_create` |
-| `.bobbit/extensions/team-lead-tools.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
+| `.bobbit/config/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `task_create` |
+| `.bobbit/config/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
 | `.bobbit/config/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |
 | `.bobbit/config/workflows/general.yaml` | Seed workflow: general-purpose lifecycle |
