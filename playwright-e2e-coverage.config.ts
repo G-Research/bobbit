@@ -1,8 +1,9 @@
 /**
- * Playwright E2E config with c8 code coverage collection.
+ * Playwright E2E config with V8 code coverage collection.
  *
- * Identical to playwright-e2e.config.ts except the webServer command is
- * wrapped with c8 so V8 coverage is collected from the gateway process.
+ * Identical to playwright-e2e.config.ts except the webServer env includes
+ * NODE_V8_COVERAGE so V8 natively writes coverage data on process exit.
+ * After tests complete, run `c8 report` to process the raw data.
  *
  * Usage: npm run test:coverage
  */
@@ -35,10 +36,10 @@ export default defineConfig({
 		'**/team-lifecycle*',
 		'**/real-app-mobile*',
 	],
-	timeout: 45_000, // slightly higher — c8 adds overhead
+	timeout: 45_000,
 	workers: 1,
 	webServer: {
-		command: `npx c8 --reporter=html --reporter=lcov --reports-dir=coverage --src=src/server node dist/server/cli.js --host 127.0.0.1 --port ${E2E_PORT} --no-tls --no-ui --agent-cli ${MOCK_AGENT}`,
+		command: `node dist/server/cli.js --host 127.0.0.1 --port ${E2E_PORT} --no-tls --no-ui --agent-cli ${MOCK_AGENT}`,
 		url: `http://127.0.0.1:${E2E_PORT}/api/sessions`,
 		reuseExistingServer: false,
 		timeout: 30_000,
@@ -49,8 +50,9 @@ export default defineConfig({
 			BOBBIT_DIR: E2E_BOBBIT_DIR,
 			BOBBIT_LLM_REVIEW_SKIP: "1",
 			BOBBIT_SKIP_NPM_CI: "1",
+			NODE_V8_COVERAGE: path.join(__dirname, 'coverage', 'tmp'),
 		},
 	},
-	globalTeardown: './tests/e2e/e2e-teardown.ts',
+	globalTeardown: './tests/e2e/e2e-coverage-teardown.ts',
 	use: { baseURL: `http://127.0.0.1:${E2E_PORT}` },
 });
