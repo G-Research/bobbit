@@ -2,8 +2,8 @@ name: web_fetch
 description: "Fetch a URL and extract text"
 summary: "Fetch a URL and extract readable text via curl."
 provider:
-  type: user-extension
-  extension: web-research.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Web
 renderer: src/ui/tools/renderers/WebFetchRenderer.ts
 docs: |-

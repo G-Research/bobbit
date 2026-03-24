@@ -2,8 +2,8 @@ name: browser_navigate
 description: "Navigate to a URL in headless browser"
 summary: "Navigate to a URL in a headless browser. Launches browser if needed."
 provider:
-  type: user-extension
-  extension: playwright/index.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Browser
 renderer: src/ui/tools/renderers/BrowserNavigateRenderer.ts
 docs: |-

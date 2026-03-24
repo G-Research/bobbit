@@ -3,8 +3,8 @@ description: "Execute JavaScript in the page"
 summary: "Execute JavaScript in the headless browser page context and return the
   result."
 provider:
-  type: user-extension
-  extension: playwright/index.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Browser
 renderer: src/ui/tools/renderers/BrowserEvalRenderer.ts
 docs: |-

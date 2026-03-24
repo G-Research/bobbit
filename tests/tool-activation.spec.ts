@@ -30,11 +30,11 @@ function standardProviders(): Map<string, ProviderWithGroup> {
 		["grep", { type: "builtin", tool: "grep", groupDir: "filesystem" }],
 		["find", { type: "builtin", tool: "find", groupDir: "filesystem" }],
 		["ls", { type: "builtin", tool: "ls", groupDir: "filesystem" }],
-		["web_search", { type: "user-extension", extension: "web-research.ts", groupDir: "web" }],
-		["web_fetch", { type: "user-extension", extension: "web-research.ts", groupDir: "web" }],
-		["delegate", { type: "user-extension", extension: "delegate.ts", groupDir: "agent" }],
-		["browser_navigate", { type: "user-extension", extension: "playwright/index.ts", groupDir: "browser" }],
-		["browser_click", { type: "user-extension", extension: "playwright/index.ts", groupDir: "browser" }],
+		["web_search", { type: "bobbit-extension", extension: "extension.ts", groupDir: "web" }],
+		["web_fetch", { type: "bobbit-extension", extension: "extension.ts", groupDir: "web" }],
+		["delegate", { type: "bobbit-extension", extension: "extension.ts", groupDir: "agent" }],
+		["browser_navigate", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser" }],
+		["browser_click", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser" }],
 		["task_create", { type: "bobbit-extension", extension: "extension.ts", groupDir: "tasks" }],
 		["team_spawn", { type: "bobbit-extension", extension: "extension.ts", groupDir: "team" }],
 	]);
@@ -53,7 +53,7 @@ test.describe("computeToolActivationArgs", () => {
 		expect(toolsCsv).not.toContain("web_search"); // no extensions in fallback
 	});
 
-	test("no allowedTools — enables all builtins and all user extensions", () => {
+	test("no allowedTools — enables all builtins and all bobbit extensions", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(undefined, tm);
 
@@ -69,18 +69,16 @@ test.describe("computeToolActivationArgs", () => {
 		// Should have --no-extensions (Bobbit controls loading)
 		expect(result.args).toContain("--no-extensions");
 
-		// User extensions should appear as --extension flags
+		// Bobbit extensions should appear as --extension flags
 		const extPaths = result.args
 			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
 			.map(p => p.replace(/\\/g, "/"));
-		// web-research.ts (provides web_search + web_fetch), delegate.ts, playwright/index.ts
-		expect(extPaths.some(p => p.endsWith("/extensions/web-research.ts"))).toBe(true);
-		expect(extPaths.some(p => p.endsWith("/extensions/delegate.ts"))).toBe(true);
-		expect(extPaths.some(p => p.endsWith("/extensions/playwright/index.ts"))).toBe(true);
-
-		// Bobbit extensions (task_create, team_spawn) should NOT appear — handled by session-manager
-		expect(extPaths.some(p => p.includes("tasks/extension"))).toBe(false);
-		expect(extPaths.some(p => p.includes("team/extension"))).toBe(false);
+		// All bobbit-extension groups: web, agent, browser, tasks, team
+		expect(extPaths.some(p => p.includes("/web/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/agent/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/browser/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/tasks/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/team/extension.ts"))).toBe(true);
 	});
 
 	test("empty allowedTools array — same as undefined (all tools)", () => {
@@ -104,7 +102,7 @@ test.describe("computeToolActivationArgs", () => {
 		expect(result.args.filter(a => a === "--extension").length).toBe(0);
 	});
 
-	test("restricted to user extensions only — uses --no-tools", () => {
+	test("restricted to bobbit extensions only — uses --no-tools", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(["web_search", "delegate"], tm);
 
@@ -115,13 +113,13 @@ test.describe("computeToolActivationArgs", () => {
 		const extPaths = result.args
 			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
 			.map(p => p.replace(/\\/g, "/"));
-		expect(extPaths.some(p => p.endsWith("/extensions/web-research.ts"))).toBe(true);
-		expect(extPaths.some(p => p.endsWith("/extensions/delegate.ts"))).toBe(true);
-		// playwright not requested
-		expect(extPaths.some(p => p.includes("playwright"))).toBe(false);
+		expect(extPaths.some(p => p.includes("/web/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/agent/extension.ts"))).toBe(true);
+		// browser not requested
+		expect(extPaths.some(p => p.includes("/browser/extension.ts"))).toBe(false);
 	});
 
-	test("mixed builtins + user extensions", () => {
+	test("mixed builtins + bobbit extensions", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(["read", "bash", "web_fetch", "browser_navigate"], tm);
 
@@ -134,19 +132,19 @@ test.describe("computeToolActivationArgs", () => {
 		const extPaths = result.args
 			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
 			.map(p => p.replace(/\\/g, "/"));
-		expect(extPaths.some(p => p.endsWith("/extensions/web-research.ts"))).toBe(true);
-		expect(extPaths.some(p => p.endsWith("/extensions/playwright/index.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/web/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/browser/extension.ts"))).toBe(true);
 	});
 
-	test("deduplicates extension paths — web_search + web_fetch share web-research.ts", () => {
+	test("deduplicates extension paths — web_search + web_fetch share web/extension.ts", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(["web_search", "web_fetch"], tm);
 
 		const extPaths = result.args
 			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
 			.map(p => p.replace(/\\/g, "/"));
-		const webResearch = extPaths.filter(p => p.endsWith("/extensions/web-research.ts"));
-		expect(webResearch.length).toBe(1); // deduplicated
+		const webExt = extPaths.filter(p => p.includes("/web/extension.ts"));
+		expect(webExt.length).toBe(1); // deduplicated
 	});
 
 	test("unknown tools are skipped", () => {
@@ -160,17 +158,19 @@ test.describe("computeToolActivationArgs", () => {
 		expect(result.args.filter(a => a === "--extension").length).toBe(0);
 	});
 
-	test("bobbit-extension tools are silently skipped", () => {
+	test("bobbit-extension tools are included as --extension flags", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(["read", "task_create", "team_spawn"], tm);
 
 		const toolsIdx = result.args.indexOf("--tools");
 		const toolsCsv = result.args[toolsIdx + 1];
 		expect(toolsCsv).toBe("read");
-		// Bobbit extensions are not added as --extension flags
+		// Bobbit extensions are added as --extension flags
 		const extPaths = result.args
-			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension");
-		expect(extPaths.length).toBe(0);
+			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
+			.map(p => p.replace(/\\/g, "/"));
+		expect(extPaths.some(p => p.includes("/tasks/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/team/extension.ts"))).toBe(true);
 	});
 
 	test("bash-only role — bash excluded from --tools, gets --no-tools", () => {

@@ -34,11 +34,6 @@ export function bobbitStateDir(projectRoot?: string): string {
   return path.join(bobbitDir(projectRoot), "state");
 }
 
-/** Returns .bobbit/extensions */
-export function bobbitExtensionsDir(projectRoot?: string): string {
-  return path.join(bobbitDir(projectRoot), "extensions");
-}
-
 /** Returns the global auth.json path (~/.pi/agent/auth.json). API keys are global, not per-project. */
 export function globalAuthPath(): string {
   return path.join(os.homedir(), ".pi", "agent", "auth.json");

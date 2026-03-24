@@ -1,14 +1,12 @@
 /**
  * Maps role allowedTools to pi-coding-agent CLI flags.
  *
- * Tools come from three sources (defined in tools/<group>/*.yaml `provider` field):
+ * Tools come from two sources (defined in tools/<group>/*.yaml `provider` field):
  * 1. **Builtin tools** (pi-coding-agent built-in): read, bash, edit, write, grep, find, ls
  *    → Controlled via `--tools` flag
- * 2. **User extensions** (pi-coding-agent bundled): delegate, web_search, web_fetch, browser_*
- *    → Resolved from bobbitExtensionsDir(), controlled via `--extension` flags
- * 3. **Bobbit extensions** (tools/<group>/extension.ts): task_*, gate_*, team_*, bash_bg
+ * 2. **Bobbit extensions** (tools/<group>/extension.ts): delegate, browser_*, web_*, task_*, gate_*, team_*, bash_bg
  *    → Resolved from tools/<groupDir>/extension.ts, controlled via `--extension` flag
- *    → Goal/team extensions are added separately by session-manager
+ *    → Goal/team extensions are also added separately by session-manager (duplicates are harmless)
  *
  * Provider info is read from tools/<group>/*.yaml via ToolManager instead of hardcoded maps.
  * All sessions use `--no-extensions` so Bobbit has complete control over extension loading.
@@ -24,24 +22,18 @@ export interface ToolActivationResult {
 }
 
 /**
- * Resolve the absolute path for an extension based on provider type.
- * - bobbit-extension: resolved from tools/<groupDir>/<extension>
- * - user-extension: resolved from <cwd>/.pi/extensions/<extension>
- *   (project-local extensions auto-discovered by pi-coding-agent)
+ * Resolve the absolute path for a bobbit-extension provider.
+ * Path is: tools/<groupDir>/<extension>
  */
-function resolveExtensionPath(provider: ToolProvider & { groupDir: string }, cwd: string): string {
-	if (provider.type === "bobbit-extension" && provider.extension) {
-		return path.join(TOOLS_DIR, provider.groupDir, provider.extension);
-	}
-	// user-extension: resolve from project-local .pi/extensions/ (where pi-coding-agent discovers them)
-	return path.join(cwd, ".pi", "extensions", provider.extension!);
+function resolveExtensionPath(provider: ToolProvider & { groupDir: string }): string {
+	return path.join(TOOLS_DIR, provider.groupDir, provider.extension!);
 }
 
 /**
  * Given a role's allowedTools list and a ToolManager, compute the CLI args needed
- * to activate exactly those tools (plus Bobbit extensions which are handled separately).
+ * to activate exactly those tools.
  *
- * If allowedTools is empty or undefined, all tools are enabled (all builtins + all user extensions).
+ * If allowedTools is empty or undefined, all tools are enabled (all builtins + all bobbit extensions).
  * Always adds `--no-extensions` so Bobbit has complete control over extension loading.
  */
 export function computeToolActivationArgs(allowedTools?: string[], toolManager?: ToolManager, cwd?: string): ToolActivationResult {
@@ -59,7 +51,7 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 	// Load all providers in a single YAML scan
 	const providers = toolManager.getToolProviders();
 
-	// No restrictions — enable all builtins and all user extensions
+	// No restrictions — enable all builtins and all bobbit extensions
 	if (!allowedTools || allowedTools.length === 0) {
 		const builtins: string[] = [];
 		const extensionPaths = new Set<string>();
@@ -69,10 +61,9 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 				// Skip bash — provided by custom bash-tool.ts extension (loaded by rpc-bridge)
 				if (provider.tool === "bash") continue;
 				builtins.push(provider.tool);
-			} else if (provider.type === "user-extension" && provider.extension) {
-				extensionPaths.add(resolveExtensionPath(provider, cwd || process.cwd()));
+			} else if (provider.type === "bobbit-extension" && provider.extension) {
+				extensionPaths.add(resolveExtensionPath(provider));
 			}
-			// bobbit-extension: skip, handled by session-manager
 		}
 
 		if (builtins.length > 0) {
@@ -99,10 +90,9 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 		if (provider.type === "builtin" && provider.tool) {
 			// Skip bash — provided by custom bash-tool.ts extension (loaded by rpc-bridge)
 			if (provider.tool !== "bash") activeBaseTools.push(provider.tool);
-		} else if (provider.type === "user-extension" && provider.extension) {
-			neededExtensions.add(resolveExtensionPath(provider, cwd || process.cwd()));
+		} else if (provider.type === "bobbit-extension" && provider.extension) {
+			neededExtensions.add(resolveExtensionPath(provider));
 		}
-		// bobbit-extension: skip, handled by session-manager
 	}
 
 	if (activeBaseTools.length > 0) {

@@ -2,8 +2,8 @@ name: web_search
 description: "Search the web via DuckDuckGo"
 summary: "Search the web via DuckDuckGo. Returns titles, URLs, and snippets."
 provider:
-  type: user-extension
-  extension: web-research.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Web
 renderer: src/ui/tools/renderers/WebSearchRenderer.ts
 docs: |-

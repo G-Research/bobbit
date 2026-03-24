@@ -2,8 +2,8 @@ name: browser_type
 description: "Type text into an input element"
 summary: "Type text into an input element by CSS selector. Clears the field first."
 provider:
-  type: user-extension
-  extension: playwright/index.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Browser
 renderer: src/ui/tools/renderers/BrowserTypeRenderer.ts
 docs: |-
