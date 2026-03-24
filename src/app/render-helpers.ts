@@ -301,7 +301,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 		title="${expanded ? "Collapse agents" : "Expand agents"}"
 	>${expanded ? "▾" : "▸"}</span>`;
 
-	const childBadge = childCount > 0 ? html`<span class="text-[9px] text-muted-foreground/70 tabular-nums shrink-0" title="${childCount} agent${childCount !== 1 ? "s" : ""}">${childCount}</span>` : "";
+	void childCount; // available if needed later
 
 	return html`
 		<div
@@ -318,7 +318,6 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory)}
 			</div>
 			<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1 text-base" : "truncate text-xs"} ${isActive ? "font-semibold" : "font-normal"}"><span class="${mobile ? "truncate" : ""}">${displayTitle}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
-			${childBadge}
 			${!mobile ? renderSessionTime(session) : ""}
 			${mobile
 				? buttons
