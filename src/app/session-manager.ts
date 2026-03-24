@@ -377,6 +377,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Un-collapse panel on desktop
 				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
 				localStorage.removeItem(collapseKey);
+				// On mobile, switch to the panel tab so user sees the goal form
+				if (!isDesktop()) {
+					state.previewPanelTab = "preview";
+				}
 			}
 			renderApp();
 		};
