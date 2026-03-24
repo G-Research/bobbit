@@ -3,6 +3,7 @@ import type { CustomProvidersStore } from "./stores/custom-providers-store.js";
 import type { ProviderKeysStore } from "./stores/provider-keys-store.js";
 import type { SessionsStore } from "./stores/sessions-store.js";
 import type { SettingsStore } from "./stores/settings-store.js";
+import type { ShortcutBindingsStore } from "./stores/shortcut-bindings-store.js";
 import type { StorageBackend } from "./types.js";
 
 /**
@@ -16,6 +17,7 @@ export class AppStorage {
 	readonly sessions: SessionsStore;
 	readonly customProviders: CustomProvidersStore;
 	readonly commandHistory: CommandHistoryStore;
+	readonly shortcutBindings: ShortcutBindingsStore;
 
 	constructor(
 		settings: SettingsStore,
@@ -23,6 +25,7 @@ export class AppStorage {
 		sessions: SessionsStore,
 		customProviders: CustomProvidersStore,
 		commandHistory: CommandHistoryStore,
+		shortcutBindings: ShortcutBindingsStore,
 		backend: StorageBackend,
 	) {
 		this.settings = settings;
@@ -30,6 +33,7 @@ export class AppStorage {
 		this.sessions = sessions;
 		this.customProviders = customProviders;
 		this.commandHistory = commandHistory;
+		this.shortcutBindings = shortcutBindings;
 		this.backend = backend;
 	}
 

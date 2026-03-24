@@ -85,6 +85,7 @@ export type { CommandHistoryEntry } from "./storage/stores/command-history-store
 export { ProviderKeysStore } from "./storage/stores/provider-keys-store.js";
 export { SessionsStore } from "./storage/stores/sessions-store.js";
 export { SettingsStore } from "./storage/stores/settings-store.js";
+export { ShortcutBindingsStore } from "./storage/stores/shortcut-bindings-store.js";
 export type {
 	IndexConfig,
 	IndexedDBConfig,

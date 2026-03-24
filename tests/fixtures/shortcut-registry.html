@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head><title>Shortcut Registry Tests</title></head>
+<body>
+<input id="test-input" type="text" />
+<textarea id="test-textarea"></textarea>
+<div id="test-contenteditable" contenteditable="true">editable</div>
+<div id="test-div">not editable</div>
+
+<script>
+// ============================================================================
+// Inlined shortcut registry logic (from src/app/shortcut-registry.ts)
+// Persistence (loadSavedBindings/saveBindings) is excluded — requires IndexedDB
+// ============================================================================
+
+// Allow tests to override platform detection
+let _isMac = false;
+
+const shortcuts = new Map();
+
+function registerShortcut(entry) {
+	const full = {
+		...entry,
+		currentBindings: entry.currentBindings
+			? entry.currentBindings
+			: entry.defaultBindings.map((b) => ({ ...b })),
+	};
+	shortcuts.set(full.id, full);
+}
+
+function unregisterShortcut(id) {
+	shortcuts.delete(id);
+}
+
+function getShortcuts() {
+	return [...shortcuts.values()];
+}
+
+function getShortcutById(id) {
+	return shortcuts.get(id);
+}
+
+function updateBinding(id, bindingIndex, newBinding) {
+	const entry = shortcuts.get(id);
+	if (!entry || bindingIndex < 0 || bindingIndex >= entry.currentBindings.length) return;
+	entry.currentBindings[bindingIndex] = { ...newBinding };
+}
+
+function addBinding(id, binding) {
+	const entry = shortcuts.get(id);
+	if (!entry) return;
+	entry.currentBindings.push({ ...binding });
+}
+
+function removeBinding(id, bindingIndex) {
+	const entry = shortcuts.get(id);
+	if (!entry || bindingIndex < 0 || bindingIndex >= entry.currentBindings.length) return;
+	entry.currentBindings.splice(bindingIndex, 1);
+}
+
+function resetBinding(id) {
+	const entry = shortcuts.get(id);
+	if (!entry) return;
+	entry.currentBindings = entry.defaultBindings.map((b) => ({ ...b }));
+}
+
+function resetAllBindings() {
+	for (const entry of shortcuts.values()) {
+		entry.currentBindings = entry.defaultBindings.map((b) => ({ ...b }));
+	}
+}
+
+function bindingsEqual(a, b) {
+	return (
+		a.key.toLowerCase() === b.key.toLowerCase() &&
+		a.ctrlOrMeta === b.ctrlOrMeta &&
+		a.shift === b.shift &&
+		a.alt === b.alt
+	);
+}
+
+function findConflict(binding, excludeId) {
+	for (const entry of shortcuts.values()) {
+		if (entry.id === excludeId) continue;
+		for (const b of entry.currentBindings) {
+			if (bindingsEqual(b, binding)) return entry;
+		}
+	}
+	return undefined;
+}
+
+// Formatting
+const SPECIAL_KEYS = {
+	arrowup: "↑",
+	arrowdown: "↓",
+	arrowleft: "←",
+	arrowright: "→",
+	escape: "Esc",
+	backspace: "⌫",
+	delete: "Del",
+	enter: "↵",
+	tab: "Tab",
+	" ": "Space",
+};
+
+function formatBinding(binding) {
+	const parts = [];
+	if (binding.ctrlOrMeta) parts.push(_isMac ? "Cmd" : "Ctrl");
+	if (binding.shift) parts.push("Shift");
+	if (binding.alt) parts.push("Alt");
+
+	const keyLower = binding.key.toLowerCase();
+	const keyDisplay = SPECIAL_KEYS[keyLower] ?? binding.key.toUpperCase();
+	parts.push(keyDisplay);
+
+	return parts.join("+");
+}
+
+// Browser reserved combos
+const BROWSER_RESERVED = [
+	{ key: "w", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "n", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "Tab", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "l", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "d", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "q", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "r", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "p", ctrlOrMeta: true, shift: false, alt: false },
+	{ key: "f", ctrlOrMeta: true, shift: false, alt: false },
+];
+
+function isBrowserReserved(binding) {
+	return BROWSER_RESERVED.some((reserved) => bindingsEqual(reserved, binding));
+}
+
+// Keydown listener
+function matchesBinding(e, b) {
+	const modMatch = b.ctrlOrMeta
+		? (_isMac ? e.metaKey : e.ctrlKey)
+		: !(_isMac ? e.metaKey : e.ctrlKey);
+	return (
+		modMatch &&
+		e.shiftKey === b.shift &&
+		e.altKey === b.alt &&
+		e.key.toLowerCase() === b.key.toLowerCase()
+	);
+}
+
+function isInputFocused() {
+	const active = document.activeElement;
+	if (!active) return false;
+	if (isInputElement(active)) return true;
+	const shadowActive = active.shadowRoot?.activeElement;
+	if (shadowActive && isInputElement(shadowActive)) return true;
+	return false;
+}
+
+function isInputElement(el) {
+	const tag = el.tagName.toLowerCase();
+	if (tag === "input" || tag === "textarea") return true;
+	if (el.hasAttribute("contenteditable") && el.getAttribute("contenteditable") !== "false") return true;
+	return false;
+}
+
+function handleKeydown(e) {
+	if (["Control", "Meta", "Shift", "Alt"].includes(e.key)) return;
+	const inputFocused = isInputFocused();
+	for (const entry of shortcuts.values()) {
+		if (inputFocused && !entry.allowInInput) continue;
+		for (const binding of entry.currentBindings) {
+			if (matchesBinding(e, binding)) {
+				e.preventDefault();
+				entry.handler();
+				return;
+			}
+		}
+	}
+}
+
+let listening = false;
+
+function startListening() {
+	if (listening) return;
+	listening = true;
+	window.addEventListener("keydown", handleKeydown);
+}
+
+function stopListening() {
+	if (!listening) return;
+	listening = false;
+	window.removeEventListener("keydown", handleKeydown);
+}
+
+function clearAll() {
+	shortcuts.clear();
+	stopListening();
+}
+
+// Expose on window for Playwright tests
+window.__registry = {
+	registerShortcut,
+	unregisterShortcut,
+	getShortcuts,
+	getShortcutById,
+	updateBinding,
+	addBinding,
+	removeBinding,
+	resetBinding,
+	resetAllBindings,
+	findConflict,
+	bindingsEqual,
+	formatBinding,
+	isBrowserReserved,
+	matchesBinding,
+	startListening,
+	stopListening,
+	clearAll,
+	setMac: (val) => { _isMac = val; },
+};
+</script>
+</body>
+</html>
