@@ -7,7 +7,7 @@
     "bobbit": "dist/server/cli.js"
   },
   "scripts": {
-    "build:server": "tsc -p tsconfig.server.json && shx chmod +x dist/server/cli.js && shx cp -r src/server/defaults dist/server/defaults",
+    "build:server": "tsc -p tsconfig.server.json && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && shx cp -r src/server/defaults dist/server/defaults",
     "build:ui": "vite build",
     "build": "npm run build:server && npm run build:ui",
     "dev": "concurrently -n gw,ui -c blue,green \"node dist/server/cli.js --cwd . --no-ui\" \"vite\"",
