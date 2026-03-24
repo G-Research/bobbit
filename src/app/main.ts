@@ -13,8 +13,8 @@ import { gatewayFetch, refreshSessions } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
-import { showGoalDialog } from "./dialogs.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
+import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 
 // ============================================================================
 // WIRE UP RENDER
@@ -315,112 +315,141 @@ async function initApp() {
 	// Listen for browser back/forward navigation
 	window.addEventListener("hashchange", handleHashChange);
 
-	// Global keyboard shortcuts
-	window.addEventListener("keydown", (e: KeyboardEvent) => {
-		const mod = e.ctrlKey || e.metaKey;
+	// ========================================================================
+	// KEYBOARD SHORTCUT REGISTRY
+	// ========================================================================
 
-		// Ctrl+T / Cmd+T / Alt+N — New session
-		if ((mod && e.key === "t") || (e.altKey && (e.key === "n" || e.key === "N"))) {
-			if (state.appView === "authenticated") {
-				e.preventDefault();
-				createAndConnectSession();
+	// Helper: build ordered session list and navigate up/down
+	function navigateSession(direction: "up" | "down"): void {
+		const allSessions = state.gatewaySessions;
+		const nonDelegate = allSessions.filter((s) => !s.delegateOf);
+		const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
+		const byAge = (a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt;
+		const stateOrder: Record<string, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
+		const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
+
+		const ordered: string[] = [];
+		for (const goal of sortedGoals) {
+			const goalSessions = nonDelegate
+				.filter((s) => s.goalId === goal.id || s.teamGoalId === goal.id)
+				.sort(byAge);
+			for (const s of goalSessions) ordered.push(s.id);
+		}
+		const ungrouped = nonDelegate
+			.filter((s) => !s.goalId && !s.teamGoalId && !staffSessionIds.has(s.id))
+			.sort(byAge);
+		for (const s of ungrouped) ordered.push(s.id);
+		const staffSessions = nonDelegate
+			.filter((s) => staffSessionIds.has(s.id))
+			.sort(byAge);
+		for (const s of staffSessions) ordered.push(s.id);
+
+		if (ordered.length > 1) {
+			const currentId = activeSessionId();
+			const currentIndex = currentId ? ordered.indexOf(currentId) : -1;
+			let nextIndex: number;
+			if (direction === "up") {
+				nextIndex = currentIndex <= 0 ? ordered.length - 1 : currentIndex - 1;
+			} else {
+				nextIndex = currentIndex >= ordered.length - 1 ? 0 : currentIndex + 1;
+			}
+			const nextId = ordered[nextIndex];
+			if (nextId && nextId !== currentId) {
+				connectToSession(nextId, true);
 			}
 		}
+	}
 
-		// Ctrl+/ / Cmd+/ — Focus message input
-		if (mod && e.key === "/") {
-			e.preventDefault();
+	// MIGRATED shortcuts (all allowInInput: true to preserve existing behavior)
+	registerShortcut({
+		id: "new-session", label: "New session", category: "Sessions",
+		defaultBindings: [
+			{ key: "t", ctrlOrMeta: true, shift: false, alt: false },
+			{ key: "n", ctrlOrMeta: false, shift: false, alt: true },
+		],
+		allowInInput: true,
+		handler: () => { if (state.appView === "authenticated") createAndConnectSession(); },
+	});
+
+	registerShortcut({
+		id: "focus-input", label: "Focus message input", category: "Navigation",
+		defaultBindings: [{ key: "/", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: true,
+		handler: () => {
 			const textarea = document.querySelector("message-editor")?.querySelector("textarea");
-			if (textarea) {
-				(textarea as HTMLElement).focus();
-			}
-		}
+			if (textarea) (textarea as HTMLElement).focus();
+		},
+	});
 
-		// Alt+G — New goal
-		if (e.altKey && (e.key === "g" || e.key === "G") && !mod) {
-			if (state.appView === "authenticated") {
-				e.preventDefault();
-				showGoalDialog();
-			}
-		}
-
-		// Ctrl+Shift+D / Cmd+Shift+D — Terminate current session
-		if (mod && e.shiftKey && (e.key === "D" || e.key === "d")) {
-			const sid = activeSessionId();
-			if (sid) {
-				e.preventDefault();
-				terminateSession(sid);
-			}
-		}
-
-		// Ctrl+[ / Cmd+[ — Toggle sidebar
-		if (mod && e.key === "[") {
-			e.preventDefault();
+	registerShortcut({
+		id: "toggle-sidebar", label: "Toggle sidebar", category: "UI",
+		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: true,
+		handler: () => {
 			state.sidebarCollapsed = !state.sidebarCollapsed;
 			localStorage.setItem("bobbit-sidebar-collapsed", String(state.sidebarCollapsed));
 			renderApp();
-		}
+		},
+	});
 
-		// Ctrl+Up / Cmd+Up — Previous session
-		// Ctrl+Down / Cmd+Down — Next session
-		if (mod && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-			// Build navigable list: Goals -> Sessions -> Staff
-			// Within each section, oldest session first (by createdAt)
-			const allSessions = state.gatewaySessions;
-			const nonDelegate = allSessions.filter((s) => !s.delegateOf);
-			const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-			const byAge = (a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt;
-			const stateOrder: Record<string, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
-			const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
+	registerShortcut({
+		id: "prev-session", label: "Previous session", category: "Sessions",
+		defaultBindings: [{ key: "ArrowUp", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: true,
+		handler: () => navigateSession("up"),
+	});
 
-			const ordered: string[] = [];
-			// 1. Goal sessions (goals sorted by state, sessions by age within each)
-			for (const goal of sortedGoals) {
-				const goalSessions = nonDelegate
-					.filter((s) => s.goalId === goal.id || s.teamGoalId === goal.id)
-					.sort(byAge);
-				for (const s of goalSessions) ordered.push(s.id);
-			}
-			// 2. Ungrouped sessions (by age)
-			const ungrouped = nonDelegate
-				.filter((s) => !s.goalId && !s.teamGoalId && !staffSessionIds.has(s.id))
-				.sort(byAge);
-			for (const s of ungrouped) ordered.push(s.id);
-			// 3. Staff sessions (by age)
-			const staffSessions = nonDelegate
-				.filter((s) => staffSessionIds.has(s.id))
-				.sort(byAge);
-			for (const s of staffSessions) ordered.push(s.id);
+	registerShortcut({
+		id: "next-session", label: "Next session", category: "Sessions",
+		defaultBindings: [{ key: "ArrowDown", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: true,
+		handler: () => navigateSession("down"),
+	});
 
-			if (ordered.length > 1) {
-				const currentId = activeSessionId();
-				const currentIndex = currentId ? ordered.indexOf(currentId) : -1;
-				let nextIndex: number;
-				if (e.key === "ArrowUp") {
-					nextIndex = currentIndex <= 0 ? ordered.length - 1 : currentIndex - 1;
-				} else {
-					nextIndex = currentIndex >= ordered.length - 1 ? 0 : currentIndex + 1;
-				}
-				const nextId = ordered[nextIndex];
-				if (nextId && nextId !== currentId) {
-					e.preventDefault();
-					connectToSession(nextId, true);
-				}
-			}
-		}
-
-		// Ctrl+] / Cmd+] — Toggle preview panel
-		if (mod && e.key === "]") {
+	registerShortcut({
+		id: "toggle-preview", label: "Toggle preview panel", category: "UI",
+		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: true,
+		handler: () => {
 			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null);
 			if (hasPanel) {
-				e.preventDefault();
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
 				localStorage.setItem(key, String(!collapsed));
 				renderApp();
 			}
-		}
+		},
 	});
+
+	// NEW shortcuts
+	registerShortcut({
+		id: "new-goal", label: "New goal", category: "Goals",
+		defaultBindings: [{ key: "g", ctrlOrMeta: false, shift: false, alt: true }],
+		handler: () => {
+			import("./dialogs.js").then(({ showGoalDialog }) => showGoalDialog());
+		},
+	});
+
+	registerShortcut({
+		id: "terminate-session", label: "Terminate session", category: "Sessions",
+		defaultBindings: [{ key: "d", ctrlOrMeta: true, shift: true, alt: false }],
+		handler: () => {
+			const id = activeSessionId();
+			if (id) terminateSession(id);
+		},
+	});
+
+	registerShortcut({
+		id: "show-shortcuts", label: "Keyboard shortcuts", category: "UI",
+		defaultBindings: [{ key: "/", ctrlOrMeta: true, shift: true, alt: false }],
+		handler: async () => {
+			const { showShortcutsDialog } = await import("./shortcuts-dialog.js");
+			showShortcutsDialog();
+		},
+	});
+
+	await loadSavedBindings();
+	startListening();
 }
 
 initApp();
