@@ -234,6 +234,90 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 }
 
 // ============================================================================
+// PROMPT DRAFT PERSISTENCE
+// ============================================================================
+// Module-level state prevents monkey-patch stacking across session switches.
+// Each call to _setupPromptDraftHandlers cancels the previous session's timers
+// and rebinds to the new session ID without wrapping old handlers.
+
+let _draftSessionId: string | null = null;
+let _draftTimer: ReturnType<typeof setTimeout> | null = null;
+let _draftAbort: AbortController | null = null;
+let _draftInstalled = false;
+
+function _teardownDraftHandlers(): void {
+	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+	if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
+	_draftSessionId = null;
+}
+
+function _setupPromptDraftHandlers(sessionId: string): void {
+	// Tear down any previous session's draft state
+	_teardownDraftHandlers();
+	_draftSessionId = sessionId;
+
+	// Restore existing draft from server
+	(async () => {
+		try {
+			const draft = await loadDraftFromServer(sessionId, 'prompt');
+			// Only apply if we're still on the same session
+			if (_draftSessionId !== sessionId) return;
+			const editor = document.querySelector("message-editor") as any;
+			if (editor && draft && typeof draft === 'string') {
+				editor.value = draft;
+			}
+		} catch { /* ignore */ }
+	})();
+
+	// Install onInput/onSend handlers exactly once — they read _draftSessionId
+	// at call time, so switching sessions doesn't require re-wrapping.
+	if (!_draftInstalled) {
+		requestAnimationFrame(() => {
+			const editor = document.querySelector("message-editor") as any;
+			if (!editor) return;
+			const baseOnInput = editor.onInput;
+			const baseOnSend = editor.onSend;
+
+			editor.onInput = (val: string) => {
+				baseOnInput?.(val);
+				if (!_draftSessionId) return;
+				if (_draftTimer) clearTimeout(_draftTimer);
+				_draftTimer = setTimeout(() => {
+					_draftTimer = null;
+					if (!_draftSessionId) return;
+					if (_draftAbort) _draftAbort.abort();
+					if (val.trim()) {
+						_draftAbort = new AbortController();
+						const sid = _draftSessionId;
+						saveDraftToServer(sid, 'prompt', val, _draftAbort.signal)
+							.finally(() => { if (_draftAbort) _draftAbort = null; });
+					} else {
+						deleteDraftFromServer(_draftSessionId, 'prompt');
+					}
+				}, 500);
+			};
+
+			editor.onSend = (text: string, attachments: any[]) => {
+				// Cancel pending timer AND abort any in-flight save request
+				if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+				if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
+				if (_draftSessionId) deleteDraftFromServer(_draftSessionId, 'prompt');
+				baseOnSend?.(text, attachments);
+			};
+
+			_draftInstalled = true;
+		});
+	}
+
+	// Focus the textarea
+	requestAnimationFrame(() => {
+		const editor = document.querySelector("message-editor") as any;
+		const textarea = editor?.querySelector("textarea");
+		if (textarea) textarea.focus();
+	});
+}
+
+// ============================================================================
 // CONNECT TO SESSION
 // ============================================================================
 
@@ -667,51 +751,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		}
 
 		// Restore prompt draft from server and set up auto-save
-		(async () => {
-			try {
-				const draft = await loadDraftFromServer(sessionId, 'prompt');
-				const editor = document.querySelector("message-editor") as any;
-				if (editor && draft && typeof draft === 'string') {
-					editor.value = draft;
-				}
-			} catch { /* ignore */ }
-		})();
-
-		// Set up debounced prompt draft saving with in-flight request tracking
-		let _promptDraftTimer: ReturnType<typeof setTimeout> | null = null;
-		let _promptDraftAbort: AbortController | null = null;
-		requestAnimationFrame(() => {
-			const editor = document.querySelector("message-editor") as any;
-			if (editor) {
-				const origOnInput = editor.onInput;
-				editor.onInput = (val: string) => {
-					origOnInput?.(val);
-					if (_promptDraftTimer) clearTimeout(_promptDraftTimer);
-					_promptDraftTimer = setTimeout(() => {
-						_promptDraftTimer = null;
-						// Abort any previous in-flight save
-						if (_promptDraftAbort) _promptDraftAbort.abort();
-						if (val.trim()) {
-							_promptDraftAbort = new AbortController();
-							saveDraftToServer(sessionId, 'prompt', val, _promptDraftAbort.signal)
-								.finally(() => { _promptDraftAbort = null; });
-						} else {
-							deleteDraftFromServer(sessionId, 'prompt');
-						}
-					}, 500);
-				};
-				const origOnSend = editor.onSend;
-				editor.onSend = (text: string, attachments: any[]) => {
-					// Cancel pending timer AND abort any in-flight save request
-					if (_promptDraftTimer) { clearTimeout(_promptDraftTimer); _promptDraftTimer = null; }
-					if (_promptDraftAbort) { _promptDraftAbort.abort(); _promptDraftAbort = null; }
-					deleteDraftFromServer(sessionId, 'prompt');
-					origOnSend?.(text, attachments);
-				};
-				const textarea = editor.querySelector("textarea");
-				if (textarea) textarea.focus();
-			}
-		});
+		_setupPromptDraftHandlers(sessionId);
 
 		refreshSessions();
 	} catch (err) {
