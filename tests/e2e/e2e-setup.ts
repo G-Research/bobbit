@@ -8,7 +8,8 @@
  * process.env so parallel test runs on the same machine never collide.
  */
 
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect } from "@playwright/test";
@@ -43,6 +44,23 @@ export function nonGitCwd(): string {
 		mkdirSync(_nonGitCwd, { recursive: true });
 	}
 	return _nonGitCwd;
+}
+
+/**
+ * A cwd that IS a git repository (minimal, no package-lock.json).
+ * Used by tests that need worktree creation (e.g. staff agents).
+ */
+let _gitCwd: string | undefined;
+export function gitCwd(): string {
+	if (!_gitCwd) {
+		_gitCwd = join(tmpdir(), `bobbit-e2e-git-${Date.now()}`);
+		mkdirSync(_gitCwd, { recursive: true });
+		writeFileSync(join(_gitCwd, "README.md"), "# E2E test repo\n");
+		execFileSync("git", ["init"], { cwd: _gitCwd, stdio: "pipe" });
+		execFileSync("git", ["add", "."], { cwd: _gitCwd, stdio: "pipe" });
+		execFileSync("git", ["commit", "-m", "init"], { cwd: _gitCwd, stdio: "pipe" });
+	}
+	return _gitCwd;
 }
 
 /** Read the auth token that the test server auto-created on startup. */

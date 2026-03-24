@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
+import { createWorktree, cleanupWorktree } from "../skills/git.js";
+
+function sanitiseBranchName(name: string): string {
+	return name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
 
 export class StaffManager {
 	private store = new StaffStore();
@@ -35,21 +40,41 @@ export class StaffManager {
 			createdAt: now,
 			updatedAt: now,
 		};
+		// Create a worktree for this staff agent
+		const shortId = randomUUID().slice(0, 8);
+		const branchName = "staff-" + sanitiseBranchName(name) + "-" + shortId;
+		const worktreeResult = createWorktree(cwd, branchName);
+		staff.worktreePath = worktreeResult.worktreePath;
+		staff.branch = worktreeResult.branchName;
+
 		this.store.put(staff);
 
 		// Create the permanent session for this staff agent
-		let fullPrompt = staff.systemPrompt;
-		if (staff.memory) {
-			fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
+		try {
+			let fullPrompt = staff.systemPrompt;
+			if (staff.memory) {
+				fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
+			}
+			const session = await sessionManager.createSession(worktreeResult.worktreePath, undefined, undefined, undefined, {
+				rolePrompt: fullPrompt,
+				env: { BOBBIT_STAFF_ID: id },
+			});
+			session.staffId = id;
+			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
+			await sessionManager.persistSessionMetadata(session);
+			this.store.update(id, { currentSessionId: session.id });
+			staff.currentSessionId = session.id;
+		} catch (err) {
+			// Clean up the orphaned worktree on failure
+			try {
+				cleanupWorktree(cwd, worktreeResult.worktreePath, branchName, true);
+				console.log(`[staff-manager] Cleaned up orphaned worktree after createStaff failure: ${worktreeResult.worktreePath}`);
+			} catch (cleanupErr) {
+				console.error(`[staff-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
+			}
+			this.store.remove(id);
+			throw err;
 		}
-		const session = await sessionManager.createSession(staff.cwd, undefined, undefined, undefined, {
-			rolePrompt: fullPrompt,
-			env: { BOBBIT_STAFF_ID: id },
-		});
-		session.staffId = id;
-		await sessionManager.persistSessionMetadata(session);
-		this.store.update(id, { currentSessionId: session.id });
-		staff.currentSessionId = session.id;
 
 		return staff;
 	}
@@ -96,6 +121,15 @@ export class StaffManager {
 				await sessionManager.terminateSession(staff.currentSessionId);
 			} catch (err) {
 				console.error(`[staff-manager] Failed to terminate session ${staff.currentSessionId} for staff ${id}:`, err);
+			}
+		}
+
+		// Clean up the worktree if it exists
+		if (staff.worktreePath) {
+			try {
+				cleanupWorktree(staff.cwd, staff.worktreePath, staff.branch, true);
+			} catch (err) {
+				console.error(`[staff-manager] Failed to clean up worktree for staff ${id}:`, err);
 			}
 		}
 
@@ -146,7 +180,8 @@ export class StaffManager {
 			if (staff.memory) {
 				fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
 			}
-			const session = await sessionManager.createSession(staff.cwd, undefined, undefined, undefined, {
+			const sessionCwd = staff.worktreePath ?? staff.cwd;
+			const session = await sessionManager.createSession(sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: staffId },
 			});

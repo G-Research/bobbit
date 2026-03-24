@@ -1962,15 +1962,20 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = body.cwd || config.defaultCwd;
-		const staff = await staffManager.createStaff(
-			body.name,
-			body.description || "",
-			body.systemPrompt,
-			cwd,
-			sessionManager,
-			{ triggers: body.triggers, roleId: body.roleId },
-		);
-		json(staff, 201);
+		try {
+			const staff = await staffManager.createStaff(
+				body.name,
+				body.description || "",
+				body.systemPrompt,
+				cwd,
+				sessionManager,
+				{ triggers: body.triggers, roleId: body.roleId },
+			);
+			json(staff, 201);
+		} catch (err: any) {
+			console.error("[server] Failed to create staff agent:", err);
+			json({ error: err?.message || "Failed to create staff agent" }, 500);
+		}
 		return;
 	}
 

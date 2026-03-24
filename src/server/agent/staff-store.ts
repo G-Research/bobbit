@@ -37,6 +37,8 @@ export interface PersistedStaff {
 	updatedAt: number;
 	lastWakeAt?: number;
 	currentSessionId?: string;
+	worktreePath?: string;
+	branch?: string;
 }
 
 const STORE_DIR = bobbitStateDir();
