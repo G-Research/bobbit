@@ -33,12 +33,17 @@ export interface ToolInfo {
 	rendererFile?: string;
 }
 
-/** tools/ directory at the repo root — version controlled */
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TOOLS_DIR = path.resolve(__dirname, "../../../tools");
+import { bobbitConfigDir } from "../bobbit-dir.js";
 
-/** Exported for use by tool-activation.ts, rpc-bridge.ts, session-manager.ts */
-export { TOOLS_DIR };
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/** Tool YAML definitions directory — .bobbit/config/tools/ (user-facing, scaffolded from defaults) */
+const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
+
+/** Tool extension code directory — repo-root tools/ (source code, not user config) */
+const TOOLS_CODE_DIR = path.resolve(__dirname, "../../../tools");
+
+export { TOOLS_DIR, TOOLS_CODE_DIR };
 
 /**
  * Scan the tools/ YAML directory and return all tool definitions.

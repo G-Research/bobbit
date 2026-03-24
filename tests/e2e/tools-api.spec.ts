@@ -9,21 +9,22 @@
  * the specific YAML files that are modified by PUT tests.
  */
 import { test, expect } from "@playwright/test";
-import { existsSync, copyFileSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readE2EToken, BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE, E2E_BOBBIT_DIR } from "./e2e-setup.js";
 
 const TOKEN = readE2EToken();
 
 /**
  * YAML files modified by PUT tests — we backup/restore these.
- * Paths are relative to the repo root (process.cwd()).
+ * Paths are relative to the E2E BOBBIT_DIR's config/tools/ directory
+ * (tool YAMLs are scaffolded into .bobbit/config/tools/ on server startup).
  */
 const MODIFIED_YAMLS = [
-	"tools/shell/bash.yaml",
-	"tools/filesystem/read.yaml",
-	"tools/filesystem/edit.yaml",
-	"tools/agent/delegate.yaml",
+	"config/tools/shell/bash.yaml",
+	"config/tools/filesystem/read.yaml",
+	"config/tools/filesystem/edit.yaml",
+	"config/tools/agent/delegate.yaml",
 ];
 
 const yamlBackups = new Map<string, string>();
@@ -43,7 +44,7 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 // Back up and restore YAML files around the test suite
 test.beforeAll(() => {
 	for (const yamlPath of MODIFIED_YAMLS) {
-		const abs = join(process.cwd(), yamlPath);
+		const abs = join(E2E_BOBBIT_DIR, yamlPath);
 		if (existsSync(abs)) {
 			yamlBackups.set(yamlPath, readFileSync(abs, "utf-8"));
 		}
@@ -52,7 +53,7 @@ test.beforeAll(() => {
 
 test.afterAll(() => {
 	for (const [yamlPath, content] of yamlBackups) {
-		const abs = join(process.cwd(), yamlPath);
+		const abs = join(E2E_BOBBIT_DIR, yamlPath);
 		writeFileSync(abs, content, "utf-8");
 	}
 });

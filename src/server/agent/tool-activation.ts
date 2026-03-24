@@ -14,7 +14,7 @@
 
 import path from "node:path";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
-import { TOOLS_DIR } from "./tool-manager.js";
+import { TOOLS_CODE_DIR } from "./tool-manager.js";
 
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--tools", "read,bash", "--no-extensions", "--extension", "/path/to/ext"]) */
@@ -26,7 +26,7 @@ export interface ToolActivationResult {
  * Path is: tools/<groupDir>/<extension>
  */
 function resolveExtensionPath(provider: ToolProvider & { groupDir: string }): string {
-	return path.join(TOOLS_DIR, provider.groupDir, provider.extension!);
+	return path.join(TOOLS_CODE_DIR, provider.groupDir, provider.extension!);
 }
 
 /**

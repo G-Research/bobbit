@@ -19,9 +19,9 @@ import { parse } from "yaml";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-/** Scan tool YAML files from tools/<group>/*.yaml and return all tools as {name, docs} objects */
+/** Scan tool YAML files from src/server/defaults/tools/<group>/*.yaml and return all tools as {name, docs} objects */
 function loadToolDefs(): Array<{ name: string; docs?: string }> {
-	const toolsDir = resolve(__dirname, "..", "tools");
+	const toolsDir = resolve(__dirname, "..", "src", "server", "defaults", "tools");
 	const tools: Array<{ name: string; docs?: string }> = [];
 	for (const group of readdirSync(toolsDir, { withFileTypes: true })) {
 		if (!group.isDirectory()) continue;

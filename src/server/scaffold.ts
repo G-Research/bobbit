@@ -29,7 +29,19 @@ export function scaffoldBobbitDir(projectRoot: string): void {
 
   // Check for config/ subdir to determine if already scaffolded.
   // The top-level dir may already exist (e.g. created by env var or mkdir).
-  if (fs.existsSync(path.join(dotBobbit, "config"))) return;
+  if (fs.existsSync(path.join(dotBobbit, "config"))) {
+    // Incremental scaffolding: add tools/ if missing (for existing installations)
+    const toolsConfigDir = path.join(dotBobbit, "config", "tools");
+    if (!fs.existsSync(toolsConfigDir)) {
+      const defaultsDir = path.join(__dirname, "defaults");
+      const defaultToolsDir = path.join(defaultsDir, "tools");
+      if (fs.existsSync(defaultToolsDir)) {
+        console.log(`Adding .bobbit/config/tools/ to existing installation...`);
+        copyDir(defaultToolsDir, toolsConfigDir);
+      }
+    }
+    return;
+  }
 
   console.log(`Creating .bobbit/ in ${projectRoot}...`);
 
@@ -61,6 +73,10 @@ export function scaffoldBobbitDir(projectRoot: string): void {
     copyDir(
       path.join(defaultsDir, "personalities"),
       path.join(dotBobbit, "config", "personalities"),
+    );
+    copyDir(
+      path.join(defaultsDir, "tools"),
+      path.join(dotBobbit, "config", "tools"),
     );
     const sysPromptSrc = path.join(defaultsDir, "system-prompt.md");
     if (fs.existsSync(sysPromptSrc)) {

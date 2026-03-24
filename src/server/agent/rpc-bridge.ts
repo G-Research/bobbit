@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir } from "../bobbit-dir.js";
-import { TOOLS_DIR } from "./tool-manager.js";
+import { TOOLS_CODE_DIR } from "./tool-manager.js";
 
 export interface RpcBridgeOptions {
 	/** Path to pi-coding-agent cli.js. Auto-resolved if omitted. */
@@ -46,7 +46,7 @@ export class RpcBridge {
 		}
 
 		// Always load the custom bash tool extension (FD-safe bash + bash_bg)
-		const bashExtPath = path.join(TOOLS_DIR, "shell", "extension.ts");
+		const bashExtPath = path.join(TOOLS_CODE_DIR, "shell", "extension.ts");
 		if (!args.includes(bashExtPath)) {
 			args.push("--extension", bashExtPath);
 		}
