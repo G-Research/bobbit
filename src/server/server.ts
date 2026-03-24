@@ -314,6 +314,14 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/shutdown — graceful shutdown (used by coverage teardown to flush V8 coverage)
+	if (url.pathname === "/api/shutdown" && req.method === "POST") {
+		json({ status: "shutting down" });
+		// Defer exit to allow the response to be sent
+		setTimeout(() => process.exit(0), 500);
+		return;
+	}
+
 	// GET /api/ca-cert — download the Bobbit CA certificate for device trust
 	if (url.pathname === "/api/ca-cert" && req.method === "GET") {
 		const caCertPath = config.tls?.caCert;
