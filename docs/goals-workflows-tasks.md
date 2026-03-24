@@ -270,9 +270,9 @@ Here's the typical flow for a team goal with a workflow:
 | Location | What |
 |---|---|
 | `workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
-| `~/.pi/gateway-goals.json` | Goals with snapshotted workflows |
-| `~/.pi/gateway-gates.json` | Gate state and signal history |
-| `~/.pi/gateway-tasks.json` | Tasks with workflow gate links |
+| `.bobbit/state/goals.json` | Goals with snapshotted workflows |
+| `.bobbit/state/gates.json` | Gate state and signal history |
+| `.bobbit/state/tasks.json` | Tasks with workflow gate links |
 
 ## Key source files
 

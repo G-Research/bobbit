@@ -1,0 +1,27 @@
+id: test-fast
+name: Test Fast
+description: Lightweight workflow for E2E testing with fast verification steps.
+hidden: true
+gates:
+  - id: design-doc
+    name: Design Doc
+    verify:
+      - name: "Content present"
+        type: command
+        run: "echo ok"
+
+  - id: implementation
+    name: Implementation
+    depends_on: [design-doc]
+    verify:
+      - name: "Quick check"
+        type: command
+        run: "echo ok"
+
+  - id: ready-to-merge
+    name: Ready to Merge
+    depends_on: [implementation]
+    verify:
+      - name: "All gates passed"
+        type: command
+        run: "echo ok"

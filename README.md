@@ -45,7 +45,7 @@ See [docs/dev-workflow.md](docs/dev-workflow.md) for the full development workfl
 
 ### Dev server harness
 
-Use `npm run dev:harness` when developing Bobbit itself. The harness wraps the server process and watches a sentinel file (`~/.pi/gateway-restart`). Running `npm run restart-server` triggers:
+Use `npm run dev:harness` when developing Bobbit itself. The harness wraps the server process and watches a sentinel file (`.bobbit/state/gateway-restart`). Running `npm run restart-server` triggers:
 
 1. Kill the running server
 2. Wait for the port to clear
@@ -76,10 +76,13 @@ bobbit [options]
 
 | File | Purpose |
 |---|---|
-| `cli.ts` | Entry point. Parses args, auto-detects NordLynx IP and embedded UI, resolves custom system prompt from `config/system-prompt.md`, sets up TLS, updates deSEC DNS, starts the gateway. |
+| `cli.ts` | Entry point. Parses args, auto-detects NordLynx IP and embedded UI, resolves custom system prompt from `.bobbit/config/system-prompt.md`, sets up TLS, updates deSEC DNS, starts the gateway. |
 | `server.ts` | HTTP server with REST API routes + WebSocket upgrade handling + static file serving with SPA fallback. |
 | `index.ts` | Barrel export of the server's public API (`createGateway`, `SessionManager`, `RpcBridge`, etc.). |
-| `pi-dir.ts` | Resolves the `~/.pi` state directory. Override via `BOBBIT_PI_DIR` env var for test isolation. |
+| `bobbit-dir.ts` | Resolves `.bobbit/` directory paths (config, state, global auth). Override via `BOBBIT_DIR` env var for test isolation. |
+| `scaffold.ts` | First-run scaffolding — creates `.bobbit/` with default configs. |
+| `pi-dir.ts` | @deprecated — use `bobbit-dir.ts` instead. |
+| `watchdog.ts` | Process health watchdog. |
 | `harness.ts` | Dev server wrapper. Watches sentinel file for restart signals, auto-restarts on crash. |
 | `harness-signal.ts` | Touches the sentinel file to trigger a harness restart. |
 
@@ -88,34 +91,41 @@ bobbit [options]
 | File | Purpose |
 |---|---|
 | `session-manager.ts` | Creates/destroys/restores agent sessions. Manages RPC bridge lifecycle, client connections, auto-title generation, prompt queuing, cost tracking, and disk persistence. |
-| `session-store.ts` | Persists session metadata to `~/.pi/gateway-sessions.json`. Sessions restore on server restart via `switch_session` RPC. |
+| `session-store.ts` | Persists session metadata to `.bobbit/state/sessions.json`. Sessions restore on server restart via `switch_session` RPC. |
 | `rpc-bridge.ts` | Spawns `pi-coding-agent --mode rpc` as a child process. Sends commands via JSONL on stdin, receives responses and streaming events on stdout. |
 | `event-buffer.ts` | Circular buffer of recent agent events. Replays the latest `tool_execution_update` per tool call ID on reconnect. |
 | `title-generator.ts` | Auto-generates 2–3 word session titles via Claude Haiku. Reads auth from `~/.pi/agent/auth.json`. |
-| `system-prompt.ts` | Assembles session system prompts from three layers: global `config/system-prompt.md`, `AGENTS.md` (with `@ref` resolution), and goal spec. Writes to `~/.pi/session-prompts/`. |
+| `system-prompt.ts` | Assembles session system prompts from three layers: global `.bobbit/config/system-prompt.md`, `AGENTS.md` (with `@ref` resolution), and goal spec. Writes to `.bobbit/state/session-prompts/`. |
 | `goal-manager.ts` | Goal CRUD operations, auto-transition from `todo` to `in-progress`, optional git worktree creation. |
-| `goal-store.ts` | Persists goals to `~/.pi/gateway-goals.json`. States: `todo`, `in-progress`, `complete`, `shelved`. |
-| `gate-store.ts` | Stores gate state and signal history in `~/.pi/gateway-gates.json`. |
+| `goal-store.ts` | Persists goals to `.bobbit/state/goals.json`. States: `todo`, `in-progress`, `complete`, `shelved`. |
+| `gate-store.ts` | Stores gate state and signal history in `.bobbit/state/gates.json`. |
 | `goal-assistant.ts` | System prompt for goal creation assistant sessions. Outputs `<goal_proposal>` blocks. |
 | `task-manager.ts` | Task CRUD with state machine (todo → in-progress → complete/skipped/blocked), assignment, and dependency tracking. |
-| `task-store.ts` | Persists tasks to `~/.pi/gateway-tasks.json`. |
+| `task-store.ts` | Persists tasks to `.bobbit/state/tasks.json`. |
 | `team-manager.ts` | Team lifecycle: start team lead, spawn/dismiss role agents with git worktrees, notify lead on task completion. |
-| `team-store.ts` | Persists team state to `~/.pi/gateway-team-state.json`. |
+| `team-store.ts` | Persists team state to `.bobbit/state/team-state.json`. |
 | `team-names.ts` | Fun name pools for team agents, loaded from `data/team-names/` per role. Falls back to generic pool. |
 | `name-generator.ts` | Generates role-themed funny names for team agents via Claude Haiku. |
 | `role-manager.ts` | Role definitions CRUD. Maintains built-in tool registry (`AVAILABLE_TOOLS`). |
-| `role-store.ts` | Persists roles as YAML files under `~/.pi/roles/`. |
+| `role-store.ts` | Persists roles as YAML files under `.bobbit/config/roles/`. |
 | `role-assistant.ts` | System prompt for role creation assistant sessions. |
-| `tool-store.ts` | Stores tool metadata overrides (description, group, docs) in `~/.pi/gateway-tools.json`. |
+| `tool-store.ts` | Stores tool metadata overrides (description, group, docs) in `.bobbit/config/tools.json`. |
 | `tool-manager.ts` | Merges base tool definitions (from YAML) with store overrides. Detects tool renderers in `src/ui/tools/renderers/`. |
 | `tool-assistant.ts` | System prompt for tool management assistant sessions. |
-| `trait-manager.ts` | Personality trait CRUD and resolution (maps trait names to prompt fragments). |
-| `trait-store.ts` | Persists traits as YAML files. |
-| `cost-tracker.ts` | Tracks per-session token usage and cost. Aggregates to goal and task level. Persists to `~/.pi/gateway-session-costs.json`. |
+| `personality-manager.ts` | Personality CRUD and resolution (maps personality names to prompt fragments). |
+| `personality-store.ts` | Persists personalities as YAML files under `.bobbit/config/personalities/`. |
+| `personality-assistant.ts` | System prompt for personality assistant sessions. |
+| `cost-tracker.ts` | Tracks per-session token usage and cost. Aggregates to goal and task level. Persists to `.bobbit/state/session-costs.json`. |
 | `prompt-queue.ts` | Server-side prompt queue. Steered messages sort before non-steered. Auto-drains when agent becomes idle. |
-| `color-store.ts` | Maps session IDs to color indices (0–13). Persists to `~/.pi/gateway-session-colors.json`. |
+| `color-store.ts` | Maps session IDs to color indices (0–13). Persists to `.bobbit/state/session-colors.json`. |
 | `assistant-registry.ts` | Unified registry mapping assistant types (`goal`, `role`, `tool`) to their prompts and titles. |
-| `workflow-store.ts` | Persists workflow templates as YAML files in `workflows/`. |
+| `bg-process-manager.ts` | Background process lifecycle management. |
+| `staff-assistant.ts` | System prompt for staff agent assistant sessions. |
+| `staff-manager.ts` | Staff agent lifecycle management. |
+| `staff-store.ts` | Staff agent persistence (`.bobbit/state/staff.json`). |
+| `staff-trigger-engine.ts` | Staff agent trigger evaluation engine. |
+| `tool-activation.ts` | Tool activation/deactivation logic. |
+| `workflow-store.ts` | Persists workflow templates as YAML files in `.bobbit/config/workflows/`. |
 | `workflow-manager.ts` | Workflow CRUD, DAG validation, cloning. |
 | `verification-harness.ts` | Async gate verification — command runner + LLM reviewer. |
 
@@ -123,11 +133,11 @@ bobbit [options]
 
 | File | Purpose |
 |---|---|
-| `token.ts` | Generates 256-bit tokens, persists to `~/.pi/gateway-token` (mode 0600), validates with constant-time comparison. |
+| `token.ts` | Generates 256-bit tokens, persists to `.bobbit/state/token` (mode 0600), validates with constant-time comparison. |
 | `rate-limit.ts` | IP-based rate limiting for failed auth attempts. Auto-cleanup every 60s. |
 | `tls.ts` | Auto-generates TLS certificates. Prefers mkcert (local CA) with openssl fallback. Regenerates on IP change. |
-| `oauth.ts` | Server-side OAuth PKCE flow. Generates code verifier/challenge, returns auth URL, exchanges code for tokens. Stores credentials in `~/.pi/agent/auth.json`. |
-| `desec.ts` | Updates a deSEC dynDNS A record on startup so the custom domain resolves to the current mesh IP. Config in `~/.pi/desec.json`. |
+| `oauth.ts` | Server-side OAuth PKCE flow. Generates code verifier/challenge, returns auth URL, exchanges code for tokens. Stores credentials in `~/.pi/agent/auth.json` (global). |
+| `desec.ts` | Updates a deSEC dynDNS A record on startup so the custom domain resolves to the current mesh IP. Config in `.bobbit/state/desec.json`. |
 
 ### `ws/` — WebSocket protocol
 
@@ -144,7 +154,7 @@ bobbit [options]
 | `registry.ts` | In-memory store of skill definitions. `registerSkill()` at import time, `getSkill()`/`listSkills()` at runtime. |
 | `sub-agent.ts` | Spawns isolated agent subprocesses for skill execution. 10-minute default timeout. Receives only skill instructions + context + `AGENTS.md`. |
 | `git.ts` | Git worktree create/cleanup helpers used by skills and team agents. |
-| `definitions-sync.ts` | Exports registered skills to `~/.pi/skill-definitions.json` at startup for agent discovery. |
+| `definitions-sync.ts` | Exports registered skills to `.bobbit/state/skill-definitions.json` at startup for agent discovery. |
 | `index.ts` | Barrel export + auto-registration of built-in skills. |
 | `definitions/code-review.ts` | Three independent review skills: `correctness-review`, `security-review`, `design-review`. |
 | `definitions/test-suite-report.ts` | Single skill that runs tests in a worktree and produces a structured report. |
@@ -249,15 +259,15 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `PUT` | `/api/roles/:name` | Update a role |
 | `DELETE` | `/api/roles/:name` | Delete a role |
 
-### Traits
+### Personalities
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/traits` | List all personality traits |
-| `POST` | `/api/traits` | Create a trait (`{ name, label, description, promptFragment }`) |
-| `GET` | `/api/traits/:name` | Get a trait |
-| `PUT` | `/api/traits/:name` | Update a trait |
-| `DELETE` | `/api/traits/:name` | Delete a trait |
+| `GET` | `/api/personalities` | List all personalities |
+| `POST` | `/api/personalities` | Create a personality (`{ name, label, description, promptFragment }`) |
+| `GET` | `/api/personalities/:name` | Get a personality |
+| `PUT` | `/api/personalities/:name` | Update a personality |
+| `DELETE` | `/api/personalities/:name` | Delete a personality |
 
 ### Skills
 
@@ -348,7 +358,7 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 
 Each session is a running `pi-coding-agent` child process with its own conversation history.
 
-- **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `~/.pi/gateway-sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. If an agent was mid-turn when the server died, it is automatically re-prompted.
+- **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `.bobbit/state/sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. If an agent was mid-turn when the server died, it is automatically re-prompted.
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
 - **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session.
@@ -384,15 +394,15 @@ Custom role definitions that control agent behaviour and tool access.
 
 - **Built-in tools**: `role-manager.ts` maintains `AVAILABLE_TOOLS` — the master list of agent tool names.
 - **Per-role configuration**: Each role has a name, label, prompt template, allowed tools list, accessory (for the mascot), and optional default traits.
-- **Storage**: Roles persist as YAML files under `~/.pi/roles/`.
+- **Storage**: Roles persist as YAML files under `.bobbit/config/roles/`.
 
-### Traits
+### Personalities
 
-Personality traits that modify agent behaviour via prompt fragments.
+Personality definitions that modify agent behaviour via prompt fragments.
 
-- Each trait has a name, label, description, and `promptFragment` that gets injected into the system prompt.
-- Sessions can have multiple traits. Traits can be set at creation time or updated via `PATCH /api/sessions/:id`.
-- Roles can define default traits applied when no explicit traits are provided.
+- Each personality has a name, label, description, and `promptFragment` that gets injected into the system prompt.
+- Sessions can have multiple personalities. Personalities can be set at creation time or updated via `PATCH /api/sessions/:id`.
+- Roles can define default personalities applied when no explicit personalities are provided.
 
 ### Skills
 
@@ -401,7 +411,7 @@ Skills are reusable templates for spawning isolated sub-agents that produce stru
 - **Isolation**: Sub-agents receive only skill instructions + explicit context + `AGENTS.md` — never the parent conversation.
 - **Built-in skills**: `correctness-review`, `security-review`, `design-review` (three code review perspectives), and `test-suite-report` (runs tests and produces a structured report).
 - **Invocation**: Via `invoke_skill` WebSocket command. Server broadcasts `skill_started`, then `skill_completed` or `skill_failed`.
-- **Definition sync**: Registered skills are exported to `~/.pi/skill-definitions.json` for agent-side tool extensions to discover.
+- **Definition sync**: Registered skills are exported to `.bobbit/state/skill-definitions.json` for agent-side tool extensions to discover.
 
 ### Cost Tracking
 
@@ -447,11 +457,11 @@ Context compaction reduces token usage by summarising the conversation.
 
 Each session's system prompt is assembled from three layers:
 
-1. **Global** — `config/system-prompt.md` from the Bobbit project root
+1. **Global** — `.bobbit/config/system-prompt.md` from the Bobbit project root
 2. **AGENTS.md** — From the session's working directory, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe)
 3. **Goal spec** — If the session belongs to a goal, the goal's spec is appended
 
-The assembled prompt is written to `~/.pi/session-prompts/{sessionId}.md` and cleaned up on session termination.
+The assembled prompt is written to `.bobbit/state/session-prompts/{sessionId}.md` and cleaned up on session termination.
 
 ### Reconnection
 
@@ -545,7 +555,7 @@ Forked from `@mariozechner/pi-web-ui`. Lit-based web components.
 
 **This tool grants full shell access to the host machine.** The auth token is equivalent to an SSH key.
 
-- 256-bit cryptographically random token generated on first run, persisted at `~/.pi/gateway-token` with mode `0600`
+- 256-bit cryptographically random token generated on first run, persisted at `.bobbit/state/token` with mode `0600`
 - All API routes and WebSocket connections require the token
 - Constant-time token comparison prevents timing attacks
 - IP-based rate limiting on failed auth attempts (automatic lockout)
@@ -565,7 +575,7 @@ Bobbit is accessed remotely over a **NordVPN mesh network**. The gateway auto-de
 
 In production (`npm start`), the gateway serves the bundled UI directly on `:3001`.
 
-**deSEC dynamic DNS**: On startup, the gateway updates a deSEC A record so a custom domain (e.g. `bobbit.dedyn.io`) resolves to the current mesh IP. Config stored in `~/.pi/desec.json`. Skipped for loopback addresses to avoid clobbering the record during tests.
+**deSEC dynamic DNS**: On startup, the gateway updates a deSEC A record so a custom domain (e.g. `bobbit.dedyn.io`) resolves to the current mesh IP. Config stored in `.bobbit/state/desec.json`. Skipped for loopback addresses to avoid clobbering the record during tests.
 
 **TLS** is on by default. Certs are generated via mkcert (local CA) or openssl fallback. The cert covers the current host IP + localhost and regenerates automatically if the IP changes. Vite reuses the same cert.
 
@@ -581,7 +591,7 @@ npm test              # Unit tests (Playwright with file:// fixtures)
 npm run test:e2e      # E2E tests (auto-starts sandboxed gateway)
 ```
 
-**E2E tests** use Playwright's `webServer` config in `playwright-e2e.config.ts` to **automatically start a sandboxed gateway on port 3099**. No manual server setup needed. The test server runs with `BOBBIT_PI_DIR=.e2e-pi/` so all state files are fully isolated from the dev server's `~/.pi/`.
+**E2E tests** use Playwright's `webServer` config in `playwright-e2e.config.ts` to **automatically start a sandboxed gateway on port 3099**. No manual server setup needed. The test server runs with `BOBBIT_DIR` set to an isolated temp directory so all state files are fully separated from the dev server's `.bobbit/`.
 
 **Unit tests** use `file://` fixtures — plain HTML/JS files that test logic without a build step. See `tests/mobile-header.spec.ts` for the pattern.
 

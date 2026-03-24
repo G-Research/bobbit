@@ -19,9 +19,11 @@ src/
 │   ├── bobbit-dir.ts # Resolves .bobbit/ directory paths (config, state, global auth)
 │   ├── scaffold.ts  # First-run scaffolding — creates .bobbit/ with defaults
 │   ├── pi-dir.ts    # @deprecated — use bobbit-dir.ts instead
+│   ├── watchdog.ts  # Process health watchdog
 │   ├── defaults/    # Bundled default templates (roles, workflows, personalities, system-prompt)
 │   ├── agent/       # Session lifecycle, RPC bridge, persistence, goals, teams, title generation
 │   │   ├── assistant-registry.ts       # Registry of assistant types (goal, role, tool)
+│   │   ├── bg-process-manager.ts       # Background process lifecycle management
 │   │   ├── color-store.ts              # Per-session color index persistence (.bobbit/state/session-colors.json)
 │   │   ├── cost-tracker.ts             # Per-session token/cost tracking
 │   │   ├── event-buffer.ts             # Circular buffer for tool_execution_update replay on reconnect
@@ -30,6 +32,7 @@ src/
 │   │   ├── goal-manager.ts             # Goal CRUD operations
 │   │   ├── goal-store.ts               # Disk persistence (.bobbit/state/goals.json)
 │   │   ├── name-generator.ts           # Random name generator for team agents
+│   │   ├── personality-assistant.ts    # System prompt for personality assistant
 │   │   ├── prompt-queue.ts             # Server-side prompt queue with priority sorting
 │   │   ├── role-assistant.ts           # System prompt for role assistant
 │   │   ├── role-manager.ts             # Role definitions, tool access, and management
@@ -37,6 +40,10 @@ src/
 │   │   ├── rpc-bridge.ts               # JSONL stdin/stdout bridge to agent subprocess
 │   │   ├── session-manager.ts          # Create/destroy/restore sessions, broadcast events, force abort
 │   │   ├── session-store.ts            # Disk persistence (.bobbit/state/sessions.json)
+│   │   ├── staff-assistant.ts          # System prompt for staff agent assistant
+│   │   ├── staff-manager.ts            # Staff agent lifecycle management
+│   │   ├── staff-store.ts              # Staff agent persistence (.bobbit/state/staff.json)
+│   │   ├── staff-trigger-engine.ts     # Staff agent trigger evaluation engine
 │   │   ├── system-prompt.ts            # Assemble system prompt from global + AGENTS.md + goal spec
 │   │   ├── task-manager.ts             # Task CRUD and state transitions
 │   │   ├── task-store.ts               # Disk persistence (.bobbit/state/tasks.json)
@@ -44,6 +51,7 @@ src/
 │   │   ├── team-names.ts               # Themed name lists for team agents
 │   │   ├── team-store.ts               # Disk persistence (.bobbit/state/team-state.json)
 │   │   ├── title-generator.ts          # Auto-generate session titles via Claude Haiku
+│   │   ├── tool-activation.ts          # Tool activation/deactivation logic
 │   │   ├── tool-assistant.ts           # System prompt for tool management assistant
 │   │   ├── tool-manager.ts             # Tool CRUD with renderer discovery
 │   │   ├── tool-store.ts               # Tool metadata persistence (.bobbit/config/tools.json)
@@ -79,6 +87,7 @@ src/
 │   ├── components/  # MessageList, StreamingMessageContainer, AgentInterface, etc.
 │   │   ├── AgentInterface.ts              # Bridges agent events to UI state
 │   │   ├── AttachmentTile.ts              # File attachment preview tile
+│   │   ├── BgProcessPill.ts              # Background process status pill
 │   │   ├── ConsoleBlock.ts                # Console output display block
 │   │   ├── CustomProviderCard.ts          # Custom AI provider card
 │   │   ├── DiffBlock.ts                   # Diff visualization component
@@ -123,6 +132,7 @@ src/
 │   │   ├── types.ts               # Tool renderer type definitions
 │   │   ├── renderers/             # Per-tool renderers
 │   │   │   ├── BashRenderer.ts            # Shell command renderer
+│   │   │   ├── BgProcessRenderer.ts       # Background process tool renderer
 │   │   │   ├── BrowserClickRenderer.ts    # Browser click tool renderer
 │   │   │   ├── BrowserEvalRenderer.ts     # Browser eval tool renderer
 │   │   │   ├── BrowserNavigateRenderer.ts # Browser navigate tool renderer
@@ -137,6 +147,7 @@ src/
 │   │   │   ├── GrepRenderer.ts            # Grep results renderer
 │   │   │   ├── HtmlRenderer.ts            # HTML preview renderer
 │   │   │   ├── LsRenderer.ts             # Directory listing renderer
+│   │   │   ├── PersonalityToolRenderers.ts # Personality management tool renderers
 │   │   │   ├── ReadRenderer.ts            # File read renderer
 │   │   │   ├── ScreenshotRenderer.ts      # Screenshot display renderer
 │   │   │   ├── SvgRenderer.ts             # SVG preview renderer
@@ -176,8 +187,8 @@ src/
 │   │       ├── provider-keys-store.ts           # API key persistence
 │   │       ├── role-draft-store.ts              # Role draft persistence
 │   │       ├── sessions-store.ts                # Session metadata persistence
-│   │       ├── settings-store.ts                # App settings persistence
-│   │       └── spec-draft-store.ts              # Spec draft persistence
+│   │       ├── personality-draft-store.ts        # Personality draft persistence
+│   │       └── settings-store.ts                # App settings persistence
 │   └── utils/       # Formatting, auth token, model discovery, i18n
 │       ├── ansi.ts              # ANSI escape code processing
 │       ├── attachment-utils.ts  # File attachment helpers
@@ -213,12 +224,18 @@ src/
 │   ├── sidebar.ts               # Desktop session sidebar
 │   ├── state.ts                 # App-level state management
 │   ├── storage.ts               # Client-side storage helpers
+│   ├── personality-manager-page.ts # Personality management page
+│   ├── personality-manager.css  # Personality manager page styles
+│   ├── staff-page.ts           # Staff agent management page
 │   ├── tool-manager-page.ts     # Tool management UI (list + detail views)
-│   └── tool-manager.css         # Tool management page styles
+│   ├── tool-manager.css         # Tool management page styles
+│   ├── workflow-page.ts         # Workflow list and detail/edit page
+│   └── workflow-page.css        # Workflow page styles
 docs/
+├── bobbit-sprites.md    # Bobbit pixel art, animation & accessory system reference
 ├── dev-workflow.md      # Development workflow guide
-├── prompt-queue.md      # Prompt queue architecture
-└── bobbit-sprites.md    # Bobbit pixel art, animation & accessory system reference
+├── goals-workflows-tasks.md  # Goals, workflows, tasks & gates architecture
+└── prompt-queue.md      # Prompt queue architecture
 ```
 
 ## Commands

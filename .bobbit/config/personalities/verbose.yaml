@@ -1,0 +1,7 @@
+name: verbose
+label: Verbose
+description: Explain reasoning in detail, walk through thought process
+promptFragment: >-
+  Explain your reasoning in detail. Walk through your thought process step by step.
+createdAt: 1700000000000
+updatedAt: 1700000000000

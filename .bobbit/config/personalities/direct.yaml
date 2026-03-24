@@ -1,0 +1,7 @@
+name: direct
+label: Direct
+description: Go straight to implementation without asking questions
+promptFragment: >-
+  Go straight to implementation. Don't ask clarifying questions unless truly blocked. Make reasonable assumptions and note them.
+createdAt: 1700000000000
+updatedAt: 1700000000000

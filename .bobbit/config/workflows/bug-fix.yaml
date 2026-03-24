@@ -1,0 +1,110 @@
+id: bug-fix
+name: Bug Fix
+description: Fix a reported bug with TDD verification
+
+gates:
+  - id: issue-analysis
+    name: Issue Analysis
+    content: true
+    inject_downstream: true
+    verify:
+      - name: "Analysis quality"
+        type: llm-review
+        prompt: |
+          Review the issue analysis for completeness. Check:
+          1. Reproduction steps are specific enough to follow mechanically
+          2. Root cause references actual source files and lines
+          3. Analysis distinguishes symptoms from underlying cause
+
+      - name: "Gap analysis"
+        type: llm-review
+        prompt: |
+          Compare the goal specification to this issue analysis.
+
+          The goal spec is:
+          {{goal_spec}}
+
+          Identify:
+          1. Bug symptoms mentioned in the goal but not analyzed
+          2. Missing reproduction steps for reported behavior
+          3. Root cause analysis gaps relative to the reported issue
+
+  - id: reproducing-test
+    name: Reproducing Test
+    depends_on: [issue-analysis]
+    metadata:
+      test_command: string
+    verify:
+      - name: "Test fails (bug exists)"
+        type: command
+        run: "{{test_command}}"
+        expect: failure
+
+  - id: implementation
+    name: Implementation
+    depends_on: [reproducing-test]
+    verify:
+      - name: "Type check"
+        type: command
+        run: "npm run check"
+      - name: "Repro test passes (bug fixed)"
+        type: command
+        run: "{{reproducing-test.test_command}}"
+        expect: success
+      - name: "Unit tests"
+        type: command
+        run: "npm run test:unit"
+      - name: "E2E tests"
+        type: command
+        run: "npm run test:e2e"
+      - name: "Gap analysis"
+        type: llm-review
+        prompt: |
+          Compare the goal specification and design document to the actual implementation on this branch.
+
+          The goal spec is:
+          {{goal_spec}}
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see the implementation diff.
+
+          Identify:
+          1. Features described in the goal but not implemented
+          2. Acceptance criteria not met by the code changes
+          3. Does the fix address the root cause identified in the issue analysis?
+
+      - name: "Code quality review"
+        type: llm-review
+        prompt: |
+          Review the code changes on branch {{branch}} vs {{master}} for quality.
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see changes.
+          Read modified files for full context.
+
+          Check:
+          1. Correctness — does the fix address the root cause?
+          2. Minimality — no unrelated changes
+          3. Error handling — missing try/catch, unhandled promise rejections
+          4. Regression risk — could this break other things?
+          5. Test coverage — is the fix adequately tested?
+
+      - name: "Security review"
+        type: llm-review
+        prompt: |
+          Security review of changes on branch {{branch}} vs {{master}}.
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see changes.
+
+          Check:
+          1. Injection risks — command injection, path traversal, template injection
+          2. Auth/authz — are new endpoints properly authenticated?
+          3. Data validation — are inputs validated and sanitized?
+          4. Secrets handling — no hardcoded secrets, tokens, or credentials
+          5. Dependency risks — any new dependencies with known vulnerabilities?
+
+  - id: ready-to-merge
+    name: Ready to Merge
+    depends_on: [implementation]
+    verify:
+      - name: "All gates passed"
+        type: command
+        run: "echo 'All upstream gates passed'"

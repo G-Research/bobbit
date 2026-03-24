@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import type { GoalManager } from "./goal-manager.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
@@ -8,11 +7,11 @@ import type { RoleStore } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
 import { generateTeamName } from "./team-names.js";
+import { bobbitExtensionsDir } from "../bobbit-dir.js";
 import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export class GateDependencyError extends Error {
 	constructor(message: string) {
@@ -34,7 +33,7 @@ export function formatElapsed(sinceMs: number): string {
 }
 
 /** Resolve the absolute path to the team-lead-tools extension (raw .ts, loaded by jiti). */
-const TEAM_LEAD_EXTENSION_PATH = path.resolve(__dirname, "../../../extensions/team-lead-tools.ts");
+const TEAM_LEAD_EXTENSION_PATH = path.join(bobbitExtensionsDir(), "team-lead-tools.ts");
 import type { TaskManager } from "./task-manager.js";
 
 

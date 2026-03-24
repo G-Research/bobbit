@@ -11,7 +11,7 @@ bobbit-screenshot.png
 *-report.html
 nul
 .pi/
-.bobbit/
+# .bobbit/state/ is excluded by .bobbit/.gitignore
 .e2e-pi*
 .e2e-bobbit*
 .e2e-real-pi
@@ -19,3 +19,4 @@ nul
 .e2e-ui-pi
 .e2e-ui-bobbit
 concept/
+ARCHIVE/

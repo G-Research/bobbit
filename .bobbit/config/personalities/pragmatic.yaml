@@ -1,0 +1,7 @@
+name: pragmatic
+label: Pragmatic
+description: Focus on what works, avoid over-engineering
+promptFragment: >-
+  Focus on what works. Avoid over-engineering and unnecessary abstractions. Ship the simplest solution that meets requirements.
+createdAt: 1700000000000
+updatedAt: 1700000000000

@@ -39,10 +39,10 @@ npm run dev:harness
 
 Same two-process setup, but the gateway is wrapped in a **restart harness** (`src/server/harness.ts`). The harness:
 
-- Watches a sentinel file at `~/.pi/gateway-restart`
+- Watches a sentinel file at `.bobbit/state/gateway-restart`
 - On signal: kills the server, waits for the port to free, runs `npm run build:server`, relaunches
 - Auto-restarts on unexpected crashes
-- Sessions survive restarts (persisted to `~/.pi/gateway-sessions.json`)
+- Sessions survive restarts (persisted to `.bobbit/state/sessions.json`)
 
 To trigger a restart:
 
@@ -85,7 +85,7 @@ After editing files under `src/server/`:
 npm run restart-server
 ```
 
-This signals the harness to rebuild and restart the server. Your current session will survive — the harness persists session metadata to disk, and on relaunch the server restores all sessions from `~/.pi/gateway-sessions.json`.
+This signals the harness to rebuild and restart the server. Your current session will survive — the harness persists session metadata to disk, and on relaunch the server restores all sessions from `.bobbit/state/sessions.json`.
 
 **Do not skip this step.** The gateway runs from compiled JavaScript in `dist/server/`. Your TypeScript edits under `src/server/` have no effect until the server is rebuilt.
 
@@ -173,7 +173,7 @@ The detected mesh IP (e.g. `100.123.227.233`) is what other mesh devices use to 
 
 ### deSEC dynamic DNS
 
-On startup, the gateway updates a **deSEC** (dedyn.io) DNS A record so that `bobbit.dedyn.io` points to the current mesh IP. Config lives at `~/.pi/desec.json`:
+On startup, the gateway updates a **deSEC** (dedyn.io) DNS A record so that `bobbit.dedyn.io` points to the current mesh IP. Config lives at `.bobbit/state/desec.json`:
 
 ```json
 { "domain": "bobbit.dedyn.io", "token": "<deSEC API token>" }
@@ -189,14 +189,14 @@ TLS is **on by default**. The server generates certificates on first run and sto
 
 | File | Purpose |
 |---|---|
-| `~/.pi/gateway-cert.pem` | Server certificate (covers the host IP + `localhost`) |
-| `~/.pi/gateway-key.pem` | Server private key |
-| `~/.pi/gateway-tls/ca.crt` | Local CA certificate (install on other devices to trust) |
-| `~/.pi/gateway-tls/ca.key` | Local CA private key |
+| `.bobbit/state/tls/cert.pem` | Server certificate (covers the host IP + `localhost`) |
+| `.bobbit/state/tls/key.pem` | Server private key |
+| `.bobbit/state/tls/ca.crt` | Local CA certificate (install on other devices to trust) |
+| `.bobbit/state/tls/ca.key` | Local CA private key |
 
 The cert is generated via **mkcert** (npm package) signed by the local CA, with fallback to openssl self-signed. Vite reuses the same cert/key for its HTTPS server (`vite.config.ts` reads them from disk).
 
-To trust the cert on a remote device, install `~/.pi/gateway-tls/ca.crt` as a trusted CA.
+To trust the cert on a remote device, install `.bobbit/state/tls/ca.crt` as a trusted CA.
 
 If the cert doesn't cover the current host (e.g. the mesh IP changed), it is regenerated automatically on next startup.
 
@@ -209,7 +209,7 @@ If the cert doesn't cover the current host (e.g. the mesh IP changed), it is reg
 | WebSocket connects but session fails | Browser has wrong gateway URL in `localStorage` | Open DevTools console: `localStorage.getItem("gw-url")` — should match the gateway's actual address. Fix with `localStorage.setItem("gw-url", "<correct URL>")` and reload |
 | DNS resolves to `127.0.0.1` | A prior `--host 127.0.0.1` run (e.g. E2E tests) pushed loopback to deSEC | Restart the server normally — it will push the mesh IP to deSEC. Flush DNS on the client device if cached |
 | Vite HMR WebSocket error in console | Normal when accessing via domain/mesh IP — Vite's HMR can't always connect back | Harmless. Vite falls back to polling. The "Direct websocket connection fallback" message confirms this |
-| `ERR_CERT_AUTHORITY_INVALID` | Remote device doesn't trust the local CA | Install `~/.pi/gateway-tls/ca.crt` on the device, or click through the browser warning |
+| `ERR_CERT_AUTHORITY_INVALID` | Remote device doesn't trust the local CA | Install `.bobbit/state/tls/ca.crt` on the device, or click through the browser warning |
 
 ### Local-only development (no NordVPN)
 

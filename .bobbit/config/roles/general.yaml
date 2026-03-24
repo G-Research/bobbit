@@ -1,0 +1,22 @@
+name: general
+label: General
+accessory: none
+allowedTools:
+  - read
+  - write
+  - edit
+  - bash
+  - grep
+  - find
+  - ls
+  - web_search
+  - web_fetch
+  - delegate
+  - browser_navigate
+  - browser_screenshot
+  - browser_click
+  - browser_type
+  - browser_eval
+  - browser_wait
+  - workflow
+  - bash_bg

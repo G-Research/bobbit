@@ -70,7 +70,7 @@ Sent whenever the queue changes — enqueue, dequeue, steer, remove. Contains th
 
 **Dispatched tracking**: When a steered message is sent mid-turn via `steer` RPC, it's marked `dispatched: true` but stays in the queue for UI display. On `message_end` for a user message, dispatched entries are cleaned up. On drain, `dequeueUndispatched()` skips already-dispatched messages.
 
-**Persistence**: The queue is persisted to `~/.pi/gateway-sessions.json` (via `SessionStore.update`) on every mutation, and restored on server restart via `new PromptQueue(ps.messageQueue)`.
+**Persistence**: The queue is persisted to `.bobbit/state/sessions.json` (via `SessionStore.update`) on every mutation, and restored on server restart via `new PromptQueue(ps.messageQueue)`.
 
 ## Client-side rendering
 
