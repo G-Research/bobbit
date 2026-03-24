@@ -2,8 +2,8 @@ name: browser_wait
 description: "Wait for an element to appear"
 summary: "Wait for an element matching a CSS selector to appear (default 10s timeout)."
 provider:
-  type: user-extension
-  extension: playwright/index.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Browser
 renderer: src/ui/tools/renderers/BrowserWaitRenderer.ts
 docs: |-

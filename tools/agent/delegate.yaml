@@ -3,8 +3,8 @@ description: "Run a task in a separate agent process"
 summary: "Run a task in a separate agent process with full tool access but
   isolated context."
 provider:
-  type: user-extension
-  extension: delegate.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Agent
 renderer: src/ui/tools/renderers/DelegateRenderer.ts
 docs: |-

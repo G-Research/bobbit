@@ -2,8 +2,8 @@ name: browser_screenshot
 description: "Take a screenshot of the page"
 summary: "Take a screenshot of the current page or a specific CSS selector."
 provider:
-  type: user-extension
-  extension: playwright/index.ts
+  type: bobbit-extension
+  extension: extension.ts
 group: Browser
 renderer: src/ui/tools/renderers/ScreenshotRenderer.ts
 docs: |-

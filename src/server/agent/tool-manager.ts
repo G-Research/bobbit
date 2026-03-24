@@ -4,9 +4,9 @@ import { fileURLToPath } from "node:url";
 import { parse, parseDocument, stringify } from "yaml";
 
 export interface ToolProvider {
-	type: 'builtin' | 'user-extension' | 'bobbit-extension';
+	type: 'builtin' | 'bobbit-extension';
 	tool?: string;       // for builtin
-	extension?: string;  // for user-extension and bobbit-extension
+	extension?: string;  // for bobbit-extension
 }
 
 /** Base tool definition loaded from YAML */
