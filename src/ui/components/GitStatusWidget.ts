@@ -153,11 +153,7 @@ export class GitStatusWidget extends LitElement {
         const colorClass = this.prState === 'OPEN' ? 'text-green-600/70 dark:text-green-400/70'
             : this.prState === 'MERGED' ? 'text-purple-600/70 dark:text-purple-400/70'
             : 'text-red-600/70 dark:text-red-400/70';
-        const icon = html`<span class="${colorClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title="PR #${this.prNumber} ${this.prState.toLowerCase()}"><span style="font-size:10px">⦿</span>${this.prNumber != null ? html`<span style="font-size:10px">#${this.prNumber}</span>` : nothing}</span>`;
-        if (this.prUrl) {
-            return html`<a href=${this.prUrl} target="_blank" rel="noopener" @click=${(e: Event) => e.stopPropagation()} style="display:inline-flex;align-items:center">${icon}</a>`;
-        }
-        return icon;
+        return html`<span class="${colorClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title="PR #${this.prNumber} ${this.prState.toLowerCase()}"><span style="font-size:10px">⦿</span>${this.prNumber != null ? html`<span style="font-size:10px">#${this.prNumber}</span>` : nothing}</span>`;
     }
 
     /** PR section for the expanded dropdown */
