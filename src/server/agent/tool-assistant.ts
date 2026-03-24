@@ -58,13 +58,13 @@ provider:
 \`\`\`
 User extensions: delegate.ts, web-research.ts (web_search + web_fetch), playwright/index.ts (browser_* tools), workflow.ts
 
-**\`bobbit-extension\`** — An extension in the Bobbit repo \`extensions/\` directory:
+**\`bobbit-extension\`** — An extension co-located in the tool's group directory:
 \`\`\`yaml
 provider:
   type: bobbit-extension
-  extension: goal-tools.ts    # Path relative to extensions/
+  extension: extension.ts    # Path relative to tools/<group>/
 \`\`\`
-Bobbit extensions: goal-tools.ts (task_* + gate_* tools), team-lead-tools.ts (team_* tools)
+Bobbit extensions: tools/tasks/extension.ts (task_* + gate_* tools), tools/team/extension.ts (team_* tools)
 
 ## Role permissions
 

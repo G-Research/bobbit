@@ -94,7 +94,7 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 		const provider = providers.get(toolName);
 		if (!provider) {
 			// Unknown tool — log warning and skip
-			console.warn(`[tool-activation] Tool "${toolName}" has no provider in tools/*.yaml — skipping`);
+			console.warn(`[tool-activation] Tool "${toolName}" has no provider in tools/<group>/*.yaml — skipping`);
 			continue;
 		}
 		if (provider.type === "builtin" && provider.tool) {
