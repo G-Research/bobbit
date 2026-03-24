@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, svg } from "lit";
-import { Goal as GoalIcon, LayoutDashboard, Pencil, Shield, Trash2 } from "lucide";
+import { Goal as GoalIcon, LayoutDashboard, Pencil, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -16,7 +16,7 @@ import {
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
 import { connectToSession, terminateSession, createAndConnectSession } from "./session-manager.js";
-import { showRenameDialog, showAssignRoleDialog } from "./dialogs.js";
+import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, teardownTeam, refreshSessions } from "./api.js";
 
@@ -215,17 +215,13 @@ export function renderSessionRow(session: GatewaySession) {
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
 
 	// Desktop: hover-revealed gradient overlay. Mobile: always-visible inline buttons.
-	const isTeamAgent = !!session.teamGoalId;
 	const buttons = html`
-		${isTeamAgent ? "" : html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); showAssignRoleDialog(session.id); }}
-			title="Assign Role">${icon(Shield, "xs")}</button>`}
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); }}
-			title="Rename">${icon(Pencil, "xs")}</button>
+			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
-			title="Terminate">${icon(Trash2, "xs")}</button>
+			title="Terminate (Ctrl+Shift+D)">${icon(Trash2, "xs")}</button>
 	`;
 
 	return html`
@@ -288,10 +284,10 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const buttons = html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); }}
-			title="Rename">${icon(Pencil, "xs")}</button>
+			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
-			title="Terminate">${icon(Trash2, "xs")}</button>
+			title="Terminate (Ctrl+Shift+D)">${icon(Trash2, "xs")}</button>
 	`;
 
 	const chevron = html`<span
@@ -340,7 +336,7 @@ function renderGoalBadge(goalId: string) {
 	// PR status takes priority over gate counts
 	const pr = state.prStatusCache.get(goalId);
 	if (pr) {
-		const color = pr.state === "OPEN" ? "#6bc485" : pr.state === "MERGED" ? "#9f8abf" : "#c47070";
+		const color = pr.state === "OPEN" ? "#6bc485" : pr.state === "MERGED" ? "#a87fd4" : "#c47070";
 		const label = pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`;
 		const icon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
 		if (pr.url) {
