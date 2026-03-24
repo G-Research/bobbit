@@ -68,6 +68,16 @@ interface GoalGitStatus {
 }
 let gitStatus: GoalGitStatus | null = null;
 
+/** PR status for goal branch */
+interface PrStatus {
+	number: number;
+	url: string;
+	title: string;
+	state: "OPEN" | "MERGED" | "CLOSED";
+	mergeable: boolean;
+}
+let prStatus: PrStatus | null = null;
+
 /** Aggregated cost for goal */
 interface GoalCost {
 	inputTokens: number;
@@ -100,13 +110,14 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	startTaskPolling(goalId);
 
 	try {
-		const [goalRes, tasksRes, commitsRes, fetchedGates, gitStatusRes, costRes] = await Promise.all([
+		const [goalRes, tasksRes, commitsRes, fetchedGates, gitStatusRes, costRes, prStatusRes] = await Promise.all([
 			gatewayFetch(`/api/goals/${goalId}`),
 			gatewayFetch(`/api/goals/${goalId}/tasks`),
 			gatewayFetch(`/api/goals/${goalId}/commits?limit=20`).catch(() => null),
 			fetchGoalGates(goalId),
 			gatewayFetch(`/api/goals/${goalId}/git-status`).catch(() => null),
 			gatewayFetch(`/api/goals/${goalId}/cost`).catch(() => null),
+			gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null),
 		]);
 
 		if (!goalRes.ok) throw new Error(`Goal not found (${goalRes.status})`);
@@ -135,6 +146,10 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		if (costRes && costRes.ok) {
 			goalCost = await costRes.json();
+		}
+
+		if (prStatusRes && prStatusRes.ok) {
+			prStatus = await prStatusRes.json();
 		}
 
 		const teamState = await getTeamState(goalId);
@@ -169,6 +184,7 @@ export function clearDashboardState(): void {
 	dashboardTab = "gates";
 	roleDropdownOpen = false;
 	gitStatus = null;
+	prStatus = null;
 	goalCost = null;
 	stopAgentPolling();
 	stopTaskPolling();
@@ -287,16 +303,31 @@ function startGitStatusPolling(goalId: string): void {
 	stopGitStatusPolling();
 	gitStatusPollTimer = setInterval(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
+		let needRender = false;
 		try {
 			const res = await gatewayFetch(`/api/goals/${goalId}/git-status`);
 			if (res.ok) {
 				const newStatus: GoalGitStatus = await res.json();
 				if (JSON.stringify(newStatus) !== JSON.stringify(gitStatus)) {
 					gitStatus = newStatus;
-					renderApp();
+					needRender = true;
 				}
 			}
 		} catch { /* ignore */ }
+		try {
+			const prRes = await gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null);
+			if (prRes && prRes.ok) {
+				const newPr: PrStatus = await prRes.json();
+				if (JSON.stringify(newPr) !== JSON.stringify(prStatus)) {
+					prStatus = newPr;
+					needRender = true;
+				}
+			} else if (prStatus !== null) {
+				prStatus = null;
+				needRender = true;
+			}
+		} catch { /* ignore */ }
+		if (needRender) renderApp();
 	}, 30_000);
 }
 
@@ -525,6 +556,42 @@ async function handleEndTeam(goalId: string): Promise<void> {
 }
 
 // ============================================================================
+// PR MERGE HANDLER
+// ============================================================================
+
+async function handlePrMerge(e: CustomEvent<{ method: string }>): Promise<void> {
+	if (!currentGoalId) return;
+	const widget = e.target as import('../ui/components/GitStatusWidget.js').GitStatusWidget;
+	const goalId = currentGoalId;
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/pr-merge`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ method: e.detail.method }),
+		});
+		if (res.ok) {
+			widget.setMergeResult();
+		} else {
+			const data = await res.json().catch(() => ({ error: 'Merge failed' }));
+			widget.setMergeResult(data.error || 'Merge failed');
+		}
+	} catch (err) {
+		widget.setMergeResult(err instanceof Error ? err.message : 'Network error');
+	}
+	// Re-fetch both git-status and pr-status
+	try {
+		const [gitRes, prRes] = await Promise.all([
+			gatewayFetch(`/api/goals/${goalId}/git-status`).catch(() => null),
+			gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null),
+		]);
+		if (gitRes && gitRes.ok) gitStatus = await gitRes.json();
+		if (prRes && prRes.ok) prStatus = await prRes.json();
+		else prStatus = null;
+	} catch { /* ignore */ }
+	renderApp();
+}
+
+// ============================================================================
 // SVG ICON HELPERS
 // ============================================================================
 
@@ -725,6 +792,12 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.unpushed=${false}
 						.statusFiles=${[]}
 						.loading=${!gs && !!branch}
+						.prState=${prStatus?.state}
+						.prUrl=${prStatus?.url}
+						.prNumber=${prStatus?.number}
+						.prTitle=${prStatus?.title}
+						.prMergeable=${prStatus?.mergeable ?? false}
+						@pr-merge=${handlePrMerge}
 					></git-status-widget>
 					${goal.worktreePath ? html`
 						<span class="meta-sep">\u00B7</span>
