@@ -1,120 +1,24 @@
 /**
  * E2E tests for the server-authoritative prompt queue.
  *
- * These tests run against a real gateway (started by Playwright webServer).
- * They create sessions, connect via WebSocket, and verify queue behavior.
- *
- * Note: The sandboxed gateway spawns real agent subprocesses. We don't need
- * them to actually process prompts — we just need to verify the queue state
- * transitions. The agent will start processing but we check queue_update
- * messages that fire synchronously on enqueue/steer/remove.
+ * Tests create sessions, connect via WebSocket, and verify queue behavior.
+ * The mock agent stays busy via STAY_BUSY prompts so we can test queueing.
  */
 import { test, expect } from "@playwright/test";
-import WebSocket from "ws";
-import { readE2EToken, BASE, WS_BASE } from "./e2e-setup.js";
-
-const TOKEN = readE2EToken();
-
-interface QueueMsg {
-	type: string;
-	sessionId?: string;
-	queue?: Array<{ id: string; text: string; isSteered: boolean }>;
-}
-
-/** Create a session via REST, returns session ID */
-async function createSession(): Promise<string> {
-	const resp = await fetch(`${BASE}/api/sessions`, {
-		method: "POST",
-		headers: {
-			"Authorization": `Bearer ${TOKEN}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify({ cwd: process.cwd() }),
-	});
-	expect(resp.status).toBe(201);
-	const data = await resp.json() as { id: string };
-	return data.id;
-}
-
-/** Connect a WebSocket to a session, authenticate, return helpers */
-function connectWs(sessionId: string): Promise<{
-	ws: WebSocket;
-	messages: QueueMsg[];
-	waitForMessage: (predicate: (m: QueueMsg) => boolean, timeoutMs?: number) => Promise<QueueMsg>;
-	send: (msg: Record<string, unknown>) => void;
-	close: () => void;
-}> {
-	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}`);
-		const messages: QueueMsg[] = [];
-
-		const waiters: Array<{
-			predicate: (m: QueueMsg) => boolean;
-			resolve: (m: QueueMsg) => void;
-			reject: (e: Error) => void;
-		}> = [];
-
-		ws.on("message", (data) => {
-			const msg = JSON.parse(data.toString()) as QueueMsg;
-			messages.push(msg);
-
-			// Check waiters
-			for (let i = waiters.length - 1; i >= 0; i--) {
-				if (waiters[i].predicate(msg)) {
-					waiters[i].resolve(msg);
-					waiters.splice(i, 1);
-				}
-			}
-		});
-
-		ws.on("open", () => {
-			ws.send(JSON.stringify({ type: "auth", token: TOKEN }));
-		});
-
-		ws.on("error", reject);
-
-		// Wait for auth_ok
-		const checkAuth = setInterval(() => {
-			if (messages.some((m) => m.type === "auth_ok")) {
-				clearInterval(checkAuth);
-				resolve({
-					ws,
-					messages,
-					waitForMessage: (predicate, timeoutMs = 5000) => {
-						// Check already-received messages first
-						const existing = messages.find(predicate);
-						if (existing) return Promise.resolve(existing);
-
-						return new Promise((res, rej) => {
-							const timer = setTimeout(() => {
-								rej(new Error(`Timed out waiting for message (${timeoutMs}ms)`));
-							}, timeoutMs);
-							waiters.push({
-								predicate,
-								resolve: (m) => { clearTimeout(timer); res(m); },
-								reject: rej,
-							});
-						});
-					},
-					send: (msg) => ws.send(JSON.stringify(msg)),
-					close: () => ws.close(),
-				});
-			}
-		}, 50);
-
-		setTimeout(() => {
-			clearInterval(checkAuth);
-			reject(new Error("Auth timeout"));
-		}, 10000);
-	});
-}
+import {
+	createSession,
+	connectWs,
+	waitForHealth,
+	statusPredicate,
+	queueLenPredicate,
+	type WsMsg,
+} from "./e2e-setup.js";
 
 test.describe("Queue E2E", () => {
 	let sessionId: string;
 
 	test.beforeAll(async () => {
-		// Wait a moment for server to be fully ready
-		await new Promise((r) => setTimeout(r, 1000));
+		await waitForHealth();
 	});
 
 	test("receives queue_update on connect (initially empty)", async () => {
@@ -122,7 +26,7 @@ test.describe("Queue E2E", () => {
 		const conn = await connectWs(sessionId);
 
 		try {
-			const queueMsg = await conn.waitForMessage((m) => m.type === "queue_update");
+			const queueMsg = await conn.waitFor((m) => m.type === "queue_update");
 			expect(queueMsg.queue).toEqual([]);
 			expect(queueMsg.sessionId).toBe(sessionId);
 		} finally {
@@ -135,22 +39,18 @@ test.describe("Queue E2E", () => {
 		const conn = await connectWs(sessionId);
 
 		try {
-			// Wait for initial queue_update
-			await conn.waitForMessage((m) => m.type === "queue_update");
-
-			// Clear messages
+			await conn.waitFor((m) => m.type === "queue_update");
 			conn.messages.length = 0;
 
 			// Send a prompt — agent is idle, should dispatch directly
 			conn.send({ type: "prompt", text: "hello" });
 
-			// Wait a bit — we should NOT get a queue_update with items
-			// (the prompt bypasses the queue when idle+empty)
-			await new Promise((r) => setTimeout(r, 1000));
+			// Wait for agent_end — at that point we know the turn completed.
+			// If queue_update with items had fired, it would be in messages.
+			await conn.waitFor((m) => m.type === "event" && m.data?.type === "agent_end");
 
-			// Check: no queue_update with non-empty queue
 			const queueUpdates = conn.messages.filter(
-				(m) => m.type === "queue_update" && m.queue && m.queue.length > 0,
+				(m: WsMsg) => m.type === "queue_update" && m.queue && m.queue.length > 0,
 			);
 			expect(queueUpdates.length).toBe(0);
 		} finally {
@@ -163,23 +63,16 @@ test.describe("Queue E2E", () => {
 		const conn = await connectWs(sessionId);
 
 		try {
-			// Wait for initial empty queue
-			await conn.waitForMessage((m) => m.type === "queue_update");
+			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Send first prompt to make agent busy
-			conn.send({ type: "prompt", text: "first prompt" });
-
-			// Wait for agent to start streaming
-			await conn.waitForMessage((m) => m.type === "session_status" && (m as any).status === "streaming");
+			// Make agent busy with explicit stay-busy duration
+			conn.send({ type: "prompt", text: "STAY_BUSY:5000 first prompt" });
+			await conn.waitFor(statusPredicate("streaming"));
 
 			// Now agent is busy — send another prompt
 			conn.send({ type: "prompt", text: "queued message" });
 
-			// Should get queue_update with the queued message
-			const queueMsg = await conn.waitForMessage(
-				(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length > 0,
-			);
-			expect(queueMsg.queue!.length).toBe(1);
+			const queueMsg = await conn.waitFor(queueLenPredicate(1));
 			expect(queueMsg.queue![0].text).toBe("queued message");
 			expect(queueMsg.queue![0].isSteered).toBe(false);
 		} finally {
@@ -192,29 +85,21 @@ test.describe("Queue E2E", () => {
 		const conn = await connectWs(sessionId);
 
 		try {
-			await conn.waitForMessage((m) => m.type === "queue_update");
+			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy
-			conn.send({ type: "prompt", text: "working" });
-			await conn.waitForMessage((m) => m.type === "session_status" && (m as any).status === "streaming");
+			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			await conn.waitFor(statusPredicate("streaming"));
 
-			// Queue two messages
 			conn.send({ type: "prompt", text: "msg A" });
-			await conn.waitForMessage(
-				(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 1,
-			);
+			await conn.waitFor(queueLenPredicate(1));
 
 			conn.send({ type: "prompt", text: "msg B" });
-			const twoQueued = await conn.waitForMessage(
-				(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 2,
-			);
+			const twoQueued = await conn.waitFor(queueLenPredicate(2));
 
-			// Steer msg B (second in queue)
 			const msgBId = twoQueued.queue![1].id;
 			conn.send({ type: "steer_queued", messageId: msgBId });
 
-			// Should get reordered queue: B first (steered), A second
-			const reordered = await conn.waitForMessage(
+			const reordered = await conn.waitFor(
 				(m) => m.type === "queue_update" && m.queue !== undefined &&
 					m.queue.length === 2 && m.queue[0].isSteered === true,
 			);
@@ -232,25 +117,17 @@ test.describe("Queue E2E", () => {
 		const conn = await connectWs(sessionId);
 
 		try {
-			await conn.waitForMessage((m) => m.type === "queue_update");
+			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy
-			conn.send({ type: "prompt", text: "working" });
-			await conn.waitForMessage((m) => m.type === "session_status" && (m as any).status === "streaming");
+			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			await conn.waitFor(statusPredicate("streaming"));
 
-			// Queue a message
 			conn.send({ type: "prompt", text: "to remove" });
-			const queued = await conn.waitForMessage(
-				(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 1,
-			);
+			const queued = await conn.waitFor(queueLenPredicate(1));
 
-			// Remove it
 			conn.send({ type: "remove_queued", messageId: queued.queue![0].id });
 
-			// Should get empty queue
-			const empty = await conn.waitForMessage(
-				(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 0,
-			);
+			const empty = await conn.waitFor(queueLenPredicate(0));
 			expect(empty.queue).toEqual([]);
 		} finally {
 			conn.close();
@@ -263,24 +140,16 @@ test.describe("Queue E2E", () => {
 		const conn2 = await connectWs(sessionId);
 
 		try {
-			// Both get initial empty queue
-			await conn1.waitForMessage((m) => m.type === "queue_update");
-			await conn2.waitForMessage((m) => m.type === "queue_update");
+			await conn1.waitFor((m) => m.type === "queue_update");
+			await conn2.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy via client 1
-			conn1.send({ type: "prompt", text: "working" });
-			await conn1.waitForMessage((m) => m.type === "session_status" && (m as any).status === "streaming");
+			conn1.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			await conn1.waitFor(statusPredicate("streaming"));
 
-			// Queue a message via client 1
 			conn1.send({ type: "prompt", text: "from client 1" });
 
-			// Both clients should see the queue update
-			const q1 = await conn1.waitForMessage(
-				(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 1,
-			);
-			const q2 = await conn2.waitForMessage(
-				(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 1,
-			);
+			const q1 = await conn1.waitFor(queueLenPredicate(1));
+			const q2 = await conn2.waitFor(queueLenPredicate(1));
 			expect(q1.queue![0].text).toBe("from client 1");
 			expect(q2.queue![0].text).toBe("from client 1");
 		} finally {
@@ -288,38 +157,26 @@ test.describe("Queue E2E", () => {
 			conn2.close();
 		}
 	});
+
 	test("queue drains after agent finishes turn", async () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
-	try {
-		await conn.waitForMessage((m) => m.type === "queue_update");
+		try {
+			await conn.waitFor((m) => m.type === "queue_update");
 
-		// Send first prompt to make agent busy
-		conn.send({ type: "prompt", text: "say hello" });
-		await conn.waitForMessage((m) => m.type === "session_status" && (m as any).status === "streaming");
+			// Use STAY_BUSY:500 — just long enough for us to queue a message
+			conn.send({ type: "prompt", text: "STAY_BUSY:500 say hello" });
+			await conn.waitFor(statusPredicate("streaming"));
 
-		// Queue a second message while busy
-		conn.send({ type: "prompt", text: "queued follow-up" });
-		await conn.waitForMessage(
-			(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 1,
-		);
+			conn.send({ type: "prompt", text: "queued follow-up" });
+			await conn.waitFor(queueLenPredicate(1));
 
-		// Wait for agent to finish first turn — queue should drain
-		// The drain dequeues the message and dispatches it, so we get
-		// a queue_update with empty queue
-		const drained = await conn.waitForMessage(
-			(m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === 0,
-			30_000, // agent turn can take a while
-		);
-		expect(drained.queue).toEqual([]);
-
-		// Agent should go streaming again (processing the drained message)
-		// We already saw it go streaming for the first prompt, so we need
-		// to see idle then streaming again. The drain sets status to streaming
-		// optimistically, so we should see another streaming status.
-	} finally {
-		conn.close();
-	}
+			// Wait for queue to drain (agent finishes first turn, dequeues second)
+			const drained = await conn.waitFor(queueLenPredicate(0), 10_000);
+			expect(drained.queue).toEqual([]);
+		} finally {
+			conn.close();
+		}
 	});
 });

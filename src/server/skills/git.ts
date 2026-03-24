@@ -32,7 +32,8 @@ export function createWorktree(repoPath: string, branchName: string): WorktreeRe
 	// fast when the npm cache is warm (seconds, not minutes).
 	// NOTE: Never use symlinks/junctions for node_modules — worktree cleanup
 	// can follow the link and destroy the source repo's node_modules.
-	if (fs.existsSync(path.join(worktreePath, "package-lock.json"))) {
+	// Skip via BOBBIT_SKIP_NPM_CI=1 in E2E tests where npm ci is slow and unnecessary.
+	if (!process.env.BOBBIT_SKIP_NPM_CI && fs.existsSync(path.join(worktreePath, "package-lock.json"))) {
 		try {
 			execFileSync("npm", ["ci", "--prefer-offline", "--no-audit", "--no-fund"], {
 				cwd: worktreePath,

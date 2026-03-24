@@ -51,9 +51,13 @@ export class GoalManager {
 		let repoPath: string | undefined;
 		let goalCwd = cwd;
 
-		// Create a git worktree if the cwd is a git repo (explicit worktree flag, defaults to true for team goals)
-		if (worktree && isGitRepo(cwd)) {
+		// Detect git repo root — needed for team operations even without a worktree
+		if (isGitRepo(cwd)) {
 			repoPath = getRepoRoot(cwd);
+		}
+
+		// Create a git worktree if the cwd is a git repo (explicit worktree flag, defaults to true for team goals)
+		if (worktree && repoPath) {
 			branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 			try {
 				const result = createWorktree(repoPath, branch);
@@ -65,7 +69,6 @@ export class GoalManager {
 				console.error(`[goal-manager] Failed to create worktree for goal "${title}":`, err);
 				worktreePath = undefined;
 				branch = undefined;
-				repoPath = undefined;
 			}
 		}
 

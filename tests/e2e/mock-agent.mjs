@@ -145,13 +145,21 @@ async function handlePrompt(requestId, text) {
 		emit({ type: "message_end", message: assistantMsg });
 	}
 
-	// Delay before completing — longer delay for prompts that need the agent
-	// to stay "busy" (queue/abort/steer tests), shorter for everything else
+	// Delay before completing — only stay busy when tests explicitly request it.
+	// Use "STAY_BUSY:<ms>" in the prompt to request a specific delay (abortable).
+	// Legacy keywords ("sleep 120", "working", "first prompt", "long essay") use
+	// shorter delays than before to keep the suite fast.
 	const lower = text.toLowerCase();
-	const needsLongBusy = lower.includes("sleep 120") || lower.includes("sleep 60");
-	const needsBusyState = needsLongBusy || lower.includes("working") || lower.includes("first prompt")
-		|| lower.includes("long essay");
-	await tick(needsLongBusy ? 120000 : needsBusyState ? 3000 : 50);
+	const busyMatch = text.match(/STAY_BUSY:(\d+)/);
+	let busyMs = 10;
+	if (busyMatch) {
+		busyMs = parseInt(busyMatch[1], 10);
+	} else if (lower.includes("sleep 120") || lower.includes("sleep 60")) {
+		busyMs = 60000;
+	} else if (lower.includes("working") || lower.includes("first prompt") || lower.includes("long essay")) {
+		busyMs = 500;
+	}
+	await tick(busyMs);
 
 	// If aborted during delay, don't emit end events (abort handler already did)
 	if (!currentAbortController || currentAbortController.signal.aborted) {

@@ -13,12 +13,12 @@
  */
 import { test, expect } from "@playwright/test";
 import WebSocket from "ws";
-import { readE2EToken, BASE, WS_BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE, WS_BASE, waitForHealth } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Config — agent tool tests need much longer timeouts
 // ---------------------------------------------------------------------------
-test.setTimeout(120_000);
+test.setTimeout(30_000);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -120,9 +120,9 @@ function agentEndPredicate(): (m: WsMsg) => boolean {
 	return (m) => m.type === "event" && m.data?.type === "agent_end";
 }
 
-// Give the server a moment to be fully ready
+// Wait for the server to be fully ready (replaces fixed sleep)
 test.beforeAll(async () => {
-	await new Promise((r) => setTimeout(r, 1500));
+	await waitForHealth();
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

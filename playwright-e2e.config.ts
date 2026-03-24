@@ -36,7 +36,7 @@ export default defineConfig({
 		'**/team-lifecycle*',    // spawns real agents; needs long timeouts + real config
 		'**/real-app-mobile*',   // needs Vite UI (server runs --no-ui)
 	],
-	timeout: 60_000,
+	timeout: 30_000,
 	workers: 1, // serial — all tests share a single gateway instance
 	webServer: {
 		command: `node dist/server/cli.js --host 127.0.0.1 --port ${E2E_PORT} --no-tls --no-ui --agent-cli ${MOCK_AGENT}`,
@@ -49,6 +49,7 @@ export default defineConfig({
 			...process.env,
 			BOBBIT_DIR: E2E_BOBBIT_DIR,
 			BOBBIT_LLM_REVIEW_SKIP: "1",
+			BOBBIT_SKIP_NPM_CI: "1",
 		},
 	},
 	globalTeardown: './tests/e2e/e2e-teardown.ts',
