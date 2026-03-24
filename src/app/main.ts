@@ -345,7 +345,8 @@ async function initApp() {
 
 		// Ctrl+] / Cmd+] — Toggle preview panel
 		if (mod && e.key === "]") {
-			if (state.isPreviewSession) {
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null);
+			if (hasPanel) {
 				e.preventDefault();
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";

@@ -82,33 +82,27 @@ test.describe("Goal creation flow", () => {
 		expect(fetched.id).toBe(goal.id);
 	});
 
-	test("dialogs.ts doSave does not call terminateSession (no confirmation dialog)", () => {
-		// Read the source file and verify the bug pattern is absent
-		const dialogsPath = path.resolve(__dirname, "../../src/app/dialogs.ts");
-		const source = fs.readFileSync(dialogsPath, "utf-8");
+	test("goal proposal panel handleCreateGoal does not call terminateSession (no confirmation dialog)", () => {
+		// The goal proposal flow moved from a modal in dialogs.ts to an inline panel in render.ts.
+		// Verify the inline panel's handleCreateGoal calls createGoal without terminateSession.
+		const renderPath = path.resolve(__dirname, "../../src/app/render.ts");
+		const source = fs.readFileSync(renderPath, "utf-8");
 
-		// Find the goal-creation doSave — it's inside showGoalEditDialogFromProposal
-		// and contains createGoal. Search for the doSave that has createGoal in its body.
-		const allDoSaves = [...source.matchAll(/const doSave = async \(\) => \{/g)];
-		let goalDoSaveBody = "";
-		for (const match of allDoSaves) {
-			const start = match.index! + match[0].length;
-			// Extract ~800 chars after the function start to capture the body
-			const chunk = source.slice(start, start + 1500);
-			if (chunk.includes("createGoal")) {
-				goalDoSaveBody = chunk;
-				break;
-			}
-		}
-		expect(goalDoSaveBody).toBeTruthy();
+		// Find the goalProposalPanel section by locating the second handleCreateGoal
+		// (the first one is in the goal-assistant panel; the second is in the proposal panel)
+		const allMatches = [...source.matchAll(/const handleCreateGoal = async \(\) => \{/g)];
+		expect(allMatches.length).toBeGreaterThanOrEqual(2);
 
-		// The bug: doSave called terminateSession which shows a confirmation dialog
-		// The fix: replaced with silent cleanup (gatewayFetch DELETE, clearSessionModel, etc.)
-		expect(goalDoSaveBody).not.toContain("terminateSession");
+		// Extract the body of the second handleCreateGoal (the proposal panel one)
+		const secondMatch = allMatches[1];
+		const start = secondMatch.index! + secondMatch[0].length;
+		const chunk = source.slice(start, start + 1500);
 
-		// Verify it uses silent cleanup instead
-		expect(goalDoSaveBody).toContain("DELETE");
-		expect(goalDoSaveBody).toContain("clearSessionModel");
+		// Must call createGoal
+		expect(chunk).toContain("createGoal");
+
+		// Must NOT call terminateSession (which shows a confirmation dialog)
+		expect(chunk).not.toContain("terminateSession");
 	});
 
 	test("render.ts handleCreateGoal navigates to goal-dashboard, not landing", () => {
