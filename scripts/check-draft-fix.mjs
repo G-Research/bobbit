@@ -1,19 +1,24 @@
-// Verify the stale draft fix is present in session-manager.ts.
-// Pass --master to check master branch (for reproducing-test gate).
-// Without --master, checks working tree (for implementation gate).
+// Verify the stale draft fix in session-manager.ts.
+// Usage:
+//   node scripts/check-draft-fix.mjs --master   Check master branch (exits 1 if bug exists)
+//   node scripts/check-draft-fix.mjs            Check working tree (exits 0 if fix present)
 import fs from "node:fs";
 import { execSync } from "node:child_process";
 
 const checkMaster = process.argv.includes("--master");
 
-function readFile(path) {
-  if (checkMaster) {
-    return execSync(`git show master:${path}`, { encoding: "utf8" });
+let src;
+if (checkMaster) {
+  try {
+    src = execSync("git show master:src/app/session-manager.ts", { encoding: "utf8" });
+  } catch {
+    console.error("FAIL: could not read master:src/app/session-manager.ts");
+    process.exit(1);
   }
-  return fs.readFileSync(path, "utf8");
+} else {
+  src = fs.readFileSync("src/app/session-manager.ts", "utf8");
 }
 
-const src = readFile("src/app/session-manager.ts");
 if (!src.includes("clearDraft(sessionId)")) {
   console.error("FAIL: clearDraft(sessionId) not found in session-manager.ts");
   process.exit(1);
