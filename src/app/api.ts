@@ -910,13 +910,16 @@ export async function deleteRole(name: string): Promise<boolean> {
 // ============================================================================
 
 /** Save a draft to the server. Fire-and-forget â€” errors are logged, not thrown. */
-export async function saveDraftToServer(sessionId: string, type: string, data: unknown): Promise<void> {
+export async function saveDraftToServer(sessionId: string, type: string, data: unknown, signal?: AbortSignal): Promise<void> {
 	try {
 		await gatewayFetch(`/api/sessions/${sessionId}/draft`, {
 			method: "PUT",
 			body: JSON.stringify({ type, data }),
+			signal,
 		});
 	} catch (err) {
+		// Ignore aborted requests — they're intentionally cancelled on send
+		if (err instanceof DOMException && err.name === "AbortError") return;
 		console.error("[draft-api] Failed to save draft:", err);
 	}
 }
