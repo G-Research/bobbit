@@ -6,7 +6,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.js";
 import { html, render } from "lit";
-import { RotateCcw } from "lucide";
+import { Plus, RotateCcw, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -298,31 +298,34 @@ function renderShortcutRow(entry: ShortcutEntry) {
 				${entry.currentBindings.map((binding, idx) => {
 					const isThisRebinding = isActiveRebind && rebindingIndex === idx && !pendingBinding;
 					return html`
-						<button
-							class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-mono transition-all
-								${isThisRebinding
-									? "bg-primary/20 text-primary border border-primary animate-pulse"
-									: "bg-secondary text-secondary-foreground hover:bg-secondary/80 border border-transparent"}"
-							@click=${() => startRebind(entry.id, idx)}
-							title=${isThisRebinding ? "Press a key combo..." : `Click to rebind (${formatBinding(binding)})`}
-						>
-							${isThisRebinding ? "Press a key combo..." : formatBinding(binding)}
-						</button>
+						<span class="inline-flex items-center gap-0">
+							<button
+								class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-l text-xs font-mono transition-all
+									${isThisRebinding
+										? "bg-primary/20 text-primary border border-primary animate-pulse"
+										: "bg-secondary text-secondary-foreground hover:bg-secondary/80 border border-transparent"}"
+								@click=${() => startRebind(entry.id, idx)}
+								title=${isThisRebinding ? "Press a key combo..." : `Click to rebind (${formatBinding(binding)})`}
+							>
+								${isThisRebinding ? "Press a key combo..." : formatBinding(binding)}
+							</button><button
+								class="inline-flex items-center px-0.5 py-0.5 rounded-r text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 border border-transparent transition-colors opacity-0 group-hover:opacity-100"
+								@click=${() => handleRemoveBinding(entry.id, idx)}
+								title="Remove binding"
+							>${icon(X, "xs")}</button>
+						</span>
 					`;
 				})}
-				${entry.currentBindings.length === 0
+				${isActiveRebind && rebindingIndex === null && !pendingBinding
 					? html`<button
-							class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-mono
-								${isActiveRebind && rebindingIndex === null && !pendingBinding
-									? "bg-primary/20 text-primary border border-primary animate-pulse"
-									: "bg-secondary/50 text-muted-foreground hover:bg-secondary/80 border border-dashed border-border"}"
+							class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-mono bg-primary/20 text-primary border border-primary animate-pulse"
 							@click=${() => startRebind(entry.id, null)}
-						>
-							${isActiveRebind && rebindingIndex === null && !pendingBinding
-								? "Press a key combo..."
-								: "Add binding"}
-						</button>`
-					: ""}
+						>Press a key combo...</button>`
+					: html`<button
+							class="inline-flex items-center p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80 transition-colors opacity-0 group-hover:opacity-100"
+							@click=${() => startRebind(entry.id, null)}
+							title="Add binding"
+						>${icon(Plus, "xs")}</button>`}
 				${isCustom
 					? html`<button
 							class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80 transition-colors opacity-0 group-hover:opacity-100"
