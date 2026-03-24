@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bobbitExtensionsDir, bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitDir, bobbitExtensionsDir, bobbitStateDir } from "../bobbit-dir.js";
 
 export interface RpcBridgeOptions {
 	/** Path to pi-coding-agent cli.js. Auto-resolved if omitted. */
@@ -54,7 +54,7 @@ export class RpcBridge {
 		this.process = spawn("node", [cliPath, ...args], {
 			stdio: ["pipe", "pipe", "pipe"],
 			cwd: this.options.cwd,
-			env: { ...process.env, ...this.options.env },
+			env: { ...process.env, BOBBIT_DIR: bobbitDir(), ...this.options.env },
 		});
 
 		this.process.stdout!.on("data", (chunk: Buffer) => {
