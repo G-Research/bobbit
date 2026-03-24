@@ -13,16 +13,33 @@ interface HtmlWriteParams {
 /**
  * Renders HTML files written via the `write` tool inline in the chat.
  *
- * To avoid the white flash caused by srcdoc replacements, we write to the
- * iframe's contentDocument directly via document.open/write/close. This
- * replaces the page content in-place without the full teardown/rebuild cycle.
- * Updates are debounced during streaming (every 1.5s).
+ * Completed tool calls use Lit's declarative `.srcdoc` property binding on
+ * the iframe — Lit only updates it if the value actually changes, preventing
+ * spurious iframe reloads on parent re-renders.
+ *
+ * Streaming tool calls use imperative `document.open/write/close` via a ref
+ * callback, with debounced updates (every 1.5s) to avoid flicker.
  */
 export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
+	// ── streaming-only state ──
 	private _iframe: HTMLIFrameElement | null = null;
 	private _debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	private _pendingContent: string | null = null;
 	private _lastAppliedContent: string | null = null;
+	private _iframeReady = false;
+
+	private _autoResize(iframe: HTMLIFrameElement) {
+		requestAnimationFrame(() => {
+			try {
+				const doc = iframe.contentDocument;
+				const height = Math.min(
+					doc?.body?.scrollHeight ? doc.body.scrollHeight + 16 : 300,
+					600,
+				);
+				iframe.style.height = `${height}px`;
+			} catch { /* cross-origin fallback */ }
+		});
+	}
 
 	private _writeToIframe(content: string) {
 		const iframe = this._iframe;
@@ -34,16 +51,9 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 				doc.write(content);
 				doc.close();
 				this._lastAppliedContent = content;
-				// Auto-resize after content paints
-				requestAnimationFrame(() => {
-					try {
-						const height = Math.min(doc.body?.scrollHeight + 16 || 300, 600);
-						iframe.style.height = `${height}px`;
-					} catch { /* cross-origin fallback */ }
-				});
+				this._autoResize(iframe);
 			}
 		} catch {
-			// Fallback to srcdoc if contentDocument isn't accessible
 			iframe.srcdoc = content;
 			this._lastAppliedContent = content;
 		}
@@ -59,6 +69,18 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 				this._pendingContent = null;
 			}
 		}, 1500);
+	}
+
+	/** Reset streaming state so the next tool call starts fresh. */
+	private _resetStreamingState() {
+		this._iframe = null;
+		this._lastAppliedContent = null;
+		this._pendingContent = null;
+		this._iframeReady = false;
+		if (this._debounceTimer) {
+			clearTimeout(this._debounceTimer);
+			this._debounceTimer = null;
+		}
 	}
 
 	render(
@@ -86,7 +108,13 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 		}
 
 		const htmlContent = params?.content || "";
-		const hasHtml = htmlContent.includes("<") && (htmlContent.includes("<html") || htmlContent.includes("<body") || htmlContent.includes("<div") || htmlContent.includes("<!DOCTYPE") || htmlContent.includes("<svg"));
+		const hasHtml = htmlContent.includes("<") && (
+			htmlContent.includes("<html") ||
+			htmlContent.includes("<body") ||
+			htmlContent.includes("<div") ||
+			htmlContent.includes("<!DOCTYPE") ||
+			htmlContent.includes("<svg")
+		);
 
 		if (!hasHtml) {
 			return { content: renderHeader(state, AppWindow, headerText), isCustom: false };
@@ -96,41 +124,65 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 		const chevronRef = createRef<HTMLSpanElement>();
 		const isComplete = !!result && !result.isError;
 
-		// On completion, flush pending debounce
+		// ── COMPLETED: declarative srcdoc binding ──
+		// Lit only updates the .srcdoc property when the value changes,
+		// so parent re-renders won't cause iframe reloads.
 		if (isComplete) {
-			if (this._debounceTimer) {
-				clearTimeout(this._debounceTimer);
-				this._debounceTimer = null;
-			}
-			this._pendingContent = null;
+			this._resetStreamingState();
+
+			const onLoad = (e: Event) => {
+				const iframe = e.target as HTMLIFrameElement;
+				this._autoResize(iframe);
+			};
+
+			return {
+				content: html`
+					<div>
+						${renderCollapsibleHeader(state, AppWindow, headerText, contentRef, chevronRef, false)}
+						<div class="mt-3 rounded-lg border border-border overflow-hidden" style="position: relative;">
+							<iframe
+								.srcdoc=${htmlContent}
+								sandbox="allow-scripts allow-same-origin"
+								@load=${onLoad}
+								style="width: 100%; height: 300px; border: none; background: #0c0c1a;"
+								title=${params?.path || "HTML preview"}
+							></iframe>
+						</div>
+						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
+							<code-block .code=${htmlContent} language="html"></code-block>
+						</div>
+					</div>
+				`,
+				isCustom: false,
+			};
 		}
 
-		// Ref callback: capture iframe and write content imperatively
-		const iframeSetup = (el: Element | undefined) => {
+		// ── STREAMING: imperative document.write with debouncing ──
+		const streamingIframeSetup = (el: Element | undefined) => {
 			if (!el) return;
 			const iframe = el as HTMLIFrameElement;
-			this._iframe = iframe;
 
-			if (isComplete) {
-				// Final render — apply immediately
-				this._writeToIframe(htmlContent);
-			} else if (isStreaming) {
-				if (!this._lastAppliedContent) {
-					// First content — apply immediately
-					this._writeToIframe(htmlContent);
-				} else if (htmlContent !== this._lastAppliedContent) {
+			// Same element — skip unless content changed
+			if (iframe === this._iframe) {
+				if (this._iframeReady && htmlContent !== this._lastAppliedContent) {
 					this._scheduleUpdate(htmlContent);
 				}
+				return;
 			}
-		};
 
-		// Reset instance state after completion for the next tool call
-		if (isComplete) {
-			setTimeout(() => {
-				this._iframe = null;
-				this._lastAppliedContent = null;
-			}, 100);
-		}
+			// New iframe element — wait for about:blank load then write
+			this._iframe = iframe;
+			this._iframeReady = false;
+			this._lastAppliedContent = null;
+
+			const handler = () => {
+				iframe.removeEventListener("load", handler);
+				if (this._iframe !== iframe) return; // stale
+				this._iframeReady = true;
+				this._writeToIframe(htmlContent);
+			};
+			iframe.addEventListener("load", handler);
+		};
 
 		return {
 			content: html`
@@ -138,32 +190,30 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 					${renderCollapsibleHeader(state, AppWindow, headerText, contentRef, chevronRef, false)}
 					<div class="mt-3 rounded-lg border border-border overflow-hidden" style="position: relative;">
 						<iframe
-							${ref(iframeSetup)}
+							${ref(streamingIframeSetup)}
 							sandbox="allow-scripts allow-same-origin"
 							style="width: 100%; height: 300px; border: none; background: #0c0c1a;"
 							title=${params?.path || "HTML preview"}
 						></iframe>
-						${isStreaming ? html`
+						<div style="
+							position: absolute; inset: 0; z-index: 10;
+							background: rgba(10, 10, 20, 0.2);
+							display: flex; align-items: center; justify-content: center;
+							pointer-events: none;
+						">
+							<style>
+								@keyframes html-renderer-spin {
+									to { transform: rotate(360deg); }
+								}
+							</style>
 							<div style="
-								position: absolute; inset: 0; z-index: 10;
-								background: rgba(10, 10, 20, 0.2);
-								display: flex; align-items: center; justify-content: center;
-								pointer-events: none;
-							">
-								<style>
-									@keyframes html-renderer-spin {
-										to { transform: rotate(360deg); }
-									}
-								</style>
-								<div style="
-									width: 20px; height: 20px;
-									border: 2px solid rgba(255,255,255,0.15);
-									border-top-color: rgba(255,255,255,0.6);
-									border-radius: 50%;
-									animation: html-renderer-spin 0.8s linear infinite;
-								"></div>
-							</div>
-						` : ""}
+								width: 20px; height: 20px;
+								border: 2px solid rgba(255,255,255,0.15);
+								border-top-color: rgba(255,255,255,0.6);
+								border-radius: 50%;
+								animation: html-renderer-spin 0.8s linear infinite;
+							"></div>
+						</div>
 					</div>
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 						<code-block .code=${htmlContent} language="html"></code-block>
