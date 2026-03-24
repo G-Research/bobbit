@@ -528,6 +528,25 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel.agentInterface.onBgProcessDismiss = (processId: string) => {
 				dismissBgProcess(sessionId, processId);
 			};
+			state.chatPanel.agentInterface.onPrMerge = async (method: string) => {
+				const sd = state.gatewaySessions.find((s) => s.id === sessionId);
+				if (!sd?.goalId) return 'No goal linked';
+				try {
+					const res = await gatewayFetch(`/api/goals/${sd.goalId}/pr-merge`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ method }),
+					});
+					if (res.ok) {
+						refreshPrStatusForSession(sessionId);
+						return undefined;
+					}
+					const data = await res.json().catch(() => ({ error: 'Merge failed' }));
+					return data.error || 'Merge failed';
+				} catch (err) {
+					return err instanceof Error ? err.message : 'Network error';
+				}
+			};
 		}
 
 		// Initial git status and bg process fetch
@@ -855,6 +874,56 @@ async function refreshGitStatusForSession(sessionId: string): Promise<void> {
 	} finally {
 		if (activeSessionId() === sessionId) {
 			ai.gitStatusLoading = false;
+		}
+	}
+	refreshPrStatusForSession(sessionId);
+}
+
+async function refreshPrStatusForSession(sessionId: string): Promise<void> {
+	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+	const goalId = sessionData?.goalId;
+	if (!goalId) {
+		const ai = state.chatPanel?.agentInterface;
+		if (activeSessionId() === sessionId && ai) {
+			ai.prState = undefined;
+			ai.prUrl = undefined;
+			ai.prNumber = undefined;
+			ai.prTitle = undefined;
+			ai.prMergeable = undefined;
+		}
+		return;
+	}
+
+	const ai = state.chatPanel?.agentInterface;
+	if (!ai) return;
+
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null);
+		if (!res || !res.ok) {
+			if (activeSessionId() === sessionId) {
+				ai.prState = undefined;
+				ai.prUrl = undefined;
+				ai.prNumber = undefined;
+				ai.prTitle = undefined;
+				ai.prMergeable = undefined;
+			}
+			return;
+		}
+		const data = await res.json();
+		if (activeSessionId() === sessionId) {
+			ai.prState = data.state;
+			ai.prUrl = data.url;
+			ai.prNumber = data.number;
+			ai.prTitle = data.title;
+			ai.prMergeable = data.mergeable;
+		}
+	} catch {
+		if (activeSessionId() === sessionId) {
+			ai.prState = undefined;
+			ai.prUrl = undefined;
+			ai.prNumber = undefined;
+			ai.prTitle = undefined;
+			ai.prMergeable = undefined;
 		}
 	}
 }

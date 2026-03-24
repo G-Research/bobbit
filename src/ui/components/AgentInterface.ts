@@ -52,10 +52,17 @@ export class AgentInterface extends LitElement {
 		status: Array<{ file: string; status: string }>;
 	};
 	@property({ type: Boolean }) gitStatusLoading = false;
+	// PR status properties for goal-linked sessions
+	@property() prState?: string;
+	@property() prUrl?: string;
+	@property({ type: Number }) prNumber?: number;
+	@property() prTitle?: string;
+	@property({ type: Boolean }) prMergeable?: boolean;
 	// Background processes for this session
 	@property({ attribute: false }) bgProcesses: BgProcessInfo[] = [];
 	@property({ attribute: false }) onBgProcessKill?: (id: string) => void;
 	@property({ attribute: false }) onBgProcessDismiss?: (id: string) => void;
+	@property({ attribute: false }) onPrMerge?: (method: string) => Promise<string | undefined>;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
 	@property({ attribute: false }) onApiKeyRequired?: (provider: string) => Promise<boolean>;
 	// Optional callback called before sending a message
@@ -663,6 +670,12 @@ export class AgentInterface extends LitElement {
 								.unpushed=${this.gitStatus?.unpushed ?? false}
 								.statusFiles=${this.gitStatus?.status ?? []}
 								.loading=${this.gitStatusLoading}
+								.prState=${this.prState}
+								.prUrl=${this.prUrl}
+								.prNumber=${this.prNumber}
+								.prTitle=${this.prTitle}
+								.prMergeable=${this.prMergeable ?? false}
+								@pr-merge=${this._handlePrMerge}
 							></git-status-widget>` : nothing}
 						</div>
 						` : ''}
@@ -705,6 +718,17 @@ export class AgentInterface extends LitElement {
 				</div>
 			</div>
 		`;
+	}
+
+	private async _handlePrMerge(e: CustomEvent<{ method: string }>): Promise<void> {
+		if (!this.onPrMerge) return;
+		const widget = e.target as import('./GitStatusWidget.js').GitStatusWidget;
+		try {
+			const error = await this.onPrMerge(e.detail.method);
+			widget.setMergeResult(error);
+		} catch (err) {
+			widget.setMergeResult(err instanceof Error ? err.message : 'Network error');
+		}
 	}
 }
 
