@@ -44,8 +44,7 @@ export function saveGoalDraft(sessionId: string): void {
 			previewCwdEdited: state.previewCwdEdited,
 			hasReceivedProposal: state.assistantHasProposal,
 			goalAssistantTab: state.assistantTab,
-			previewTeamMode: state.previewTeamMode,
-			previewWorktree: state.previewWorktree,
+
 		};
 		saveDraftToServer(sessionId, 'goal', draft);
 	}, 300);
@@ -66,8 +65,7 @@ async function restoreGoalDraft(sessionId: string): Promise<boolean> {
 		state.previewCwdEdited = draft.previewCwdEdited ?? false;
 		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
 		state.assistantTab = draft.goalAssistantTab ?? "chat";
-		state.previewTeamMode = draft.previewTeamMode ?? true;
-		state.previewWorktree = draft.previewWorktree ?? true;
+
 		return true;
 	} catch (err) {
 		console.error("[goal-draft] Failed to restore draft:", err);
@@ -662,7 +660,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.previewCwdEdited = false;
 				state.previewSpecEdited = false;
 				state.assistantHasProposal = false;
-				state.previewTeamMode = true;
 			}
 			state.previewSpecEditMode = false;
 		}

@@ -254,10 +254,10 @@ export async function fetchGitStatus(sessionId: string): Promise<GitStatusData |
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; team?: boolean; worktree?: boolean; workflowId?: string }): Promise<Goal | null> {
-	const { spec = "", team = true, worktree = true, workflowId } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string }): Promise<Goal | null> {
+	const { spec = "", workflowId } = opts ?? {};
 	try {
-		const body: Record<string, any> = { title, cwd, spec, team, worktree };
+		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
@@ -328,11 +328,6 @@ export function patchSession(sessionId: string, updates: Record<string, unknown>
 // ============================================================================
 // TEAM API
 // ============================================================================
-
-/** @deprecated Use createGoal with { team: true, worktree } instead */
-export async function createTeamGoal(title: string, cwd: string, spec = "", worktree = true): Promise<Goal | null> {
-	return createGoal(title, cwd, { spec, team: true, worktree });
-}
 
 export async function startTeam(goalId: string): Promise<string | null> {
 	try {
@@ -927,7 +922,7 @@ export async function saveDraftToServer(sessionId: string, type: string, data: u
 			signal,
 		});
 	} catch (err) {
-		// Ignore aborted requests — they're intentionally cancelled on send
+		// Ignore aborted requests ï¿½ they're intentionally cancelled on send
 		if (err instanceof DOMException && err.name === "AbortError") return;
 		console.error("[draft-api] Failed to save draft:", err);
 	}
