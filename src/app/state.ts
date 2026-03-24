@@ -127,8 +127,6 @@ export const state = {
 	previewSpecEdited: false,
 	hasReceivedProposal: false,
 	previewSpecEditMode: false,
-	previewTeamMode: true,
-	previewWorktree: true,
 	cwdDropdownOpen: false,
 	cwdHighlightIndex: -1,
 

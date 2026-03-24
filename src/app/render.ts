@@ -25,7 +25,7 @@ import { renderGoalGroup, renderSessionRow } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
-import { cwdCombobox, worktreeToggle } from "./cwd-combobox.js";
+import { cwdCombobox } from "./cwd-combobox.js";
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
@@ -205,11 +205,7 @@ function goalPreviewPanel() {
 		}
 		state.assistantType = null;
 		state.activeGoalProposal = null;
-		const teamMode = state.previewTeamMode;
-		const worktree = state.previewWorktree;
 		const workflowId = _selectedWorkflowId || "general";
-		state.previewTeamMode = true;
-		state.previewWorktree = true;
 		_selectedWorkflowId = "general";
 		// Clean up persisted draft
 		if (sessionId) {
@@ -218,7 +214,7 @@ function goalPreviewPanel() {
 		localStorage.removeItem("gateway.sessionId");
 		state.appView = "authenticated";
 
-		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), { spec: state.previewSpec, team: teamMode, worktree, workflowId });
+		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), { spec: state.previewSpec, workflowId });
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
@@ -277,11 +273,7 @@ function goalPreviewPanel() {
 						highlightedIndex: state.cwdHighlightIndex,
 						onHighlight: (i) => { state.cwdHighlightIndex = i; renderApp(); },
 					})}
-					<div class="mt-2">${worktreeToggle({
-						checked: state.previewWorktree,
-						onChange: (v) => { state.previewWorktree = v; const sid = activeSessionId(); if (sid) saveGoalDraft(sid); renderApp(); },
-					})}</div>
-				</div>
+					</div>
 				${_cachedWorkflows.length > 0 ? html`
 					<div>
 						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
@@ -324,13 +316,6 @@ function goalPreviewPanel() {
 				</div>
 			</div>
 			<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
-				<label class="flex items-center gap-2.5 cursor-pointer">
-					<input type="checkbox"
-						.checked=${state.previewTeamMode}
-						@change=${(e: Event) => { state.previewTeamMode = (e.target as HTMLInputElement).checked; if (state.previewTeamMode) state.previewWorktree = true; const sid = activeSessionId(); if (sid) saveGoalDraft(sid); renderApp(); }}
-						class="toggle-switch" />
-					<span class="text-xs text-muted-foreground">🐝 Team mode — Team Lead auto-spawns role agents</span>
-				</label>
 				<div class="flex items-center justify-end gap-2">
 					${Button({ variant: "ghost", onClick: handleCancel, children: "Cancel" })}
 					${Button({
@@ -1144,8 +1129,6 @@ function getAssistantPreviewPanel(type: string) {
 let _proposalTitle = "";
 let _proposalCwd = "";
 let _proposalSpec = "";
-let _proposalTeamMode = true;
-let _proposalWorktree = true;
 let _proposalWorkflowId = "general";
 let _proposalSpecEditMode = false;
 let _proposalCwdDropdownOpen = false;
@@ -1165,8 +1148,6 @@ function syncProposalFormState(): void {
 	_proposalSpec = proposal.spec;
 	_proposalCwd = proposal.cwd || "";
 	_proposalWorkflowId = proposal.workflow || "general";
-	_proposalTeamMode = true;
-	_proposalWorktree = true;
 	_proposalSpecEditMode = false;
 	_proposalSaving = false;
 }
@@ -1184,8 +1165,6 @@ function goalProposalPanel() {
 		try {
 			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 				spec: _proposalSpec,
-				team: _proposalTeamMode,
-				worktree: _proposalWorktree,
 				workflowId: _proposalWorkflowId || undefined,
 			});
 			state.activeGoalProposal = null;
@@ -1235,11 +1214,7 @@ function goalProposalPanel() {
 					highlightedIndex: _proposalCwdHighlightIndex,
 					onHighlight: (i) => { _proposalCwdHighlightIndex = i; renderApp(); },
 				})}
-				<div class="mt-2">${worktreeToggle({
-					checked: _proposalWorktree,
-					onChange: (v) => { _proposalWorktree = v; renderApp(); },
-				})}</div>
-			</div>
+				</div>
 			${_cachedWorkflows.length > 0 ? html`
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
@@ -1277,13 +1252,6 @@ function goalProposalPanel() {
 			</div>
 		</div>
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
-			<label class="flex items-center gap-2.5 cursor-pointer">
-				<input type="checkbox"
-					.checked=${_proposalTeamMode}
-					@change=${(e: Event) => { _proposalTeamMode = (e.target as HTMLInputElement).checked; if (_proposalTeamMode) _proposalWorktree = true; renderApp(); }}
-					class="toggle-switch" />
-				<span class="text-xs text-muted-foreground">🐝 Team mode — Team Lead auto-spawns role agents</span>
-			</label>
 			<div class="flex items-center justify-end gap-2">
 				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
 				${Button({

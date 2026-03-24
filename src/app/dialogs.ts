@@ -4,7 +4,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader } from "@mariozechner
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { WandSparkles } from "lucide";
-import { cwdCombobox, worktreeToggle } from "./cwd-combobox.js";
+import { cwdCombobox } from "./cwd-combobox.js";
 import QRCode from "qrcode";
 import {
 	state,
@@ -839,7 +839,7 @@ function showGoalEditDialog(existingGoal: Goal): void {
 	let specValue = existingGoal.spec;
 	let stateValue: GoalState = existingGoal.state;
 	let saving = false;
-	let teamValue = (existingGoal as any).team || false;
+
 	let cwdDropdownOpenEdit = false;
 	let cwdHighlightIndexEdit = -1;
 
@@ -859,7 +859,7 @@ function showGoalEditDialog(existingGoal: Goal): void {
 			cwd: cwdValue.trim() || undefined,
 			state: stateValue,
 			spec: specValue,
-			team: teamValue,
+			team: true,
 		});
 		saving = false;
 		cleanup();
@@ -933,15 +933,7 @@ function showGoalEditDialog(existingGoal: Goal): void {
 									></textarea>
 									<p class="text-[10px] text-muted-foreground mt-1">Injected into the context window of all sessions under this goal.</p>
 								</div>
-								<div class="flex items-center gap-2.5">
-									<input type="checkbox" id="team-toggle-edit"
-										.checked=${teamValue}
-										@change=${(e: Event) => { teamValue = (e.target as HTMLInputElement).checked; renderDialog(); }}
-										class="toggle-switch" />
-									<label for="team-toggle-edit" class="text-xs text-muted-foreground cursor-pointer">
-										🐝 Team mode — Team Lead auto-spawns role agents
-									</label>
-								</div>
+	
 							</div>
 						`,
 					})}

@@ -525,8 +525,8 @@ async function handleApiRoute(
 		const title = body?.title;
 		const cwd = body?.cwd || config.defaultCwd;
 		const spec = body?.spec || "";
-		const team = body?.team === true || body?.swarm === true; // Accept legacy 'swarm' field
-		const worktree = body?.worktree !== undefined ? body.worktree === true : team; // default to team value
+		const team = true; // Always-on team mode
+		const worktree = true; // Always create worktree
 		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
 		if (!title || typeof title !== "string") {
 			json({ error: "Missing title" }, 400);
@@ -535,8 +535,6 @@ async function handleApiRoute(
 		try {
 			const goal = await sessionManager.goalManager.createGoal(title, cwd, {
 				spec,
-				team,
-				worktree,
 				workflowId,
 				workflowStore: workflowManager.store,
 			});
@@ -599,7 +597,7 @@ async function handleApiRoute(
 				cwd: body.cwd,
 				state: body.state,
 				spec: body.spec,
-				team: body.team ?? body.swarm, // Accept legacy 'swarm' field
+				team: true, // Always-on team mode
 				repoPath: body.repoPath,
 				branch: body.branch,
 				prUrl: body.prUrl,

@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { ChevronDown, GitBranch } from "lucide";
+import { ChevronDown } from "lucide";
 import { state } from "./state.js";
 
 /** Collect unique working directories from sessions and goals, most recent first. */
@@ -149,22 +149,4 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 	`;
 }
 
-/**
- * Render a worktree toggle: a toggle switch with a git-branch icon and label.
- */
-export function worktreeToggle(opts: {
-	checked: boolean;
-	onChange: (checked: boolean) => void;
-	id?: string;
-}) {
-	return html`
-		<label class="flex items-center gap-2 cursor-pointer">
-			<input type="checkbox"
-				id=${opts.id || ""}
-				.checked=${opts.checked}
-				@change=${(e: Event) => opts.onChange((e.target as HTMLInputElement).checked)}
-				class="toggle-switch" />
-			<span class="text-xs text-muted-foreground inline-flex items-center gap-1">${icon(GitBranch, "xs")} Create worktree</span>
-		</label>
-	`;
-}
+
