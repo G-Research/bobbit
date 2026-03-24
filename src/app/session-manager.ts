@@ -677,8 +677,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} catch { /* ignore */ }
 		})();
 
-		// Set up debounced prompt draft saving
+		// Set up debounced prompt draft saving with in-flight request tracking
 		let _promptDraftTimer: ReturnType<typeof setTimeout> | null = null;
+		let _promptDraftAbort: AbortController | null = null;
 		requestAnimationFrame(() => {
 			const editor = document.querySelector("message-editor") as any;
 			if (editor) {
@@ -688,8 +689,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					if (_promptDraftTimer) clearTimeout(_promptDraftTimer);
 					_promptDraftTimer = setTimeout(() => {
 						_promptDraftTimer = null;
+						// Abort any previous in-flight save
+						if (_promptDraftAbort) _promptDraftAbort.abort();
 						if (val.trim()) {
-							saveDraftToServer(sessionId, 'prompt', val);
+							_promptDraftAbort = new AbortController();
+							saveDraftToServer(sessionId, 'prompt', val, _promptDraftAbort.signal)
+								.finally(() => { _promptDraftAbort = null; });
 						} else {
 							deleteDraftFromServer(sessionId, 'prompt');
 						}
@@ -697,7 +702,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				};
 				const origOnSend = editor.onSend;
 				editor.onSend = (text: string, attachments: any[]) => {
+					// Cancel pending timer AND abort any in-flight save request
 					if (_promptDraftTimer) { clearTimeout(_promptDraftTimer); _promptDraftTimer = null; }
+					if (_promptDraftAbort) { _promptDraftAbort.abort(); _promptDraftAbort = null; }
 					deleteDraftFromServer(sessionId, 'prompt');
 					origOnSend?.(text, attachments);
 				};
