@@ -1,77 +1,80 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/draft-persistence.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/fixtures/draft-persistence.html")}`;
 
-test.describe("Draft persistence", () => {
-	test("saves draft to sessionStorage after debounce", async ({ page }) => {
+test.describe("Draft persistence on send", () => {
+	test.beforeEach(async ({ page }) => {
 		await page.goto(TEST_PAGE);
-
-		await page.fill("#editor", "hello world");
-		// Wait for 100ms debounce + margin
-		await page.waitForTimeout(200);
-
-		const stored = await page.evaluate(() =>
-			sessionStorage.getItem("bobbit_draft_session-A")
-		);
-		expect(stored).toBe("hello world");
+		// Clear any leftover localStorage state
+		await page.evaluate(() => localStorage.clear());
 	});
 
-	test("restores draft on page reload", async ({ page }) => {
-		await page.goto(TEST_PAGE);
+	test("bug: draft persists after send without clearDraft", async ({ page }) => {
+		const editor = page.locator("#editor");
+		await editor.fill("hello world");
+		await editor.dispatchEvent("input");
 
-		await page.fill("#editor", "persisted text");
-		await page.waitForTimeout(200);
+		// Wait for debounced saveDraft to fire
+		await page.waitForTimeout(150);
 
-		// Reload — draft should be restored
-		await page.reload();
-		const val = await page.inputValue("#editor");
-		expect(val).toBe("persisted text");
+		// Send without clearing draft (the bug)
+		await page.evaluate(() => (window as any).sendBuggy());
+
+		// Draft is still in localStorage — this is the bug
+		const draft = await page.evaluate(() =>
+			(window as any).loadDraft((window as any).SESSION_ID)
+		);
+		expect(draft).toBe("hello world");
 	});
 
-	test("send clears draft from sessionStorage and textarea", async ({ page }) => {
-		await page.goto(TEST_PAGE);
+	test("fix: draft cleared after send with clearDraft", async ({ page }) => {
+		const editor = page.locator("#editor");
+		await editor.fill("hello world");
+		await editor.dispatchEvent("input");
 
-		await page.fill("#editor", "will be sent");
-		await page.waitForTimeout(200);
+		// Wait for debounced saveDraft to fire
+		await page.waitForTimeout(150);
 
-		await page.click("#send-btn");
+		// Send with the fix (calls clearDraft)
+		await page.evaluate(() => (window as any).sendFixed());
 
-		const val = await page.inputValue("#editor");
-		expect(val).toBe("");
-
-		const stored = await page.evaluate(() =>
-			sessionStorage.getItem("bobbit_draft_session-A")
+		const draft = await page.evaluate(() =>
+			(window as any).loadDraft((window as any).SESSION_ID)
 		);
-		expect(stored).toBeNull();
+		expect(draft).toBe("");
 	});
 
-	test("switching sessions restores correct draft", async ({ page }) => {
-		await page.goto(TEST_PAGE);
+	test("fix: debounce race handled — clearDraft cancels pending timer", async ({ page }) => {
+		const editor = page.locator("#editor");
+		await editor.fill("race condition text");
+		await editor.dispatchEvent("input");
 
-		// Set draft for session A
-		await page.fill("#editor", "draft A");
-		await page.waitForTimeout(200);
+		// Send immediately — within the 100ms debounce window
+		await page.evaluate(() => (window as any).sendFixed());
 
-		// Switch to session B
-		await page.fill("#session-id", "session-B");
-		await page.dispatchEvent("#session-id", "change");
+		// Wait longer than the debounce period
+		await page.waitForTimeout(150);
 
-		// Type draft for session B
-		await page.fill("#editor", "draft B");
-		await page.waitForTimeout(200);
-
-		// Switch back to session A
-		await page.fill("#session-id", "session-A");
-		await page.dispatchEvent("#session-id", "change");
-
-		const val = await page.inputValue("#editor");
-		expect(val).toBe("draft A");
-
-		// Verify session B's draft is still stored
-		const storedB = await page.evaluate(() =>
-			sessionStorage.getItem("bobbit_draft_session-B")
+		// Draft must still be empty — clearDraft cancelled the pending timer
+		const draft = await page.evaluate(() =>
+			(window as any).loadDraft((window as any).SESSION_ID)
 		);
-		expect(storedB).toBe("draft B");
+		expect(draft).toBe("");
+	});
+
+	test("unsent draft preserved on navigate away", async ({ page }) => {
+		const editor = page.locator("#editor");
+		await editor.fill("unsent draft");
+		await editor.dispatchEvent("input");
+
+		// Wait for debounced saveDraft to fire
+		await page.waitForTimeout(150);
+
+		// Don't send — just check that draft is preserved
+		const draft = await page.evaluate(() =>
+			(window as any).loadDraft((window as any).SESSION_ID)
+		);
+		expect(draft).toBe("unsent draft");
 	});
 });

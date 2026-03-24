@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head><title>Draft Persistence Test</title></head>
+<body>
+<input id="editor" type="text" />
+<script>
+// --- Exact copy of draft functions from src/app/routing.ts ---
+const DRAFT_PREFIX = "bobbit-draft-";
+let _draftTimer = null;
+
+function saveDraft(sessionId, text) {
+	if (_draftTimer) clearTimeout(_draftTimer);
+	_draftTimer = setTimeout(() => {
+		if (text.trim()) {
+			localStorage.setItem(DRAFT_PREFIX + sessionId, text);
+		} else {
+			localStorage.removeItem(DRAFT_PREFIX + sessionId);
+		}
+	}, 100);
+}
+
+function loadDraft(sessionId) {
+	return localStorage.getItem(DRAFT_PREFIX + sessionId) || "";
+}
+
+function clearDraft(sessionId) {
+	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+	localStorage.removeItem(DRAFT_PREFIX + sessionId);
+}
+
+// --- Simulate session-manager.ts onInput wrapping ---
+const SESSION_ID = "test-session-1";
+const editor = document.getElementById("editor");
+
+editor.addEventListener("input", () => {
+	saveDraft(SESSION_ID, editor.value);
+});
+
+// --- Buggy send: does NOT call clearDraft (reproduces the bug) ---
+function sendBuggy() {
+	const text = editor.value;
+	editor.value = "";
+	// Bug: clearDraft is never called, so localStorage draft persists
+	return text;
+}
+
+// --- Fixed send: calls clearDraft before clearing input ---
+function sendFixed() {
+	const text = editor.value;
+	clearDraft(SESSION_ID);
+	editor.value = "";
+	return text;
+}
+
+// Expose globals for Playwright
+window.sendBuggy = sendBuggy;
+window.sendFixed = sendFixed;
+window.loadDraft = loadDraft;
+window.clearDraft = clearDraft;
+window.SESSION_ID = SESSION_ID;
+</script>
+</body>
+</html>
