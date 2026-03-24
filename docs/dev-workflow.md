@@ -63,7 +63,7 @@ This touches the sentinel file. The harness picks it up within ~500ms (polled on
 | `package.json` (new dependency) | `npm install`, then restart server |
 | `vite.config.ts` | Restart Vite (kill and re-run `npm run dev:harness`) |
 | `tsconfig.*.json` | Restart server; may need to restart Vite for web config changes |
-| `config/system-prompt.md` | Restart server (the path is resolved at startup and passed to agents) |
+| `.bobbit/config/system-prompt.md` | Restart server (the path is resolved at startup and passed to agents) |
 
 **Rule of thumb**: UI is hot. Server is compiled. If you touched anything under `src/server/`, you need a rebuild + restart.
 
@@ -236,7 +236,7 @@ npm test              # Mobile header Playwright tests (standalone)
 npm run test:e2e      # E2E integration tests (starts gateway + vite on localhost)
 ```
 
-E2E tests use `tests/playwright-e2e.config.ts` which starts both the gateway and Vite on localhost automatically. Tests run against the real system — creating sessions, sending prompts, verifying UI behavior.
+E2E tests use `playwright-e2e.config.ts` (at the project root) which starts a sandboxed gateway on localhost automatically. Tests run against the real system — creating sessions, sending prompts, verifying UI behavior.
 
 ---
 

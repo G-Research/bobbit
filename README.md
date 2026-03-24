@@ -434,7 +434,7 @@ See [docs/prompt-queue.md](docs/prompt-queue.md) for the full architecture.
 
 ### Workflows
 
-Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Stored as YAML in `workflows/`. Snapshotted into goals at creation (frozen). See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Stored as YAML in `.bobbit/config/workflows/`. Snapshotted into goals at creation (frozen). See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 
 ### Assistant Registry
 
