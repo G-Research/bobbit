@@ -88,7 +88,7 @@ export class GoalManager {
 		// Compute worktree path and branch (but don't create yet)
 		if (worktree && repoPath) {
 			branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
-			worktreePath = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt-${branch}`);
+			worktreePath = path.join(path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`), branch.replace(/\//g, "-"));
 			goalCwd = worktreePath;
 			setupStatus = "preparing";
 		}

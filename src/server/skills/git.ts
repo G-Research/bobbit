@@ -24,7 +24,11 @@ export async function createWorktree(repoPath: string, branchName: string): Prom
 		throw new Error(`Cannot create worktree: repoPath does not exist: ${repoPath}`);
 	}
 
-	const worktreePath = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt-${branchName}`);
+	// Place all worktrees under a single sibling directory: <repo>-wt/
+	const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
+	// branchName may contain slashes (e.g. "goal/slug-id"), flatten to a safe dirname
+	const safeName = branchName.replace(/\//g, "-");
+	const worktreePath = path.join(wtRoot, safeName);
 
 	// Create branch and worktree in one step (async, no shell, prevents injection)
 	await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, "HEAD"], {
