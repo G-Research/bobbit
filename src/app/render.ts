@@ -1138,6 +1138,164 @@ function getAssistantPreviewPanel(type: string) {
 }
 
 // ============================================================================
+// GOAL PROPOSAL PANEL (non-assistant inline panel)
+// ============================================================================
+
+/** Module-level form state for the goal proposal panel. */
+let _proposalTitle = "";
+let _proposalCwd = "";
+let _proposalSpec = "";
+let _proposalTeamMode = true;
+let _proposalWorktree = true;
+let _proposalWorkflowId = "general";
+let _proposalSpecEditMode = false;
+let _proposalCwdDropdownOpen = false;
+let _proposalCwdHighlightIndex = -1;
+let _proposalSaving = false;
+let _proposalInitializedFrom: string | null = null;
+
+/** Sync module-level form state from the active goal proposal when it changes. */
+function syncProposalFormState(): void {
+	const proposal = state.activeGoalProposal;
+	if (!proposal) return;
+	// Use a simple identity check to avoid re-initializing on every render
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}`;
+	if (_proposalInitializedFrom === key) return;
+	_proposalInitializedFrom = key;
+	_proposalTitle = proposal.title;
+	_proposalSpec = proposal.spec;
+	_proposalCwd = proposal.cwd || "";
+	_proposalWorkflowId = proposal.workflow || "general";
+	_proposalTeamMode = true;
+	_proposalWorktree = true;
+	_proposalSpecEditMode = false;
+	_proposalSaving = false;
+}
+
+function goalProposalPanel() {
+	syncProposalFormState();
+	ensureWorkflowsLoaded();
+
+	const handleCreateGoal = async () => {
+		const trimmedTitle = _proposalTitle.trim();
+		if (!trimmedTitle || _proposalSaving) return;
+		_proposalSaving = true;
+		renderApp();
+
+		try {
+			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
+				spec: _proposalSpec,
+				team: _proposalTeamMode,
+				worktree: _proposalWorktree,
+				workflowId: _proposalWorkflowId || undefined,
+			});
+			state.activeGoalProposal = null;
+			_proposalInitializedFrom = null;
+			if (goal) {
+				setHashRoute("goal-dashboard", goal.id);
+			}
+		} finally {
+			_proposalSaving = false;
+			renderApp();
+		}
+	};
+
+	const handleDismiss = () => {
+		state.activeGoalProposal = null;
+		_proposalInitializedFrom = null;
+		// If preview tab still available, switch to it
+		if (state.isPreviewSession) {
+			state.previewPanelActiveTab = "preview";
+		}
+		renderApp();
+	};
+
+	return html`
+		<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+			<div>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Title</label>
+				${Input({
+					type: "text",
+					value: _proposalTitle,
+					placeholder: "Goal title",
+					onInput: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
+				})}
+			</div>
+			<div>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
+				${cwdCombobox({
+					value: _proposalCwd,
+					placeholder: "(server default)",
+					onInput: (v) => { _proposalCwd = v; renderApp(); },
+					onSelect: (v) => { _proposalCwd = v; renderApp(); },
+					dropdownOpen: _proposalCwdDropdownOpen,
+					onToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
+					highlightedIndex: _proposalCwdHighlightIndex,
+					onHighlight: (i) => { _proposalCwdHighlightIndex = i; renderApp(); },
+				})}
+				<div class="mt-2">${worktreeToggle({
+					checked: _proposalWorktree,
+					onChange: (v) => { _proposalWorktree = v; renderApp(); },
+				})}</div>
+			</div>
+			${_cachedWorkflows.length > 0 ? html`
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
+					<select
+						class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
+						.value=${_proposalWorkflowId}
+						@change=${(e: Event) => { _proposalWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); }}
+					>
+						${_cachedWorkflows.map((wf) => html`
+							<option value=${wf.id} ?selected=${_proposalWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
+						`)}
+					</select>
+				</div>
+			` : ""}
+			<div class="flex-1 flex flex-col min-h-0">
+				<div class="flex items-center justify-between mb-1.5">
+					<label class="text-xs text-muted-foreground font-medium">Spec</label>
+					<button
+						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+						@click=${() => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); }}
+					>
+						${_proposalSpecEditMode ? "Preview" : "Edit"}
+					</button>
+				</div>
+				${_proposalSpecEditMode
+					? html`<textarea
+							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+							.value=${_proposalSpec}
+							@input=${(e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; }}
+						></textarea>`
+					: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
+							<markdown-block .content=${_proposalSpec || "_No spec content yet_"}></markdown-block>
+						</div>`
+				}
+			</div>
+		</div>
+		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
+			<label class="flex items-center gap-2.5 cursor-pointer">
+				<input type="checkbox"
+					.checked=${_proposalTeamMode}
+					@change=${(e: Event) => { _proposalTeamMode = (e.target as HTMLInputElement).checked; if (_proposalTeamMode) _proposalWorktree = true; renderApp(); }}
+					class="toggle-switch" />
+				<span class="text-xs text-muted-foreground">🐝 Team mode — Team Lead auto-spawns role agents</span>
+			</label>
+			<div class="flex items-center justify-end gap-2">
+				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
+				${Button({
+					variant: "default",
+					onClick: handleCreateGoal,
+					disabled: !_proposalTitle.trim() || _proposalSaving,
+					children: _proposalSaving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
+				})}
+			</div>
+		</div>
+	`;
+}
+
+// ============================================================================
 // PREVIEW SWIPE (mobile)
 // ============================================================================
 
@@ -1177,6 +1335,11 @@ const PREVIEW_SWIPE_SCRIPT = `<script>
 })();
 <\/script>`;
 
+/** Whether the unified panel is active for the current non-assistant session. */
+function hasUnifiedPanel(): boolean {
+	return !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null);
+}
+
 /** Listen for postMessage from the preview iframe and drive the slider track.
  *  Also handles leftward swipes on the chat side (#app touch events). */
 function setupPreviewSwipe(): void {
@@ -1185,7 +1348,7 @@ function setupPreviewSwipe(): void {
 
 	// === iframe → parent: rightward swipe on preview ===
 	window.addEventListener("message", (e: MessageEvent) => {
-		if (!state.isPreviewSession || state.previewPanelTab !== "preview") return;
+		if (!hasUnifiedPanel() || state.previewPanelTab !== "preview") return;
 		const track = document.querySelector(".preview-slider__track") as HTMLElement | null;
 		if (!track) return;
 
@@ -1212,7 +1375,7 @@ function setupPreviewSwipe(): void {
 	const el = document.getElementById("app")!;
 
 	el.addEventListener("touchstart", (e: TouchEvent) => {
-		if (!state.isPreviewSession || state.previewPanelTab !== "chat") return;
+		if (!hasUnifiedPanel() || state.previewPanelTab !== "chat") return;
 		chatStartX = e.touches[0].clientX;
 		chatStartY = e.touches[0].clientY;
 		chatCaptured = false;
@@ -1220,7 +1383,7 @@ function setupPreviewSwipe(): void {
 	}, { passive: true });
 
 	el.addEventListener("touchmove", (e: TouchEvent) => {
-		if (!state.isPreviewSession || state.previewPanelTab !== "chat") return;
+		if (!hasUnifiedPanel() || state.previewPanelTab !== "chat") return;
 		if (chatDecided && !chatCaptured) return;
 		const dx = e.touches[0].clientX - chatStartX;
 		const dy = e.touches[0].clientY - chatStartY;
@@ -1536,17 +1699,26 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const previewTabBar = () => {
+	const unifiedTabBar = () => {
+		if (!hasUnifiedPanel()) return "";
 		return html`
 			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
 				<button
 					class="goal-tab-pill ${state.previewPanelTab === "chat" ? "goal-tab-pill--active" : ""}"
 					@click=${() => { state.previewPanelTab = "chat"; renderApp(); }}
 				>Chat</button>
-				<button
-					class="goal-tab-pill ${state.previewPanelTab === "preview" ? "goal-tab-pill--active" : ""}"
-					@click=${() => { state.previewPanelTab = "preview"; renderApp(); }}
-				>Preview</button>
+				${state.isPreviewSession ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "preview" && state.previewPanelActiveTab === "preview" ? "goal-tab-pill--active" : ""}"
+						@click=${() => { state.previewPanelTab = "preview"; state.previewPanelActiveTab = "preview"; renderApp(); }}
+					>Preview</button>
+				` : ""}
+				${state.activeGoalProposal != null ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "preview" && state.previewPanelActiveTab === "goal" ? "goal-tab-pill--active" : ""}"
+						@click=${() => { state.previewPanelTab = "preview"; state.previewPanelActiveTab = "goal"; renderApp(); }}
+					>Goal <span class="goal-tab-dot"></span></button>
+				` : ""}
 			</div>
 		`;
 	};
@@ -1559,24 +1731,61 @@ export function doRenderApp(): void {
 		renderApp();
 	};
 
-	const htmlPreviewPanel = () => {
+	/** Render the HTML preview iframe content (no header — unified panel provides it). */
+	const htmlPreviewContent = () => {
+		return html`
+			<div style="position:relative;flex:1;min-height:0;">
+				<iframe
+					class="w-full border-0"
+					style="position:absolute;inset:0;height:100%;"
+					sandbox="allow-scripts allow-same-origin"
+					.srcdoc=${state.previewPanelHtml + PREVIEW_SWIPE_SCRIPT}
+				></iframe>
+			</div>
+		`;
+	};
+
+	/** Unified preview panel with tab header + content dispatch.
+	 *  Used on desktop for non-assistant sessions that have preview or goal proposal. */
+	const unifiedPreviewPanel = () => {
+		// Auto-correct tab if the active tab's content is no longer available
+		if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeGoalProposal != null) {
+			state.previewPanelActiveTab = "goal";
+		} else if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal == null && state.isPreviewSession) {
+			state.previewPanelActiveTab = "preview";
+		}
+
+		const showPreviewTab = state.isPreviewSession;
+		const showGoalTab = state.activeGoalProposal != null;
+
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+				<!-- Tab header -->
 				<div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
-					<span class="text-xs font-medium text-muted-foreground" style="flex-shrink:0;">Live Preview</span>
-					<span class="text-xs text-muted-foreground" style="flex:1;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:0.7;padding:0 8px;" title=${`preview-${activeSessionId() || ""}.html`}>preview-${activeSessionId() || ""}.html</span>
+					<div class="flex items-center gap-1">
+						${showPreviewTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "preview" ? "goal-tab-pill--active" : ""}"
+								@click=${() => { state.previewPanelActiveTab = "preview"; renderApp(); }}
+							>Preview</button>
+						` : ""}
+						${showGoalTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "goal" ? "goal-tab-pill--active" : ""}"
+								@click=${() => { state.previewPanelActiveTab = "goal"; renderApp(); }}
+							>Goal <span class="goal-tab-dot"></span></button>
+						` : ""}
+					</div>
 					<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Collapse preview (Ctrl+])">
 						${icon(PanelRightClose, "sm")}
 					</button>
 				</div>
-				<div style="position:relative;flex:1;min-height:0;">
-					<iframe
-						class="w-full border-0"
-						style="position:absolute;inset:0;height:100%;"
-						sandbox="allow-scripts allow-same-origin"
-						.srcdoc=${state.previewPanelHtml + PREVIEW_SWIPE_SCRIPT}
-					></iframe>
-				</div>
+				<!-- Tab content -->
+				${state.previewPanelActiveTab === "preview" && showPreviewTab
+					? htmlPreviewContent()
+					: state.previewPanelActiveTab === "goal" && showGoalTab
+						? goalProposalPanel()
+						: ""}
 			</div>
 		`;
 	};
@@ -1586,6 +1795,26 @@ export function doRenderApp(): void {
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
+
+	/** Mobile content for the unified panel (shown in slider).
+	 *  Dispatches to preview iframe or goal proposal panel based on active tab. */
+	const unifiedPanelMobileContent = () => {
+		if (state.previewPanelActiveTab === "preview" && state.isPreviewSession) {
+			return html`
+				<div class="goal-preview-panel flex-1 flex flex-col min-h-0">
+					${htmlPreviewContent()}
+				</div>
+			`;
+		}
+		if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal != null) {
+			return html`
+				<div class="goal-preview-panel flex-1 flex flex-col min-h-0">
+					${goalProposalPanel()}
+				</div>
+			`;
+		}
+		return html``;
+	};
 
 	const mainArea = () => {
 		// Goal dashboard route
@@ -1632,14 +1861,14 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
-		if (connected && state.isPreviewSession) {
+		if (connected && hasUnifiedPanel()) {
 			if (desktop) {
 				const collapsed = isPreviewCollapsed();
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex min-h-0 overflow-hidden">
 						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
-						${collapsed ? previewExpandButton() : htmlPreviewPanel()}
+						${collapsed ? previewExpandButton() : unifiedPreviewPanel()}
 					</div>
 				`;
 			}
@@ -1649,7 +1878,7 @@ export function doRenderApp(): void {
 				<div class="preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
 					<div class="preview-slider__track" style="display:flex;width:200%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
 						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${state.chatPanel}</div>
-						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${htmlPreviewPanel()}</div>
+						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${unifiedPanelMobileContent()}</div>
 					</div>
 				</div>
 			`;
@@ -1718,7 +1947,7 @@ export function doRenderApp(): void {
 						${headerRight()}
 					</div>
 					${state.assistantType ? assistantTabBar() : ""}
-					${state.isPreviewSession && !state.assistantType ? previewTabBar() : ""}
+					${hasUnifiedPanel() ? unifiedTabBar() : ""}
 				</div>
 				<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
 			</div>

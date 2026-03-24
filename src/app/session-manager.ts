@@ -18,7 +18,7 @@ import { gatewayFetch, refreshSessions, startSessionPolling, updateLocalSessionT
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, saveDraft, loadDraft, clearDraft } from "./routing.js";
 import { sessionHueRotation } from "./session-colors.js";
-import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog, showGoalEditDialogFromProposal } from "./dialogs.js";
+import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
@@ -372,8 +372,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Persist draft to IndexedDB
 				saveGoalDraft(sessionId);
 			} else {
-				// Non-goal-assistant session: show the proposal dialog
-				showGoalEditDialogFromProposal(proposal);
+				// Non-goal-assistant session: show inline preview panel
+				state.previewPanelActiveTab = "goal";
+				// Un-collapse panel on desktop
+				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
+				localStorage.removeItem(collapseKey);
+				// On mobile, switch to the panel tab so user sees the goal form
+				if (!isDesktop()) {
+					state.previewPanelTab = "preview";
+				}
 			}
 			renderApp();
 		};

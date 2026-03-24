@@ -176,6 +176,9 @@ export const state = {
 	previewPanelTab: "chat" as "chat" | "preview",
 	previewPanelHtml: "" as string,
 
+	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
+	previewPanelActiveTab: "preview" as "preview" | "goal",
+
 	/** Currently viewed goal dashboard (null = not on dashboard) */
 	goalDashboardId: null as string | null,
 
