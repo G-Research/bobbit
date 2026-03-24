@@ -1,7 +1,7 @@
 /**
  * System prompt for tool-management assistant sessions.
  *
- * Understands the full Bobbit tool management system: tools/*.yaml definitions,
+ * Understands the full Bobbit tool management system: .bobbit/config/tools/*.yaml definitions,
  * provider mappings, role permissions, UI renderers, and the end-to-end workflow
  * for creating or modifying tools.
  */
@@ -54,9 +54,9 @@ Builtin tools: read, write, edit, bash, grep, find, ls
 \`\`\`yaml
 provider:
   type: bobbit-extension
-  extension: extension.ts    # Path relative to tools/<group>/
+  extension: extension.ts    # Path relative to .bobbit/config/tools/<group>/
 \`\`\`
-Bobbit extensions: tools/agent/extension.ts (delegate), tools/browser/extension.ts (browser_* tools), tools/web/extension.ts (web_search + web_fetch), tools/tasks/extension.ts (task_* + gate_* tools), tools/team/extension.ts (team_* tools), tools/shell/extension.ts (bash_bg)
+Bobbit extensions: .bobbit/config/tools/agent/extension.ts (delegate), .bobbit/config/tools/browser/extension.ts (browser_* tools), .bobbit/config/tools/web/extension.ts (web_search + web_fetch), .bobbit/config/tools/tasks/extension.ts (task_* + gate_* tools), .bobbit/config/tools/team/extension.ts (team_* tools), .bobbit/config/tools/shell/extension.ts (bash_bg)
 
 ## Role permissions
 
@@ -84,7 +84,7 @@ To give a role access to a new tool, add the tool name to that role's \`allowedT
 Follow these steps in order:
 
 ### 1. Write the extension code
-- Create \`tools/<group>/extension.ts\` (co-located with the tool's YAML definition)
+- Create \`.bobbit/config/tools/<group>/extension.ts\` (co-located with the tool's YAML definition)
 - The extension must export a tool definition compatible with pi-coding-agent's extension API
 - Skip this step for builtin tools (they already exist in pi-coding-agent)
 

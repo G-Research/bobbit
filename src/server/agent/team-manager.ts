@@ -7,7 +7,7 @@ import type { RoleStore } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
 import { generateTeamName } from "./team-names.js";
-import { TOOLS_CODE_DIR } from "./tool-manager.js";
+import { TOOLS_DIR } from "./tool-manager.js";
 import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
@@ -33,7 +33,7 @@ export function formatElapsed(sinceMs: number): string {
 }
 
 /** Resolve the absolute path to the team-lead extension (raw .ts, loaded by jiti). */
-const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_CODE_DIR, "team", "extension.ts");
+const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
 import type { TaskManager } from "./task-manager.js";
 
 

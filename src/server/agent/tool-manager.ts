@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parse, parseDocument, stringify } from "yaml";
 
 export interface ToolProvider {
@@ -35,15 +34,12 @@ export interface ToolInfo {
 
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/** Tool YAML definitions directory — .bobbit/config/tools/ (user-facing, scaffolded from defaults) */
+/** Tool definitions directory — .bobbit/config/tools/ (YAML definitions AND extension code, scaffolded from defaults) */
 const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
 
-/** Tool extension code directory — repo-root tools/ (source code, not user config) */
-const TOOLS_CODE_DIR = path.resolve(__dirname, "../../../tools");
 
-export { TOOLS_DIR, TOOLS_CODE_DIR };
+export { TOOLS_DIR };
 
 /**
  * Scan the tools/ YAML directory and return all tool definitions.

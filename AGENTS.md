@@ -320,7 +320,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add/edit tool documentation**: Navigate to `#/tools`, click a tool, edit the Description/Group/Docs fields, and Save. Or launch a Tool Assistant session for AI-guided documentation. Server-side: tool metadata lives in `.bobbit/config/tools/<group>/*.yaml` files, managed by `tool-manager.ts`, API routes in `server.ts`.
 
-**Add a new tool**: Create a YAML file in the appropriate `.bobbit/config/tools/<group>/` directory (e.g. `.bobbit/config/tools/filesystem/my_tool.yaml`). Define `name`, `description`, `summary`, `group`, `provider`, and optionally `renderer` and `docs`. If the tool needs a custom extension, add code to the group's `extension.ts` in `tools/<group>/`. Register a renderer in `src/ui/tools/renderers/` if needed.
+**Add a new tool**: Create a YAML file in the appropriate `.bobbit/config/tools/<group>/` directory (e.g. `.bobbit/config/tools/filesystem/my_tool.yaml`). Define `name`, `description`, `summary`, `group`, `provider`, and optionally `renderer` and `docs`. If the tool needs a custom extension, add code to the group's `extension.ts` in `.bobbit/config/tools/<group>/`. Register a renderer in `src/ui/tools/renderers/` if needed.
 
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
 
@@ -350,7 +350,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `roles/*.yaml` | `RoleStore` | Role definitions and tool access |
 | `workflows/*.yaml` | `WorkflowStore` | Workflow templates (gate DAGs, verification configs) |
 | `personalities/*.yaml` | `PersonalityStore` | Personality definitions |
-| `tools/<group>/*.yaml` | `ToolManager` | Tool definitions (name, description, docs, provider, renderer) |
+| `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
 
 
 ### `.bobbit/state/` — runtime state (gitignored)
@@ -376,7 +376,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 
 ### `.bobbit/extensions/` — pi-coding-agent extension resolution directory
 
-Retained for pi-coding-agent's `user-extension` resolution (delegate, browser, web tools). Bobbit-owned tool extensions live in `tools/<group>/extension.ts` (repo root). Tool YAML definitions live in `.bobbit/config/tools/<group>/*.yaml`.
+Retained for pi-coding-agent's `user-extension` resolution (delegate, browser, web tools). Bobbit-owned tool extensions and YAML definitions are co-located in `.bobbit/config/tools/<group>/` (scaffolded from `src/server/defaults/tools/`).
 
 ### Global state (not per-project)
 
