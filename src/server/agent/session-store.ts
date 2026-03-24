@@ -47,6 +47,8 @@ export interface PersistedSession {
 	personalities?: string[];
 	/** Persisted prompt queue */
 	messageQueue?: QueuedMessage[];
+	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role", "personality") */
+	drafts?: Record<string, unknown>;
 }
 
 const STORE_DIR = bobbitStateDir();
@@ -139,6 +141,37 @@ export class SessionStore {
 		if (!existing) return;
 		Object.assign(existing, updates);
 		this.save(); // debounced — frequent field updates
+	}
+
+
+	/** Get a draft for a session by type. */
+	getDraft(sessionId: string, type: string): unknown | undefined {
+		const session = this.sessions.get(sessionId);
+		if (!session?.drafts) return undefined;
+		return session.drafts[type];
+	}
+
+	/** Set a draft for a session by type. Triggers debounced save. */
+	setDraft(sessionId: string, type: string, data: unknown): boolean {
+		const session = this.sessions.get(sessionId);
+		if (!session) return false;
+		if (!session.drafts) session.drafts = {};
+		session.drafts[type] = data;
+		this.save();
+		return true;
+	}
+
+	/** Delete a draft for a session by type. Triggers debounced save. */
+	deleteDraft(sessionId: string, type: string): boolean {
+		const session = this.sessions.get(sessionId);
+		if (!session?.drafts) return false;
+		delete session.drafts[type];
+		// Clean up empty drafts object
+		if (Object.keys(session.drafts).length === 0) {
+			delete session.drafts;
+		}
+		this.save();
+		return true;
 	}
 
 	/** Flush any pending debounced save immediately (e.g. before shutdown). */

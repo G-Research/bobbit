@@ -1083,6 +1083,23 @@ export class SessionManager {
 		return true;
 	}
 
+t// ── Draft storage ──────────────────────────────────────────────
+
+	/** Get a draft for a session by type. */
+	getDraft(id: string, type: string): unknown | undefined {
+		return this.store.getDraft(id, type);
+	}
+
+	/** Set a draft for a session by type. Returns false if session not found. */
+	setDraft(id: string, type: string, data: unknown): boolean {
+		return this.store.setDraft(id, type, data);
+	}
+
+	/** Delete a draft for a session by type. */
+	deleteDraft(id: string, type: string): boolean {
+		return this.store.deleteDraft(id, type);
+	}
+
 	/**
 	 * Assign a role to an existing session by killing the agent, reassembling
 	 * the system prompt with the role instructions, and respawning with
