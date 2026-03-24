@@ -719,6 +719,9 @@ export class RemoteAgent {
 				this._state.streamMessage = null;
 				this._state.pendingToolCalls = new Set();
 
+				// Beep so the user hears task completion
+				RemoteAgent.playNotificationBeep();
+
 				this._taskStartTime = null;
 				this._state.turnStartTime = null;
 				break;
