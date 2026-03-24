@@ -15,6 +15,10 @@ import { RemoteAgent } from "./remote-agent.js";
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
 
+/** Throttle PR status polling — don't hit GitHub API every 5s. */
+let _lastPrRefresh = 0;
+const PR_POLL_INTERVAL_MS = 30_000;
+
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
 async function showConnectionError(title: string, message: string): Promise<void> {
 	const { showConnectionError: show } = await import("./dialogs.js");
@@ -137,10 +141,6 @@ export async function refreshSessions(): Promise<void> {
 		}
 
 		state.sessionsError = "";
-
-		// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion)
-		refreshGateStatusCache();
-		refreshPrStatusCache();
 	} catch (err) {
 		if (isInitial) {
 			state.sessionsError = err instanceof Error ? err.message : String(err);
@@ -149,6 +149,15 @@ export async function refreshSessions(): Promise<void> {
 	} finally {
 		state.sessionsLoading = false;
 		renderApp();
+	}
+
+	// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion).
+	// These call renderApp() only if data actually changed, avoiding redundant re-renders.
+	refreshGateStatusCache();
+	const now = Date.now();
+	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS) {
+		_lastPrRefresh = now;
+		refreshPrStatusCache();
 	}
 }
 

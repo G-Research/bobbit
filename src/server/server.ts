@@ -1,4 +1,5 @@
-import { execSync } from "node:child_process";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -30,6 +31,40 @@ import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
+
+const execAsync = promisify(exec);
+
+// ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
+const _prCache = new Map<string, { data: any; ts: number }>();
+const PR_CACHE_TTL_MS = 30_000; // 30 seconds
+
+async function getCachedPrStatus(cwd: string): Promise<any | null> {
+	const cached = _prCache.get(cwd);
+	if (cached && Date.now() - cached.ts < PR_CACHE_TTL_MS) return cached.data;
+	try {
+		const { stdout } = await execAsync("gh pr view --json state,url,number,title,mergeable,headRefName", {
+			cwd,
+			encoding: "utf-8",
+			timeout: 10000,
+		});
+		const pr = JSON.parse(stdout);
+		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName };
+		_prCache.set(cwd, { data, ts: Date.now() });
+		return data;
+	} catch {
+		_prCache.set(cwd, { data: null, ts: Date.now() });
+		return null;
+	}
+}
+
+// ── Async git helpers (avoid blocking event loop) ──
+async function execGit(cmd: string, cwd: string, timeout = 5000): Promise<string> {
+	const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout });
+	return stdout.trim();
+}
+async function execGitSafe(cmd: string, cwd: string, fallback = ""): Promise<string> {
+	try { return await execGit(cmd, cwd); } catch { return fallback; }
+}
 
 export interface TlsConfig {
 	cert: string;  // path to PEM certificate
@@ -848,7 +883,7 @@ async function handleApiRoute(
 		// Get commit SHA
 		let commitSha = "unknown";
 		try {
-			commitSha = execSync("git rev-parse HEAD", { cwd: goal.cwd, encoding: "utf-8", timeout: 5000 }).trim();
+			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
 		} catch { /* ignore */ }
 
 		// Compute content version
@@ -1131,36 +1166,24 @@ async function handleApiRoute(
 		// Validate branch name to prevent injection
 		if (!/^[a-zA-Z0-9/_.\-]+$/.test(branch)) { json({ error: "Invalid branch name" }, 400); return; }
 		const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 1), 100);
-		const execOpts = { cwd: goal.cwd, encoding: "utf-8" as const, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"], timeout: 5000 };
 		try {
-			// Determine primary branch to exclude inherited commits
 			let primaryBranch = "master";
 			try {
-				const remoteHead = execSync("git symbolic-ref refs/remotes/origin/HEAD", execOpts).trim();
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", goal.cwd);
 				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
 			} catch {
-				try { execSync("git rev-parse --verify refs/heads/master", execOpts); primaryBranch = "master"; }
-				catch { try { execSync("git rev-parse --verify refs/heads/main", execOpts); primaryBranch = "main"; } catch { /* keep default */ } }
+				try { await execGit("git rev-parse --verify refs/heads/master", goal.cwd); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", goal.cwd); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
 
-			// Use range notation to show only commits unique to goal branch
-			// Fall back to plain log if the branch IS the primary branch or range fails
 			let rangeSpec = `-${limit} ${branch}`;
 			if (branch !== primaryBranch && branch !== "HEAD") {
-				const primaryRef = (() => {
-					try { execSync(`git rev-parse --verify origin/${primaryBranch}`, execOpts); return `origin/${primaryBranch}`; }
-					catch { return primaryBranch; }
-				})();
-				try {
-					// Test that the range is valid
-					execSync(`git rev-parse ${primaryRef}`, execOpts);
-					rangeSpec = `-${limit} ${primaryRef}..${branch}`;
-				} catch { /* fall back to plain log */ }
+				let primaryRef = primaryBranch;
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, goal.cwd); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = execSync(`git log --format="%H|%h|%s|%an|%aI" ${rangeSpec}`, {
-				cwd: goal.cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
-			});
+			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" ${rangeSpec}`, goal.cwd);
 			const commits = out.trim().split("\n").filter(Boolean).map((line: string) => {
 				const [sha, shortSha, message, author, timestamp] = line.split("|");
 				return { sha, shortSha, message, author, timestamp };
@@ -1172,7 +1195,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/goals/:id/git-status — git status for goal worktree
+	// GET /api/goals/:id/git-status — git status for goal worktree (async)
 	const goalGitMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/git-status$/);
 	if (goalGitMatch && req.method === "GET") {
 		const goalId = goalGitMatch[1];
@@ -1180,39 +1203,29 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		const execOpts = { cwd, encoding: "utf-8" as const, timeout: 5000, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
 		try {
 			let branch = "";
-			try {
-				branch = execSync("git rev-parse --abbrev-ref HEAD", execOpts).trim();
-			} catch {
-				json({ error: "Not a git repository" }, 400);
-				return;
-			}
+			try { branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd); }
+			catch { json({ error: "Not a git repository" }, 400); return; }
 			let primaryBranch = "master";
 			try {
-				const remoteHead = execSync("git symbolic-ref refs/remotes/origin/HEAD", execOpts).trim();
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
 				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
 			} catch {
-				try { execSync("git rev-parse --verify refs/heads/master", execOpts); primaryBranch = "master"; }
-				catch { try { execSync("git rev-parse --verify refs/heads/main", execOpts); primaryBranch = "main"; } catch { /* keep default */ } }
+				try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
 			const isOnPrimary = branch === primaryBranch;
-			let aheadOfPrimary = 0;
-			let behindPrimary = 0;
-			let mergedIntoPrimary = false;
+			let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
 			if (!isOnPrimary) {
-				const primaryRef = (() => {
-					try { execSync(`git rev-parse --verify origin/${primaryBranch}`, execOpts); return `origin/${primaryBranch}`; }
-					catch { return primaryBranch; }
-				})();
-				try { aheadOfPrimary = parseInt(execSync(`git rev-list --count ${primaryRef}..HEAD`, execOpts).trim(), 10) || 0; } catch { /* ignore */ }
-				try { behindPrimary = parseInt(execSync(`git rev-list --count HEAD..${primaryRef}`, execOpts).trim(), 10) || 0; } catch { /* ignore */ }
+				let primaryRef = primaryBranch;
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, "0"), 10) || 0;
+				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, "0"), 10) || 0;
 				mergedIntoPrimary = aheadOfPrimary === 0;
 			}
-			let statusRaw = "";
-			try { statusRaw = execSync("git status --porcelain", execOpts).replace(/\s+$/, ""); } catch { /* empty */ }
-			const clean = !statusRaw;
+			const statusRaw = await execGitSafe("git status --porcelain", cwd);
+			const clean = !statusRaw.trim();
 			json({ branch, primaryBranch, isOnPrimary, clean, aheadOfPrimary, behindPrimary, mergedIntoPrimary });
 		} catch (err) {
 			json({ error: String(err) }, 500);
@@ -1220,7 +1233,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/goals/:id/pr-status — PR status for goal branch
+	// GET /api/goals/:id/pr-status — PR status for goal branch (async + cached)
 	const goalPrStatusMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-status$/);
 	if (goalPrStatusMatch && req.method === "GET") {
 		const goalId = goalPrStatusMatch[1];
@@ -1228,18 +1241,8 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		try {
-			const output = execSync("gh pr view --json state,url,number,title,mergeable,headRefName", {
-				cwd,
-				encoding: "utf-8",
-				timeout: 10000,
-				stdio: ["pipe", "pipe", "pipe"],
-			});
-			const pr = JSON.parse(output);
-			json({ number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName });
-		} catch {
-			json({ error: "No PR found" }, 404);
-		}
+		const pr = await getCachedPrStatus(cwd);
+		if (pr) { json(pr); } else { json({ error: "No PR found" }, 404); }
 		return;
 	}
 
@@ -1258,12 +1261,8 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			execSync(`gh pr merge --${method}`, {
-				cwd,
-				encoding: "utf-8",
-				timeout: 30000,
-				stdio: ["pipe", "pipe", "pipe"],
-			});
+			await execAsync(`gh pr merge --${method}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			_prCache.delete(cwd);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -1679,7 +1678,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/sessions/:id/git-status — get git status for session's working directory
+	// GET /api/sessions/:id/git-status — get git status for session's working directory (async)
 	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-status')) {
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
@@ -1688,102 +1687,48 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = session.cwd;
-		const execOpts = { cwd, encoding: 'utf-8' as const, timeout: 5000 };
 
 		try {
-			// Get branch name
 			let branch = '';
-			try {
-				branch = execSync('git rev-parse --abbrev-ref HEAD', execOpts).trim();
-			} catch {
-				json({ error: "Not a git repository" }, 400);
-				return;
-			}
+			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd); }
+			catch { json({ error: "Not a git repository" }, 400); return; }
 
-			// Detect primary branch (master or main)
 			let primaryBranch = 'master';
 			try {
-				const remoteHead = execSync('git symbolic-ref refs/remotes/origin/HEAD', execOpts).trim();
+				const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd);
 				primaryBranch = remoteHead.replace('refs/remotes/origin/', '');
 			} catch {
-				// Fallback: check if master or main exists
-				try {
-					execSync('git rev-parse --verify refs/heads/master', execOpts);
-					primaryBranch = 'master';
-				} catch {
-					try {
-						execSync('git rev-parse --verify refs/heads/main', execOpts);
-						primaryBranch = 'main';
-					} catch { /* keep default */ }
-				}
+				try { await execGit('git rev-parse --verify refs/heads/master', cwd); primaryBranch = 'master'; }
+				catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd); primaryBranch = 'main'; } catch { /* keep default */ } }
 			}
 
 			const isOnPrimary = branch === primaryBranch;
-
-			// Get status
-			let statusRaw = '';
-			try {
-				// Only trim trailing whitespace — leading spaces are significant
-				// in porcelain format (they encode index vs working-tree status)
-				statusRaw = execSync('git status --porcelain', execOpts).replace(/\s+$/, '');
-			} catch { /* empty */ }
-
-			const statusLines = statusRaw ? statusRaw.split('\n') : [];
+			const statusRaw = (await execGitSafe('git status --porcelain', cwd)).replace(/\s+$/, '');
+			const statusLines = statusRaw ? statusRaw.split("\n") : [];
 			const status = statusLines.map(line => {
-				// Strip trailing \r from Windows CRLF line endings
-				const l = line.endsWith('\r') ? line.slice(0, -1) : line;
-				return {
-					file: l.substring(3),
-					status: l.substring(0, 2).trim(),
-				};
+				const l = line.endsWith("\r") ? line.slice(0, -1) : line;
+				return { file: l.substring(3), status: l.substring(0, 2).trim() };
 			});
 
-			// Check if branch has an upstream tracking branch
 			let hasUpstream = false;
-			try {
-				execSync(`git rev-parse --abbrev-ref ${branch}@{u}`, execOpts);
-				hasUpstream = true;
-			} catch { /* no upstream */ }
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch { /* no upstream */ }
 
-			// Get ahead/behind vs upstream (only if upstream exists)
-			let ahead = 0;
-			let behind = 0;
+			let ahead = 0, behind = 0;
 			if (hasUpstream) {
-				try {
-					ahead = parseInt(execSync('git rev-list --count @{u}..HEAD', execOpts).trim(), 10) || 0;
-				} catch { /* ignore */ }
-				try {
-					behind = parseInt(execSync('git rev-list --count HEAD..@{u}', execOpts).trim(), 10) || 0;
-				} catch { /* ignore */ }
+				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0'), 10) || 0;
+				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0'), 10) || 0;
 			}
 
-			// If on a feature branch, check relationship to primary
-			let aheadOfPrimary = 0;
-			let behindPrimary = 0;
-			let mergedIntoPrimary = false;
+			let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
 			if (!isOnPrimary) {
-				// Check against origin/<primary> first (more up-to-date), fall back to local
-				const primaryRef = (() => {
-					try {
-						execSync(`git rev-parse --verify origin/${primaryBranch}`, execOpts);
-						return `origin/${primaryBranch}`;
-					} catch {
-						return primaryBranch;
-					}
-				})();
-				try {
-					aheadOfPrimary = parseInt(execSync(`git rev-list --count ${primaryRef}..HEAD`, execOpts).trim(), 10) || 0;
-				} catch { /* primary branch may not exist */ }
-				try {
-					behindPrimary = parseInt(execSync(`git rev-list --count HEAD..${primaryRef}`, execOpts).trim(), 10) || 0;
-				} catch { /* ignore */ }
-				// Branch is merged if it has no commits ahead of origin/primary
+				let primaryRef = primaryBranch;
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, '0'), 10) || 0;
+				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, '0'), 10) || 0;
 				mergedIntoPrimary = aheadOfPrimary === 0;
 			}
 
 			const clean = statusLines.length === 0;
-
-			// Build summary
 			let summary = 'clean';
 			if (!clean) {
 				const counts: Record<string, number> = {};
@@ -1803,26 +1748,15 @@ async function handleApiRoute(
 			}
 
 			json({
-				branch,
-				primaryBranch,
-				isOnPrimary,
-				status,
-				hasUpstream,
-				ahead,
-				behind,
-				aheadOfPrimary,
-				behindPrimary,
-				mergedIntoPrimary,
-				clean,
-				summary,
-				unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
+				branch, primaryBranch, isOnPrimary, status, hasUpstream,
+				ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
+				clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
 			});
 		} catch (err) {
 			json({ error: String(err) }, 500);
 		}
 		return;
 	}
-
 	// GET /api/skills — list available skill definitions
 	if (url.pathname === "/api/skills" && req.method === "GET") {
 		json({ skills: listSkills().map((s) => ({ id: s.id, name: s.name, description: s.description })) });
