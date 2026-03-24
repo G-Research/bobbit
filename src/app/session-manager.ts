@@ -243,7 +243,9 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 let _draftSessionId: string | null = null;
 let _draftTimer: ReturnType<typeof setTimeout> | null = null;
 let _draftAbort: AbortController | null = null;
-let _draftInstalled = false;
+// Track the editor element we last patched so we can detect when the DOM
+// element is replaced (e.g. session switch recreates AgentInterface).
+let _draftPatchedEditor: WeakRef<HTMLElement> | null = null;
 
 function _teardownDraftHandlers(): void {
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
@@ -269,50 +271,49 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 		} catch { /* ignore */ }
 	})();
 
-	// Install onInput/onSend handlers exactly once — they read _draftSessionId
-	// at call time, so switching sessions doesn't require re-wrapping.
-	if (!_draftInstalled) {
-		requestAnimationFrame(() => {
-			const editor = document.querySelector("message-editor") as any;
-			if (!editor) return;
-			const baseOnInput = editor.onInput;
-			const baseOnSend = editor.onSend;
-
-			editor.onInput = (val: string) => {
-				baseOnInput?.(val);
-				if (!_draftSessionId) return;
-				if (_draftTimer) clearTimeout(_draftTimer);
-				_draftTimer = setTimeout(() => {
-					_draftTimer = null;
-					if (!_draftSessionId) return;
-					if (_draftAbort) _draftAbort.abort();
-					if (val.trim()) {
-						_draftAbort = new AbortController();
-						const sid = _draftSessionId;
-						saveDraftToServer(sid, 'prompt', val, _draftAbort.signal)
-							.finally(() => { if (_draftAbort) _draftAbort = null; });
-					} else {
-						deleteDraftFromServer(_draftSessionId, 'prompt');
-					}
-				}, 500);
-			};
-
-			editor.onSend = (text: string, attachments: any[]) => {
-				// Cancel pending timer AND abort any in-flight save request
-				if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-				if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
-				if (_draftSessionId) deleteDraftFromServer(_draftSessionId, 'prompt');
-				baseOnSend?.(text, attachments);
-			};
-
-			_draftInstalled = true;
-		});
-	}
-
-	// Focus the textarea
+	// Install onInput/onSend on the current editor element. We re-install
+	// whenever the element changes (session switches recreate AgentInterface)
+	// but use _draftSessionId (read at call time) to avoid stacking.
 	requestAnimationFrame(() => {
 		const editor = document.querySelector("message-editor") as any;
-		const textarea = editor?.querySelector("textarea");
+		if (!editor) return;
+
+		// Skip if we already patched this exact element
+		if (_draftPatchedEditor?.deref() === editor) return;
+
+		const baseOnInput = editor.onInput;
+		const baseOnSend = editor.onSend;
+
+		editor.onInput = (val: string) => {
+			baseOnInput?.(val);
+			if (!_draftSessionId) return;
+			if (_draftTimer) clearTimeout(_draftTimer);
+			_draftTimer = setTimeout(() => {
+				_draftTimer = null;
+				if (!_draftSessionId) return;
+				if (_draftAbort) _draftAbort.abort();
+				if (val.trim()) {
+					_draftAbort = new AbortController();
+					const sid = _draftSessionId;
+					saveDraftToServer(sid, 'prompt', val, _draftAbort.signal)
+						.finally(() => { if (_draftAbort) _draftAbort = null; });
+				} else {
+					deleteDraftFromServer(_draftSessionId, 'prompt');
+				}
+			}, 500);
+		};
+
+		editor.onSend = (text: string, attachments: any[]) => {
+			// Cancel pending timer AND abort any in-flight save request
+			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+			if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
+			if (_draftSessionId) deleteDraftFromServer(_draftSessionId, 'prompt');
+			baseOnSend?.(text, attachments);
+		};
+
+		_draftPatchedEditor = new WeakRef(editor);
+
+		const textarea = editor.querySelector("textarea");
 		if (textarea) textarea.focus();
 	});
 }
