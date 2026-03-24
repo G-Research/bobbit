@@ -214,10 +214,10 @@ export class GateStatusRenderer implements ToolRenderer {
 					return html`
 						<details class="group">
 							<summary class="flex items-center gap-2 py-0.5 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:text-foreground transition-colors">
+								<span class="text-muted-foreground shrink-0 transition-transform group-open:rotate-90">▸</span>
 								<span class="${iconCls} font-bold">${icon}</span>
 								<span class="truncate flex-1">${step.name || "step"}</span>
 								${dur ? html`<span class="text-muted-foreground ml-auto shrink-0">${dur}</span>` : ""}
-								<span class="text-muted-foreground shrink-0 transition-transform group-open:rotate-90">▸</span>
 							</summary>
 							${step.output ? html`<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded p-2 mt-1">${step.output}</pre>` : ""}
 						</details>
