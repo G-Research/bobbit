@@ -1,0 +1,7 @@
+name: gate_signal
+description: "Signal a workflow gate with content/metadata"
+summary: "Signal a workflow gate — triggers verification. Accepts content and/or metadata."
+provider:
+  type: bobbit-extension
+  extension: goal-tools.ts
+group: Gates

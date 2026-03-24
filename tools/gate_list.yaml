@@ -1,0 +1,7 @@
+name: gate_list
+description: "List all workflow gates with status"
+summary: "List all workflow gates for the current goal with status and definitions."
+provider:
+  type: bobbit-extension
+  extension: goal-tools.ts
+group: Gates
