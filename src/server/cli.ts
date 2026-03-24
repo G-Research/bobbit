@@ -19,6 +19,7 @@ interface CliArgs {
 	showToken: boolean;
 	noUi: boolean;
 	tls: boolean;
+	tlsExplicit: boolean;
 	staticDir?: string;
 	agentCliPath?: string;
 }
@@ -47,6 +48,7 @@ function parseArgs(argv: string[]): CliArgs {
 		showToken: false,
 		noUi: false,
 		tls: true,  // on by default
+		tlsExplicit: false,
 	};
 
 	for (let i = 0; i < argv.length; i++) {
@@ -77,9 +79,11 @@ function parseArgs(argv: string[]): CliArgs {
 				break;
 			case "--tls":
 				result.tls = true;
+				result.tlsExplicit = true;
 				break;
 			case "--no-tls":
 				result.tls = false;
+				result.tlsExplicit = true;
 				break;
 		}
 	}
@@ -117,11 +121,8 @@ async function main() {
 		if (nordIp) {
 			args.host = nordIp;
 		} else {
-			console.error(
-				"Error: NordVPN mesh (NordLynx) interface not found.\n" +
-				"  Start NordVPN, or pass --host <addr> to bind manually."
-			);
-			process.exit(1);
+			args.host = "localhost";
+			console.log("No mesh network found — binding to localhost (local-only access).");
 		}
 	}
 
@@ -151,6 +152,13 @@ async function main() {
 		console.log(`  System prompt: ${systemPromptPath}`);
 	}
 
+	// Auto-disable TLS for loopback to avoid self-signed cert warnings on localhost
+	const isLoopback = args.host === "127.0.0.1" || args.host === "::1" || args.host === "localhost";
+	if (isLoopback && !args.tlsExplicit) {
+		args.tls = false;
+		console.log("  Binding to localhost — TLS disabled (use --tls to override).");
+	}
+
 	// TLS setup — auto-generate cert (mkcert CA preferred, openssl fallback)
 	const tls = args.tls ? await ensureTlsCert(args.host) : undefined;
 
@@ -158,7 +166,6 @@ async function main() {
 	// Skip for loopback addresses (e.g. E2E tests with --host 127.0.0.1) to avoid
 	// clobbering the DNS record with an unreachable IP.
 	const desecConfig = loadDesecConfig();
-	const isLoopback = args.host === "127.0.0.1" || args.host === "::1" || args.host === "localhost";
 	if (desecConfig && !isLoopback) {
 		updateDesecIp(desecConfig, args.host); // fire and forget
 	}
