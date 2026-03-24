@@ -1376,3 +1376,39 @@
 .signal-metadata-item {
 	color: var(--text-tertiary);
 }
+
+/* ── SETUP STATUS BANNERS ── */
+.setup-banner {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	border-radius: 6px;
+	font-size: 13px;
+	margin: 0 0 4px 0;
+}
+.setup-banner--preparing {
+	background: oklch(0.62 0.15 250 / 0.1);
+	color: oklch(0.72 0.15 250);
+	border: 1px solid oklch(0.62 0.15 250 / 0.2);
+}
+.setup-banner--error {
+	background: oklch(0.55 0.18 25 / 0.1);
+	color: var(--foreground);
+	border: 1px solid oklch(0.55 0.18 25 / 0.2);
+	justify-content: space-between;
+}
+.btn-retry {
+	background: transparent;
+	color: var(--primary);
+	border: 1px solid var(--primary);
+	border-radius: 4px;
+	padding: 3px 10px;
+	font-size: 12px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+.btn-retry:hover {
+	background: var(--primary);
+	color: var(--primary-foreground);
+}

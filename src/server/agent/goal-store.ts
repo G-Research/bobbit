@@ -30,6 +30,10 @@ export interface PersistedGoal {
 	workflowId?: string;
 	/** Frozen snapshot of the workflow at goal creation time */
 	workflow?: Workflow;
+	/** Worktree setup status: ready (done/not needed), preparing (in progress), error (failed) */
+	setupStatus?: "ready" | "preparing" | "error";
+	/** Error message when setupStatus === "error" */
+	setupError?: string;
 }
 
 const STORE_DIR = bobbitStateDir();
@@ -62,6 +66,10 @@ export class GoalStore {
 							if (g.skipArtifactRequirements && !g.skipGateRequirements) {
 								g.skipGateRequirements = g.skipArtifactRequirements;
 								delete g.skipArtifactRequirements;
+							}
+							// Default setupStatus for existing goals
+							if (!g.setupStatus) {
+								g.setupStatus = "ready";
 							}
 							this.goals.set(g.id, g);
 						}

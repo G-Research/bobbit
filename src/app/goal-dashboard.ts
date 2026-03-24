@@ -549,6 +549,42 @@ const svgPhaseArrow = html`<svg viewBox="0 0 20 12" fill="none" stroke="currentC
 // RENDER: NAV BAR
 // ============================================================================
 
+async function handleRetrySetup(goalId: string): Promise<void> {
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/retry-setup`, { method: "POST" });
+		if (res.ok) {
+			// Optimistically update local state
+			if (currentGoal) {
+				(currentGoal as any).setupStatus = "preparing";
+				(currentGoal as any).setupError = undefined;
+			}
+			renderApp();
+		}
+	} catch (err) {
+		console.error("[goal-dashboard] Retry setup failed:", err);
+	}
+}
+
+function renderSetupBanner(goal: Goal): TemplateResult {
+	if (goal.setupStatus === "preparing") {
+		return html`
+			<div class="setup-banner setup-banner--preparing">
+				<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+				<span>Setting up worktree…</span>
+			</div>
+		`;
+	}
+	if (goal.setupStatus === "error") {
+		return html`
+			<div class="setup-banner setup-banner--error">
+				<span style="color:var(--destructive)">⚠ Worktree setup failed${goal.setupError ? `: ${goal.setupError}` : ""}</span>
+				<button class="btn-retry" @click=${() => handleRetrySetup(goal.id)}>Retry Setup</button>
+			</div>
+		`;
+	}
+	return nothing as any;
+}
+
 function renderNavBar(goal: Goal): TemplateResult {
 	const isTeamGoal = !!goal.team;
 
@@ -583,7 +619,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 	}
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting}>
+			<button class="btn-split-main" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
 				${svgPlay}
 				<span>${teamStarting ? "Starting\u2026" : "Start Team"}</span>
 			</button>
@@ -594,7 +630,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 function renderSessionButton(goal: Goal): TemplateResult {
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" @click=${() => createAndConnectSession(goal.id)}>
+			<button class="btn-split-main" @click=${() => createAndConnectSession(goal.id)} ?disabled=${goal.setupStatus !== undefined && goal.setupStatus !== "ready"}>
 				${svgPlus}
 				New Session
 			</button>
@@ -1292,6 +1328,7 @@ export function renderGoalDashboard(): TemplateResult {
 	return html`
 		<div class="dashboard-container">
 			${renderNavBar(currentGoal)}
+			${renderSetupBanner(currentGoal)}
 			${renderMetaRows(currentGoal)}
 			${renderSummaryRow(tasks, agents)}
 			${renderGatePipeline()}

@@ -131,7 +131,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, broadcastToGoal);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, broadcastToGoal, broadcastToAll);
 
 			return;
 		}
@@ -179,6 +179,15 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 
+	/** Broadcast to ALL authenticated WebSocket clients (regardless of session/goal). */
+	function broadcastToAll(event: any): void {
+		const data = JSON.stringify(event);
+		for (const ws of wss.clients) {
+			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+				ws.send(data);
+			}
+		}
+	}
 	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -257,6 +266,7 @@ async function handleApiRoute(
 	workflowManager: WorkflowManager,
 	verificationHarness: VerificationHarness,
 	broadcastToGoal: (goalId: string, event: any) => void,
+	broadcastToAll: (event: any) => void,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -492,9 +502,37 @@ async function handleApiRoute(
 				gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
 			}
 			json(goal, 201);
+
+			// Fire-and-forget async worktree setup
+			if (goal.setupStatus === "preparing") {
+				sessionManager.goalManager.setupWorktree(goal.id).then(() => {
+					broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
+				}).catch((err) => {
+					broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
+				});
+			}
 		} catch (err) {
 			json({ error: String(err) }, 400);
 		}
+		return;
+	}
+
+	// POST /api/goals/:id/retry-setup — retry worktree setup for a goal in error state
+	const retrySetupMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-setup$/);
+	if (retrySetupMatch && req.method === "POST") {
+		const goalId = retrySetupMatch[1];
+		const ok = sessionManager.goalManager.retrySetup(goalId);
+		if (!ok) {
+			json({ error: "Goal not found or not in error state" }, 400);
+			return;
+		}
+		json({ ok: true });
+		// Fire-and-forget async worktree setup
+		sessionManager.goalManager.setupWorktree(goalId).then(() => {
+			broadcastToAll({ type: "goal_setup_complete", goalId });
+		}).catch((err) => {
+			broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
+		});
 		return;
 	}
 
@@ -1036,6 +1074,12 @@ async function handleApiRoute(
 	const teamSpawnMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/spawn$/);
 	if (teamSpawnMatch && req.method === "POST") {
 		const goalId = teamSpawnMatch[1];
+		// Guard: reject spawn if goal worktree is not ready
+		const spawnGoal = sessionManager.goalManager.getGoal(goalId);
+		if (spawnGoal && spawnGoal.setupStatus !== "ready") {
+			json({ error: "Goal setup not complete" }, 409);
+			return;
+		}
 		const body = await readBody(req);
 		if (!body?.role || !body?.task) {
 			json({ error: "Missing role or task" }, 400);

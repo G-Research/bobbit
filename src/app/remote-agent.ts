@@ -94,6 +94,8 @@ export class RemoteAgent {
 	/** Callback fired when the server-side prompt queue changes. */
 	onQueueUpdate?: (queue: QueuedMessage[]) => void;
 	/** Callback fired when background process state changes. */
+	/** Callback fired when goal setup status changes (worktree ready or failed). */
+	onGoalSetupEvent?: () => void;
 	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; process?: any }) => void;
 	private _title = "New session";
 
@@ -660,6 +662,11 @@ export class RemoteAgent {
 			case "queue_update":
 				this._serverQueue = Array.isArray(msg.queue) ? msg.queue : [];
 				this.onQueueUpdate?.(this._serverQueue);
+				break;
+
+			case "goal_setup_complete":
+			case "goal_setup_error":
+				this.onGoalSetupEvent?.();
 				break;
 
 			case "bg_process_created":
