@@ -226,6 +226,9 @@ export class MessageEditor extends LitElement {
 
 	private handleSend = () => {
 		const text = this.value;
+		// Dispatch a composed event that escapes shadow DOM — used by
+		// session-manager for draft cleanup without monkey-patching.
+		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
 		this.onSend?.(text, this.attachments);
 		// Reset history browsing state after send
 		this._historyIndex = -1;

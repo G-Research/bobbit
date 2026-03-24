@@ -243,9 +243,7 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 let _draftSessionId: string | null = null;
 let _draftTimer: ReturnType<typeof setTimeout> | null = null;
 let _draftAbort: AbortController | null = null;
-// Track the editor element we last patched so we can detect when the DOM
-// element is replaced (e.g. session switch recreates AgentInterface).
-let _draftPatchedEditor: WeakRef<HTMLElement> | null = null;
+let _draftListenersInstalled = false;
 
 function _teardownDraftHandlers(): void {
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
@@ -271,22 +269,20 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 		} catch { /* ignore */ }
 	})();
 
-	// Install onInput/onSend on the current editor element. We re-install
-	// whenever the element changes (session switches recreate AgentInterface)
-	// but use _draftSessionId (read at call time) to avoid stacking.
-	requestAnimationFrame(() => {
-		const editor = document.querySelector("message-editor") as any;
-		if (!editor) return;
-
-		// Skip if we already patched this exact element
-		if (_draftPatchedEditor?.deref() === editor) return;
-
-		const baseOnInput = editor.onInput;
-		const baseOnSend = editor.onSend;
-
-		editor.onInput = (val: string) => {
-			baseOnInput?.(val);
+	// Use document-level event listeners instead of monkey-patching.
+	// Lit re-renders overwrite property-based callbacks (.onSend, .onInput)
+	// on every state change, silently removing our patches. Native DOM
+	// events (composed: true) bubble through shadow DOM and survive re-renders.
+	if (!_draftListenersInstalled) {
+		// Debounced draft save on textarea input (native 'input' event is composed)
+		document.addEventListener("input", (e: Event) => {
+			const target = e.target as HTMLElement;
+			if (!target || target.tagName !== "TEXTAREA") return;
+			// Verify it's inside a message-editor
+			if (!target.closest("message-editor")) return;
 			if (!_draftSessionId) return;
+
+			const val = (target as HTMLTextAreaElement).value;
 			if (_draftTimer) clearTimeout(_draftTimer);
 			_draftTimer = setTimeout(() => {
 				_draftTimer = null;
@@ -301,19 +297,22 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 					deleteDraftFromServer(_draftSessionId, 'prompt');
 				}
 			}, 500);
-		};
+		});
 
-		editor.onSend = (text: string, attachments: any[]) => {
-			// Cancel pending timer AND abort any in-flight save request
+		// Clear draft on send (custom composed event from MessageEditor)
+		document.addEventListener("message-send", () => {
 			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
 			if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
 			if (_draftSessionId) deleteDraftFromServer(_draftSessionId, 'prompt');
-			baseOnSend?.(text, attachments);
-		};
+		});
 
-		_draftPatchedEditor = new WeakRef(editor);
+		_draftListenersInstalled = true;
+	}
 
-		const textarea = editor.querySelector("textarea");
+	// Focus the textarea
+	requestAnimationFrame(() => {
+		const editor = document.querySelector("message-editor") as any;
+		const textarea = editor?.querySelector("textarea");
 		if (textarea) textarea.focus();
 	});
 }
