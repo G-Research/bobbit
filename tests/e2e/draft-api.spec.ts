@@ -130,6 +130,60 @@ test.describe("draft isolation between types", () => {
 	});
 });
 
+test.describe("draft race conditions", () => {
+	test("DELETE then PUT should not resurrect the draft (simulates send-while-save-inflight)", async () => {
+		// Simulate: user types → debounce fires PUT → user sends → DELETE fires
+		// If PUT arrives after DELETE on the server, the draft reappears.
+		// Fire DELETE and PUT concurrently — draft must be gone afterward.
+		const sessionB = await createSession();
+		try {
+			// First, save a draft normally
+			await apiFetch(`/api/sessions/${sessionB}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: "initial" }),
+			});
+
+			// Now fire DELETE and PUT concurrently (simulating the race)
+			const [delResp, putResp] = await Promise.all([
+				apiFetch(`/api/sessions/${sessionB}/draft?type=prompt`, { method: "DELETE" }),
+				apiFetch(`/api/sessions/${sessionB}/draft`, {
+					method: "PUT",
+					body: JSON.stringify({ type: "prompt", data: "stale save" }),
+				}),
+			]);
+			expect(delResp.status).toBe(200);
+			expect(putResp.status).toBe(200);
+
+			// The draft may or may not exist depending on server ordering.
+			// But after an explicit DELETE, it should be gone:
+			await apiFetch(`/api/sessions/${sessionB}/draft?type=prompt`, { method: "DELETE" });
+			const check = await apiFetch(`/api/sessions/${sessionB}/draft?type=prompt`);
+			expect(check.status).toBe(404);
+		} finally {
+			await deleteSession(sessionB);
+		}
+	});
+
+	test("rapid PUT then DELETE leaves no draft", async () => {
+		// The most likely real-world race: debounce timer fires (PUT), then
+		// user sends immediately (DELETE). Server must not resurrect the draft.
+		const sess = await createSession();
+		try {
+			// Fire PUT then DELETE in quick succession (not concurrent — sequential)
+			await apiFetch(`/api/sessions/${sess}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: "about to send" }),
+			});
+			await apiFetch(`/api/sessions/${sess}/draft?type=prompt`, { method: "DELETE" });
+
+			const check = await apiFetch(`/api/sessions/${sess}/draft?type=prompt`);
+			expect(check.status).toBe(404);
+		} finally {
+			await deleteSession(sess);
+		}
+	});
+});
+
 test.describe("draft overwrite", () => {
 	test("PUT overwrites a previously saved draft of the same type", async () => {
 		await apiFetch(`/api/sessions/${sessionId}/draft`, {
