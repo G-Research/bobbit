@@ -8,8 +8,8 @@ export interface PersistedTeamEntry {
 	agents: Array<{
 		sessionId: string;
 		role: string;
-		worktreePath: string;
-		branch: string;
+		worktreePath?: string;
+		branch?: string;
 		task: string;
 		createdAt: number;
 	}>;

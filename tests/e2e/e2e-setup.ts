@@ -8,8 +8,9 @@
  * process.env so parallel test runs on the same machine never collide.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { expect } from "@playwright/test";
 import WebSocket from "ws";
 
@@ -28,6 +29,21 @@ export const E2E_BOBBIT_DIR = process.env.BOBBIT_DIR
 
 // Legacy alias for tests that still reference E2E_PI_DIR
 export const E2E_PI_DIR = E2E_BOBBIT_DIR;
+
+/**
+ * A cwd that is NOT inside a git repository.
+ * Used by tests to prevent worktree creation on goal/session create.
+ * This avoids creating real git worktrees (slow, leaky, conflicts between
+ * parallel test runs that share the same repo).
+ */
+let _nonGitCwd: string | undefined;
+export function nonGitCwd(): string {
+	if (!_nonGitCwd) {
+		_nonGitCwd = join(tmpdir(), `bobbit-e2e-${Date.now()}`);
+		mkdirSync(_nonGitCwd, { recursive: true });
+	}
+	return _nonGitCwd;
+}
 
 /** Read the auth token that the test server auto-created on startup. */
 export function readE2EToken(): string {
@@ -58,11 +74,11 @@ export function apiFetch(path: string, opts: RequestInit = {}): Promise<Response
 	});
 }
 
-/** Create a session via REST, return its ID. */
+/** Create a session via REST, return its ID. Defaults cwd to a non-git temp dir. */
 export async function createSession(opts?: { cwd?: string; goalId?: string }): Promise<string> {
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
-		body: JSON.stringify({ cwd: opts?.cwd || process.cwd(), goalId: opts?.goalId }),
+		body: JSON.stringify({ cwd: opts?.cwd || nonGitCwd(), goalId: opts?.goalId }),
 	});
 	expect(resp.status).toBe(201);
 	return (await resp.json()).id;
@@ -73,7 +89,7 @@ export async function deleteSession(id: string): Promise<void> {
 	await apiFetch(`/api/sessions/${id}`, { method: "DELETE" }).catch(() => {});
 }
 
-/** Create a goal via REST, return the full goal object. */
+/** Create a goal via REST, return the full goal object. Defaults cwd to a non-git temp dir. */
 export async function createGoal(opts: {
 	title: string;
 	cwd?: string;
@@ -84,7 +100,7 @@ export async function createGoal(opts: {
 }): Promise<{ id: string; [k: string]: unknown }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
-		body: JSON.stringify({ cwd: process.cwd(), worktree: false, ...opts }),
+		body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, ...opts }),
 	});
 	expect(resp.status).toBe(201);
 	return resp.json();

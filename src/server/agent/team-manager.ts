@@ -40,8 +40,8 @@ import type { TaskManager } from "./task-manager.js";
 export interface TeamAgent {
 	sessionId: string;
 	role: string;
-	worktreePath: string;
-	branch: string;
+	worktreePath?: string;
+	branch?: string;
 	task: string;
 	createdAt: number;
 	/** Unsubscribe from the agent_end event listener (cleanup on dismiss). */
@@ -52,8 +52,8 @@ export interface TeamAgentInfo {
 	sessionId: string;
 	role: string;
 	status: string;
-	worktreePath: string;
-	branch: string;
+	worktreePath?: string;
+	branch?: string;
 	task: string;
 	createdAt: number;
 }
@@ -509,7 +509,7 @@ export class TeamManager {
 		role: string,
 		task: string,
 		opts?: { personalities?: string[]; workflowGateId?: string; inputGateIds?: string[] },
-	): Promise<{ sessionId: string; worktreePath: string }> {
+	): Promise<{ sessionId: string; worktreePath?: string }> {
 		const roleStore = this.config.roleStore;
 		const storedRoleDef = roleStore?.get(role);
 		if (!storedRoleDef) {
@@ -538,13 +538,9 @@ export class TeamManager {
 			throw new Error(`Goal not found: ${goalId}`);
 		}
 
-		if (!goal.repoPath) {
-			throw new Error(
-				`Goal "${goal.title}" has no repoPath — cannot create worktree for role agent. ` +
-				`This usually means the goal was created without team mode enabled, or the cwd is not a git repo. ` +
-				`Update the goal with repoPath set to the git repository root.`
-			);
-		}
+		// repoPath is only set when the goal's cwd is inside a git repo.
+		// If absent, skip worktree creation and use the goal's cwd directly.
+		const useWorktree = !!goal.repoPath;
 
 		// Enforce gate dependency check: upstream gates must be passed before spawning for a gate
 		const resolvedWorkflowGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
@@ -566,11 +562,20 @@ export class TeamManager {
 			}
 		}
 
-		// Create a worktree for this role agent
+		// Create a worktree for this role agent (only when the goal is in a git repo)
 		const shortId = randomUUID().slice(0, 8);
-		const goalSlug = (goal.branch || goalId.slice(0, 8)).replace(/\//g, '-');
-		const branchName = `goal-${goalSlug}-${role}-${shortId}`;
-		const worktreeResult = createWorktree(goal.repoPath, branchName);
+		let worktreeResult: { worktreePath: string; branchName: string } | undefined;
+		let branchName: string | undefined;
+		let agentCwd: string;
+
+		if (useWorktree) {
+			const goalSlug = (goal.branch || goalId.slice(0, 8)).replace(/\//g, '-');
+			branchName = `goal-${goalSlug}-${role}-${shortId}`;
+			worktreeResult = createWorktree(goal.repoPath!, branchName);
+			agentCwd = worktreeResult.worktreePath;
+		} else {
+			agentCwd = goal.cwd;
+		}
 
 		try {
 			const agentId = `${role}-${shortId}`;
@@ -598,9 +603,9 @@ export class TeamManager {
 				if (ctx) workflowContext = ctx;
 			}
 
-			// Create the session with the role's worktree as cwd, role prompt appended to goal spec
+			// Create the session with the role agent's cwd
 			const session = await this.sessionManager.createSession(
-				worktreeResult.worktreePath,
+				agentCwd,
 				undefined,
 				goalId,
 				undefined,
@@ -617,7 +622,7 @@ export class TeamManager {
 			this.sessionManager.updateSessionMeta(session.id, {
 				role,
 				teamGoalId: goalId,
-				worktreePath: worktreeResult.worktreePath,
+				worktreePath: worktreeResult?.worktreePath,
 				accessory: roleAccessory,
 			});
 
@@ -625,7 +630,7 @@ export class TeamManager {
 			const agent: TeamAgent = {
 				sessionId: session.id,
 				role,
-				worktreePath: worktreeResult.worktreePath,
+				worktreePath: worktreeResult?.worktreePath,
 				branch: branchName,
 				task,
 				createdAt: Date.now(),
@@ -652,17 +657,19 @@ export class TeamManager {
 			agent.unsubscribeEvent = unsubscribe;
 
 			console.log(
-				`[team-manager] Spawned ${role} agent (${session.id}) for goal "${goal.title}" — worktree: ${worktreeResult.worktreePath}`,
+				`[team-manager] Spawned ${role} agent (${session.id}) for goal "${goal.title}" — cwd: ${agentCwd}`,
 			);
 
-			return { sessionId: session.id, worktreePath: worktreeResult.worktreePath };
+			return { sessionId: session.id, worktreePath: worktreeResult?.worktreePath };
 		} catch (err) {
-			// Clean up the orphaned worktree on failure
-			try {
-				cleanupWorktree(goal.repoPath, worktreeResult.worktreePath, branchName, true);
-				console.log(`[team-manager] Cleaned up orphaned worktree after spawnRole failure: ${worktreeResult.worktreePath}`);
-			} catch (cleanupErr) {
-				console.error(`[team-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
+			// Clean up the orphaned worktree on failure (only if one was created)
+			if (worktreeResult && goal.repoPath) {
+				try {
+					cleanupWorktree(goal.repoPath, worktreeResult.worktreePath, branchName, true);
+					console.log(`[team-manager] Cleaned up orphaned worktree after spawnRole failure: ${worktreeResult.worktreePath}`);
+				} catch (cleanupErr) {
+					console.error(`[team-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
+				}
 			}
 			throw err;
 		}

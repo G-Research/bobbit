@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { readE2EToken, BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE, nonGitCwd } from "./e2e-setup.js";
 let token: string;
 
 async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
@@ -232,7 +232,7 @@ test.describe("Workflow CRUD API", () => {
 			method: "POST",
 			body: JSON.stringify({
 				title: "E2E delete-block test goal",
-				cwd: process.cwd(),
+				cwd: nonGitCwd(),
 				workflowId: wfId,
 				team: false,
 				worktree: false,

@@ -13,7 +13,7 @@
  */
 import { test, expect } from "@playwright/test";
 import WebSocket from "ws";
-import { readE2EToken, BASE, WS_BASE, waitForHealth } from "./e2e-setup.js";
+import { readE2EToken, BASE, WS_BASE, waitForHealth, nonGitCwd } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Config — agent tool tests need much longer timeouts
@@ -42,7 +42,7 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 async function createSession(cwd?: string): Promise<string> {
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
-		body: JSON.stringify({ cwd: cwd || process.cwd() }),
+		body: JSON.stringify({ cwd: cwd || nonGitCwd() }),
 	});
 	expect(resp.status).toBe(201);
 	const data = await resp.json();
@@ -150,7 +150,7 @@ test.describe("Sessions API", () => {
 	test("POST creates a session", async () => {
 		const resp = await apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ cwd: process.cwd() }),
+			body: JSON.stringify({ cwd: nonGitCwd() }),
 		});
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
@@ -235,7 +235,7 @@ test.describe("Goals API", () => {
 	test("POST creates a goal", async () => {
 		const resp = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "E2E test goal", cwd: process.cwd(), spec: "Test spec" }),
+			body: JSON.stringify({ title: "E2E test goal", cwd: nonGitCwd(), spec: "Test spec" }),
 		});
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
@@ -248,7 +248,7 @@ test.describe("Goals API", () => {
 	test("GET lists goals", async () => {
 		const resp1 = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "List test", cwd: process.cwd() }),
+			body: JSON.stringify({ title: "List test", cwd: nonGitCwd() }),
 		});
 		goalId = (await resp1.json()).id;
 		const resp = await apiFetch("/api/goals");
@@ -260,7 +260,7 @@ test.describe("Goals API", () => {
 	test("GET /:id returns a single goal", async () => {
 		const resp1 = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Get test", cwd: process.cwd(), spec: "spec here" }),
+			body: JSON.stringify({ title: "Get test", cwd: nonGitCwd(), spec: "spec here" }),
 		});
 		goalId = (await resp1.json()).id;
 		const resp = await apiFetch(`/api/goals/${goalId}`);
@@ -271,7 +271,7 @@ test.describe("Goals API", () => {
 	test("PUT updates a goal", async () => {
 		const resp1 = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Update test", cwd: process.cwd() }),
+			body: JSON.stringify({ title: "Update test", cwd: nonGitCwd() }),
 		});
 		goalId = (await resp1.json()).id;
 		const resp = await apiFetch(`/api/goals/${goalId}`, {
@@ -288,7 +288,7 @@ test.describe("Goals API", () => {
 	test("DELETE removes a goal", async () => {
 		const resp1 = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Delete test", cwd: process.cwd() }),
+			body: JSON.stringify({ title: "Delete test", cwd: nonGitCwd() }),
 		});
 		goalId = (await resp1.json()).id;
 		const resp = await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
@@ -300,14 +300,14 @@ test.describe("Goals API", () => {
 	test("creating a session under a goal auto-transitions to in-progress", async () => {
 		const resp1 = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Integration test goal", cwd: process.cwd() }),
+			body: JSON.stringify({ title: "Integration test goal", cwd: nonGitCwd() }),
 		});
 		goalId = (await resp1.json()).id;
 		expect((await (await apiFetch(`/api/goals/${goalId}`)).json()).state).toBe("todo");
 
 		const sessResp = await apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ goalId, cwd: process.cwd() }),
+			body: JSON.stringify({ goalId, cwd: nonGitCwd() }),
 		});
 		const sessId = (await sessResp.json()).id;
 
@@ -326,7 +326,7 @@ test.describe("Tasks API", () => {
 	test.beforeEach(async () => {
 		const resp = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Task test goal " + Date.now(), cwd: process.cwd(), team: true, worktree: false }),
+			body: JSON.stringify({ title: "Task test goal " + Date.now(), cwd: nonGitCwd(), team: true, worktree: false }),
 		});
 		goalId = (await resp.json()).id;
 	});
@@ -419,7 +419,7 @@ test.describe("Artifacts API", () => {
 	test.beforeEach(async () => {
 		const resp = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Gate test " + Date.now(), cwd: process.cwd(), team: false, workflowId: "general" }),
+			body: JSON.stringify({ title: "Gate test " + Date.now(), cwd: nonGitCwd(), team: false, workflowId: "general" }),
 		});
 		goalId = (await resp.json()).id;
 	});

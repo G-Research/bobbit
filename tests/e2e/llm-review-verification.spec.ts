@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { readE2EToken, BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE, nonGitCwd } from "./e2e-setup.js";
 
 let token: string;
 
@@ -20,7 +20,7 @@ async function createGoalWithWorkflow(workflowId: string): Promise<string> {
 		method: "POST",
 		body: JSON.stringify({
 			title: `LLM Review Test ${Date.now()}`,
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 			team: false,
 			workflowId,
 		}),

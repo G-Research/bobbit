@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { readE2EToken, BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE, nonGitCwd } from "./e2e-setup.js";
 
 let token: string;
 
@@ -21,7 +21,7 @@ async function createGoalWithWorkflow(workflowId: string): Promise<string> {
 		method: "POST",
 		body: JSON.stringify({
 			title: `Gate Test ${workflowId} ${Date.now()}`,
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 			team: false,
 			workflowId,
 		}),
@@ -381,7 +381,7 @@ test.describe("Gates API", () => {
 		// Create goal without explicit workflowId — may get a default workflow
 		const resp = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Default Workflow Goal", cwd: process.cwd() }),
+			body: JSON.stringify({ title: "Default Workflow Goal", cwd: nonGitCwd() }),
 		});
 		const goal = await resp.json();
 		try {

@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { readE2EToken, BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE, nonGitCwd } from "./e2e-setup.js";
 let token: string;
 
 async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
@@ -26,7 +26,7 @@ test.beforeEach(async () => {
 		body: JSON.stringify({
 			title: "Test Goal " + Date.now(),
 			spec: "Test spec",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 			team: true,
 			worktree: false,
 		}),

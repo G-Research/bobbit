@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { readE2EToken, BASE } from "./e2e-setup.js";
+import { readE2EToken, BASE, nonGitCwd } from "./e2e-setup.js";
 
 /**
  * End-to-end tests for the Staff Agents feature (persistent session model).
@@ -77,7 +77,7 @@ test.describe("Staff Agents — REST API", () => {
 			name: "Test Warden",
 			description: "A test staff agent",
 			systemPrompt: "You are a test warden.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -126,7 +126,7 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "Listable Agent",
 			systemPrompt: "You are listable.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -147,7 +147,7 @@ test.describe("Staff Agents — REST API", () => {
 			name: "Fetchable Agent",
 			description: "desc",
 			systemPrompt: "You are fetchable.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		cleanupStaffIds.push(created.id);
 		if (created.currentSessionId) cleanupSessionIds.push(created.currentSessionId);
@@ -160,14 +160,14 @@ test.describe("Staff Agents — REST API", () => {
 		expect(staff.id).toBe(created.id);
 		expect(staff.name).toBe("Fetchable Agent");
 		expect(staff.description).toBe("desc");
-		expect(staff.cwd).toBe(process.cwd());
+		expect(staff.cwd).toBe(nonGitCwd());
 	});
 
 	test("PUT /api/staff/:id updates fields", async () => {
 		const created = await apiCreateStaff(token, {
 			name: "Updatable Agent",
 			systemPrompt: "Original prompt.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		cleanupStaffIds.push(created.id);
 		if (created.currentSessionId) cleanupSessionIds.push(created.currentSessionId);
@@ -189,7 +189,7 @@ test.describe("Staff Agents — REST API", () => {
 		const created = await apiCreateStaff(token, {
 			name: "Deletable Agent",
 			systemPrompt: "To be deleted.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		const sessionId = created.currentSessionId;
 		expect(sessionId).toBeTruthy();
@@ -217,7 +217,7 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "Triggered Agent",
 			systemPrompt: "You have triggers.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 			triggers: [
 				{ type: "schedule", config: { cron: "0 9 * * *" }, enabled: true, prompt: "Good morning" },
 				{ type: "manual", config: {}, enabled: true },
@@ -257,7 +257,7 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "Wakeable Agent",
 			systemPrompt: "You can be woken.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -303,7 +303,7 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "History Agent",
 			systemPrompt: "Track my sessions.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -380,7 +380,7 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "Paused Agent",
 			systemPrompt: "I am paused.",
-			cwd: process.cwd(),
+			cwd: nonGitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
