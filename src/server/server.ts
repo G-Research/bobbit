@@ -517,7 +517,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/retry-setup � retry worktree setup for a goal in error state
+	// POST /api/goals/:id/retry-setup � retry worktree setup for a goal in error state
 	const retrySetupMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-setup$/);
 	if (retrySetupMatch && req.method === "POST") {
 		const goalId = retrySetupMatch[1];
@@ -559,6 +559,7 @@ async function handleApiRoute(
 				team: body.team ?? body.swarm, // Accept legacy 'swarm' field
 				repoPath: body.repoPath,
 				branch: body.branch,
+				prUrl: body.prUrl,
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
 			json({ ok: true });
@@ -1215,6 +1216,58 @@ async function handleApiRoute(
 			json({ branch, primaryBranch, isOnPrimary, clean, aheadOfPrimary, behindPrimary, mergedIntoPrimary });
 		} catch (err) {
 			json({ error: String(err) }, 500);
+		}
+		return;
+	}
+
+	// GET /api/goals/:id/pr-status — PR status for goal branch
+	const goalPrStatusMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-status$/);
+	if (goalPrStatusMatch && req.method === "GET") {
+		const goalId = goalPrStatusMatch[1];
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const cwd = goal.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		try {
+			const output = execSync("gh pr view --json state,url,number,title,mergeable,headRefName", {
+				cwd,
+				encoding: "utf-8",
+				timeout: 10000,
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			const pr = JSON.parse(output);
+			json({ number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName });
+		} catch {
+			json({ error: "No PR found" }, 404);
+		}
+		return;
+	}
+
+	// POST /api/goals/:id/pr-merge — merge PR for goal branch
+	const goalPrMergeMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-merge$/);
+	if (goalPrMergeMatch && req.method === "POST") {
+		const goalId = goalPrMergeMatch[1];
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const cwd = goal.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const body = await readBody(req);
+		const method = body?.method ?? "merge";
+		if (!["merge", "squash", "rebase"].includes(method)) {
+			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
+			return;
+		}
+		try {
+			execSync(`gh pr merge --${method}`, {
+				cwd,
+				encoding: "utf-8",
+				timeout: 30000,
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			json({ ok: true });
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			json({ error: msg }, 500);
 		}
 		return;
 	}

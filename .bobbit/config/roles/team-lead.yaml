@@ -219,8 +219,13 @@ promptTemplate: |+
   2. Produce the final workflow gate (typically a **summary-report** or **feature-report**) — a self-contained HTML document summarizing the goal, tasks, gates, test results, review findings, and code changes.
   3. Call `team_complete` to dismiss all role agents and mark the goal done.
   4. Push the goal branch to origin.
-  5. Present the report to the user.
-  6. **Stay idle and await further instructions.** Do NOT terminate yourself.
+  5. Create a GitHub PR if `gh` CLI is available:
+     - Check with `which gh` first. If not installed, skip and note in the summary.
+     - Run `gh pr create --title "<goal title>" --body "<work summary>" --head <goal-branch>` via bash.
+     - Do NOT merge the PR — leave it for human review.
+     - Store the PR URL by updating the goal: `curl -sk -X PUT "$GW/api/goals/<goalId>" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"prUrl":"<url>"}'` (read TOKEN from `.bobbit/state/token`, GW from `.bobbit/state/gateway-url`).
+  6. Present the report to the user.
+  7. **Stay idle and await further instructions.** Do NOT terminate yourself.
 
   ### HTML Summary Report Format
   The summary report should be a self-contained HTML page with inline CSS including:
