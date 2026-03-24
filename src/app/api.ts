@@ -10,10 +10,8 @@ import {
 } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
-import { RemoteAgent } from "./remote-agent.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
-const _prevSessionStatus = new Map<string, string>();
 
 /** Throttle PR status polling — don't hit GitHub API every 5s. */
 let _lastPrRefresh = 0;
@@ -94,28 +92,6 @@ export async function refreshSessions(): Promise<void> {
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
 		const sessionsData = await sessionsRes.json();
 		const newSessions: GatewaySession[] = sessionsData.sessions || [];
-
-		// Detect non-active sessions that transitioned from streaming→idle
-		// and notify the user (beep + browser notification).
-		const activeId = state.remoteAgent?.gatewaySessionId;
-		for (const s of newSessions) {
-			const prev = _prevSessionStatus.get(s.id);
-			const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
-			if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
-				RemoteAgent.playNotificationBeep();
-				if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-					const title = s.title || "Bobbit";
-					const n = new Notification(title, {
-						body: "Task completed. Awaiting your input.",
-						tag: `bobbit-done-${s.id}`,
-					});
-					n.onclick = () => { window.focus(); n.close(); };
-				}
-			}
-		}
-		for (const s of newSessions) {
-			_prevSessionStatus.set(s.id, s.status);
-		}
 
 		state.gatewaySessions = newSessions;
 
@@ -927,7 +903,7 @@ export async function saveDraftToServer(sessionId: string, type: string, data: u
 			signal,
 		});
 	} catch (err) {
-		// Ignore aborted requests � they're intentionally cancelled on send
+		// Ignore aborted requests � they're intentionally cancelled on send
 		if (err instanceof DOMException && err.name === "AbortError") return;
 		console.error("[draft-api] Failed to save draft:", err);
 	}

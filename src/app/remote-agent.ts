@@ -143,81 +143,6 @@ export class RemoteAgent {
 		return this._title;
 	}
 
-	// ── Connection ────────────────────────────────────────────────────
-
-	private static readonly CONNECT_TIMEOUT_MS = 15_000;
-
-	async connect(gatewayUrl: string, token: string, sessionId: string): Promise<void> {
-		this._gatewayUrl = gatewayUrl;
-		this._authToken = token;
-		this._sessionId = sessionId;
-		this._intentionalDisconnect = false;
-		this._reconnectAttempt = 0;
-
-		// Best-effort permission request (may be ignored without a user gesture).
-		RemoteAgent._requestNotificationPermission();
-
-		// Race the WebSocket connect against a timeout so we don't hang
-		// forever on degraded mobile networks.
-		const timeout = new Promise<never>((_, reject) => {
-			setTimeout(() => reject(new Error("Connection timed out")), RemoteAgent.CONNECT_TIMEOUT_MS);
-		});
-
-		try {
-			await Promise.race([this._connectWs(true), timeout]);
-		} catch (err) {
-			// If timed out, clean up the pending WebSocket
-			this._intentionalDisconnect = true;
-			this.ws?.close();
-			this.ws = null;
-			throw err;
-		}
-	}
-
-	private static _notificationPermissionRequested = false;
-
-	/** Request browser notification permission (once per page load, requires user gesture). */
-	private static _requestNotificationPermission(): void {
-		if (RemoteAgent._notificationPermissionRequested) return;
-		if (typeof Notification === "undefined" || Notification.permission !== "default") return;
-		Notification.requestPermission().then(() => {
-			if (Notification.permission !== "default") {
-				RemoteAgent._notificationPermissionRequested = true;
-			}
-		}).catch(() => {});
-	}
-
-	/**
-	 * Notify the user that a long-running task finished while the tab is
-	 * hidden. Uses two mechanisms that work over plain HTTP:
-	 *   1. Flashing the document title (stops when the tab regains focus)
-	 *   2. A short notification beep via the Web Audio API
-	 * Falls back to the Notification API when available (secure contexts).
-	 */
-	private _notifyTaskComplete(elapsedMs: number): void {
-		// Skip notifications for delegate agents and non-lead team role agents
-		const sessionInfo = state.gatewaySessions.find((s) => s.id === this._sessionId);
-		if (sessionInfo) {
-			const isSubAgent = !!sessionInfo.delegateOf || (!!sessionInfo.role && sessionInfo.role !== "lead");
-			if (isSubAgent) return;
-		}
-
-		// Always beep so the user hears completion even on the active tab
-		RemoteAgent.playNotificationBeep();
-
-		// Browser toast only when the tab is hidden
-		if (document.visibilityState === "visible") return;
-
-		const mins = Math.round(elapsedMs / 60_000);
-
-		if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-			const title = this._title || "Bobbit";
-			const body = `Task completed after ${mins} minute${mins === 1 ? "" : "s"}. Awaiting your input.`;
-			const n = new Notification(title, { body, tag: `bobbit-done-${this._sessionId}` });
-			n.onclick = () => { window.focus(); n.close(); };
-		}
-	}
-
 	/** Play a short two-tone beep using the Web Audio API (no file needed). */
 	static playNotificationBeep(): void {
 		try {
@@ -243,6 +168,35 @@ export class RemoteAgent {
 			// Web Audio not available — silently skip
 		}
 	}
+
+	// ── Connection ────────────────────────────────────────────────────
+
+	private static readonly CONNECT_TIMEOUT_MS = 15_000;
+
+	async connect(gatewayUrl: string, token: string, sessionId: string): Promise<void> {
+		this._gatewayUrl = gatewayUrl;
+		this._authToken = token;
+		this._sessionId = sessionId;
+		this._intentionalDisconnect = false;
+		this._reconnectAttempt = 0;
+
+		// Race the WebSocket connect against a timeout so we don't hang
+		// forever on degraded mobile networks.
+		const timeout = new Promise<never>((_, reject) => {
+			setTimeout(() => reject(new Error("Connection timed out")), RemoteAgent.CONNECT_TIMEOUT_MS);
+		});
+
+		try {
+			await Promise.race([this._connectWs(true), timeout]);
+		} catch (err) {
+			// If timed out, clean up the pending WebSocket
+			this._intentionalDisconnect = true;
+			this.ws?.close();
+			this.ws = null;
+			throw err;
+		}
+	}
+
 
 	/**
 	 * Internal WebSocket connect. When `initial` is true the returned promise
@@ -400,9 +354,6 @@ export class RemoteAgent {
 					.map((a: any) => ({ type: "image", data: a.content, mimeType: a.mimeType }));
 			}
 		}
-
-		// Request notification permission on first prompt (has user gesture).
-		RemoteAgent._requestNotificationPermission();
 
 		// Stash attachments so we can enrich the echoed user message
 		this._pendingAttachments = attachments || null;
@@ -768,9 +719,6 @@ export class RemoteAgent {
 				this._state.streamMessage = null;
 				this._state.pendingToolCalls = new Set();
 
-				// Notify the user that the task finished
-				const elapsed = this._taskStartTime ? Date.now() - this._taskStartTime : 0;
-				this._notifyTaskComplete(elapsed);
 				this._taskStartTime = null;
 				this._state.turnStartTime = null;
 				break;
