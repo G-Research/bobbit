@@ -1,8 +1,5 @@
 import { ChatPanel } from "../ui/index.js";
 import { startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
-import type { GoalDraft } from "../ui/storage/stores/goal-draft-store.js";
-import type { RoleDraft } from "../ui/storage/stores/role-draft-store.js";
-import type { PersonalityDraft } from "../ui/storage/stores/personality-draft-store.js";
 import type { ConnectionStatus } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
 import {
@@ -14,9 +11,9 @@ import {
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
 } from "./state.js";
-import { gatewayFetch, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus } from "./api.js";
 import { startTimeRefresh } from "./render-helpers.js";
-import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, saveDraft, loadDraft, clearDraft } from "./routing.js";
+import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel } from "./routing.js";
 import { sessionHueRotation } from "./session-colors.js";
 import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
@@ -31,12 +28,12 @@ import { setSelectedWorkflowId } from "./render.js";
 /** Debounce timer for draft saves. */
 let _draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Save the current goal assistant preview state to IndexedDB (debounced 300ms). */
+/** Save the current goal assistant preview state to the server (debounced 300ms). */
 export function saveGoalDraft(sessionId: string): void {
 	if (_draftSaveTimer) clearTimeout(_draftSaveTimer);
 	_draftSaveTimer = setTimeout(() => {
 		_draftSaveTimer = null;
-		const draft: GoalDraft = {
+		const draft = {
 			sessionId,
 			activeGoalProposal: state.activeGoalProposal ?? undefined,
 			previewTitle: state.previewTitle,
@@ -50,16 +47,14 @@ export function saveGoalDraft(sessionId: string): void {
 			previewTeamMode: state.previewTeamMode,
 			previewWorktree: state.previewWorktree,
 		};
-		storage.goalDrafts.saveDraft(draft).catch((err) => {
-			console.error("[goal-draft] Failed to save draft:", err);
-		});
+		saveDraftToServer(sessionId, 'goal', draft);
 	}, 300);
 }
 
-/** Restore goal assistant preview state from IndexedDB. Returns true if a draft was found. */
+/** Restore goal assistant preview state from the server. Returns true if a draft was found. */
 async function restoreGoalDraft(sessionId: string): Promise<boolean> {
 	try {
-		const draft = await storage.goalDrafts.getDraft(sessionId);
+		const draft = await loadDraftFromServer(sessionId, 'goal') as any;
 		if (!draft) return false;
 
 		state.activeGoalProposal = draft.activeGoalProposal ?? null;
@@ -80,11 +75,9 @@ async function restoreGoalDraft(sessionId: string): Promise<boolean> {
 	}
 }
 
-/** Delete goal draft from IndexedDB. */
+/** Delete goal draft from the server. */
 export function deleteGoalDraft(sessionId: string): void {
-	storage.goalDrafts.deleteDraft(sessionId).catch((err) => {
-		console.error("[goal-draft] Failed to delete draft:", err);
-	});
+	deleteDraftFromServer(sessionId, 'goal');
 }
 
 // ============================================================================
@@ -94,12 +87,12 @@ export function deleteGoalDraft(sessionId: string): void {
 /** Debounce timer for role draft saves. */
 let _roleDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Save the current role assistant preview state to IndexedDB (debounced 300ms). */
+/** Save the current role assistant preview state to the server (debounced 300ms). */
 export function saveRoleDraft(sessionId: string): void {
 	if (_roleDraftSaveTimer) clearTimeout(_roleDraftSaveTimer);
 	_roleDraftSaveTimer = setTimeout(() => {
 		_roleDraftSaveTimer = null;
-		const draft: RoleDraft = {
+		const draft = {
 			sessionId,
 			activeRoleProposal: state.activeRoleProposal ?? undefined,
 			previewName: state.rolePreviewName,
@@ -115,16 +108,14 @@ export function saveRoleDraft(sessionId: string): void {
 			hasReceivedRoleProposal: state.assistantHasProposal,
 			roleAssistantTab: state.assistantTab,
 		};
-		storage.roleDrafts.saveDraft(draft).catch((err) => {
-			console.error("[role-draft] Failed to save draft:", err);
-		});
+		saveDraftToServer(sessionId, 'role', draft);
 	}, 300);
 }
 
-/** Restore role assistant preview state from IndexedDB. Returns true if a draft was found. */
+/** Restore role assistant preview state from the server. Returns true if a draft was found. */
 async function restoreRoleDraft(sessionId: string): Promise<boolean> {
 	try {
-		const draft = await storage.roleDrafts.getDraft(sessionId);
+		const draft = await loadDraftFromServer(sessionId, 'role') as any;
 		if (!draft) return false;
 
 		state.activeRoleProposal = draft.activeRoleProposal ?? null;
@@ -147,11 +138,9 @@ async function restoreRoleDraft(sessionId: string): Promise<boolean> {
 	}
 }
 
-/** Delete role draft from IndexedDB. */
+/** Delete role draft from the server. */
 export function deleteRoleDraft(sessionId: string): void {
-	storage.roleDrafts.deleteDraft(sessionId).catch((err) => {
-		console.error("[role-draft] Failed to delete draft:", err);
-	});
+	deleteDraftFromServer(sessionId, 'role');
 }
 
 
@@ -165,7 +154,7 @@ export function savePersonalityDraft(sessionId: string): void {
 	if (_personalityDraftSaveTimer) clearTimeout(_personalityDraftSaveTimer);
 	_personalityDraftSaveTimer = setTimeout(() => {
 		_personalityDraftSaveTimer = null;
-		const draft: PersonalityDraft = {
+		const draft = {
 			sessionId,
 			activePersonalityProposal: state.activePersonalityProposal ?? undefined,
 			previewName: state.personalityPreviewName,
@@ -179,15 +168,13 @@ export function savePersonalityDraft(sessionId: string): void {
 			hasReceivedPersonalityProposal: state.assistantHasProposal,
 			personalityAssistantTab: state.assistantTab,
 		};
-		storage.personalityDrafts.saveDraft(draft).catch((err) => {
-			console.error("[personality-draft] Failed to save draft:", err);
-		});
+		saveDraftToServer(sessionId, 'personality', draft);
 	}, 300);
 }
 
 async function restorePersonalityDraft(sessionId: string): Promise<boolean> {
 	try {
-		const draft = await storage.personalityDrafts.getDraft(sessionId);
+		const draft = await loadDraftFromServer(sessionId, 'personality') as any;
 		if (!draft) return false;
 
 		state.activePersonalityProposal = draft.activePersonalityProposal ?? null;
@@ -209,10 +196,9 @@ async function restorePersonalityDraft(sessionId: string): Promise<boolean> {
 }
 
 export function deletePersonalityDraft(sessionId: string): void {
-	storage.personalityDrafts.deleteDraft(sessionId).catch((err) => {
-		console.error("[personality-draft] Failed to delete draft:", err);
-	});
+	deleteDraftFromServer(sessionId, 'personality');
 }
+
 
 // ============================================================================
 // AUTHENTICATE GATEWAY
@@ -296,13 +282,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				saveSessionModel(sessionId, model.provider, model.id);
 			}
 			renderApp();
-		};
-
-		// Clear draft on prompt
-		const originalPrompt = remote.prompt.bind(remote);
-		remote.prompt = (...args: Parameters<typeof remote.prompt>) => {
-			localStorage.removeItem(`bobbit-draft-${sessionId}`);
-			return originalPrompt(...args);
 		};
 
 		// Callbacks
@@ -668,20 +647,39 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (autoPrompt) remote.prompt(autoPrompt);
 		}
 
-		// Restore draft and set up auto-save
+		// Restore prompt draft from server and set up auto-save
+		(async () => {
+			try {
+				const draft = await loadDraftFromServer(sessionId, 'prompt');
+				const editor = document.querySelector("message-editor") as any;
+				if (editor && draft && typeof draft === 'string') {
+					editor.value = draft;
+				}
+			} catch { /* ignore */ }
+		})();
+
+		// Set up debounced prompt draft saving
+		let _promptDraftTimer: ReturnType<typeof setTimeout> | null = null;
 		requestAnimationFrame(() => {
 			const editor = document.querySelector("message-editor") as any;
 			if (editor) {
-				const draft = loadDraft(sessionId);
-				if (draft) editor.value = draft;
 				const origOnInput = editor.onInput;
 				editor.onInput = (val: string) => {
 					origOnInput?.(val);
-					saveDraft(sessionId, val);
+					if (_promptDraftTimer) clearTimeout(_promptDraftTimer);
+					_promptDraftTimer = setTimeout(() => {
+						_promptDraftTimer = null;
+						if (val.trim()) {
+							saveDraftToServer(sessionId, 'prompt', val);
+						} else {
+							deleteDraftFromServer(sessionId, 'prompt');
+						}
+					}, 500);
 				};
 				const origOnSend = editor.onSend;
 				editor.onSend = (text: string, attachments: any[]) => {
-					clearDraft(sessionId);
+					if (_promptDraftTimer) { clearTimeout(_promptDraftTimer); _promptDraftTimer = null; }
+					deleteDraftFromServer(sessionId, 'prompt');
 					origOnSend?.(text, attachments);
 				};
 				const textarea = editor.querySelector("textarea");
