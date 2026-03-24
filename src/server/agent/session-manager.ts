@@ -1085,18 +1085,44 @@ export class SessionManager {
 
 	// ── Draft storage ──────────────────────────────────────────────
 
+	/**
+	 * Ensure the session has an entry in the persistent store.
+	 * When a session is first created, store.put() is called asynchronously
+	 * (fire-and-forget) so it may not have completed yet. This ensures
+	 * draft operations work even before persistence is complete.
+	 */
+	private ensureStoreEntry(id: string): boolean {
+		const session = this.sessions.get(id);
+		if (!session) return false;
+		if (!this.store.get(id)) {
+			this.store.put({
+				id: session.id,
+				title: session.title,
+				cwd: session.cwd,
+				agentSessionFile: "",
+				createdAt: session.createdAt,
+				lastActivity: session.lastActivity,
+				goalId: session.goalId,
+			});
+		}
+		return true;
+	}
+
 	/** Get a draft for a session by type. */
 	getDraft(id: string, type: string): unknown | undefined {
+		if (!this.ensureStoreEntry(id)) return undefined;
 		return this.store.getDraft(id, type);
 	}
 
 	/** Set a draft for a session by type. Returns false if session not found. */
 	setDraft(id: string, type: string, data: unknown): boolean {
+		if (!this.ensureStoreEntry(id)) return false;
 		return this.store.setDraft(id, type, data);
 	}
 
 	/** Delete a draft for a session by type. */
 	deleteDraft(id: string, type: string): boolean {
+		if (!this.ensureStoreEntry(id)) return false;
 		return this.store.deleteDraft(id, type);
 	}
 

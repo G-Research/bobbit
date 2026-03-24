@@ -2081,8 +2081,7 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		sessionManager.deleteDraft(id, type);
-		res.writeHead(204);
-		res.end();
+		json({ ok: true });
 		return;
 	}
 
