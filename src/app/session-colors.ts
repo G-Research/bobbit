@@ -330,5 +330,5 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	const containerWidth = "20px";
 
 	const innerLeft = "0";
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:2px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><span style="position:absolute;left:${innerLeft};top:${innerTop};display:block;width:1px;height:1px;image-rendering:pixelated;${baseTransform}box-shadow:${shadow};${shimmer}"></span>${eyeLayer}${accessoryLayer}</span>`;
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><span style="position:absolute;left:${innerLeft};top:${innerTop};display:block;width:1px;height:1px;image-rendering:pixelated;${baseTransform}box-shadow:${shadow};${shimmer}"></span>${eyeLayer}${accessoryLayer}</span>`;
 }

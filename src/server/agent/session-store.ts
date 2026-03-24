@@ -58,6 +58,8 @@ const STORE_FILE = path.join(STORE_DIR, "sessions.json");
  */
 export class SessionStore {
 	private sessions: Map<string, PersistedSession> = new Map();
+	private saveTimer: ReturnType<typeof setTimeout> | null = null;
+	private static SAVE_DEBOUNCE_MS = 1000;
 
 	constructor() {
 		this.load();
@@ -91,7 +93,8 @@ export class SessionStore {
 		}
 	}
 
-	private save(): void {
+	/** Write sessions to disk immediately (synchronous). */
+	private saveNow(): void {
 		try {
 			if (!fs.existsSync(STORE_DIR)) {
 				fs.mkdirSync(STORE_DIR, { recursive: true });
@@ -103,9 +106,18 @@ export class SessionStore {
 		}
 	}
 
+	/** Schedule a debounced save — coalesces rapid writes into one disk flush. */
+	private save(): void {
+		if (this.saveTimer) return; // already scheduled
+		this.saveTimer = setTimeout(() => {
+			this.saveTimer = null;
+			this.saveNow();
+		}, SessionStore.SAVE_DEBOUNCE_MS);
+	}
+
 	put(session: PersistedSession): void {
 		this.sessions.set(session.id, session);
-		this.save();
+		this.saveNow(); // immediate — structural change
 	}
 
 	get(id: string): PersistedSession | undefined {
@@ -114,7 +126,7 @@ export class SessionStore {
 
 	remove(id: string): void {
 		this.sessions.delete(id);
-		this.save();
+		this.saveNow(); // immediate — structural change
 	}
 
 	getAll(): PersistedSession[] {
@@ -126,6 +138,15 @@ export class SessionStore {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		Object.assign(existing, updates);
-		this.save();
+		this.save(); // debounced — frequent field updates
+	}
+
+	/** Flush any pending debounced save immediately (e.g. before shutdown). */
+	flush(): void {
+		if (this.saveTimer) {
+			clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+			this.saveNow();
+		}
 	}
 }

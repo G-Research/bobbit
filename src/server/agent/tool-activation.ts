@@ -15,7 +15,6 @@
  */
 
 import path from "node:path";
-import { bobbitDir } from "../bobbit-dir.js";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 
@@ -27,15 +26,15 @@ export interface ToolActivationResult {
 /**
  * Resolve the absolute path for an extension based on provider type.
  * - bobbit-extension: resolved from tools/<groupDir>/<extension>
- * - user-extension: resolved from .bobbit/extensions/<extension>
+ * - user-extension: resolved from <cwd>/.pi/extensions/<extension>
+ *   (project-local extensions auto-discovered by pi-coding-agent)
  */
-function resolveExtensionPath(provider: ToolProvider & { groupDir: string }): string {
-	const extDir = path.join(bobbitDir(), "extensions");
+function resolveExtensionPath(provider: ToolProvider & { groupDir: string }, cwd: string): string {
 	if (provider.type === "bobbit-extension" && provider.extension) {
 		return path.join(TOOLS_DIR, provider.groupDir, provider.extension);
 	}
-	// user-extension: resolve from bobbitExtensionsDir (pi-coding-agent resolves these)
-	return path.join(extDir, provider.extension!);
+	// user-extension: resolve from project-local .pi/extensions/ (where pi-coding-agent discovers them)
+	return path.join(cwd, ".pi", "extensions", provider.extension!);
 }
 
 /**
@@ -45,7 +44,7 @@ function resolveExtensionPath(provider: ToolProvider & { groupDir: string }): st
  * If allowedTools is empty or undefined, all tools are enabled (all builtins + all user extensions).
  * Always adds `--no-extensions` so Bobbit has complete control over extension loading.
  */
-export function computeToolActivationArgs(allowedTools?: string[], toolManager?: ToolManager): ToolActivationResult {
+export function computeToolActivationArgs(allowedTools?: string[], toolManager?: ToolManager, cwd?: string): ToolActivationResult {
 	const args: string[] = [];
 
 	if (!toolManager) {
@@ -71,7 +70,7 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 				if (provider.tool === "bash") continue;
 				builtins.push(provider.tool);
 			} else if (provider.type === "user-extension" && provider.extension) {
-				extensionPaths.add(resolveExtensionPath(provider));
+				extensionPaths.add(resolveExtensionPath(provider, cwd || process.cwd()));
 			}
 			// bobbit-extension: skip, handled by session-manager
 		}
@@ -101,7 +100,7 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 			// Skip bash — provided by custom bash-tool.ts extension (loaded by rpc-bridge)
 			if (provider.tool !== "bash") activeBaseTools.push(provider.tool);
 		} else if (provider.type === "user-extension" && provider.extension) {
-			neededExtensions.add(resolveExtensionPath(provider));
+			neededExtensions.add(resolveExtensionPath(provider, cwd || process.cwd()));
 		}
 		// bobbit-extension: skip, handled by session-manager
 	}

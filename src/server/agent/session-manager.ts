@@ -501,7 +501,7 @@ export class SessionManager {
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
 			if (role && role.allowedTools.length > 0) {
-				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager);
+				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, ps.cwd);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 			}
 		}
@@ -722,7 +722,7 @@ export class SessionManager {
 
 		// Apply tool activation args based on allowedTools (controls --tools and --extension flags)
 		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager);
+			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		}
 
@@ -1146,7 +1146,7 @@ export class SessionManager {
 
 		// Apply tool activation args based on role's allowedTools
 		if (role.allowedTools.length > 0) {
-			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager);
+			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		}
 
@@ -1269,7 +1269,7 @@ export class SessionManager {
 		if (session.role && this.roleManager) {
 			const role = this.roleManager.getRole(session.role);
 			if (role && role.allowedTools.length > 0) {
-				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager);
+				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 			}
 		}
@@ -1547,7 +1547,7 @@ export class SessionManager {
 			if (session.role && this.roleManager) {
 				const role = this.roleManager.getRole(session.role);
 				if (role && role.allowedTools.length > 0) {
-					const activation = computeToolActivationArgs(role.allowedTools, this.toolManager);
+					const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd);
 					bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 				}
 			}
@@ -1616,5 +1616,8 @@ export class SessionManager {
 			session.clients.clear();
 			this.sessions.delete(id);
 		}
+
+		// Flush any debounced store writes before exit
+		this.store.flush();
 	}
 }

@@ -232,6 +232,16 @@ async function main() {
 	process.on("SIGTERM", shutdown);
 }
 
+// Global error handlers — prevent silent zombification from stray rejections
+process.on("unhandledRejection", (reason) => {
+	console.error("[gateway] Unhandled rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+	console.error("[gateway] Uncaught exception:", err);
+	process.exit(1);
+});
+
 main().catch((err) => {
 	console.error("Fatal:", err);
 	process.exit(1);

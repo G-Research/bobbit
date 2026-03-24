@@ -270,7 +270,7 @@ export function renderStaffSidebarSection() {
 					${active ? "bg-secondary text-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 					@click=${() => handleStaffClick(agent)}>
 					${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1" : ""} mt-0.5 ${active ? "font-medium" : "font-normal"}"><span class="truncate ${mobile ? "text-base" : "text-xs"}">${agent.name}</span>${mobile && session ? (() => {
+					<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1" : "text-xs"} ${active ? "font-medium" : "font-normal"}"><span class="truncate ${mobile ? "text-base" : ""}">${agent.name}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) return html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span><span class="shrink-0 inline-flex items-center text-[11px] text-muted-foreground/50" style="letter-spacing:0.01em;vertical-align:middle;">${"active".split("").map((ch, i) =>
 								html`<span class="sidebar-shimmer-letter" style="animation-delay:${i * 0.18}s">${ch}</span>`

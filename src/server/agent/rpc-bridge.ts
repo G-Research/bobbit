@@ -1,8 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bobbitDir, bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 
 export interface RpcBridgeOptions {
@@ -183,22 +182,6 @@ export class RpcBridge {
 				parsed = JSON.parse(trimmed);
 			} catch {
 				continue; // skip non-JSON output (e.g. log lines)
-			}
-
-			// Debug: log events to file
-			try {
-				const debugPath = path.join(bobbitStateDir(), "rpc-debug.log");
-				appendFileSync(debugPath, `EVENT: type=${parsed.type}, id=${parsed.id}, msg_role=${parsed.message?.role}, success=${parsed.success}\n`);
-				if (parsed.type === "message_end" && parsed.message?.role === "user") {
-					const content = parsed.message.content;
-					const types = Array.isArray(content) ? content.map((c: any) => c.type) : [typeof content];
-					appendFileSync(debugPath, `  User msg content types: ${JSON.stringify(types)}\n`);
-				}
-				if (parsed.type?.includes("compaction") || parsed.type?.includes("compact")) {
-					appendFileSync(debugPath, `  Compact detail: ${JSON.stringify(parsed).substring(0, 500)}\n`);
-				}
-			} catch(e) {
-				process.stderr.write(`Debug log error: ${e}\n`);
 			}
 
 			// Response to a pending request
