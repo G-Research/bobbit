@@ -28,8 +28,6 @@ export interface QueuedMessage {
 export class MessageEditor extends LitElement {
 	private _value = "";
 	private textareaRef = createRef<HTMLTextAreaElement>();
-	private _draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
-	private _restoredSessionId: string | undefined;
 
 	@property()
 	get value() {
@@ -68,51 +66,6 @@ export class MessageEditor extends LitElement {
 	@state() isDragging = false;
 	@state() private isRecording = false;
 	private fileInputRef = createRef<HTMLInputElement>();
-
-	// -- Draft persistence --
-
-	private _draftKey(): string | undefined {
-		return this.sessionId ? `bobbit_draft_${this.sessionId}` : undefined;
-	}
-
-	private _saveDraftDebounced() {
-		if (this._draftSaveTimer) clearTimeout(this._draftSaveTimer);
-		this._draftSaveTimer = setTimeout(() => {
-			const key = this._draftKey();
-			if (!key) return;
-			try {
-				if (this._value) {
-					sessionStorage.setItem(key, this._value);
-				} else {
-					sessionStorage.removeItem(key);
-				}
-			} catch { /* quota exceeded — ignore */ }
-		}, 500);
-	}
-
-	private _restoreDraft() {
-		const key = this._draftKey();
-		if (!key) return;
-		try {
-			const draft = sessionStorage.getItem(key);
-			if (draft && !this._value) {
-				this._value = draft;
-				this.requestUpdate();
-				const textarea = this.textareaRef.value;
-				if (textarea) textarea.value = draft;
-			}
-		} catch { /* ignore */ }
-	}
-
-	private _clearDraft() {
-		if (this._draftSaveTimer) {
-			clearTimeout(this._draftSaveTimer);
-			this._draftSaveTimer = null;
-		}
-		const key = this._draftKey();
-		if (!key) return;
-		try { sessionStorage.removeItem(key); } catch { /* ignore */ }
-	}
 
 	// Command history state
 	private _history: string[] = [];
@@ -176,7 +129,6 @@ export class MessageEditor extends LitElement {
 		const textarea = e.target as HTMLTextAreaElement;
 		this.value = textarea.value;
 		this.onInput?.(this.value);
-		this._saveDraftDebounced();
 	};
 
 	private handleKeyDown = (e: KeyboardEvent) => {
@@ -274,7 +226,6 @@ export class MessageEditor extends LitElement {
 
 	private handleSend = () => {
 		const text = this.value;
-		this._clearDraft();
 		this.onSend?.(text, this.attachments);
 		// Reset history browsing state after send
 		this._historyIndex = -1;
@@ -517,8 +468,6 @@ export class MessageEditor extends LitElement {
 		super.connectedCallback();
 		document.addEventListener("keydown", this.handleGlobalKeyDown);
 		document.addEventListener("keyup", this.handleGlobalKeyUp);
-		this._restoredSessionId = this.sessionId;
-		this._restoreDraft();
 	}
 
 	override disconnectedCallback() {
@@ -526,10 +475,6 @@ export class MessageEditor extends LitElement {
 		document.removeEventListener("keydown", this.handleGlobalKeyDown);
 		document.removeEventListener("keyup", this.handleGlobalKeyUp);
 		this.stopSpeechRecognition();
-		if (this._draftSaveTimer) {
-			clearTimeout(this._draftSaveTimer);
-			this._draftSaveTimer = null;
-		}
 	}
 
 	override firstUpdated() {
@@ -537,19 +482,11 @@ export class MessageEditor extends LitElement {
 		if (textarea) {
 			textarea.focus();
 		}
-		// Restore draft after first render when textarea ref is available
-		this._restoreDraft();
 	}
 
 	protected override updated(changed: Map<string, unknown>) {
 		super.updated(changed);
 		if (changed.has("sessionId")) {
-			if (this.sessionId !== this._restoredSessionId) {
-				this._restoredSessionId = this.sessionId;
-				// Session changed — restore draft for the new session
-				this._value = "";
-				this._restoreDraft();
-			}
 			if (this.sessionId) {
 				this._loadHistory();
 			}

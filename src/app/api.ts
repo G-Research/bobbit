@@ -869,3 +869,43 @@ export async function deleteRole(name: string): Promise<boolean> {
 		return false;
 	}
 }
+
+// ============================================================================
+// DRAFT API
+// ============================================================================
+
+/** Save a draft to the server. Fire-and-forget — errors are logged, not thrown. */
+export async function saveDraftToServer(sessionId: string, type: string, data: unknown): Promise<void> {
+	try {
+		await gatewayFetch(`/api/sessions/${sessionId}/draft`, {
+			method: "PUT",
+			body: JSON.stringify({ type, data }),
+		});
+	} catch (err) {
+		console.error("[draft-api] Failed to save draft:", err);
+	}
+}
+
+/** Load a draft from the server. Returns null if not found or on error. */
+export async function loadDraftFromServer(sessionId: string, type: string): Promise<unknown | null> {
+	try {
+		const res = await gatewayFetch(`/api/sessions/${sessionId}/draft?type=${encodeURIComponent(type)}`);
+		if (!res.ok) return null;
+		const body = await res.json();
+		return body.data ?? null;
+	} catch (err) {
+		console.error("[draft-api] Failed to load draft:", err);
+		return null;
+	}
+}
+
+/** Delete a draft from the server. Fire-and-forget — errors are logged, not thrown. */
+export async function deleteDraftFromServer(sessionId: string, type: string): Promise<void> {
+	try {
+		await gatewayFetch(`/api/sessions/${sessionId}/draft?type=${encodeURIComponent(type)}`, {
+			method: "DELETE",
+		});
+	} catch (err) {
+		console.error("[draft-api] Failed to delete draft:", err);
+	}
+}

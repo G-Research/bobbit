@@ -2037,6 +2037,54 @@ async function handleApiRoute(
 		json({ ok: true });
 		return;
 	}
+	// ── Draft endpoints ─────────────────────────────────────────────
+
+	// PUT /api/sessions/:id/draft — upsert a draft
+	const draftPutMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
+	if (draftPutMatch && req.method === "PUT") {
+		const id = draftPutMatch[1];
+		const body = await readBody(req);
+		if (!body || typeof body.type !== "string") {
+			json({ error: "Missing type" }, 400);
+			return;
+		}
+		const ok = sessionManager.setDraft(id, body.type, body.data);
+		if (!ok) { json({ error: "Session not found" }, 404); return; }
+		json({ ok: true });
+		return;
+	}
+
+	// GET /api/sessions/:id/draft?type=prompt — retrieve a draft
+	const draftGetMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
+	if (draftGetMatch && req.method === "GET") {
+		const id = draftGetMatch[1];
+		const type = url.searchParams.get("type");
+		if (!type) { json({ error: "Missing type query param" }, 400); return; }
+		const data = sessionManager.getDraft(id, type);
+		if (data === undefined) {
+			// Check if session exists at all
+			const session = sessionManager.getSession(id);
+			if (!session) { json({ error: "Session not found" }, 404); return; }
+			json({ error: "Draft not found" }, 404);
+			return;
+		}
+		json({ type, data });
+		return;
+	}
+
+	// DELETE /api/sessions/:id/draft?type=prompt — clear a draft
+	const draftDelMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
+	if (draftDelMatch && req.method === "DELETE") {
+		const id = draftDelMatch[1];
+		const type = url.searchParams.get("type");
+		if (!type) { json({ error: "Missing type query param" }, 400); return; }
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		sessionManager.deleteDraft(id, type);
+		json({ ok: true });
+		return;
+	}
+
 	// ── Staff endpoints ────────────────────────────────────────────
 
 	// GET /api/staff

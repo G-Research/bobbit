@@ -113,30 +113,3 @@ export function loadSessionModel(sessionId: string): { provider: string; modelId
 export function clearSessionModel(sessionId: string): void {
 	localStorage.removeItem(`session.${sessionId}.model`);
 }
-
-// ============================================================================
-// DRAFT PERSISTENCE
-// ============================================================================
-
-const DRAFT_PREFIX = "bobbit-draft-";
-let _draftTimer: ReturnType<typeof setTimeout> | null = null;
-
-export function saveDraft(sessionId: string, text: string): void {
-	if (_draftTimer) clearTimeout(_draftTimer);
-	_draftTimer = setTimeout(() => {
-		if (text.trim()) {
-			localStorage.setItem(DRAFT_PREFIX + sessionId, text);
-		} else {
-			localStorage.removeItem(DRAFT_PREFIX + sessionId);
-		}
-	}, 100);
-}
-
-export function loadDraft(sessionId: string): string {
-	return localStorage.getItem(DRAFT_PREFIX + sessionId) || "";
-}
-
-export function clearDraft(sessionId: string): void {
-	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-	localStorage.removeItem(DRAFT_PREFIX + sessionId);
-}
