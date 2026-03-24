@@ -18,7 +18,7 @@ function toBranchName(title: string): string {
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-|-$/g, "")
-		.slice(0, 40) || "goal";
+		.slice(0, 10) || "goal";
 }
 
 /** Check if a directory is inside a git repository. */
