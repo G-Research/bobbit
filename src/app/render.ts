@@ -1203,9 +1203,12 @@ function goalProposalPanel() {
 	const handleDismiss = () => {
 		state.activeGoalProposal = null;
 		_proposalInitializedFrom = null;
-		// If preview tab still available, switch to it
+		// If preview tab still available, switch to it; otherwise back to chat
 		if (state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
+			if (state.previewPanelTab === "goal") state.previewPanelTab = "preview";
+		} else {
+			if (state.previewPanelTab === "goal") state.previewPanelTab = "chat";
 		}
 		renderApp();
 	};
@@ -1299,9 +1302,9 @@ function goalProposalPanel() {
 // PREVIEW SWIPE (mobile)
 // ============================================================================
 
-/** Script injected into the preview iframe srcdoc to detect rightward swipes
+/** Script injected into the preview iframe srcdoc to detect horizontal swipes
  *  and send position updates to the parent via postMessage.
- *  Only rightward swipes are captured; all other gestures pass through normally. */
+ *  Only horizontal swipes are captured; all other gestures pass through normally. */
 const PREVIEW_SWIPE_SCRIPT = `<script>
 (function() {
 	var startX = 0, startY = 0, captured = false, decided = false;
@@ -1317,7 +1320,7 @@ const PREVIEW_SWIPE_SCRIPT = `<script>
 		var dy = e.touches[0].clientY - startY;
 		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
 			decided = true;
-			captured = dx > 0 && Math.abs(dx) > Math.abs(dy);
+			captured = Math.abs(dx) > Math.abs(dy);
 			if (captured) parent.postMessage({type:'preview-swipe-start'}, '*');
 		}
 		if (captured) {
@@ -1340,82 +1343,133 @@ function hasUnifiedPanel(): boolean {
 	return !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null);
 }
 
+/** Ordered list of available unified panel tabs for the current session. */
+function unifiedPanelTabs(): Array<"chat" | "preview" | "goal"> {
+	const tabs: Array<"chat" | "preview" | "goal"> = ["chat"];
+	if (state.isPreviewSession) tabs.push("preview");
+	if (state.activeGoalProposal != null) tabs.push("goal");
+	return tabs;
+}
+
+/** Index of the current previewPanelTab within unifiedPanelTabs(). Clamps to valid range. */
+function unifiedTabIndex(): number {
+	const tabs = unifiedPanelTabs();
+	const idx = tabs.indexOf(state.previewPanelTab);
+	if (idx >= 0) return idx;
+	state.previewPanelTab = tabs[tabs.length - 1];
+	return tabs.length - 1;
+}
+
+/** Compute slider translateX% for the given tab index and pane count. */
+function unifiedSlideX(index: number, count: number): number {
+	if (count <= 1) return 0;
+	return -(index * 100) / count;
+}
+
 /** Listen for postMessage from the preview iframe and drive the slider track.
- *  Also handles leftward swipes on the chat side (#app touch events). */
+ *  Also handles touch swipes on the chat / preview / goal panes. */
 function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
 
-	// === iframe → parent: rightward swipe on preview ===
+	const getTrack = () => document.querySelector(".preview-slider__track") as HTMLElement | null;
+
+	// === iframe -> parent: swipe on preview pane ===
 	window.addEventListener("message", (e: MessageEvent) => {
-		if (!hasUnifiedPanel() || state.previewPanelTab !== "preview") return;
-		const track = document.querySelector(".preview-slider__track") as HTMLElement | null;
+		if (!hasUnifiedPanel()) return;
+		const tabs = unifiedPanelTabs();
+		const curIdx = unifiedTabIndex();
+		if (state.previewPanelTab !== "preview") return;
+		const track = getTrack();
 		if (!track) return;
+
+		const paneW = track.parentElement!.clientWidth;
+		const count = tabs.length;
+		const baseX = unifiedSlideX(curIdx, count);
 
 		if (e.data?.type === "preview-swipe-start") {
 			track.style.transition = "none";
 		} else if (e.data?.type === "preview-swipe-move") {
 			const dx: number = e.data.dx;
-			const dragPercent = (dx / track.parentElement!.clientWidth) * 50;
-			track.style.transform = `translateX(${Math.max(-50, Math.min(0, -50 + dragPercent))}%)`;
+			const dragPercent = (dx / paneW) * (100 / count);
+			const target = Math.max(unifiedSlideX(count - 1, count), Math.min(0, baseX + dragPercent));
+			track.style.transform = `translateX(${target}%)`;
 		} else if (e.data?.type === "preview-swipe-end") {
 			track.style.transition = "transform 0.3s ease-out";
 			const dx: number = e.data.dx;
-			const threshold = track.parentElement!.clientWidth * 0.2;
-			if (dx > threshold) {
-				state.previewPanelTab = "chat";
-			}
-			track.style.transform = `translateX(${state.previewPanelTab === "chat" ? 0 : -50}%)`;
+			const threshold = paneW * 0.2;
+			let newIdx = curIdx;
+			if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
+			else if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
+			state.previewPanelTab = tabs[newIdx];
+			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
 			renderApp();
 		}
 	});
 
-	// === chat side: leftward swipe to show preview ===
-	let chatStartX = 0, chatStartY = 0, chatCaptured = false, chatDecided = false;
+	// === touch swipe on non-iframe panes (chat, goal) ===
+	let startX = 0, startY = 0, captured = false, decided = false;
 	const el = document.getElementById("app")!;
 
 	el.addEventListener("touchstart", (e: TouchEvent) => {
-		if (!hasUnifiedPanel() || state.previewPanelTab !== "chat") return;
-		chatStartX = e.touches[0].clientX;
-		chatStartY = e.touches[0].clientY;
-		chatCaptured = false;
-		chatDecided = false;
+		if (!hasUnifiedPanel() || state.assistantType) return;
+		startX = e.touches[0].clientX;
+		startY = e.touches[0].clientY;
+		captured = false;
+		decided = false;
 	}, { passive: true });
 
 	el.addEventListener("touchmove", (e: TouchEvent) => {
-		if (!hasUnifiedPanel() || state.previewPanelTab !== "chat") return;
-		if (chatDecided && !chatCaptured) return;
-		const dx = e.touches[0].clientX - chatStartX;
-		const dy = e.touches[0].clientY - chatStartY;
-		if (!chatDecided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-			chatDecided = true;
-			chatCaptured = dx < 0 && Math.abs(dx) > Math.abs(dy); // leftward
-			if (chatCaptured) {
-				const track = document.querySelector(".preview-slider__track") as HTMLElement | null;
+		if (!hasUnifiedPanel() || state.assistantType) return;
+		if (decided && !captured) return;
+		const dx = e.touches[0].clientX - startX;
+		const dy = e.touches[0].clientY - startY;
+		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+			decided = true;
+			const tabs = unifiedPanelTabs();
+			const curIdx = unifiedTabIndex();
+			if (dx < 0 && Math.abs(dx) > Math.abs(dy) && curIdx < tabs.length - 1) {
+				captured = true;
+			} else if (dx > 0 && Math.abs(dx) > Math.abs(dy) && curIdx > 0) {
+				captured = true;
+			}
+			if (captured) {
+				const track = getTrack();
 				if (track) track.style.transition = "none";
 			}
 		}
-		if (chatCaptured) {
-			const track = document.querySelector(".preview-slider__track") as HTMLElement | null;
+		if (captured) {
+			const track = getTrack();
 			if (track) {
-				const dragPercent = (dx / track.parentElement!.clientWidth) * 50;
-				track.style.transform = `translateX(${Math.max(-50, Math.min(0, dragPercent))}%)`;
+				const tabs = unifiedPanelTabs();
+				const count = tabs.length;
+				const curIdx = unifiedTabIndex();
+				const baseX = unifiedSlideX(curIdx, count);
+				const dragPercent = (dx / track.parentElement!.clientWidth) * (100 / count);
+				const target = Math.max(unifiedSlideX(count - 1, count), Math.min(0, baseX + dragPercent));
+				track.style.transform = `translateX(${target}%)`;
 			}
 		}
 	}, { passive: true });
 
 	el.addEventListener("touchend", (e: TouchEvent) => {
-		if (!chatCaptured) return;
-		const track = document.querySelector(".preview-slider__track") as HTMLElement | null;
+		if (!captured) return;
+		const track = getTrack();
 		if (track) {
 			track.style.transition = "transform 0.3s ease-out";
-			const dx = e.changedTouches[0].clientX - chatStartX;
+			const dx = e.changedTouches[0].clientX - startX;
+			const tabs = unifiedPanelTabs();
+			const count = tabs.length;
+			const curIdx = unifiedTabIndex();
 			const threshold = track.parentElement!.clientWidth * 0.2;
-			if (dx < -threshold) state.previewPanelTab = "preview";
-			track.style.transform = `translateX(${state.previewPanelTab === "chat" ? 0 : -50}%)`;
+			let newIdx = curIdx;
+			if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
+			else if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
+			state.previewPanelTab = tabs[newIdx];
+			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
 		}
-		chatCaptured = false;
-		chatDecided = false;
+		captured = false;
+		decided = false;
 		renderApp();
 	}, { passive: true });
 }
@@ -1709,14 +1763,14 @@ export function doRenderApp(): void {
 				>Chat</button>
 				${state.isPreviewSession ? html`
 					<button
-						class="goal-tab-pill ${state.previewPanelTab === "preview" && state.previewPanelActiveTab === "preview" ? "goal-tab-pill--active" : ""}"
-						@click=${() => { state.previewPanelTab = "preview"; state.previewPanelActiveTab = "preview"; renderApp(); }}
+						class="goal-tab-pill ${state.previewPanelTab === "preview" ? "goal-tab-pill--active" : ""}"
+						@click=${() => { state.previewPanelTab = "preview"; renderApp(); }}
 					>Preview</button>
 				` : ""}
 				${state.activeGoalProposal != null ? html`
 					<button
-						class="goal-tab-pill ${state.previewPanelTab === "preview" && state.previewPanelActiveTab === "goal" ? "goal-tab-pill--active" : ""}"
-						@click=${() => { state.previewPanelTab = "preview"; state.previewPanelActiveTab = "goal"; renderApp(); }}
+						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
+						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
 					>Goal <span class="goal-tab-dot"></span></button>
 				` : ""}
 			</div>
@@ -1795,23 +1849,14 @@ export function doRenderApp(): void {
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
-
-	/** Mobile content for the unified panel (shown in slider).
-	 *  Dispatches to preview iframe or goal proposal panel based on active tab. */
-	const unifiedPanelMobileContent = () => {
-		if (state.previewPanelActiveTab === "preview" && state.isPreviewSession) {
-			return html`
-				<div class="goal-preview-panel flex-1 flex flex-col min-h-0">
-					${htmlPreviewContent()}
-				</div>
-			`;
+	/** Render individual pane content for mobile slider. */
+	const mobilePaneContent = (tab: "chat" | "preview" | "goal") => {
+		if (tab === "chat") return state.chatPanel;
+		if (tab === "preview" && state.isPreviewSession) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${htmlPreviewContent()}</div>`;
 		}
-		if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal != null) {
-			return html`
-				<div class="goal-preview-panel flex-1 flex flex-col min-h-0">
-					${goalProposalPanel()}
-				</div>
-			`;
+		if (tab === "goal" && state.activeGoalProposal != null) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${goalProposalPanel()}</div>`;
 		}
 		return html``;
 	};
@@ -1872,13 +1917,17 @@ export function doRenderApp(): void {
 					</div>
 				`;
 			}
-			const slideX = state.previewPanelTab === "chat" ? 0 : -50;
+			const tabs = unifiedPanelTabs();
+			const count = tabs.length;
+			const curIdx = unifiedTabIndex();
+			const slideX = unifiedSlideX(curIdx, count);
+			const trackW = count * 100;
+			const paneW = 100 / count;
 			return html`
 				${reconnectBanner()}
 				<div class="preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
-					<div class="preview-slider__track" style="display:flex;width:200%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
-						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${state.chatPanel}</div>
-						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${unifiedPanelMobileContent()}</div>
+					<div class="preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
+						${tabs.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
 					</div>
 				</div>
 			`;

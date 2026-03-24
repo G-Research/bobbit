@@ -175,7 +175,7 @@ export const state = {
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
-	previewPanelTab: "chat" as "chat" | "preview",
+	previewPanelTab: "chat" as "chat" | "preview" | "goal",
 	previewPanelHtml: "" as string,
 
 	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
