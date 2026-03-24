@@ -17,12 +17,15 @@ import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { bobbitExtensionsDir } from "../bobbit-dir.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
+import { TOOLS_DIR } from "./tool-manager.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
-const GOAL_TOOLS_EXTENSION_PATH = path.join(bobbitExtensionsDir(), "goal-tools.ts");
+const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
+
+/** Team lead extension — team management tools. */
+const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
 
 export type SessionStatus = "starting" | "idle" | "streaming" | "terminated";
 
@@ -489,7 +492,7 @@ export class SessionManager {
 		if (ps.goalId && !ps.assistantType) {
 			const isTeamLead = ps.role === "team-lead";
 			const extensionPath = isTeamLead
-				? path.join(bobbitExtensionsDir(), "team-lead-tools.ts")
+				? TEAM_LEAD_EXTENSION_PATH
 				: GOAL_TOOLS_EXTENSION_PATH;
 			bridgeOptions.args = ["--extension", extensionPath];
 		}
@@ -1535,7 +1538,7 @@ export class SessionManager {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 				const isTeamLead = session.role === "team-lead";
 				const extensionPath = isTeamLead
-					? path.join(bobbitExtensionsDir(), "team-lead-tools.ts")
+					? TEAM_LEAD_EXTENSION_PATH
 					: GOAL_TOOLS_EXTENSION_PATH;
 				bridgeOptions.args = ["--extension", extensionPath];
 			}

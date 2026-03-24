@@ -1,0 +1,65 @@
+name: write
+description: "Create or overwrite a file"
+summary: "Create or overwrite a file. Automatically creates parent directories."
+provider:
+  type: builtin
+  tool: write
+group: File System
+renderer: src/ui/tools/renderers/WriteRenderer.ts
+docs: |-
+  ## Purpose
+
+  Write content to a file on disk. If the file already exists, it is **completely overwritten**. If it doesn't exist, it is created along with any necessary parent directories.
+
+  This is a full-file operation — the entire content you provide becomes the new file contents. There is no append mode or partial write. For modifying specific parts of an existing file, use `edit` instead.
+
+  Files written with `.html` or `.svg` extensions are rendered inline in the Bobbit chat UI as live previews, making this tool ideal for creating visual mockups, reports, and data visualizations.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `path` | string | **Yes** | Path to the file to write. Relative paths resolve from the session working directory. Parent directories are created automatically. |
+  | `content` | string | **Yes** | The complete content to write to the file. This replaces any existing file content entirely. |
+
+  ## When to Use
+
+  - **Creating new files** — new source files, config files, test fixtures, scripts.
+  - **Complete file rewrites** — when the changes are so extensive that surgical edits would be impractical (more than ~50% of the file is changing).
+  - **Generating reports or visualizations** — write `.html` files for interactive previews in the chat.
+  - **Creating test fixtures** — write JSON, HTML, or other data files needed by tests.
+  - **Writing scripts** — create bash scripts, node scripts, or other executable files.
+
+  ## When NOT to Use
+
+  - **Small changes to existing files** — use `edit` instead. Overwriting a 500-line file to change 3 lines is risky (you might accidentally drop content) and wasteful.
+  - **Appending to a file** — read the file first, then write the combined content. Or use `bash` with `echo >> file`.
+  - **Binary files** — use `bash` with appropriate tools (e.g., `cp`, `curl -o`) for binary content.
+
+  ## Examples
+
+  ```
+  # Create a new TypeScript module
+  write(path="src/utils/format-date.ts", content="export function formatDate(d: Date): string {\n  return d.toISOString().split('T')[0];\n}\n")
+
+  # Create a test fixture
+  write(path="tests/fixtures/sample-config.json", content="{\n  \"port\": 3000,\n  \"host\": \"localhost\",\n  \"debug\": true\n}")
+
+  # Write an HTML report that renders inline in chat
+  write(path="report.html", content="<!DOCTYPE html>\n<html><head><style>body{font-family:system-ui}</style></head>\n<body><h1>Test Results</h1><p>All 42 tests passed.</p></body></html>")
+
+  # Create a shell script
+  write(path="scripts/deploy.sh", content="#!/bin/bash\nset -euo pipefail\nnpm run build\nnpm run test\necho 'Deploy complete'")
+
+  # Create parent directories automatically
+  write(path="src/features/auth/handlers/login.ts", content="export async function handleLogin(req, res) {\n  // ...\n}")
+  ```
+
+  ## Notes / Gotchas
+
+  - **Overwrites without warning** — there is no confirmation prompt. If the file exists, it is replaced entirely. Read the file first if you need to preserve parts of it.
+  - **Parent directory creation** — all intermediate directories are created automatically. No need to `mkdir -p` first.
+  - **Inline rendering** — `.html` and `.htm` files render in a sandboxed iframe in the chat. `.svg` files render as visual previews. Use this for mockups and visualizations.
+  - **No append mode** — to add content to an existing file, read it first, then write the combined content. Or use `bash` with `>>` redirection.
+  - **Line endings** — use `\n` for newlines. The tool does not convert line endings.
+  - **Encoding** — content is written as UTF-8.

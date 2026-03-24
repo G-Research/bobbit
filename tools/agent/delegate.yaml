@@ -1,0 +1,76 @@
+name: delegate
+description: "Run a task in a separate agent process"
+summary: "Run a task in a separate agent process with full tool access but
+  isolated context."
+provider:
+  type: user-extension
+  extension: delegate.ts
+group: Agent
+renderer: src/ui/tools/renderers/DelegateRenderer.ts
+docs: |-
+  ## Purpose
+
+  Spawn an isolated agent subprocess to execute a task independently. The delegate agent gets full tool access (bash, read, write, edit, web search, browser tools) but receives **only the instructions you provide** — it has no access to the current conversation history, messages, or context.
+
+  The delegate runs as a completely separate process and blocks the caller until it finishes. Its final output is returned as the result. This enables two key patterns: **context isolation** (the delegate can't see sensitive conversation content) and **mass parallelism** (multiple delegates run concurrently).
+
+  The `parallel` parameter accepts an array of instruction objects to spawn multiple delegates simultaneously. All run concurrently and the tool returns when all complete.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `instructions` | string | Optional (provide either `instructions` or `parallel`) | Detailed task instructions for a single delegate. Must be self-contained — the delegate has no other context. |
+  | `context` | object | No | Key-value pairs of additional context passed to the delegate (e.g., file paths, error messages, configuration). |
+  | `parallel` | array | Optional (provide either `instructions` or `parallel`) | Array of `{ instructions: string, context?: object }` objects. Each spawns an independent delegate. All run concurrently. |
+  | `timeout_minutes` | number | No | Maximum execution time in minutes. Default: **10 minutes**. |
+
+  ## When to Use
+
+  - **Context isolation** — when the delegate must NOT see the current conversation (e.g., independent code review, unbiased analysis).
+  - **Mass parallelism** — 3 or more independent sub-tasks that benefit from concurrent execution (e.g., reviewing multiple modules, generating docs for multiple components, running analyses across different areas).
+
+  ## When NOT to Use
+
+  - **Single tasks you can do yourself** — if there's no need for isolation or parallelism, do the work inline. Delegating adds significant overhead (spawning a new agent process) for zero benefit.
+  - **Reading files** — never delegate just to read files. `read` is instant; delegating it wastes a full agent spawn.
+  - **Parallelizing file reads** — even for many files, read them yourself with parallel `read` calls in one message. Delegates are slower, not faster, for this.
+  - **Simple sequential tasks** — "the task is complex" or "the task is long" are NOT valid reasons to delegate. You can handle complex, long tasks directly.
+
+  ## Examples
+
+  ```
+  # Context-isolated code review (single delegate with instructions)
+  delegate(instructions="Review the changes in src/server/auth/ for security vulnerabilities. The branch has modifications to token validation, rate limiting, and TLS setup. Check for: injection attacks, timing attacks, insecure defaults, missing validation. Report findings as structured markdown with severity levels.")
+
+  # Parallel analysis of independent modules
+  delegate(parallel=[
+    { instructions: "Analyze src/server/ for error handling gaps. Check every async function for missing try/catch, unhandled promise rejections, and error propagation. Report as markdown." },
+    { instructions: "Analyze src/ui/ for accessibility issues. Check for missing ARIA labels, keyboard navigation, color contrast, and screen reader compatibility. Report as markdown." },
+    { instructions: "Analyze src/app/ for memory leak risks. Check for unremoved event listeners, unclosed connections, growing arrays, and retained references. Report as markdown." }
+  ])
+
+  # Delegate with context
+  delegate(
+    instructions="Fix the failing E2E test. The test expects a 200 response but gets 404. Check the API route handler and the test setup.",
+    context={ testFile: "tests/e2e/tools-api.spec.ts", errorLine: "42", endpoint: "/api/tools/bash" }
+  )
+
+  # Parallel documentation generation
+  delegate(parallel=[
+    { instructions: "Write comprehensive JSDoc comments for all exported functions in src/server/agent/session-manager.ts" },
+    { instructions: "Write comprehensive JSDoc comments for all exported functions in src/server/agent/goal-manager.ts" },
+    { instructions: "Write comprehensive JSDoc comments for all exported functions in src/server/agent/task-manager.ts" }
+  ])
+  ```
+
+  ## Notes / Gotchas
+
+  - **Instructions must be self-contained** — the delegate sees ONLY what you put in `instructions` and `context`. It has no conversation history, no knowledge of prior decisions, no awareness of other delegates. Include all necessary file paths, requirements, and context.
+  - **Significant overhead** — each delegate spawns an entire agent process. Only delegate when the isolation or parallelism benefit justifies this cost.
+  - **Provide `instructions` or `parallel`, not both** — use `instructions` for a single delegate, `parallel` for multiple concurrent delegates. Neither is strictly required at the schema level, but one must be provided at runtime.
+  - **10-minute default timeout** — delegates that exceed the timeout are killed. Increase `timeout_minutes` for longer tasks.
+  - **Blocking** — the `delegate` tool blocks until all delegates finish. Plan accordingly for long-running delegates.
+  - **No inter-delegate communication** — parallel delegates cannot talk to each other. They run independently and their results are collected when all finish.
+  - **Full tool access** — delegates can read, write, edit, run bash, search the web, and use browser tools. They can make changes to the filesystem.
+  - **File conflicts in parallel** — if multiple parallel delegates edit the same file, the last write wins. Design parallel tasks to work on independent files.

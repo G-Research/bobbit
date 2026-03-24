@@ -1,0 +1,66 @@
+name: browser_type
+description: "Type text into an input element"
+summary: "Type text into an input element by CSS selector. Clears the field first."
+provider:
+  type: user-extension
+  extension: playwright/index.ts
+group: Browser
+renderer: src/ui/tools/renderers/BrowserTypeRenderer.ts
+docs: |-
+  ## Purpose
+
+  Type text into a form input, textarea, or contenteditable element identified by a CSS selector. The field is **cleared first** by default — the previous content is completely replaced with the new text.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `selector` | string | **Yes** | CSS selector of the input element to type into. |
+  | `text` | string | **Yes** | The text to type into the element. |
+  | `clear` | boolean | No | When `true` (default), clears the field before typing — replacing existing content. When `false`, appends the text character-by-character via `pressSequentially` without clearing. Default: **true**. |
+
+  ## When to Use
+
+  - **Filling out forms** — entering usernames, passwords, search queries, or any text input.
+  - **Testing input validation** — typing various values to test form validation behavior.
+  - **Search functionality** — entering search terms in search boxes.
+  - **Editing content** — modifying text in contenteditable regions or text editors.
+  - **Appending text** — use `clear: false` to add text to existing content without replacing it.
+
+  ## When NOT to Use
+
+  - **Clicking buttons or links** — use `browser_click`.
+  - **When the input hasn't loaded yet** — use `browser_wait` first.
+  - **For programmatic value setting** — if you need to set a value without typing events (e.g., for hidden inputs), use `browser_eval` with JavaScript.
+
+  ## Examples
+
+  ```
+  # Type into a search box (replaces any existing text)
+  browser_type(selector="input[name='search']", text="WebSocket reconnection patterns")
+
+  # Fill a login form
+  browser_type(selector="#username", text="admin@example.com")
+  browser_type(selector="#password", text="secure-password-123")
+
+  # Type into a textarea
+  browser_type(selector="textarea.comment-input", text="This implementation looks correct.")
+
+  # Append text without clearing the field
+  browser_type(selector="input[name='search']", text=" additional terms", clear=false)
+
+  # Type into a contenteditable div
+  browser_type(selector="[contenteditable='true']", text="New paragraph content")
+
+  # Explicitly clear and replace (same as default)
+  browser_type(selector="#email", text="new@example.com", clear=true)
+  ```
+
+  ## Notes / Gotchas
+
+  - **Clears by default** — the existing field content is replaced entirely unless you pass `clear: false`.
+  - **Append mode** — with `clear: false`, text is typed character-by-character via `pressSequentially`, appending to whatever is already in the field. This fires individual key events for each character.
+  - **Fires input events** — typing triggers `input`, `change`, and `keydown`/`keyup` events, so JavaScript handlers attached to the input will fire.
+  - **Element must be focusable** — the target must be an `<input>`, `<textarea>`, or element with `contenteditable`. Typing into a `<div>` without contenteditable won't work.
+  - **Wait for dynamic inputs** — if the input appears after a page transition or async load, use `browser_wait(selector=...)` before typing.
+  - **Special characters** — most characters work as expected. For special keys (Enter, Tab, Escape), use `browser_eval` to dispatch keyboard events.

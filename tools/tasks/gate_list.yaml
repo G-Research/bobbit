@@ -1,0 +1,90 @@
+name: gate_list
+description: "List all workflow gates with status"
+summary: "List all workflow gates for the current goal with status and definitions."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Gates
+docs: >-
+  ## Purpose
+
+
+  List all workflow gates for the current goal with their status and
+  definitions. This is the primary tool for understanding where the goal stands
+  in its workflow — which gates have passed, which are pending, and which have
+  failed.
+
+
+  ## Parameters
+
+
+  None.
+
+
+  ## Returns
+
+
+  An array of gate objects, each containing:
+
+  - `gateId` — unique gate identifier within the workflow (e.g. "design-doc",
+  "implementation")
+
+  - `name` — human-readable display name
+
+  - `status` — current state: `pending`, `passed`, or `failed`
+
+  - `dependsOn` — array of gate IDs that must pass before this gate can be
+  signaled
+
+  - `content` — whether this gate accepts markdown content
+
+  - `injectDownstream` — whether passed content is auto-injected into downstream
+  agents
+
+
+  ## When to Use
+
+
+  - **Starting work on a goal** — check which gates exist and their current
+  status.
+
+  - **Planning next steps** — identify which gates are pending and what their
+  dependencies are.
+
+  - **Verifying completion** — confirm all gates have passed before calling
+  `team_complete`.
+
+  - **Resuming work** — after a restart, check gate status to resume from the
+  right point.
+
+
+  ## When NOT to Use
+
+
+  - **Getting a single gate's full detail** — use `gate_status` for a specific
+  gate's content and signal history.
+
+
+  ## Examples
+
+
+  ```
+
+  # Check all gates at the start of work
+
+  gate_list()
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Lightweight** — no parameters, fast response. Call frequently to stay
+  informed.
+
+  - **Status values** — `pending` (not yet signaled or reset), `passed`
+  (signaled and verified), `failed` (verification failed).
+
+  - **Call early** — agents should call `gate_list()` at the start of their work
+  to understand the workflow state.

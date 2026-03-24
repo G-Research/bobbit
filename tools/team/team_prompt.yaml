@@ -1,0 +1,58 @@
+name: team_prompt
+description: "Send a prompt to a team agent (queued or immediate)"
+summary: "Send a prompt to a team agent, queued or immediate."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Team
+renderer: src/ui/tools/renderers/TeamToolRenderers.ts
+docs: |-
+  ## Purpose
+
+  Send a new prompt to a team agent to start a follow-up turn. If the agent is currently idle (finished its previous turn), the prompt is sent immediately. If the agent is still active (streaming/processing), the prompt is **queued** and delivered automatically when the current turn finishes.
+
+  This is the standard way to give an agent additional tasks, ask questions, or provide feedback after it completes a turn.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `session_id` | string | **Yes** | Session ID of the agent to prompt (from `team_list`). |
+  | `message` | string | **Yes** | The prompt message to send. Treated as a user message that starts a new agent turn. |
+
+  ## When to Use
+
+  - **Follow-up tasks** — assigning additional work after the agent completes its initial task.
+  - **Requesting changes** — asking an agent to revise its work based on review feedback.
+  - **Status checks** — asking an agent what it has accomplished and whether it's blocked.
+  - **Providing information** — giving an agent additional context or answers to questions it raised.
+  - **Queuing work** — sending a prompt to a busy agent so it picks up the task when its current turn ends.
+
+  ## When NOT to Use
+
+  - **Agent is actively going wrong** — use `team_steer` for urgent mid-turn corrections. `team_prompt` waits for the current turn to finish.
+  - **Agent should be terminated** — use `team_dismiss` to remove agents you no longer need.
+
+  ## Examples
+
+  ```
+  # Give a coder a follow-up task
+  team_prompt(session_id="abc123", message="Good work on the API endpoints. Now add input validation — tool names should be alphanumeric + hyphens only, max 50 chars. Return 400 for invalid input.")
+
+  # Ask for a status update
+  team_prompt(session_id="abc123", message="What's your current status? Have you finished the implementation? Any blockers?")
+
+  # Send revision feedback from a review
+  team_prompt(session_id="abc123", message="The reviewer found an issue: the PUT endpoint doesn't validate the request body. Add schema validation and return 400 for malformed requests. Check the code-review gate for details.")
+
+  # Queue a task for a busy agent
+  team_prompt(session_id="abc123", message="When you're done with the current task, also add JSDoc comments to all exported functions in the tool-store module.")
+  ```
+
+  ## Notes / Gotchas
+
+  - **Team lead only** — only team lead sessions can prompt agents.
+  - **Queued if busy** — if the agent is mid-turn, the prompt is queued and delivered automatically when the turn ends. The agent will process it as its next task.
+  - **Starts a new turn** — unlike `team_steer` which injects into the current turn, `team_prompt` starts a fresh turn with the message as user input.
+  - **Check status first** — use `team_list` to see if the agent is active or idle. This helps you decide between `team_prompt` (idle or queue for later) and `team_steer` (redirect now).
+  - **Be specific** — include file paths, gate references, and clear acceptance criteria. The agent may have compacted earlier context and lost details.

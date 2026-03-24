@@ -1,0 +1,109 @@
+name: gate_status
+description: "Get a gate's detail (status, content, signals)"
+summary: "Get a workflow gate's detail including status, content, signal
+  history, and definition."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Gates
+docs: >-
+  ## Purpose
+
+
+  Get detailed information about a specific workflow gate, including its current
+  status, content, signal history, and definition. This is how agents read
+  upstream gate content (design docs, test plans, review findings) to understand
+  context.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `gate_id` | string | **Yes** | The workflow gate ID to query (e.g.
+  "design-doc", "implementation"). Get this from `gate_list`. |
+
+
+  ## Returns
+
+
+  A gate detail object containing:
+
+  - `gateId` — the gate identifier
+
+  - `name` — human-readable display name
+
+  - `status` — current state: `pending`, `passed`, or `failed`
+
+  - `currentContent` — the latest passed content (markdown text)
+
+  - `currentContentVersion` — content version number
+
+  - `currentMetadata` — key-value metadata
+
+  - `dependsOn` — array of upstream gate IDs
+
+  - `signals` — full signal history with verification results
+
+  - `updatedAt` — last update timestamp
+
+
+  ## When to Use
+
+
+  - **Reading the design doc** — `gate_status(gate_id="design-doc")` to get the
+  full design content.
+
+  - **Checking verification results** — see why a gate failed and what the
+  verification output was.
+
+  - **Reading upstream context** — get the content of any passed gate to
+  understand requirements.
+
+  - **Checking signal history** — see all previous signals, who sent them, and
+  their verification results.
+
+
+  ## When NOT to Use
+
+
+  - **Listing all gates** — use `gate_list` for an overview of all gates.
+
+  - **Signaling a gate** — use `gate_signal` to submit work.
+
+
+  ## Examples
+
+
+  ```
+
+  # Read the design document
+
+  gate_status(gate_id="design-doc")
+
+
+  # Check why implementation verification failed
+
+  gate_status(gate_id="implementation")
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Use `gate_list` first** — to discover gate IDs before querying specific
+  gates.
+
+  - **Content may be large** — design docs and review findings can be
+  substantial. The full content is returned without truncation.
+
+  - **Signal history** — the `signals` array contains every signal ever sent to
+  this gate, including failed ones. Check the latest signal's verification
+  status for the current state.
+
+  - **Read before coding** — always read the design-doc gate before starting
+  implementation work.

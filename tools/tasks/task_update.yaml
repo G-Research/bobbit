@@ -1,0 +1,87 @@
+name: task_update
+description: "Update task fields, assignment, or state"
+summary: "Update task fields, assignment, or state (todo, in-progress, complete,
+  blocked)."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Tasks
+renderer: src/ui/tools/renderers/TaskToolRenderers.ts
+docs: |-
+  ## Purpose
+
+  Update one or more fields on an existing task in a single atomic call. This is the primary tool for managing task lifecycle: transitioning states, assigning agents, recording results, and linking commits.
+
+  Multiple fields can be updated simultaneously — for example, assigning an agent and starting the task in one call.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `task_id` | string | **Yes** | The unique ID of the task to update. Get this from `task_list`. |
+  | `title` | string | No | Updated task title. |
+  | `spec` | string | No | Updated task specification. |
+  | `result_summary` | string | No | Summary of what was accomplished. Best practice: always set this when marking a task complete. |
+  | `commit_sha` | string | No | Git commit SHA associated with the task's work. |
+  | `assigned_to` | string | No | Session ID to assign the task to. Get the session ID from `team_spawn` or `team_list`. |
+  | `state` | string | No | New state. See valid transitions below. |
+  | `depends_on` | string[] | No | Array of task IDs this task depends on. Replaces existing dependencies. |
+
+  ## Valid State Transitions
+
+  State transitions are **enforced** — invalid transitions are rejected. The valid transitions are:
+
+  - `todo` → `in-progress`
+  - `todo` → `skipped`
+  - `in-progress` → `complete`
+  - `in-progress` → `blocked`
+  - `in-progress` → `skipped`
+  - `blocked` → `in-progress`
+  - `blocked` → `skipped`
+
+  For example, you cannot go from `complete` → `in-progress` or from `todo` → `complete` directly.
+
+  ## When to Use
+
+  - **Starting a task** — set `state="in-progress"` and `assigned_to` when an agent begins work.
+  - **Completing a task** — set `state="complete"` and `result_summary` when work is done and verified.
+  - **Blocking a task** — set `state="blocked"` and `result_summary` explaining the blocker.
+  - **Recording results** — update `result_summary` and `commit_sha` with completion details.
+  - **Reassigning** — change `assigned_to` if a task needs to move to a different agent.
+  - **Updating dependencies** — change `depends_on` to add or modify task ordering.
+
+  ## When NOT to Use
+
+  - **Creating tasks** — use `task_create` for new tasks.
+  - **Listing tasks** — use `task_list` to see all tasks.
+
+  ## Examples
+
+  ```
+  # Assign a task to an agent and start it
+  task_update(task_id="abc123", assigned_to="session-456", state="in-progress")
+
+  # Mark a task complete with summary and commit
+  task_update(task_id="abc123", state="complete",
+    result_summary="Implemented GET/PUT /api/tools/:name endpoints. All E2E tests pass. Merged to goal branch.",
+    commit_sha="a1b2c3d4")
+
+  # Mark a task as blocked
+  task_update(task_id="abc123", state="blocked",
+    result_summary="Blocked: the ToolStore module hasn't been implemented yet. Depends on task def456.")
+
+  # Skip a task that's no longer needed
+  task_update(task_id="abc123", state="skipped",
+    result_summary="Skipped: requirements changed, this endpoint is no longer needed.")
+
+  # Update dependencies
+  task_update(task_id="abc123", depends_on=["task-1", "task-2"])
+  ```
+
+  ## Notes / Gotchas
+
+  - **Atomic updates** — all fields provided in a single call are updated atomically. No partial failures.
+  - **Always include `result_summary` on completion** — this is the primary way to communicate what was accomplished. The team lead and other agents rely on it.
+  - **State transitions are enforced** — invalid transitions (e.g., `complete` → `in-progress`) are rejected with an error. Follow the valid transition graph.
+  - **`assigned_to` is a session ID** — get it from `team_spawn` (return value) or `team_list` (agent list).
+  - **Multiple updates at once** — you can set state, assignment, and result in a single call. This is preferred over multiple separate calls.

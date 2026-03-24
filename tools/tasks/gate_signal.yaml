@@ -1,0 +1,118 @@
+name: gate_signal
+description: "Signal a workflow gate with content/metadata"
+summary: "Signal a workflow gate — triggers verification. Accepts content and/or
+  metadata."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Gates
+docs: >-
+  ## Purpose
+
+
+  Signal a workflow gate to indicate that its requirements have been met. A
+  signal can include content (markdown text for content gates like design docs)
+  and/or metadata (key-value pairs). After signaling, automated verification
+  runs asynchronously — the gate transitions to `passed` or `failed` based on
+  the results.
+
+
+  This is how agents submit work products to the workflow: design documents,
+  implementation completion, review findings, test results, etc.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `gate_id` | string | **Yes** | The workflow gate ID to signal (e.g.
+  "design-doc", "implementation"). Get this from `gate_list`. |
+
+  | `content` | string | No | Markdown content for content gates. This becomes
+  the gate's current content, visible to downstream agents via context
+  injection. |
+
+  | `metadata` | object | No | Key-value pairs for metadata gates (e.g. test
+  results, commit SHAs). |
+
+
+  ## When to Use
+
+
+  - **Submitting a design document** — signal the design-doc gate with the full
+  design as content.
+
+  - **Marking implementation complete** — signal the implementation gate
+  (content optional).
+
+  - **Submitting review findings** — signal the code-review gate with findings
+  as content.
+
+  - **Submitting test results** — signal with a command or results as
+  content/metadata.
+
+  - **Re-signaling after fixes** — if a gate failed verification, fix the issue
+  and re-signal. Re-signaling a passed gate cascade-resets all downstream gates
+  to pending.
+
+
+  ## When NOT to Use
+
+
+  - **Checking gate status** — use `gate_status` or `gate_list`.
+
+  - **When upstream dependencies haven't passed** — the server returns 409 if
+  upstream gates are still pending.
+
+
+  ## Examples
+
+
+  ```
+
+  # Signal the design-doc gate with content
+
+  gate_signal(gate_id="design-doc", content="# Design\n\n## Overview\n...")
+
+
+  # Signal implementation complete (no content needed)
+
+  gate_signal(gate_id="implementation")
+
+
+  # Signal with metadata
+
+  gate_signal(gate_id="test-results", metadata={"passed": "42", "failed": "0"})
+
+
+  # Re-signal after fixing verification failures
+
+  gate_signal(gate_id="design-doc", content="# Design v2\n\n## Updated
+  approach...")
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Verification is async** — after signaling, the gate status is "running".
+  Wait for the verification notification before proceeding. Do NOT assume it
+  will pass.
+
+  - **409 on unmet dependencies** — if upstream gates haven't passed, the signal
+  is rejected. Check `gate_list` to see which dependencies are blocking.
+
+  - **Cascade reset** — re-signaling a previously passed gate resets all
+  transitive downstream gates to `pending`. This is intentional — downstream
+  work may need to be redone.
+
+  - **Content version tracking** — each signal with content increments the
+  content version. Downstream agents can detect when content has been updated.
+
+  - **Command-format gates** — some gates expect raw shell commands as content
+  (no markdown, no backticks). Check the workflow definition for the expected
+  format.
