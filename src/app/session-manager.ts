@@ -573,7 +573,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Initial git status and bg process fetch
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
-		refreshPrStatusForSession(sessionId);
 
 		if (isExisting) {
 			remote.requestMessages();
@@ -885,7 +884,17 @@ async function refreshGitStatusForSession(sessionId: string): Promise<void> {
 async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 	const goalId = sessionData?.goalId;
-	if (!goalId) return;
+	if (!goalId) {
+		const ai = state.chatPanel?.agentInterface;
+		if (activeSessionId() === sessionId && ai) {
+			ai.prState = undefined;
+			ai.prUrl = undefined;
+			ai.prNumber = undefined;
+			ai.prTitle = undefined;
+			ai.prMergeable = undefined;
+		}
+		return;
+	}
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
