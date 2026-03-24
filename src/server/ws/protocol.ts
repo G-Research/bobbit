@@ -59,4 +59,6 @@ export type ServerMessage =
 	| { type: "gate_signal_received"; goalId: string; gateId: string; signalId: string }
 	| { type: "gate_verification_started"; goalId: string; gateId: string; signalId: string }
 	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: string }
-	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string };
+	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string }
+	| { type: "goal_setup_complete"; goalId: string }
+	| { type: "goal_setup_error"; goalId: string; error: string };

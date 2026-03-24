@@ -1,4 +1,4 @@
-import { execFileSync, execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
@@ -14,23 +14,21 @@ export interface WorktreeResult {
  * Create a git worktree on a new branch from HEAD.
  * The worktree is placed as a sibling directory to the repo.
  *
- * Note: the initial `git worktree add` is synchronous because callers
- * need the worktree directory to exist before proceeding.  The follow-up
- * `npm ci` and `git push` are async so they don't block the event loop.
+ * Fully async — the `git worktree add`, `npm ci`, and `git push`
+ * are all awaited without blocking the Node.js event loop.
  */
 export async function createWorktree(repoPath: string, branchName: string): Promise<WorktreeResult> {
-	// Validate repoPath exists — execFileSync with a bad cwd throws a misleading
-	// "spawnSync git ENOENT" that looks like git isn't installed
+	// Validate repoPath exists — execFile with a bad cwd throws a misleading
+	// "spawn git ENOENT" that looks like git isn't installed
 	if (!fs.existsSync(repoPath)) {
 		throw new Error(`Cannot create worktree: repoPath does not exist: ${repoPath}`);
 	}
 
 	const worktreePath = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt-${branchName}`);
 
-	// Create branch and worktree in one step — uses execFileSync (no shell) to prevent injection
-	execFileSync("git", ["worktree", "add", "-b", branchName, worktreePath, "HEAD"], {
+	// Create branch and worktree in one step (async, no shell, prevents injection)
+	await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, "HEAD"], {
 		cwd: repoPath,
-		stdio: "pipe",
 	});
 
 	// Seed node_modules into the worktree so npm scripts (tsc, tests) work

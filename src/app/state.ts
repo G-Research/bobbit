@@ -57,6 +57,8 @@ export interface Goal {
 	team?: boolean;
 	teamLeadSessionId?: string;
 	workflowId?: string;
+	setupStatus?: "ready" | "preparing" | "error";
+	setupError?: string;
 	workflow?: {
 		id: string;
 		name: string;

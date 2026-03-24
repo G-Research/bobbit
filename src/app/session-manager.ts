@@ -334,6 +334,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onWorkflowUpdate = () => renderApp();
 
+		remote.onGoalSetupEvent = () => {
+			// Refresh sessions and goals to pick up setupStatus changes
+			refreshSessions();
+		};
+
 		remote.onBgProcessEvent = (msg) => {
 			const ai = state.chatPanel?.agentInterface;
 			if (!ai || activeSessionId() !== sessionId) return;

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFileSync, execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 
@@ -22,9 +22,9 @@ function toBranchName(title: string): string {
 }
 
 /** Check if a directory is inside a git repository. */
-function isGitRepo(cwd: string): boolean {
+async function isGitRepo(cwd: string): Promise<boolean> {
 	try {
-		execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd, stdio: "pipe" });
+		await execFile("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
 		return true;
 	} catch {
 		return false;
@@ -32,18 +32,43 @@ function isGitRepo(cwd: string): boolean {
 }
 
 /** Get the git repo root for a directory. */
-function getRepoRoot(cwd: string): string {
-	return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, stdio: "pipe" }).toString().trim();
+async function getRepoRoot(cwd: string): Promise<string> {
+	const { stdout } = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd });
+	return stdout.toString().trim();
 }
 
 export class GoalManager {
 	private store = new GoalStore();
 	private workflowStore?: WorkflowStore;
+	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
+	private _setupsInFlight = new Set<string>();
 
 	constructor(workflowStore?: WorkflowStore) {
 		this.workflowStore = workflowStore;
+		// Mark any goals stuck in "preparing" from a previous run as error
+		this._recoverStuckSetups();
 	}
 
+	/**
+	 * On startup, scan for goals stuck in setupStatus === "preparing"
+	 * and mark them as "error" (setup was interrupted by server restart).
+	 */
+	private _recoverStuckSetups(): void {
+		for (const goal of this.store.getAll()) {
+			if (goal.setupStatus === "preparing") {
+				this.store.update(goal.id, {
+					setupStatus: "error",
+					setupError: "Setup interrupted by server restart",
+				});
+				console.warn(`[goal-manager] Marked goal "${goal.title}" (${goal.id}) as error — setup was interrupted by server restart`);
+			}
+		}
+	}
+
+	/**
+	 * Create a goal instantly — persists to disk and returns immediately.
+	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
+	 */
 	async createGoal(title: string, cwd: string, opts?: { spec?: string; team?: boolean; worktree?: boolean; workflowId?: string; workflowStore?: WorkflowStore }): Promise<PersistedGoal> {
 		const { spec = "", team = true, worktree = true, workflowId, workflowStore = this.workflowStore } = opts ?? {};
 		const now = Date.now();
@@ -53,26 +78,19 @@ export class GoalManager {
 		let branch: string | undefined;
 		let repoPath: string | undefined;
 		let goalCwd = cwd;
+		let setupStatus: "ready" | "preparing" = "ready";
 
 		// Detect git repo root — needed for team operations even without a worktree
-		if (isGitRepo(cwd)) {
-			repoPath = getRepoRoot(cwd);
+		if (await isGitRepo(cwd)) {
+			repoPath = await getRepoRoot(cwd);
 		}
 
-		// Create a git worktree if the cwd is a git repo (explicit worktree flag, defaults to true for team goals)
+		// Compute worktree path and branch (but don't create yet)
 		if (worktree && repoPath) {
 			branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
-			try {
-				const result = await createWorktree(repoPath, branch);
-				worktreePath = result.worktreePath;
-				goalCwd = worktreePath;
-				console.log(`[goal-manager] Created worktree for goal "${title}": ${worktreePath} (branch: ${branch})`);
-			} catch (err) {
-				// Worktree creation failed — fall back to shared cwd
-				console.error(`[goal-manager] Failed to create worktree for goal "${title}":`, err);
-				worktreePath = undefined;
-				branch = undefined;
-			}
+			worktreePath = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt-${branch}`);
+			goalCwd = worktreePath;
+			setupStatus = "preparing";
 		}
 
 		const goal: PersistedGoal = {
@@ -87,6 +105,7 @@ export class GoalManager {
 			branch,
 			repoPath,
 			team,
+			setupStatus,
 		};
 
 		// Snapshot workflow onto goal if workflowId is provided
@@ -110,6 +129,77 @@ export class GoalManager {
 		return goal;
 	}
 
+	/**
+	 * Async worktree setup — called after createGoal() returns.
+	 * Retries once on failure. Updates setupStatus accordingly.
+	 */
+	async setupWorktree(goalId: string): Promise<void> {
+		const goal = this.store.get(goalId);
+		if (!goal || !goal.repoPath || !goal.branch) {
+			throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
+		}
+
+		// Prevent concurrent setup calls for the same goal
+		if (this._setupsInFlight.has(goalId)) {
+			return;
+		}
+		this._setupsInFlight.add(goalId);
+
+		try {
+			await this._doSetupWorktree(goal);
+		} finally {
+			this._setupsInFlight.delete(goalId);
+		}
+	}
+
+	private async _doSetupWorktree(goal: PersistedGoal): Promise<void> {
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				const result = await createWorktree(goal.repoPath!, goal.branch!);
+				// Update goal with actual worktree path and mark as ready
+				this.store.update(goal.id, {
+					worktreePath: result.worktreePath,
+					cwd: result.worktreePath,
+					setupStatus: "ready",
+					setupError: undefined,
+				});
+				console.log(`[goal-manager] Worktree ready for goal "${goal.title}": ${result.worktreePath} (branch: ${goal.branch})`);
+				return;
+			} catch (err) {
+				lastError = err;
+				console.error(`[goal-manager] Worktree setup attempt ${attempt + 1} failed for goal "${goal.title}":`, err);
+				if (attempt === 0) {
+					// Brief delay before retry
+					await new Promise(resolve => setTimeout(resolve, 1000));
+				}
+			}
+		}
+
+		// Both attempts failed
+		this.store.update(goal.id, {
+			setupStatus: "error",
+			setupError: String(lastError),
+		});
+		throw lastError;
+	}
+
+	/**
+	 * Retry setup for a goal in error state.
+	 * Returns true if retry was initiated, false if goal not found or not in error state.
+	 */
+	retrySetup(goalId: string): boolean {
+		const goal = this.store.get(goalId);
+		if (!goal || goal.setupStatus !== "error") {
+			return false;
+		}
+		this.store.update(goalId, {
+			setupStatus: "preparing",
+			setupError: undefined,
+		});
+		return true;
+	}
+
 	getGoal(id: string): PersistedGoal | undefined {
 		return this.store.get(id);
 	}
@@ -125,8 +215,8 @@ export class GoalManager {
 		// If toggling team mode ON for a non-team goal, auto-create worktree
 		if (updates.team === true && !existing.team && !existing.worktreePath) {
 			const cwd = updates.cwd ?? existing.cwd;
-			if (isGitRepo(cwd)) {
-				const repoRoot = getRepoRoot(cwd);
+			if (await isGitRepo(cwd)) {
+				const repoRoot = await getRepoRoot(cwd);
 				const title = updates.title ?? existing.title;
 				const branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 				try {
