@@ -66,7 +66,7 @@ export class TeamSpawnRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, UserPlus, skipped ? html`Aborted spawn of ${roleBadge(role)} — skipped due to queued message` : html`Failed to spawn ${roleBadge(role)}`)}
+					${renderHeader(state, UserPlus, skipped ? html`Aborted spawn of ${roleBadge(role)}` : html`Failed to spawn ${roleBadge(role)}`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -95,7 +95,7 @@ export class TeamListRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Users, skipped ? "Aborted team list — skipped due to queued message" : "Team list failed")}
+					${renderHeader(state, Users, skipped ? "Aborted team list" : "Team list failed")}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -150,7 +150,7 @@ export class TeamDismissRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, UserMinus, skipped ? html`Aborted dismiss — skipped due to queued message` : html`Failed to dismiss agent`)}
+					${renderHeader(state, UserMinus, skipped ? html`Aborted dismiss` : html`Failed to dismiss agent`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -179,7 +179,7 @@ export class TeamCompleteRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Trophy, skipped ? "Aborted team completion — skipped due to queued message" : "Team completion failed")}
+					${renderHeader(state, Trophy, skipped ? "Aborted team completion" : "Team completion failed")}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -213,7 +213,7 @@ export class TeamSteerRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Zap, skipped ? html`Aborted steer ${sid ? renderSessionLink(sid) : ""} — skipped due to queued message` : html`Steer failed ${sid ? renderSessionLink(sid) : ""}`)}
+					${renderHeader(state, Zap, skipped ? html`Aborted steer ${sid ? renderSessionLink(sid) : ""}` : html`Steer failed ${sid ? renderSessionLink(sid) : ""}`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -247,7 +247,7 @@ export class TeamPromptRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, MessageSquare, skipped ? html`Aborted prompt ${sid ? renderSessionLink(sid) : ""} — skipped due to queued message` : html`Prompt failed ${sid ? renderSessionLink(sid) : ""}`)}
+					${renderHeader(state, MessageSquare, skipped ? html`Aborted prompt ${sid ? renderSessionLink(sid) : ""}` : html`Prompt failed ${sid ? renderSessionLink(sid) : ""}`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -279,7 +279,7 @@ export class TeamAbortRenderer implements ToolRenderer {
 			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, AlertTriangle, skipped ? html`Skipped abort of ${sid ? renderSessionLink(sid) : ""} — queued message` : html`Abort failed ${sid ? renderSessionLink(sid) : ""}`)}
+					${renderHeader(state, AlertTriangle, skipped ? html`Skipped abort of ${sid ? renderSessionLink(sid) : ""}` : html`Abort failed ${sid ? renderSessionLink(sid) : ""}`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
