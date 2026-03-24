@@ -29,9 +29,12 @@ function gateBadge(status: string): TemplateResult {
 	return html`<span class="px-1.5 py-0.5 rounded text-xs font-medium ${cls}">${status}</span>`;
 }
 
-function truncate(s: string, max = 200): string {
-	if (!s) return "";
-	return s.length > max ? s.slice(0, max) + "…" : s;
+function formatDuration(ms: number): string {
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+	const m = Math.floor(ms / 60000);
+	const s = Math.round((ms % 60000) / 1000);
+	return `${m}m ${s}s`;
 }
 
 // ── gate_list ────────────────────────────────────────────────────────
@@ -162,17 +165,9 @@ export class GateStatusRenderer implements ToolRenderer {
 		const signals: any[] = data.signals || [];
 		const contentVersion = data.currentContentVersion;
 
-		// Check for latest verification failure
-		let failureOutput = "";
-		if (signals.length > 0) {
-			const latest = signals[signals.length - 1];
-			if (latest?.verification?.status === "failed" && latest.verification.steps) {
-				const failedStep = latest.verification.steps.find((s: any) => !s.passed);
-				if (failedStep?.output) {
-					failureOutput = truncate(failedStep.output, 200);
-				}
-			}
-		}
+		// Latest signal verification
+		const latestSignal = signals.length > 0 ? signals[signals.length - 1] : null;
+		const verification = latestSignal?.verification;
 
 		const contentRef = createRef<HTMLDivElement>();
 		const chevronRef = createRef<HTMLSpanElement>();
@@ -185,11 +180,49 @@ export class GateStatusRenderer implements ToolRenderer {
 						${deps.length ? html`<div>Depends on: ${deps.join(", ")}</div>` : ""}
 						<div>${signals.length} signal${signals.length !== 1 ? "s" : ""}</div>
 						${contentVersion ? html`<div>content v${contentVersion}</div>` : ""}
-						${failureOutput ? html`<div class="text-red-600 dark:text-red-400 mt-1">Verification failed: ${failureOutput}</div>` : ""}
+						${verification ? this._renderVerification(verification) : ""}
 					</div>
 				</div>
 			</div>`,
 			isCustom: false,
 		};
+	}
+
+	private _renderVerification(verification: any): TemplateResult {
+		const steps: any[] = verification.steps || [];
+		const vStatus = verification.status || "running";
+		const passedCount = steps.filter((s: any) => s.passed).length;
+		const summaryText = `${passedCount}/${steps.length} steps`;
+
+		return html`
+			<div class="mt-2 border-t border-border pt-2">
+				<div class="flex items-center gap-2 mb-1">
+					<span class="font-medium">Verification:</span>
+					${gateBadge(vStatus)}
+					<span>(${summaryText})</span>
+				</div>
+				${steps.map((step: any) => {
+					const passed = step.passed;
+					const running = passed == null;
+					const icon = running ? "…" : passed ? "✓" : "✗";
+					const iconCls = running
+						? "text-blue-600 dark:text-blue-400"
+						: passed
+							? "text-green-600 dark:text-green-400"
+							: "text-red-600 dark:text-red-400";
+					const dur = step.duration_ms != null ? formatDuration(step.duration_ms) : "";
+					return html`
+						<details class="group">
+							<summary class="flex items-center gap-2 py-0.5 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+								<span class="${iconCls} font-bold">${icon}</span>
+								<span class="truncate flex-1">${step.name || "step"}</span>
+								${dur ? html`<span class="text-muted-foreground ml-auto shrink-0">${dur}</span>` : ""}
+							</summary>
+							${step.output ? html`<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded p-2 mt-1">${step.output}</pre>` : ""}
+						</details>
+					`;
+				})}
+			</div>
+		`;
 	}
 }
