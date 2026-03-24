@@ -932,23 +932,17 @@ async function refreshGitStatusForSession(sessionId: string): Promise<void> {
 async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 	const goalId = sessionData?.goalId;
-	if (!goalId) {
-		const ai = state.chatPanel?.agentInterface;
-		if (activeSessionId() === sessionId && ai) {
-			ai.prState = undefined;
-			ai.prUrl = undefined;
-			ai.prNumber = undefined;
-			ai.prTitle = undefined;
-			ai.prMergeable = undefined;
-		}
-		return;
-	}
+
+	// Build the URL: goal-scoped if available, otherwise session-scoped
+	const prStatusUrl = goalId
+		? `/api/goals/${goalId}/pr-status`
+		: `/api/sessions/${sessionId}/pr-status`;
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
 
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null);
+		const res = await gatewayFetch(prStatusUrl).catch(() => null);
 		if (!res || !res.ok) {
 			if (activeSessionId() === sessionId) {
 				ai.prState = undefined;

@@ -1765,6 +1765,18 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	// GET /api/sessions/:id/pr-status — PR status for session's branch
+	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/pr-status')) {
+		const id = url.pathname.split('/')[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const cwd = session.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const pr = await getCachedPrStatus(cwd);
+		if (pr) { json(pr); } else { json({ error: "No PR found" }, 404); }
+		return;
+	}
+
 	// GET /api/skills — list available skill definitions
 	if (url.pathname === "/api/skills" && req.method === "GET") {
 		json({ skills: listSkills().map((s) => ({ id: s.id, name: s.name, description: s.description })) });
