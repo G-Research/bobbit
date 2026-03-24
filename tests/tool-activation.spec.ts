@@ -12,28 +12,31 @@ import type { ToolProvider } from "../dist/server/agent/tool-manager.js";
  *   npx playwright test tests/tool-activation.spec.ts --config tests/playwright.config.ts
  */
 
+/** Provider with groupDir — matches ToolManager.getToolProviders() return type */
+type ProviderWithGroup = ToolProvider & { groupDir: string };
+
 /** Minimal mock that satisfies the ToolManager interface used by computeToolActivationArgs */
-function mockToolManager(providers: Map<string, ToolProvider>) {
+function mockToolManager(providers: Map<string, ProviderWithGroup>) {
 	return { getToolProviders: () => providers } as any;
 }
 
-/** Standard provider map matching real tools/*.yaml definitions */
-function standardProviders(): Map<string, ToolProvider> {
-	return new Map<string, ToolProvider>([
-		["read", { type: "builtin", tool: "read" }],
-		["write", { type: "builtin", tool: "write" }],
-		["edit", { type: "builtin", tool: "edit" }],
-		["bash", { type: "builtin", tool: "bash" }],
-		["grep", { type: "builtin", tool: "grep" }],
-		["find", { type: "builtin", tool: "find" }],
-		["ls", { type: "builtin", tool: "ls" }],
-		["web_search", { type: "user-extension", extension: "web-research.ts" }],
-		["web_fetch", { type: "user-extension", extension: "web-research.ts" }],
-		["delegate", { type: "user-extension", extension: "delegate.ts" }],
-		["browser_navigate", { type: "user-extension", extension: "playwright/index.ts" }],
-		["browser_click", { type: "user-extension", extension: "playwright/index.ts" }],
-		["task_create", { type: "bobbit-extension", extension: "goal-tools.ts" }],
-		["team_spawn", { type: "bobbit-extension", extension: "team-lead-tools.ts" }],
+/** Standard provider map matching real tools/<group>/*.yaml definitions */
+function standardProviders(): Map<string, ProviderWithGroup> {
+	return new Map<string, ProviderWithGroup>([
+		["read", { type: "builtin", tool: "read", groupDir: "filesystem" }],
+		["write", { type: "builtin", tool: "write", groupDir: "filesystem" }],
+		["edit", { type: "builtin", tool: "edit", groupDir: "filesystem" }],
+		["bash", { type: "builtin", tool: "bash", groupDir: "shell" }],
+		["grep", { type: "builtin", tool: "grep", groupDir: "filesystem" }],
+		["find", { type: "builtin", tool: "find", groupDir: "filesystem" }],
+		["ls", { type: "builtin", tool: "ls", groupDir: "filesystem" }],
+		["web_search", { type: "user-extension", extension: "web-research.ts", groupDir: "web" }],
+		["web_fetch", { type: "user-extension", extension: "web-research.ts", groupDir: "web" }],
+		["delegate", { type: "user-extension", extension: "delegate.ts", groupDir: "agent" }],
+		["browser_navigate", { type: "user-extension", extension: "playwright/index.ts", groupDir: "browser" }],
+		["browser_click", { type: "user-extension", extension: "playwright/index.ts", groupDir: "browser" }],
+		["task_create", { type: "bobbit-extension", extension: "extension.ts", groupDir: "tasks" }],
+		["team_spawn", { type: "bobbit-extension", extension: "extension.ts", groupDir: "team" }],
 	]);
 }
 
@@ -76,8 +79,8 @@ test.describe("computeToolActivationArgs", () => {
 		expect(extPaths.some(p => p.endsWith("/extensions/playwright/index.ts"))).toBe(true);
 
 		// Bobbit extensions (task_create, team_spawn) should NOT appear — handled by session-manager
-		expect(extPaths.some(p => p.includes("goal-tools"))).toBe(false);
-		expect(extPaths.some(p => p.includes("team-lead"))).toBe(false);
+		expect(extPaths.some(p => p.includes("tasks/extension"))).toBe(false);
+		expect(extPaths.some(p => p.includes("team/extension"))).toBe(false);
 	});
 
 	test("empty allowedTools array — same as undefined (all tools)", () => {

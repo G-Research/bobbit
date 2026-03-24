@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
-import { ToolStore } from "./tool-store.js";
+import { parse, parseDocument, stringify } from "yaml";
 
 export interface ToolProvider {
 	type: 'builtin' | 'user-extension' | 'bobbit-extension';
@@ -19,6 +18,10 @@ interface BaseToolInfo {
 	renderer?: string;
 	docs?: string;
 	provider?: ToolProvider;
+	/** Subdirectory name within tools/ (e.g. "shell", "filesystem"). Empty string for flat files. */
+	groupDir: string;
+	/** Absolute path to the YAML file on disk. */
+	filePath: string;
 }
 
 export interface ToolInfo {
@@ -34,20 +37,68 @@ export interface ToolInfo {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOLS_DIR = path.resolve(__dirname, "../../../tools");
 
+/** Exported for use by tool-activation.ts, rpc-bridge.ts, session-manager.ts */
+export { TOOLS_DIR };
+
 /**
  * Scan the tools/ YAML directory and return all tool definitions.
+ * Supports both grouped layout (tools/<group>/*.yaml) and flat layout (tools/*.yaml).
  * Called on every request so new/edited YAML files are picked up without restart.
  */
 function loadToolDefinitions(): BaseToolInfo[] {
 	const tools: BaseToolInfo[] = [];
+	const seen = new Set<string>();
+
 	try {
 		const entries = fs.readdirSync(TOOLS_DIR, { withFileTypes: true });
+
+		// First pass: scan group subdirectories (tools/<group>/*.yaml)
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const groupDir = entry.name;
+			const groupPath = path.join(TOOLS_DIR, groupDir);
+			try {
+				const files = fs.readdirSync(groupPath, { withFileTypes: true });
+				for (const file of files) {
+					if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
+					const filePath = path.join(groupPath, file.name);
+					try {
+						const raw = fs.readFileSync(filePath, "utf-8");
+						const data = parse(raw);
+						if (data && typeof data === "object" && data.name) {
+							if (seen.has(data.name)) continue;
+							seen.add(data.name);
+							tools.push({
+								name: data.name,
+								description: data.description || "",
+								summary: data.summary,
+								group: data.group || groupDir,
+								renderer: data.renderer,
+								docs: data.docs,
+								provider: data.provider,
+								groupDir,
+								filePath,
+							});
+						}
+					} catch (err) {
+						console.error(`[tool-manager] Failed to load tool ${filePath}:`, err);
+					}
+				}
+			} catch {
+				// Can't read group dir — skip
+			}
+		}
+
+		// Second pass: scan flat files (tools/*.yaml) for backward compat
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
+			const filePath = path.join(TOOLS_DIR, entry.name);
 			try {
-				const raw = fs.readFileSync(path.join(TOOLS_DIR, entry.name), "utf-8");
+				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
 				if (data && typeof data === "object" && data.name) {
+					if (seen.has(data.name)) continue; // Group dir version takes precedence
+					seen.add(data.name);
 					tools.push({
 						name: data.name,
 						description: data.description || "",
@@ -56,6 +107,8 @@ function loadToolDefinitions(): BaseToolInfo[] {
 						renderer: data.renderer,
 						docs: data.docs,
 						provider: data.provider,
+						groupDir: "",
+						filePath,
 					});
 				}
 			} catch (err) {
@@ -70,30 +123,23 @@ function loadToolDefinitions(): BaseToolInfo[] {
 
 /**
  * Manages tool definitions and metadata.
- * Tool definitions are loaded from tools/*.yaml on every read.
- * Custom overrides (description, group, docs) are persisted via ToolStore.
+ * Tool definitions are loaded from tools/<group>/*.yaml on every read.
+ * Metadata updates write directly to the YAML files.
  */
 export class ToolManager {
-	private store: ToolStore;
-
-	constructor(store?: ToolStore) {
-		this.store = store ?? new ToolStore();
-	}
+	constructor() {}
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */
 	getAvailableTools(): ToolInfo[] {
 		const tools = loadToolDefinitions();
-		return tools.map((tool) => {
-			const override = this.store.get(tool.name);
-			return {
-				name: tool.name,
-				description: override?.description ?? tool.description,
-				group: override?.group ?? tool.group,
-				docs: override?.docs,
-				hasRenderer: !!tool.renderer,
-				rendererFile: tool.renderer,
-			};
-		});
+		return tools.map((tool) => ({
+			name: tool.name,
+			description: tool.description,
+			group: tool.group,
+			docs: tool.docs,
+			hasRenderer: !!tool.renderer,
+			rendererFile: tool.renderer,
+		}));
 	}
 
 	/** Returns a single tool's full detail, or undefined if not found. */
@@ -101,12 +147,11 @@ export class ToolManager {
 		const tools = loadToolDefinitions();
 		const base = tools.find((t) => t.name === name);
 		if (!base) return undefined;
-		const override = this.store.get(name);
 		return {
 			name: base.name,
-			description: override?.description ?? base.description,
-			group: override?.group ?? base.group,
-			docs: override?.docs,
+			description: base.description,
+			group: base.group,
+			docs: base.docs,
 			hasRenderer: !!base.renderer,
 			rendererFile: base.renderer,
 		};
@@ -129,16 +174,15 @@ export class ToolManager {
 
 		for (const tool of tools) {
 			if (toolNames && !toolNames.includes(tool.name)) continue;
-			const override = this.store.get(tool.name);
-			const group = override?.group ?? tool.group;
-			const summary = tool.summary ?? override?.description ?? tool.description;
-			const docs = override?.docs ?? tool.docs;
+			const group = tool.group;
+			const summary = tool.summary ?? tool.description;
+			const docs = tool.docs?.trim();
 
 			if (!grouped.has(group)) grouped.set(group, []);
 			grouped.get(group)!.push({
 				name: tool.name,
 				summary,
-				docs: docs?.trim(),
+				docs,
 			});
 		}
 
@@ -179,12 +223,12 @@ export class ToolManager {
 		return base?.provider;
 	}
 
-	/** Returns all tool providers in a single YAML scan (avoids repeated disk reads). */
-	getToolProviders(): Map<string, ToolProvider> {
+	/** Returns all tool providers with groupDir in a single YAML scan. */
+	getToolProviders(): Map<string, ToolProvider & { groupDir: string }> {
 		const tools = loadToolDefinitions();
-		const map = new Map<string, ToolProvider>();
+		const map = new Map<string, ToolProvider & { groupDir: string }>();
 		for (const tool of tools) {
-			if (tool.provider) map.set(tool.name, tool.provider);
+			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir });
 		}
 		return map;
 	}
@@ -194,22 +238,25 @@ export class ToolManager {
 		return loadToolDefinitions().map((t) => t.name);
 	}
 
-	/** Updates custom tool metadata (description, group, docs). */
+	/** Updates tool metadata (description, group, docs) by writing directly to the YAML file. */
 	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string }): boolean {
 		const tools = loadToolDefinitions();
 		const base = tools.find((t) => t.name === name);
 		if (!base) return false;
 
-		const existing = this.store.get(name);
-		const meta = {
-			name,
-			description: updates.description ?? existing?.description,
-			group: updates.group ?? existing?.group,
-			docs: updates.docs ?? existing?.docs,
-			updatedAt: Date.now(),
-		};
-		this.store.put(meta);
-		return true;
-	}
+		try {
+			const raw = fs.readFileSync(base.filePath, "utf-8");
+			const doc = parseDocument(raw);
 
+			if (updates.description !== undefined) doc.set("description", updates.description);
+			if (updates.group !== undefined) doc.set("group", updates.group);
+			if (updates.docs !== undefined) doc.set("docs", updates.docs);
+
+			fs.writeFileSync(base.filePath, doc.toString(), "utf-8");
+			return true;
+		} catch (err) {
+			console.error(`[tool-manager] Failed to update ${name} at ${base.filePath}:`, err);
+			return false;
+		}
+	}
 }

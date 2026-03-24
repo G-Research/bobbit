@@ -1,0 +1,49 @@
+name: team_complete
+description: "Dismiss all agents and complete goal"
+summary: "Dismiss all team agents and mark the goal as complete."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Team
+renderer: src/ui/tools/renderers/TeamToolRenderers.ts
+docs: |-
+  ## Purpose
+
+  End the team workflow by dismissing all role agents and marking the goal as complete. This is the final step in a goal's lifecycle — it cleans up all role agent sessions, removes their git worktrees, and transitions the goal state to `done`.
+
+  **Important**: The team lead session is NOT dismissed — only role agents (coders, reviewers, testers) are terminated. The team lead stays active to present a final report and handle any follow-up.
+
+  ## Parameters
+
+  None.
+
+  ## Returns
+
+  Confirmation that all role agents were dismissed and the goal was marked complete.
+
+  ## When to Use
+
+  - **Goal is finished** — all tasks are complete, code is reviewed, tests pass, and everything is merged.
+  - **Final cleanup** — as the very last action after verifying all work is done.
+
+  ## When NOT to Use
+
+  - **Work is still in progress** — don't complete until all agents have finished, merged, and been verified.
+  - **Missing gates — goal completion requires all workflow gates to have passed. If any gate is still pending or failed, completion will be blocked.
+  - **Dismissing a single agent** — use `team_dismiss` for individual agents.
+
+  ## Examples
+
+  ```
+  # Complete the goal after all work is verified
+  team_complete()
+  ```
+
+  ## Notes / Gotchas
+
+  - **Team lead only** — only team lead sessions can complete goals.
+  - **Team lead stays active** — unlike `team_dismiss`, this does NOT terminate the team lead session. The lead remains active to summarize results and present a report to the user.
+  - **Role agents are dismissed** — all coder, reviewer, and tester agents are terminated and their worktrees removed. Ensure all work is merged first.
+  - **Gate requirement — the workflow gates must all be passed before completion. Ensure all verification has succeeded before calling `team_complete`.
+  - **Irreversible** — the goal transitions to `done` state. All team resources (except the lead) are cleaned up.
+  - **Call last** — this should be the very last action in a goal workflow, after all verification is complete.

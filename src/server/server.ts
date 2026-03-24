@@ -16,7 +16,6 @@ import { exportSkillDefinitions, listSkills } from "./skills/index.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolStore } from "./agent/tool-store.js";
 import { ToolManager } from "./agent/tool-manager.js";
 import { PersonalityStore } from "./agent/personality-store.js";
 import { PersonalityManager } from "./agent/personality-manager.js";
@@ -59,8 +58,7 @@ export function createGateway(config: GatewayConfig) {
 	fs.mkdirSync(bobbitStateDir(), { recursive: true });
 	const roleStore = new RoleStore();
 	const roleManager = new RoleManager(roleStore);
-	const toolStore = new ToolStore();
-	const toolManager = new ToolManager(toolStore);
+	const toolManager = new ToolManager();
 	const gateStore = new GateStore();
 	const workflowStore = new WorkflowStore();
 	const sessionManager = new SessionManager({

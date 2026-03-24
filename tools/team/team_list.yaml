@@ -1,0 +1,62 @@
+name: team_list
+description: "List all agents in the team"
+summary: "List all team agents with role, status, and current task."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Team
+renderer: src/ui/tools/renderers/TeamToolRenderers.ts
+docs: |-
+  ## Purpose
+
+  List all agents currently in the team, showing their role, status, assigned task, and session ID. This is the primary tool for monitoring team progress and deciding next actions (steer, prompt, dismiss, or wait).
+
+  ## Parameters
+
+  None.
+
+  ## Returns
+
+  An array of agent objects, each containing:
+  - `sessionId` — unique session identifier (used for steer/prompt/dismiss)
+  - `role` — the agent's assigned role (coder, reviewer, tester, or custom)
+  - `status` — current session status (see Status Values below)
+  - `task` — the original task description
+  - `name` — the agent's generated display name
+
+  ### Status Values
+
+  The `status` field is one of these exact string values:
+
+  | Status | Meaning |
+  |--------|----------|
+  | `starting` | Agent process is launching but not yet ready. |
+  | `streaming` | Agent is actively processing — generating output or executing tools. Use `team_steer` to redirect. |
+  | `idle` | Agent has finished its current turn and is waiting. Use `team_prompt` to assign more work. |
+  | `terminated` | Agent process has been shut down. Cannot be steered or prompted. |
+
+  ## When to Use
+
+  - **Monitoring progress** — check which agents are still working, which are idle, which are blocked.
+  - **Before steering** — verify an agent's status is `streaming` before sending a steer message.
+  - **Before prompting** — confirm an agent's status is `idle` before sending a follow-up prompt.
+  - **Planning dismissals** — identify which agents have finished and can be dismissed.
+  - **Before spawning** — check how many agents are already active to avoid over-provisioning.
+
+  ## When NOT to Use
+
+  - This tool has no restrictions — use it freely whenever you need team status.
+
+  ## Examples
+
+  ```
+  # Check on all team agents
+  team_list()
+  # Returns: [{ sessionId: "abc123", role: "coder", status: "streaming", task: "Implement...", name: "swift-falcon" }, ...]
+  ```
+
+  ## Notes / Gotchas
+
+  - **Team lead only** — only available to team lead sessions.
+  - **Lightweight** — no parameters, fast response. Call frequently to stay informed about team state.
+  - **Status values** — `streaming` means the agent is actively processing. `idle` means it has finished its current turn and is waiting. `starting` means the process is launching. `terminated` means the agent has been shut down. Check status before choosing between `team_steer` (streaming) and `team_prompt` (idle).

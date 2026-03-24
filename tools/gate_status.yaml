@@ -1,7 +1,0 @@
-name: gate_status
-description: "Get a gate's detail (status, content, signals)"
-summary: "Get a workflow gate's detail including status, content, signal history, and definition."
-provider:
-  type: bobbit-extension
-  extension: goal-tools.ts
-group: Gates
