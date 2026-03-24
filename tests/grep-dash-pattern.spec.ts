@@ -1,61 +1,51 @@
 /**
- * Reproducing test for the grep `--` pattern bug.
+ * Reproducing test for the grep `--` pattern bug (documentation gap).
  *
- * When the grep tool receives a pattern starting with `--` (e.g. `--extension`),
- * ripgrep interprets it as a command-line flag instead of a search pattern,
- * because grep.js pushes the pattern directly into args without a `--`
- * end-of-options separator (grep.js line ~96: `args.push(pattern, searchPath)`).
+ * The grep tool in pi-coding-agent passes patterns directly to ripgrep
+ * without a `--` end-of-options separator (grep.js: `args.push(pattern, searchPath)`).
+ * When the pattern starts with `--` (e.g. `--extension`), rg interprets it as a flag.
  *
- * The bash workaround (`rg -- '--extension' src/`) works correctly.
+ * Since the bug is in a dependency we can't patch, the fix is documentation:
+ * tools.json must warn agents about this and tell them to use bash with `--`.
+ *
+ * This test fails until the documentation fix is applied, then passes.
  */
 import { test, expect } from "@playwright/test";
-import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { accessSync } from "node:fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Resolve rg the same way the grep tool does (via pi-coding-agent's tools-manager)
-let rgPath: string;
-try {
-	// The tool manager caches rg at ~/.pi/agent/bin/rg.exe (Windows) or ~/.pi/agent/bin/rg
-	const home = process.env.HOME || process.env.USERPROFILE || "";
-	const candidates = [
-		resolve(home, ".pi/agent/bin/rg.exe"),
-		resolve(home, ".pi/agent/bin/rg"),
-	];
-	rgPath = candidates.find((p) => {
-		try { accessSync(p); return true; } catch { return false; }
-	}) || "rg";
-} catch {
-	rgPath = "rg";
-}
+const toolsJsonPath = resolve(__dirname, "..", ".bobbit", "config", "tools.json");
 
-const searchPath = resolve(__dirname, "..", "src", "server");
+test("grep tool docs warn about --prefixed patterns", () => {
+	const tools: Array<{ name: string; docs?: string }> = JSON.parse(
+		readFileSync(toolsJsonPath, "utf-8"),
+	);
+	const grep = tools.find((t) => t.name === "grep");
+	expect(grep, "grep entry must exist in tools.json").toBeTruthy();
+	expect(grep!.docs, "grep docs must exist").toBeTruthy();
 
-test("rg fails when --prefixed pattern is passed without -- separator (the bug)", () => {
-	// This reproduces what grep.js does: args.push(pattern, searchPath)
-	// with no -- separator before the pattern.
-	try {
-		execFileSync(rgPath, ["--json", "--line-number", "--color=never", "--hidden", "--extension", searchPath], {
-			encoding: "utf8",
-			timeout: 10_000,
-		});
-		// If it doesn't throw, check stderr
-		expect.unreachable("Expected rg to fail with unrecognized flag");
-	} catch (err: any) {
-		expect(err.stderr || err.message).toContain("unrecognized flag");
-	}
+	const docs = grep!.docs!.toLowerCase();
+	// Must warn about patterns starting with --
+	expect(docs).toContain("--");
+	expect(docs).toMatch(/pattern.*start.*dash|dash.*prefix|--.*pattern.*flag/i);
+	// Must mention the bash workaround with -- separator
+	expect(docs).toMatch(/rg\s+--\s+/);
 });
 
-test("rg succeeds when -- separator is used before --prefixed pattern (the workaround)", () => {
-	const result = execFileSync(rgPath, ["--line-number", "--color=never", "--hidden", "--", "--extension", searchPath], {
-		encoding: "utf8",
-		timeout: 10_000,
-	});
-	// Should find matches — --extension appears in several server files
-	expect(result).toContain("--extension");
-	expect(result.split("\n").filter((l) => l.trim()).length).toBeGreaterThan(0);
+test("bash tool docs warn about rg -- separator for dash-prefixed patterns", () => {
+	const tools: Array<{ name: string; docs?: string }> = JSON.parse(
+		readFileSync(toolsJsonPath, "utf-8"),
+	);
+	const bash = tools.find((t) => t.name === "bash");
+	expect(bash, "bash entry must exist in tools.json").toBeTruthy();
+	expect(bash!.docs, "bash docs must exist").toBeTruthy();
+
+	const docs = bash!.docs!;
+	// Must mention rg/grep gotcha about -- separator
+	expect(docs).toMatch(/rg\s+--\s+/);
+	expect(docs.toLowerCase()).toMatch(/dash|--.*pattern|pattern.*--/);
 });
