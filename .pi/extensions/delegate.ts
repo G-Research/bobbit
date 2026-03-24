@@ -40,19 +40,28 @@ export interface DelegateDetails {
 // ── Gateway API helpers ──
 
 function getGatewayUrl(): string {
-	const urlPath = path.join(os.homedir(), ".pi", "gateway-url");
+	// Prefer BOBBIT_DIR (always set by rpc-bridge), fall back to ~/.pi/
+	const stateDir = process.env.BOBBIT_DIR
+		? path.join(process.env.BOBBIT_DIR, "state")
+		: path.join(os.homedir(), ".pi");
+	const urlPath = path.join(stateDir, "gateway-url");
 	if (fs.existsSync(urlPath)) {
 		return fs.readFileSync(urlPath, "utf-8").trim();
 	}
-	throw new Error("Gateway URL not found at ~/.pi/gateway-url — is the gateway running?");
+	throw new Error(`Gateway URL not found at ${urlPath} — is the gateway running?`);
 }
 
 function getGatewayToken(): string {
-	const tokenPath = path.join(os.homedir(), ".pi", "gateway-token");
+	// Prefer BOBBIT_DIR (always set by rpc-bridge), fall back to ~/.pi/
+	const stateDir = process.env.BOBBIT_DIR
+		? path.join(process.env.BOBBIT_DIR, "state")
+		: path.join(os.homedir(), ".pi");
+	const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
+	const tokenPath = path.join(stateDir, tokenFile);
 	if (fs.existsSync(tokenPath)) {
 		return fs.readFileSync(tokenPath, "utf-8").trim();
 	}
-	throw new Error("Gateway token not found at ~/.pi/gateway-token");
+	throw new Error(`Gateway token not found at ${tokenPath}`);
 }
 
 async function gatewayFetch(endpoint: string, options: RequestInit = {}): Promise<Response> {

@@ -79,9 +79,12 @@ export default function (pi: ExtensionAPI) {
 	let token: string;
 	let baseUrl: string;
 	try {
-		const piDirPath = process.env.BOBBIT_PI_DIR || path.join(homedir(), ".pi");
-		token = fs.readFileSync(path.join(piDirPath, "gateway-token"), "utf-8").trim();
-		baseUrl = fs.readFileSync(path.join(piDirPath, "gateway-url"), "utf-8").trim().replace(/\/+$/, "");
+		const stateDir = process.env.BOBBIT_DIR
+			? path.join(process.env.BOBBIT_DIR, "state")
+			: path.join(homedir(), ".pi");
+		const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
+		token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
+		baseUrl = fs.readFileSync(path.join(stateDir, "gateway-url"), "utf-8").trim().replace(/\/+$/, "");
 	} catch {
 		console.error("[bash-tool] Cannot read gateway credentials");
 		token = "";
