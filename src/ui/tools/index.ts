@@ -21,6 +21,7 @@ import { WebSearchRenderer } from "./renderers/WebSearchRenderer.js";
 import { WriteRenderer } from "./renderers/WriteRenderer.js";
 import { TeamSpawnRenderer, TeamListRenderer, TeamDismissRenderer, TeamCompleteRenderer, TeamSteerRenderer, TeamPromptRenderer, TeamAbortRenderer } from "./renderers/TeamToolRenderers.js";
 import { TaskListRenderer, TaskCreateRenderer, TaskUpdateRenderer } from "./renderers/TaskToolRenderers.js";
+import { GateListRenderer, GateSignalRenderer, GateStatusRenderer } from "./renderers/GateToolRenderers.js";
 import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
 import { PersonalitiesListRenderer, PersonalitiesCreateRenderer } from "./renderers/PersonalityToolRenderers.js";
 import type { ToolRenderResult } from "./types.js";
@@ -57,6 +58,9 @@ registerToolRenderer("task_update", new TaskUpdateRenderer());
 registerToolRenderer("bash_bg", new BgProcessRenderer());
 registerToolRenderer("personalities_list", new PersonalitiesListRenderer());
 registerToolRenderer("personalities_create", new PersonalitiesCreateRenderer());
+registerToolRenderer("gate_list", new GateListRenderer());
+registerToolRenderer("gate_signal", new GateSignalRenderer());
+registerToolRenderer("gate_status", new GateStatusRenderer());
 
 const defaultRenderer = new DefaultRenderer();
 
