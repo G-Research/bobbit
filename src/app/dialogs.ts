@@ -20,7 +20,7 @@ import { gatewayFetch, createGoal, updateGoal } from "./api.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
-import { clearSessionModel } from "./routing.js";
+import { clearSessionModel, setHashRoute } from "./routing.js";
 import { fetchPersonalities, type PersonalityData } from "./api.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
@@ -863,12 +863,25 @@ export function showGoalEditDialogFromProposal(proposal: { title: string; spec: 
 
 		try {
 			const sessionId = activeSessionId();
-			await createGoal(trimmedTitle, cwdValue.trim(), { spec: specValue, team: teamValue, worktree: worktreeValue, workflowId: workflowId || undefined });
+			const goal = await createGoal(trimmedTitle, cwdValue.trim(), { spec: specValue, team: teamValue, worktree: worktreeValue, workflowId: workflowId || undefined });
 			state.activeGoalProposal = null;
 			// Only terminate goal-assistant sessions — regular sessions that suggested a goal should keep running.
 			if (sessionId && state.assistantType === "goal") {
-				const { terminateSession } = await import("./session-manager.js");
-				await terminateSession(sessionId);
+				// Silent cleanup — no confirmation dialog
+				if (state.remoteAgent) {
+					state.remoteAgent.disconnect();
+					state.remoteAgent = null;
+					state.connectionStatus = "disconnected";
+				}
+				state.assistantType = null;
+				await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+				clearSessionModel(sessionId);
+				const { deleteGoalDraft } = await import("./session-manager.js");
+				deleteGoalDraft(sessionId);
+			}
+			if (goal) {
+				setHashRoute("goal-dashboard", goal.id);
+				renderApp();
 			}
 		} finally {
 			saving = false;

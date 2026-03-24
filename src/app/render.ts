@@ -217,15 +217,19 @@ function goalPreviewPanel() {
 			deleteGoalDraft(sessionId);
 		}
 		localStorage.removeItem("gateway.sessionId");
-		setHashRoute("landing");
 		state.appView = "authenticated";
 
-		await createGoal(trimmedTitle, state.previewCwd.trim(), { spec: state.previewSpec, team: teamMode, worktree, workflowId });
+		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), { spec: state.previewSpec, team: teamMode, worktree, workflowId });
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
 		await refreshSessions();
+		if (goal) {
+			setHashRoute("goal-dashboard", goal.id);
+		} else {
+			setHashRoute("landing");
+		}
 		renderApp();
 	};
 
