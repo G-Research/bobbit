@@ -62,11 +62,26 @@ export default defineConfig({
 				changeOrigin: true,
 				// Trust self-signed cert when proxying to the gateway
 				secure: false,
+				on: {
+					error(err, _req, res) {
+						console.warn(`[api proxy] ${err.message} — gateway likely restarting`);
+						if (res && "writeHead" in res && !res.headersSent) {
+							(res as import("node:http").ServerResponse).writeHead(502, { "Content-Type": "text/plain" });
+							(res as import("node:http").ServerResponse).end("Gateway restarting");
+						}
+					},
+				},
 			},
 			"/ws": {
 				target: GATEWAY_WS,
 				ws: true,
 				secure: false,
+				// Gracefully handle backend restarts instead of crashing Vite
+				on: {
+					error(err) {
+						console.warn(`[ws proxy] ${err.message} — gateway likely restarting`);
+					},
+				},
 			},
 		},
 	},
