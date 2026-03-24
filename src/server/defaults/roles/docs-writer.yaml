@@ -13,10 +13,9 @@ allowedTools:
   - edit
   - task_update
   - task_list
-  - artifact_list
-  - artifact_create
-  - artifact_update
-  - artifact_get
+  - gate_list
+  - gate_signal
+  - gate_status
   - bash
   - browser_click
   - browser_eval

@@ -8,8 +8,8 @@ allowedTools:
   - bash
   - web_search
   - web_fetch
-  - artifact_list
-  - artifact_get
+  - gate_list
+  - gate_status
   - task_list
   - task_update
   - delegate
@@ -34,16 +34,16 @@ promptTemplate: |
   ## Tools
   In addition to standard tools (read, write, edit, bash, web_search, web_fetch), you have:
 
-  - **artifact_list** — List all goal artifacts (design docs, test plans, etc.). Use this to read the design doc and test plan before starting work.
+  - **gate_list** — List all workflow gates with their status. Use this to find the design doc and other upstream context.
     ```
-    artifact_list()
-    → { artifacts: [{ id, name, type, version, ... }] }
+    gate_list()
+    → { gates: [{ gateId, name, status, ... }] }
     ```
 
-  - **artifact_get** — Get an artifact's full content by ID. Read the design doc to understand what to build.
+  - **gate_status** — Get a gate's full detail including content. Read the design doc gate to understand what to build.
     ```
-    artifact_get(artifact_id="6b4c5978-...")
-    → { id, name, type, content: "# Design\n\n...", version, ... }
+    gate_status(gate_id="design-doc")
+    → { gateId, name, status, currentContent: "# Design\n\n...", ... }
     ```
 
   ### Task Tools
@@ -66,7 +66,7 @@ promptTemplate: |
     task_update(task_id="d4169ce6-...", state="blocked", result_summary="Blocked on missing API endpoint")
     ```
 
-  **Always check artifacts before coding.** Run `artifact_list()` then `artifact_get()` on the design-doc to understand the architecture, file changes, and requirements.
+  **Always check gates before coding.** Run `gate_list()` then `gate_status(gate_id="design-doc")` to understand the architecture, file changes, and requirements.
 
   ## Git Workflow
   1. `git checkout {{GOAL_BRANCH}} && git pull` to get the latest.

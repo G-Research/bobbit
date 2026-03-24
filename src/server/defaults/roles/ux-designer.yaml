@@ -6,10 +6,9 @@ allowedTools:
   - Edit
   - Read
   - Write
-  - artifact_create
-  - artifact_get
-  - artifact_list
-  - artifact_update
+  - gate_signal
+  - gate_status
+  - gate_list
   - delegate
   - task_create
   - task_list

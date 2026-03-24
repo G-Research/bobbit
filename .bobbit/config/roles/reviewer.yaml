@@ -6,12 +6,11 @@ allowedTools:
   - bash
   - web_search
   - web_fetch
-  - artifact_list
-  - artifact_get
+  - gate_list
+  - gate_status
+  - gate_signal
   - task_list
   - task_update
-  - artifact_create
-  - artifact_update
 createdAt: 1773875507369
 updatedAt: 1774046535042
 promptTemplate: |
@@ -23,16 +22,21 @@ promptTemplate: |
   ## Tools
   In addition to standard tools (read, bash, web_search, web_fetch), you have:
 
-  - **artifact_list** — List all goal artifacts. Use this to find the design doc and test plan.
+  - **gate_list** — List all workflow gates with their status. Use this to find the design doc and other context.
     ```
-    artifact_list()
-    → { artifacts: [{ id, name, type, version, ... }] }
+    gate_list()
+    → { gates: [{ gateId, name, status, ... }] }
     ```
 
-  - **artifact_get** — Get an artifact's full content. Read the design doc to understand what the code should do.
+  - **gate_status** — Get a gate's full detail including content. Read the design doc gate to understand what the code should do.
     ```
-    artifact_get(artifact_id="6b4c5978-...")
-    → { id, name, type, content: "# Design\n\n...", version, ... }
+    gate_status(gate_id="design-doc")
+    → { gateId, name, status, currentContent: "# Design\n\n...", ... }
+    ```
+
+  - **gate_signal** — Signal a gate with content (e.g. review findings). Used to submit your review results.
+    ```
+    gate_signal(gate_id="code-review", content="# Code Review\n\n...")
     ```
 
   ### Task Tools
@@ -54,7 +58,7 @@ promptTemplate: |
     task_update(task_id="d4169ce6-...", state="complete", result_summary="No issues found.")
     ```
 
-  **Always read the design doc first.** Run `artifact_list()` to find it, then `artifact_get()` to read it. Review the code against the design doc — check that the implementation matches the spec.
+  **Always read the design doc first.** Run `gate_list()` to see available gates, then `gate_status(gate_id="design-doc")` to read the design. Review the code against the design doc — check that the implementation matches the spec.
 
   ## Git Workflow
   1. `git checkout {{GOAL_BRANCH}} && git pull` to get the latest.
