@@ -340,7 +340,7 @@ function renderGoalBadge(goalId: string) {
 	// PR status takes priority over gate counts
 	const pr = state.prStatusCache.get(goalId);
 	if (pr) {
-		const color = pr.state === "OPEN" ? "#22c55e" : pr.state === "MERGED" ? "#a855f7" : "#ef4444";
+		const color = pr.state === "OPEN" ? "#6bc485" : pr.state === "MERGED" ? "#9f8abf" : "#c47070";
 		const label = pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`;
 		const icon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
 		if (pr.url) {
@@ -370,7 +370,7 @@ function renderGoalBadge(goalId: string) {
 export function renderGoalGroup(goal: Goal) {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
-	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
 	const isCreatingHere = state.creatingSessionForGoalId === goal.id;
 	const isTeamGoal = !!(goal as any).team;
 	const hasActiveTeam = isTeamGoal && goalSessions.some((s) => s.role === "team-lead" && s.status !== "terminated");

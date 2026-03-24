@@ -302,7 +302,7 @@ export function renderStaffSidebarSection() {
 
 export function renderSidebar() {
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.delegateOf && !staffSessionIds.has(s.id));
+	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
 	const stateOrder: Record<GoalState, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
 	const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
 
@@ -371,7 +371,6 @@ export function renderSidebar() {
 								${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 								${renderGoalGroup(goal)}
 							`)}
-							${renderStaffSidebarSection()}
 							${sortedGoals.length > 0 ? html`
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5">
@@ -432,6 +431,7 @@ export function renderSidebar() {
 										: ungroupedSessions.map(renderSessionRow)}
 								</div>
 							`}
+							${renderStaffSidebarSection()}
 						`
 				}
 			</div>
@@ -457,7 +457,7 @@ export function renderSidebar() {
 function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewaySession[]) {
 	const allSessions = state.gatewaySessions;
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-	const ungrouped = allSessions.filter((s) => !s.goalId && !s.delegateOf && !staffSessionIds.has(s.id));
+	const ungrouped = allSessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
 
 	const renderCollapsedSession = (s: GatewaySession) => {
 		const active = activeSessionId() === s.id;
@@ -506,7 +506,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge" style="background: var(--sidebar);">
 			<div class="flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
 				${sortedGoals.map((goal, i) => {
-					const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+					const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
 					const expanded = expandedGoals.has(goal.id);
 					return html`
 						${i > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
@@ -521,6 +521,18 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 						${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
 					`;
 				})}
+				${sortedGoals.length > 0 ? html`
+					<div class="w-7 border-t border-border/50 my-1.5"></div>
+					<button
+						class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+						title="Ungrouped sessions"
+						@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}
+					>
+						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
+						<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
+					</button>
+					${ungroupedExpanded ? ungrouped.map(renderCollapsedSession) : ""}
+				` : ungrouped.map(renderCollapsedSession)}
 				<div class="w-7 border-t border-border/50 my-1.5"></div>
 				${state.staffList.filter(s => s.state !== "retired").map((agent) => {
 					const session = agent.currentSessionId ? state.gatewaySessions.find(s => s.id === agent.currentSessionId) : undefined;
@@ -540,18 +552,6 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 						</button>
 					`;
 				})}
-				${sortedGoals.length > 0 ? html`
-					<div class="w-7 border-t border-border/50 my-1.5"></div>
-					<button
-						class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
-						title="Ungrouped sessions"
-						@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}
-					>
-						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
-						<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
-					</button>
-					${ungroupedExpanded ? ungrouped.map(renderCollapsedSession) : ""}
-				` : ungrouped.map(renderCollapsedSession)}
 			</div>
 			<button
 				class="p-2 mb-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"

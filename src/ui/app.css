@@ -14,30 +14,32 @@
    achromatic mini-lit theme feels cohesive with Bobbit's green.
    User-message orange shifts toward amber/gold to complement green. */
 
-/* Light mode — subtle warm-green tint */
+/* Light mode — warm parchment with green undertone */
 :root {
-	--background: oklch(0.99 0.004 140);
-	--foreground: oklch(0.16 0.01 140);
-	--card: oklch(0.99 0.004 140);
-	--card-foreground: oklch(0.16 0.01 140);
-	--secondary: oklch(0.96 0.008 140);
-	--secondary-foreground: oklch(0.22 0.01 140);
-	--muted: oklch(0.96 0.008 140);
-	--muted-foreground: oklch(0.50 0.01 140);
-	--accent: oklch(0.96 0.012 140);
-	--accent-foreground: oklch(0.42 0.08 145);
-	--border: oklch(0.91 0.008 140);
-	--input: oklch(0.91 0.008 140);
-	--ring: oklch(0.55 0.06 145);
-	--primary: oklch(0.42 0.08 145);
-	--primary-foreground: oklch(0.98 0.005 140);
-	--sidebar: oklch(0.975 0.006 140);
-	--sidebar-foreground: oklch(0.16 0.01 140);
-	--sidebar-primary: oklch(0.42 0.08 145);
-	--sidebar-primary-foreground: oklch(0.98 0.005 140);
-	--sidebar-accent: oklch(0.96 0.01 140);
-	--sidebar-accent-foreground: oklch(0.22 0.01 140);
-	--sidebar-border: oklch(0.91 0.008 140);
+	--background: oklch(0.935 0.012 148);
+	--foreground: oklch(0.18 0.014 142);
+	--card: oklch(0.945 0.010 146);
+	--card-foreground: oklch(0.18 0.014 142);
+	--popover: oklch(0.95 0.009 146);
+	--popover-foreground: oklch(0.18 0.014 142);
+	--secondary: oklch(0.905 0.015 146);
+	--secondary-foreground: oklch(0.22 0.014 142);
+	--muted: oklch(0.905 0.015 146);
+	--muted-foreground: oklch(0.44 0.014 142);
+	--accent: oklch(0.91 0.018 146);
+	--accent-foreground: oklch(0.36 0.08 148);
+	--border: oklch(0.86 0.014 146);
+	--input: oklch(0.88 0.014 146);
+	--ring: oklch(0.48 0.06 148);
+	--primary: oklch(0.38 0.08 148);
+	--primary-foreground: oklch(0.96 0.008 146);
+	--sidebar: oklch(0.915 0.014 148);
+	--sidebar-foreground: oklch(0.18 0.014 142);
+	--sidebar-primary: oklch(0.38 0.08 148);
+	--sidebar-primary-foreground: oklch(0.96 0.008 146);
+	--sidebar-accent: oklch(0.895 0.016 146);
+	--sidebar-accent-foreground: oklch(0.22 0.014 142);
+	--sidebar-border: oklch(0.86 0.014 146);
 }
 
 /* Dark mode — warm charcoal with green undertone */

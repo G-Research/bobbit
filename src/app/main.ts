@@ -343,6 +343,54 @@ async function initApp() {
 			renderApp();
 		}
 
+		// Ctrl+Up / Cmd+Up — Previous session
+		// Ctrl+Down / Cmd+Down — Next session
+		if (mod && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+			// Build navigable list: Goals -> Sessions -> Staff
+			// Within each section, oldest session first (by createdAt)
+			const allSessions = state.gatewaySessions;
+			const nonDelegate = allSessions.filter((s) => !s.delegateOf);
+			const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
+			const byAge = (a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt;
+			const stateOrder: Record<string, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
+			const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
+
+			const ordered: string[] = [];
+			// 1. Goal sessions (goals sorted by state, sessions by age within each)
+			for (const goal of sortedGoals) {
+				const goalSessions = nonDelegate
+					.filter((s) => s.goalId === goal.id || s.teamGoalId === goal.id)
+					.sort(byAge);
+				for (const s of goalSessions) ordered.push(s.id);
+			}
+			// 2. Ungrouped sessions (by age)
+			const ungrouped = nonDelegate
+				.filter((s) => !s.goalId && !s.teamGoalId && !staffSessionIds.has(s.id))
+				.sort(byAge);
+			for (const s of ungrouped) ordered.push(s.id);
+			// 3. Staff sessions (by age)
+			const staffSessions = nonDelegate
+				.filter((s) => staffSessionIds.has(s.id))
+				.sort(byAge);
+			for (const s of staffSessions) ordered.push(s.id);
+
+			if (ordered.length > 1) {
+				const currentId = activeSessionId();
+				const currentIndex = currentId ? ordered.indexOf(currentId) : -1;
+				let nextIndex: number;
+				if (e.key === "ArrowUp") {
+					nextIndex = currentIndex <= 0 ? ordered.length - 1 : currentIndex - 1;
+				} else {
+					nextIndex = currentIndex >= ordered.length - 1 ? 0 : currentIndex + 1;
+				}
+				const nextId = ordered[nextIndex];
+				if (nextId && nextId !== currentId) {
+					e.preventDefault();
+					connectToSession(nextId, true);
+				}
+			}
+		}
+
 		// Ctrl+] / Cmd+] — Toggle preview panel
 		if (mod && e.key === "]") {
 			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null);

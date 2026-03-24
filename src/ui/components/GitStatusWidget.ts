@@ -57,12 +57,12 @@ export class GitStatusWidget extends LitElement {
 
     private _statusColor(status: string): string {
         switch (status) {
-            case 'M': return 'text-amber-400';
-            case 'A': return 'text-green-400';
-            case 'D': return 'text-red-400';
+            case 'M': return 'text-amber-600 dark:text-amber-400';
+            case 'A': return 'text-green-600 dark:text-green-400';
+            case 'D': return 'text-red-600 dark:text-red-400';
             case '?': return 'text-muted-foreground';
-            case 'R': return 'text-blue-400';
-            case 'U': return 'text-red-500';
+            case 'R': return 'text-blue-600 dark:text-blue-400';
+            case 'U': return 'text-red-700 dark:text-red-500';
             default: return 'text-muted-foreground';
         }
     }
@@ -86,10 +86,10 @@ export class GitStatusWidget extends LitElement {
             return nothing;
         }
         if (this.unpushed) {
-            return html`<span class="text-amber-400 shrink-0">↑</span>`;
+            return html`<span class="text-amber-600 dark:text-amber-400 shrink-0">↑</span>`;
         }
         if (!this.isOnPrimary && !this.mergedIntoPrimary) {
-            return html`<span class="text-blue-400 shrink-0">↗</span>`;
+            return html`<span class="text-blue-600 dark:text-blue-400 shrink-0">↗</span>`;
         }
         return nothing;
     }
@@ -98,28 +98,28 @@ export class GitStatusWidget extends LitElement {
         if (this.isOnPrimary) {
             // On primary branch — show ahead/behind vs remote
             if (this.ahead > 0 && this.behind > 0) {
-                return html`<span class="text-amber-400">${this.ahead} ahead, ${this.behind} behind remote</span>`;
+                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} ahead, ${this.behind} behind remote</span>`;
             }
             if (this.ahead > 0) {
-                return html`<span class="text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span>`;
+                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span>`;
             }
             if (this.behind > 0) {
-                return html`<span class="text-amber-400">${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span>`;
+                return html`<span class="text-amber-600 dark:text-amber-400">${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span>`;
             }
-            return html`<span class="text-green-400">up to date with remote</span>`;
+            return html`<span class="text-green-600 dark:text-green-400">up to date with remote</span>`;
         }
 
         // On a feature branch
         if (this.mergedIntoPrimary) {
-            return html`<span class="text-green-400">merged into ${this.primaryBranch}</span>`;
+            return html`<span class="text-green-600 dark:text-green-400">merged into ${this.primaryBranch}</span>`;
         }
         if (!this.hasUpstream) {
-            return html`<span class="text-amber-400">local only — not pushed</span>`;
+            return html`<span class="text-amber-600 dark:text-amber-400">local only — not pushed</span>`;
         }
         if (this.ahead > 0) {
-            return html`<span class="text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span>`;
+            return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span>`;
         }
-        return html`<span class="text-green-400">pushed to remote branch</span>`;
+        return html`<span class="text-green-600 dark:text-green-400">pushed to remote branch</span>`;
     }
 
     private _renderPrimaryStatus() {
@@ -131,17 +131,17 @@ export class GitStatusWidget extends LitElement {
         }
         if (this.mergedIntoPrimary && this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                ${primary} is <span class="text-blue-400">${this.behindPrimary} commit${this.behindPrimary > 1 ? 's' : ''} ahead</span> of this branch
+                ${primary} is <span class="text-blue-600 dark:text-blue-400">${this.behindPrimary} commit${this.behindPrimary > 1 ? 's' : ''} ahead</span> of this branch
             </div>`;
         }
         if (this.aheadOfPrimary > 0 && this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                vs ${primary}: <span class="text-blue-400">${this.aheadOfPrimary} ahead</span>, <span class="text-amber-400">${this.behindPrimary} behind</span>
+                vs ${primary}: <span class="text-blue-600 dark:text-blue-400">${this.aheadOfPrimary} ahead</span>, <span class="text-amber-600 dark:text-amber-400">${this.behindPrimary} behind</span>
             </div>`;
         }
         if (this.aheadOfPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                vs ${primary}: <span class="text-blue-400">${this.aheadOfPrimary} commit${this.aheadOfPrimary > 1 ? 's' : ''} not yet merged</span>
+                vs ${primary}: <span class="text-blue-600 dark:text-blue-400">${this.aheadOfPrimary} commit${this.aheadOfPrimary > 1 ? 's' : ''} not yet merged</span>
             </div>`;
         }
         return nothing;
@@ -150,9 +150,9 @@ export class GitStatusWidget extends LitElement {
     /** Small PR status dot for the pill */
     private _prPillIcon() {
         if (!this.prState) return nothing;
-        const colorClass = this.prState === 'OPEN' ? 'text-green-400'
-            : this.prState === 'MERGED' ? 'text-purple-400'
-            : 'text-red-400';
+        const colorClass = this.prState === 'OPEN' ? 'text-green-600/70 dark:text-green-400/70'
+            : this.prState === 'MERGED' ? 'text-purple-600/70 dark:text-purple-400/70'
+            : 'text-red-600/70 dark:text-red-400/70';
         const dot = html`<span class="${colorClass} shrink-0" style="font-size:10px" title="PR ${this.prState.toLowerCase()}">⦿</span>`;
         if (this.prUrl) {
             return html`<a href=${this.prUrl} target="_blank" rel="noopener" @click=${(e: Event) => e.stopPropagation()} style="display:inline-flex;align-items:center">${dot}</a>`;
@@ -164,12 +164,12 @@ export class GitStatusWidget extends LitElement {
     private _renderPrSection() {
         if (!this.prState) return nothing;
 
-        const badgeColor = this.prState === 'OPEN' ? 'oklch(0.72 0.19 145)'
-            : this.prState === 'MERGED' ? 'oklch(0.65 0.20 300)'
-            : 'oklch(0.65 0.22 25)';
-        const badgeBg = this.prState === 'OPEN' ? 'oklch(0.72 0.19 145 / 0.15)'
-            : this.prState === 'MERGED' ? 'oklch(0.65 0.20 300 / 0.15)'
-            : 'oklch(0.65 0.22 25 / 0.15)';
+        const badgeColor = this.prState === 'OPEN' ? 'oklch(0.68 0.12 145)'
+            : this.prState === 'MERGED' ? 'oklch(0.62 0.13 300)'
+            : 'oklch(0.62 0.14 25)';
+        const badgeBg = this.prState === 'OPEN' ? 'oklch(0.68 0.12 145 / 0.12)'
+            : this.prState === 'MERGED' ? 'oklch(0.62 0.13 300 / 0.12)'
+            : 'oklch(0.62 0.14 25 / 0.12)';
 
         return html`
             <div class="border-t border-border pt-2 mt-2">
@@ -177,7 +177,7 @@ export class GitStatusWidget extends LitElement {
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                     ${this.prUrl ? html`
                         <a href=${this.prUrl} target="_blank" rel="noopener"
-                           class="text-blue-400 hover:underline" style="font-size:12px">
+                           class="text-blue-600 dark:text-blue-400 hover:underline" style="font-size:12px">
                             #${this.prNumber} ${this.prTitle}
                         </a>
                     ` : html`<span style="font-size:12px">#${this.prNumber} ${this.prTitle}</span>`}
@@ -198,7 +198,7 @@ export class GitStatusWidget extends LitElement {
                             <option value="rebase">Rebase</option>
                         </select>
                         <button
-                            style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.72 0.19 145 / 0.15);color:oklch(0.72 0.19 145);cursor:pointer;font-weight:500"
+                            style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
                             ?disabled=${this.merging || !this.prMergeable}
                             @click=${this._handleMerge}
                         >
@@ -231,7 +231,7 @@ export class GitStatusWidget extends LitElement {
     render() {
         if (!this.branch && !this.loading) return nothing;
 
-        const summaryColor = this.clean ? 'text-green-400' : 'text-amber-400';
+        const summaryColor = this.clean ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400';
 
         return html`
             <button
@@ -298,7 +298,7 @@ export class GitStatusWidget extends LitElement {
                                     </div>
                                 `
                               : html`
-                                    <div class="text-green-400 border-t border-border pt-2 mt-2">
+                                    <div class="text-green-600 dark:text-green-400 border-t border-border pt-2 mt-2">
                                         Working tree clean
                                     </div>
                                 `}

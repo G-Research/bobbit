@@ -17,7 +17,7 @@ import {
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions } from "./api.js";
 import { clearSessionModel } from "./routing.js";
-import { backToSessions, disconnectGateway, createAndConnectSession, connectToSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
+import { backToSessions, createAndConnectSession, connectToSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection } from "./sidebar.js";
 
@@ -49,7 +49,7 @@ import { renderStaffPage } from "./staff-page.js";
 
 function renderMobileLanding() {
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.delegateOf && !staffSessionIds.has(s.id));
+	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
 	const stateOrder: Record<GoalState, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
 	const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
 	const isUngroupedExpanded = ungroupedExpanded;
@@ -113,7 +113,6 @@ function renderMobileLanding() {
 									${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 									${renderGoalGroup(goal)}
 								`)}
-								${renderStaffSidebarSection()}
 								${sortedGoals.length > 0 ? html`
 									<div class="border-t border-border/30 my-1 mx-2"></div>
 									<div class="flex flex-col gap-0.5">
@@ -163,7 +162,7 @@ function renderMobileLanding() {
 										${ungroupedSessions.map(renderSessionRow)}
 									</div>
 								` : ""}
-
+								${renderStaffSidebarSection()}
 
 							`}
 			</div>
@@ -1612,15 +1611,22 @@ export function doRenderApp(): void {
 
 			const sessionTitle = state.remoteAgent.title || "New session";
 			const sid = activeSessionId();
+			const staffAgent = sid ? state.staffList.find(s => s.currentSessionId === sid) : undefined;
 			const editDeleteBtns = sid ? html`
 				<div class="flex items-center shrink-0">
 					${Button({
 						variant: "ghost",
 						size: "sm",
-						onClick: () => showRenameDialog(sid, sessionTitle),
+						onClick: () => {
+							if (staffAgent) {
+								window.location.hash = `#/staff/${staffAgent.id}`;
+							} else {
+								showRenameDialog(sid, sessionTitle);
+							}
+						},
 						children: icon(Pencil, "xs"),
 						className: "h-7 w-7 text-muted-foreground",
-						title: "Rename session",
+						title: staffAgent ? "Edit staff agent" : "Rename session",
 					})}
 					${Button({
 						variant: "ghost",
@@ -1673,25 +1679,7 @@ export function doRenderApp(): void {
 
 	const headerRight = () => {
 		if (desktop) {
-			return html`
-				<div class="flex items-center gap-1 px-2">
-					${Button({
-						variant: "ghost",
-						size: "sm",
-						children: html`${icon(Unplug, "sm")}`,
-						onClick: disconnectGateway,
-						title: "Disconnect from gateway",
-					})}
-					${Button({
-						variant: "ghost",
-						size: "sm",
-						children: html`${icon(QrCode, "sm")}`,
-						onClick: showQrCodeDialog,
-						title: "Show QR code",
-					})}
-					<theme-toggle></theme-toggle>
-				</div>
-			`;
+			return html``;
 		}
 		if (connected && state.remoteAgent) {
 			return html``;
@@ -1704,13 +1692,6 @@ export function doRenderApp(): void {
 					children: html`${icon(QrCode, "sm")}`,
 					onClick: showQrCodeDialog,
 					title: "Show QR code",
-				})}
-				${Button({
-					variant: "ghost",
-					size: "sm",
-					children: html`${icon(Unplug, "sm")}`,
-					onClick: disconnectGateway,
-					title: "Disconnect from gateway",
 				})}
 				<theme-toggle></theme-toggle>
 			</div>
@@ -1969,7 +1950,17 @@ export function doRenderApp(): void {
 							${bobbitIcon}
 							<span class="text-base font-semibold text-foreground">Bobbit</span>
 						</div>
-
+						<div class="flex items-center gap-0.5">
+							${Button({
+								variant: "ghost",
+								size: "sm",
+								children: html`${icon(QrCode, "xs")}`,
+								onClick: showQrCodeDialog,
+								title: "Show QR code",
+								className: "h-7 w-7 text-muted-foreground",
+							})}
+							<theme-toggle></theme-toggle>
+						</div>
 					</div>
 					`}
 					<div class="flex-1 flex items-center justify-between min-w-0">
