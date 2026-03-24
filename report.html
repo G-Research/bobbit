@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bobbit Git History — Feature Analysis</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0f1a;color:#e2e8f0;font-family:'Inter',system-ui,-apple-system,sans-serif;padding:28px;max-width:1440px;margin:0 auto;line-height:1.5}
+h1{font-size:32px;font-weight:800;background:linear-gradient(135deg,#38bdf8 0%,#818cf8 40%,#c084fc 70%,#f472b6 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-0.5px}
+.sub{color:#475569;font-size:13px;margin-bottom:28px;letter-spacing:0.2px}
+.sg{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:28px}
+.sc2{background:linear-gradient(135deg,#1e293b,#1a2332);border-radius:14px;padding:16px;text-align:center;border:1px solid #1e3a5f30}
+.sc2 .v{font-size:30px;font-weight:800;background:linear-gradient(135deg,#38bdf8,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sc2 .l{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:1px;margin-top:4px;font-weight:600}
+.cr{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.cc{background:#111827;border-radius:14px;padding:20px;border:1px solid #1e3a5f30}
+.cc.full{grid-column:1/-1}
+.ct{font-size:12px;font-weight:700;color:#64748b;margin-bottom:14px;text-transform:uppercase;letter-spacing:1px}
+h2{font-size:22px;font-weight:700;margin:36px 0 12px;color:#f1f5f9;letter-spacing:-0.3px}
+.fc{background:#111827;border-radius:10px;margin-bottom:6px;overflow:hidden;border:1px solid #1e3a5f20;transition:all .15s}
+.fc:hover{border-color:#334155;background:#131d2e}
+.fh{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;cursor:pointer;gap:10px}
+.fn{font-weight:600;font-size:13px;white-space:nowrap}
+.fb{font-size:10px;color:#64748b;background:#0a0f1a;padding:2px 8px;border-radius:10px;white-space:nowrap;font-weight:500}
+.fb2{display:none;padding:0 14px 14px;border-top:1px solid #1e293b}
+.fc.ex .fb2{display:block;padding-top:12px}
+.fc.ex .ch{transform:rotate(180deg)}
+.ch{color:#475569;transition:transform .15s;font-size:11px}
+.sc{display:flex;align-items:center;gap:4px}
+.sl{font-size:9px;color:#475569;width:58px;text-align:right;font-weight:600;text-transform:uppercase;letter-spacing:0.5px}
+.sb{width:50px;height:5px;background:#0a0f1a;border-radius:3px;overflow:hidden}
+.sf{height:100%;border-radius:3px}
+.sn{font-size:10px;font-weight:700;width:14px;color:#94a3b8}
+.ms{background:#0a0f1a;border-radius:8px;padding:8px 10px;text-align:center}
+.ml{font-size:9px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;font-weight:600}
+.mv{font-size:15px;font-weight:700;color:#cbd5e1;margin-top:2px}
+canvas{max-height:320px}
+@media(max-width:900px){.sg{grid-template-columns:repeat(3,1fr)}.cr{grid-template-columns:1fr}}
+.quadrant-label{position:absolute;font-size:10px;color:#334155;font-weight:600;pointer-events:none}
+</style>
+</head>
+<body>
+<h1>Bobbit — Git History Feature Analysis</h1>
+<div class="sub">917 commits across 13 active days · Feb 17 – Mar 24, 2026 · 40 feature areas identified</div>
+
+<div class="sg">
+  <div class="sc2"><div class="v">917</div><div class="l">Commits</div></div>
+  <div class="sc2"><div class="v">173.5k</div><div class="l">Lines Added</div></div>
+  <div class="sc2"><div class="v">77.7k</div><div class="l">Lines Removed</div></div>
+  <div class="sc2"><div class="v">95.8k</div><div class="l">Net Growth</div></div>
+  <div class="sc2"><div class="v">70.5</div><div class="l">Commits / Day</div></div>
+  <div class="sc2"><div class="v">40</div><div class="l">Feature Areas</div></div>
+</div>
+
+<div class="cr">
+  <div class="cc"><div class="ct">Daily Velocity</div><canvas id="c1"></canvas></div>
+  <div class="cc"><div class="ct">Complexity vs Value</div><canvas id="c2"></canvas></div>
+</div>
+<div class="cr">
+  <div class="cc full"><div class="ct">Feature Commit Distribution</div><canvas id="c3" style="max-height:500px;"></canvas></div>
+</div>
+<div class="cr">
+  <div class="cc"><div class="ct">Cumulative Code Growth</div><canvas id="c4"></canvas></div>
+  <div class="cc"><div class="ct">Feature Activity Over Time (Top 12)</div><canvas id="c5"></canvas></div>
+</div>
+
+<h2>Feature Breakdown</h2>
+<div style="margin-bottom:10px;font-size:12px;color:#475569;">Click any row to expand · Sorted by commit count</div>
+
+  <div class="fc" style="border-left:3px solid #f97316;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#f97316;flex-shrink:0;"></span>
+        <span class="fn">Other / Misc</span>
+        <span class="fb">166 commits</span>
+        <span class="fb">+21,520/-17,115</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:100%;background:#ef4444;"></span></span><span class="sn">10</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:50%;background:#3b82f6;"></span></span><span class="sn">5</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">580</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+4,405</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">36 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-02-17 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-02-17</span> Add Hono API server, React frontend, and Vitest tests <span style="color:#475569;">(+5966/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-16</span> Refactor main.ts into focused modules, fix scroll test reliability <span style="color:#475569;">(+2987/-2899)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> chore: move mockups, old test dirs, and .pi state to ARCHIVE/ <span style="color:#475569;">(+14/-3724)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> chore: move mockups, old test dirs, and .pi state to ARCHIVE/ <span style="color:#475569;">(+14/-3724)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-23</span> feat: update tests, docs, and cleanup for .bobbit restructure <span style="color:#475569;">(+282/-1553)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #ec4899;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#ec4899;flex-shrink:0;"></span>
+        <span class="fn">Workflow & Gate Verification</span>
+        <span class="fb">94 commits</span>
+        <span class="fb">+54,006/-24,812</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:100%;background:#ef4444;"></span></span><span class="sn">10</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:100%;background:#22c55e;"></span></span><span class="sn">10</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">638</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+29,194</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Replace product definition tool with remote coding agent gateway <span style="color:#475569;">(+22679/-6556)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: workflows & artifact verification system <span style="color:#475569;">(+2826/-3484)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-15</span> Workflow DAG: fix parsing mismatches, add Playwright component tests <span style="color:#475569;">(+4768/-512)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-15</span> Add goals system, workflow orchestration, and UI improvements <span style="color:#475569;">(+3735/-205)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-16</span> Fix OAuth transient error handling, extract synthesis logic from workflow engine <span style="color:#475569;">(+3071/-661)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #8b5cf6;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#8b5cf6;flex-shrink:0;"></span>
+        <span class="fn">Accessories & Pixel Art</span>
+        <span class="fb">65 commits</span>
+        <span class="fb">+3,857/-2,259</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:100%;background:#ef4444;"></span></span><span class="sn">10</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">167</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+1,598</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">8 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-17 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Add coder bandana accessory (sidebar + chat area) <span style="color:#475569;">(+547/-300)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-22</span> feat: add interactive HTML mockup for wizard hat and magic wand accessories <span style="color:#475569;">(+475/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Re-apply rigid accessory animations + magnifier shift left 1px <span style="color:#475569;">(+367/-70)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Revert rigid accessory animations — lost animation flair <span style="color:#475569;">(+70/-367)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Rigid accessory animations + shift magnifier left 1px <span style="color:#475569;">(+360/-63)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #10b981;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#10b981;flex-shrink:0;"></span>
+        <span class="fn">Team Orchestration</span>
+        <span class="fb">63 commits</span>
+        <span class="fb">+10,236/-2,832</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:100%;background:#ef4444;"></span></span><span class="sn">10</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:90%;background:#22c55e;"></span></span><span class="sn">9</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">223</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+7,404</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">9 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-16 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> Replace Haiku API calls for swarm names with pre-generated pool <span style="color:#475569;">(+1776/-158)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Add bobbit CLI tool for team lead, remove curl commands from prompts <span style="color:#475569;">(+677/-434)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-16</span> feat: swarm orchestration — Team Lead spawns role agents with isolated worktrees <span style="color:#475569;">(+914/-17)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Add E2E tests for swarm and goal session lifecycle <span style="color:#475569;">(+914/-1)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Add team_steer/team_prompt tools, YAML-based tool registry, ToolManager <span style="color:#475569;">(+749/-154)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #06b6d4;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#06b6d4;flex-shrink:0;"></span>
+        <span class="fn">Role System</span>
+        <span class="fb">56 commits</span>
+        <span class="fb">+8,010/-2,660</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:100%;background:#ef4444;"></span></span><span class="sn">10</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:90%;background:#22c55e;"></span></span><span class="sn">9</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">158</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+5,350</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">5 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-18 → 2026-03-22</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Fix: use Plus icon and 'New Tool' label to match role page pattern <span style="color:#475569;">(+1282/-92)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Convert Roles modal to full-page view with card grid layout <span style="color:#475569;">(+972/-3)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Update role manager mockup: list-based redesign <span style="color:#475569;">(+391/-573)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Move roles to YAML files in roles/ — single source of truth <span style="color:#475569;">(+384/-371)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> Add high-fidelity Role Manager UI mockup <span style="color:#475569;">(+715/-0)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #f59e0b;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#f59e0b;flex-shrink:0;"></span>
+        <span class="fn">Goal System</span>
+        <span class="fb">46 commits</span>
+        <span class="fb">+4,527/-820</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:90%;background:#ef4444;"></span></span><span class="sn">9</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:80%;background:#22c55e;"></span></span><span class="sn">8</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">121</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+3,707</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">10 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-15 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: goal split layout fixes, cwd combobox, worktree toggle, toggle switch styling <span style="color:#475569;">(+1064/-34)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-15</span> Collapsible sidebar, per-session bobbit colors, goal reticle icons <span style="color:#475569;">(+336/-86)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> feat: auto-load goal tools for all goal sessions <span style="color:#475569;">(+257/-163)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> Unify session row and goal group renderers across desktop and mobile <span style="color:#475569;">(+165/-242)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: session-task integration — auto-assign, goal cascade, system prompt <span style="color:#475569;">(+377/-2)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #ef4444;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#ef4444;flex-shrink:0;"></span>
+        <span class="fn">Staff Agents</span>
+        <span class="fb">37 commits</span>
+        <span class="fb">+4,808/-578</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:80%;background:#22c55e;"></span></span><span class="sn">8</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">118</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+4,230</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">4 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-21 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> test: add unit tests for cost-tracker, event-buffer, staff-trigger-engine <span style="color:#475569;">(+915/-1)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: add client-side staff agent UI integration <span style="color:#475569;">(+898/-7)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> test: add E2E tests for Staff Agents API and cron parser unit tests <span style="color:#475569;">(+706/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> Add server-side Staff Store, Manager, Assistant, and REST API <span style="color:#475569;">(+454/-2)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> fix: staff sidebar shows bobbit sprite with session status, hides staff sessions from ungrouped list <span style="color:#475569;">(+335/-19)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #3b82f6;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#3b82f6;flex-shrink:0;"></span>
+        <span class="fn">Bobbit Sprite & Animation</span>
+        <span class="fb">35 commits</span>
+        <span class="fb">+4,092/-1,357</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:30%;background:#94a3b8;"></span></span><span class="sn">3</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">109</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+2,735</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-23</span> feat: add .bobbit directory foundation (bobbit-dir, scaffold, defaults) <span style="color:#475569;">(+1569/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Pixel art Bobbit blob: 8-bit sprite with Disney animation, shimmer, idle eyes <span style="color:#475569;">(+617/-21)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Remove bobbit-cli.ts and BOBBIT_CLI references <span style="color:#475569;">(+2/-468)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Rebuild preview to reference real app.css — no duplicated pixel art <span style="color:#475569;">(+138/-294)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Fix crown idle offset: match sprite translateX(-7px) <span style="color:#475569;">(+330/-89)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #14b8a6;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#14b8a6;flex-shrink:0;"></span>
+        <span class="fn">Goal Dashboard</span>
+        <span class="fb">32 commits</span>
+        <span class="fb">+8,471/-3,815</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:90%;background:#ef4444;"></span></span><span class="sn">9</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:70%;background:#3b82f6;"></span></span><span class="sn">7</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">72</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+4,656</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">8 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-17 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Redesign goal dashboard: tabbed layout with B5 design <span style="color:#475569;">(+1267/-1548)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Redesign goal dashboard: tabbed layout with B5 design <span style="color:#475569;">(+1267/-1548)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: high-fidelity goal dashboard HTML mockup <span style="color:#475569;">(+1375/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> design: add goal dashboard mock B5 (final approved design) <span style="color:#475569;">(+846/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: goal dashboard with kanban board (#20) <span style="color:#475569;">(+740/-5)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #6366f1;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#6366f1;flex-shrink:0;"></span>
+        <span class="fn">Task System</span>
+        <span class="fb">32 commits</span>
+        <span class="fb">+2,156/-790</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:80%;background:#22c55e;"></span></span><span class="sn">8</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">42</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+1,366</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">6 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-16 → 2026-03-21</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Add TaskStore and TaskManager tests (task #25) <span style="color:#475569;">(+620/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> docs: trim AGENTS.md to agent guide, delete stale TASKS.md <span style="color:#475569;">(+220/-348)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: add task-store and task-manager from task-1/task-2 branches <span style="color:#475569;">(+388/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> finalize TASKS.md — all 14 tasks done, all review findings addressed <span style="color:#475569;">(+16/-278)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: implement TaskManager with CRUD, state transitions, dependency cycle detection, sub-task validation, cascading deletes <span style="color:#475569;">(+281/-1)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #84cc16;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#84cc16;flex-shrink:0;"></span>
+        <span class="fn">Git Integration</span>
+        <span class="fb">27 commits</span>
+        <span class="fb">+4,460/-5,152</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:60%;background:#3b82f6;"></span></span><span class="sn">6</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">76</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">-692</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">8 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-17 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> Overhaul agent name system: curated pools, improved prompt, merged role+generic names <span style="color:#475569;">(+1209/-4694)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Fix PWA icons: add padding to prevent clipping on Android adaptive icons <span style="color:#475569;">(+1685/-27)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> fix: git status first file path truncated by .trim() <span style="color:#475569;">(+704/-5)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Add expandable git status widget above prompt input <span style="color:#475569;">(+346/-3)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> perf: replace execSync with async exec, add PR status cache, throttle polling <span style="color:#475569;">(+97/-154)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #d946ef;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#d946ef;flex-shrink:0;"></span>
+        <span class="fn">Sidebar & Navigation</span>
+        <span class="fb">26 commits</span>
+        <span class="fb">+1,905/-614</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:70%;background:#f59e0b;"></span></span><span class="sn">7</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:50%;background:#3b82f6;"></span></span><span class="sn">5</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">65</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+1,291</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Improve sidebar session rows: show full cwd path and time on separate lines <span style="color:#475569;">(+913/-47)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-15</span> Sidebar density: simplified rows, rich tooltips, overlay actions on hover <span style="color:#475569;">(+169/-48)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> Unify mobile sessions browser with desktop sidebar aesthetic <span style="color:#475569;">(+106/-103)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-15</span> Sidebar polish: animated bobbit eyes, overlay actions, pixel-perfect alignment <span style="color:#475569;">(+74/-52)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: show last activity time + unseen indicator on sidebar session rows <span style="color:#475569;">(+98/-1)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #0ea5e9;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#0ea5e9;flex-shrink:0;"></span>
+        <span class="fn">Testing</span>
+        <span class="fb">25 commits</span>
+        <span class="fb">+7,017/-2,070</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:60%;background:#3b82f6;"></span></span><span class="sn">6</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">123</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+4,947</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> test: overhaul E2E test suite — eliminate sleeps, shared helpers, skip npm ci <span style="color:#475569;">(+553/-1009)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> test: add 125 unit tests for server pure logic <span style="color:#475569;">(+1461/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> test: replace mock HTML tests with real e2e tests against running app <span style="color:#475569;">(+231/-762)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Add comprehensive E2E tool tests <span style="color:#475569;">(+790/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> test: add unit tests for system-prompt and session-store <span style="color:#475569;">(+731/-1)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #22c55e;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#22c55e;flex-shrink:0;"></span>
+        <span class="fn">Tool Management</span>
+        <span class="fb">25 commits</span>
+        <span class="fb">+11,499/-1,404</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:90%;background:#ef4444;"></span></span><span class="sn">9</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:80%;background:#22c55e;"></span></span><span class="sn">8</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">278</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+10,095</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> refactor: move tools to group directories, merge docs, eliminate ToolStore <span style="color:#475569;">(+1926/-733)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> Add default tool definitions to .bobbit/config/tools/ <span style="color:#475569;">(+1976/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Add UX mockups for tool management page <span style="color:#475569;">(+1939/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> feat: track tool extension.ts files in .bobbit/config/tools/ <span style="color:#475569;">(+1568/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Add client-side tool management page with routing, CSS, and API functions <span style="color:#475569;">(+1074/-3)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #a855f7;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#a855f7;flex-shrink:0;"></span>
+        <span class="fn">Preview Panel</span>
+        <span class="fb">24 commits</span>
+        <span class="fb">+5,157/-5,737</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:60%;background:#3b82f6;"></span></span><span class="sn">6</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">68</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">-580</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">10 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-15 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Clean up design dir: keep only final tool-preview.html <span style="color:#475569;">(+0/-5027)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Add tool assistant preview panel with name, description, group, docs form fields <span style="color:#475569;">(+3182/-259)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Refactor preview panel to session-level flag pattern <span style="color:#475569;">(+700/-53)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> feat: implement unified preview panel with tabbed interface <span style="color:#475569;">(+258/-24)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> System prompt: don't render preview HTML inline in chat <span style="color:#475569;">(+202/-0)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #f43f5e;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#f43f5e;flex-shrink:0;"></span>
+        <span class="fn">Message Queue & Steering</span>
+        <span class="fb">24 commits</span>
+        <span class="fb">+3,644/-974</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:70%;background:#3b82f6;"></span></span><span class="sn">7</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">76</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+2,670</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> feat: server-authoritative prompt queue <span style="color:#475569;">(+2267/-312)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Extract MessageQueue state machine, fix steer timing, add tests <span style="color:#475569;">(+470/-509)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Allow sending messages while agent is working — queued as follow-up <span style="color:#475569;">(+365/-40)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> docs: add prompt queue & message dispatch reference <span style="color:#475569;">(+139/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Message queue UI: show queued messages above input, steer button to interrupt <span style="color:#475569;">(+106/-13)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #eab308;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#eab308;flex-shrink:0;"></span>
+        <span class="fn">Context Compaction</span>
+        <span class="fb">18 commits</span>
+        <span class="fb">+1,378/-525</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:70%;background:#f59e0b;"></span></span><span class="sn">7</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:70%;background:#3b82f6;"></span></span><span class="sn">7</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">54</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+853</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">11 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-23</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Add context window usage bar, session rename, title gen improvements, e2e tests <span style="color:#475569;">(+630/-86)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Add test-filter.mjs pipe for compact test output <span style="color:#475569;">(+144/-136)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Add compact test summary script for agent context efficiency <span style="color:#475569;">(+177/-26)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Compact tool tiles with tooltip descriptions <span style="color:#475569;">(+32/-73)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-14</span> Add build-up shake before compaction, remove diagonal overlay artifact <span style="color:#475569;">(+64/-23)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #fb923c;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#fb923c;flex-shrink:0;"></span>
+        <span class="fn">Mobile UX</span>
+        <span class="fb">16 commits</span>
+        <span class="fb">+1,420/-577</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:70%;background:#f59e0b;"></span></span><span class="sn">7</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">44</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+843</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">11 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-23</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> Fix mobile header render race on first session connect <span style="color:#475569;">(+515/-4)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Mobile scroll-to-reveal header: add CSS padding for fixed overlay header, add tool renderers <span style="color:#475569;">(+461/-5)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Pin mobile header — remove scroll-based auto-hide <span style="color:#475569;">(+40/-313)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Replace swipe gesture with edge-strip approach <span style="color:#475569;">(+51/-101)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-23</span> feat: touch drag reorder — immediate on grip handle, long-press on header <span style="color:#475569;">(+97/-3)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #94a3b8;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#94a3b8;flex-shrink:0;"></span>
+        <span class="fn">Personality System</span>
+        <span class="fb">16 commits</span>
+        <span class="fb">+4,692/-1,016</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:80%;background:#ef4444;"></span></span><span class="sn">8</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">122</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+3,676</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">2 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-21 → 2026-03-22</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: agent personality traits system <span style="color:#475569;">(+1256/-96)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: add personality management UI, assistant, routing, and draft persistence <span style="color:#475569;">(+1240/-38)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> refactor: rename traits → personalities across backend and tests <span style="color:#475569;">(+613/-613)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: agent personality traits system <span style="color:#475569;">(+1149/-38)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> refactor: rename traits → personalities across client code <span style="color:#475569;">(+120/-70)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #2dd4bf;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#2dd4bf;flex-shrink:0;"></span>
+        <span class="fn">Streaming & Messages</span>
+        <span class="fb">15 commits</span>
+        <span class="fb">+409/-112</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:60%;background:#f59e0b;"></span></span><span class="sn">6</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:60%;background:#3b82f6;"></span></span><span class="sn">6</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">54</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+297</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Hide per-message token stats in history, show only during streaming <span style="color:#475569;">(+83/-6)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: stream bg process logs over WS with timestamps, remove polling <span style="color:#475569;">(+59/-21)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-14</span> Show idle Bobbit when session has messages but not streaming <span style="color:#475569;">(+66/-7)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: bg process pill improvements — streaming logs, timestamps, dedup, terminal styling, wider popover, viewport clamping <span style="color:#475569;">(+43/-23)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> Fix inline HTML preview flashing during streaming <span style="color:#475569;">(+40/-4)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #c084fc;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#c084fc;flex-shrink:0;"></span>
+        <span class="fn">Cost Tracking</span>
+        <span class="fb">11 commits</span>
+        <span class="fb">+368/-33</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:50%;background:#f59e0b;"></span></span><span class="sn">5</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:50%;background:#3b82f6;"></span></span><span class="sn">5</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">13</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+335</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">4 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-17 → 2026-03-20</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: add CostTracker and integrate into SessionManager <span style="color:#475569;">(+159/-1)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> feat: implement CostTracker with per-session cost aggregation and disk persistence <span style="color:#475569;">(+125/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Fix cost tracking: handle usage.cost.total object format <span style="color:#475569;">(+15/-3)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Fix cost tracking: handle usage.cost.total object format <span style="color:#475569;">(+15/-3)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> review: #11 cost tracking code review — 8 findings, 2 fix tasks added <span style="color:#475569;">(+16/-1)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #64748b;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#64748b;flex-shrink:0;"></span>
+        <span class="fn">Documentation</span>
+        <span class="fb">10 commits</span>
+        <span class="fb">+1,375/-188</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:60%;background:#f59e0b;"></span></span><span class="sn">6</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">20</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+1,187</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">36 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-02-17 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> docs: rewrite README.md as comprehensive app reference <span style="color:#475569;">(+699/-99)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> docs: fix review findings in README.md and AGENTS.md <span style="color:#475569;">(+408/-55)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-02-17</span> Update CLAUDE.md and README.md with full project context <span style="color:#475569;">(+133/-18)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Add custom system prompt with conciseness instructions <span style="color:#475569;">(+59/-1)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> chore: primary branch is master (not main), add git conventions to system prompt + AGENTS.md <span style="color:#475569;">(+28/-1)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #e879f9;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#e879f9;flex-shrink:0;"></span>
+        <span class="fn">Tool Renderers</span>
+        <span class="fb">8 commits</span>
+        <span class="fb">+628/-190</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:60%;background:#f59e0b;"></span></span><span class="sn">6</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">22</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+438</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">8 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-20</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Overhaul tool system: descriptions, groups, and improved permission UI <span style="color:#475569;">(+340/-101)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> UX: hide file list in tool groups when expanded, update README <span style="color:#475569;">(+74/-32)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Polish tool permissions UI: grouped card layout, better visual hierarchy <span style="color:#475569;">(+59/-34)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Add compact ScreenshotRenderer for browser_screenshot tool <span style="color:#475569;">(+70/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Fix tool grouping: skip invisible empty text/thinking chunks between tool calls <span style="color:#475569;">(+38/-11)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #34d399;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#34d399;flex-shrink:0;"></span>
+        <span class="fn">Draft Persistence</span>
+        <span class="fb">6 commits</span>
+        <span class="fb">+393/-532</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:60%;background:#f59e0b;"></span></span><span class="sn">6</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:50%;background:#3b82f6;"></span></span><span class="sn">5</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">21</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">-139</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-24 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> refactor: remove IndexedDB draft stores and old client-side draft tests <span style="color:#475569;">(+2/-285)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> refactor: migrate client-side draft persistence to server API <span style="color:#475569;">(+85/-137)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> fix: prevent draft handler stacking across session switches <span style="color:#475569;">(+139/-45)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> feat: add server-side draft storage API <span style="color:#475569;">(+99/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> fix: re-install draft handlers when editor element is recreated <span style="color:#475569;">(+41/-40)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #fbbf24;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#fbbf24;flex-shrink:0;"></span>
+        <span class="fn">Color System</span>
+        <span class="fb">5 commits</span>
+        <span class="fb">+591/-151</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:50%;background:#f59e0b;"></span></span><span class="sn">5</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:20%;background:#94a3b8;"></span></span><span class="sn">2</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">20</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+440</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">7 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-14 → 2026-03-20</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Remove colours 9 and 20 from Bobbit palette, migrate existing sessions <span style="color:#475569;">(+383/-6)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Remove colour 9 (225°) from Bobbit palette, now 17 colours <span style="color:#475569;">(+165/-117)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-14</span> Redesign colour palette and unify navbar <span style="color:#475569;">(+26/-21)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> Defer all changes to Save: colour picker is now pending too <span style="color:#475569;">(+16/-6)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Increase idle desaturation from 0.55 to 0.4 <span style="color:#475569;">(+1/-1)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #f87171;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#f87171;flex-shrink:0;"></span>
+        <span class="fn">Inline Previews</span>
+        <span class="fb">4 commits</span>
+        <span class="fb">+364/-89</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:50%;background:#f59e0b;"></span></span><span class="sn">5</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">13</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+275</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">5 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-20 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> fix: inline HTML preview going blank after tool call completes <span style="color:#475569;">(+109/-59)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> test: add tests for formatElapsed, isHtmlContent, and HTML artifact storage <span style="color:#475569;">(+141/-6)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> Add loading overlay to inline HTML artifacts to prevent flashing <span style="color:#475569;">(+63/-16)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> Add loading overlay to inline HTML artifacts to prevent flashing <span style="color:#475569;">(+51/-8)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #818cf8;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#818cf8;flex-shrink:0;"></span>
+        <span class="fn">PWA</span>
+        <span class="fb">4 commits</span>
+        <span class="fb">+151/-35</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:40%;background:#22c55e;"></span></span><span class="sn">4</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">12</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+116</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">2 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-18 → 2026-03-19</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> Add PWA support: manifest, icons, service worker <span style="color:#475569;">(+90/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-18</span> Fix service worker: network-first for HTML, cache-first only for hashed assets <span style="color:#475569;">(+46/-32)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Add maskable PWA icons for full-bleed adaptive icons on Android <span style="color:#475569;">(+13/-1)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Change PWA theme_color to dark background to match app UI <span style="color:#475569;">(+2/-2)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #38bdf8;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#38bdf8;flex-shrink:0;"></span>
+        <span class="fn">Session Management</span>
+        <span class="fb">3 commits</span>
+        <span class="fb">+175/-2</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:40%;background:#22c55e;"></span></span><span class="sn">4</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:70%;background:#3b82f6;"></span></span><span class="sn">7</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">5</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+173</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">5 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-20 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> fix: delete spec assistant session after creating spec <span style="color:#475569;">(+126/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> fix: ensure draft API works before async session persistence completes <span style="color:#475569;">(+27/-2)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> fix: restore extension and env vars on session restore <span style="color:#475569;">(+22/-0)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #a3e635;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#a3e635;flex-shrink:0;"></span>
+        <span class="fn">Office Visualization (Reverted)</span>
+        <span class="fb">3 commits</span>
+        <span class="fb">+892/-892</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:60%;background:#f59e0b;"></span></span><span class="sn">6</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:20%;background:#94a3b8;"></span></span><span class="sn">2</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">15</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">0</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-22 → 2026-03-22</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-22</span> revert: remove isometric office viz (needs more work) <span style="color:#475569;">(+2/-869)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-22</span> feat: add isometric office visualization page at #/office <span style="color:#475569;">(+856/-2)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-22</span> fix: address code review findings for office viz <span style="color:#475569;">(+34/-21)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #fb7185;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#fb7185;flex-shrink:0;"></span>
+        <span class="fn">Background Processes</span>
+        <span class="fb">3 commits</span>
+        <span class="fb">+37/-11</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:30%;background:#22c55e;"></span></span><span class="sn">3</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:50%;background:#3b82f6;"></span></span><span class="sn">5</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">5</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+26</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-21 → 2026-03-21</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: add dismiss button to exited bg process pills <span style="color:#475569;">(+20/-1)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> feat: terminal-style output in bg process popover — top-anchored, auto-tails <span style="color:#475569;">(+13/-4)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-21</span> fix: bash_bg shell detection on ESM — use import instead of require for fs <span style="color:#475569;">(+4/-6)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #4ade80;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#4ade80;flex-shrink:0;"></span>
+        <span class="fn">Error Handling</span>
+        <span class="fb">3 commits</span>
+        <span class="fb">+2,588/-264</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:60%;background:#f59e0b;"></span></span><span class="sn">6</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">31</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+2,324</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">2 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-14</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-14</span> UX improvements: confirm on delete, loading states, error handling, auto-focus, inline SVG rendering <span style="color:#475569;">(+2501/-264)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> feat: inline dismissable error messages in chat history <span style="color:#475569;">(+68/-0)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> feat: handle server error messages in RemoteAgent <span style="color:#475569;">(+19/-0)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #c4b5fd;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#c4b5fd;flex-shrink:0;"></span>
+        <span class="fn">Error Recovery</span>
+        <span class="fb">2 commits</span>
+        <span class="fb">+129/-4</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:40%;background:#22c55e;"></span></span><span class="sn">4</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:50%;background:#3b82f6;"></span></span><span class="sn">5</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">4</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+125</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">12 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-24</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> feat: force-abort with agent process restart on stuck sessions <span style="color:#475569;">(+116/-1)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-24</span> fix: abort in-flight draft save on send to prevent PUT/DELETE race <span style="color:#475569;">(+13/-3)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #fcd34d;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#fcd34d;flex-shrink:0;"></span>
+        <span class="fn">Dev Infrastructure</span>
+        <span class="fb">2 commits</span>
+        <span class="fb">+55/-6</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:30%;background:#22c55e;"></span></span><span class="sn">3</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">2</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+49</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-22 → 2026-03-22</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-22</span> fix: watchdog probes server bind address instead of hardcoded 127.0.0.1 <span style="color:#475569;">(+54/-5)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-22</span> chore: increase watchdog startup grace period to 120s <span style="color:#475569;">(+1/-1)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #67e8f9;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#67e8f9;flex-shrink:0;"></span>
+        <span class="fn">Console & Output</span>
+        <span class="fb">2 commits</span>
+        <span class="fb">+198/-10</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:40%;background:#22c55e;"></span></span><span class="sn">4</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">3</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+188</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">4 days</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-17 → 2026-03-20</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-20</span> feat: render ANSI color codes in console output <span style="color:#475569;">(+193/-2)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-17</span> Fix bobbit idle-to-active transition on mobile <span style="color:#475569;">(+5/-8)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #f472b6;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#f472b6;flex-shrink:0;"></span>
+        <span class="fn">Auth & TLS</span>
+        <span class="fb">2 commits</span>
+        <span class="fb">+913/-19</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:60%;background:#f59e0b;"></span></span><span class="sn">6</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">11</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+894</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-19 → 2026-03-19</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Add Let's Encrypt cert support via deSEC DNS <span style="color:#475569;">(+767/-5)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Use mkcert for trusted local CA certificates <span style="color:#475569;">(+146/-14)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #bef264;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#bef264;flex-shrink:0;"></span>
+        <span class="fn">Image Handling</span>
+        <span class="fb">2 commits</span>
+        <span class="fb">+147/-20</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:40%;background:#22c55e;"></span></span><span class="sn">4</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">2</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+127</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-13</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> fix: replace raw image tab with in-app lightbox overlay <span style="color:#475569;">(+115/-17)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> feat: enrich restored user messages with image attachments <span style="color:#475569;">(+32/-3)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #93c5fd;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#93c5fd;flex-shrink:0;"></span>
+        <span class="fn">Title Generation</span>
+        <span class="fb">2 commits</span>
+        <span class="fb">+262/-31</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:50%;background:#f59e0b;"></span></span><span class="sn">5</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">8</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+231</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-13 → 2026-03-13</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Auto-generate AI session titles after first message <span style="color:#475569;">(+250/-29)</span></div><div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-13</span> Auto-generate AI session titles after first message <span style="color:#475569;">(+12/-2)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #fca5a5;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#fca5a5;flex-shrink:0;"></span>
+        <span class="fn">Skills System</span>
+        <span class="fb">1 commits</span>
+        <span class="fb">+454/-0</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:50%;background:#f59e0b;"></span></span><span class="sn">5</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:70%;background:#3b82f6;"></span></span><span class="sn">7</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">8</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+454</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-19 → 2026-03-19</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-19</span> Add skills system: types, registry, definitions, sub-agent, sync, and WS protocol messages <span style="color:#475569;">(+454/-0)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #86efac;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#86efac;flex-shrink:0;"></span>
+        <span class="fn">Diff Rendering</span>
+        <span class="fb">1 commits</span>
+        <span class="fb">+346/-19</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:50%;background:#f59e0b;"></span></span><span class="sn">5</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">6</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+327</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-15 → 2026-03-15</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-15</span> feat: render git diffs as side-by-side on desktop, inline on mobile <span style="color:#475569;">(+346/-19)</span></div>
+    </div>
+  </div>
+  <div class="fc" style="border-left:3px solid #fdba74;">
+    <div class="fh" onclick="this.parentElement.classList.toggle('ex')">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <span style="width:10px;height:10px;border-radius:50%;background:#fdba74;flex-shrink:0;"></span>
+        <span class="fn">Voice Input</span>
+        <span class="fb">1 commits</span>
+        <span class="fb">+202/-4</span>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div class="sc"><span class="sl">Complexity</span><span class="sb"><span class="sf" style="width:40%;background:#22c55e;"></span></span><span class="sn">4</span></div>
+        <div class="sc"><span class="sl">Value</span><span class="sb"><span class="sf" style="width:40%;background:#94a3b8;"></span></span><span class="sn">4</span></div>
+        <span class="ch">▾</span>
+      </div>
+    </div>
+    <div class="fb2">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+        <div class="ms"><div class="ml">Files Touched</div><div class="mv">2</div></div>
+        <div class="ms"><div class="ml">Net LOC</div><div class="mv">+198</div></div>
+        <div class="ms"><div class="ml">Active Span</div><div class="mv">1 day</div></div>
+        <div class="ms"><div class="ml">Period</div><div class="mv" style="font-size:11px;">2026-03-15 → 2026-03-15</div></div>
+      </div>
+      <div style="font-size:12px;color:#64748b;font-weight:600;margin-bottom:6px;">Top commits by code volume:</div>
+      <div style="padding:3px 0;font-size:12px;line-height:1.4;"><span style="color:#475569;">2026-03-15</span> feat: voice-to-text input via Web Speech API <span style="color:#475569;">(+202/-4)</span></div>
+    </div>
+  </div>
+
+<div style="margin-top:48px;padding-top:20px;border-top:1px solid #1e293b;color:#334155;font-size:11px;text-align:center;">
+  Generated from 917 git commits · Bobbit Project · 2026-03-24
+</div>
+
+<script>
+Chart.defaults.color="#64748b";
+Chart.defaults.borderColor="#1e293b";
+Chart.defaults.font.family="system-ui";
+Chart.defaults.font.size=11;
+
+const dates=["2026-02-17","2026-03-13","2026-03-14","2026-03-15","2026-03-16","2026-03-17","2026-03-18","2026-03-19","2026-03-20","2026-03-21","2026-03-22","2026-03-23","2026-03-24"];
+const daily=[{"commits":6,"ins":8629,"del":378},{"commits":42,"ins":29220,"del":7411},{"commits":29,"ins":3670,"del":640},{"commits":14,"ins":11781,"del":1440},{"commits":21,"ins":10236,"del":4430},{"commits":135,"ins":12970,"del":3051},{"commits":53,"ins":10311,"del":2081},{"commits":92,"ins":13238,"del":9778},{"commits":195,"ins":24014,"del":16963},{"commits":131,"ins":18456,"del":7800},{"commits":46,"ins":6696,"del":4660},{"commits":53,"ins":4710,"del":2260},{"commits":100,"ins":19601,"del":16827}];
+const scatter=[{"x":10,"y":5,"r":32.21024681681281,"label":"Other / Misc","color":"#f97316","commits":166},{"x":10,"y":10,"r":24.23839928708165,"label":"Workflow & Gate Verification","color":"#ec4899","commits":94},{"x":10,"y":4,"r":20.155644370746373,"label":"Accessories & Pixel Art","color":"#8b5cf6","commits":65},{"x":10,"y":9,"r":19.84313483298443,"label":"Team Orchestration","color":"#10b981","commits":63},{"x":10,"y":9,"r":18.708286933869708,"label":"Role System","color":"#06b6d4","commits":56},{"x":9,"y":8,"r":16.95582495781317,"label":"Goal System","color":"#f59e0b","commits":46},{"x":8,"y":8,"r":15.206906325745548,"label":"Staff Agents","color":"#ef4444","commits":37},{"x":8,"y":3,"r":14.79019945774904,"label":"Bobbit Sprite & Animation","color":"#3b82f6","commits":35},{"x":9,"y":7,"r":14.142135623730951,"label":"Goal Dashboard","color":"#14b8a6","commits":32},{"x":8,"y":8,"r":14.142135623730951,"label":"Task System","color":"#6366f1","commits":32},{"x":8,"y":6,"r":12.99038105676658,"label":"Git Integration","color":"#84cc16","commits":27},{"x":7,"y":5,"r":12.747548783981962,"label":"Sidebar & Navigation","color":"#d946ef","commits":26},{"x":8,"y":6,"r":12.5,"label":"Testing","color":"#0ea5e9","commits":25},{"x":9,"y":8,"r":12.5,"label":"Tool Management","color":"#22c55e","commits":25},{"x":8,"y":6,"r":12.24744871391589,"label":"Preview Panel","color":"#a855f7","commits":24},{"x":8,"y":7,"r":12.24744871391589,"label":"Message Queue & Steering","color":"#f43f5e","commits":24},{"x":7,"y":7,"r":10.606601717798211,"label":"Context Compaction","color":"#eab308","commits":18},{"x":7,"y":4,"r":10,"label":"Mobile UX","color":"#fb923c","commits":16},{"x":8,"y":4,"r":10,"label":"Personality System","color":"#94a3b8","commits":16},{"x":6,"y":6,"r":9.682458365518542,"label":"Streaming & Messages","color":"#2dd4bf","commits":15},{"x":5,"y":5,"r":8.291561975888499,"label":"Cost Tracking","color":"#c084fc","commits":11},{"x":6,"y":4,"r":7.905694150420949,"label":"Documentation","color":"#64748b","commits":10},{"x":6,"y":4,"r":7.0710678118654755,"label":"Tool Renderers","color":"#e879f9","commits":8},{"x":6,"y":5,"r":6.123724356957945,"label":"Draft Persistence","color":"#34d399","commits":6},{"x":5,"y":2,"r":5.5901699437494745,"label":"Color System","color":"#fbbf24","commits":5},{"x":5,"y":4,"r":5,"label":"Inline Previews","color":"#f87171","commits":4},{"x":4,"y":4,"r":5,"label":"PWA","color":"#818cf8","commits":4},{"x":4,"y":7,"r":5,"label":"Session Management","color":"#38bdf8","commits":3},{"x":6,"y":2,"r":5,"label":"Office Visualization (Reverted)","color":"#a3e635","commits":3},{"x":3,"y":5,"r":5,"label":"Background Processes","color":"#fb7185","commits":3},{"x":6,"y":4,"r":5,"label":"Error Handling","color":"#4ade80","commits":3},{"x":4,"y":5,"r":5,"label":"Error Recovery","color":"#c4b5fd","commits":2},{"x":3,"y":4,"r":5,"label":"Dev Infrastructure","color":"#fcd34d","commits":2},{"x":4,"y":4,"r":5,"label":"Console & Output","color":"#67e8f9","commits":2},{"x":6,"y":4,"r":5,"label":"Auth & TLS","color":"#f472b6","commits":2},{"x":4,"y":4,"r":5,"label":"Image Handling","color":"#bef264","commits":2},{"x":5,"y":4,"r":5,"label":"Title Generation","color":"#93c5fd","commits":2},{"x":5,"y":7,"r":5,"label":"Skills System","color":"#fca5a5","commits":1},{"x":5,"y":4,"r":5,"label":"Diff Rendering","color":"#86efac","commits":1},{"x":4,"y":4,"r":5,"label":"Voice Input","color":"#fdba74","commits":1}];
+const feats=[{"n":"Other / Misc","c":166,"i":21520,"d":17115},{"n":"Workflow & Gate Verification","c":94,"i":54006,"d":24812},{"n":"Accessories & Pixel Art","c":65,"i":3857,"d":2259},{"n":"Team Orchestration","c":63,"i":10236,"d":2832},{"n":"Role System","c":56,"i":8010,"d":2660},{"n":"Goal System","c":46,"i":4527,"d":820},{"n":"Staff Agents","c":37,"i":4808,"d":578},{"n":"Bobbit Sprite & Animation","c":35,"i":4092,"d":1357},{"n":"Goal Dashboard","c":32,"i":8471,"d":3815},{"n":"Task System","c":32,"i":2156,"d":790},{"n":"Git Integration","c":27,"i":4460,"d":5152},{"n":"Sidebar & Navigation","c":26,"i":1905,"d":614},{"n":"Testing","c":25,"i":7017,"d":2070},{"n":"Tool Management","c":25,"i":11499,"d":1404},{"n":"Preview Panel","c":24,"i":5157,"d":5737},{"n":"Message Queue & Steering","c":24,"i":3644,"d":974},{"n":"Context Compaction","c":18,"i":1378,"d":525},{"n":"Mobile UX","c":16,"i":1420,"d":577},{"n":"Personality System","c":16,"i":4692,"d":1016},{"n":"Streaming & Messages","c":15,"i":409,"d":112},{"n":"Cost Tracking","c":11,"i":368,"d":33},{"n":"Documentation","c":10,"i":1375,"d":188},{"n":"Tool Renderers","c":8,"i":628,"d":190},{"n":"Draft Persistence","c":6,"i":393,"d":532},{"n":"Color System","c":5,"i":591,"d":151},{"n":"Inline Previews","c":4,"i":364,"d":89},{"n":"PWA","c":4,"i":151,"d":35},{"n":"Session Management","c":3,"i":175,"d":2},{"n":"Office Visualization (Reverted)","c":3,"i":892,"d":892},{"n":"Background Processes","c":3,"i":37,"d":11},{"n":"Error Handling","c":3,"i":2588,"d":264},{"n":"Error Recovery","c":2,"i":129,"d":4},{"n":"Dev Infrastructure","c":2,"i":55,"d":6},{"n":"Console & Output","c":2,"i":198,"d":10},{"n":"Auth & TLS","c":2,"i":913,"d":19},{"n":"Image Handling","c":2,"i":147,"d":20},{"n":"Title Generation","c":2,"i":262,"d":31},{"n":"Skills System","c":1,"i":454,"d":0},{"n":"Diff Rendering","c":1,"i":346,"d":19},{"n":"Voice Input","c":1,"i":202,"d":4}];
+const colors=["#f97316","#ec4899","#8b5cf6","#10b981","#06b6d4","#f59e0b","#ef4444","#3b82f6","#14b8a6","#6366f1","#84cc16","#d946ef","#0ea5e9","#22c55e","#a855f7","#f43f5e","#eab308","#fb923c","#94a3b8","#2dd4bf","#c084fc","#64748b","#e879f9","#34d399","#fbbf24","#f87171","#818cf8","#38bdf8","#a3e635","#fb7185","#4ade80","#c4b5fd","#fcd34d","#67e8f9","#f472b6","#bef264","#93c5fd","#fca5a5","#86efac","#fdba74"];
+
+// Daily velocity
+new Chart(document.getElementById("c1"),{type:"bar",data:{labels:dates.map(d=>d.slice(5)),datasets:[
+  {label:"Commits",data:daily.map(d=>d.commits),backgroundColor:"#3b82f680",borderColor:"#3b82f6",borderWidth:1,yAxisID:"y",order:2,borderRadius:3},
+  {label:"Insertions",data:daily.map(d=>d.ins),type:"line",borderColor:"#22c55e",backgroundColor:"transparent",yAxisID:"y1",pointRadius:1.5,borderWidth:1.5,order:1,tension:0.3},
+  {label:"Deletions",data:daily.map(d=>d.del),type:"line",borderColor:"#ef4444",backgroundColor:"transparent",yAxisID:"y1",pointRadius:1.5,borderWidth:1.5,order:1,tension:0.3}
+]},options:{responsive:true,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{boxWidth:10,padding:8}}},scales:{y:{position:"left",title:{display:true,text:"Commits"},grid:{color:"#1e293b40"}},y1:{position:"right",title:{display:true,text:"LOC"},grid:{drawOnChartArea:false}}}}});
+
+// Scatter
+new Chart(document.getElementById("c2"),{type:"bubble",data:{datasets:[{data:scatter.map(p=>({x:p.x,y:p.y,r:p.r})),backgroundColor:scatter.map(p=>p.color+"88"),borderColor:scatter.map(p=>p.color),borderWidth:1.5,hoverBorderWidth:2}]},options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{const p=scatter[ctx.dataIndex];return p.label+" (C:"+p.x+" V:"+p.y+" "+p.commits+" commits)"}}}},scales:{x:{title:{display:true,text:"Complexity →"},min:0,max:11,grid:{color:"#1e293b40"}},y:{title:{display:true,text:"Value →"},min:0,max:11,grid:{color:"#1e293b40"}}}}});
+
+// Bar chart
+new Chart(document.getElementById("c3"),{type:"bar",data:{labels:feats.map(f=>f.n),datasets:[
+  {label:"Commits",data:feats.map(f=>f.c),backgroundColor:colors.map(c=>c+"cc"),borderColor:colors,borderWidth:1,borderRadius:4}
+]},options:{responsive:true,indexAxis:"y",plugins:{legend:{display:false}},scales:{x:{title:{display:true,text:"Commits"},grid:{color:"#1e293b40"}},y:{ticks:{font:{size:11}}}}}});
+
+// Cumulative
+const ci=[],cd=[];let _ci=0,_cd=0;daily.forEach(d=>{_ci+=d.ins;_cd+=d.del;ci.push(_ci);cd.push(_cd)});
+new Chart(document.getElementById("c4"),{type:"line",data:{labels:dates.map(d=>d.slice(5)),datasets:[
+  {label:"Insertions",data:ci,borderColor:"#22c55e",backgroundColor:"rgba(34,197,94,0.08)",fill:true,pointRadius:0,borderWidth:2,tension:0.3},
+  {label:"Deletions",data:cd,borderColor:"#ef4444",backgroundColor:"rgba(239,68,68,0.08)",fill:true,pointRadius:0,borderWidth:2,tension:0.3},
+  {label:"Net",data:ci.map((v,i)=>v-cd[i]),borderColor:"#38bdf8",backgroundColor:"transparent",pointRadius:0,borderWidth:2,tension:0.3,borderDash:[4,2]}
+]},options:{responsive:true,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{boxWidth:10}}},scales:{y:{title:{display:true,text:"LOC"},grid:{color:"#1e293b40"}}}}});
+
+// Stacked area
+const top12=["Other / Misc","Workflow & Gate Verification","Accessories & Pixel Art","Team Orchestration","Role System","Goal System","Staff Agents","Bobbit Sprite & Animation","Goal Dashboard","Task System","Git Integration","Sidebar & Navigation"];
+const top12Colors=["#f97316","#ec4899","#8b5cf6","#10b981","#06b6d4","#f59e0b","#ef4444","#3b82f6","#14b8a6","#6366f1","#84cc16","#d946ef"];
+const stackData={};
+["Other / Misc","Workflow & Gate Verification","Accessories & Pixel Art","Team Orchestration","Role System","Goal System","Staff Agents","Bobbit Sprite & Animation","Goal Dashboard","Task System","Git Integration","Sidebar & Navigation"].forEach(n=>{stackData[n]=dates.map(()=>0)});
+[{"name":"Other / Misc","commits":["2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-16","2026-03-16","2026-03-16","2026-03-16","2026-03-15","2026-03-15","2026-03-15","2026-03-14","2026-03-14","2026-03-14","2026-03-14","2026-03-14","2026-03-14","2026-03-13","2026-03-13","2026-03-13","2026-03-13","2026-03-13","2026-03-13","2026-02-17","2026-02-17","2026-02-17","2026-02-17","2026-02-17"]},{"name":"Workflow & Gate Verification","commits":["2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-23","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-18","2026-03-18","2026-03-16","2026-03-16","2026-03-16","2026-03-16","2026-03-16","2026-03-16","2026-03-15","2026-03-15","2026-03-15","2026-03-13","2026-03-13"]},{"name":"Accessories & Pixel Art","commits":["2026-03-24","2026-03-24","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-18","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17"]},{"name":"Team Orchestration","commits":["2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-23","2026-03-23","2026-03-23","2026-03-22","2026-03-22","2026-03-22","2026-03-22","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-16","2026-03-16","2026-03-16"]},{"name":"Role System","commits":["2026-03-22","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18"]},{"name":"Goal System","commits":["2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-23","2026-03-23","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-18","2026-03-18","2026-03-18","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-16","2026-03-16","2026-03-16","2026-03-16","2026-03-16","2026-03-15"]},{"name":"Staff Agents","commits":["2026-03-24","2026-03-24","2026-03-24","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21","2026-03-21"]},{"name":"Bobbit Sprite & Animation","commits":["2026-03-24","2026-03-24","2026-03-23","2026-03-21","2026-03-21","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-19","2026-03-17","2026-03-17","2026-03-15","2026-03-14","2026-03-14","2026-03-14","2026-03-14","2026-03-14","2026-03-14","2026-03-13","2026-03-13","2026-03-13","2026-03-13","2026-03-13","2026-03-13"]},{"name":"Goal Dashboard","commits":["2026-03-24","2026-03-24","2026-03-24","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-18","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17"]},{"name":"Task System","commits":["2026-03-21","2026-03-18","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-16","2026-03-16"]},{"name":"Git Integration","commits":["2026-03-24","2026-03-24","2026-03-24","2026-03-24","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-18","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17","2026-03-17"]},{"name":"Sidebar & Navigation","commits":["2026-03-24","2026-03-21","2026-03-21","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-20","2026-03-19","2026-03-19","2026-03-19","2026-03-18","2026-03-18","2026-03-15","2026-03-15","2026-03-14","2026-03-13","2026-03-13","2026-03-13"]}].forEach(f=>{
+  f.commits.forEach(d=>{const idx=dates.indexOf(d);if(idx>=0)stackData[f.name][idx]++})
+});
+new Chart(document.getElementById("c5"),{type:"line",data:{labels:dates.map(d=>d.slice(5)),datasets:top12.map((n,i)=>({
+  label:n.length>25?n.slice(0,22)+"...":n,data:stackData[n],borderColor:top12Colors[i],backgroundColor:top12Colors[i]+"30",fill:true,pointRadius:0,borderWidth:1.5,tension:0.3
+}))},options:{responsive:true,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{boxWidth:8,padding:6,font:{size:10}}}},scales:{y:{stacked:true,title:{display:true,text:"Commits"},grid:{color:"#1e293b40"}},x:{grid:{color:"#1e293b40"}}}}});
+</script>
+</body>
+</html>

@@ -351,7 +351,7 @@ export function renderSidebar() {
 					<button
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
 						@click=${() => showGoalDialog()}
-						title="New goal"
+						title="New goal (Alt+G)"
 					>
 						${icon(GoalIcon, "sm")}
 						<span>New Goal</span>

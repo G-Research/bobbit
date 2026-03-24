@@ -1,13 +1,17 @@
 /**
  * Favicon notification badge.
  *
- * Draws a small coloured dot on the top-right corner of the favicon when
- * a session completes while the tab is hidden.  Clears automatically when
- * the tab regains focus.
+ * Draws a small coloured dot (with black outline) on the top-right corner
+ * of the favicon when a session completes.  Clears automatically when the
+ * tab regains focus.
+ *
+ * Also sets the PWA app badge via the Badging API when available.
  */
 
 const BADGE_RADIUS_RATIO = 0.22; // dot radius relative to icon size
 const BADGE_COLOR = "#d4a017";   // warm amber/gold — matches user-message accent
+const OUTLINE_COLOR = "#000000";
+const OUTLINE_WIDTH_RATIO = 0.12; // outline width relative to dot radius
 const ICON_SIZE = 32;            // rendered favicon size in px
 
 let _originalHref: string | null = null;
@@ -50,10 +54,19 @@ async function applyBadge(): Promise<void> {
 		// Draw original favicon scaled to canvas
 		ctx.drawImage(img, 0, 0, ICON_SIZE, ICON_SIZE);
 
-		// Draw notification dot (top-right)
+		// Draw notification dot (top-right) with black outline
 		const r = ICON_SIZE * BADGE_RADIUS_RATIO;
 		const cx = ICON_SIZE - r - 1;
 		const cy = r + 1;
+		const outlineW = Math.max(1, r * OUTLINE_WIDTH_RATIO);
+
+		// Outline
+		ctx.beginPath();
+		ctx.arc(cx, cy, r + outlineW, 0, Math.PI * 2);
+		ctx.fillStyle = OUTLINE_COLOR;
+		ctx.fill();
+
+		// Fill
 		ctx.beginPath();
 		ctx.arc(cx, cy, r, 0, Math.PI * 2);
 		ctx.fillStyle = BADGE_COLOR;
@@ -63,6 +76,11 @@ async function applyBadge(): Promise<void> {
 		_badgeActive = true;
 	} catch {
 		// If image loading fails, silently skip
+	}
+
+	// PWA app badge (taskbar/dock icon)
+	if ("setAppBadge" in navigator) {
+		(navigator as any).setAppBadge().catch(() => {});
 	}
 }
 
@@ -74,6 +92,11 @@ function clearBadge(): void {
 		link.href = _originalHref;
 	}
 	_badgeActive = false;
+
+	// Clear PWA app badge
+	if ("clearAppBadge" in navigator) {
+		(navigator as any).clearAppBadge().catch(() => {});
+	}
 }
 
 /** Show a notification dot on the favicon. */

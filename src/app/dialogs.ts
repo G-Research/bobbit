@@ -35,10 +35,17 @@ export function confirmAction(title: string, message: string, confirmLabel = "Co
 		document.body.appendChild(container);
 
 		const cleanup = (result: boolean) => {
+			document.removeEventListener("keydown", onKeydown);
 			render(html``, container);
 			container.remove();
 			resolve(result);
 		};
+
+		const onKeydown = (e: KeyboardEvent) => {
+			if (e.key === "Enter") { e.preventDefault(); cleanup(true); }
+			if (e.key === "Escape") { e.preventDefault(); cleanup(false); }
+		};
+		document.addEventListener("keydown", onKeydown);
 
 		render(
 			Dialog({

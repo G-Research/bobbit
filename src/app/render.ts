@@ -78,7 +78,8 @@ function renderMobileLanding() {
 							${icon(WorkflowIcon, "xs")} Workflows
 						</button>
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
-							@click=${() => showGoalDialog()}>
+							@click=${() => showGoalDialog()}
+							title="New goal (Alt+G)">
 							${icon(GoalIcon, "xs")} New Goal
 						</button>
 					</div>
@@ -1583,7 +1584,7 @@ export function doRenderApp(): void {
 				},
 				children: html`<span class="inline-flex items-center gap-1">${icon(Pencil, "xs")}<span class="text-xs">${editLabel}</span></span>`,
 				className: "h-7 px-2 text-muted-foreground",
-				title: activeStaffAgent ? "Edit staff agent" : "Rename session",
+				title: activeStaffAgent ? "Edit staff agent" : "Modify session",
 			})}
 			${Button({
 				variant: "ghost",
@@ -1591,7 +1592,7 @@ export function doRenderApp(): void {
 				onClick: () => terminateSession(activeSid),
 				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs">Terminate</span></span>`,
 				className: "h-7 px-2 text-muted-foreground hover:text-destructive",
-				title: "Terminate session",
+				title: "Terminate session (Ctrl+Shift+D)",
 			})}
 		</div>
 	` : "";
