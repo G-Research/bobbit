@@ -415,7 +415,7 @@ export class TeamManager {
 
 		// Transition goal to in-progress if needed
 		if (goal.state === "todo") {
-			this.goalManager.updateGoal(goalId, { state: "in-progress" });
+			await this.goalManager.updateGoal(goalId, { state: "in-progress" });
 		}
 
 		// Kick off the team lead with an initial prompt (same pattern as delegate sessions)
@@ -571,7 +571,7 @@ export class TeamManager {
 		if (useWorktree) {
 			const goalSlug = (goal.branch || goalId.slice(0, 8)).replace(/\//g, '-');
 			branchName = `goal-${goalSlug}-${role}-${shortId}`;
-			worktreeResult = createWorktree(goal.repoPath!, branchName);
+			worktreeResult = await createWorktree(goal.repoPath!, branchName);
 			agentCwd = worktreeResult.worktreePath;
 		} else {
 			agentCwd = goal.cwd;
@@ -665,7 +665,7 @@ export class TeamManager {
 			// Clean up the orphaned worktree on failure (only if one was created)
 			if (worktreeResult && goal.repoPath) {
 				try {
-					cleanupWorktree(goal.repoPath, worktreeResult.worktreePath, branchName, true);
+					await cleanupWorktree(goal.repoPath, worktreeResult.worktreePath, branchName, true);
 					console.log(`[team-manager] Cleaned up orphaned worktree after spawnRole failure: ${worktreeResult.worktreePath}`);
 				} catch (cleanupErr) {
 					console.error(`[team-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
@@ -773,7 +773,7 @@ export class TeamManager {
 		const goal = this.goalManager.getGoal(goalId);
 		if (goal?.repoPath && agent.worktreePath) {
 			try {
-				cleanupWorktree(goal.repoPath, agent.worktreePath, agent.branch, true);
+				await cleanupWorktree(goal.repoPath, agent.worktreePath, agent.branch, true);
 				console.log(`[team-manager] Cleaned up worktree for ${agent.role} agent: ${agent.worktreePath}`);
 			} catch (err) {
 				console.error(`[team-manager] Failed to clean up worktree for ${agent.role} agent:`, err);
@@ -860,7 +860,7 @@ export class TeamManager {
 		// The team lead will present a report and await further instructions.
 
 		// Update goal state
-		this.goalManager.updateGoal(goalId, { state: "complete" });
+		await this.goalManager.updateGoal(goalId, { state: "complete" });
 
 		// Keep team tracking alive so the team lead can still be found
 		// but persist the updated state (agents cleared)

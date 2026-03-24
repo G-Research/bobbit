@@ -381,7 +381,7 @@ async function handleApiRoute(
 				cwd = body?.cwd || goal.cwd;
 				// Auto-transition goal to in-progress when first session starts
 				if (goal.state === "todo") {
-					sessionManager.goalManager.updateGoal(goalId, { state: "in-progress" });
+					await sessionManager.goalManager.updateGoal(goalId, { state: "in-progress" });
 				}
 			}
 		}
@@ -482,7 +482,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const goal = sessionManager.goalManager.createGoal(title, cwd, {
+			const goal = await sessionManager.goalManager.createGoal(title, cwd, {
 				spec,
 				team,
 				worktree,
@@ -515,7 +515,7 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const ok = sessionManager.goalManager.updateGoal(id, {
+			const ok = await sessionManager.goalManager.updateGoal(id, {
 				title: body.title,
 				cwd: body.cwd,
 				state: body.state,
@@ -541,7 +541,7 @@ async function handleApiRoute(
 			}
 			sessionManager.taskManager.deleteTasksForGoal(id);
 			gateStore.removeGoalGates(id);
-			sessionManager.goalManager.deleteGoal(id);
+			await sessionManager.goalManager.deleteGoal(id);
 			json({ ok: true });
 			return;
 		}

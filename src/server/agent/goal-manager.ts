@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
+
+const execFile = promisify(execFileCb);
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
@@ -41,7 +44,7 @@ export class GoalManager {
 		this.workflowStore = workflowStore;
 	}
 
-	createGoal(title: string, cwd: string, opts?: { spec?: string; team?: boolean; worktree?: boolean; workflowId?: string; workflowStore?: WorkflowStore }): PersistedGoal {
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; team?: boolean; worktree?: boolean; workflowId?: string; workflowStore?: WorkflowStore }): Promise<PersistedGoal> {
 		const { spec = "", team = true, worktree = true, workflowId, workflowStore = this.workflowStore } = opts ?? {};
 		const now = Date.now();
 		const id = randomUUID();
@@ -60,7 +63,7 @@ export class GoalManager {
 		if (worktree && repoPath) {
 			branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 			try {
-				const result = createWorktree(repoPath, branch);
+				const result = await createWorktree(repoPath, branch);
 				worktreePath = result.worktreePath;
 				goalCwd = worktreePath;
 				console.log(`[goal-manager] Created worktree for goal "${title}": ${worktreePath} (branch: ${branch})`);
@@ -115,7 +118,7 @@ export class GoalManager {
 		return this.store.getAll();
 	}
 
-	updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string }): boolean {
+	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string }): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
 
@@ -127,7 +130,7 @@ export class GoalManager {
 				const title = updates.title ?? existing.title;
 				const branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 				try {
-					const result = createWorktree(repoRoot, branch);
+					const result = await createWorktree(repoRoot, branch);
 					updates.repoPath = repoRoot;
 					updates.branch = branch;
 					// Also update cwd to the worktree
@@ -142,7 +145,7 @@ export class GoalManager {
 		return this.store.update(id, updates);
 	}
 
-	deleteGoal(id: string): boolean {
+	async deleteGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (goal?.team) {
 			console.warn(`[goal-manager] Deleting team goal "${goal.title}" — ensure no active team sessions remain (cannot check from GoalManager)`);
@@ -161,16 +164,16 @@ export class GoalManager {
 							// Try to detect the branch name so we can delete it too
 							let agentBranch: string | undefined;
 							try {
-								agentBranch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+								const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
 									cwd: agentWtPath,
-									stdio: "pipe",
-								}).toString().trim();
+								});
+								agentBranch = stdout.toString().trim();
 								if (agentBranch === "HEAD") agentBranch = undefined; // detached
 							} catch {
 								// worktree may already be broken
 							}
 							try {
-								cleanupWorktree(goal.repoPath, agentWtPath, agentBranch, true);
+								await cleanupWorktree(goal.repoPath, agentWtPath, agentBranch, true);
 							} catch {
 								// Best-effort — directory may already be cleaned
 							}
@@ -186,7 +189,7 @@ export class GoalManager {
 
 			// Clean up the goal's own worktree and branch
 			try {
-				cleanupWorktree(goal.repoPath, goal.worktreePath, goal.branch, true);
+				await cleanupWorktree(goal.repoPath, goal.worktreePath, goal.branch, true);
 				console.log(`[goal-manager] Cleaned up worktree for goal "${goal.title}": ${goal.worktreePath}`);
 			} catch (err) {
 				console.error(`[goal-manager] Failed to clean up worktree for goal "${goal.title}":`, err);
@@ -194,7 +197,7 @@ export class GoalManager {
 
 			// Prune stale worktree references
 			try {
-				execFileSync("git", ["worktree", "prune"], { cwd: goal.repoPath, stdio: "pipe" });
+				await execFile("git", ["worktree", "prune"], { cwd: goal.repoPath });
 			} catch {
 				// ignore
 			}

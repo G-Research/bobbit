@@ -43,7 +43,7 @@ export class StaffManager {
 		// Create a worktree for this staff agent
 		const shortId = randomUUID().slice(0, 8);
 		const branchName = "staff-" + sanitiseBranchName(name) + "-" + shortId;
-		const worktreeResult = createWorktree(cwd, branchName);
+		const worktreeResult = await createWorktree(cwd, branchName);
 		staff.worktreePath = worktreeResult.worktreePath;
 		staff.branch = worktreeResult.branchName;
 
@@ -67,7 +67,7 @@ export class StaffManager {
 		} catch (err) {
 			// Clean up the orphaned worktree on failure
 			try {
-				cleanupWorktree(cwd, worktreeResult.worktreePath, branchName, true);
+				await cleanupWorktree(cwd, worktreeResult.worktreePath, branchName, true);
 				console.log(`[staff-manager] Cleaned up orphaned worktree after createStaff failure: ${worktreeResult.worktreePath}`);
 			} catch (cleanupErr) {
 				console.error(`[staff-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
@@ -127,7 +127,7 @@ export class StaffManager {
 		// Clean up the worktree if it exists
 		if (staff.worktreePath) {
 			try {
-				cleanupWorktree(staff.cwd, staff.worktreePath, staff.branch, true);
+				await cleanupWorktree(staff.cwd, staff.worktreePath, staff.branch, true);
 			} catch (err) {
 				console.error(`[staff-manager] Failed to clean up worktree for staff ${id}:`, err);
 			}
