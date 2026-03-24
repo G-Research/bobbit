@@ -6,7 +6,7 @@ import "../../components/ConsoleBlock.js";
 import { Diff } from "@mariozechner/mini-lit/dist/Diff.js";
 import { html, type TemplateResult } from "lit";
 import { i18n } from "../../utils/i18n.js";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { ArtifactPill } from "./ArtifactPill.js";
 import type { ArtifactsPanel, ArtifactsParams } from "./artifacts.js";
@@ -67,7 +67,7 @@ export class ArtifactsToolRenderer implements ToolRenderer<ArtifactsParams, unde
 		result: ToolResultMessage<undefined> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		// Create refs for collapsible sections
 		const contentRef = createRef<HTMLDivElement>();

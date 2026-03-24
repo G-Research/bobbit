@@ -2,7 +2,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Image } from "lucide";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface SvgWriteParams {
@@ -33,7 +33,7 @@ export class SvgRenderer implements ToolRenderer<SvgWriteParams, any> {
 		result: ToolResultMessage<any> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.path ? `SVG ${params.path}` : "SVG";
 
@@ -48,7 +48,7 @@ export class SvgRenderer implements ToolRenderer<SvgWriteParams, any> {
 				content: html`
 					<div class="space-y-3">
 						${renderHeader(state, Image, headerText)}
-						<div class="text-sm text-destructive">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 					</div>
 				`,
 				isCustom: false,

@@ -4,7 +4,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { SquareTerminal } from "lucide";
 import { i18n } from "../../utils/i18n.js";
 import { isGitDiff } from "../../components/DiffBlock.js";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
 
@@ -43,7 +43,7 @@ function summarizeCommand(command: string): string {
 // Bash tool has undefined details (only uses output)
 export class BashRenderer implements ToolRenderer<BashParams, undefined> {
 	render(params: BashParams | undefined, result: ToolResultMessage<undefined> | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.command
 			? html`<span class="font-mono">${summarizeCommand(params.command)}</span>`

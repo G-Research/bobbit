@@ -2,7 +2,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Code } from "lucide";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface BrowserEvalParams {
@@ -19,7 +19,7 @@ export class BrowserEvalRenderer implements ToolRenderer<BrowserEvalParams, any>
 		result: ToolResultMessage<any> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.expression
 			? html`Eval: <span class="font-mono">${truncate(params.expression)}</span>`

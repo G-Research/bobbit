@@ -1,7 +1,7 @@
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { MousePointerClick } from "lucide";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface BrowserClickParams {
@@ -14,7 +14,7 @@ export class BrowserClickRenderer implements ToolRenderer<BrowserClickParams, an
 		result: ToolResultMessage<any> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.selector
 			? html`Click: <span class="font-mono">${params.selector}</span>`
@@ -30,7 +30,7 @@ export class BrowserClickRenderer implements ToolRenderer<BrowserClickParams, an
 				content: html`
 					<div class="space-y-2">
 						${renderHeader(state, MousePointerClick, headerText)}
-						<div class="text-sm text-destructive">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 					</div>
 				`,
 				isCustom: false,

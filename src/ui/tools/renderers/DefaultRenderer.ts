@@ -2,7 +2,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { Code } from "lucide";
 import { i18n } from "../../utils/i18n.js";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
 
@@ -28,7 +28,7 @@ export class DefaultRenderer implements ToolRenderer {
 	}
 
 	render(params: any | undefined, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		// Format params as JSON
 		let paramsJson = "";

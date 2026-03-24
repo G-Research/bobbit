@@ -6,7 +6,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { ListTodo, SquarePlus, SquarePen } from "lucide";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderSessionLink } from "./delegate-cards.js";
 
@@ -64,7 +64,7 @@ function renderTaskRow(t: any): TemplateResult {
 
 export class TaskListRenderer implements ToolRenderer {
 	render(_params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		if (!result) {
 			return { content: html`<div>${renderHeader(state, ListTodo, "Listing tasks…")}</div>`, isCustom: false };
@@ -72,10 +72,11 @@ export class TaskListRenderer implements ToolRenderer {
 
 		const { data, text } = getResult(result);
 		if (result.isError) {
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, ListTodo, "Task list failed")}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, ListTodo, skipped ? "Aborted task list — skipped due to queued message" : "Task list failed")}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -109,7 +110,7 @@ export class TaskListRenderer implements ToolRenderer {
 
 export class TaskCreateRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const title = params?.title || "task";
 		const type = params?.type;
 
@@ -122,12 +123,17 @@ export class TaskCreateRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			// Highlight 409 gate requirement errors
 			const is409 = text.includes("409") || text.toLowerCase().includes("gate");
+			const headerText = skipped
+				? html`Aborted creation of task — <span class="font-medium text-xs">${truncate(title)}</span> — skipped due to queued message`
+				: html`Failed to create task — <span class="font-medium text-xs">${truncate(title)}</span>`;
+			const textCls = skipped ? "text-amber-600 dark:text-amber-400" : is409 ? "text-amber-600 dark:text-amber-400" : "text-destructive";
 			return {
 				content: html`<div>
-					${renderHeader(state, SquarePlus, html`Failed to create task — <span class="font-medium text-xs">${truncate(title)}</span>`)}
-					<div class="mt-1 text-xs ${is409 ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
+					${renderHeader(state, SquarePlus, headerText)}
+					<div class="mt-1 text-xs ${textCls}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -146,7 +152,7 @@ export class TaskCreateRenderer implements ToolRenderer {
 
 export class TaskUpdateRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const taskId = params?.task_id ? params.task_id.slice(0, 8) : "task";
 
 		// Build a summary of what's changing
@@ -167,10 +173,11 @@ export class TaskUpdateRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, SquarePen, html`Failed to update <span class="font-mono text-xs">${taskId}</span>`)}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, SquarePen, skipped ? html`Aborted update of <span class="font-mono text-xs">${taskId}</span> — skipped due to queued message` : html`Failed to update <span class="font-mono text-xs">${taskId}</span>`)}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};

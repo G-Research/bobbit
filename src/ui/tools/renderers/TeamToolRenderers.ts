@@ -6,7 +6,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Users, UserPlus, UserMinus, Trophy, Zap, MessageSquare, AlertTriangle } from "lucide";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderSessionLink } from "./delegate-cards.js";
 
@@ -46,7 +46,7 @@ function truncate(s: string, max = 60): string {
 
 export class TeamSpawnRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const role = params?.role || "agent";
 		const task = params?.task ? truncate(params.task, 80) : "";
 
@@ -63,10 +63,11 @@ export class TeamSpawnRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, UserPlus, html`Failed to spawn ${roleBadge(role)}`)}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, UserPlus, skipped ? html`Aborted spawn of ${roleBadge(role)} — skipped due to queued message` : html`Failed to spawn ${roleBadge(role)}`)}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -83,7 +84,7 @@ export class TeamSpawnRenderer implements ToolRenderer {
 
 export class TeamListRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		if (!result) {
 			return { content: html`<div>${renderHeader(state, Users, "Listing team agents…")}</div>`, isCustom: false };
@@ -91,10 +92,11 @@ export class TeamListRenderer implements ToolRenderer {
 
 		const { data, text } = getResult(result);
 		if (result.isError) {
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Users, "Team list failed")}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, Users, skipped ? "Aborted team list — skipped due to queued message" : "Team list failed")}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -136,7 +138,7 @@ export class TeamListRenderer implements ToolRenderer {
 
 export class TeamDismissRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const sid = params?.session_id;
 
 		if (!result) {
@@ -145,10 +147,11 @@ export class TeamDismissRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, UserMinus, html`Failed to dismiss agent`)}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, UserMinus, skipped ? html`Aborted dismiss — skipped due to queued message` : html`Failed to dismiss agent`)}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -165,7 +168,7 @@ export class TeamDismissRenderer implements ToolRenderer {
 
 export class TeamCompleteRenderer implements ToolRenderer {
 	render(_params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		if (!result) {
 			return { content: html`<div>${renderHeader(state, Trophy, "Completing team…")}</div>`, isCustom: false };
@@ -173,10 +176,11 @@ export class TeamCompleteRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Trophy, "Team completion failed")}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, Trophy, skipped ? "Aborted team completion — skipped due to queued message" : "Team completion failed")}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -193,7 +197,7 @@ export class TeamCompleteRenderer implements ToolRenderer {
 
 export class TeamSteerRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const sid = params?.session_id;
 		const msg = params?.message ? truncate(params.message, 80) : "";
 
@@ -206,10 +210,11 @@ export class TeamSteerRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Zap, html`Steer failed ${sid ? renderSessionLink(sid) : ""}`)}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, Zap, skipped ? html`Aborted steer ${sid ? renderSessionLink(sid) : ""} — skipped due to queued message` : html`Steer failed ${sid ? renderSessionLink(sid) : ""}`)}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -226,7 +231,7 @@ export class TeamSteerRenderer implements ToolRenderer {
 
 export class TeamPromptRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const sid = params?.session_id;
 		const msg = params?.message ? truncate(params.message, 80) : "";
 
@@ -239,10 +244,11 @@ export class TeamPromptRenderer implements ToolRenderer {
 
 		const { data, text } = getResult(result);
 		if (result.isError) {
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, MessageSquare, html`Prompt failed ${sid ? renderSessionLink(sid) : ""}`)}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, MessageSquare, skipped ? html`Aborted prompt ${sid ? renderSessionLink(sid) : ""} — skipped due to queued message` : html`Prompt failed ${sid ? renderSessionLink(sid) : ""}`)}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -261,7 +267,7 @@ export class TeamPromptRenderer implements ToolRenderer {
 
 export class TeamAbortRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const sid = params?.session_id;
 
 		if (!result) {
@@ -270,10 +276,11 @@ export class TeamAbortRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, AlertTriangle, html`Abort failed ${sid ? renderSessionLink(sid) : ""}`)}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, AlertTriangle, skipped ? html`Aborted abort ${sid ? renderSessionLink(sid) : ""} — skipped due to queued message` : html`Abort failed ${sid ? renderSessionLink(sid) : ""}`)}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};

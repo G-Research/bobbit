@@ -1,9 +1,33 @@
 import { icon } from "@mariozechner/mini-lit";
+import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import type { Ref } from "lit/directives/ref.js";
 import { ref } from "lit/directives/ref.js";
 import { ChevronsUpDown, ChevronUp, Loader } from "lucide";
 import type { ToolRenderer } from "./types.js";
+
+/** Possible states for a tool call header icon/styling. */
+export type ToolHeaderState = "inprogress" | "complete" | "error" | "warning";
+
+/**
+ * Detect whether a tool result is a benign "skipped due to queued user message"
+ * rather than a real error.
+ */
+export function isSkippedToolResult(result: ToolResultMessage | undefined): boolean {
+	if (!result?.isError) return false;
+	const text = result.content?.filter(c => c.type === 'text').map((c: any) => c.text).join('') || '';
+	return text.includes('Skipped due to queued user message');
+}
+
+/**
+ * Resolve the display state for a tool call result.
+ * Returns "warning" for skipped-due-to-queued-message results instead of "error".
+ */
+export function getToolState(result: ToolResultMessage | undefined, isStreaming?: boolean): ToolHeaderState {
+	if (!result) return isStreaming ? "inprogress" : "complete";
+	if (isSkippedToolResult(result)) return "warning";
+	return result.isError ? "error" : "complete";
+}
 
 // Registry of tool renderers
 export const toolRenderers = new Map<string, ToolRenderer>();
@@ -27,7 +51,7 @@ export function getToolRenderer(toolName: string): ToolRenderer | undefined {
  * Shows icon on left when complete/error, spinner on right when in progress
  */
 export function renderHeader(
-	state: "inprogress" | "complete" | "error",
+	state: ToolHeaderState,
 	toolIcon: any,
 	text: string | TemplateResult,
 ): TemplateResult {
@@ -59,6 +83,13 @@ export function renderHeader(
 					${text}
 				</div>
 			`;
+		case "warning":
+			return html`
+				<div class="flex items-center gap-2 text-sm text-muted-foreground">
+					${statusIcon(toolIcon, "text-amber-600 dark:text-amber-500")}
+					${text}
+				</div>
+			`;
 	}
 }
 
@@ -67,7 +98,7 @@ export function renderHeader(
  * Same as renderHeader but with a chevron button that toggles visibility of content
  */
 export function renderCollapsibleHeader(
-	state: "inprogress" | "complete" | "error",
+	state: ToolHeaderState,
 	toolIcon: any,
 	text: string | TemplateResult,
 	contentRef: Ref<HTMLElement>,
@@ -112,7 +143,9 @@ export function renderCollapsibleHeader(
 			? "text-green-600 dark:text-green-500"
 			: state === "error"
 				? "text-destructive"
-				: "text-foreground";
+				: state === "warning"
+					? "text-amber-600 dark:text-amber-500"
+					: "text-foreground";
 
 	return html`
 		<button @click=${toggleContent} class="flex items-center justify-between gap-2 text-sm text-muted-foreground w-full text-left hover:text-foreground transition-colors cursor-pointer">

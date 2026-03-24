@@ -2,7 +2,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { Camera } from "lucide";
 import { i18n } from "../../utils/i18n.js";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
 
@@ -18,7 +18,7 @@ export class ScreenshotRenderer implements ToolRenderer<ScreenshotParams, any> {
 		result: ToolResultMessage<any> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.selector
 			? `${i18n("Screenshot")} ${params.selector}`
@@ -38,7 +38,7 @@ export class ScreenshotRenderer implements ToolRenderer<ScreenshotParams, any> {
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Camera, headerText)}
-							<div class="text-sm text-destructive">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,

@@ -1,7 +1,7 @@
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { Clock } from "lucide";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface BrowserWaitParams {
@@ -15,7 +15,7 @@ export class BrowserWaitRenderer implements ToolRenderer<BrowserWaitParams, any>
 		result: ToolResultMessage<any> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const timeoutStr = params?.timeout ? ` (${params.timeout}ms)` : "";
 		const headerText = params?.selector
@@ -32,7 +32,7 @@ export class BrowserWaitRenderer implements ToolRenderer<BrowserWaitParams, any>
 				content: html`
 					<div class="space-y-2">
 						${renderHeader(state, Clock, headerText)}
-						<div class="text-sm text-destructive">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 					</div>
 				`,
 				isCustom: false,

@@ -9,7 +9,7 @@ import { type SandboxFile, SandboxIframe, type SandboxResult } from "../componen
 import type { SandboxRuntimeProvider } from "../components/sandbox/SandboxRuntimeProvider.js";
 import { JAVASCRIPT_REPL_TOOL_DESCRIPTION } from "../prompts/prompts.js";
 import type { Attachment } from "../utils/attachment-utils.js";
-import { registerToolRenderer, renderCollapsibleHeader, renderHeader } from "./renderer-registry.js";
+import { registerToolRenderer, renderCollapsibleHeader, renderHeader, getToolState } from "./renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "./types.js";
 
 // Execute JavaScript code with attachments using SandboxedIframe
@@ -204,7 +204,7 @@ export const javascriptReplRenderer: ToolRenderer<JavaScriptReplParams, JavaScri
 		isStreaming?: boolean,
 	): ToolRenderResult {
 		// Determine status
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		// Create refs for collapsible code section
 		const codeContentRef = createRef<HTMLDivElement>();

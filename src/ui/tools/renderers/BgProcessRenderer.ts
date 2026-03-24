@@ -2,7 +2,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { SquareTerminal } from "lucide";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface BgParams {
@@ -29,7 +29,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 		isStreaming?: boolean,
 	): ToolRenderResult {
 		const summary = params ? summarize(params) : "background process";
-		const state = !result ? "inprogress" : result.isError ? "error" : "complete";
+		const state = getToolState(result);
 
 		const output = typeof result?.content === "string"
 			? result.content

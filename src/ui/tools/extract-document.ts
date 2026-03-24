@@ -7,7 +7,7 @@ import { FileText } from "lucide";
 import { EXTRACT_DOCUMENT_DESCRIPTION } from "../prompts/prompts.js";
 import { loadAttachment } from "../utils/attachment-utils.js";
 import { isCorsError } from "../utils/proxy-utils.js";
-import { registerToolRenderer, renderCollapsibleHeader, renderHeader } from "./renderer-registry.js";
+import { registerToolRenderer, renderCollapsibleHeader, renderHeader, getToolState } from "./renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "./types.js";
 
 // ============================================================================
@@ -194,7 +194,7 @@ export const extractDocumentRenderer: ToolRenderer<ExtractDocumentParams, Extrac
 		isStreaming?: boolean,
 	): ToolRenderResult {
 		// Determine status
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		// Create refs for collapsible sections
 		const contentRef = createRef<HTMLDivElement>();

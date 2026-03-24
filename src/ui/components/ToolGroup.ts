@@ -14,6 +14,7 @@ import {
 } from "lucide";
 import { i18n } from "../utils/i18n.js";
 import { renderTool } from "../tools/index.js";
+import { isSkippedToolResult } from "../tools/renderer-registry.js";
 
 /** Icon lookup by tool name — mirrors individual renderers */
 const TOOL_ICONS: Record<string, any> = {
@@ -96,7 +97,11 @@ export class ToolGroup extends LitElement {
 		const count = this.toolCalls.length;
 		const toolIcon = TOOL_ICONS[this.toolName] || FileText;
 		const label = TOOL_LABELS[this.toolName] || { verb: this.toolName, noun: "item", nounPlural: "items" };
-		const hasErrors = this.toolCalls.some((tc) => this.toolResultsById?.get(tc.id)?.isError);
+		const hasErrors = this.toolCalls.some((tc) => {
+			const r = this.toolResultsById?.get(tc.id);
+			return r?.isError && !isSkippedToolResult(r);
+		});
+		const hasWarnings = this.toolCalls.some((tc) => isSkippedToolResult(this.toolResultsById?.get(tc.id)));
 
 		// Build the file/item list for the summary
 		const labels = this.toolCalls.map((tc) => summarizeCall(this.toolName, tc.arguments));
@@ -109,7 +114,9 @@ export class ToolGroup extends LitElement {
 
 		const iconColor = hasErrors
 			? "text-destructive"
-			: "text-green-600 dark:text-green-500";
+			: hasWarnings
+				? "text-amber-600 dark:text-amber-500"
+				: "text-green-600 dark:text-green-500";
 
 		return html`
 			<div class="p-2.5 border border-border rounded-md bg-card text-card-foreground shadow-xs">

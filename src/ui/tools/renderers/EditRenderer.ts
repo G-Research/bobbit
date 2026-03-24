@@ -3,7 +3,7 @@ import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { FileCode2 } from "lucide";
 import { i18n } from "../../utils/i18n.js";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface EditParams {
@@ -19,7 +19,7 @@ interface EditDetails {
 
 export class EditRenderer implements ToolRenderer<EditParams, EditDetails> {
 	render(params: EditParams | undefined, result: ToolResultMessage<EditDetails> | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.path
 			? `${i18n("Editing")} ${params.path}`
@@ -32,11 +32,12 @@ export class EditRenderer implements ToolRenderer<EditParams, EditDetails> {
 				.join("\n") || "";
 
 			if (result.isError) {
+				const skipped = isSkippedToolResult(result);
 				return {
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, FileCode2, headerText)}
-							<div class="text-sm text-destructive">${output}</div>
+							<div class="text-sm ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${output}</div>
 						</div>
 					`,
 					isCustom: false,

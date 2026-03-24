@@ -1,7 +1,7 @@
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { Globe } from "lucide";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
 
@@ -26,7 +26,7 @@ export class BrowserNavigateRenderer implements ToolRenderer<BrowserNavigatePara
 		result: ToolResultMessage<any> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.url
 			? html`Navigate: <a href="${params.url}" target="_blank" rel="noopener" class="font-mono hover:underline">${shortenUrl(params.url)}</a>`
@@ -43,7 +43,7 @@ export class BrowserNavigateRenderer implements ToolRenderer<BrowserNavigatePara
 					content: html`
 						<div class="space-y-2">
 							${renderHeader(state, Globe, headerText)}
-							<div class="text-sm text-destructive">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,

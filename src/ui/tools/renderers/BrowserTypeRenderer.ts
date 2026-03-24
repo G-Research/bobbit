@@ -1,7 +1,7 @@
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { Keyboard } from "lucide";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface BrowserTypeParams {
@@ -20,7 +20,7 @@ export class BrowserTypeRenderer implements ToolRenderer<BrowserTypeParams, any>
 		result: ToolResultMessage<any> | undefined,
 		isStreaming?: boolean,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params
 			? html`Type into <span class="font-mono">${params.selector}</span>: <span class="font-mono">"${truncate(params.text)}"</span>`
@@ -36,7 +36,7 @@ export class BrowserTypeRenderer implements ToolRenderer<BrowserTypeParams, any>
 				content: html`
 					<div class="space-y-2">
 						${renderHeader(state, Keyboard, headerText)}
-						<div class="text-sm text-destructive">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 					</div>
 				`,
 				isCustom: false,

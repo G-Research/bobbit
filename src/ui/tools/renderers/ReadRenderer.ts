@@ -3,7 +3,7 @@ import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { FileText } from "lucide";
 import { i18n } from "../../utils/i18n.js";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
 
@@ -15,7 +15,7 @@ interface ReadParams {
 
 export class ReadRenderer implements ToolRenderer<ReadParams, any> {
 	render(params: ReadParams | undefined, result: ToolResultMessage<any> | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.path
 			? `${i18n("Reading")} ${params.path}${params.offset ? ` (from line ${params.offset})` : ""}`
@@ -30,11 +30,12 @@ export class ReadRenderer implements ToolRenderer<ReadParams, any> {
 			const hasImages = result.content?.some((c: any) => c.type === "image");
 
 			if (result.isError) {
+				const skipped = isSkippedToolResult(result);
 				return {
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, FileText, headerText)}
-							<div class="text-sm text-destructive">${output}</div>
+							<div class="text-sm ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${output}</div>
 						</div>
 					`,
 					isCustom: false,

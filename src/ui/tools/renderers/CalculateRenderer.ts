@@ -2,7 +2,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { Calculator } from "lucide";
 import { i18n } from "../../utils/i18n.js";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface CalculateParams {
@@ -12,7 +12,7 @@ interface CalculateParams {
 // Calculate tool has undefined details (only uses output)
 export class CalculateRenderer implements ToolRenderer<CalculateParams, undefined> {
 	render(params: CalculateParams | undefined, result: ToolResultMessage<undefined> | undefined): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : "inprogress";
+		const state = getToolState(result);
 
 		// Full params + full result
 		if (result && params?.expression) {
@@ -28,7 +28,7 @@ export class CalculateRenderer implements ToolRenderer<CalculateParams, undefine
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Calculator, params.expression)}
-							<div class="text-sm text-destructive">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,

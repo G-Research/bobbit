@@ -5,7 +5,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Sparkles, Plus } from "lucide";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
+import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 function getResult(result: ToolResultMessage | undefined): { text: string; data: any } {
@@ -24,7 +24,7 @@ function truncate(s: string, max = 60): string {
 
 export class PersonalitiesListRenderer implements ToolRenderer {
 	render(_params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 
 		if (!result) {
 			return { content: html`<div>${renderHeader(state, Sparkles, "Listing personalities…")}</div>`, isCustom: false };
@@ -32,10 +32,11 @@ export class PersonalitiesListRenderer implements ToolRenderer {
 
 		const { data, text } = getResult(result);
 		if (result.isError) {
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Sparkles, "Personality list failed")}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, Sparkles, skipped ? "Aborted personality list — skipped due to queued message" : "Personality list failed")}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -72,7 +73,7 @@ export class PersonalitiesListRenderer implements ToolRenderer {
 
 export class PersonalitiesCreateRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : isStreaming ? "inprogress" : "complete";
+		const state = getToolState(result, isStreaming);
 		const name = params?.name || "personality";
 		const desc = params?.description ? truncate(params.description, 60) : "";
 
@@ -85,10 +86,11 @@ export class PersonalitiesCreateRenderer implements ToolRenderer {
 
 		if (result.isError) {
 			const { text } = getResult(result);
+			const skipped = isSkippedToolResult(result);
 			return {
 				content: html`<div>
-					${renderHeader(state, Plus, html`Failed to create personality <span class="font-medium text-xs">${name}</span>`)}
-					<div class="mt-1 text-xs text-destructive">${text}</div>
+					${renderHeader(state, Plus, skipped ? html`Aborted creation of personality <span class="font-medium text-xs">${name}</span> — skipped due to queued message` : html`Failed to create personality <span class="font-medium text-xs">${name}</span>`)}
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
 			};

@@ -2,7 +2,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html } from "lit";
 import { Clock } from "lucide";
 import { i18n } from "../../utils/i18n.js";
-import { renderHeader } from "../renderer-registry.js";
+import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 interface GetCurrentTimeParams {
@@ -15,7 +15,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 		params: GetCurrentTimeParams | undefined,
 		result: ToolResultMessage<undefined> | undefined,
 	): ToolRenderResult {
-		const state = result ? (result.isError ? "error" : "complete") : "inprogress";
+		const state = getToolState(result);
 
 		// Full params + full result
 		if (result && params) {
@@ -34,7 +34,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Clock, headerText)}
-							<div class="text-sm text-destructive">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,
@@ -59,7 +59,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Clock, i18n("Getting current date and time"))}
-							<div class="text-sm text-destructive">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-warning' : 'text-destructive'}">${output}</div>
 						</div>
 					`,
 					isCustom: false,
