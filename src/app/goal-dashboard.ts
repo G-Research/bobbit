@@ -891,7 +891,7 @@ function renderTabBar(): TemplateResult {
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
 		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
-		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length) },
+		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length + (currentGoal?.team && state.gatewaySessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead") ? 1 : 0)) },
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },
 	];
 
@@ -988,14 +988,32 @@ function renderTasksTab(): TemplateResult {
 // ============================================================================
 
 function renderAgentsTab(): TemplateResult {
-	if (agents.length === 0) {
+	// Build combined list: team lead (if any) + spawned agents
+	const allAgents: TeamAgent[] = [];
+	const teamLeadSession = currentGoal?.team
+		? state.gatewaySessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")
+		: null;
+	if (teamLeadSession) {
+		allAgents.push({
+			sessionId: teamLeadSession.id,
+			role: "team-lead",
+			status: teamLeadSession.status,
+			worktreePath: "",
+			branch: "",
+			task: "",
+			createdAt: 0,
+		});
+	}
+	allAgents.push(...agents);
+
+	if (allAgents.length === 0) {
 		return html`<div class="tab-empty">${svgAgents}<span>No active agents</span></div>`;
 	}
 
 	return html`
 		<div class="tab-panel-inner">
 			<div class="agent-grid">
-				${agents.map(agent => {
+				${allAgents.map(agent => {
 					const session = state.gatewaySessions.find(s => s.id === agent.sessionId);
 					const isWorking = agent.status === "streaming";
 					const roleColor = getRoleColor(agent.role);
