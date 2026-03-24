@@ -19,6 +19,7 @@
     "test:unit": "playwright test --config tests/playwright.config.ts",
     "test:node": "npx tsx --test --test-force-exit tests/workflow-manager-logic.test.ts tests/task-state-machine.test.ts tests/name-validation.test.ts tests/gate-store-logic.test.ts",
     "test:e2e": "npm run build:server && npx playwright test --config playwright-e2e.config.ts",
+    "test:coverage": "npm run build:server && shx rm -rf coverage && npx playwright test --config playwright-e2e-coverage.config.ts && npx c8 report --temp-directory=coverage/tmp --reports-dir=coverage --reporter=html --reporter=lcov --reporter=text",
     "test": "npm run test:node && npm run test:unit && npm run test:e2e",
     "test:e2e:ui": "npm run build && npx playwright test --config tests/playwright-e2e-ui.config.ts",
     "clean": "shx rm -rf dist"
@@ -48,6 +49,7 @@
     "@tailwindcss/vite": "^4.1.17",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.14",
+    "c8": "^11.0.0",
     "concurrently": "^9.2.1",
     "shx": "^0.3.4",
     "typescript": "^5.7.3",
