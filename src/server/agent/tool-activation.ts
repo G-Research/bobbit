@@ -1,20 +1,20 @@
 /**
  * Maps role allowedTools to pi-coding-agent CLI flags.
  *
- * Tools come from two sources (defined in tools/<group>/*.yaml `provider` field):
+ * Tools come from two sources (defined in .bobbit/config/tools/<group>/*.yaml `provider` field):
  * 1. **Builtin tools** (pi-coding-agent built-in): read, bash, edit, write, grep, find, ls
  *    → Controlled via `--tools` flag
- * 2. **Bobbit extensions** (tools/<group>/extension.ts): delegate, browser_*, web_*, task_*, gate_*, team_*, bash_bg
- *    → Resolved from tools/<groupDir>/extension.ts, controlled via `--extension` flag
+ * 2. **Bobbit extensions** (.bobbit/config/tools/<group>/extension.ts): delegate, browser_*, web_*, task_*, gate_*, team_*, bash_bg
+ *    → Resolved from .bobbit/config/tools/<groupDir>/extension.ts, controlled via `--extension` flag
  *    → Goal/team extensions are also added separately by session-manager (duplicates are harmless)
  *
- * Provider info is read from tools/<group>/*.yaml via ToolManager instead of hardcoded maps.
+ * Provider info is read from .bobbit/config/tools/<group>/*.yaml via ToolManager instead of hardcoded maps.
  * All sessions use `--no-extensions` so Bobbit has complete control over extension loading.
  */
 
 import path from "node:path";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
-import { TOOLS_CODE_DIR } from "./tool-manager.js";
+import { TOOLS_DIR } from "./tool-manager.js";
 
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--tools", "read,bash", "--no-extensions", "--extension", "/path/to/ext"]) */
@@ -23,10 +23,10 @@ export interface ToolActivationResult {
 
 /**
  * Resolve the absolute path for a bobbit-extension provider.
- * Path is: tools/<groupDir>/<extension>
+ * Path is: .bobbit/config/tools/<groupDir>/<extension>
  */
 function resolveExtensionPath(provider: ToolProvider & { groupDir: string }): string {
-	return path.join(TOOLS_CODE_DIR, provider.groupDir, provider.extension!);
+	return path.join(TOOLS_DIR, provider.groupDir, provider.extension!);
 }
 
 /**
@@ -84,7 +84,7 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 		const provider = providers.get(toolName);
 		if (!provider) {
 			// Unknown tool — log warning and skip
-			console.warn(`[tool-activation] Tool "${toolName}" has no provider in tools/<group>/*.yaml — skipping`);
+			console.warn(`[tool-activation] Tool "${toolName}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping`);
 			continue;
 		}
 		if (provider.type === "builtin" && provider.tool) {

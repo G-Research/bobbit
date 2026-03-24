@@ -39,6 +39,21 @@ export function scaffoldBobbitDir(projectRoot: string): void {
         console.log(`Adding .bobbit/config/tools/ to existing installation...`);
         copyDir(defaultToolsDir, toolsConfigDir);
       }
+    } else {
+      // Incremental: add extension.ts files if missing (for existing installations)
+      const defaultsDir = path.join(__dirname, "defaults");
+      const defaultToolsDir = path.join(defaultsDir, "tools");
+      if (fs.existsSync(defaultToolsDir)) {
+        for (const groupEntry of fs.readdirSync(defaultToolsDir, { withFileTypes: true })) {
+          if (!groupEntry.isDirectory()) continue;
+          const extSrc = path.join(defaultToolsDir, groupEntry.name, "extension.ts");
+          const extDest = path.join(toolsConfigDir, groupEntry.name, "extension.ts");
+          if (fs.existsSync(extSrc) && !fs.existsSync(extDest)) {
+            fs.mkdirSync(path.join(toolsConfigDir, groupEntry.name), { recursive: true });
+            fs.copyFileSync(extSrc, extDest);
+          }
+        }
+      }
     }
     return;
   }

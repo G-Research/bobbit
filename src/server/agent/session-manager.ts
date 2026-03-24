@@ -18,14 +18,14 @@ import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
-import { TOOLS_CODE_DIR } from "./tool-manager.js";
+import { TOOLS_DIR } from "./tool-manager.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
-const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_CODE_DIR, "tasks", "extension.ts");
+const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
 
 /** Team lead extension — team management tools. */
-const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_CODE_DIR, "team", "extension.ts");
+const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
 
 export type SessionStatus = "starting" | "idle" | "streaming" | "terminated";
 
