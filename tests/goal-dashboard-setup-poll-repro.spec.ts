@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/goal-dashboard-setup-poll.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/goal-dashboard-setup-poll-repro.html")}`;
 
 /**
  * Reproducing test for the stale worktree status bug.
