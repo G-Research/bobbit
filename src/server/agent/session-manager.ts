@@ -19,7 +19,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
-import { getAigwUrl, getAigwModels } from "./aigw-manager.js";
+import { getAigwUrl, getAigwModels, modelRecencyRank } from "./aigw-manager.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -989,10 +989,10 @@ export class SessionManager {
 		if (!aigwUrl || !aigwModels || aigwModels.length === 0) return;
 
 		try {
-			// G5: Check preferred model first, fall back to first available
+			// G5: Check preferred model first, fall back to best by recency rank
 			const preferredId = this.preferencesStore.get("aigw.preferredModel") as string | undefined;
 			const preferred = preferredId ? aigwModels.find(m => m.id === preferredId) : undefined;
-			const modelToUse = preferred ?? aigwModels[0];
+			const modelToUse = preferred ?? [...aigwModels].sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id))[0];
 
 			await session.rpcClient.setModel("aigw", modelToUse.id);
 			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
