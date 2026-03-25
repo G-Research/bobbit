@@ -464,6 +464,29 @@ async function initApp() {
 
 	await loadSavedBindings();
 	startListening();
+
+	// Sync preferences when the page becomes visible (covers cross-device
+	// changes when the user switches back to this tab/app).
+	document.addEventListener("visibilitychange", async () => {
+		if (document.visibilityState !== "visible") return;
+		if (state.appView !== "authenticated") return;
+		try {
+			const res = await gatewayFetch("/api/preferences");
+			if (!res.ok) return;
+			const prefs = await res.json();
+			// Apply palette
+			const palette = (prefs.palette as string) || "forest";
+			if (palette === "forest") {
+				delete document.documentElement.dataset.palette;
+			} else {
+				document.documentElement.dataset.palette = palette;
+			}
+			// Reload shortcuts if changed
+			if (prefs.shortcuts) {
+				await loadSavedBindings();
+			}
+		} catch {}
+	});
 }
 
 initApp();
