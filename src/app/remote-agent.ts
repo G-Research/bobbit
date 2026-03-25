@@ -111,6 +111,8 @@ export class RemoteAgent {
 			messages: [] as any[],
 			isStreaming: false,
 			isCompacting: false,
+			isArchived: false,
+			archivedAt: null as number | null,
 			streamMessage: null as any,
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
@@ -534,6 +536,10 @@ export class RemoteAgent {
 				if (msg.data?.isStreaming !== undefined) {
 					this._state.isStreaming = msg.data.isStreaming;
 				}
+				if (msg.data?.archived) {
+					this._state.isArchived = true;
+					this._state.archivedAt = msg.data.archivedAt;
+				}
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
@@ -605,11 +611,18 @@ export class RemoteAgent {
 
 			case "session_status":
 				console.log(`[RemoteAgent] session_status: ${msg.status}, isStreaming was: ${this._state.isStreaming}`);
-				this._state.isStreaming = msg.status === "streaming";
-				if (msg.status === "streaming") {
-					this._state.turnStartTime = msg.streamingStartedAt ?? this._state.turnStartTime ?? Date.now();
-				} else {
+				if (msg.status === "archived") {
+					this._state.isStreaming = false;
+					this._state.isArchived = true;
 					this._state.turnStartTime = null;
+				} else {
+					this._state.isStreaming = msg.status === "streaming";
+					this._state.isArchived = false;
+					if (msg.status === "streaming") {
+						this._state.turnStartTime = msg.streamingStartedAt ?? this._state.turnStartTime ?? Date.now();
+					} else {
+						this._state.turnStartTime = null;
+					}
 				}
 				if (msg.status !== "streaming") this._isAborting = false;
 				this.onStatusChange?.(msg.status);

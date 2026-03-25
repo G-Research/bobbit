@@ -121,6 +121,7 @@ export class SessionManager {
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
+	private purgeInterval: ReturnType<typeof setInterval> | null = null;
 
 	constructor(options?: SessionManagerOptions) {
 		this.agentCliPath = options?.agentCliPath;
@@ -419,7 +420,7 @@ export class SessionManager {
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
 	async restoreSessions(): Promise<void> {
-		const persisted = this.store.getAll();
+		const persisted = this.store.getLive();
 		if (persisted.length === 0) return;
 
 		// Separate regular sessions from delegate sessions
@@ -1523,11 +1524,10 @@ export class SessionManager {
 			console.log(`[session ${id}] Cascading terminate to delegate ${child.id}`);
 			await this.terminateSession(child.id);
 		}
-		// Also clean up persisted-but-not-in-memory delegate sessions
-		for (const ps of this.store.getAll()) {
+		// Also archive persisted-but-not-in-memory delegate sessions
+		for (const ps of this.store.getLive()) {
 			if (ps.delegateOf === id && !this.sessions.has(ps.id)) {
-				this.store.remove(ps.id);
-				cleanupSessionPrompt(ps.id);
+				this.store.archive(ps.id);
 			}
 		}
 
@@ -1540,16 +1540,180 @@ export class SessionManager {
 			(this as any).bgProcessManager.cleanup(id);
 		}
 
+		// Broadcast session_archived event before closing clients
+		const archivedAt = Date.now();
+		broadcast(session.clients, { type: "session_archived", sessionId: id, archivedAt });
+
 		for (const client of session.clients) {
 			client.close(1000, "Session terminated");
 		}
 		session.clients.clear();
 
 		this.sessions.delete(id);
-		this.store.remove(id);
-		this.colorStore?.remove(id);
-		cleanupSessionPrompt(id);
+		// Archive instead of delete — keep metadata for 7 days
+		this.store.archive(id);
+		// Don't remove color or session prompt — they're needed for archived view
 		return true;
+	}
+
+	/** Get an archived session's metadata. */
+	getArchivedSession(id: string): PersistedSession | undefined {
+		const ps = this.store.get(id);
+		return ps?.archived ? ps : undefined;
+	}
+
+	/** Parse the .jsonl file for an archived session and return messages. */
+	getArchivedMessages(id: string): unknown[] {
+		const ps = this.store.get(id);
+		if (!ps?.archived || !ps.agentSessionFile) return [];
+		try {
+			if (!fs.existsSync(ps.agentSessionFile)) return [];
+			const content = fs.readFileSync(ps.agentSessionFile, "utf-8");
+			const lines = content.trim().split("\n");
+			const messages: unknown[] = [];
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				try {
+					const entry = JSON.parse(line);
+					// Extract chat messages (user and assistant messages)
+					if (entry.type === "message" && entry.message) {
+						messages.push(entry.message);
+					}
+				} catch {
+					// Skip malformed lines
+				}
+			}
+			return messages;
+		} catch {
+			return [];
+		}
+	}
+
+	/** List archived sessions in the same format as listSessions(). */
+	listArchivedSessions(): Array<{
+		id: string;
+		title: string;
+		cwd: string;
+		status: string;
+		createdAt: number;
+		lastActivity: number;
+		clientCount: number;
+		isCompacting: boolean;
+		goalId?: string;
+		assistantType?: string;
+		delegateOf?: string;
+		role?: string;
+		teamGoalId?: string;
+		worktreePath?: string;
+		taskId?: string;
+		staffId?: string;
+		accessory?: string;
+		preview?: boolean;
+		personalities?: string[];
+		archived: boolean;
+		archivedAt?: number;
+	}> {
+		return this.store.getArchived().map((ps) => ({
+			id: ps.id,
+			title: ps.title,
+			cwd: ps.cwd,
+			status: "archived",
+			createdAt: ps.createdAt,
+			lastActivity: ps.lastActivity,
+			clientCount: 0,
+			isCompacting: false,
+			goalId: ps.goalId,
+			assistantType: ps.assistantType,
+			delegateOf: ps.delegateOf,
+			role: ps.role,
+			teamGoalId: ps.teamGoalId,
+			worktreePath: ps.worktreePath,
+			taskId: ps.taskId,
+			staffId: ps.staffId,
+			accessory: ps.accessory,
+			preview: ps.preview,
+			personalities: ps.personalities,
+			archived: true,
+			archivedAt: ps.archivedAt,
+		}));
+	}
+
+	/** Permanently purge a single archived session immediately. */
+	async purgeArchivedSession(id: string): Promise<boolean> {
+		const ps = this.store.get(id);
+		if (!ps?.archived) return false;
+		await this.purgeOneSession(ps);
+		return true;
+	}
+
+	/** Purge all archived sessions older than 7 days. */
+	async purgeExpiredArchives(): Promise<void> {
+		const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+		const cutoff = Date.now() - SEVEN_DAYS_MS;
+		const archived = this.store.getArchived();
+		for (const ps of archived) {
+			if (ps.archivedAt && ps.archivedAt < cutoff) {
+				try {
+					await this.purgeOneSession(ps);
+					console.log(`[session-manager] Purged expired archive: "${ps.title}" (${ps.id})`);
+				} catch (err) {
+					console.error(`[session-manager] Failed to purge archive ${ps.id}:`, err);
+				}
+			}
+		}
+	}
+
+	/** Internal: purge a single archived session — delete files, worktree, store entry. */
+	private async purgeOneSession(ps: PersistedSession): Promise<void> {
+		// Delete .jsonl file
+		try {
+			if (ps.agentSessionFile && fs.existsSync(ps.agentSessionFile)) {
+				fs.unlinkSync(ps.agentSessionFile);
+			}
+		} catch (err) {
+			console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
+		}
+
+		// Delete session prompt file
+		try {
+			cleanupSessionPrompt(ps.id);
+		} catch (err) {
+			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
+		}
+
+		// Clean up worktree
+		if (ps.worktreePath && ps.repoPath) {
+			try {
+				const { cleanupWorktree } = await import("../skills/git.js");
+				await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
+			} catch (err) {
+				console.error(`[session-manager] Failed to cleanup worktree for ${ps.id}:`, err);
+			}
+		}
+
+		// Remove color
+		try {
+			this.colorStore?.remove(ps.id);
+		} catch (err) {
+			console.error(`[session-manager] Failed to remove color for ${ps.id}:`, err);
+		}
+
+		// Remove from store
+		this.store.purge(ps.id);
+	}
+
+	/** Start the archive purge schedule — call after restoreSessions(). */
+	startPurgeSchedule(): void {
+		// Purge on startup
+		this.purgeExpiredArchives().catch(err => {
+			console.error("[session-manager] Startup purge failed:", err);
+		});
+		// Purge every 24 hours
+		this.purgeInterval = setInterval(() => {
+			this.purgeExpiredArchives().catch(err => {
+				console.error("[session-manager] Scheduled purge failed:", err);
+			});
+		}, 24 * 60 * 60 * 1000);
 	}
 
 	addClient(sessionId: string, ws: WebSocket): boolean {
@@ -1723,6 +1887,11 @@ export class SessionManager {
 	}
 
 	async shutdown(): Promise<void> {
+		if (this.purgeInterval) {
+			clearInterval(this.purgeInterval);
+			this.purgeInterval = null;
+		}
+
 		// Don't remove from store on shutdown — sessions should survive restart.
 		// Persist the streaming state for each session so interrupted agents
 		// can be re-prompted on the next startup.
