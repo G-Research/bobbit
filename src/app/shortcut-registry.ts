@@ -217,10 +217,10 @@ function handleKeydown(e: KeyboardEvent): void {
 	const inputFocused = isInputFocused();
 
 	for (const entry of shortcuts.values()) {
-		if (inputFocused && !entry.allowInInput) continue;
-
 		for (const binding of entry.currentBindings) {
 			if (matchesBinding(e, binding)) {
+				// Allow in input if: explicitly flagged, or the binding uses a modifier key
+				if (inputFocused && !entry.allowInInput && !binding.ctrlOrMeta && !binding.alt) continue;
 				e.preventDefault();
 				entry.handler();
 				return;
