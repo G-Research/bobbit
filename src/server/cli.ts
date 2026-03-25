@@ -14,6 +14,7 @@ import { createGateway } from "./server.js";
 interface CliArgs {
 	host: string;
 	port: number;
+	portExplicit: boolean;
 	cwd: string;
 	newToken: boolean;
 	showToken: boolean;
@@ -43,6 +44,7 @@ function parseArgs(argv: string[]): CliArgs {
 	const result: CliArgs = {
 		host: "",  // resolved after parsing
 		port: 3001,
+		portExplicit: false,
 		cwd: process.cwd(),
 		newToken: false,
 		showToken: false,
@@ -58,6 +60,7 @@ function parseArgs(argv: string[]): CliArgs {
 				break;
 			case "--port":
 				result.port = parseInt(argv[++i], 10);
+				result.portExplicit = true;
 				break;
 			case "--cwd":
 				result.cwd = path.resolve(argv[++i]);
@@ -173,6 +176,7 @@ async function main() {
 	const gateway = createGateway({
 		host: args.host,
 		port: args.port,
+		portExplicit: args.portExplicit,
 		authToken,
 		defaultCwd: args.cwd,
 		staticDir: args.staticDir,
@@ -181,7 +185,7 @@ async function main() {
 		tls,
 	});
 
-	await gateway.start();
+	const actualPort = await gateway.start();
 
 	// Collect reachable addresses for display
 	const interfaces = os.networkInterfaces();
@@ -196,7 +200,7 @@ async function main() {
 	}
 
 	const proto = args.tls ? "https" : "http";
-	const baseUrl = `${proto}://${args.host}:${args.port}`;
+	const baseUrl = `${proto}://${args.host}:${actualPort}`;
 	const fullUrl = `${baseUrl}/?token=${encodeURIComponent(authToken)}`;
 
 	// Write gateway URL to a discoverable file so extensions can call the API.
