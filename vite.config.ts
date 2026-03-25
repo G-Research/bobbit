@@ -19,35 +19,24 @@ function findNordLynxIp(): string | null {
 	return null;
 }
 
-const meshIp = findNordLynxIp();
-const host = process.env.VITE_HOST || meshIp || "localhost";
-
-// Detect whether the gateway is running with TLS by checking for the cert
-const piDir = path.join(os.homedir(), ".pi");
-const hasTlsCert = fs.existsSync(path.join(piDir, "gateway-cert.pem"));
-const noTls = process.env.GATEWAY_NO_TLS === "1";
-const gwProto = noTls ? "http" : (hasTlsCert ? "https" : "http");
-function resolveGatewayUrl(): string {
-	if (process.env.GATEWAY_URL) return process.env.GATEWAY_URL;
-	try {
-		const stateFile = path.join(process.cwd(), ".bobbit", "state", "gateway-url");
-		const url = fs.readFileSync(stateFile, "utf-8").trim();
-		if (url) return url;
-	} catch { /* file doesn't exist yet */ }
-	return `${gwProto}://${host}:3001`;
-}
-const GATEWAY = resolveGatewayUrl();
+/**
+ * Determine the host Vite should bind to and proxy against.
+ *
+ * - VITE_HOST env var: explicit override
+ * - BOBBIT_NORD=1: use NordLynx mesh IP (set by dev:nord script)
+ * - Default: localhost
+ */
+const nordMode = process.env.BOBBIT_NORD === "1";
+const host = process.env.VITE_HOST || (nordMode ? findNordLynxIp() || "localhost" : "localhost");
+const proto = host === "localhost" ? "http" : "https";
+const GATEWAY = process.env.GATEWAY_URL || `${proto}://${host}:3001`;
 const GATEWAY_WS = GATEWAY.replace(/^https/, "wss").replace(/^http/, "ws");
 
-if (!meshIp && !process.env.VITE_HOST) {
-	console.warn("Warning: NordLynx interface not found. Vite will bind to localhost.");
-	console.warn("  Start NordVPN, or set VITE_HOST manually.\n");
-}
-
-// Load the self-signed cert for vite's own HTTPS server + proxy trust
-const certPath = path.join(piDir, "gateway-cert.pem");
-const keyPath = path.join(piDir, "gateway-key.pem");
-const tlsAvailable = !noTls && fs.existsSync(certPath) && fs.existsSync(keyPath);
+// Load TLS cert for vite's own HTTPS server + proxy trust
+const tlsDir = path.join(process.cwd(), ".bobbit", "state", "tls");
+const certPath = path.join(tlsDir, "cert.pem");
+const keyPath = path.join(tlsDir, "key.pem");
+const tlsAvailable = proto === "https" && fs.existsSync(certPath) && fs.existsSync(keyPath);
 
 export default defineConfig({
 	plugins: [tailwindcss()],

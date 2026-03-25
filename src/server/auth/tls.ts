@@ -52,25 +52,28 @@ export interface TlsFiles {
  *
  * Returns paths to the cert, key, and optionally the CA cert.
  */
-export async function ensureTlsCert(host: string): Promise<TlsFiles> {
+export async function ensureTlsCert(host: string, extraDomains?: string[]): Promise<TlsFiles> {
 	fs.mkdirSync(STATE_DIR, { recursive: true });
 	fs.mkdirSync(TLS_DIR, { recursive: true });
 
-	// If existing cert covers this host, reuse it
+	// All domains/IPs the cert should cover
+	const allDomains = [host, "127.0.0.1", "localhost", ...(extraDomains || [])];
+
+	// If existing cert covers all required names, reuse it
 	if (fs.existsSync(CERT_PATH) && fs.existsSync(KEY_PATH)) {
-		if (certCoversHost(CERT_PATH, host)) {
+		if (certCoversAllDomains(CERT_PATH, allDomains)) {
 			const caCert = fs.existsSync(CA_CERT_PATH) ? CA_CERT_PATH : undefined;
 			return { cert: CERT_PATH, key: KEY_PATH, caCert };
 		}
-		console.log(`  TLS cert does not cover ${host}, regenerating...`);
+		console.log(`  TLS cert does not cover all required names, regenerating...`);
 	}
 
 	// Try mkcert first, fall back to openssl
 	try {
-		return await generateMkcertCert(host);
+		return await generateMkcertCert(host, allDomains);
 	} catch (err: any) {
 		console.log(`  mkcert unavailable (${err.message}), falling back to openssl self-signed cert`);
-		return generateSelfSignedCert(host);
+		return generateSelfSignedCert(host, allDomains);
 	}
 }
 
@@ -78,7 +81,7 @@ export async function ensureTlsCert(host: string): Promise<TlsFiles> {
  * Generate a CA + cert using the mkcert npm package.
  * The CA cert can be installed on devices to trust all Bobbit certs.
  */
-async function generateMkcertCert(host: string): Promise<TlsFiles> {
+async function generateMkcertCert(host: string, allDomains: string[]): Promise<TlsFiles> {
 	// Dynamic import — fails fast if mkcert isn't installed
 	const { createCA, createCert } = await import("mkcert");
 
@@ -109,11 +112,11 @@ async function generateMkcertCert(host: string): Promise<TlsFiles> {
 		console.log(`  CA cert: ${CA_CERT_PATH}`);
 	}
 
-	// Generate a cert for this host signed by our CA
-	console.log(`  Generating mkcert TLS certificate for ${host}...`);
+	// Generate a cert for all required domains signed by our CA
+	console.log(`  Generating mkcert TLS certificate for: ${allDomains.join(", ")}`);
 	const cert = await createCert({
 		ca: { cert: caCert, key: caKey },
-		domains: [host, "127.0.0.1", "localhost"],
+		domains: allDomains,
 		validity: 3650,
 	});
 
@@ -131,13 +134,14 @@ async function generateMkcertCert(host: string): Promise<TlsFiles> {
 	return { cert: CERT_PATH, key: KEY_PATH, caCert: CA_CERT_PATH };
 }
 
-function generateSelfSignedCert(host: string): TlsFiles {
-	console.log(`  Generating self-signed TLS certificate for ${host}...`);
+function generateSelfSignedCert(host: string, allDomains: string[]): TlsFiles {
+	console.log(`  Generating self-signed TLS certificate for: ${allDomains.join(", ")}`);
 
 	const openssl = resolveOpenssl();
 
-	// Build SAN: always include the IP, plus localhost for local dev
-	const san = `subjectAltName=IP:${host},IP:127.0.0.1,DNS:localhost`;
+	// Build SAN from all domains — classify each as IP or DNS
+	const sanParts = allDomains.map(d => /^\d+\.\d+\.\d+\.\d+$/.test(d) ? `IP:${d}` : `DNS:${d}`);
+	const san = `subjectAltName=${sanParts.join(",")}`;
 
 	try {
 		execSync(
@@ -170,7 +174,7 @@ function generateSelfSignedCert(host: string): TlsFiles {
 				"CN = bobbit",
 				"",
 				"[v3_ext]",
-				`subjectAltName = IP:${host},IP:127.0.0.1,DNS:localhost`,
+				`subjectAltName = ${sanParts.join(",")}`,
 			].join("\n"));
 
 			execSync(
@@ -208,7 +212,38 @@ function generateSelfSignedCert(host: string): TlsFiles {
 	return { cert: CERT_PATH, key: KEY_PATH };
 }
 
-/** Check if an existing cert's SAN includes the given host IP or if it's a still-valid non-self-signed cert. */
+/** Check if an existing cert covers ALL required domains/IPs. */
+function certCoversAllDomains(certPath: string, domains: string[]): boolean {
+	try {
+		const openssl = resolveOpenssl();
+
+		// Check expiry first
+		try {
+			execSync(
+				`${openssl} x509 -in "${certPath}" -noout -checkend 86400`,
+				{ stdio: ["pipe", "pipe", "pipe"], shell: true as unknown as string },
+			);
+		} catch {
+			return false; // expired or expiring
+		}
+
+		const out = execSync(
+			`${openssl} x509 -in "${certPath}" -noout -ext subjectAltName`,
+			{ encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], shell: true as unknown as string },
+		);
+
+		for (const domain of domains) {
+			const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(domain);
+			const needle = isIp ? `IP Address:${domain}` : `DNS:${domain}`;
+			if (!out.includes(needle)) return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** @deprecated Use certCoversAllDomains instead. Kept for backward compat. */
 function certCoversHost(certPath: string, host: string): boolean {
 	try {
 		const openssl = resolveOpenssl();

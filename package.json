@@ -15,6 +15,7 @@
     "build": "npm run build:server && npm run build:ui",
     "dev": "concurrently -n gw,ui -c blue,green \"node dist/server/cli.js --cwd . --no-ui\" \"vite\"",
     "dev:harness": "npm run build:server && concurrently -n harness,ui -c yellow,green \"node dist/server/harness.js -- --cwd . --no-ui\" \"vite\"",
+    "dev:nord": "npm run build:server && node scripts/dev-nord.mjs",
     "dev:watchdog": "npm run build:server && concurrently -n watchdog,ui -c red,green \"node dist/server/watchdog.js -- --cwd . --no-ui\" \"vite\"",
     "restart-server": "node dist/server/harness-signal.js",
     "start": "node dist/server/cli.js --cwd .",

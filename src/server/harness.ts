@@ -219,8 +219,9 @@ function watchSentinel(): void {
 
 	console.log(`[harness] Watching sentinel: ${SENTINEL}`);
 
-	// Track last-modified to debounce rapid writes
-	let lastMtime = 0;
+	// Track last-modified to debounce rapid writes — seed from current mtime
+	// to avoid a spurious restart on the first poll cycle.
+	let lastMtime = fs.statSync(SENTINEL).mtimeMs;
 
 	// fs.watch can be flaky on some platforms — use polling fallback on Windows
 	const usePolling = process.platform === "win32";

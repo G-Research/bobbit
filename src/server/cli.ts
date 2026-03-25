@@ -166,13 +166,16 @@ async function main() {
 		console.log("  Binding to localhost — TLS disabled (use --tls to override).");
 	}
 
+	// Load deSEC config early — domain is needed for TLS cert SAN
+	const desecConfig = loadDesecConfig();
+	const extraDomains = desecConfig ? [desecConfig.domain] : [];
+
 	// TLS setup — auto-generate cert (mkcert CA preferred, openssl fallback)
-	const tls = args.tls ? await ensureTlsCert(args.host) : undefined;
+	const tls = args.tls ? await ensureTlsCert(args.host, extraDomains) : undefined;
 
 	// Update deSEC dynDNS if configured (keeps domain pointing to current mesh IP)
 	// Skip for loopback addresses (e.g. E2E tests with --host 127.0.0.1) to avoid
 	// clobbering the DNS record with an unreachable IP.
-	const desecConfig = loadDesecConfig();
 	if (desecConfig && !isLoopback) {
 		updateDesecIp(desecConfig, args.host); // fire and forget
 	}
@@ -207,12 +210,9 @@ async function main() {
 	const baseUrl = `${proto}://${args.host}:${actualPort}`;
 	const fullUrl = `${baseUrl}/?token=${encodeURIComponent(authToken)}`;
 
-	// Write gateway URL to a discoverable file so extensions can call the API.
-	// Skip for loopback addresses to avoid E2E tests clobbering the real URL.
-	if (!isLoopback) {
-		const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
-		fs.writeFileSync(gatewayUrlPath, baseUrl, "utf-8");
-	}
+	// Write gateway URL to a discoverable file so Vite proxy and extensions can find it.
+	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
+	fs.writeFileSync(gatewayUrlPath, baseUrl, "utf-8");
 
 	console.log(`\nPi Gateway v0.1.0`);
 	console.log(`  Listening:  ${baseUrl}`);
