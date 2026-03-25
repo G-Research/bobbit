@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench } from "lucide";
+import { ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench } from "lucide";
 import {
 	state,
 	renderApp,
@@ -1652,11 +1652,19 @@ export function doRenderApp(): void {
 		if (desktop) {
 			return editDeleteBtns ? html`<div class="flex items-center gap-1 px-2">${editDeleteBtns}</div>` : html``;
 		}
+		const settingsBtn = Button({
+			variant: "ghost",
+			size: "sm",
+			children: html`${icon(Settings, "sm")}`,
+			onClick: () => { import("./settings-page.js").then((m) => m.toggleSettings()); },
+			title: "Settings",
+		});
 		if (connected && state.remoteAgent) {
-			return html``;
+			return html`<div class="flex items-center gap-1 px-2">${settingsBtn}</div>`;
 		}
 		return html`
 			<div class="flex items-center gap-1 px-2">
+				${settingsBtn}
 				${Button({
 					variant: "ghost",
 					size: "sm",
