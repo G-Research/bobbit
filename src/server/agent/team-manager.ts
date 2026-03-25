@@ -707,8 +707,12 @@ export class TeamManager {
 
 		let message: string;
 		if (tasks.length > 0) {
-			const taskSummaries = tasks.map(t => `"${t.title}" (state: ${t.state})`).join(", ");
-			message = `Agent ${agentId} (${role}) has finished. Tasks: ${taskSummaries}. Check tasks and decide next steps.`;
+			const taskSummaries = tasks.map(t => {
+				let s = `"${t.title}" (state: ${t.state})`;
+				if (t.resultSummary) s += ` — ${t.resultSummary}`;
+				return s;
+			}).join("; ");
+			message = `Agent ${agentId} (${role}) has finished. Tasks: ${taskSummaries}. Check task details and gate content (gate_status) for full results.`;
 		} else {
 			message = `Agent ${agentId} (${role}) has finished with no assigned tasks. Check tasks and decide next steps.`;
 		}
@@ -739,7 +743,7 @@ export class TeamManager {
 		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
 
-		const message = `Task "${taskTitle}" transitioned to ${taskState}. Check tasks and decide next steps.`;
+		const message = `Task "${taskTitle}" transitioned to ${taskState}. Use task_list for result summaries and gate_status to read any gate content the agent produced.`;
 
 		if (teamLeadSession.status === "streaming") {
 			teamLeadSession.rpcClient.steer(message).catch((err: any) => {
