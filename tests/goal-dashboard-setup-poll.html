@@ -33,7 +33,8 @@ button:hover { border-color: #666; }
 <div id="debug">
   Server status: <span id="server-status">preparing</span> |
   UI status: <span id="ui-status">preparing</span> |
-  Refresh count: <span id="refresh-count">0</span>
+  Refresh count: <span id="refresh-count">0</span> |
+  Polling: <span id="polling-status">false</span>
 </div>
 
 <script>
@@ -54,36 +55,38 @@ let currentGoal = null;
 let refreshCount = 0;
 let setupPollTimer = null;
 
-// Simulates refreshDashboardGoal() — fetches from "server"
+// Simulates refreshDashboardGoal() from goal-dashboard.ts
 function refreshDashboardGoal() {
   refreshCount++;
-  // Simulate fetching goal from API — returns a copy of serverGoal
   currentGoal = { ...serverGoal };
   renderDashboard();
   updateDebug();
 
   // If polling is active and status is no longer "preparing", stop polling
   if (setupPollTimer && currentGoal.setupStatus !== "preparing") {
-    clearInterval(setupPollTimer);
-    setupPollTimer = null;
+    stopSetupStatusPoll();
   }
 }
 
-// Start polling for setup status changes — THIS IS THE FIX THAT DOESN'T EXIST YET
-// The implementation file (goal-dashboard.ts) does not call this.
-// When the fix is applied, it will call startSetupStatusPoll() after loading
-// a goal with setupStatus === "preparing".
+// ============================================================
+// Setup status polling — mirrors what the fix will add to
+// goal-dashboard.ts. This function is NOT called automatically
+// by loadDashboardData — that's the bug. The test must call it
+// explicitly via __enableSetupPoll() to simulate the fix.
+// ============================================================
 function startSetupStatusPoll() {
-  if (setupPollTimer) return; // already polling
+  if (setupPollTimer) return;
   setupPollTimer = setInterval(() => {
     refreshDashboardGoal();
-  }, 1000); // poll every 1s for test speed
+  }, 500); // fast for tests
+  updateDebug();
 }
 
-function stopAllPolling() {
+function stopSetupStatusPoll() {
   if (setupPollTimer) {
     clearInterval(setupPollTimer);
     setupPollTimer = null;
+    updateDebug();
   }
 }
 
@@ -106,13 +109,12 @@ function renderDashboard() {
     `;
   } else if (currentGoal.setupStatus === "error") {
     container.innerHTML = `
-      <div class="setup-banner setup-banner--error" id="setup-banner">
-        <span>⚠ Worktree setup failed${currentGoal.setupError ? ": " + currentGoal.setupError : ""}</span>
+      <div class="setup-banner setup-banner--error" id="setup-banner-error">
+        <span>Worktree setup failed${currentGoal.setupError ? ": " + currentGoal.setupError : ""}</span>
         <button id="btn-retry">Retry Setup</button>
       </div>
     `;
   } else {
-    // ready or undefined — no banner
     container.innerHTML = `
       <div class="ready-state" id="ready-state">
         ✓ Worktree ready
@@ -125,17 +127,16 @@ function updateDebug() {
   document.getElementById("server-status").textContent = serverGoal.setupStatus;
   document.getElementById("ui-status").textContent = currentGoal ? currentGoal.setupStatus : "none";
   document.getElementById("refresh-count").textContent = refreshCount;
+  document.getElementById("polling-status").textContent = String(setupPollTimer !== null);
 }
 
 // ============================================================
-// Controls — simulate server-side changes
+// Controls
 // ============================================================
 document.getElementById("btn-set-ready").addEventListener("click", () => {
   serverGoal.setupStatus = "ready";
   serverGoal.setupError = null;
   updateDebug();
-  // NOTE: No automatic refresh — this simulates the server changing state
-  // without the client knowing. The bug is that the UI doesn't poll.
 });
 
 document.getElementById("btn-set-error").addEventListener("click", () => {
@@ -149,16 +150,40 @@ document.getElementById("btn-manual-refresh").addEventListener("click", () => {
 });
 
 // ============================================================
-// Initial load — simulate loadDashboardData()
+// Simulated loadDashboardData() — loads goal, starts polling
+// if setupStatus === "preparing" AND the fix is enabled.
 // ============================================================
-currentGoal = { ...serverGoal };
-renderDashboard();
-updateDebug();
+let fixEnabled = false;
+
+function loadDashboardData() {
+  currentGoal = { ...serverGoal };
+  refreshCount = 0;
+  renderDashboard();
+  updateDebug();
+
+  // The FIX: start polling when setupStatus is "preparing"
+  // This only runs when fixEnabled is true (simulating the real fix)
+  if (fixEnabled && currentGoal.setupStatus === "preparing") {
+    startSetupStatusPoll();
+  }
+}
+
+// ============================================================
+// Initial load
+// ============================================================
+loadDashboardData();
 
 // Expose for testing
+window.__enableFix = () => { fixEnabled = true; };
+window.__loadDashboardData = loadDashboardData;
 window.__refreshDashboardGoal = refreshDashboardGoal;
 window.__startSetupStatusPoll = startSetupStatusPoll;
-window.__stopAllPolling = stopAllPolling;
+window.__stopAllPolling = () => { stopSetupStatusPoll(); };
+window.__setServerStatus = (status, error) => {
+  serverGoal.setupStatus = status;
+  serverGoal.setupError = error || null;
+  updateDebug();
+};
 window.__getState = () => ({
   serverStatus: serverGoal.setupStatus,
   uiStatus: currentGoal ? currentGoal.setupStatus : null,
