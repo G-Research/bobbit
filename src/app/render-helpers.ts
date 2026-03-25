@@ -524,7 +524,7 @@ export function renderGoalGroup(goal: Goal) {
 		if (!teamLead) return goalSessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
 		// Archived members belonging to the live lead
-		const archivedForLiveLead = state.archivedSectionExpanded
+		const archivedForLiveLead = state.showArchived
 			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
 			: [];
 		return html`
@@ -567,7 +567,7 @@ export function renderGoalGroup(goal: Goal) {
 						Creating…
 					</div>` : ""}
 					${teamControls}
-					${state.archivedSectionExpanded ? (() => {
+					${state.showArchived ? (() => {
 						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");

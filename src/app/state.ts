@@ -120,7 +120,7 @@ export const state = {
 	/** Whether to show archived sessions in the sidebar */
 	showArchived: localStorage.getItem("bobbit-show-archived") === "true",
 	/** Whether the archived section is expanded */
-	archivedSectionExpanded: localStorage.getItem("bobbit-show-archived") === "true",
+
 	/** Archived sessions (loaded on demand) */
 	archivedSessions: [] as GatewaySession[],
 

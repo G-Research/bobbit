@@ -459,13 +459,20 @@ export function renderSidebar() {
 										<button
 											class="relative flex items-center gap-1 pr-1 py-0.5 w-full text-left hover:bg-secondary/30 rounded-md transition-colors"
 											style="padding-left:${HEADER_CHEVRON_W}px;"
-											@click=${() => { state.archivedSectionExpanded = !state.archivedSectionExpanded; renderApp(); }}
+											@click=${() => {
+												state.showArchived = !state.showArchived;
+												localStorage.setItem("bobbit-show-archived", String(state.showArchived));
+												if (state.showArchived) {
+													import("./api.js").then(m => m.fetchArchivedSessions());
+												}
+												renderApp();
+											}}
 										>
-											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.archivedSectionExpanded ? "▾" : "▸"}</span>
+											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.showArchived ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
 											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
-										${state.archivedSectionExpanded ? html`
+										${state.showArchived ? html`
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 												${standaloneArchived.map(s => html`
 													${renderArchivedSessionRow(s)}
@@ -494,10 +501,10 @@ export function renderSidebar() {
 						state.showArchived = !state.showArchived;
 						localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 						if (state.showArchived) {
-							state.archivedSectionExpanded = true;
+							state.showArchived = true;
 							import("./api.js").then(m => m.fetchArchivedSessions());
 						} else {
-							state.archivedSectionExpanded = false;
+							state.showArchived = false;
 						}
 						renderApp();
 					}}
