@@ -109,7 +109,8 @@ export function renderRolePickerDropdown() {
 					? html`<div class="px-3 py-1 text-xs text-muted-foreground">No roles defined</div>`
 					: state.roles.filter(r => r.name !== "general").map(role => html`
 						<button class="w-full text-left px-3 py-1.5 text-sm hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-2 ${_pickerRole === role.name ? "bg-primary/10" : ""}"
-							@click=${() => selectRole(role.name)}>
+							@click=${() => selectRole(role.name)}
+							title="Select ${role.label} role">
 							<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
 							<span class="flex-1 ${_pickerRole === role.name ? "text-primary font-medium" : ""}">${role.label}</span>
 							${_pickerRole === role.name ? html`<span class="text-primary text-xs">✓</span>` : ""}
@@ -121,6 +122,7 @@ export function renderRolePickerDropdown() {
 				<button
 					class="w-full text-center px-3 py-1.5 text-sm rounded-md font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
 					@click=${doCreate}
+					title="Create session with selected role"
 				>Create Session</button>
 			</div>
 		</div>
@@ -362,7 +364,7 @@ export function renderSidebar() {
 					: state.sessionsError
 						? html`<div class="text-center py-6">
 								<p class="text-xs text-red-500 mb-2">${state.sessionsError}</p>
-								<button class="text-xs text-muted-foreground hover:text-foreground underline" @click=${refreshSessions}>Retry</button>
+								<button class="text-xs text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: html`
 							${sortedGoals.map((goal, i) => html`
@@ -424,7 +426,7 @@ export function renderSidebar() {
 									${ungroupedSessions.length === 0
 										? html`<div class="text-center py-6">
 												<p class="text-xs text-muted-foreground mb-2">No sessions</p>
-												<button class="text-xs text-primary hover:underline" @click=${() => createAndConnectSession()}>Create one</button>
+												<button class="text-xs text-primary hover:underline" title="Create a new session" @click=${() => createAndConnectSession()}>Create one</button>
 											</div>`
 										: ungroupedSessions.map(renderSessionRow)}
 								</div>
@@ -474,6 +476,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 				@mouseenter=${(e: MouseEvent) => showSessionTooltip(e, s, displayTitle)}
 				@mouseleave=${hideSessionTooltip}
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
+				title=${displayTitle}
 			>
 				${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory)}
 				<span class="text-[8px] font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(displayTitle)}</span>
@@ -497,6 +500,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 				@mouseenter=${(e: MouseEvent) => showSessionTooltip(e, teamLead, tlTitle)}
 				@mouseleave=${hideSessionTooltip}
 				@click=${() => { if (!tlActive) connectToSession(teamLead.id, true); }}
+				title=${tlTitle}
 			>
 				<span class="text-[9px] text-muted-foreground shrink-0 select-none" style="width:8px;text-align:center;cursor:pointer;"
 					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); renderApp(); }}

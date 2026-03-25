@@ -94,7 +94,7 @@ function renderMobileLanding() {
 					: state.sessionsError
 						? html`<div class="text-center py-12">
 								<p class="text-xs text-red-500 mb-3">${state.sessionsError}</p>
-								<button class="text-xs text-muted-foreground underline" @click=${refreshSessions}>Retry</button>
+								<button class="text-xs text-muted-foreground underline" title="Retry" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
 							? html`<div class="text-center py-12">
@@ -1711,10 +1711,12 @@ export function doRenderApp(): void {
 			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
 				<button
 					class="goal-tab-pill ${state.assistantTab === "chat" ? "goal-tab-pill--active" : ""}"
+					title="Chat"
 					@click=${() => { state.assistantTab = "chat"; renderApp(); }}
 				>Chat</button>
 				<button
 					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
+					title="Preview"
 					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
 				>
 					Preview${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
@@ -1729,17 +1731,20 @@ export function doRenderApp(): void {
 			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
 				<button
 					class="goal-tab-pill ${state.previewPanelTab === "chat" ? "goal-tab-pill--active" : ""}"
+					title="Chat"
 					@click=${() => { state.previewPanelTab = "chat"; renderApp(); }}
 				>Chat</button>
 				${state.isPreviewSession ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "preview" ? "goal-tab-pill--active" : ""}"
+						title="Preview"
 						@click=${() => { state.previewPanelTab = "preview"; renderApp(); }}
 					>Preview</button>
 				` : ""}
 				${state.activeGoalProposal != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
+						title="Goal"
 						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
 					>Goal <span class="goal-tab-dot"></span></button>
 				` : ""}
@@ -1790,12 +1795,14 @@ export function doRenderApp(): void {
 						${showPreviewTab ? html`
 							<button
 								class="goal-tab-pill ${state.previewPanelActiveTab === "preview" ? "goal-tab-pill--active" : ""}"
+								title="Preview"
 								@click=${() => { state.previewPanelActiveTab = "preview"; renderApp(); }}
 							>Preview</button>
 						` : ""}
 						${showGoalTab ? html`
 							<button
 								class="goal-tab-pill ${state.previewPanelActiveTab === "goal" ? "goal-tab-pill--active" : ""}"
+								title="Goal"
 								@click=${() => { state.previewPanelActiveTab = "goal"; renderApp(); }}
 							>Goal <span class="goal-tab-dot"></span></button>
 						` : ""}

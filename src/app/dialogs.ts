@@ -694,6 +694,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 												<button
 													class="w-full text-left px-3 py-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-2.5"
 													@click=${(e: Event) => { e.stopPropagation(); roleDropdownOpen = !roleDropdownOpen; renderDialog(); }}
+													title="Select role"
 												>
 													<span class="shrink-0">${statusBobbit("idle", false, sessionId, false, false, false, false, displayAccessory, true)}</span>
 													<span class="flex-1 ${displayRole ? "text-foreground" : "text-muted-foreground"}">${roleLabel}</span>
@@ -705,6 +706,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 														<button
 															class="w-full text-left px-3 py-2 text-sm text-popover-foreground/60 hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2.5 ${!displayRole ? "bg-accent/50" : ""}"
 															@click=${(e: Event) => { e.stopPropagation(); selectRole(""); }}
+															title="Remove role"
 														>
 															<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, "none", true)}</span>
 															<span>None</span>
@@ -713,6 +715,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 															<button
 																class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2.5 ${displayRole === role.name ? "bg-accent/50" : ""}"
 																@click=${(e: Event) => { e.stopPropagation(); selectRole(role.name); }}
+																title="Assign ${role.label} role"
 															>
 																<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
 																<span>${role.label}</span>
@@ -926,6 +929,7 @@ function showGoalEditDialog(existingGoal: Goal): void {
 														? "border-primary bg-primary/10 text-primary font-medium"
 														: "border-border text-muted-foreground hover:bg-secondary"}"
 												@click=${() => { stateValue = opt.value as GoalState; renderDialog(); }}
+												title="Set state to ${opt.label}"
 											>${opt.label}</button>
 										`)}
 									</div>
@@ -1029,7 +1033,8 @@ export async function showAssignRoleDialog(sessionId: string): Promise<void> {
 									: state.roles.filter(r => r.name !== "general").map(role => html`
 										<button
 											class="w-full text-left px-3 py-2 text-sm rounded-md hover:bg-secondary/50 text-foreground transition-colors flex items-center gap-2"
-											@click=${() => doAssign(role.name)}>
+											@click=${() => doAssign(role.name)}
+											title="Assign ${role.label} role">
 											<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
 											<span>${role.label}</span>
 										</button>

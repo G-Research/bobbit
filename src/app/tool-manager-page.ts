@@ -467,7 +467,7 @@ function renderListView(): TemplateResult {
 				const isCollapsed = collapsedGroups.has(groupName);
 				return html`
 					<div class="tool-group ${isCollapsed ? "collapsed" : ""}">
-						<button class="tool-group-header" @click=${() => toggleGroup(groupName)}>
+						<button class="tool-group-header" title="Toggle ${groupName} group" @click=${() => toggleGroup(groupName)}>
 							${chevronSvg}
 							<span class="tool-group-name">${groupName}</span>
 							<span class="tool-group-count">${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}</span>

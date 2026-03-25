@@ -661,7 +661,7 @@ function renderSetupBanner(goal: Goal): TemplateResult {
 		return html`
 			<div class="setup-banner setup-banner--error">
 				<span style="color:var(--destructive)">⚠ Worktree setup failed${goal.setupError ? `: ${goal.setupError}` : ""}</span>
-				<button class="btn-retry" @click=${() => handleRetrySetup(goal.id)}>Retry Setup</button>
+				<button class="btn-retry" title="Retry worktree setup" @click=${() => handleRetrySetup(goal.id)}>Retry Setup</button>
 			</div>
 		`;
 	}
@@ -725,7 +725,7 @@ function renderSessionButton(goal: Goal): TemplateResult {
 					${state.roles.length === 0
 						? html`<div class="role-dropdown-item" style="color:var(--text-tertiary)">No roles defined</div>`
 						: state.roles.map(role => html`
-							<button class="role-dropdown-item" @click=${() => { roleDropdownOpen = false; createAndConnectSession(goal.id, role.name); }}>
+							<button class="role-dropdown-item" title="New session as ${role.label}" @click=${() => { roleDropdownOpen = false; createAndConnectSession(goal.id, role.name); }}>
 								<span style="flex-shrink:0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
 								<span class="role-label">${role.label}</span>
 							</button>
@@ -1116,7 +1116,7 @@ function renderAgentsTab(): TemplateResult {
 					const timeStr = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
 
 					return html`
-						<div class="agent-card" @click=${() => connectToSession(agent.sessionId, true)}>
+						<div class="agent-card" @click=${() => connectToSession(agent.sessionId, true)} title="Connect to ${formatAgentName(agent)}">
 							<div class="agent-card-bobbit">
 								${statusBobbit(
 									session?.status ?? agent.status,
