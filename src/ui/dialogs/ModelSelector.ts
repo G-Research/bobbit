@@ -15,8 +15,23 @@ import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
 import { discoverModels } from "../utils/model-discovery.js";
 
+/** AI Gateway model configuration — set from app layer */
+export interface AigwModelConfig {
+	/** When true, only gateway models are shown (built-in providers hidden) */
+	active: boolean;
+	/** Gateway models to display */
+	models: Model<any>[];
+}
+
 @customElement("agent-model-selector")
 export class ModelSelector extends DialogBase {
+	/**
+	 * Static aigw configuration. Set from the app layer before opening
+	 * the selector. When active, built-in and custom providers are hidden
+	 * and only gateway models are shown.
+	 */
+	static aigwConfig: AigwModelConfig = { active: false, models: [] };
+
 	@state() currentModel: Model<any> | null = null;
 	@state() searchQuery = "";
 	@state() filterThinking = false;
@@ -169,20 +184,28 @@ export class ModelSelector extends DialogBase {
 	}
 
 	private getFilteredModels(): Array<{ provider: string; id: string; model: any }> {
-		// Collect all models from known providers
 		const allModels: Array<{ provider: string; id: string; model: any }> = [];
-		const knownProviders = getProviders();
 
-		for (const provider of knownProviders) {
-			const models = getModels(provider as any);
-			for (const model of models) {
-				allModels.push({ provider, id: model.id, model });
+		// When AI Gateway is active, show ONLY gateway models
+		if (ModelSelector.aigwConfig.active && ModelSelector.aigwConfig.models.length > 0) {
+			for (const model of ModelSelector.aigwConfig.models) {
+				allModels.push({ provider: model.provider, id: model.id, model });
 			}
-		}
+		} else {
+			// Collect all models from known providers
+			const knownProviders = getProviders();
 
-		// Add custom provider models
-		for (const model of this.customProviderModels) {
-			allModels.push({ provider: model.provider, id: model.id, model });
+			for (const provider of knownProviders) {
+				const models = getModels(provider as any);
+				for (const model of models) {
+					allModels.push({ provider, id: model.id, model });
+				}
+			}
+
+			// Add custom provider models
+			for (const model of this.customProviderModels) {
+				allModels.push({ provider: model.provider, id: model.id, model });
+			}
 		}
 
 		// Filter models based on search and capability filters
@@ -210,16 +233,20 @@ export class ModelSelector extends DialogBase {
 
 		// Sort: current model first, then authenticated providers, then by provider name
 		const authed = this.authenticatedProviders;
+		const aigwActive = ModelSelector.aigwConfig.active;
 		filteredModels.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
 
-			const aHasKey = authed.has(a.provider);
-			const bHasKey = authed.has(b.provider);
-			if (aHasKey && !bHasKey) return -1;
-			if (!aHasKey && bHasKey) return 1;
+			// When aigw is active all models are "authenticated"
+			if (!aigwActive) {
+				const aHasKey = authed.has(a.provider);
+				const bHasKey = authed.has(b.provider);
+				if (aHasKey && !bHasKey) return -1;
+				if (!aHasKey && bHasKey) return 1;
+			}
 
 			return a.provider.localeCompare(b.provider);
 		});
@@ -241,6 +268,7 @@ export class ModelSelector extends DialogBase {
 
 	protected override renderContent(): TemplateResult {
 		const filteredModels = this.getFilteredModels();
+		const aigwActive = ModelSelector.aigwConfig.active;
 
 		return html`
 			<!-- Header and Search -->
@@ -294,7 +322,7 @@ export class ModelSelector extends DialogBase {
 				${filteredModels.map(({ provider, id, model }, index) => {
 					const isCurrent = modelsAreEqual(this.currentModel, model);
 					const isSelected = index === this.selectedIndex;
-					const hasKey = this.authenticatedProviders.has(provider);
+					const hasKey = aigwActive || this.authenticatedProviders.has(provider);
 					return html`
 						<div
 							data-model-item

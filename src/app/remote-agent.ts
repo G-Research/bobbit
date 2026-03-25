@@ -763,6 +763,11 @@ export class RemoteAgent {
 		if ("shortcuts" in prefs) {
 			import("./shortcut-registry.js").then((m) => m.loadSavedBindings());
 		}
+
+		// Apply AI Gateway config to ModelSelector
+		if ("aigw.url" in prefs || "aigw.models" in prefs) {
+			import("./aigw-config.js").then(({ applyAigwConfig }) => applyAigwConfig(prefs));
+		}
 	}
 
 	private _appendNotification(message: string, category: "system" | "task" | "team" | "error"): void {

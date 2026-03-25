@@ -30,6 +30,7 @@ import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
+import { configureAigw, removeAigw, getAigwUrl, getAigwModels, discoverAigwModels, proxyRequest } from "./agent/aigw-manager.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -711,6 +712,69 @@ async function handleApiRoute(
 		}
 		json({ ok: true });
 		broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+		return;
+	}
+
+	// ── AI Gateway ──
+
+	// GET /api/aigw/status — check if aigw is configured and return models
+	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
+		const aigwUrl = getAigwUrl(preferencesStore);
+		if (!aigwUrl) {
+			json({ configured: false });
+		} else {
+			json({ configured: true, url: aigwUrl, models: getAigwModels(preferencesStore) || [] });
+		}
+		return;
+	}
+
+	// POST /api/aigw/configure — set aigw URL, discover models, write models.json
+	if (url.pathname === "/api/aigw/configure" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.url || typeof body.url !== "string") {
+			json({ error: "Missing 'url' field" }, 400);
+			return;
+		}
+		try {
+			const models = await configureAigw(body.url, preferencesStore);
+			broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+			json({ ok: true, models });
+		} catch (err: any) {
+			json({ error: `Failed to configure AI Gateway: ${err.message}` }, 502);
+		}
+		return;
+	}
+
+	// DELETE /api/aigw/configure — remove aigw config
+	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
+		removeAigw(preferencesStore);
+		broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+		json({ ok: true });
+		return;
+	}
+
+	// GET /api/aigw/test — test connection to a URL without saving
+	if (url.pathname === "/api/aigw/test" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.url || typeof body.url !== "string") {
+			json({ error: "Missing 'url' field" }, 400);
+			return;
+		}
+		try {
+			const models = await discoverAigwModels(body.url);
+			json({ ok: true, models });
+		} catch (err: any) {
+			json({ error: err.message }, 502);
+		}
+		return;
+	}
+
+	// Proxy: /api/aigw/v1/* → forward to configured aigw URL
+	if (url.pathname.startsWith("/api/aigw/v1/") && getAigwUrl(preferencesStore)) {
+		const aigwUrl = getAigwUrl(preferencesStore)!;
+		const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
+		const targetUrl = `${aigwUrl}${subPath}${url.search}`;
+		proxyRequest(targetUrl, req, res);
 		return;
 	}
 

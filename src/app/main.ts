@@ -260,7 +260,7 @@ async function initApp() {
 		try {
 			await authenticateGateway(savedUrl, savedToken);
 
-			// Load saved color palette from server preferences
+			// Load saved preferences (palette + AI gateway)
 			try {
 				const prefRes = await gatewayFetch("/api/preferences");
 				if (prefRes.ok) {
@@ -268,6 +268,8 @@ async function initApp() {
 					if (prefs.palette && prefs.palette !== "forest") {
 						document.documentElement.dataset.palette = prefs.palette;
 					}
+					// Load AI Gateway config into ModelSelector
+					import("./aigw-config.js").then(({ applyAigwConfig }) => applyAigwConfig(prefs));
 				}
 			} catch {}
 
@@ -485,6 +487,8 @@ async function initApp() {
 			if (prefs.shortcuts) {
 				await loadSavedBindings();
 			}
+			// Sync AI Gateway config
+			import("./aigw-config.js").then(({ applyAigwConfig }) => applyAigwConfig(prefs));
 		} catch {}
 	});
 }

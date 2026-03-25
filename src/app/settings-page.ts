@@ -21,7 +21,7 @@ import { renderApp } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 
-type SettingsTab = "shortcuts" | "palette";
+type SettingsTab = "shortcuts" | "palette" | "aigw";
 let activeTab: SettingsTab = "shortcuts";
 
 // Rebind state (same as shortcuts-dialog)
@@ -441,11 +441,213 @@ function renderPaletteTab() {
 	`;
 }
 
+// ── AI Gateway tab ──
+
+let aigwUrl = "";
+let aigwStatus: "idle" | "testing" | "saving" | "removing" = "idle";
+let aigwError = "";
+let aigwConfigured = false;
+let aigwConfiguredUrl = "";
+let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }> = [];
+let _aigwLoadPromise: Promise<void> | null = null;
+
+function loadAigwStatus(): void {
+	if (_aigwLoadPromise) return;
+	_aigwLoadPromise = (async () => {
+		try {
+			const res = await gatewayFetch("/api/aigw/status");
+			if (res.ok) {
+				const data = await res.json();
+				aigwConfigured = data.configured;
+				if (data.configured) {
+					aigwConfiguredUrl = data.url;
+					aigwUrl = data.url;
+					aigwModels = data.models || [];
+				}
+			}
+		} catch {}
+		_aigwLoadPromise = null;
+	})();
+}
+
+async function testAigwConnection(): Promise<void> {
+	if (!aigwUrl.trim()) return;
+	aigwStatus = "testing";
+	aigwError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/aigw/test", {
+			method: "POST",
+			body: JSON.stringify({ url: aigwUrl.trim() }),
+		});
+		const data = await res.json();
+		if (!res.ok) {
+			aigwError = data.error || `HTTP ${res.status}`;
+		} else {
+			aigwModels = data.models || [];
+			aigwError = "";
+		}
+	} catch (err: any) {
+		aigwError = err.message || "Connection failed";
+	}
+	aigwStatus = "idle";
+	renderApp();
+}
+
+async function saveAigwConfig(): Promise<void> {
+	if (!aigwUrl.trim()) return;
+	aigwStatus = "saving";
+	aigwError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: aigwUrl.trim() }),
+		});
+		const data = await res.json();
+		if (!res.ok) {
+			aigwError = data.error || `HTTP ${res.status}`;
+		} else {
+			aigwConfigured = true;
+			aigwConfiguredUrl = aigwUrl.trim();
+			aigwModels = data.models || [];
+			aigwError = "";
+		}
+	} catch (err: any) {
+		aigwError = err.message || "Save failed";
+	}
+	aigwStatus = "idle";
+	renderApp();
+}
+
+async function removeAigwConfig(): Promise<void> {
+	aigwStatus = "removing";
+	aigwError = "";
+	renderApp();
+	try {
+		await gatewayFetch("/api/aigw/configure", { method: "DELETE" });
+		aigwConfigured = false;
+		aigwConfiguredUrl = "";
+		aigwUrl = "";
+		aigwModels = [];
+		aigwError = "";
+	} catch (err: any) {
+		aigwError = err.message || "Remove failed";
+	}
+	aigwStatus = "idle";
+	renderApp();
+}
+
+function formatTokens(tokens: number): string {
+	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(0)}M`;
+	if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(0)}K`;
+	return String(tokens);
+}
+
+function renderAigwTab() {
+	loadAigwStatus();
+
+	const busy = aigwStatus !== "idle";
+
+	return html`
+		<div class="flex flex-col gap-4">
+			<p class="text-sm text-muted-foreground">
+				Connect to an AI Gateway that proxies access to on-prem and off-prem LLM providers
+				through a single OpenAI-compatible endpoint. When configured, only gateway models
+				are available — cloud provider keys are not needed.
+			</p>
+
+			<!-- URL input -->
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-medium text-foreground">Gateway URL</label>
+				<div class="flex gap-2">
+					<input
+						type="text"
+						class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+							focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder="http://aigw-local.c3.zone/v1"
+						.value=${aigwUrl}
+						?disabled=${busy}
+						@input=${(e: Event) => { aigwUrl = (e.target as HTMLInputElement).value; }}
+					/>
+					<button
+						class="px-3 py-2 text-sm rounded-md border border-input bg-background text-foreground
+							hover:bg-secondary transition-colors disabled:opacity-50"
+						?disabled=${busy || !aigwUrl.trim()}
+						@click=${testAigwConnection}
+					>${aigwStatus === "testing" ? "Testing..." : "Test"}</button>
+				</div>
+				<p class="text-xs text-muted-foreground">
+					The gateway's OpenAI-compatible base URL (e.g. <code>http://aigw-local.c3.zone/v1</code>).
+					The server proxies requests — the hostname does not need to resolve from the browser.
+				</p>
+			</div>
+
+			<!-- Error -->
+			${aigwError ? html`
+				<div class="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">
+					${aigwError}
+				</div>
+			` : ""}
+
+			<!-- Status badge -->
+			${aigwConfigured ? html`
+				<div class="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
+					<span class="w-2 h-2 rounded-full bg-green-500"></span>
+					<span class="text-sm text-foreground">Connected to <code class="text-xs">${aigwConfiguredUrl}</code></span>
+				</div>
+			` : ""}
+
+			<!-- Action buttons -->
+			<div class="flex gap-2">
+				<button
+					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
+						hover:bg-primary/90 transition-colors disabled:opacity-50"
+					?disabled=${busy || !aigwUrl.trim()}
+					@click=${saveAigwConfig}
+				>${aigwStatus === "saving" ? "Saving..." : aigwConfigured ? "Update" : "Enable Gateway"}</button>
+				${aigwConfigured ? html`
+					<button
+						class="px-4 py-2 text-sm rounded-md border border-destructive text-destructive
+							hover:bg-destructive/10 transition-colors disabled:opacity-50"
+						?disabled=${busy}
+						@click=${removeAigwConfig}
+					>${aigwStatus === "removing" ? "Removing..." : "Disconnect"}</button>
+				` : ""}
+			</div>
+
+			<!-- Discovered models -->
+			${aigwModels.length > 0 ? html`
+				<div class="flex flex-col gap-2 mt-2">
+					<h3 class="text-sm font-semibold text-foreground">
+						Available Models (${aigwModels.length})
+					</h3>
+					<div class="border border-border rounded-md divide-y divide-border max-h-80 overflow-y-auto">
+						${aigwModels.map((m: any) => html`
+							<div class="px-3 py-2 flex items-center justify-between">
+								<div class="flex flex-col gap-0.5 min-w-0">
+									<span class="text-sm font-medium text-foreground truncate">${m.id}</span>
+									<span class="text-xs text-muted-foreground">${m.name}</span>
+								</div>
+								<div class="flex items-center gap-2 text-xs text-muted-foreground shrink-0 ml-2">
+									${m.reasoning ? html`<span class="px-1.5 py-0.5 rounded bg-secondary">Reasoning</span>` : ""}
+									<span>${formatTokens(m.contextWindow)} ctx</span>
+								</div>
+							</div>
+						`)}
+					</div>
+				</div>
+			` : ""}
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
 
 	const tabs: { id: SettingsTab; label: string }[] = [
+		{ id: "aigw", label: "AI Gateway" },
 		{ id: "shortcuts", label: "Shortcuts" },
 		{ id: "palette", label: "Color Palette" },
 	];
@@ -476,6 +678,7 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto p-4">
 				<div class="${activeTab === "palette" ? "max-w-2xl" : "max-w-xl"}">
+					${activeTab === "aigw" ? renderAigwTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}
 				</div>
