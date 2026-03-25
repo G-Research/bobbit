@@ -91,6 +91,7 @@ interface GoalCost {
 let goalCost: GoalCost | null = null;
 let costPollTimer: ReturnType<typeof setInterval> | null = null;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Live verification tracking */
 interface LiveVerification {
@@ -173,6 +174,11 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		startCostPolling(goalId);
 		startGitStatusPolling(goalId);
 
+		// Start setup status polling if worktree is still being prepared
+		if (currentGoal && currentGoal.setupStatus === "preparing") {
+			startSetupStatusPoll(goalId);
+		}
+
 		// Bootstrap live verification state from REST (catches in-progress verifications)
 		fetchActiveVerifications(goalId);
 
@@ -247,6 +253,7 @@ export function clearDashboardState(): void {
 	stopGatePolling();
 	stopCostPolling();
 	stopGitStatusPolling();
+	stopSetupStatusPoll();
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	liveVerifications = new Map();
 	expandedLiveStepKeys = new Set();
@@ -488,6 +495,22 @@ function startGitStatusPolling(goalId: string): void {
 
 function stopGitStatusPolling(): void {
 	if (gitStatusPollTimer) { clearInterval(gitStatusPollTimer); gitStatusPollTimer = null; }
+}
+
+function startSetupStatusPoll(goalId: string): void {
+	stopSetupStatusPoll();
+	setupPollTimer = setInterval(async () => {
+		if (!currentGoalId || currentGoalId !== goalId) return;
+		await refreshDashboardGoal();
+		// Stop polling once status changes away from "preparing"
+		if (currentGoal && currentGoal.setupStatus !== "preparing") {
+			stopSetupStatusPoll();
+		}
+	}, 3000);
+}
+
+function stopSetupStatusPoll(): void {
+	if (setupPollTimer) { clearInterval(setupPollTimer); setupPollTimer = null; }
 }
 
 // ============================================================================

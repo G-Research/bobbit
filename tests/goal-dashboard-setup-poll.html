@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Goal Dashboard Setup Status Poll Test</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #0a0a0a; color: #e4e4e7; padding: 16px; }
+.setup-banner { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
+.setup-banner--preparing { background: #1a1a2e; border: 1px solid #2a2a4e; color: #a0a0ff; }
+.setup-banner--error { background: #2e1a1a; border: 1px solid #4e2a2a; color: #ff6b6b; }
+.ready-state { padding: 10px 14px; border-radius: 8px; background: #1a2e1a; border: 1px solid #2a4e2a; color: #6bff6b; font-size: 13px; margin-bottom: 16px; }
+.controls { margin-top: 20px; display: flex; gap: 8px; }
+button { padding: 6px 12px; border-radius: 4px; border: 1px solid #444; background: #1a1a1a; color: #e4e4e7; cursor: pointer; font-size: 12px; }
+button:hover { border-color: #666; }
+.animate-spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+#debug { margin-top: 16px; font-size: 11px; color: #888; }
+</style>
+</head>
+<body>
+
+<h2>Goal Dashboard</h2>
+
+<div id="dashboard-content"></div>
+
+<div class="controls">
+  <button id="btn-set-ready">Server: set status to "ready"</button>
+  <button id="btn-set-error">Server: set status to "error"</button>
+  <button id="btn-manual-refresh">Manual refresh</button>
+</div>
+
+<div id="debug">
+  Server status: <span id="server-status">preparing</span> |
+  UI status: <span id="ui-status">preparing</span> |
+  Refresh count: <span id="refresh-count">0</span> |
+  Polling: <span id="polling-status">false</span>
+</div>
+
+<script>
+// ============================================================
+// Simulated server-side state
+// ============================================================
+let serverGoal = {
+  id: "goal-test-1",
+  title: "Test Goal",
+  setupStatus: "preparing",
+  setupError: null
+};
+
+// ============================================================
+// Dashboard state (mirrors goal-dashboard.ts currentGoal)
+// ============================================================
+let currentGoal = null;
+let refreshCount = 0;
+let setupPollTimer = null;
+
+// Simulates refreshDashboardGoal() from goal-dashboard.ts
+function refreshDashboardGoal() {
+  refreshCount++;
+  currentGoal = { ...serverGoal };
+  renderDashboard();
+  updateDebug();
+
+  // If polling is active and status is no longer "preparing", stop polling
+  if (setupPollTimer && currentGoal.setupStatus !== "preparing") {
+    stopSetupStatusPoll();
+  }
+}
+
+// ============================================================
+// Setup status polling — mirrors what the fix will add to
+// goal-dashboard.ts. This function is NOT called automatically
+// by loadDashboardData — that's the bug. The test must call it
+// explicitly via __enableSetupPoll() to simulate the fix.
+// ============================================================
+function startSetupStatusPoll() {
+  if (setupPollTimer) return;
+  setupPollTimer = setInterval(() => {
+    refreshDashboardGoal();
+  }, 500); // fast for tests
+  updateDebug();
+}
+
+function stopSetupStatusPoll() {
+  if (setupPollTimer) {
+    clearInterval(setupPollTimer);
+    setupPollTimer = null;
+    updateDebug();
+  }
+}
+
+// ============================================================
+// Rendering (mirrors renderSetupBanner in goal-dashboard.ts)
+// ============================================================
+function renderDashboard() {
+  const container = document.getElementById("dashboard-content");
+  if (!currentGoal) {
+    container.innerHTML = "<p>No goal loaded</p>";
+    return;
+  }
+
+  if (currentGoal.setupStatus === "preparing") {
+    container.innerHTML = `
+      <div class="setup-banner setup-banner--preparing" id="setup-banner">
+        <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+        <span>Setting up worktree…</span>
+      </div>
+    `;
+  } else if (currentGoal.setupStatus === "error") {
+    container.innerHTML = `
+      <div class="setup-banner setup-banner--error" id="setup-banner-error">
+        <span>Worktree setup failed${currentGoal.setupError ? ": " + currentGoal.setupError : ""}</span>
+        <button id="btn-retry">Retry Setup</button>
+      </div>
+    `;
+  } else {
+    container.innerHTML = `
+      <div class="ready-state" id="ready-state">
+        ✓ Worktree ready
+      </div>
+    `;
+  }
+}
+
+function updateDebug() {
+  document.getElementById("server-status").textContent = serverGoal.setupStatus;
+  document.getElementById("ui-status").textContent = currentGoal ? currentGoal.setupStatus : "none";
+  document.getElementById("refresh-count").textContent = refreshCount;
+  document.getElementById("polling-status").textContent = String(setupPollTimer !== null);
+}
+
+// ============================================================
+// Controls
+// ============================================================
+document.getElementById("btn-set-ready").addEventListener("click", () => {
+  serverGoal.setupStatus = "ready";
+  serverGoal.setupError = null;
+  updateDebug();
+});
+
+document.getElementById("btn-set-error").addEventListener("click", () => {
+  serverGoal.setupStatus = "error";
+  serverGoal.setupError = "git worktree add failed";
+  updateDebug();
+});
+
+document.getElementById("btn-manual-refresh").addEventListener("click", () => {
+  refreshDashboardGoal();
+});
+
+// ============================================================
+// Simulated loadDashboardData() — loads goal, starts polling
+// if setupStatus === "preparing" AND the fix is enabled.
+// ============================================================
+let fixEnabled = true;
+
+function loadDashboardData() {
+  stopSetupStatusPoll(); // clear any existing poll (mirrors clearDashboardState)
+  currentGoal = { ...serverGoal };
+  refreshCount = 0;
+  renderDashboard();
+  updateDebug();
+
+  // The FIX: start polling when setupStatus is "preparing"
+  // This only runs when fixEnabled is true (simulating the real fix)
+  if (fixEnabled && currentGoal.setupStatus === "preparing") {
+    startSetupStatusPoll();
+  }
+}
+
+// ============================================================
+// Initial load
+// ============================================================
+loadDashboardData();
+
+// Expose for testing
+window.__enableFix = () => { fixEnabled = true; };
+window.__loadDashboardData = loadDashboardData;
+window.__refreshDashboardGoal = refreshDashboardGoal;
+window.__startSetupStatusPoll = startSetupStatusPoll;
+window.__stopAllPolling = () => { stopSetupStatusPoll(); };
+window.__setServerStatus = (status, error) => {
+  serverGoal.setupStatus = status;
+  serverGoal.setupError = error || null;
+  updateDebug();
+};
+window.__getState = () => ({
+  serverStatus: serverGoal.setupStatus,
+  uiStatus: currentGoal ? currentGoal.setupStatus : null,
+  refreshCount,
+  isPolling: setupPollTimer !== null
+});
+</script>
+</body>
+</html>
