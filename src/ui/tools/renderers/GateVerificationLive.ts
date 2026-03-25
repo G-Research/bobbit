@@ -2,11 +2,19 @@
  * <gate-verification-live> — Lit element that subscribes to gate-verification-event
  * CustomEvents on document and renders live step cards with timers.
  *
+ * Uses the shared delegate-cards.ts components to match the delegate UX pattern.
  * Used by GateSignalRenderer (chat) and could be embedded in the dashboard.
  */
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import "../../components/LiveTimer.js";
+import {
+	type DelegateCardEntry,
+	statusColor,
+	statusIcon,
+	formatDuration,
+	renderDuration,
+} from "./delegate-cards.js";
 
 interface VerificationStep {
 	name: string;
@@ -15,6 +23,28 @@ interface VerificationStep {
 	durationMs?: number;
 	output?: string;
 	startedAt: number;
+}
+
+/** Map verification step status to delegate-cards status strings */
+function toDelegateStatus(status: "running" | "passed" | "failed"): string {
+	if (status === "passed") return "completed";
+	if (status === "failed") return "error";
+	return "running";
+}
+
+/** Build a DelegateCardEntry-compatible object for renderDuration() */
+function toCardEntry(step: VerificationStep, index: number): DelegateCardEntry {
+	const delegateStatus = toDelegateStatus(step.status);
+	// For running steps, compute durationMs from startedAt so <live-timer> works
+	const durationMs = step.status === "running"
+		? Date.now() - step.startedAt
+		: (step.durationMs ?? 0);
+	return {
+		id: `step-${index}`,
+		name: step.name || "step",
+		status: delegateStatus,
+		durationMs,
+	};
 }
 
 @customElement("gate-verification-live")
@@ -29,7 +59,6 @@ export class GateVerificationLive extends LitElement {
 	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
 	@state() private expandedSteps = new Set<number>();
 
-	private _timerInterval: ReturnType<typeof setInterval> | null = null;
 	private _boundOnEvent = this._onEvent.bind(this);
 
 	override createRenderRoot() { return this; }
@@ -42,19 +71,6 @@ export class GateVerificationLive extends LitElement {
 	override disconnectedCallback() {
 		super.disconnectedCallback();
 		document.removeEventListener("gate-verification-event", this._boundOnEvent);
-		this._stopTimer();
-	}
-
-	private _startTimer() {
-		if (this._timerInterval) return;
-		this._timerInterval = setInterval(() => this.requestUpdate(), 1000);
-	}
-
-	private _stopTimer() {
-		if (this._timerInterval) {
-			clearInterval(this._timerInterval);
-			this._timerInterval = null;
-		}
 	}
 
 	private _onEvent(e: Event) {
@@ -74,7 +90,6 @@ export class GateVerificationLive extends LitElement {
 					startedAt: Date.now(),
 				}));
 				this.overallStatus = "running";
-				this._startTimer();
 				break;
 			}
 			case "gate_verification_step_complete": {
@@ -108,7 +123,6 @@ export class GateVerificationLive extends LitElement {
 			}
 			case "gate_verification_complete": {
 				this.overallStatus = detail.status || "passed";
-				this._stopTimer();
 				this.requestUpdate();
 				break;
 			}
@@ -121,36 +135,22 @@ export class GateVerificationLive extends LitElement {
 		this.expandedSteps = next;
 	}
 
-	private _formatElapsed(startedAt: number): string {
-		const s = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-		return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
-	}
-
-	private _formatDuration(ms: number): string {
-		if (ms < 1000) return `${Math.round(ms)}ms`;
-		if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-		const m = Math.floor(ms / 60000);
-		const s = Math.round((ms % 60000) / 1000);
-		return `${m}m ${s}s`;
-	}
-
 	override render() {
 		// No events yet — show placeholder based on finalStatus or idle state
 		if (this.overallStatus === "idle" && this.steps.length === 0) {
 			if (this.finalStatus === "passed") {
-				return html`<div class="mt-2 text-xs text-green-600 dark:text-green-400">✓ Passed (no verification steps)</div>`;
+				return html`<div class="mt-2 text-xs ${statusColor("completed")}">${statusIcon("completed")} Passed (no verification)</div>`;
 			}
 			if (this.finalStatus === "failed") {
-				return html`<div class="mt-2 text-xs text-red-600 dark:text-red-400">✗ Failed</div>`;
+				return html`<div class="mt-2 text-xs ${statusColor("error")}">${statusIcon("error")} Failed</div>`;
 			}
-			return html`<div class="mt-2 text-xs text-muted-foreground animate-pulse">Verification in progress…</div>`;
+			return html`<div class="mt-2 text-xs ${statusColor("running")}">Verification in progress…</div>`;
 		}
 
 		// Auto-pass: complete arrived with no steps
 		if (this.steps.length === 0 && this.overallStatus !== "running") {
-			const color = this.overallStatus === "passed" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400";
-			const icon = this.overallStatus === "passed" ? "✓" : "✗";
-			return html`<div class="mt-2 text-xs ${color}">${icon} ${this.overallStatus === "passed" ? "Passed (no verification steps)" : "Failed"}</div>`;
+			const dStatus = toDelegateStatus(this.overallStatus as "passed" | "failed");
+			return html`<div class="mt-2 text-xs ${statusColor(dStatus)}">${statusIcon(dStatus)} ${this.overallStatus === "passed" ? "Passed (no verification)" : "Failed"}</div>`;
 		}
 
 		const passedCount = this.steps.filter(s => s.status === "passed").length;
@@ -167,43 +167,26 @@ export class GateVerificationLive extends LitElement {
 
 	private _renderHeader(passed: number, failed: number, total: number): TemplateResult {
 		if (this.overallStatus === "passed") {
-			return html`<div class="text-xs font-medium text-green-600 dark:text-green-400 mb-1">✓ Verified <code class="text-[10px]">${this.gateId}</code> — passed</div>`;
+			return html`<div class="text-xs font-medium ${statusColor("completed")} mb-1">${statusIcon("completed")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${passed}/${total} passed</span></div>`;
 		}
 		if (this.overallStatus === "failed") {
-			return html`<div class="text-xs font-medium text-red-600 dark:text-red-400 mb-1">✗ Verified <code class="text-[10px]">${this.gateId}</code> — failed</div>`;
+			return html`<div class="text-xs font-medium ${statusColor("error")} mb-1">${statusIcon("error")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${passed} passed</span>, <span class="text-red-500">${failed} failed</span></div>`;
 		}
-		return html`<div class="text-xs font-medium text-muted-foreground mb-1">Verifying <code class="text-[10px]">${this.gateId}</code> — ${passed}/${total} steps passed${failed > 0 ? html`, <span class="text-red-600 dark:text-red-400">${failed} failed</span>` : nothing}</div>`;
+		// Running
+		const completedCount = passed + failed;
+		return html`<div class="text-xs font-medium ${statusColor("running")} mb-1">Verifying <code class="text-[10px]">${this.gateId}</code> — <span class="text-xs">${completedCount}/${total} steps</span>${failed > 0 ? html` <span class="text-red-500">(${failed} failed)</span>` : nothing}</div>`;
 	}
 
 	private _renderStepCard(step: VerificationStep, index: number): TemplateResult {
 		const isExpanded = this.expandedSteps.has(index);
 		const hasOutput = !!step.output;
+		const dStatus = toDelegateStatus(step.status);
+		const entry = toCardEntry(step, index);
 
-		// Status icon and color
-		let iconStr: string;
-		let iconCls: string;
-		if (step.status === "running") {
-			iconStr = "●";
-			iconCls = "text-blue-500 animate-pulse";
-		} else if (step.status === "passed") {
-			iconStr = "✓";
-			iconCls = "text-green-600 dark:text-green-400";
-		} else {
-			iconStr = "✗";
-			iconCls = "text-red-600 dark:text-red-400";
-		}
-
-		// Type badge
+		// Type badge (verification-specific, not in delegate-cards)
 		const typeBadgeCls = step.type === "command"
 			? "bg-muted text-muted-foreground"
 			: "bg-purple-500/20 text-purple-600 dark:text-purple-400";
-
-		// Duration or live timer
-		const durationPart = step.status === "running"
-			? html`<span class="text-xs text-muted-foreground">${this._formatElapsed(step.startedAt)}</span>`
-			: step.durationMs != null
-				? html`<span class="text-xs text-muted-foreground">${this._formatDuration(step.durationMs)}</span>`
-				: nothing;
 
 		return html`
 			<div class="border border-border rounded text-sm">
@@ -211,10 +194,10 @@ export class GateVerificationLive extends LitElement {
 					class="p-2 flex items-center gap-2 ${hasOutput ? "cursor-pointer hover:bg-accent/50" : ""}"
 					@click=${hasOutput ? () => this._toggleStep(index) : null}
 				>
-					<span class="${iconCls} font-bold shrink-0">${iconStr}</span>
-					<span class="truncate flex-1 text-xs">${step.name || "step"}</span>
+					<span class="${statusColor(dStatus)}">${statusIcon(dStatus)}</span>
+					<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name || "step"}</span>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
-					${durationPart}
+					${renderDuration(entry)}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
 				</div>
 				${isExpanded && step.output ? html`
