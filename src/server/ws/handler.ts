@@ -35,6 +35,7 @@ export function handleWebSocketConnection(
 	sessionManager: SessionManager,
 	authToken: string,
 	rateLimiter: RateLimiter,
+	skipAuth = false,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -63,17 +64,19 @@ export function handleWebSocketConnection(
 				return;
 			}
 
-			if (rateLimiter.isRateLimited(ip)) {
-				ws.close(4003, "Rate limited");
-				return;
-			}
+			if (!skipAuth) {
+				if (rateLimiter.isRateLimited(ip)) {
+					ws.close(4003, "Rate limited");
+					return;
+				}
 
-			if (!validateToken(msg.token, authToken)) {
-				rateLimiter.recordFailure(ip);
-				console.log(`[gateway] Auth failed from ${ip}`);
-				send(ws, { type: "auth_failed" });
-				ws.close(4004, "Invalid token");
-				return;
+				if (!validateToken(msg.token, authToken)) {
+					rateLimiter.recordFailure(ip);
+					console.log(`[gateway] Auth failed from ${ip}`);
+					send(ws, { type: "auth_failed" });
+					ws.close(4004, "Invalid token");
+					return;
+				}
 			}
 
 			clearTimeout(authTimeout);

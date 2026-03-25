@@ -251,8 +251,28 @@ async function initApp() {
 		window.history.replaceState({}, "", window.location.pathname + window.location.hash);
 	}
 
-	const savedUrl = localStorage.getItem(GW_URL_KEY);
-	const savedToken = localStorage.getItem(GW_TOKEN_KEY);
+	let savedUrl = localStorage.getItem(GW_URL_KEY);
+	let savedToken = localStorage.getItem(GW_TOKEN_KEY);
+
+	// Auto-connect in localhost mode: probe the server without credentials.
+	// If it reports localhost: true, store a dummy token and proceed — no
+	// gateway dialog needed.
+	if (!savedUrl || !savedToken) {
+		try {
+			const probe = await fetch(`${window.location.origin}/api/health`);
+			if (probe.ok) {
+				const health = await probe.json();
+				if (health.localhost) {
+					savedUrl = window.location.origin;
+					savedToken = "localhost";
+					localStorage.setItem(GW_URL_KEY, savedUrl);
+					localStorage.setItem(GW_TOKEN_KEY, savedToken);
+				}
+			}
+		} catch {
+			// Server not reachable — fall through to disconnected state
+		}
+	}
 
 	renderApp();
 

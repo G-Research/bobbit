@@ -21,6 +21,7 @@ interface CliArgs {
 	noUi: boolean;
 	tls: boolean;
 	tlsExplicit: boolean;
+	forceAuth: boolean;
 	staticDir?: string;
 	agentCliPath?: string;
 }
@@ -51,6 +52,7 @@ function parseArgs(argv: string[]): CliArgs {
 		noUi: false,
 		tls: true,  // on by default
 		tlsExplicit: false,
+		forceAuth: false,
 	};
 
 	for (let i = 0; i < argv.length; i++) {
@@ -79,6 +81,9 @@ function parseArgs(argv: string[]): CliArgs {
 				break;
 			case "--no-ui":
 				result.noUi = true;
+				break;
+			case "--auth":
+				result.forceAuth = true;
 				break;
 			case "--tls":
 				result.tls = true;
@@ -190,6 +195,7 @@ async function main() {
 		agentCliPath: args.agentCliPath,
 		systemPromptPath,
 		tls,
+		forceAuth: args.forceAuth,
 	});
 
 	const actualPort = await gateway.start();

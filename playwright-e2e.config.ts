@@ -39,7 +39,7 @@ export default defineConfig({
 	timeout: 30_000,
 	workers: 1, // serial — all tests share a single gateway instance
 	webServer: {
-		command: `node dist/server/cli.js --host 127.0.0.1 --port ${E2E_PORT} --no-tls --no-ui --agent-cli ${MOCK_AGENT}`,
+		command: `node dist/server/cli.js --host 127.0.0.1 --port ${E2E_PORT} --no-tls --no-ui --auth --agent-cli ${MOCK_AGENT}`,
 		url: `http://127.0.0.1:${E2E_PORT}/api/sessions`,
 		reuseExistingServer: false,
 		timeout: 30_000,

@@ -214,10 +214,15 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		throw new Error(`Gateway error: ${healthRes.status}`);
 	}
 
-	const hasAuth = await checkOAuthStatus();
-	if (!hasAuth) {
-		const success = await openOAuthDialog();
-		if (!success) throw new Error("OAuth login required");
+	// Skip OAuth in localhost mode — only local processes can connect,
+	// and on air-gapped systems OAuth endpoints are unreachable anyway.
+	const healthData = await healthRes.json();
+	if (!healthData.localhost) {
+		const hasAuth = await checkOAuthStatus();
+		if (!hasAuth) {
+			const success = await openOAuthDialog();
+			if (!success) throw new Error("OAuth login required");
+		}
 	}
 
 	state.appView = "authenticated";

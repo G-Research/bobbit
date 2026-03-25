@@ -84,6 +84,8 @@ export interface GatewayConfig {
 	agentCliPath?: string;
 	systemPromptPath?: string;
 	tls?: TlsConfig;
+	/** Force auth even on localhost (used by E2E tests). */
+	forceAuth?: boolean;
 }
 
 export function createGateway(config: GatewayConfig) {
@@ -140,6 +142,8 @@ export function createGateway(config: GatewayConfig) {
 
 		// API routes
 		if (url.pathname.startsWith("/api/")) {
+			const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
+
 			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
@@ -152,23 +156,25 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			// Auth check
-			const authHeader = req.headers.authorization;
-			const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
-				: url.searchParams.get("token"); // Allow token in query param for links opened in new tabs
-			const ip = req.socket.remoteAddress || "unknown";
+			// Auth check — skipped in localhost mode (only local processes can connect)
+			if (!isLocalhostMode) {
+				const authHeader = req.headers.authorization;
+				const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
+					: url.searchParams.get("token"); // Allow token in query param for links opened in new tabs
+				const ip = req.socket.remoteAddress || "unknown";
 
-			if (rateLimiter.isRateLimited(ip)) {
-				res.writeHead(429);
-				res.end();
-				return;
-			}
+				if (rateLimiter.isRateLimited(ip)) {
+					res.writeHead(429);
+					res.end();
+					return;
+				}
 
-			if (!token || !validateToken(token, config.authToken)) {
-				if (token) rateLimiter.recordFailure(ip);
-				res.writeHead(401, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: "Unauthorized" }));
-				return;
+				if (!token || !validateToken(token, config.authToken)) {
+					if (token) rateLimiter.recordFailure(ip);
+					res.writeHead(401, { "Content-Type": "application/json" });
+					res.end(JSON.stringify({ error: "Unauthorized" }));
+					return;
+				}
 			}
 
 			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, broadcastToGoal, broadcastToAll);
@@ -247,6 +253,8 @@ export function createGateway(config: GatewayConfig) {
 		}
 	});
 
+	const isLocalhostServer = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
+
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
 		const match = url.pathname.match(/^\/ws\/([^/]+)$/);
@@ -257,13 +265,13 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		const ip = req.socket.remoteAddress || "unknown";
-		if (rateLimiter.isRateLimited(ip)) {
+		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
 			return;
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter);
+			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, isLocalhostServer);
 		});
 	});
 
@@ -346,9 +354,10 @@ async function handleApiRoute(
 		res.end(JSON.stringify(data));
 	};
 
-	// GET /api/health
+	// GET /api/health — unauthenticated so the client can probe localhost mode
 	if (url.pathname === "/api/health" && req.method === "GET") {
-		json({ status: "ok", sessions: sessionManager.listSessions().length });
+		const isLocalhost = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
+		json({ status: "ok", sessions: sessionManager.listSessions().length, localhost: isLocalhost });
 		return;
 	}
 
