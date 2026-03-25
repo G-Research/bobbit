@@ -376,6 +376,7 @@ function renderListView(): TemplateResult {
 	}
 
 	return html`
+		<p class="text-sm text-muted-foreground mb-3">Roles define what an agent can do \u2014 its system prompt and which tools it has access to. Bobbit includes built-in roles (coder, reviewer, tester) and you can create custom ones.</p>
 		<div class="roles-list">
 			${roles.map((role, i) => renderRoleRow(role, i))}
 		</div>

@@ -693,7 +693,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 	if (teamActive) {
 		return html`
 			<div class="btn-split">
-				<button class="btn-split-main danger" @click=${() => handleEndTeam(goal.id)} ?disabled=${teamStopping}>
+				<button class="btn-split-main danger" title="Stop the goal team" @click=${() => handleEndTeam(goal.id)} ?disabled=${teamStopping}>
 					${svgStop}
 					<span>${teamStopping ? "Stopping\u2026" : "Stop Team"}</span>
 				</button>
@@ -702,7 +702,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 	}
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
+			<button class="btn-split-main" title="Start the goal team" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
 				${svgPlay}
 				<span>${teamStarting ? "Starting\u2026" : "Start Team"}</span>
 			</button>
@@ -713,7 +713,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 function renderSessionButton(goal: Goal): TemplateResult {
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" @click=${() => createAndConnectSession(goal.id)} ?disabled=${goal.setupStatus !== undefined && goal.setupStatus !== "ready"}>
+			<button class="btn-split-main" title="New session for this goal" @click=${() => createAndConnectSession(goal.id)} ?disabled=${goal.setupStatus !== undefined && goal.setupStatus !== "ready"}>
 				${svgPlus}
 				New Session
 			</button>
@@ -987,7 +987,7 @@ function renderTabBar(): TemplateResult {
 	return html`
 		<div class="tab-bar">
 			${tabs.map(t => html`
-				<div class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)}>
+				<div class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)} title="${t.label}">
 					${t.icon}
 					<span class="tab-label">${t.label}</span>
 					${t.countStr ? html`<span class="tab-count">${t.countStr}</span>` : nothing}

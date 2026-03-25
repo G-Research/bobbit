@@ -460,6 +460,7 @@ function renderListView(): TemplateResult {
 	const chevronSvg = html`<svg class="tool-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
 
 	return html`
+		<p class="text-sm text-muted-foreground mb-3">Tools are the capabilities available to agents \u2014 file editing, shell commands, web search, and more. This page lets you view and document them.</p>
 		<div class="tools-list">
 			${sortedGroups.map((groupName) => {
 				const groupTools = groups.get(groupName)!;

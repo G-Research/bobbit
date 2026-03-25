@@ -122,6 +122,7 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 					<button
 						type="button"
 						class="absolute right-0 top-0 bottom-0 w-8 flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+						title="Show recent directories"
 						@mousedown=${(e: Event) => { e.preventDefault(); opts.onToggle(!opts.dropdownOpen); }}
 						tabindex="-1"
 					>
