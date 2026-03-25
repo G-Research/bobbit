@@ -2,8 +2,8 @@
  * Team Lead tool extensions for Bobbit.
  *
  * Registers team management tools (spawn, dismiss, list, complete) for team lead
- * sessions only. Task and gate tools are in goal-tools.ts, which is loaded
- * automatically for ALL goal sessions.
+ * sessions only. Task and gate tools live in tasks/extension.ts and are loaded
+ * independently by the tool activation system — do NOT import them here.
  *
  * Calls the gateway REST API directly — no CLI wrapper needed.
  */
@@ -13,13 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
-// Also register goal-tools (task + gate management)
-import goalTools from "../tasks/extension.js";
-
 export default function (pi: ExtensionAPI) {
-	// Register goal tools first (task_list, task_create, gate_signal, etc.)
-	goalTools(pi);
-
 	// Self-signed TLS
 	process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 

@@ -2,7 +2,13 @@
 <html>
 <head>
 <style>
+/* ── Forest (default, no data-palette) ── */
 :root {
+  --background: oklch(0.935 0.012 148);
+  --foreground: oklch(0.18 0.014 142);
+  --primary: oklch(0.38 0.08 148);
+  --primary-foreground: oklch(0.96 0.008 146);
+  --sidebar: oklch(0.915 0.014 148);
   --notif-system-bg: rgba(100, 120, 160, 0.12);
   --notif-system-border: rgba(100, 120, 160, 0.30);
   --notif-system-text: rgba(130, 150, 190, 0.90);
@@ -11,22 +17,147 @@
   --user-msg-bg: rgba(80, 140, 80, 0.10);
 }
 
+/* ── Dark mode (forest default) ── */
+.dark {
+  --background: oklch(0.21 0.008 145);
+  --foreground: oklch(0.96 0.008 140);
+  --primary: oklch(0.72 0.12 140);
+  --primary-foreground: oklch(0.18 0.01 145);
+  --sidebar: oklch(0.23 0.01 145);
+}
+
+/* ── Ocean (hue 230) ── */
 [data-palette="ocean"] {
+  --background: oklch(0.935 0.012 230);
+  --primary: oklch(0.38 0.08 230);
+  --sidebar: oklch(0.915 0.014 230);
   --notif-system-bg: rgba(60, 120, 190, 0.12);
   --notif-system-border: rgba(60, 120, 190, 0.30);
   --notif-system-text: rgba(90, 150, 210, 0.90);
   --notif-task-bg: rgba(224, 120, 80, 0.12);
-  --user-msg-accent: rgba(50, 150, 140, 1);
-  --user-msg-bg: rgba(50, 150, 140, 0.10);
+  --user-msg-accent: rgba(50, 120, 190, 1);
+  --user-msg-bg: rgba(50, 120, 190, 0.10);
+}
+.dark[data-palette="ocean"], [data-palette="ocean"].dark {
+  --background: oklch(0.21 0.008 230);
+  --primary: oklch(0.72 0.12 230);
+  --sidebar: oklch(0.23 0.01 230);
 }
 
+/* ── Dusk (hue 300) ── */
+[data-palette="dusk"] {
+  --background: oklch(0.935 0.012 300);
+  --primary: oklch(0.38 0.08 300);
+  --sidebar: oklch(0.915 0.014 300);
+  --notif-system-bg: rgba(90, 90, 175, 0.12);
+  --notif-system-border: rgba(90, 90, 175, 0.30);
+  --notif-system-text: rgba(120, 120, 200, 0.90);
+  --notif-task-bg: rgba(212, 160, 23, 0.12);
+  --user-msg-accent: rgba(160, 90, 180, 1);
+  --user-msg-bg: rgba(160, 90, 180, 0.10);
+}
+.dark[data-palette="dusk"], [data-palette="dusk"].dark {
+  --background: oklch(0.21 0.008 300);
+  --primary: oklch(0.72 0.12 300);
+  --sidebar: oklch(0.23 0.01 300);
+}
+
+/* ── Ember (hue 65) ── */
+[data-palette="ember"] {
+  --background: oklch(0.935 0.012 65);
+  --primary: oklch(0.38 0.08 65);
+  --sidebar: oklch(0.915 0.014 65);
+  --notif-system-bg: rgba(100, 120, 160, 0.12);
+  --notif-task-bg: rgba(200, 150, 40, 0.12);
+  --user-msg-accent: rgba(190, 140, 40, 1);
+  --user-msg-bg: rgba(190, 140, 40, 0.10);
+}
+.dark[data-palette="ember"], [data-palette="ember"].dark {
+  --background: oklch(0.21 0.008 65);
+  --primary: oklch(0.72 0.12 65);
+}
+
+/* ── Rose (hue 10) ── */
+[data-palette="rose"] {
+  --background: oklch(0.935 0.012 10);
+  --primary: oklch(0.38 0.08 10);
+  --sidebar: oklch(0.915 0.014 10);
+  --user-msg-accent: rgba(190, 80, 90, 1);
+  --user-msg-bg: rgba(190, 80, 90, 0.10);
+}
+.dark[data-palette="rose"], [data-palette="rose"].dark {
+  --background: oklch(0.21 0.008 10);
+  --primary: oklch(0.72 0.12 10);
+}
+
+/* ── Slate (hue 260, low chroma) ── */
+[data-palette="slate"] {
+  --background: oklch(0.935 0.008 260);
+  --primary: oklch(0.38 0.04 260);
+  --sidebar: oklch(0.915 0.010 260);
+  --user-msg-accent: rgba(110, 110, 160, 1);
+  --user-msg-bg: rgba(110, 110, 160, 0.10);
+}
+.dark[data-palette="slate"], [data-palette="slate"].dark {
+  --background: oklch(0.21 0.006 260);
+  --primary: oklch(0.72 0.06 260);
+}
+
+/* ── Sand (hue 85) ── */
+[data-palette="sand"] {
+  --background: oklch(0.935 0.012 85);
+  --primary: oklch(0.38 0.08 85);
+  --sidebar: oklch(0.915 0.014 85);
+  --user-msg-accent: rgba(140, 130, 50, 1);
+  --user-msg-bg: rgba(140, 130, 50, 0.10);
+}
+.dark[data-palette="sand"], [data-palette="sand"].dark {
+  --background: oklch(0.21 0.008 85);
+  --primary: oklch(0.72 0.12 85);
+}
+
+/* ── Teal (hue 195) ── */
+[data-palette="teal"] {
+  --background: oklch(0.935 0.012 195);
+  --primary: oklch(0.38 0.08 195);
+  --sidebar: oklch(0.915 0.014 195);
+  --user-msg-accent: rgba(40, 145, 160, 1);
+  --user-msg-bg: rgba(40, 145, 160, 0.10);
+}
+.dark[data-palette="teal"], [data-palette="teal"].dark {
+  --background: oklch(0.21 0.008 195);
+  --primary: oklch(0.72 0.12 195);
+}
+
+/* ── Copper (hue 50) ── */
+[data-palette="copper"] {
+  --background: oklch(0.935 0.012 50);
+  --primary: oklch(0.38 0.08 50);
+  --sidebar: oklch(0.915 0.014 50);
+  --user-msg-accent: rgba(180, 120, 50, 1);
+  --user-msg-bg: rgba(180, 120, 50, 0.10);
+}
+.dark[data-palette="copper"], [data-palette="copper"].dark {
+  --background: oklch(0.21 0.008 50);
+  --primary: oklch(0.72 0.12 50);
+}
+
+/* ── Mono (achromatic) ── */
 [data-palette="mono"] {
+  --background: oklch(0.935 0 0);
+  --primary: oklch(0.38 0 0);
+  --sidebar: oklch(0.915 0 0);
   --notif-system-bg: rgba(107, 114, 128, 0.12);
   --notif-system-border: rgba(107, 114, 128, 0.30);
   --notif-system-text: rgba(140, 147, 161, 0.90);
   --notif-task-bg: rgba(209, 213, 219, 0.12);
   --user-msg-accent: rgba(156, 163, 175, 1);
   --user-msg-bg: rgba(156, 163, 175, 0.10);
+}
+.dark[data-palette="mono"], [data-palette="mono"].dark {
+  --background: oklch(0.21 0 0);
+  --primary: oklch(0.72 0 0);
+  --sidebar: oklch(0.23 0 0);
 }
 
 .test-box {
@@ -42,10 +173,22 @@
   background: var(--user-msg-bg);
   color: var(--user-msg-accent);
 }
+.primary-box {
+  width: 100px;
+  height: 20px;
+  background: var(--primary);
+}
+.bg-box {
+  width: 100px;
+  height: 20px;
+  background: var(--background);
+}
 </style>
 </head>
 <body>
 <div class="test-box" id="system-box">System</div>
 <div class="user-box" id="user-box">User</div>
+<div class="primary-box" id="primary-box"></div>
+<div class="bg-box" id="bg-box"></div>
 </body>
 </html>
