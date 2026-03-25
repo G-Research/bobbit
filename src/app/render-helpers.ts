@@ -413,8 +413,18 @@ function renderGoalBadge(goalId: string) {
 	// PR status takes priority over gate counts
 	const pr = state.prStatusCache.get(goalId);
 	if (pr) {
-		const color = pr.state === "OPEN" ? "#6bc485" : pr.state === "MERGED" ? "#a87fd4" : "#c47070";
-		const label = pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`;
+		let color: string;
+		if (pr.state === "MERGED") color = "#a87fd4";
+		else if (pr.state === "CLOSED") color = "#c47070";
+		else if (pr.reviewDecision === "APPROVED") color = "#6bc485";
+		else if (pr.reviewDecision === "CHANGES_REQUESTED") color = "#c47070";
+		else if (pr.reviewDecision === "REVIEW_REQUIRED") color = "#d4a04a";
+		else color = "#6bc485";
+		const reviewLabel = pr.state === "OPEN" && pr.reviewDecision === "REVIEW_REQUIRED" ? " — awaiting review"
+			: pr.state === "OPEN" && pr.reviewDecision === "CHANGES_REQUESTED" ? " — changes requested"
+			: pr.state === "OPEN" && pr.reviewDecision === "APPROVED" ? " — approved"
+			: "";
+		const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel;
 		const icon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
 		if (pr.url) {
 			return html`<a class="shrink-0 flex items-center" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${icon}</a>`;

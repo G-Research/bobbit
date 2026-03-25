@@ -1007,6 +1007,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 				ai.prTitle = undefined;
 				ai.prMergeable = undefined;
 				ai.viewerIsAdmin = undefined;
+				ai.reviewDecision = undefined;
 			}
 			return;
 		}
@@ -1018,6 +1019,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = data.title;
 			ai.prMergeable = data.mergeable;
 			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
+			ai.reviewDecision = data.reviewDecision ?? undefined;
 		}
 	} catch {
 		if (activeSessionId() === sessionId) {
@@ -1027,6 +1029,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = undefined;
 			ai.prMergeable = undefined;
 			ai.viewerIsAdmin = undefined;
+			ai.reviewDecision = undefined;
 		}
 	}
 }

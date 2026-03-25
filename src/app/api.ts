@@ -210,7 +210,7 @@ async function refreshPrStatusCache() {
 				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status`);
 				if (!res.ok) return { goalId: g.id, pr: null };
 				const data = await res.json();
-				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number } };
+				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string } };
 			} catch {
 				return { goalId: g.id, pr: null };
 			}
@@ -221,7 +221,7 @@ async function refreshPrStatusCache() {
 	for (const { goalId, pr } of results) {
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
-			if (!prev || prev.state !== pr.state) {
+			if (!prev || prev.state !== pr.state || prev.reviewDecision !== pr.reviewDecision) {
 				state.prStatusCache.set(goalId, pr);
 				changed = true;
 			}
