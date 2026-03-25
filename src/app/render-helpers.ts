@@ -285,6 +285,7 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 		<div
 			class="group relative flex items-center gap-1 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
 				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+			style="padding-left:${hasDelegates ? 0 : CHEVRON_W}px;"
 			@click=${() => connectToSession(session.id, true)}
 			title="${displayTitle} (archived)"
 		>
@@ -293,7 +294,7 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 				style="width:${CHEVRON_W}px;text-align:center;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse delegates" : "Expand delegates"}"
-			>${expanded ? "▾" : "▸"}</span>` : html`<span style="width:${CHEVRON_W}px;" class="shrink-0"></span>`}
+			>${expanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center" style="filter:grayscale(1) opacity(0.7);">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
