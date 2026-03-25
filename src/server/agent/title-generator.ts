@@ -101,14 +101,44 @@ function cleanTitle(raw: string): string {
 }
 
 /**
+ * Resolve a potentially prefix-stripped model ID back to the full gateway model ID.
+ * Claude models are stored with the provider prefix stripped (e.g. "us.anthropic.claude-...")
+ * but the gateway's /v1/chat/completions endpoint needs the full ID (e.g. "aws/us.anthropic.claude-...").
+ * Queries the gateway's /v1/models endpoint to find a match.
+ */
+async function resolveGatewayModelId(baseUrl: string, strippedId: string): Promise<string> {
+	try {
+		const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+		const res = await fetch(modelsUrl, { signal: AbortSignal.timeout(5000) });
+		if (!res.ok) return strippedId;
+		const data = await res.json() as { data?: Array<{ id: string }> };
+		if (!Array.isArray(data.data)) return strippedId;
+
+		// Exact match first
+		const exact = data.data.find(m => m.id === strippedId);
+		if (exact) return exact.id;
+
+		// Suffix match — find a model whose ID ends with the stripped ID after the prefix slash
+		const match = data.data.find(m => {
+			const slash = m.id.indexOf("/");
+			return slash >= 0 && m.id.slice(slash + 1) === strippedId;
+		});
+		return match?.id ?? strippedId;
+	} catch {
+		return strippedId; // Fall back to the stripped ID on network errors
+	}
+}
+
+/**
  * Generate title via the AI Gateway using OpenAI-compatible chat completions.
  */
 async function generateViaGateway(aigwUrl: string, modelId: string, preview: string): Promise<string | null> {
 	const baseUrl = aigwUrl.replace(/\/+$/, "");
+	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId);
 	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
 	const body = {
-		model: modelId,
+		model: resolvedModel,
 		max_tokens: 20,
 		messages: [
 			{
@@ -122,7 +152,7 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 		],
 	};
 
-	console.log(`[title-gen] Requesting title via gateway model "${modelId}"…`);
+	console.log(`[title-gen] Requesting title via gateway model "${resolvedModel}"${resolvedModel !== modelId ? ` (resolved from "${modelId}")` : ""}…`);
 
 	try {
 		const response = await fetch(url, {
