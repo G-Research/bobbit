@@ -306,13 +306,19 @@ interface ColorPalette {
 }
 
 const PALETTES: ColorPalette[] = [
-	{ id: "forest", name: "Forest", swatches: ["#508C50", "#6478A0", "#B99130", "#9169C3", "#C34B4B"] },
-	{ id: "ocean",  name: "Ocean",  swatches: ["#32968C", "#3C78BE", "#E07850", "#8C8C9A", "#C34B4B"] },
-	{ id: "dusk",   name: "Dusk",   swatches: ["#D2788C", "#5A5AAF", "#D4A017", "#8B5FCF", "#C85050"] },
-	{ id: "mono",   name: "Mono",   swatches: ["#9CA3AF", "#6B7280", "#D1D5DB", "#A1A1AA", "#EF4444"] },
+	{ id: "forest", name: "Forest", swatches: ["#2E6E2E", "#E8E4DC", "#4D7A3A", "#508C50", "#6478A0"] },
+	{ id: "ocean",  name: "Ocean",  swatches: ["#2B4F8C", "#E0E4EC", "#3A5E8C", "#3278BE", "#3C78BE"] },
+	{ id: "dusk",   name: "Dusk",   swatches: ["#6E2E7A", "#ECE0EC", "#7A3A7A", "#A05AB4", "#5A5AAF"] },
+	{ id: "ember",  name: "Ember",  swatches: ["#8C6E2B", "#ECE8E0", "#8C7A3A", "#BE8C28", "#6478A0"] },
+	{ id: "rose",   name: "Rose",   swatches: ["#8C2E36", "#ECE0E0", "#8C3A40", "#BE505A", "#6478A0"] },
+	{ id: "slate",  name: "Slate",  swatches: ["#50506E", "#E4E4EC", "#5A5A72", "#6E6EA0", "#6470A0"] },
+	{ id: "sand",   name: "Sand",   swatches: ["#6E6E2B", "#E8E8E0", "#7A7A3A", "#8C8C32", "#6478A0"] },
+	{ id: "teal",   name: "Teal",   swatches: ["#2B6E72", "#E0E8EC", "#3A7A7E", "#2891A0", "#3C8CA0"] },
+	{ id: "copper", name: "Copper", swatches: ["#8C5A2B", "#ECE4E0", "#8C6E3A", "#B47832", "#6478A0"] },
+	{ id: "mono",   name: "Mono",   swatches: ["#525252", "#E8E8E8", "#5E5E5E", "#9CA3AF", "#6B7280"] },
 ];
 
-const SWATCH_LABELS = ["User", "System", "Task", "Team", "Error"];
+const SWATCH_LABELS = ["Primary", "Background", "Accent", "User", "Notif"];
 
 let activePaletteId = "forest";
 let paletteLoaded = false;
@@ -347,7 +353,7 @@ function renderPaletteTab() {
 	return html`
 		<div class="flex flex-col gap-3">
 			<p class="text-sm text-muted-foreground">
-				Choose a color palette for notifications and user messages.
+				Choose a color palette for the app theme.
 			</p>
 			<div class="flex flex-col gap-2">
 				${PALETTES.map((palette) => {
