@@ -563,17 +563,46 @@ export function renderGoalGroup(goal: Goal) {
 						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
-						// Archived members collapse with the team lead (live or archived)
-						const tlForCollapse = teamLead || archivedLeads[0];
-						const membersVisible = tlForCollapse
-							? (teamLead ? isTeamLeadExpanded(teamLead.id) : isArchivedParentExpanded(tlForCollapse.id))
-							: true;
+						// If there's a live team lead, archived members collapse with it.
+						// Otherwise, members nest under the last archived lead.
+						if (teamLead) {
+							// Live lead present — archived members show/hide with live lead's toggle
+							const tlExpanded = isTeamLeadExpanded(teamLead.id);
+							return html`
+								${archivedLeads.map(s => html`
+									${renderArchivedSessionRow(s)}
+									${renderArchivedDelegates(s.id)}
+								`)}
+								${tlExpanded && archivedMembers.length > 0 ? html`
+									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+										${archivedMembers.map(s => html`
+											${renderArchivedSessionRow(s)}
+											${renderArchivedDelegates(s.id)}
+										`)}
+									</div>
+								` : ""}
+							`;
+						}
+						// No live lead — group members under each archived lead
+						// (members placed under the last lead since we can't map them to specific leads)
 						return html`
-							${archivedLeads.map(s => html`
-								${renderArchivedSessionRow(s, archivedMembers.length > 0)}
-								${renderArchivedDelegates(s.id)}
-							`)}
-							${membersVisible && archivedMembers.length > 0 ? html`
+							${archivedLeads.map((s, i) => {
+								const isLast = i === archivedLeads.length - 1;
+								const expanded = isArchivedParentExpanded(s.id);
+								return html`
+									${renderArchivedSessionRow(s, isLast && archivedMembers.length > 0)}
+									${renderArchivedDelegates(s.id)}
+									${isLast && expanded && archivedMembers.length > 0 ? html`
+										<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+											${archivedMembers.map(m => html`
+												${renderArchivedSessionRow(m)}
+												${renderArchivedDelegates(m.id)}
+											`)}
+										</div>
+									` : ""}
+								`;
+							})}
+							${archivedLeads.length === 0 && archivedMembers.length > 0 ? html`
 								<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 									${archivedMembers.map(s => html`
 										${renderArchivedSessionRow(s)}
