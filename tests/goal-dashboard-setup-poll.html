@@ -153,9 +153,10 @@ document.getElementById("btn-manual-refresh").addEventListener("click", () => {
 // Simulated loadDashboardData() — loads goal, starts polling
 // if setupStatus === "preparing" AND the fix is enabled.
 // ============================================================
-let fixEnabled = false;
+let fixEnabled = true;
 
 function loadDashboardData() {
+  stopSetupStatusPoll(); // clear any existing poll (mirrors clearDashboardState)
   currentGoal = { ...serverGoal };
   refreshCount = 0;
   renderDashboard();
