@@ -1,25 +1,10 @@
 # Bobbit
 
-A remote gateway for AI coding agents. Run a coding agent on a powerful machine, control it from any browser — desktop, phone, or tablet.
+**Run an AI coding agent on your machine. Control it from any browser.**
 
-Bobbit wraps [pi-coding-agent](https://github.com/anthropics/anthropic-quickstarts/tree/main/pi-coding-agent) in a WebSocket gateway with a browser UI built on Lit. You start the server, open the URL (or scan a QR code on your phone), and interact with a coding agent that has full shell access to the host machine.
+Bobbit gives you a full-featured browser UI for a coding agent with shell access to your dev machine. Start it in your project directory, open the URL, and tell it what to build. It reads your code, edits files, runs commands, and ships features — while you watch every step in real time.
 
-## How it works
-
-```
-┌─────────────┐         ┌──────────────────────────┐
-│  Browser UI  │◄──WS──►│     Bobbit Gateway        │
-│  (any device)│         │                           │
-└─────────────┘         │  ┌──────────────────────┐ │
-                        │  │ pi-coding-agent (RPC) │ │
-                        │  │  stdin/stdout JSONL    │ │
-                        │  └──────────────────────┘ │
-                        └──────────────────────────┘
-```
-
-1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
-2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing.
-3. **UI components** (`src/ui/`) — Lit-based component library (forked from pi-web-ui). Message rendering, specialised tool call renderers, model selection, settings, and more.
+<!-- TODO: Add a demo GIF showing a full session — prompt → agent reading files → editing → running tests → done -->
 
 ## Quick start
 
@@ -27,7 +12,7 @@ Bobbit wraps [pi-coding-agent](https://github.com/anthropics/anthropic-quickstar
 npx bobbit
 ```
 
-That's it. Bobbit installs, builds, scaffolds a `.bobbit/` directory in your project, and starts the gateway on `http://localhost:3001`. Open the printed URL in your browser.
+That's it. Bobbit scaffolds a `.bobbit/` config directory, starts a gateway on `http://localhost:3001`, and opens your browser. Send your first prompt and watch it work.
 
 **Global install** (if you prefer):
 
@@ -36,26 +21,7 @@ npm install -g bobbit
 bobbit
 ```
 
-For a step-by-step walkthrough of your first session, see the **[Getting Started guide](docs/getting-started.md)**.
-
-### How it binds
-
-- **Default** (most users): Bobbit binds to `localhost:3001` with TLS disabled — plain HTTP, zero friction.
-- **`--nord` flag**: Binds to the NordVPN mesh IP with HTTPS (self-signed cert). Enables remote access from any device on the meshnet.
-- **Explicit host**: Pass `--host <addr>` to bind to a specific address. Non-loopback addresses default to HTTPS.
-
-### From source
-
-```bash
-git clone <repo> && cd bobbit
-npm install
-npm run build     # compile server + bundle UI
-npm start         # start gateway on :3001, serves UI
-```
-
-### Development
-
-See [docs/dev-workflow.md](docs/dev-workflow.md) for the full development workflow, including the restart harness and hot-reload setup.
+For a detailed walkthrough of your first session, see the **[Getting Started guide](docs/getting-started.md)**.
 
 ### CLI flags
 
@@ -64,73 +30,74 @@ bobbit [options]
 
 --host <addr>       Bind address (default: localhost)
 --port <n>          Port (default: 3001)
---nord              Bind to NordLynx mesh IP (enables remote access via NordVPN meshnet)
---tls / --no-tls    Override TLS auto-detection (default: TLS on for non-loopback, off for localhost)
+--nord              Bind to NordLynx mesh IP (remote access via NordVPN meshnet)
+--tls / --no-tls    Override TLS auto-detection
 --cwd <dir>         Working directory for agent sessions (default: .)
---agent-cli <path>  Path to pi-coding-agent cli.js (auto-resolved from node_modules)
+--agent-cli <path>  Path to pi-coding-agent cli.js
 --static <dir>      Serve a custom UI build directory
---no-ui             Don't serve any UI (gateway-only mode)
+--no-ui             Gateway-only mode (no UI)
 --new-token         Force-generate a new auth token
 --show-token        Print the current token and exit
 ```
 
+### From source
+
+```bash
+git clone <repo> && cd bobbit
+npm install
+npm run build     # compile server + bundle UI
+npm start         # start gateway on :3001
+```
+
+## Why Bobbit?
+
+Most AI coding tools are either locked inside an IDE or limited to a terminal. Bobbit is different:
+
+- **Use any device** — Work from your laptop, phone, or tablet. Start a task on your desktop, check progress from your phone. Multiple devices can connect to the same session simultaneously.
+- **Full agent power** — The agent has real shell access. It reads your codebase, edits files, runs builds and tests, searches the web, and automates browsers. No copy-pasting code snippets.
+- **Watch everything happen** — Every file read, shell command, and edit streams to your browser in real time with rich tool-call renderers. You see exactly what the agent is doing and can steer it at any point.
+- **Sessions survive everything** — Sessions persist to disk. Restart the server, close your browser, lose your connection — pick up right where you left off.
+- **Zero config** — `npx bobbit` and you're running. No API keys to configure (uses your existing `~/.pi/` credentials), no Docker, no cloud setup.
+
 ## Features
 
-- **Sessions** — Each session is a running agent with its own conversation, persistence, and multi-device support.
-- **Goals & Tasks** — Track larger work items with state, specs, and task boards.
-- **Teams** — Coordinate multiple agents working together on a goal with roles (coder, reviewer, tester).
-- **Workflows & Gates** — Define quality stages (design → implement → test → review) with enforced ordering.
-- **Roles & Personalities** — Customise agent behaviour, tool access, and communication style.
-- **Skills** — Reusable templates for isolated sub-agents (code review, test reports).
-- **Cost Tracking** — Per-session token usage and cost, aggregated to goal and task level.
+### Sessions
+Each session is a running agent with its own conversation and persistence. Run multiple sessions in parallel, each working on different parts of your project. Connect from multiple devices at once.
 
-See [docs/features.md](docs/features.md) for detailed feature documentation.
+### Goals & Tasks
+Track larger work items with structured goals. Each goal has a title, spec, state, and optional task board. Goals can create dedicated git worktrees for isolated work.
 
-**Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md) · [Goals & Workflows](docs/goals-workflows-tasks.md)
+### Teams
+Coordinate multiple agents working together. A team lead spawns role agents (coder, reviewer, tester) that work on tasks in parallel, each in their own git worktree.
 
-## Dependencies
+### Workflows & Gates
+Define quality stages — design, implement, test, review — as a DAG of gates. Each gate has criteria and enforced ordering. No cutting corners: the agent can't skip ahead.
 
-### Runtime
+### Roles & Personalities
+Control what agents can do (tool access, system prompts) and how they communicate (tone, thoroughness, style). Use built-in roles or create your own.
 
-| Package | Purpose |
+### Skills
+Reusable templates for isolated sub-agents: code review, security review, test reports. Invoke them from any session for structured, repeatable outputs.
+
+### Cost Tracking
+Per-session token usage and cost, aggregated to goal and task level. Always know what you're spending.
+
+### The Bobbit Mascot
+A squishy pixel-art blob that lives in the UI — animated, expressive, and drawn entirely with CSS box-shadows. Each session gets its own colour identity. Role accessories (crown, magnifying glass, bandana) show what the agent is doing at a glance. See the [sprite system docs](docs/bobbit-sprites.md).
+
+## Documentation
+
+| Guide | Description |
 |---|---|
-| `@lmstudio/sdk` | LM Studio local model integration |
-| `@mariozechner/mini-lit` | Minimal Lit component library (buttons, dialogs, alerts, inputs) |
-| `@mariozechner/pi-agent-core` | Agent interface types and event model |
-| `@mariozechner/pi-ai` | AI model abstraction (providers, streaming, tool calling) |
-| `@mariozechner/pi-coding-agent` | The coding agent (spawned as subprocess) |
-| `@mariozechner/pi-tui` | Terminal UI utilities |
-| `acme-client` | ACME/Let's Encrypt client for TLS certificates |
-| `docx-preview` | DOCX document rendering in browser |
-| `jszip` | ZIP file handling (used by document renderers) |
-| `lit` | Web component framework |
-| `lucide` | Icon library |
-| `mkcert` | Local CA certificate generation |
-| `ollama` | Ollama local model integration |
-| `pdfjs-dist` | PDF rendering in browser |
-| `qrcode` | QR code generation for mobile access |
-| `ws` | WebSocket server |
-| `xlsx` | Excel spreadsheet parsing |
-| `yaml` | YAML parsing/serialisation (roles, personalities, workflows) |
+| [Getting Started](docs/getting-started.md) | First session walkthrough and key concepts |
+| [Features](docs/features.md) | Detailed feature reference |
+| [Architecture](docs/architecture.md) | System design, layers, and dependencies |
+| [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
+| [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
+| [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |
 
-### Development
-
-| Package | Purpose |
-|---|---|
-| `@playwright/test` | Browser testing framework |
-| `@tailwindcss/vite` | Tailwind CSS Vite plugin |
-| `@types/node` | Node.js type definitions |
-| `@types/ws` | WebSocket type definitions |
-| `concurrently` | Run multiple processes (gateway + vite) |
-| `shx` | Cross-platform shell commands |
-| `typescript` | TypeScript compiler |
-| `vite` | Frontend build tool and dev server |
-
-
-## Testing
-
-Run `npm run check` (type-check), `npm test` (unit tests), and `npm run test:e2e` (E2E tests). See [AGENTS.md](AGENTS.md) for details.
+**Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md)
 
 ## Contributing
 
-See [docs/dev-workflow.md](docs/dev-workflow.md) for the development workflow. For repo layout and common tasks, see [AGENTS.md](AGENTS.md). Build structure is documented in [docs/build-structure.md](docs/build-structure.md). The [bobbit mascot](docs/bobbit-sprites.md) is a pixel-art blob with animations, colour identities, and role-based accessories.
+See the [development workflow guide](docs/dev-workflow.md) for dev setup, and [AGENTS.md](AGENTS.md) for repo layout and common tasks.
