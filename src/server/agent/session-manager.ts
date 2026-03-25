@@ -637,7 +637,7 @@ export class SessionManager {
 
 		// Auto-load goal tools extension for any goal-associated session
 		// (unless it's a goal/role assistant, or already has an extension —
-		// team/extension.ts imports tasks/extension internally, so no double-load)
+		// tool-activation handles loading both tasks + team extensions via YAML providers)
 		if (goalId && !assistantType) {
 			const alreadyHasExtension = bridgeOptions.args?.includes("--extension");
 			if (!alreadyHasExtension) {
