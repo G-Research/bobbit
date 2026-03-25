@@ -319,13 +319,20 @@ export class VerificationHarness {
 
 			// Override model if default.reviewModel preference is set
 			if (this.preferencesStore) {
-				const reviewModelPref = this.preferencesStore.get("default.reviewModel");
-				if (reviewModelPref && typeof reviewModelPref === "string") {
+				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
+				if (reviewModelPref) {
 					const slash = reviewModelPref.indexOf("/");
-					if (slash > 0) {
+					if (slash > 0 && slash < reviewModelPref.length - 1) {
 						const provider = reviewModelPref.slice(0, slash);
 						const modelId = reviewModelPref.slice(slash + 1);
-						await rpc.setModel(provider, modelId);
+						try {
+							await rpc.setModel(provider, modelId);
+							console.log(`[verification] Set review model "${reviewModelPref}" for ${subSessionId}`);
+						} catch (err) {
+							console.warn(`[verification] Failed to set review model "${reviewModelPref}", using default:`, err);
+						}
+					} else {
+						console.warn(`[verification] Malformed default.reviewModel preference: "${reviewModelPref}", ignoring`);
 					}
 				}
 			}

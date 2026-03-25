@@ -994,7 +994,7 @@ export class SessionManager {
 		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
 		if (sessionModelPref) {
 			const slash = sessionModelPref.indexOf("/");
-			if (slash > 0) {
+			if (slash > 0 && slash < sessionModelPref.length - 1) {
 				const provider = sessionModelPref.slice(0, slash);
 				const modelId = sessionModelPref.slice(slash + 1);
 				try {
@@ -1008,6 +1008,8 @@ export class SessionManager {
 				} catch (err) {
 					console.warn(`[session-manager] Preferred model "${sessionModelPref}" failed, falling back:`, err);
 				}
+			} else {
+				console.warn(`[session-manager] Malformed default.sessionModel preference: "${sessionModelPref}", ignoring`);
 			}
 		}
 

@@ -248,15 +248,15 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	// If a naming model is configured and we have a gateway, use it
 	if (options?.namingModel && options.aigwUrl) {
 		const slash = options.namingModel.indexOf("/");
-		const modelId = slash > 0 ? options.namingModel.slice(slash + 1) : options.namingModel;
-		return generateViaGateway(options.aigwUrl, modelId, preview);
+		if (slash > 0 && slash < options.namingModel.length - 1) {
+			const modelId = options.namingModel.slice(slash + 1);
+			return generateViaGateway(options.aigwUrl, modelId, preview);
+		}
+		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
 	}
 
-	// If aigw is configured but no specific naming model, use gateway with a haiku-like model
-	if (options?.aigwUrl) {
-		return generateViaGateway(options.aigwUrl, DEFAULT_TITLE_MODEL, preview);
-	}
-
-	// Default: direct Anthropic API
+	// Default: direct Anthropic API (works for both public and gateway-less setups).
+	// We don't fall back to the gateway without an explicit naming model because
+	// the gateway may not host the default Haiku model ID.
 	return generateViaAnthropic(preview);
 }
