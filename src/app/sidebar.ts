@@ -237,7 +237,7 @@ export function renderStaffSidebarSection() {
 			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
 				style="${mobile ? "" : `padding-left:${HEADER_CHEVRON_W}px;`}"
 				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); renderApp(); }}>
-				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-xs"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}">${staffSectionExpanded ? "▾" : "▸"}</span>
+				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-sm"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}">${staffSectionExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
@@ -389,7 +389,7 @@ export function renderSidebar() {
 									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 										style="padding-left:${HEADER_CHEVRON_W}px;"
 										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
-										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-xs text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
+										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
 										<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 										<div class="flex items-center relative">
@@ -461,7 +461,7 @@ export function renderSidebar() {
 											style="padding-left:${HEADER_CHEVRON_W}px;"
 											@click=${() => { state.archivedSectionExpanded = !state.archivedSectionExpanded; renderApp(); }}
 										>
-											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-xs text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.archivedSectionExpanded ? "▾" : "▸"}</span>
+											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.archivedSectionExpanded ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
 											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
