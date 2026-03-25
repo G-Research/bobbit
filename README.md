@@ -508,6 +508,7 @@ When the agent finishes a turn, the browser client notifies the user via:
 | `session-colors.ts` | Session color picker UI component. |
 | `storage.ts` | IndexedDB store initialisation (settings, provider keys, sessions, goals, roles, specs). |
 | `dialogs.ts` | Confirmation and prompt dialog helpers. |
+| `favicon-badge.ts` | Favicon notification badge on task completion. |
 | `goal-dashboard.ts` | Goal detail page with tabs: overview, tasks, gates, team, commits, cost. |
 | `role-manager-page.ts` | Role list page and detail/edit view. |
 | `role-manager-dialog.ts` | Role creation and editing dialog. |
@@ -519,6 +520,8 @@ When the agent finishes a turn, the browser client notifies the user via:
 | `cwd-combobox.ts` | Working directory selector with git branch display. |
 | `custom-messages.ts` | Custom message type registration (system notifications). |
 | `oauth.ts` | Browser-side OAuth flow (proxied token exchange). |
+| `settings-page.ts` | Settings page (keyboard shortcuts, preferences). |
+| `shortcut-registry.ts` | Central keyboard shortcut registry with rebinding and persistence. |
 
 ## UI components (`src/ui/`)
 
@@ -528,7 +531,7 @@ Forked from `@mariozechner/pi-web-ui`. Lit-based web components.
 - **`components/`** — Core components: `AgentInterface` (event→state bridge), `MessageList`, `StreamingMessageContainer`, `Messages` (per-role renderers), `Input` (chat input with attachments), `MessageEditor`, `GitStatusWidget`, `ThinkingBlock`, `ToolGroup`, sandboxed iframe providers
 - **`dialogs/`** — `ModelSelector`, `SettingsDialog`, `SessionListDialog`, `AttachmentOverlay`, `ApiKeyPromptDialog`, `CustomProviderDialog`, `PersistentStorageDialog`, `ProvidersModelsTab`
 - **`tools/`** — Specialised renderers for 20+ tool types (Bash, Read, Write, Edit, Grep, Find, Ls, Delegate, Browser*, WebSearch, WebFetch, Screenshot, SVG, HTML, Task, Team, Calculate, GetCurrentTime) + inline content display (HTML, SVG, PDF, Markdown, Docx, Excel, images)
-- **`storage/`** — IndexedDB-backed persistence with typed stores for settings, sessions, provider keys, command history, goal/role/spec drafts
+- **`storage/`** — IndexedDB-backed persistence with typed stores for settings, sessions, provider keys, command history, shortcut bindings
 - **`utils/`** — ANSI handling, text formatting, auth token, model discovery, i18n, proxy utilities
 
 ## Dependencies

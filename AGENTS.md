@@ -184,7 +184,8 @@ src/
 │   │       ├── custom-providers-store.ts         # Custom AI provider persistence
 │   │       ├── provider-keys-store.ts           # API key persistence
 │   │       ├── sessions-store.ts                # Session metadata persistence
-│   │       └── settings-store.ts                # App settings persistence
+│   │       ├── settings-store.ts                # App settings persistence
+│   │       └── shortcut-bindings-store.ts       # Keyboard shortcut bindings persistence
 │   └── utils/       # Formatting, auth token, model discovery, i18n
 │       ├── ansi.ts              # ANSI escape code processing
 │       ├── attachment-utils.ts  # File attachment helpers
@@ -200,6 +201,7 @@ src/
 │   ├── custom-messages.ts       # Custom message type definitions
 │   ├── cwd-combobox.ts          # Working directory combobox component
 │   ├── dialogs.ts               # App-level dialog helpers
+│   ├── favicon-badge.ts          # Favicon notification badge on task completion
 │   ├── goal-dashboard.css       # Goal dashboard styles
 │   ├── goal-dashboard.ts        # Goal dashboard page
 │   ├── main.ts                  # Bootstrap, routing, session sidebar, QR code, OAuth
@@ -217,6 +219,8 @@ src/
 │   ├── routing.ts               # Hash-based routing
 │   ├── session-colors.ts        # Session color assignment
 │   ├── session-manager.ts       # Client-side session management
+│   ├── settings-page.ts          # Settings page (keyboard shortcuts, preferences)
+│   ├── shortcut-registry.ts     # Central keyboard shortcut registry with rebinding support
 │   ├── sidebar.ts               # Desktop session sidebar
 │   ├── state.ts                 # App-level state management
 │   ├── storage.ts               # Client-side storage helpers
