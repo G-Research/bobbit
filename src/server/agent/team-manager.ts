@@ -827,6 +827,47 @@ export class TeamManager {
 	}
 
 	/**
+	 * Register a verification reviewer session as a team agent without creating a worktree.
+	 * The verification harness manages the session lifecycle — no agent_end subscription is needed.
+	 * Silently returns if no team exists for the goal (handles manual gate signals).
+	 */
+	registerReviewerSession(goalId: string, sessionId: string, stepName: string): void {
+		const entry = this.teams.get(goalId);
+		if (!entry) return; // No active team — skip registration silently
+
+		const agent: TeamAgent = {
+			sessionId,
+			role: 'reviewer',
+			worktreePath: undefined,
+			branch: undefined,
+			task: `Verification review: ${stepName}`,
+			createdAt: Date.now(),
+		};
+		entry.agents.push(agent);
+		this.sessionToGoal.set(sessionId, goalId);
+		this.assignUniqueColor(sessionId);
+		this.persistEntry(goalId);
+	}
+
+	/**
+	 * Unregister a verification reviewer session from the team.
+	 * Called after the session is terminated so archiving happens first.
+	 */
+	unregisterReviewerSession(goalId: string, sessionId: string): void {
+		const entry = this.teams.get(goalId);
+		if (!entry) return;
+
+		const idx = entry.agents.findIndex(a => a.sessionId === sessionId);
+		if (idx !== -1) {
+			const agent = entry.agents[idx];
+			if (agent.unsubscribeEvent) agent.unsubscribeEvent();
+			entry.agents.splice(idx, 1);
+		}
+		this.sessionToGoal.delete(sessionId);
+		this.persistEntry(goalId);
+	}
+
+	/**
 	 * List all active agents for a goal.
 	 */
 	listAgents(goalId: string): TeamAgentInfo[] {
