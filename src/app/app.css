@@ -68,7 +68,7 @@ theme-toggle button {
 	background: color-mix(in oklch, var(--secondary) 82%, var(--foreground)) !important;
 }
 .dark .sidebar-session-active {
-	background: var(--color-secondary, var(--secondary)) !important;
+	background: color-mix(in oklch, var(--secondary) 94%, var(--foreground)) !important;
 }
 
 /* Action buttons overlay: match the active row background */
@@ -76,7 +76,7 @@ theme-toggle button {
 	background: linear-gradient(to right, transparent 0%, color-mix(in oklch, var(--secondary) 82%, var(--foreground)) 50%) !important;
 }
 .dark .sidebar-session-active .sidebar-actions {
-	background: linear-gradient(to right, transparent 0%, var(--color-secondary, var(--secondary)) 50%) !important;
+	background: linear-gradient(to right, transparent 0%, color-mix(in oklch, var(--secondary) 94%, var(--foreground)) 50%) !important;
 }
 
 /* ============================================================================
