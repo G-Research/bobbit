@@ -44,8 +44,25 @@ export function parseVerdict(output: string): boolean | null {
 	return match[1].toLowerCase() === "pass";
 }
 
+/** In-flight verification state for REST bootstrapping */
+export interface ActiveVerification {
+	goalId: string;
+	gateId: string;
+	signalId: string;
+	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed"; durationMs?: number; output?: string; startedAt: number }>;
+	overallStatus: "running" | "passed" | "failed";
+	startedAt: number;
+}
+
 export class VerificationHarness {
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
+	private activeVerifications = new Map<string, ActiveVerification>();
+
+	/** Get all active (in-flight) verifications, optionally filtered by goalId */
+	getActiveVerifications(goalId?: string): ActiveVerification[] {
+		const all = [...this.activeVerifications.values()];
+		return goalId ? all.filter(v => v.goalId === goalId) : all;
+	}
 
 	constructor(
 		private gateStore: GateStore,
@@ -109,6 +126,17 @@ export class VerificationHarness {
 			steps: steps.map(s => ({ name: s.name, type: s.type })),
 		});
 
+		// Track active verification for REST bootstrapping
+		const active: ActiveVerification = {
+			goalId: signal.goalId,
+			gateId: signal.gateId,
+			signalId: signal.id,
+			steps: steps.map(s => ({ name: s.name, type: s.type, status: "running" as const, startedAt: Date.now() })),
+			overallStatus: "running",
+			startedAt: Date.now(),
+		};
+		this.activeVerifications.set(signal.id, active);
+
 		try {
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
@@ -163,6 +191,10 @@ export class VerificationHarness {
 							durationMs: cachedResult.duration_ms || 0,
 							output: cachedResult.output,
 						});
+						const av = this.activeVerifications.get(signal.id);
+						if (av && av.steps[index]) {
+							av.steps[index] = { ...av.steps[index], status: cachedResult.passed ? "passed" : "failed", durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
+						}
 						return { index, stepResult: cachedResult };
 					}
 
@@ -210,6 +242,10 @@ export class VerificationHarness {
 						durationMs: duration_ms,
 						output: result.output || "",
 					});
+					const av = this.activeVerifications.get(signal.id);
+					if (av && av.steps[index]) {
+						av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "" };
+					}
 					return {
 						index,
 						stepResult: {
@@ -234,6 +270,7 @@ export class VerificationHarness {
 
 			this.gateStore.updateSignalVerification(signal.id, { status, steps: results });
 			this.gateStore.updateGateStatus(signal.goalId, signal.gateId, status);
+			this.activeVerifications.delete(signal.id);
 
 			this.broadcastFn(signal.goalId, {
 				type: "gate_verification_complete",
@@ -255,6 +292,7 @@ export class VerificationHarness {
 				steps: [{ name: "Error", type: "command", passed: false, output: err.message, duration_ms: 0 }],
 			});
 			this.gateStore.updateGateStatus(signal.goalId, signal.gateId, "failed");
+			this.activeVerifications.delete(signal.id);
 
 			this.broadcastFn(signal.goalId, {
 				type: "gate_verification_complete",

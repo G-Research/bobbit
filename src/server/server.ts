@@ -1120,6 +1120,15 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/goals/:goalId/verifications/active — get in-flight verification state
+	const activeVerifMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/verifications\/active$/);
+	if (activeVerifMatch && req.method === "GET") {
+		const [, goalId] = activeVerifMatch;
+		const active = verificationHarness.getActiveVerifications(goalId);
+		json({ verifications: active });
+		return;
+	}
+
 	// GET /api/goals/:goalId/gates/:gateId/content — gate content
 	const gateContentMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/content$/);
 	if (gateContentMatch && req.method === "GET") {
