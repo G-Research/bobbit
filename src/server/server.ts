@@ -1412,7 +1412,7 @@ async function handleApiRoute(
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const body = await readBody(req);
-		const method = body?.method ?? "merge";
+		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
@@ -1995,7 +1995,7 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const body = await readBody(req);
-		const method = body?.method ?? "merge";
+		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;

@@ -28,7 +28,7 @@ export class GitStatusWidget extends LitElement {
     @state() private expanded = false;
     @state() private merging = false;
     @state() private mergeError = '';
-    @state() private mergeMethod: 'merge' | 'squash' | 'rebase' = 'merge';
+    @state() private mergeMethod: 'merge' | 'squash' | 'rebase' = 'squash';
 
     private _onDocumentClick = (e: MouseEvent) => {
         if (this.expanded && !this.contains(e.target as Node)) {
