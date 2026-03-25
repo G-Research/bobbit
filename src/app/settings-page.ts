@@ -432,6 +432,7 @@ let aigwConfiguredUrl = "";
 let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }> = [];
 // Preferences
 let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
+let prefReviewModel = "";    // same format
 let prefNamingModel = "";    // same format
 let _modelsLoadPromise: Promise<void> | null = null;
 
@@ -455,6 +456,7 @@ function loadModelsState(): void {
 			if (prefsRes.ok) {
 				const prefs = await prefsRes.json();
 				prefSessionModel = prefs["default.sessionModel"] || "";
+				prefReviewModel = prefs["default.reviewModel"] || "";
 				prefNamingModel = prefs["default.namingModel"] || "";
 			}
 		} catch {}
@@ -474,6 +476,12 @@ async function savePref(key: string, value: string | null): Promise<void> {
 async function setSessionModel(value: string): Promise<void> {
 	prefSessionModel = value;
 	await savePref("default.sessionModel", value || null);
+	renderApp();
+}
+
+async function setReviewModel(value: string): Promise<void> {
+	prefReviewModel = value;
+	await savePref("default.reviewModel", value || null);
 	renderApp();
 }
 
@@ -641,6 +649,12 @@ function renderModelsTab() {
 					"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
 					prefSessionModel,
 					setSessionModel,
+				)}
+				${renderModelPicker(
+					"Review Model",
+					"Model used for automated LLM code reviews during gate verification.",
+					prefReviewModel,
+					setReviewModel,
 				)}
 				${renderModelPicker(
 					"Naming Model",

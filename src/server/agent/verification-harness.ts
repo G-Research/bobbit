@@ -4,6 +4,7 @@ import fs, { statSync } from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { GateStore, GateSignal } from "./gate-store.js";
+import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
@@ -50,6 +51,7 @@ export class VerificationHarness {
 		private gateStore: GateStore,
 		private broadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
+		private preferencesStore?: PreferencesStore,
 	) {}
 
 	/** Register a callback to notify the team lead agent when verification completes. */
@@ -314,6 +316,19 @@ export class VerificationHarness {
 
 		try {
 			await rpc.start();
+
+			// Override model if default.reviewModel preference is set
+			if (this.preferencesStore) {
+				const reviewModelPref = this.preferencesStore.get("default.reviewModel");
+				if (reviewModelPref && typeof reviewModelPref === "string") {
+					const slash = reviewModelPref.indexOf("/");
+					if (slash > 0) {
+						const provider = reviewModelPref.slice(0, slash);
+						const modelId = reviewModelPref.slice(slash + 1);
+						await rpc.setModel(provider, modelId);
+					}
+				}
+			}
 
 			// Collect assistant text from streaming events as a fallback
 			// in case getMessages() fails after agent_end (race with process exit).
