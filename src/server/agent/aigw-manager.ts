@@ -198,23 +198,14 @@ export function removeAigwModelsJson(): void {
 	}
 }
 
-// ── Internet connectivity check ────────────────────────────────────
-
-let _internetAvailable: boolean | null = null;
-let _internetCheckTs = 0;
-const INTERNET_CHECK_TTL_MS = 60_000; // re-check at most once per minute
+// ── Startup internet check ─────────────────────────────────────────
 
 /**
- * Quick check whether outbound internet is available.
- * Tries a HEAD request to a well-known endpoint. Caches the result
- * for 60 s so repeated calls don't spam the network.
+ * One-shot internet check at gateway startup. Tries HEAD requests to
+ * well-known LLM API endpoints. Returns true if any responds.
+ * Called once — not repeated after startup.
  */
 export async function checkInternetAvailable(): Promise<boolean> {
-	const now = Date.now();
-	if (_internetAvailable !== null && now - _internetCheckTs < INTERNET_CHECK_TTL_MS) {
-		return _internetAvailable;
-	}
-
 	const targets = [
 		"https://api.anthropic.com",
 		"https://api.openai.com",
@@ -223,23 +214,61 @@ export async function checkInternetAvailable(): Promise<boolean> {
 	for (const target of targets) {
 		try {
 			await httpHead(target, 4_000);
-			_internetAvailable = true;
-			_internetCheckTs = now;
 			return true;
 		} catch {
 			// try next
 		}
 	}
-
-	_internetAvailable = false;
-	_internetCheckTs = now;
 	return false;
 }
 
-/** Reset the cached internet check (useful after config changes). */
-export function resetInternetCheck(): void {
-	_internetAvailable = null;
-	_internetCheckTs = 0;
+/**
+ * Run once at gateway startup:
+ * - If aigw is already configured, nothing to do.
+ * - If not configured but internet is unavailable, try to auto-discover
+ *   a gateway at a well-known local URL and configure it.
+ *
+ * Returns true if aigw is active after this call.
+ */
+export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean> {
+	// Already configured — nothing to do
+	if (getAigwUrl(prefs)) {
+		console.log("[aigw] AI Gateway already configured:", getAigwUrl(prefs));
+		return true;
+	}
+
+	// Check internet
+	const hasInternet = await checkInternetAvailable();
+	if (hasInternet) {
+		console.log("[aigw] Internet available — using standard providers");
+		return false;
+	}
+
+	console.log("[aigw] No internet detected — probing for local AI Gateway...");
+
+	// Try well-known local gateway URLs
+	const candidates = [
+		"http://aigw-local.c3.zone/v1",
+		"http://aigw-local.c3.zone",
+		"http://localhost:1111/v1",
+		"http://127.0.0.1:1111/v1",
+	];
+
+	for (const url of candidates) {
+		try {
+			const models = await discoverAigwModels(url);
+			if (models.length > 0) {
+				console.log(`[aigw] Found gateway at ${url} with ${models.length} models — auto-configuring`);
+				await configureAigw(url, prefs);
+				return true;
+			}
+		} catch {
+			// try next
+		}
+	}
+
+	console.log("[aigw] No gateway found at well-known URLs");
+	return false;
 }
 
 // ── HTTP helpers ───────────────────────────────────────────────────

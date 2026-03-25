@@ -19,7 +19,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
-import { getAigwUrl, getAigwModels, checkInternetAvailable } from "./aigw-manager.js";
+import { getAigwUrl, getAigwModels } from "./aigw-manager.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -976,11 +976,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * If an AI Gateway is configured and outbound internet is unavailable,
-	 * automatically switch the session to the first aigw model so the user
-	 * doesn't have to do it manually on every fresh session.
-	 *
-	 * Fire-and-forget — does not block session creation.
+	 * If an AI Gateway is configured, automatically set the session model
+	 * to the first aigw model. Called on every new session — no internet
+	 * check here; the gateway's presence was validated at startup or by
+	 * the user via Settings.
 	 */
 	private async tryAutoSelectAigwModel(session: SessionInfo): Promise<void> {
 		if (!this.preferencesStore) return;
@@ -990,14 +989,11 @@ export class SessionManager {
 		if (!aigwUrl || !aigwModels || aigwModels.length === 0) return;
 
 		try {
-			const hasInternet = await checkInternetAvailable();
-			if (!hasInternet) {
-				const first = aigwModels[0];
-				await session.rpcClient.setModel("aigw", first.id);
-				console.log(`[session-manager] Auto-selected aigw model "${first.id}" for session ${session.id} (no internet)`);
-			}
+			const first = aigwModels[0];
+			await session.rpcClient.setModel("aigw", first.id);
+			console.log(`[session-manager] Auto-selected aigw model "${first.id}" for session ${session.id}`);
 		} catch (err) {
-			console.warn(`[session-manager] aigw auto-select check failed for ${session.id}:`, err);
+			console.warn(`[session-manager] Failed to auto-select aigw model for ${session.id}:`, err);
 		}
 	}
 

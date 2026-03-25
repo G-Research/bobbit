@@ -30,7 +30,7 @@ import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { configureAigw, removeAigw, getAigwUrl, getAigwModels, discoverAigwModels, proxyRequest } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, getAigwModels, discoverAigwModels, proxyRequest, startupAigwCheck } from "./agent/aigw-manager.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -271,6 +271,11 @@ export function createGateway(config: GatewayConfig) {
 		server,
 		sessionManager,
 		async start(): Promise<number> {
+			// Check internet and auto-configure AI Gateway if offline
+			// Runs before session restore so models.json is written before
+			// any agent subprocesses start.
+			await startupAigwCheck(preferencesStore);
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 			// Now that sessions are live, re-subscribe to team events
