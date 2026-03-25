@@ -108,6 +108,7 @@ export function createGateway(config: GatewayConfig) {
 		roleManager,
 		toolManager,
 		workflowStore,
+		preferencesStore,
 	});
 	const protocol = config.tls ? "https" : "http";
 	let gatewayUrl = `${protocol}://${config.host}:${config.port}`;

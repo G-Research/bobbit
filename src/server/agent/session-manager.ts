@@ -19,6 +19,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
+import { getAigwUrl, getAigwModels, checkInternetAvailable } from "./aigw-manager.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -103,6 +104,8 @@ export interface SessionManagerOptions {
 	toolManager?: ToolManager;
 	/** Workflow store for injecting into GoalManager */
 	workflowStore?: import("./workflow-store.js").WorkflowStore;
+	/** Preferences store for aigw auto-model detection */
+	preferencesStore?: import("./preferences-store.js").PreferencesStore;
 }
 
 export class SessionManager {
@@ -115,6 +118,7 @@ export class SessionManager {
 	private personalityManager?: PersonalityManager;
 	private roleManager?: RoleManager;
 	private toolManager?: ToolManager;
+	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 
@@ -125,6 +129,7 @@ export class SessionManager {
 		this.personalityManager = options?.personalityManager;
 		this.roleManager = options?.roleManager;
 		this.toolManager = options?.toolManager;
+		this.preferencesStore = options?.preferencesStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
 	}
@@ -779,6 +784,9 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
+		// Auto-select aigw model when gateway is configured and internet is unavailable
+		this.tryAutoSelectAigwModel(session);
+
 		// Capture the agent's session file path and persist
 		this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist session ${id}:`, err);
@@ -860,6 +868,9 @@ export class SessionManager {
 		await rpcClient.start();
 		session.status = "idle";
 		this.sessions.set(id, session);
+
+		// Auto-select aigw model when gateway is configured and internet is unavailable
+		await this.tryAutoSelectAigwModel(session);
 
 		// Persist session metadata
 		this.persistSessionMetadata(session).then(() => {
@@ -961,6 +972,32 @@ export class SessionManager {
 			}
 		} catch (err) {
 			console.error(`[session-manager] Failed to refresh after compaction for ${session.id}:`, err);
+		}
+	}
+
+	/**
+	 * If an AI Gateway is configured and outbound internet is unavailable,
+	 * automatically switch the session to the first aigw model so the user
+	 * doesn't have to do it manually on every fresh session.
+	 *
+	 * Fire-and-forget — does not block session creation.
+	 */
+	private async tryAutoSelectAigwModel(session: SessionInfo): Promise<void> {
+		if (!this.preferencesStore) return;
+
+		const aigwUrl = getAigwUrl(this.preferencesStore);
+		const aigwModels = getAigwModels(this.preferencesStore);
+		if (!aigwUrl || !aigwModels || aigwModels.length === 0) return;
+
+		try {
+			const hasInternet = await checkInternetAvailable();
+			if (!hasInternet) {
+				const first = aigwModels[0];
+				await session.rpcClient.setModel("aigw", first.id);
+				console.log(`[session-manager] Auto-selected aigw model "${first.id}" for session ${session.id} (no internet)`);
+			}
+		} catch (err) {
+			console.warn(`[session-manager] aigw auto-select check failed for ${session.id}:`, err);
 		}
 	}
 

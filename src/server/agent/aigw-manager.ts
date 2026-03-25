@@ -198,7 +198,65 @@ export function removeAigwModelsJson(): void {
 	}
 }
 
+// ── Internet connectivity check ────────────────────────────────────
+
+let _internetAvailable: boolean | null = null;
+let _internetCheckTs = 0;
+const INTERNET_CHECK_TTL_MS = 60_000; // re-check at most once per minute
+
+/**
+ * Quick check whether outbound internet is available.
+ * Tries a HEAD request to a well-known endpoint. Caches the result
+ * for 60 s so repeated calls don't spam the network.
+ */
+export async function checkInternetAvailable(): Promise<boolean> {
+	const now = Date.now();
+	if (_internetAvailable !== null && now - _internetCheckTs < INTERNET_CHECK_TTL_MS) {
+		return _internetAvailable;
+	}
+
+	const targets = [
+		"https://api.anthropic.com",
+		"https://api.openai.com",
+	];
+
+	for (const target of targets) {
+		try {
+			await httpHead(target, 4_000);
+			_internetAvailable = true;
+			_internetCheckTs = now;
+			return true;
+		} catch {
+			// try next
+		}
+	}
+
+	_internetAvailable = false;
+	_internetCheckTs = now;
+	return false;
+}
+
+/** Reset the cached internet check (useful after config changes). */
+export function resetInternetCheck(): void {
+	_internetAvailable = null;
+	_internetCheckTs = 0;
+}
+
 // ── HTTP helpers ───────────────────────────────────────────────────
+
+/**
+ * Simple HTTP HEAD — resolves on any response, rejects on network error / timeout.
+ */
+function httpHead(url: string, timeoutMs = 4_000): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const parsedUrl = new URL(url);
+		const transport = parsedUrl.protocol === "https:" ? https : http;
+		const req = transport.request(parsedUrl, { method: "HEAD", timeout: timeoutMs }, () => resolve());
+		req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+		req.on("error", reject);
+		req.end();
+	});
+}
 
 /**
  * Simple HTTP GET that returns a parsed JSON body.
