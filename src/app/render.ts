@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench } from "lucide";
+import { Archive, ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench } from "lucide";
 import {
 	state,
 	renderApp,
@@ -1527,6 +1527,19 @@ function setupAssistantSwipe(): void {
 // RENDER APP
 // ============================================================================
 
+function renderArchivedBanner() {
+	const agent = state.remoteAgent;
+	if (!agent?.state?.isArchived) return "";
+	const archivedAt = agent.state.archivedAt;
+	const dateStr = archivedAt ? new Date(archivedAt).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "unknown date";
+	return html`
+		<div class="flex items-center justify-center gap-2 px-4 py-2 text-sm text-muted-foreground" style="background: var(--muted); border-bottom: 1px solid var(--border);">
+			${icon(Archive, "sm")}
+			<span>This session was archived on ${dateStr}</span>
+		</div>
+	`;
+}
+
 export function doRenderApp(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
@@ -1912,7 +1925,7 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
-		if (connected) return html`${reconnectBanner()}${state.chatPanel}`;
+		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
 
 		if (desktop) {
 			return html`

@@ -44,6 +44,7 @@ export type ServerMessage =
 	| { type: "client_left"; clientId: string }
 	| { type: "error"; message: string; code: string }
 	| { type: "session_status"; status: string; streamingStartedAt?: number }
+	| { type: "session_archived"; sessionId: string; archivedAt: number }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
 	| { type: "skill_started"; skillId: string }
