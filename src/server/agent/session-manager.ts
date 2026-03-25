@@ -785,7 +785,7 @@ export class SessionManager {
 		this.sessions.set(id, session);
 
 		// Auto-select aigw model when gateway is configured
-		await this.tryAutoSelectAigwModel(session);
+		await this.tryAutoSelectModel(session);
 
 		// Capture the agent's session file path and persist
 		this.persistSessionMetadata(session).catch((err) => {
@@ -870,7 +870,7 @@ export class SessionManager {
 		this.sessions.set(id, session);
 
 		// Auto-select aigw model when gateway is configured and internet is unavailable
-		await this.tryAutoSelectAigwModel(session);
+		await this.tryAutoSelectModel(session);
 
 		// Persist session metadata
 		this.persistSessionMetadata(session).then(() => {
@@ -981,29 +981,53 @@ export class SessionManager {
 	 * check here; the gateway's presence was validated at startup or by
 	 * the user via Settings.
 	 */
-	private async tryAutoSelectAigwModel(session: SessionInfo): Promise<void> {
+	/**
+	 * Auto-select a model for a new session. Uses `default.sessionModel`
+	 * preference (format: "provider/modelId") if set. Falls back to aigw
+	 * best-ranked model when gateway is configured, otherwise does nothing
+	 * (pi-coding-agent uses its own built-in default).
+	 */
+	private async tryAutoSelectModel(session: SessionInfo): Promise<void> {
 		if (!this.preferencesStore) return;
 
+		// Check explicit preference first (works for both aigw and public providers)
+		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
+		if (sessionModelPref) {
+			const slash = sessionModelPref.indexOf("/");
+			if (slash > 0) {
+				const provider = sessionModelPref.slice(0, slash);
+				const modelId = sessionModelPref.slice(slash + 1);
+				try {
+					await session.rpcClient.setModel(provider, modelId);
+					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}`);
+					broadcast(session.clients, {
+						type: "state",
+						data: { model: { provider, id: modelId } },
+					});
+					return;
+				} catch (err) {
+					console.warn(`[session-manager] Preferred model "${sessionModelPref}" failed, falling back:`, err);
+				}
+			}
+		}
+
+		// Fall back to aigw best-ranked model when gateway is configured
 		const aigwUrl = getAigwUrl(this.preferencesStore);
 		const aigwModels = getAigwModels(this.preferencesStore);
 		if (!aigwUrl || !aigwModels || aigwModels.length === 0) return;
 
 		try {
-			// G5: Check preferred model first, fall back to best by recency rank
-			const preferredId = this.preferencesStore.get("aigw.preferredModel") as string | undefined;
-			const preferred = preferredId ? aigwModels.find(m => m.id === preferredId) : undefined;
-			const modelToUse = preferred ?? [...aigwModels].sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id))[0];
+			const modelToUse = [...aigwModels].sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id))[0];
 
 			await session.rpcClient.setModel("aigw", modelToUse.id);
 			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
 
-			// G3: Broadcast model change to connected clients so the UI updates
 			broadcast(session.clients, {
 				type: "state",
 				data: { model: { provider: "aigw", id: modelToUse.id } },
 			});
 		} catch (err) {
-			console.warn(`[session-manager] Failed to auto-select aigw model for ${session.id}:`, err);
+			console.warn(`[session-manager] Failed to auto-select model for ${session.id}:`, err);
 		}
 	}
 
@@ -1421,9 +1445,15 @@ export class SessionManager {
 		});
 	}
 
+	private getTitleGenOptions(): import("./title-generator.js").TitleGenOptions {
+		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
+		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
+		return { namingModel: namingModel || undefined, aigwUrl };
+	}
+
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {
 		const messages = [{ role: "user", content: userText }];
-		const title = await generateSessionTitle(messages);
+		const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 		if (title) {
 			session.title = title;
 			this.store.update(session.id, { title });
@@ -1439,7 +1469,7 @@ export class SessionManager {
 			const messages = msgsResp.data?.messages || msgsResp.data;
 			if (!Array.isArray(messages) || messages.length === 0) return;
 
-			const title = await generateSessionTitle(messages);
+			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (title) {
 				session.title = title;
 				this.store.update(session.id, { title });

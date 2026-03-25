@@ -21,8 +21,8 @@ import { renderApp } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 
-type SettingsTab = "shortcuts" | "palette" | "aigw";
-let activeTab: SettingsTab = "shortcuts";
+type SettingsTab = "shortcuts" | "palette" | "models";
+let activeTab: SettingsTab = "models";
 
 // Rebind state (same as shortcuts-dialog)
 let rebindingId: string | null = null;
@@ -441,7 +441,7 @@ function renderPaletteTab() {
 	`;
 }
 
-// ── AI Gateway tab ──
+// ── Models tab ──
 
 let aigwUrl = "";
 let aigwStatus: "idle" | "testing" | "saving" | "removing" = "idle";
@@ -449,15 +449,21 @@ let aigwError = "";
 let aigwConfigured = false;
 let aigwConfiguredUrl = "";
 let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }> = [];
-let _aigwLoadPromise: Promise<void> | null = null;
+// Preferences
+let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
+let prefNamingModel = "";    // same format
+let _modelsLoadPromise: Promise<void> | null = null;
 
-function loadAigwStatus(): void {
-	if (_aigwLoadPromise) return;
-	_aigwLoadPromise = (async () => {
+function loadModelsState(): void {
+	if (_modelsLoadPromise) return;
+	_modelsLoadPromise = (async () => {
 		try {
-			const res = await gatewayFetch("/api/aigw/status");
-			if (res.ok) {
-				const data = await res.json();
+			const [statusRes, prefsRes] = await Promise.all([
+				gatewayFetch("/api/aigw/status"),
+				gatewayFetch("/api/preferences"),
+			]);
+			if (statusRes.ok) {
+				const data = await statusRes.json();
 				aigwConfigured = data.configured;
 				if (data.configured) {
 					aigwConfiguredUrl = data.url;
@@ -465,9 +471,35 @@ function loadAigwStatus(): void {
 					aigwModels = data.models || [];
 				}
 			}
+			if (prefsRes.ok) {
+				const prefs = await prefsRes.json();
+				prefSessionModel = prefs["default.sessionModel"] || "";
+				prefNamingModel = prefs["default.namingModel"] || "";
+			}
 		} catch {}
-		_aigwLoadPromise = null;
+		_modelsLoadPromise = null;
 	})();
+}
+
+async function savePref(key: string, value: string | null): Promise<void> {
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ [key]: value }),
+		});
+	} catch {}
+}
+
+async function setSessionModel(value: string): Promise<void> {
+	prefSessionModel = value;
+	await savePref("default.sessionModel", value || null);
+	renderApp();
+}
+
+async function setNamingModel(value: string): Promise<void> {
+	prefNamingModel = value;
+	await savePref("default.namingModel", value || null);
+	renderApp();
 }
 
 async function testAigwConnection(): Promise<void> {
@@ -564,106 +596,155 @@ function formatTokens(tokens: number): string {
 	return String(tokens);
 }
 
-function renderAigwTab() {
-	loadAigwStatus();
+/** Build a model option list for dropdowns. aigw models use "aigw/" prefix. */
+function getModelOptions(): Array<{ value: string; label: string }> {
+	return aigwModels.map(m => ({
+		value: `aigw/${m.id}`,
+		label: `${m.name}`,
+	}));
+}
+
+function renderModelSelect(label: string, hint: string, value: string, onChange: (v: string) => void) {
+	const options = getModelOptions();
+	return html`
+		<div class="flex flex-col gap-1.5">
+			<label class="text-sm font-medium text-foreground">${label}</label>
+			<select
+				class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+					focus:outline-none focus:ring-2 focus:ring-ring"
+				.value=${value}
+				@change=${(e: Event) => onChange((e.target as HTMLSelectElement).value)}
+			>
+				<option value="">Auto (best available)</option>
+				${options.map(o => html`
+					<option value=${o.value} ?selected=${value === o.value}>${o.label}</option>
+				`)}
+			</select>
+			<p class="text-xs text-muted-foreground">${hint}</p>
+		</div>
+	`;
+}
+
+function renderModelsTab() {
+	loadModelsState();
 
 	const busy = aigwStatus !== "idle";
+	const hasModels = aigwModels.length > 0;
 
 	return html`
-		<div class="flex flex-col gap-4">
-			<p class="text-sm text-muted-foreground">
-				Connect to an AI Gateway that proxies access to on-prem and off-prem LLM providers
-				through a single OpenAI-compatible endpoint. When configured, only gateway models
-				are available — cloud provider keys are not needed.
-			</p>
+		<div class="flex flex-col gap-6">
 
-			<!-- URL input -->
-			<div class="flex flex-col gap-2">
-				<label class="text-sm font-medium text-foreground">Gateway URL</label>
-				<div class="flex gap-2">
-					<input
-						type="text"
-						class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-							focus:outline-none focus:ring-2 focus:ring-ring"
-						placeholder="http://aigw-local.c3.zone/v1"
-						.value=${aigwUrl}
-						?disabled=${busy}
-						@input=${(e: Event) => { aigwUrl = (e.target as HTMLInputElement).value; }}
-					/>
-					<button
-						class="px-3 py-2 text-sm rounded-md border border-input bg-background text-foreground
-							hover:bg-secondary transition-colors disabled:opacity-50"
-						?disabled=${busy || !aigwUrl.trim()}
-						@click=${testAigwConnection}
-					>${aigwStatus === "testing" ? "Testing..." : "Test"}</button>
+			<!-- Default model preferences (shown when models are available) -->
+			${hasModels ? html`
+				<div class="flex flex-col gap-4">
+					<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
+					${renderModelSelect(
+						"Session Model",
+						"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
+						prefSessionModel,
+						setSessionModel,
+					)}
+					${renderModelSelect(
+						"Naming Model",
+						"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
+						prefNamingModel,
+						setNamingModel,
+					)}
 				</div>
-				<p class="text-xs text-muted-foreground">
-					The gateway's OpenAI-compatible base URL (e.g. <code>http://aigw-local.c3.zone/v1</code>).
-					The server proxies requests — the hostname does not need to resolve from the browser.
+			` : ""}
+
+			<!-- AI Gateway section -->
+			<div class="flex flex-col gap-4 ${hasModels ? "pt-4 border-t border-border" : ""}">
+				<h3 class="text-sm font-semibold text-foreground">AI Gateway</h3>
+				<p class="text-sm text-muted-foreground">
+					Connect to an AI Gateway for on-prem LLM access through a single
+					OpenAI-compatible endpoint. When configured, only gateway models are shown.
 				</p>
-			</div>
 
-			<!-- Error -->
-			${aigwError ? html`
-				<div class="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">
-					${aigwError}
-				</div>
-			` : ""}
-
-			<!-- Status badge -->
-			${aigwConfigured ? html`
-				<div class="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
-					<span class="w-2 h-2 rounded-full bg-green-500"></span>
-					<span class="text-sm text-foreground">Connected to <code class="text-xs">${aigwConfiguredUrl}</code></span>
-				</div>
-			` : ""}
-
-			<!-- Action buttons -->
-			<div class="flex gap-2">
-				<button
-					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
-						hover:bg-primary/90 transition-colors disabled:opacity-50"
-					?disabled=${busy || !aigwUrl.trim()}
-					@click=${saveAigwConfig}
-				>${aigwStatus === "saving" ? "Saving..." : aigwConfigured ? "Update" : "Enable Gateway"}</button>
-				${aigwConfigured ? html`
-					<button
-						class="px-4 py-2 text-sm rounded-md border border-destructive text-destructive
-							hover:bg-destructive/10 transition-colors disabled:opacity-50"
-						?disabled=${busy}
-						@click=${removeAigwConfig}
-					>${aigwStatus === "removing" ? "Removing..." : "Disconnect"}</button>
-					<button
-						class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
-							hover:bg-secondary transition-colors disabled:opacity-50"
-						?disabled=${busy}
-						@click=${refreshAigwModels}
-					>Refresh Models</button>
-				` : ""}
-			</div>
-
-			<!-- Discovered models -->
-			${aigwModels.length > 0 ? html`
-				<div class="flex flex-col gap-2 mt-2">
-					<h3 class="text-sm font-semibold text-foreground">
-						Available Models (${aigwModels.length})
-					</h3>
-					<div class="border border-border rounded-md divide-y divide-border max-h-80 overflow-y-auto">
-						${aigwModels.map((m: any) => html`
-							<div class="px-3 py-2 flex items-center justify-between">
-								<div class="flex flex-col gap-0.5 min-w-0">
-									<span class="text-sm font-medium text-foreground truncate">${m.id}</span>
-									<span class="text-xs text-muted-foreground">${m.name}</span>
-								</div>
-								<div class="flex items-center gap-2 text-xs text-muted-foreground shrink-0 ml-2">
-									${m.reasoning ? html`<span class="px-1.5 py-0.5 rounded bg-secondary">Reasoning</span>` : ""}
-									<span>${formatTokens(m.contextWindow)} ctx</span>
-								</div>
-							</div>
-						`)}
+				<!-- URL input -->
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-medium text-foreground">Gateway URL</label>
+					<div class="flex gap-2">
+						<input
+							type="text"
+							class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+								focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="http://aigw-local.c3.zone/v1"
+							.value=${aigwUrl}
+							?disabled=${busy}
+							@input=${(e: Event) => { aigwUrl = (e.target as HTMLInputElement).value; }}
+						/>
+						<button
+							class="px-3 py-2 text-sm rounded-md border border-input bg-background text-foreground
+								hover:bg-secondary transition-colors disabled:opacity-50"
+							?disabled=${busy || !aigwUrl.trim()}
+							@click=${testAigwConnection}
+						>${aigwStatus === "testing" ? "Testing..." : "Test"}</button>
 					</div>
 				</div>
-			` : ""}
+
+				<!-- Error -->
+				${aigwError ? html`
+					<div class="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">
+						${aigwError}
+					</div>
+				` : ""}
+
+				<!-- Status badge -->
+				${aigwConfigured ? html`
+					<div class="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
+						<span class="w-2 h-2 rounded-full bg-green-500"></span>
+						<span class="text-sm text-foreground">Connected to <code class="text-xs">${aigwConfiguredUrl}</code></span>
+					</div>
+				` : ""}
+
+				<!-- Action buttons -->
+				<div class="flex gap-2">
+					<button
+						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
+							hover:bg-primary/90 transition-colors disabled:opacity-50"
+						?disabled=${busy || !aigwUrl.trim()}
+						@click=${saveAigwConfig}
+					>${aigwStatus === "saving" ? "Saving..." : aigwConfigured ? "Update" : "Enable Gateway"}</button>
+					${aigwConfigured ? html`
+						<button
+							class="px-4 py-2 text-sm rounded-md border border-destructive text-destructive
+								hover:bg-destructive/10 transition-colors disabled:opacity-50"
+							?disabled=${busy}
+							@click=${removeAigwConfig}
+						>${aigwStatus === "removing" ? "Removing..." : "Disconnect"}</button>
+						<button
+							class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
+								hover:bg-secondary transition-colors disabled:opacity-50"
+							?disabled=${busy}
+							@click=${refreshAigwModels}
+						>Refresh Models</button>
+					` : ""}
+				</div>
+
+				<!-- Available models list -->
+				${hasModels ? html`
+					<div class="flex flex-col gap-2 mt-1">
+						<h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+							Available Models (${aigwModels.length})
+						</h4>
+						<div class="border border-border rounded-md divide-y divide-border max-h-60 overflow-y-auto">
+							${aigwModels.map((m: any) => html`
+								<div class="px-3 py-1.5 flex items-center justify-between">
+									<div class="flex flex-col gap-0 min-w-0">
+										<span class="text-sm text-foreground truncate">${m.name}</span>
+										<span class="text-[11px] text-muted-foreground font-mono">${m.id}</span>
+									</div>
+									<div class="flex items-center gap-2 text-xs text-muted-foreground shrink-0 ml-2">
+										${m.reasoning ? html`<span class="px-1.5 py-0.5 rounded bg-secondary">Reasoning</span>` : ""}
+										<span>${formatTokens(m.contextWindow)} ctx</span>
+									</div>
+								</div>
+							`)}
+						</div>
+					</div>
+				` : ""}
+			</div>
 		</div>
 	`;
 }
@@ -673,7 +754,7 @@ export function renderSettingsPage() {
 	updateKeydownListener();
 
 	const tabs: { id: SettingsTab; label: string }[] = [
-		{ id: "aigw", label: "AI Gateway" },
+		{ id: "models", label: "Models" },
 		{ id: "shortcuts", label: "Shortcuts" },
 		{ id: "palette", label: "Color Palette" },
 	];
@@ -704,7 +785,7 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto p-4">
 				<div class="${activeTab === "palette" ? "max-w-2xl" : "max-w-xl"}">
-					${activeTab === "aigw" ? renderAigwTab() : ""}
+					${activeTab === "models" ? renderModelsTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}
 				</div>

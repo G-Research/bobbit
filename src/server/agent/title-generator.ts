@@ -1,15 +1,24 @@
 /**
- * Generates a short session title from conversation messages
- * using a lightweight Anthropic API call via Claude Haiku.
+ * Generates a short session title from conversation messages.
+ * Supports three modes:
+ * 1. Direct Anthropic API (default — uses Claude Haiku via api.anthropic.com)
+ * 2. AI Gateway proxy (when aigw is configured — routes through the gateway)
+ * 3. Custom naming model (user preference — any provider/model via the gateway)
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 
-const TITLE_MODEL = "claude-haiku-4-5-20251001";
-const API_URL = "https://api.anthropic.com/v1/messages";
+const DEFAULT_TITLE_MODEL = "claude-haiku-4-5-20251001";
+const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+
+export interface TitleGenOptions {
+	/** Override model in "provider/modelId" format, e.g. "aigw/claude-haiku-4-5" */
+	namingModel?: string;
+	/** AI Gateway URL for proxying requests (used when provider is "aigw") */
+	aigwUrl?: string;
+}
 
 interface AuthCredentials {
 	type: string;
@@ -20,38 +29,23 @@ interface AuthCredentials {
 
 function loadAuth(): AuthCredentials | null {
 	const authPath = globalAuthPath();
-	if (!existsSync(authPath)) {
-		console.error("[title-gen] Auth file not found:", authPath);
-		return null;
-	}
+	if (!existsSync(authPath)) return null;
 
 	try {
 		const data = JSON.parse(readFileSync(authPath, "utf-8"));
 		const cred = data.anthropic;
-		if (!cred) {
-			console.error("[title-gen] No 'anthropic' key in auth.json");
-			return null;
-		}
+		if (!cred) return null;
 
-		// Support both OAuth and API key auth
-		if (cred.type === "oauth" && cred.access) {
-			return cred;
-		}
-		if (cred.type === "api-key" && cred.key) {
-			return { type: "api-key", access: cred.key };
-		}
-
-		console.error("[title-gen] Unrecognised auth type or missing credentials:", cred.type);
+		if (cred.type === "oauth" && cred.access) return cred;
+		if (cred.type === "api-key" && cred.key) return { type: "api-key", access: cred.key };
 		return null;
-	} catch (err) {
-		console.error("[title-gen] Failed to read auth.json:", err);
+	} catch {
 		return null;
 	}
 }
 
 /**
  * Extract text from agent messages for title generation.
- * Gathers the first few user and assistant messages.
  */
 function extractConversationPreview(messages: any[]): string {
 	const parts: string[] = [];
@@ -82,7 +76,6 @@ function extractConversationPreview(messages: any[]): string {
 
 		if (!text.trim()) continue;
 
-		// Truncate individual messages
 		const maxLen = 400;
 		if (text.length > maxLen) text = text.slice(0, maxLen) + "…";
 
@@ -96,15 +89,74 @@ function extractConversationPreview(messages: any[]): string {
 	return parts.join("\n\n");
 }
 
+function cleanTitle(raw: string): string {
+	let title = raw
+		.replace(/^#+\s*/, "")
+		.replace(/^["'"']+|["'"']+$/g, "")
+		.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{FE0F}]/gu, '')
+		.replace(/\n.*/s, "")
+		.trim();
+	if (title.length > 30) title = title.slice(0, 27) + "…";
+	return title;
+}
+
 /**
- * Generate a short title for a session based on its messages.
- * Returns null if generation fails.
+ * Generate title via the AI Gateway using OpenAI-compatible chat completions.
  */
-export async function generateSessionTitle(messages: any[]): Promise<string | null> {
+async function generateViaGateway(aigwUrl: string, modelId: string, preview: string): Promise<string | null> {
+	const baseUrl = aigwUrl.replace(/\/+$/, "");
+	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
+
+	const body = {
+		model: modelId,
+		max_tokens: 20,
+		messages: [
+			{
+				role: "system",
+				content: "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Output ONLY the label. No quotes, no markdown, no explanation. No emojis.",
+			},
+			{
+				role: "user",
+				content: `Conversation:\n\n---\n${preview}\n---\n\n2-3 word label:`,
+			},
+		],
+	};
+
+	console.log(`[title-gen] Requesting title via gateway model "${modelId}"…`);
+
+	try {
+		const response = await fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+
+		if (!response.ok) {
+			const errText = await response.text();
+			console.error(`[title-gen] Gateway error ${response.status}: ${errText.slice(0, 200)}`);
+			return null;
+		}
+
+		const data = await response.json() as any;
+		const text = data.choices?.[0]?.message?.content?.trim();
+		if (!text) return null;
+
+		const title = cleanTitle(text);
+		console.log(`[title-gen] Generated title: "${title}"`);
+		return title || null;
+	} catch (err) {
+		console.error("[title-gen] Gateway request failed:", err);
+		return null;
+	}
+}
+
+/**
+ * Generate title via direct Anthropic API call.
+ */
+async function generateViaAnthropic(preview: string): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
-	// If OAuth token is expired, try to refresh it
 	if (auth.type === "oauth" && auth.expires && Date.now() > auth.expires) {
 		const newToken = await refreshOAuthToken();
 		if (newToken) {
@@ -115,13 +167,6 @@ export async function generateSessionTitle(messages: any[]): Promise<string | nu
 		}
 	}
 
-	const preview = extractConversationPreview(messages);
-	if (!preview.trim()) {
-		console.error("[title-gen] No conversation content to summarise");
-		return null;
-	}
-
-	// Build headers based on auth type
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 		"anthropic-version": "2023-06-01",
@@ -140,7 +185,7 @@ export async function generateSessionTitle(messages: any[]): Promise<string | nu
 		: coreInstruction;
 
 	const body = {
-		model: TITLE_MODEL,
+		model: DEFAULT_TITLE_MODEL,
 		max_tokens: 12,
 		system: auth.type === "oauth"
 			? [{ type: "text", text: systemText }]
@@ -153,10 +198,10 @@ export async function generateSessionTitle(messages: any[]): Promise<string | nu
 		],
 	};
 
-	console.log(`[title-gen] Requesting title via ${TITLE_MODEL}…`);
+	console.log(`[title-gen] Requesting title via ${DEFAULT_TITLE_MODEL}…`);
 
 	try {
-		const response = await fetch(API_URL, {
+		const response = await fetch(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
@@ -180,19 +225,38 @@ export async function generateSessionTitle(messages: any[]): Promise<string | nu
 
 		if (!text) return null;
 
-		// Clean up: remove surrounding quotes, markdown headers, limit length
-		let title = text
-			.replace(/^#+\s*/, "")           // strip markdown headers
-			.replace(/^["'"']+|["'"']+$/g, "") // strip quotes
-			.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{FE0F}]/gu, '') // strip emojis
-			.replace(/\n.*/s, "")              // only first line
-			.trim();
-		if (title.length > 30) title = title.slice(0, 27) + "…";
-
+		const title = cleanTitle(text);
 		console.log(`[title-gen] Generated title: "${title}"`);
 		return title || null;
 	} catch (err) {
 		console.error("[title-gen] Failed:", err);
 		return null;
 	}
+}
+
+/**
+ * Generate a short title for a session based on its messages.
+ * Returns null if generation fails.
+ */
+export async function generateSessionTitle(messages: any[], options?: TitleGenOptions): Promise<string | null> {
+	const preview = extractConversationPreview(messages);
+	if (!preview.trim()) {
+		console.error("[title-gen] No conversation content to summarise");
+		return null;
+	}
+
+	// If a naming model is configured and we have a gateway, use it
+	if (options?.namingModel && options.aigwUrl) {
+		const slash = options.namingModel.indexOf("/");
+		const modelId = slash > 0 ? options.namingModel.slice(slash + 1) : options.namingModel;
+		return generateViaGateway(options.aigwUrl, modelId, preview);
+	}
+
+	// If aigw is configured but no specific naming model, use gateway with a haiku-like model
+	if (options?.aigwUrl) {
+		return generateViaGateway(options.aigwUrl, DEFAULT_TITLE_MODEL, preview);
+	}
+
+	// Default: direct Anthropic API
+	return generateViaAnthropic(preview);
 }
