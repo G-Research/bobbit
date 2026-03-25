@@ -264,8 +264,18 @@ export function renderSessionRow(session: GatewaySession) {
 					${buttons}
 				</div>`}
 		</div>
+		${renderLiveDelegates(session.id)}
 		${renderArchivedDelegates(session.id)}
 	`;
+}
+
+/** Render live delegate sessions nested under a parent session. */
+function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
+	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId);
+	if (delegates.length === 0) return "";
+	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+		${delegates.map(s => renderSessionRow(s))}
+	</div>`;
 }
 
 // Back-compat alias used by sidebar.ts
@@ -306,7 +316,6 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 
 /** Render any archived delegate sessions nested under a parent session. */
 export function renderArchivedDelegates(parentSessionId: string): TemplateResult | string {
-	if (!state.archivedSectionExpanded) return "";
 	if (!isArchivedParentExpanded(parentSessionId)) return "";
 	const delegates = state.archivedSessions.filter(s => s.delegateOf === parentSessionId);
 	if (delegates.length === 0) return "";
@@ -495,7 +504,7 @@ export function renderGoalGroup(goal: Goal) {
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
 				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
-				<span class="shrink-0 text-muted-foreground">${icon(GoalIcon, "xs")}</span>
+				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
 				${renderGoalBadge(goal.id)}

@@ -237,7 +237,7 @@ export function renderStaffSidebarSection() {
 			<div class="flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pl-0 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
 				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); renderApp(); }}>
 				<span class="${mobile ? "text-sm" : "text-[11px]"} text-muted-foreground shrink-0 select-none" style="width:${mobile ? "14" : "12"}px;text-align:center;">${staffSectionExpanded ? "▾" : "▸"}</span>
-				<span class="shrink-0 text-muted-foreground">${icon(Bot, mobile ? "sm" : "xs")}</span>
+				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
 					<button
@@ -388,7 +388,7 @@ export function renderSidebar() {
 									<div class="flex items-center gap-1 pl-0 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
 										<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
-										<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "xs")}</span>
+										<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 										<div class="flex items-center relative">
 											<button
@@ -414,7 +414,7 @@ export function renderSidebar() {
 							` : html`
 								<div class="flex flex-col gap-0.5">
 									<div class="flex items-center gap-1 pl-0 pr-1 py-0.5">
-										<span class="flex-1 flex items-center gap-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium" style="padding-left:12px;"><span class="shrink-0">${icon(MessagesSquare, "xs")}</span> Sessions</span>
+										<span class="flex-1 flex items-center gap-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium" style="padding-left:12px;"><span class="shrink-0" style="margin-right:-3px;">${icon(MessagesSquare, "xs")}</span> Sessions</span>
 										<div class="flex items-center relative">
 											<button
 												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
