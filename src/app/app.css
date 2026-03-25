@@ -410,14 +410,56 @@ theme-toggle button {
 	}
 }
 
-/* Sidebar "active" shimmer — mexican wave of brightness across letters */
-.sidebar-shimmer-letter {
+/* Sidebar active indicator — heartbeat with double ripple */
+.sidebar-active-dot {
 	display: inline-block;
-	animation: sidebar-shimmer 2.88s ease-in-out infinite;
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--muted-foreground);
+	opacity: 0.7;
+	animation: sidebar-heartbeat 9s ease-in-out infinite var(--dot-delay, 0s);
+	vertical-align: middle;
+	flex-shrink: 0;
+	position: relative;
+	left: -5px;
 }
 
-@keyframes sidebar-shimmer {
-	0%, 100% { opacity: 0.5; }
-	25% { opacity: 1; }
-	50% { opacity: 0.5; }
+@media (max-width: 767px) {
+	.sidebar-active-dot {
+		left: 2px !important;
+	}
+}
+
+.sidebar-active-dot::after {
+	content: '';
+	position: absolute;
+	inset: -3px;
+	border-radius: 50%;
+	background: conic-gradient(from 0deg, transparent 0%, var(--muted-foreground) 30%, transparent 60%);
+	animation: sidebar-conic-spin 1.8s linear infinite var(--dot-delay, 0s), sidebar-counter-pulse 9s ease-in-out infinite var(--dot-delay, 0s);
+	opacity: 0.4;
+	-webkit-mask: radial-gradient(circle, transparent 55%, black 56%);
+	mask: radial-gradient(circle, transparent 55%, black 56%);
+}
+
+@keyframes sidebar-heartbeat {
+	0%, 100% { transform: scale(1); }
+	14% { transform: scale(0.6); }
+	28% { transform: scale(1); }
+	42% { transform: scale(0.7); }
+	56% { transform: scale(1); }
+}
+
+/* Counter-scale to keep sweep size constant while parent shrinks */
+@keyframes sidebar-counter-pulse {
+	0%, 100% { scale: 1; }
+	14% { scale: calc(1 / 0.6); }
+	28% { scale: 1; }
+	42% { scale: calc(1 / 0.7); }
+	56% { scale: 1; }
+}
+
+@keyframes sidebar-conic-spin {
+	to { transform: rotate(360deg); }
 }

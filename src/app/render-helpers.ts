@@ -172,12 +172,11 @@ export function stopTimeRefresh(): void {
 // SESSION TIME + UNSEEN BADGE
 // ============================================================================
 
-/** Render "active" with a subtle shimmer wave across each letter. */
+/** Render a pulsing dot with conic sweep to indicate active session. */
+let _dotIndex = 0;
 function renderActiveShimmer() {
-	const letters = "active".split("");
-	return html`<span class="shrink-0 inline-flex items-center text-[11px] text-muted-foreground/50" style="letter-spacing:0.01em;vertical-align:middle;">${letters.map((ch, i) =>
-		html`<span class="sidebar-shimmer-letter" style="animation-delay:${i * 0.18}s">${ch}</span>`
-	)}</span>`;
+	const delay = (_dotIndex++ % 5) * 1.8;
+	return html`<span class="sidebar-active-dot" style="--dot-delay:${delay}s"></span>`;
 }
 
 /** Render terse relative time with optional unseen indicator dot. */
