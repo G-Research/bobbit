@@ -23,7 +23,7 @@ import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
 type SettingsTab = "shortcuts" | "palette" | "models";
-let activeTab: SettingsTab = "models";
+let activeTab: SettingsTab = "shortcuts";
 
 // Rebind state (same as shortcuts-dialog)
 let rebindingId: string | null = null;
@@ -765,8 +765,8 @@ export function renderSettingsPage() {
 	updateKeydownListener();
 
 	const tabs: { id: SettingsTab; label: string }[] = [
-		{ id: "models", label: "Models" },
 		{ id: "shortcuts", label: "Shortcuts" },
+		{ id: "models", label: "Models" },
 		{ id: "palette", label: "Color Palette" },
 	];
 
