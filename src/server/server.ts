@@ -1105,7 +1105,8 @@ async function handleApiRoute(
 			signal, gateDef, goal.cwd, goal.branch, "master", allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
-		json({ signal: { id: signal.id, gateId, status: "running" } }, 201);
+		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
 		return;
 	}
 
