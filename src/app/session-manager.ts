@@ -403,6 +403,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (idx >= 0) {
 				state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], isAborting: remote.isAborting };
 			}
+			// Set readOnly when archived status arrives (may come after initial connect)
+			if (status === "archived" && state.chatPanel?.agentInterface) {
+				state.chatPanel.agentInterface.readOnly = true;
+			}
 			// Refresh git status when agent becomes idle (turn finished)
 			if (status === "idle") {
 				refreshGitStatusForSession(sessionId);

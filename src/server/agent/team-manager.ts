@@ -921,8 +921,19 @@ export class TeamManager {
 			}
 		}
 
-		// Terminate the team lead session
+		// Terminate the team lead session — persist worktree info first so purge can clean up
 		if (entry.teamLeadSessionId) {
+			const goal = this.goalManager.getGoal(goalId);
+			if (goal?.repoPath) {
+				const store = (this.sessionManager as any).store;
+				if (store) {
+					store.update(entry.teamLeadSessionId, {
+						repoPath: goal.repoPath,
+						branch: goal.branch,
+						worktreePath: goal.worktreePath,
+					});
+				}
+			}
 			try {
 				await this.sessionManager.terminateSession(entry.teamLeadSessionId);
 			} catch (err) {
