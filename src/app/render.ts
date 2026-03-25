@@ -1583,7 +1583,7 @@ export function doRenderApp(): void {
 						showRenameDialog(activeSid, sessionTitle);
 					}
 				},
-				children: html`<span class="inline-flex items-center gap-1">${icon(Pencil, "xs")}<span class="text-xs">${editLabel}</span></span>`,
+				children: html`<span class="inline-flex items-center gap-1">${icon(Pencil, "xs")}<span class="text-xs hidden sm:inline">${editLabel}</span></span>`,
 				className: "h-7 px-2 text-muted-foreground",
 				title: activeStaffAgent ? "Edit staff agent" : "Modify session",
 			})}
@@ -1591,7 +1591,7 @@ export function doRenderApp(): void {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => terminateSession(activeSid),
-				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs">Terminate</span></span>`,
+				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs hidden sm:inline">Terminate</span></span>`,
 				className: "h-7 px-2 text-muted-foreground hover:text-destructive",
 				title: "Terminate session (Ctrl+Shift+D)",
 			})}
