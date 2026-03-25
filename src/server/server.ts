@@ -256,7 +256,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 	teamManager.setBroadcastToGoal(broadcastToGoal);
-	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore);
+	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
 		if (!team?.teamLeadSessionId) return;
@@ -1531,6 +1531,10 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
+		if (session.nonInteractive) {
+			json({ error: "Cannot steer a non-interactive (automated review) session" }, 400);
+			return;
+		}
 		if (session.status !== "streaming") {
 			json({ error: "Agent is not currently streaming — use team/prompt instead" }, 409);
 			return;
@@ -1592,6 +1596,10 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(body.sessionId);
 		if (!session) {
 			json({ error: "Session not found" }, 404);
+			return;
+		}
+		if (session.nonInteractive) {
+			json({ error: "Cannot prompt a non-interactive (automated review) session" }, 400);
 			return;
 		}
 		// Enforce gate dependency check for team/prompt
