@@ -1771,6 +1771,7 @@ async function handleApiRoute(
 			if (!session) { json({ error: "Session not found" }, 404); return; }
 			session.preview = body.preview;
 			sessionManager.persistSessionMetadata(session).catch(() => {});
+			broadcastToAll({ type: "preview_changed", sessionId: id, preview: body.preview });
 		}
 
 		// Track whether roleId handling already took care of personalities

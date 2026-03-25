@@ -450,6 +450,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		};
 
+		remote.onPreviewChanged = (sid, preview) => {
+			if (sid === sessionId) {
+				state.isPreviewSession = preview;
+				if (preview) startPreviewPolling();
+				else stopPreviewPolling();
+				renderApp();
+			}
+		};
+
 		remote.onGoalProposal = (proposal) => {
 			state.activeGoalProposal = proposal;
 			if (state.assistantType === "goal") {

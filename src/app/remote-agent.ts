@@ -100,6 +100,8 @@ export class RemoteAgent {
 	/** Callback fired when goal setup status changes (worktree ready or failed). */
 	onGoalSetupEvent?: () => void;
 	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; process?: any }) => void;
+	/** Callback fired when preview panel flag changes for a session. */
+	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
 	private _title = "New session";
 
 	constructor() {
@@ -689,6 +691,10 @@ export class RemoteAgent {
 
 			case "preferences_changed":
 				this._applyPreferences(msg.preferences);
+				break;
+
+			case "preview_changed":
+				this.onPreviewChanged?.(msg.sessionId, msg.preview);
 				break;
 
 			case "bg_process_created":

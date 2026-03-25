@@ -8,6 +8,20 @@ import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { getSkill } from "../skills/registry.js";
 import { runSkillAgent, createSkillRequest } from "../skills/sub-agent.js";
+import { inferMeta } from "../agent/aigw-manager.js";
+
+/**
+ * Patch model contextWindow in state data using our own inferMeta, which may
+ * be more up-to-date than the underlying agent's hardcoded model metadata.
+ */
+function patchModelContextWindow(data: any): void {
+	if (data?.model?.id) {
+		const meta = inferMeta(data.model.id);
+		if (meta.contextWindow > (data.model.contextWindow || 0)) {
+			data.model.contextWindow = meta.contextWindow;
+		}
+	}
+}
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
@@ -115,6 +129,7 @@ export function handleWebSocketConnection(
 			// so the client gets auth_ok immediately and can start rendering).
 			session.rpcClient.getState().then((stateResponse) => {
 				if (stateResponse.success) {
+					patchModelContextWindow(stateResponse.data);
 					send(ws, { type: "state", data: stateResponse.data });
 				}
 			}).catch(() => {
@@ -239,6 +254,7 @@ export function handleWebSocketConnection(
 				case "get_state": {
 					const stateResp = await session.rpcClient.getState();
 					if (stateResp.success) {
+						patchModelContextWindow(stateResp.data);
 						send(ws, { type: "state", data: stateResp.data });
 					}
 					break;
