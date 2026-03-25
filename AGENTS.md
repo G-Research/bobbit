@@ -4,7 +4,7 @@
 
 A remote gateway for AI coding agents. Wraps pi-coding-agent in a WebSocket server with a browser-based chat UI. The user runs `bobbit` on a dev machine and interacts with the agent from any browser.
 
-For architecture details, REST API, WebSocket protocol, and feature documentation, see [README.md](README.md).
+For architecture details and features, see [README.md](README.md). For the REST API reference, see [docs/rest-api.md](docs/rest-api.md). For the WebSocket protocol, see [docs/websocket-protocol.md](docs/websocket-protocol.md).
 
 ## Commands
 

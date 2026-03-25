@@ -61,20 +61,24 @@ function renderMobileLanding() {
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					<div class="flex items-center gap-1">
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+							title="Manage roles"
 							@click=${() => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); }}>
 							${icon(Users, "xs")} Roles
 						</button>
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+							title="Manage personalities"
 							@click=${() => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); setHashRoute("personalities"); }}>
 							${icon(Drama, "xs")} Personalities
 						</button>
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+							title="Manage tools"
 							@click=${() => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); }}>
 							${icon(Wrench, "xs")} Tools
 						</button>
 					</div>
 					<div class="flex items-center gap-1">
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+							title="Manage workflows"
 							@click=${() => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); }}>
 							${icon(WorkflowIcon, "xs")} Workflows
 						</button>
@@ -90,7 +94,7 @@ function renderMobileLanding() {
 					: state.sessionsError
 						? html`<div class="text-center py-12">
 								<p class="text-xs text-red-500 mb-3">${state.sessionsError}</p>
-								<button class="text-xs text-muted-foreground underline" @click=${refreshSessions}>Retry</button>
+								<button class="text-xs text-muted-foreground underline" title="Retry" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
 							? html`<div class="text-center py-12">
@@ -295,6 +299,7 @@ function goalPreviewPanel() {
 						<label class="text-xs text-muted-foreground font-medium">Spec</label>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Toggle edit/preview mode"
 							@click=${() => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); }}
 						>
 							${state.previewSpecEditMode ? "Preview" : "Edit"}
@@ -468,7 +473,7 @@ function rolePreviewPanel() {
 						${currentTools.map((tool) => html`
 							<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-secondary text-secondary-foreground">
 								${tool}
-								<button class="hover:text-destructive" @click=${() => {
+								<button class="hover:text-destructive" title="Remove tool" @click=${() => {
 									const remaining = currentTools.filter((t) => t !== tool);
 									state.rolePreviewTools = remaining.join(", ");
 									state.rolePreviewToolsEdited = true;
@@ -504,6 +509,7 @@ function rolePreviewPanel() {
 						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Toggle edit/preview mode"
 							@click=${() => { state.rolePreviewPromptEditMode = !state.rolePreviewPromptEditMode; renderApp(); }}
 						>
 							${state.rolePreviewPromptEditMode ? "Preview" : "Edit"}
@@ -931,6 +937,7 @@ function staffPreviewPanel() {
 						<label class="text-xs text-muted-foreground font-medium">Triggers</label>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Add trigger"
 							@click=${() => {
 								const triggers = parseTriggers(state.staffPreviewTriggers);
 								triggers.push({ type: "manual", config: {}, enabled: true, prompt: "" });
@@ -947,6 +954,7 @@ function staffPreviewPanel() {
 						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Toggle edit/preview mode"
 							@click=${() => { state.staffPreviewPromptEditMode = !state.staffPreviewPromptEditMode; renderApp(); }}
 						>
 							${state.staffPreviewPromptEditMode ? "Preview" : "Edit"}
@@ -1077,6 +1085,7 @@ function personalityPreviewPanel() {
 						<label class="text-xs text-muted-foreground font-medium">Prompt Fragment</label>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Toggle edit/preview mode"
 							@click=${() => { state.personalityPreviewPromptFragmentEditMode = !state.personalityPreviewPromptFragmentEditMode; renderApp(); }}
 						>
 							${state.personalityPreviewPromptFragmentEditMode ? "Preview" : "Edit"}
@@ -1236,6 +1245,7 @@ function goalProposalPanel() {
 					<label class="text-xs text-muted-foreground font-medium">Spec</label>
 					<button
 						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+						title="Toggle edit/preview mode"
 						@click=${() => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); }}
 					>
 						${_proposalSpecEditMode ? "Preview" : "Edit"}
@@ -1701,10 +1711,12 @@ export function doRenderApp(): void {
 			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
 				<button
 					class="goal-tab-pill ${state.assistantTab === "chat" ? "goal-tab-pill--active" : ""}"
+					title="Chat"
 					@click=${() => { state.assistantTab = "chat"; renderApp(); }}
 				>Chat</button>
 				<button
 					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
+					title="Preview"
 					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
 				>
 					Preview${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
@@ -1719,17 +1731,20 @@ export function doRenderApp(): void {
 			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
 				<button
 					class="goal-tab-pill ${state.previewPanelTab === "chat" ? "goal-tab-pill--active" : ""}"
+					title="Chat"
 					@click=${() => { state.previewPanelTab = "chat"; renderApp(); }}
 				>Chat</button>
 				${state.isPreviewSession ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "preview" ? "goal-tab-pill--active" : ""}"
+						title="Preview"
 						@click=${() => { state.previewPanelTab = "preview"; renderApp(); }}
 					>Preview</button>
 				` : ""}
 				${state.activeGoalProposal != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
+						title="Goal"
 						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
 					>Goal <span class="goal-tab-dot"></span></button>
 				` : ""}
@@ -1780,12 +1795,14 @@ export function doRenderApp(): void {
 						${showPreviewTab ? html`
 							<button
 								class="goal-tab-pill ${state.previewPanelActiveTab === "preview" ? "goal-tab-pill--active" : ""}"
+								title="Preview"
 								@click=${() => { state.previewPanelActiveTab = "preview"; renderApp(); }}
 							>Preview</button>
 						` : ""}
 						${showGoalTab ? html`
 							<button
 								class="goal-tab-pill ${state.previewPanelActiveTab === "goal" ? "goal-tab-pill--active" : ""}"
+								title="Goal"
 								@click=${() => { state.previewPanelActiveTab = "goal"; renderApp(); }}
 							>Goal <span class="goal-tab-dot"></span></button>
 						` : ""}

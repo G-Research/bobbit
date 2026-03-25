@@ -376,6 +376,7 @@ function renderListView(): TemplateResult {
 	}
 
 	return html`
+		<p class="text-sm text-muted-foreground mb-3">Roles define what an agent can do \u2014 its system prompt and which tools it has access to. Bobbit includes built-in roles (coder, reviewer, tester) and you can create custom ones.</p>
 		<div class="roles-list">
 			${roles.map((role, i) => renderRoleRow(role, i))}
 		</div>
@@ -401,7 +402,7 @@ function renderToolGroups(): TemplateResult {
 				const someSelected = tools.some(t => editTools.includes(t.name));
 				return html`
 					<div class="roles-tool-group">
-						<button class="roles-tool-group-header" @click=${() => toggleToolGroup(group)}>
+						<button class="roles-tool-group-header" title="Toggle ${group} tools" @click=${() => toggleToolGroup(group)}>
 							<span class="roles-tool-group-check ${allSelected ? "checked" : someSelected ? "partial" : ""}">
 								${allSelected ? "\u2713" : someSelected ? "\u2013" : ""}
 							</span>
@@ -464,6 +465,7 @@ function renderEditView(): TemplateResult {
 							return html`
 								<button
 									class="roles-accessory-option ${selected ? "roles-accessory-option--selected" : ""}"
+									title="${acc.label}"
 									@click=${() => { editAccessory = accId; renderApp(); }}
 								>
 									<span class="roles-accessory-preview">

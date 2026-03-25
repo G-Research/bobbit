@@ -661,7 +661,7 @@ function renderSetupBanner(goal: Goal): TemplateResult {
 		return html`
 			<div class="setup-banner setup-banner--error">
 				<span style="color:var(--destructive)">⚠ Worktree setup failed${goal.setupError ? `: ${goal.setupError}` : ""}</span>
-				<button class="btn-retry" @click=${() => handleRetrySetup(goal.id)}>Retry Setup</button>
+				<button class="btn-retry" title="Retry worktree setup" @click=${() => handleRetrySetup(goal.id)}>Retry Setup</button>
 			</div>
 		`;
 	}
@@ -693,7 +693,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 	if (teamActive) {
 		return html`
 			<div class="btn-split">
-				<button class="btn-split-main danger" @click=${() => handleEndTeam(goal.id)} ?disabled=${teamStopping}>
+				<button class="btn-split-main danger" title="Stop the goal team" @click=${() => handleEndTeam(goal.id)} ?disabled=${teamStopping}>
 					${svgStop}
 					<span>${teamStopping ? "Stopping\u2026" : "Stop Team"}</span>
 				</button>
@@ -702,7 +702,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 	}
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
+			<button class="btn-split-main" title="Start the goal team" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
 				${svgPlay}
 				<span>${teamStarting ? "Starting\u2026" : "Start Team"}</span>
 			</button>
@@ -713,7 +713,7 @@ function renderTeamButton(goal: Goal): TemplateResult {
 function renderSessionButton(goal: Goal): TemplateResult {
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" @click=${() => createAndConnectSession(goal.id)} ?disabled=${goal.setupStatus !== undefined && goal.setupStatus !== "ready"}>
+			<button class="btn-split-main" title="New session for this goal" @click=${() => createAndConnectSession(goal.id)} ?disabled=${goal.setupStatus !== undefined && goal.setupStatus !== "ready"}>
 				${svgPlus}
 				New Session
 			</button>
@@ -725,7 +725,7 @@ function renderSessionButton(goal: Goal): TemplateResult {
 					${state.roles.length === 0
 						? html`<div class="role-dropdown-item" style="color:var(--text-tertiary)">No roles defined</div>`
 						: state.roles.map(role => html`
-							<button class="role-dropdown-item" @click=${() => { roleDropdownOpen = false; createAndConnectSession(goal.id, role.name); }}>
+							<button class="role-dropdown-item" title="New session as ${role.label}" @click=${() => { roleDropdownOpen = false; createAndConnectSession(goal.id, role.name); }}>
 								<span style="flex-shrink:0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
 								<span class="role-label">${role.label}</span>
 							</button>
@@ -987,7 +987,7 @@ function renderTabBar(): TemplateResult {
 	return html`
 		<div class="tab-bar">
 			${tabs.map(t => html`
-				<div class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)}>
+				<div class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)} title="${t.label}">
 					${t.icon}
 					<span class="tab-label">${t.label}</span>
 					${t.countStr ? html`<span class="tab-count">${t.countStr}</span>` : nothing}
@@ -1116,7 +1116,7 @@ function renderAgentsTab(): TemplateResult {
 					const timeStr = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
 
 					return html`
-						<div class="agent-card" @click=${() => connectToSession(agent.sessionId, true)}>
+						<div class="agent-card" @click=${() => connectToSession(agent.sessionId, true)} title="Connect to ${formatAgentName(agent)}">
 							<div class="agent-card-bobbit">
 								${statusBobbit(
 									session?.status ?? agent.status,

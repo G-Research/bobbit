@@ -625,6 +625,7 @@ function renderEditView(): TemplateResult {
 						<label class="text-xs text-muted-foreground font-medium">Triggers</label>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Add trigger"
 							@click=${addTrigger}
 						>+ Add trigger</button>
 					</div>
@@ -635,6 +636,7 @@ function renderEditView(): TemplateResult {
 						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Toggle prompt edit mode"
 							@click=${() => { editPromptEditMode = !editPromptEditMode; renderApp(); }}
 						>
 							${editPromptEditMode ? "Preview" : "Edit"}

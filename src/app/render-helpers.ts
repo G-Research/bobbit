@@ -407,8 +407,8 @@ export function renderGoalGroup(goal: Goal) {
 	const emptyState = html`
 		<div class="pl-2 py-1 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground">
 			${isTeamGoal
-				? html`No agents — <button class="text-primary ${mobile ? "" : "hover:underline"}" @click=${handleStartTeam}>${isLoading ? "starting\u2026" : "start team"}</button>`
-				: html`No sessions — <button class="text-primary ${mobile ? "" : "hover:underline"}" @click=${() => createAndConnectSession(goal.id)}>start one</button>`}
+				? html`No agents — <button class="text-primary ${mobile ? "" : "hover:underline"}" title="Start team" @click=${handleStartTeam}>${isLoading ? "starting\u2026" : "start team"}</button>`
+				: html`No sessions — <button class="text-primary ${mobile ? "" : "hover:underline"}" title="Start a session" @click=${() => createAndConnectSession(goal.id)}>start one</button>`}
 		</div>
 	`;
 
@@ -438,7 +438,7 @@ export function renderGoalGroup(goal: Goal) {
 			<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-0 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
-				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${isExpanded ? "▾" : "▸"}</span>
+				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>

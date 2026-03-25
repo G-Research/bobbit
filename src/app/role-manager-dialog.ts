@@ -181,6 +181,7 @@ function renderListView() {
 					<button
 						class="flex items-center gap-3 w-full px-3 py-2.5 rounded-md hover:bg-secondary/70 transition-colors text-left group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
 						aria-label="Edit role: ${role.label}"
+						title="Edit role: ${role.label}"
 						@click=${() => showEdit(role)}
 					>
 						<span class="flex-shrink-0" style="width:18px;display:flex;align-items:center;justify-content:center;">
@@ -248,8 +249,8 @@ function renderEditView() {
 					<label class="text-[11px] text-muted-foreground">Allowed Tools</label>
 					<span class="text-[10px] text-muted-foreground/60">(empty = all)</span>
 					<span class="flex-1"></span>
-					<button class="text-[10px] text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm" @click=${selectAllTools}>Select All</button>
-					<button class="text-[10px] text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm" @click=${selectNoTools}>Select None</button>
+					<button class="text-[10px] text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm" title="Select all tools" @click=${selectAllTools}>Select All</button>
+					<button class="text-[10px] text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm" title="Deselect all tools" @click=${selectNoTools}>Select None</button>
 				</div>
 				<div class="flex flex-wrap gap-1.5">
 					${availableTools.map((tool) => {
@@ -284,6 +285,7 @@ function renderEditView() {
 								aria-selected=${selected ? "true" : "false"}
 								aria-checked=${selected ? "true" : "false"}
 								aria-label="${acc.label}"
+								title="${acc.label}"
 								class="flex flex-col items-center gap-1 py-2 px-1 rounded-md border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected
 									? "border-primary bg-secondary"
 									: "border-transparent hover:bg-secondary/50"}"
@@ -351,6 +353,7 @@ function rerender(): void {
 								<button
 									class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
 									aria-label="Back to role list"
+									title="Back to role list"
 									@click=${showList}
 								>${icon(ArrowLeft, "sm")}</button>
 							` : nothing}
@@ -504,6 +507,7 @@ export function showRoleEditDialogFromProposal(proposal: { name: string; label: 
 													aria-selected=${selected ? "true" : "false"}
 													aria-checked=${selected ? "true" : "false"}
 													aria-label="${acc.label}"
+													title="${acc.label}"
 													class="flex flex-col items-center gap-1 py-2 px-1 rounded-md border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected
 														? "border-primary bg-secondary"
 														: "border-transparent hover:bg-secondary/50"}"

@@ -333,6 +333,7 @@ function renderListView(): TemplateResult {
 	}
 
 	return html`
+		<p class="text-sm text-muted-foreground mb-3">Personalities change how an agent behaves \u2014 its communication style, thoroughness, and approach. They\u2019re optional modifiers you can apply when spawning agents.</p>
 		<div class="personalities-list">
 			${personalities.map((p) => renderPersonalityRow(p))}
 		</div>

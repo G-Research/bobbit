@@ -440,7 +440,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						<option value="failure" ?selected=${step.expect === "failure"}>expect: failure</option>
 					</select>
 				` : nothing}
-				<button class="wf-criteria-remove" @click=${(e: Event) => {
+				<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
 					e.stopPropagation();
 					const steps = (gate.verify || []).filter((_: any, i: number) => i !== stepIdx);
 					updateGateField(gateIdx, "verify", steps);
@@ -585,6 +585,7 @@ function renderListView(): TemplateResult {
 	}
 
 	return html`
+		<p class="text-sm text-muted-foreground mb-3">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
 		<div class="wf-list">
 			${workflows.map((wf) => renderWorkflowRow(wf))}
 		</div>
@@ -674,6 +675,7 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 								const checked = gate.dependsOn.includes(depId);
 								return html`
 									<button class="wf-dep-toggle-chip ${checked ? "wf-dep-toggle-chip--active" : ""}"
+										title="Toggle dependency on ${depId}"
 										@click=${() => {
 											const newDeps = checked ? gate.dependsOn.filter((d) => d !== depId) : [...gate.dependsOn, depId];
 											updateGateField(idx, "dependsOn", newDeps);
@@ -689,7 +691,7 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 						<span class="wf-verify-label">Verification Steps (${verifyCount})</span>
 						<div class="wf-verification-steps">
 							${(gate.verify || []).map((step, si) => renderVerifyStepEditor(gate, idx, step, si))}
-							<button class="wf-criteria-add-btn" @click=${(e: Event) => {
+							<button class="wf-criteria-add-btn" title="Add verification step" @click=${(e: Event) => {
 								e.stopPropagation();
 								const steps = [...(gate.verify || []), { name: "", type: "command" as const, run: "" }];
 								updateGateField(idx, "verify", steps);

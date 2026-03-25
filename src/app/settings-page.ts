@@ -211,6 +211,7 @@ function renderShortcutRow(entry: ShortcutEntry) {
 				${isActiveRebind && rebindingIndex === null && !pendingBinding
 					? html`<button
 							class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-mono bg-primary/20 text-primary border border-primary animate-pulse"
+							title="Press a key combo to add a binding"
 							@click=${() => startRebind(entry.id, null)}
 						>Press a key combo...</button>`
 					: html`<button
@@ -405,6 +406,7 @@ function renderPaletteTab() {
 								${isActive
 									? "border-primary bg-primary/5 ring-1 ring-primary/30"
 									: "border-border hover:border-primary/40 hover:bg-secondary/30"}"
+							title="Select ${palette.name} palette"
 							@click=${() => selectPalette(palette.id)}
 						>
 							${renderPalettePreview(palette)}
@@ -616,6 +618,7 @@ function renderModelPicker(label: string, hint: string, value: string, onChange:
 					class="flex-1 px-3 py-2 text-left rounded-md border border-input bg-background text-sm
 						hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
 						${value ? "text-foreground" : "text-muted-foreground"}"
+					title="Choose model"
 					@click=${() => openModelPicker(value, onChange)}
 				>${display}</button>
 				${value ? html`
@@ -688,6 +691,7 @@ function renderModelsTab() {
 						<button
 							class="px-3 py-2 text-sm rounded-md border border-input bg-background text-foreground
 								hover:bg-secondary transition-colors disabled:opacity-50"
+							title="Test gateway connection"
 							?disabled=${busy || !aigwUrl.trim()}
 							@click=${testAigwConnection}
 						>${aigwStatus === "testing" ? "Testing..." : "Test"}</button>
@@ -714,6 +718,7 @@ function renderModelsTab() {
 					<button
 						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
 							hover:bg-primary/90 transition-colors disabled:opacity-50"
+						title="Save gateway configuration"
 						?disabled=${busy || !aigwUrl.trim()}
 						@click=${saveAigwConfig}
 					>${aigwStatus === "saving" ? "Saving..." : aigwConfigured ? "Update" : "Enable Gateway"}</button>
@@ -721,12 +726,14 @@ function renderModelsTab() {
 						<button
 							class="px-4 py-2 text-sm rounded-md border border-destructive text-destructive
 								hover:bg-destructive/10 transition-colors disabled:opacity-50"
+							title="Disconnect gateway"
 							?disabled=${busy}
 							@click=${removeAigwConfig}
 						>${aigwStatus === "removing" ? "Removing..." : "Disconnect"}</button>
 						<button
 							class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
 								hover:bg-secondary transition-colors disabled:opacity-50"
+							title="Refresh available models"
 							?disabled=${busy}
 							@click=${refreshAigwModels}
 						>Refresh Models</button>
@@ -789,6 +796,7 @@ export function renderSettingsPage() {
 							${activeTab === tab.id
 								? "bg-background text-foreground shadow-sm border border-border"
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
+						title="${tab.label}"
 						@click=${() => { activeTab = tab.id; renderApp(); }}
 					>${tab.label}</button>
 				`)}
