@@ -55,15 +55,7 @@ npm start         # start gateway on :3001, serves UI
 
 ### Development
 
-```bash
-npm run build:server   # compile server TypeScript (required before first run)
-npm run dev:harness    # gateway with auto-restart harness + vite dev server (recommended)
-npm run dev            # gateway + vite without the harness
-```
-
-Both the gateway (`:3001`) and Vite (`:5173`) auto-bind to the NordLynx mesh IP. Vite proxies `/api` and `/ws` to the gateway. UI changes hot-reload instantly. Server changes require `npm run restart-server` to rebuild and restart.
-
-See [docs/dev-workflow.md](docs/dev-workflow.md) for the full development workflow.
+See [docs/dev-workflow.md](docs/dev-workflow.md) for the full development workflow, including the restart harness and hot-reload setup.
 
 ### CLI flags
 
@@ -136,24 +128,8 @@ See [docs/features.md](docs/features.md) for detailed feature documentation.
 
 ## Testing
 
-```bash
-npm run check         # Type-check server + web without emitting
-npm test              # Unit tests (Playwright with file:// fixtures)
-npm run test:e2e      # E2E tests (auto-starts sandboxed gateway)
-```
+Run `npm run check` (type-check), `npm test` (unit tests), and `npm run test:e2e` (E2E tests). See [AGENTS.md](AGENTS.md) for details.
 
-See [AGENTS.md](AGENTS.md) for detailed testing instructions, test structure, and how to write new tests.
+## Contributing
 
-## Build structure
-
-See [docs/build-structure.md](docs/build-structure.md) for the full build output layout and TypeScript config details.
-
-## Contributing / Development
-
-See [docs/dev-workflow.md](docs/dev-workflow.md) for the full development workflow — running modes, making changes, and the restart harness. For agent-facing context (repo layout, common tasks, debugging), see [AGENTS.md](AGENTS.md).
-
-## Bobbit mascot
-
-The bobbit is a pixel-art blob mascot rendered with CSS `box-shadow`, with idle/working/starting animations, 14 colour identities (via `hue-rotate`), and role-based accessories (hardhat, magnifying glass, test tube, crown, etc.).
-
-See [docs/bobbit-sprites.md](docs/bobbit-sprites.md) for the full sprite reference, animation system, and accessory catalogue.
+See [docs/dev-workflow.md](docs/dev-workflow.md) for the development workflow. For repo layout and common tasks, see [AGENTS.md](AGENTS.md). Build structure is documented in [docs/build-structure.md](docs/build-structure.md). The [bobbit mascot](docs/bobbit-sprites.md) is a pixel-art blob with animations, colour identities, and role-based accessories.
