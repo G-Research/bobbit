@@ -15,8 +15,8 @@ import { defineConfig } from "@playwright/test";
  * Usage:
  *   1. Start the dev server:  npm run dev:harness
  *   2. Set env vars if needed:
- *        FRONTEND_URL  (default: https://100.123.227.233:5173)
- *        GATEWAY_URL   (default: https://100.123.227.233:3001)
+ *        FRONTEND_URL  (default: https://localhost:5173)
+ *        GATEWAY_URL   (default: https://localhost:3001)
  *   3. Run:  npx playwright test --config tests/playwright-workflow.config.ts
  */
 export default defineConfig({
@@ -27,7 +27,7 @@ export default defineConfig({
 	retries: 0,
 	workers: 1,
 	use: {
-		baseURL: "https://100.123.227.233:5173",
+		baseURL: process.env.FRONTEND_URL || "https://localhost:5173",
 		headless: true,
 		viewport: { width: 1280, height: 800 },
 		actionTimeout: 15_000,

@@ -18,6 +18,7 @@ nul
 .e2e-real-bobbit
 .e2e-ui-pi
 .e2e-ui-bobbit
+tests/code-review-results.json
 coverage/
 concept/
 ARCHIVE/

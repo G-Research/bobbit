@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const GATEWAY_HOST = "100.123.227.233";
+const GATEWAY_HOST = process.env.GATEWAY_HOST || "localhost";
 const GATEWAY_PORT = 3001;
 const AUTH_TOKEN = fs.readFileSync(path.join(process.cwd(), ".bobbit", "state", "token"), "utf-8").trim();
 const BASE_URL = `https://${GATEWAY_HOST}:${GATEWAY_PORT}`;

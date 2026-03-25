@@ -108,12 +108,12 @@ The primary branch is **`master`** (not `main`). If the user refers to "main", t
 
 ### Primary worktree and dev server
 
-The dev server (Vite + gateway) runs from the **primary worktree** at `C:\Users\jsubr\w\bobbit`, which is checked out on `master`. Goal and agent sessions work in separate **git worktrees** under `C:\Users\jsubr\w\bobbit-wt-goal\`.
+The dev server (Vite + gateway) runs from the **primary worktree** at `<project-root>`, which is checked out on `master`. Goal and agent sessions work in separate **git worktrees** under `<project-root>-wt-goal\`.
 
 **Pushing to remote `master` does NOT update the running dev server.** After merging changes to remote master, you must pull them into the primary worktree for the dev server to pick them up:
 
 ```bash
-cd /c/Users/jsubr/w/bobbit && git pull origin master
+cd <primary-worktree> && git pull origin master
 ```
 
 UI changes (`src/ui/`, `src/app/`) hot-reload via Vite after the pull. Server changes (`src/server/`) additionally require `npm run restart-server` from the primary worktree.

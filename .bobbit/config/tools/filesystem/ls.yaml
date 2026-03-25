@@ -20,12 +20,12 @@ docs: |
   ```
   ls("src/server/agent")
   ls("src/ui/components")
-  ls("C:/Users/jsubr/w/bobbit/tools")
+  ls("C:/Users/you/project/tools")
   ls()  # lists working directory
   ```
 
   Examples — WRONG (backslashes):
   ```
   ls("src\\server\\agent")                               # WRONG
-  ls("C:\\Users\\jsubr\\w\\bobbit\\tools")               # WRONG
+  ls("C:\\Users\\you\\project\\tools")               # WRONG
   ```

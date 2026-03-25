@@ -14,7 +14,7 @@ This binds the server to your NordLynx mesh IP and enables TLS automatically.
 ## How It Works
 
 1. **NordVPN Meshnet** provides a private IP (e.g. `100.x.x.x`) accessible from your other devices
-2. **deSEC dynDNS** maps `bobbit.dedyn.io` to the mesh IP (updated on every startup)
+2. **deSEC dynDNS** maps `yourname.dedyn.io` to the mesh IP (updated on every startup)
 3. **Bobbit CA** signs TLS certs so browsers trust the HTTPS connection
 4. Devices that install the CA cert get full HTTPS trust — no warnings, PWA support
 
@@ -26,7 +26,7 @@ Create `.bobbit/state/desec.json`:
 
 ```json
 {
-  "domain": "bobbit.dedyn.io",
+  "domain": "yourname.dedyn.io",
   "token": "<your-desec-api-token>"
 }
 ```
@@ -65,8 +65,8 @@ If the CA ends up under "Personal" instead of "Trusted Root", the browser will s
 
 ### 3. Access Bobbit
 
-- **Dev mode**: `https://bobbit.dedyn.io:5173` (Vite dev server with HMR)
-- **Production**: `https://bobbit.dedyn.io:3001` (built UI served by gateway)
+- **Dev mode**: `https://yourname.dedyn.io:5173` (Vite dev server with HMR)
+- **Production**: `https://yourname.dedyn.io:3001` (built UI served by gateway)
 - **PWA**: Install from the browser (requires trusted CA — no security warnings)
 
 ## Troubleshooting

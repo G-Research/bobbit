@@ -3,7 +3,7 @@
  * Uses ACME DNS-01 challenge via the deSEC API.
  *
  * Usage: npx tsx scripts/get-cert.ts <domain> <desec-token>
- * Example: npx tsx scripts/get-cert.ts bobbit.dedyn.io PrjsoJpTmuP72af4ohbXmhmGz5ZX
+ * Example: npx tsx scripts/get-cert.ts yourname.dedyn.io YOUR_DESEC_TOKEN
  *
  * Outputs cert and key to ~/.pi/gateway-cert.pem and ~/.pi/gateway-key.pem
  */

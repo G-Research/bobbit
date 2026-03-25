@@ -2,7 +2,7 @@
 
 A remote gateway for AI coding agents. Run a coding agent on a powerful machine, control it from any browser — desktop, phone, or tablet.
 
-Bobbit wraps [pi-coding-agent](https://github.com/nickarrow/nickarrow) in a WebSocket gateway with a browser UI built on Lit. You start the server, open the URL (or scan a QR code on your phone), and interact with a coding agent that has full shell access to the host machine.
+Bobbit wraps [pi-coding-agent](https://github.com/anthropics/anthropic-quickstarts/tree/main/pi-coding-agent) in a WebSocket gateway with a browser UI built on Lit. You start the server, open the URL (or scan a QR code on your phone), and interact with a coding agent that has full shell access to the host machine.
 
 ## How it works
 
@@ -468,7 +468,7 @@ By default, Bobbit binds to `localhost` for local-only access (HTTP). Pass `--no
 
 In production (`npm start`), the gateway serves the bundled UI directly on `:3001`.
 
-**deSEC dynamic DNS**: On startup, the gateway updates a deSEC A record so a custom domain (e.g. `bobbit.dedyn.io`) resolves to the current mesh IP. Config stored in `.bobbit/state/desec.json`. Skipped for loopback addresses to avoid clobbering the record during tests.
+**deSEC dynamic DNS**: On startup, the gateway updates a deSEC A record so a custom domain (e.g. `yourname.dedyn.io`) resolves to the current mesh IP. Config stored in `.bobbit/state/desec.json`. Skipped for loopback addresses to avoid clobbering the record during tests.
 
 **TLS** is on by default for non-loopback addresses; disabled for localhost to avoid self-signed certificate warnings. Pass `--tls` to force TLS on localhost. Certs are generated via mkcert (local CA) or openssl fallback. The cert covers the current host IP + localhost and regenerates automatically if the IP changes. Vite reuses the same cert.
 

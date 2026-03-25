@@ -22,7 +22,7 @@ docs: |
   find("*.yaml", "tools")
   find("**/*.spec.ts", "src/server")
   find("*.md")  # search working directory
-  find("**/*.test.ts", "C:/Users/jsubr/w/bobbit/tests")
+  find("**/*.test.ts", "C:/Users/you/project/tests")
   ```
 
   Examples — WRONG (backslashes):

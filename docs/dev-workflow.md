@@ -150,7 +150,7 @@ Bobbit is designed for **remote access over a NordVPN mesh network**. The user r
 ```
 Browser (ProArt / phone / etc.)
   │
-  │  https://bobbit.dedyn.io:5173   ← user-facing URL
+  │  https://yourname.dedyn.io:5173   ← user-facing URL
   │
   ▼
 Vite dev server (:5173)             ← serves UI with HMR, HTTPS using gateway cert
@@ -169,17 +169,17 @@ Both the gateway and Vite auto-detect the **NordLynx** (NordVPN mesh) interface 
 - **Gateway**: exits with an error if NordLynx isn't found, unless you pass `--host <addr>`
 - **Vite**: falls back to `localhost` with a warning, or uses `VITE_HOST` env var
 
-The detected mesh IP (e.g. `100.123.227.233`) is what other mesh devices use to reach the server.
+The detected mesh IP (e.g. `<mesh-ip>`) is what other mesh devices use to reach the server.
 
 ### deSEC dynamic DNS
 
-On startup, the gateway updates a **deSEC** (dedyn.io) DNS A record so that `bobbit.dedyn.io` points to the current mesh IP. Config lives at `.bobbit/state/desec.json`:
+On startup, the gateway updates a **deSEC** (dedyn.io) DNS A record so that `yourname.dedyn.io` points to the current mesh IP. Config lives at `.bobbit/state/desec.json`:
 
 ```json
-{ "domain": "bobbit.dedyn.io", "token": "<deSEC API token>" }
+{ "domain": "yourname.dedyn.io", "token": "<deSEC API token>" }
 ```
 
-This means the user can always access `https://bobbit.dedyn.io:5173` (dev) or `https://bobbit.dedyn.io:3001` (prod) without memorizing mesh IPs, even when the IP changes across NordVPN reconnects.
+This means the user can always access `https://yourname.dedyn.io:5173` (dev) or `https://yourname.dedyn.io:3001` (prod) without memorizing mesh IPs, even when the IP changes across NordVPN reconnects.
 
 **Important**: The deSEC update is skipped for loopback addresses (`127.0.0.1`, `::1`, `localhost`) to prevent E2E tests or local-only runs from clobbering the DNS record. If DNS points to `127.0.0.1`, a prior server start with `--host 127.0.0.1` likely caused it — restart the server normally (without `--host`) to push the correct mesh IP.
 
