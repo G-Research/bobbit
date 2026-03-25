@@ -39,10 +39,18 @@ function resetRebindState(): void {
 	browserReservedWarning = false;
 }
 
+let _previousHash: string | null = null;
+
 export function toggleSettings(): void {
 	if (getRouteFromHash().view === "settings") {
-		setHashRoute("landing", undefined, true);
+		const hash = _previousHash || "#/";
+		_previousHash = null;
+		if (window.location.hash !== hash) {
+			history.replaceState({}, "", hash);
+			window.dispatchEvent(new HashChangeEvent("hashchange"));
+		}
 	} else {
+		_previousHash = window.location.hash || "#/";
 		setHashRoute("settings");
 	}
 }
@@ -302,7 +310,7 @@ export function renderSettingsPage() {
 			<div class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border">
 				<button
 					class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
-					@click=${() => { resetRebindState(); cleanupListener(); setHashRoute("landing"); }}
+					@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
 					title="Back"
 				>${icon(ArrowLeft, "sm")}</button>
 				<h1 class="text-lg font-semibold">Settings</h1>
