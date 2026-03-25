@@ -62,6 +62,8 @@ export interface SessionInfo {
 	staffId?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory?: string;
+	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
+	nonInteractive?: boolean;
 	/** Personality names */
 	personalities?: string[];
 	/** Allowed tools for this session */
@@ -1069,6 +1071,7 @@ export class SessionManager {
 			taskId: session.taskId,
 			staffId: session.staffId,
 			accessory: session.accessory,
+			nonInteractive: session.nonInteractive,
 			preview: session.preview,
 			personalities: session.personalities,
 		});
@@ -1099,6 +1102,7 @@ export class SessionManager {
 		taskId?: string;
 		staffId?: string;
 		accessory?: string;
+		nonInteractive?: boolean;
 		preview?: boolean;
 		personalities?: string[];
 	}> {
@@ -1124,6 +1128,7 @@ export class SessionManager {
 			taskId: s.taskId,
 			staffId: s.staffId,
 			accessory: s.accessory,
+			nonInteractive: s.nonInteractive,
 			preview: s.preview,
 			personalities: s.personalities,
 		}));
@@ -1155,13 +1160,14 @@ export class SessionManager {
 	}
 
 	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory) and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string }): boolean {
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (updates.role !== undefined) session.role = updates.role;
 		if (updates.teamGoalId !== undefined) session.teamGoalId = updates.teamGoalId;
 		if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
 		if (updates.accessory !== undefined) session.accessory = updates.accessory;
+		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
 		this.store.update(id, updates);
 		return true;
 	}
