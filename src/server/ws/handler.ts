@@ -274,6 +274,13 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Title generation failed: ${err}`, code: "TITLE_GEN_ERROR" });
 					});
 					break;
+				case "summarize_goal_title": {
+					const goalTitle = typeof msg.goalTitle === "string" ? msg.goalTitle.trim() : "";
+					if (goalTitle.length >= 3) {
+						sessionManager.generateGoalTitle(sessionId, goalTitle);
+					}
+					break;
+				}
 				case "task_create": {
 					const task = sessionManager.taskManager.createTask(
 						msg.goalId,

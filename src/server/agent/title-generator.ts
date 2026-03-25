@@ -290,3 +290,155 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	// the gateway may not host the default Haiku model ID.
 	return generateViaAnthropic(preview);
 }
+
+// ── Goal title summarization ──────────────────────────────────────────
+
+const GOAL_SUMMARY_SYSTEM = "Summarize this goal title in exactly 3 words. Output ONLY the 3-word summary. No quotes, no markdown, no explanation. No emojis.";
+
+/**
+ * Generate a 3-word summary of a goal title via the AI Gateway.
+ */
+async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, goalTitle: string): Promise<string | null> {
+	const baseUrl = aigwUrl.replace(/\/+$/, "");
+	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId);
+	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
+
+	const body = {
+		model: resolvedModel,
+		max_tokens: 20,
+		messages: [
+			{ role: "system", content: GOAL_SUMMARY_SYSTEM },
+			{ role: "user", content: `Goal title:\n\n---\n${goalTitle}\n---\n\n3-word summary:` },
+		],
+	};
+
+	console.log(`[title-gen] Requesting goal summary via gateway model "${resolvedModel}"…`);
+
+	try {
+		const response = await fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+
+		if (!response.ok) {
+			const errText = await response.text();
+			console.error(`[title-gen] Gateway error ${response.status}: ${errText.slice(0, 200)}`);
+			return null;
+		}
+
+		const data = await response.json() as any;
+		const text = data.choices?.[0]?.message?.content?.trim();
+		if (!text) return null;
+
+		const title = cleanTitle(text);
+		console.log(`[title-gen] Generated goal summary: "${title}"`);
+		return title || null;
+	} catch (err) {
+		console.error("[title-gen] Gateway goal summary request failed:", err);
+		return null;
+	}
+}
+
+/**
+ * Generate a 3-word summary of a goal title via direct Anthropic API.
+ */
+async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<string | null> {
+	let auth = loadAuth();
+	if (!auth) return null;
+
+	if (auth.type === "oauth" && auth.expires && Date.now() > auth.expires) {
+		const newToken = await refreshOAuthToken();
+		if (newToken) {
+			auth = { ...auth, access: newToken };
+		} else {
+			console.error("[title-gen] Token expired and refresh failed");
+			return null;
+		}
+	}
+
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+		"anthropic-version": "2023-06-01",
+	};
+
+	if (auth.type === "oauth") {
+		headers["Authorization"] = `Bearer ${auth.access}`;
+		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
+	} else {
+		headers["x-api-key"] = auth.access;
+	}
+
+	const systemText = auth.type === "oauth"
+		? `You are Claude Code, Anthropic's official CLI for Claude. ${GOAL_SUMMARY_SYSTEM}`
+		: GOAL_SUMMARY_SYSTEM;
+
+	const body = {
+		model: DEFAULT_TITLE_MODEL,
+		max_tokens: 12,
+		system: auth.type === "oauth"
+			? [{ type: "text", text: systemText }]
+			: systemText,
+		messages: [
+			{ role: "user", content: `Goal title:\n\n---\n${goalTitle}\n---\n\n3-word summary:` },
+		],
+	};
+
+	console.log(`[title-gen] Requesting goal summary via ${DEFAULT_TITLE_MODEL}…`);
+
+	try {
+		const response = await fetch(ANTHROPIC_API_URL, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+		});
+
+		if (!response.ok) {
+			const errText = await response.text();
+			console.error(`[title-gen] API error ${response.status}: ${errText}`);
+			return null;
+		}
+
+		const data = (await response.json()) as {
+			content: Array<{ type: string; text?: string }>;
+		};
+
+		const text = data.content
+			?.filter((c) => c.type === "text")
+			.map((c) => c.text || "")
+			.join("")
+			.trim();
+
+		if (!text) return null;
+
+		const title = cleanTitle(text);
+		console.log(`[title-gen] Generated goal summary: "${title}"`);
+		return title || null;
+	} catch (err) {
+		console.error("[title-gen] Goal summary failed:", err);
+		return null;
+	}
+}
+
+/**
+ * Generate a 3-word summary of a goal title for sidebar display.
+ * Returns the cleaned summary (without "New goal: " prefix — caller adds that).
+ * Returns null if generation fails.
+ */
+export async function generateGoalSummaryTitle(goalTitle: string, options?: TitleGenOptions): Promise<string | null> {
+	if (!goalTitle.trim()) {
+		console.error("[title-gen] No goal title to summarise");
+		return null;
+	}
+
+	if (options?.namingModel && options.aigwUrl) {
+		const slash = options.namingModel.indexOf("/");
+		if (slash > 0 && slash < options.namingModel.length - 1) {
+			const modelId = options.namingModel.slice(slash + 1);
+			return generateGoalSummaryViaGateway(options.aigwUrl, modelId, goalTitle);
+		}
+		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
+	}
+
+	return generateGoalSummaryViaAnthropic(goalTitle);
+}

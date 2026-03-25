@@ -252,6 +252,17 @@ function goalPreviewPanel() {
 							state.previewTitleEdited = true;
 							const sid = activeSessionId();
 							if (sid) saveGoalDraft(sid);
+							// Debounced goal title summarization (1s)
+							if ((state as any)._goalTitleDebounceTimer) {
+								clearTimeout((state as any)._goalTitleDebounceTimer);
+							}
+							const trimmedTitle = (e.target as HTMLInputElement).value.trim();
+							if (trimmedTitle.length >= 3 && state.remoteAgent) {
+								(state as any)._goalTitleDebounceTimer = setTimeout(() => {
+									state.remoteAgent?.summarizeGoalTitle(trimmedTitle);
+									(state as any)._goalTitleDebounceTimer = null;
+								}, 1000);
+							}
 						},
 					})}
 				</div>
