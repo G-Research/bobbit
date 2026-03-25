@@ -72,13 +72,15 @@ function dynamicGatewayProxy(): Plugin {
 				const target = new URL(gateway);
 				const transport = target.protocol === "https:" ? https : http;
 
-				// Filter out HTTP/2 pseudo-headers (e.g. :method, :path) —
-				// invalid in HTTP/1.1 proxy requests
+				// Filter HTTP/2 pseudo-headers from request (invalid in HTTP/1.1)
 				const fwdHeaders: Record<string, string | string[] | undefined> = {};
 				for (const [k, v] of Object.entries(req.headers)) {
 					if (!k.startsWith(":")) fwdHeaders[k] = v;
 				}
 				fwdHeaders.host = target.host;
+
+				// Headers forbidden in HTTP/2 responses (RFC 9113 §8.2.2)
+				const h2Forbidden = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection"]);
 
 				const proxyReq = transport.request(
 					{
@@ -90,7 +92,12 @@ function dynamicGatewayProxy(): Plugin {
 						rejectUnauthorized: false, // trust self-signed cert
 					},
 					(proxyRes) => {
-						res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+						// Strip HTTP/1.1 connection headers before writing to HTTP/2 client
+						const safeHeaders: Record<string, string | string[] | undefined> = {};
+						for (const [k, v] of Object.entries(proxyRes.headers)) {
+							if (!h2Forbidden.has(k.toLowerCase())) safeHeaders[k] = v;
+						}
+						res.writeHead(proxyRes.statusCode || 502, safeHeaders);
 						proxyRes.pipe(res);
 					},
 				);

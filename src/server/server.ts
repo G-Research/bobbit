@@ -1860,7 +1860,13 @@ async function handleApiRoute(
 			}
 
 			const isOnPrimary = branch === primaryBranch;
-			const statusRaw = (await execGitSafe('git status --porcelain', cwd)).replace(/\s+$/, '');
+			// Don't use execGit here — its trim() strips the leading space from
+			// porcelain status lines like " M file.txt", corrupting the first filename.
+			let statusRaw = "";
+			try {
+				const { stdout } = await execAsync('git status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
+				statusRaw = stdout.replace(/\s+$/, '');
+			} catch {}
 			const statusLines = statusRaw ? statusRaw.split("\n") : [];
 			const status = statusLines.map(line => {
 				const l = line.endsWith("\r") ? line.slice(0, -1) : line;
