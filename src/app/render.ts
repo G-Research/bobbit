@@ -1660,7 +1660,7 @@ export function doRenderApp(): void {
 			title: "Settings",
 		});
 		if (connected && state.remoteAgent) {
-			return html`<div class="flex items-center gap-1 px-2">${settingsBtn}</div>`;
+			return html``;
 		}
 		return html`
 			<div class="flex items-center gap-1 px-2">
