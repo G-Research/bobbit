@@ -250,6 +250,32 @@ let _draftTimer: ReturnType<typeof setTimeout> | null = null;
 let _draftAbort: AbortController | null = null;
 let _draftListenersInstalled = false;
 
+/** Immediately persist the given draft value (or delete if empty). */
+function _flushDraft(rawVal?: string): void {
+	if (!_draftSessionId) return;
+	if (_draftAbort) _draftAbort.abort();
+	// If no value provided, read from the editor
+	const val: string = rawVal !== undefined ? rawVal
+		: (document.querySelector("message-editor") as any)?.value ?? "";
+	if (val.trim()) {
+		_draftAbort = new AbortController();
+		const sid = _draftSessionId;
+		saveDraftToServer(sid, 'prompt', val, _draftAbort.signal)
+			.finally(() => { if (_draftAbort) _draftAbort = null; });
+	} else {
+		deleteDraftFromServer(_draftSessionId, 'prompt');
+	}
+}
+
+/** Flush any pending draft save immediately (e.g. before HMR reload). */
+export function flushPendingDraft(): void {
+	if (_draftTimer) {
+		clearTimeout(_draftTimer);
+		_draftTimer = null;
+	}
+	_flushDraft();
+}
+
 function _teardownDraftHandlers(): void {
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
 	if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
@@ -291,17 +317,8 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 			if (_draftTimer) clearTimeout(_draftTimer);
 			_draftTimer = setTimeout(() => {
 				_draftTimer = null;
-				if (!_draftSessionId) return;
-				if (_draftAbort) _draftAbort.abort();
-				if (val.trim()) {
-					_draftAbort = new AbortController();
-					const sid = _draftSessionId;
-					saveDraftToServer(sid, 'prompt', val, _draftAbort.signal)
-						.finally(() => { if (_draftAbort) _draftAbort = null; });
-				} else {
-					deleteDraftFromServer(_draftSessionId, 'prompt');
-				}
-			}, 500);
+				_flushDraft(val);
+			}, 100);
 		});
 
 		// Clear draft on send (custom composed event from MessageEditor)

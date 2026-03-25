@@ -524,5 +524,7 @@ if ('serviceWorker' in navigator) {
 if (import.meta.hot) {
 	import.meta.hot.on('vite:beforeFullReload', () => {
 		sessionStorage.setItem('bobbit-hot-reload', '1');
+		// Flush any pending draft so the message editor content survives the reload
+		import("./session-manager.js").then(m => m.flushPendingDraft());
 	});
 }
