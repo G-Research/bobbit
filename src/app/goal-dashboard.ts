@@ -90,6 +90,16 @@ let goalCost: GoalCost | null = null;
 let costPollTimer: ReturnType<typeof setInterval> | null = null;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
 
+/** Live verification tracking */
+interface LiveVerification {
+	gateId: string;
+	signalId: string;
+	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; startedAt: number }>;
+	overallStatus: string;
+}
+let liveVerifications: Map<string, LiveVerification> = new Map();
+let liveVerifTimer: ReturnType<typeof setInterval> | null = null;
+
 /** Current dashboard tab */
 let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
 
@@ -106,6 +116,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	error = "";
 	renderApp();
 
+	document.addEventListener("gate-verification-event", handleLiveVerificationEvent);
 	startAgentPolling(goalId);
 	startTaskPolling(goalId);
 
@@ -191,6 +202,9 @@ export function clearDashboardState(): void {
 	stopGatePolling();
 	stopCostPolling();
 	stopGitStatusPolling();
+	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
+	liveVerifications = new Map();
+	stopLiveVerifTimer();
 }
 
 /**
@@ -292,6 +306,70 @@ function startGatePolling(goalId: string): void {
 
 function stopGatePolling(): void {
 	if (gatePollTimer) { clearInterval(gatePollTimer); gatePollTimer = null; }
+}
+
+// ── Live verification event handling ──
+
+function handleLiveVerificationEvent(e: Event) {
+	const detail = (e as CustomEvent).detail;
+	if (!detail || detail.goalId !== currentGoalId) return;
+
+	const key = `${detail.gateId}:${detail.signalId}`;
+
+	switch (detail.type) {
+		case "gate_verification_started": {
+			const steps = (detail.steps || []).map((s: any) => ({
+				name: s.name, type: s.type, status: "running", startedAt: Date.now(),
+			}));
+			liveVerifications.set(key, { gateId: detail.gateId, signalId: detail.signalId, steps, overallStatus: "running" });
+			startLiveVerifTimer();
+			renderApp();
+			break;
+		}
+		case "gate_verification_step_complete": {
+			const entry = liveVerifications.get(key);
+			if (entry && entry.steps[detail.stepIndex]) {
+				entry.steps[detail.stepIndex] = {
+					...entry.steps[detail.stepIndex],
+					status: detail.status,
+					durationMs: detail.durationMs,
+					output: detail.output,
+				};
+				renderApp();
+			}
+			break;
+		}
+		case "gate_verification_complete": {
+			const entry = liveVerifications.get(key);
+			if (entry) {
+				entry.overallStatus = detail.status;
+				// Re-fetch gates to update signal history
+				if (currentGoalId) {
+					fetchGoalGates(currentGoalId).then(g => { gates = g; renderApp(); });
+				}
+			}
+			stopLiveVerifTimerIfDone();
+			renderApp();
+			break;
+		}
+	}
+}
+
+function startLiveVerifTimer() {
+	if (liveVerifTimer) return;
+	liveVerifTimer = setInterval(() => renderApp(), 1000);
+}
+
+function stopLiveVerifTimerIfDone() {
+	const hasRunning = [...liveVerifications.values()].some(v => v.overallStatus === "running");
+	if (!hasRunning && liveVerifTimer) {
+		clearInterval(liveVerifTimer);
+		liveVerifTimer = null;
+	}
+}
+
+function stopLiveVerifTimer() {
+	if (liveVerifTimer) { clearInterval(liveVerifTimer); liveVerifTimer = null; }
 }
 
 function startCostPolling(goalId: string): void {
@@ -1362,6 +1440,15 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const isExpanded = expandedSignalIds.has(signal.id);
 	const shortSha = signal.commitSha ? signal.commitSha.slice(0, 7) : "???????";
 
+	// Check for live verification data
+	const liveKey = `${signal.gateId}:${signal.id}`;
+	const liveEntry = liveVerifications.get(liveKey);
+	const isLive = liveEntry && vStatus === "running";
+
+	// Live header info
+	const livePassedCount = isLive ? liveEntry!.steps.filter(s => s.status === "passed").length : 0;
+	const liveTotalCount = isLive ? liveEntry!.steps.length : 0;
+
 	return html`
 		<div class="signal-entry signal-entry--${vStatus}">
 			<div class="signal-entry__header" @click=${() => toggleSignalExpand(signal.id)}>
@@ -1371,7 +1458,9 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 				</span>
 				<code class="signal-entry__commit">${shortSha}</code>
 				<span class="signal-entry__time">${formatRelativeTime(signal.timestamp)}</span>
-				${signal.verification.steps.length > 0 ? html`
+				${isLive && liveTotalCount > 0 ? html`
+					<span class="signal-steps-summary">${livePassedCount}/${liveTotalCount} checks</span>
+				` : signal.verification.steps.length > 0 ? html`
 					<span class="signal-steps-summary">
 						${signal.verification.steps.filter(s => s.passed).length}/${signal.verification.steps.length} checks
 					</span>
@@ -1380,20 +1469,22 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 			</div>
 			${isExpanded ? html`
 				<div class="signal-entry__body">
-					${signal.verification.steps.map(step => html`
-						<div class="verify-step verify-step--${step.passed ? "pass" : "fail"}">
-							<div class="verify-step__header">
-								<span class="verify-step__icon">${step.passed ? "\u2713" : "\u2717"}</span>
-								<span class="verify-step__name">${step.name}</span>
-								<span class="verify-step__type">${step.type}</span>
-								${step.expect ? html`<span class="verify-step__expect">expect: ${step.expect}</span>` : nothing}
-								<span class="verify-step__duration">${step.duration_ms}ms</span>
+					${isLive ? renderLiveVerificationSteps(liveEntry!) : html`
+						${signal.verification.steps.map(step => html`
+							<div class="verify-step verify-step--${step.passed ? "pass" : "fail"}">
+								<div class="verify-step__header">
+									<span class="verify-step__icon">${step.passed ? "\u2713" : "\u2717"}</span>
+									<span class="verify-step__name">${step.name}</span>
+									<span class="verify-step__type">${step.type}</span>
+									${step.expect ? html`<span class="verify-step__expect">expect: ${step.expect}</span>` : nothing}
+									<span class="verify-step__duration">${step.duration_ms}ms</span>
+								</div>
+								${step.output ? html`
+									<div class="verify-step__output">${step.output}</div>
+								` : nothing}
 							</div>
-							${step.output ? html`
-								<div class="verify-step__output">${step.output}</div>
-							` : nothing}
-						</div>
-					`)}
+						`)}
+					`}
 					${signal.metadata && Object.keys(signal.metadata).length > 0 ? html`
 						<div class="signal-metadata">
 							<span class="signal-metadata-label">Metadata:</span>
@@ -1406,6 +1497,30 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 			` : nothing}
 		</div>
 	`;
+}
+
+function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
+	if (entry.steps.length === 0) {
+		return html`<div class="verify-step"><div class="verify-step__header"><span class="verify-step__icon">\u23F3</span><span class="verify-step__name">Verification in progress\u2026</span></div></div>`;
+	}
+	return html`${entry.steps.map(step => {
+		const isRunning = step.status === "running";
+		const passed = step.status === "passed";
+		const elapsed = isRunning ? Math.max(0, Math.round((Date.now() - step.startedAt) / 1000)) : 0;
+		const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${String(elapsed % 60).padStart(2, "0")}s`;
+		const durStr = step.durationMs != null ? (step.durationMs < 1000 ? `${Math.round(step.durationMs)}ms` : `${(step.durationMs / 1000).toFixed(1)}s`) : "";
+		return html`
+			<div class="verify-step verify-step--${isRunning ? "running" : passed ? "pass" : "fail"}">
+				<div class="verify-step__header">
+					<span class="verify-step__icon">${isRunning ? "\u23F3" : passed ? "\u2713" : "\u2717"}</span>
+					<span class="verify-step__name">${step.name}</span>
+					<span class="verify-step__type">${step.type}</span>
+					<span class="verify-step__duration">${isRunning ? elapsedStr : durStr}</span>
+				</div>
+				${step.output ? html`<div class="verify-step__output">${step.output}</div>` : nothing}
+			</div>
+		`;
+	})}`;
 }
 
 // ============================================================================

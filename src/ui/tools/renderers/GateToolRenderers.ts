@@ -120,8 +120,37 @@ export class GateSignalRenderer implements ToolRenderer {
 			};
 		}
 
+		const { data } = getResult(result);
+		const signalId = data?.signal?.id || "";
+		const goalId2 = data?.signal?.goalId || data?.goalId || "";
+		const signalStatus = data?.signal?.status || "";
+
+		// Already completed — show static result
+		if (signalStatus === "passed" || signalStatus === "failed") {
+			return {
+				content: html`<div>
+					${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono text-xs">${gateId}</span> — ${signalStatus}`)}
+					<gate-verification-live
+						.goalId=${goalId2}
+						.gateId=${gateId}
+						.signalId=${signalId}
+						.finalStatus=${signalStatus}
+					></gate-verification-live>
+				</div>`,
+				isCustom: false,
+			};
+		}
+
+		// Running — show live verification component
 		return {
-			content: html`<div>${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono text-xs">${gateId}</span> — verification running`)}</div>`,
+			content: html`<div>
+				${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono text-xs">${gateId}</span>`)}
+				<gate-verification-live
+					.goalId=${goalId2}
+					.gateId=${gateId}
+					.signalId=${signalId}
+				></gate-verification-live>
+			</div>`,
 			isCustom: false,
 		};
 	}
