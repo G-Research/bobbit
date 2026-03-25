@@ -54,6 +54,8 @@ export interface SessionInfo {
 	role?: string;
 	/** The team goal ID this agent belongs to */
 	teamGoalId?: string;
+	/** Session ID of the team lead that spawned this agent */
+	teamLeadSessionId?: string;
 	/** Path to the git worktree for this session */
 	worktreePath?: string;
 	/** Task ID this session is working on */
@@ -586,6 +588,7 @@ export class SessionManager {
 			assistantType: ps.assistantType,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
+			teamLeadSessionId: ps.teamLeadSessionId,
 			worktreePath: ps.worktreePath,
 			taskId: ps.taskId,
 			staffId: ps.staffId,
@@ -1098,6 +1101,7 @@ export class SessionManager {
 		delegateOf?: string;
 		role?: string;
 		teamGoalId?: string;
+		teamLeadSessionId?: string;
 		worktreePath?: string;
 		taskId?: string;
 		staffId?: string;
@@ -1124,6 +1128,7 @@ export class SessionManager {
 			delegateOf: s.delegateOf,
 			role: s.role,
 			teamGoalId: s.teamGoalId,
+			teamLeadSessionId: s.teamLeadSessionId,
 			worktreePath: s.worktreePath,
 			taskId: s.taskId,
 			staffId: s.staffId,
@@ -1159,8 +1164,8 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory) and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean }): boolean {
+	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory, teamLeadSessionId) and persist. */
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (updates.role !== undefined) session.role = updates.role;
@@ -1168,6 +1173,7 @@ export class SessionManager {
 		if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
 		if (updates.accessory !== undefined) session.accessory = updates.accessory;
 		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
+		if (updates.teamLeadSessionId !== undefined) session.teamLeadSessionId = updates.teamLeadSessionId;
 		this.store.update(id, updates);
 		return true;
 	}
@@ -1610,6 +1616,7 @@ export class SessionManager {
 		delegateOf?: string;
 		role?: string;
 		teamGoalId?: string;
+		teamLeadSessionId?: string;
 		worktreePath?: string;
 		taskId?: string;
 		staffId?: string;
@@ -1633,6 +1640,7 @@ export class SessionManager {
 			delegateOf: ps.delegateOf,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
+			teamLeadSessionId: ps.teamLeadSessionId,
 			worktreePath: ps.worktreePath,
 			taskId: ps.taskId,
 			staffId: ps.staffId,

@@ -583,18 +583,31 @@ export function renderGoalGroup(goal: Goal) {
 								` : ""}
 							`;
 						}
-						// No live lead — group members under each archived lead
-						// (members placed under the last lead since we can't map them to specific leads)
+						// No live lead — group members under each archived lead.
+						// Members with teamLeadSessionId are placed under their specific lead;
+						// legacy members (no teamLeadSessionId) fall under the last lead.
+						const mappedMemberIds = new Set<string>();
+						const membersForLead = (leadId: string, isLast: boolean) => {
+							const matched = archivedMembers.filter(m => m.teamLeadSessionId === leadId);
+							matched.forEach(m => mappedMemberIds.add(m.id));
+							// Last lead also gets legacy members (no teamLeadSessionId) that weren't matched
+							if (isLast) {
+								const legacy = archivedMembers.filter(m => !m.teamLeadSessionId && !mappedMemberIds.has(m.id));
+								return [...matched, ...legacy];
+							}
+							return matched;
+						};
 						return html`
 							${archivedLeads.map((s, i) => {
 								const isLast = i === archivedLeads.length - 1;
+								const leadMembers = membersForLead(s.id, isLast);
 								const expanded = isArchivedParentExpanded(s.id);
 								return html`
-									${renderArchivedSessionRow(s, isLast && archivedMembers.length > 0)}
+									${renderArchivedSessionRow(s, leadMembers.length > 0)}
 									${renderArchivedDelegates(s.id)}
-									${isLast && expanded && archivedMembers.length > 0 ? html`
+									${expanded && leadMembers.length > 0 ? html`
 										<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-											${archivedMembers.map(m => html`
+											${leadMembers.map(m => html`
 												${renderArchivedSessionRow(m)}
 												${renderArchivedDelegates(m.id)}
 											`)}

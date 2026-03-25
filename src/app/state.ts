@@ -27,6 +27,8 @@ export interface GatewaySession {
 	role?: string;
 	/** The team goal this agent belongs to */
 	teamGoalId?: string;
+	/** Session ID of the team lead that spawned this agent */
+	teamLeadSessionId?: string;
 	/** Git worktree path */
 	worktreePath?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */

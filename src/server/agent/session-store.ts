@@ -24,6 +24,8 @@ export interface PersistedSession {
 	role?: string;
 	/** The team goal this agent belongs to */
 	teamGoalId?: string;
+	/** Session ID of the team lead that spawned this agent */
+	teamLeadSessionId?: string;
 	/** Path to the git worktree for this session */
 	worktreePath?: string;
 	/** Assistant type: "goal" | "role" | "tool" */
@@ -146,7 +148,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive">>): void {
+	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive">>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		Object.assign(existing, updates);

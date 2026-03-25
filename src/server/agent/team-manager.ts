@@ -632,6 +632,7 @@ export class TeamManager {
 				teamGoalId: goalId,
 				worktreePath: worktreeResult?.worktreePath,
 				accessory: roleAccessory,
+				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
 			});
 
 			// Track the agent
