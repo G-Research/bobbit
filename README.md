@@ -36,6 +36,8 @@ npm install -g bobbit
 bobbit
 ```
 
+For a step-by-step walkthrough of your first session, see the **[Getting Started guide](docs/getting-started.md)**.
+
 ### How it binds
 
 - **Default** (most users): Bobbit binds to `localhost:3001` with TLS disabled — plain HTTP, zero friction.
@@ -91,320 +93,29 @@ bobbit [options]
 --show-token        Print the current token and exit
 ```
 
-## REST API
-
-All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
-
-### Health & Info
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/health` | Health check + session count |
-| `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
-| `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
-
-### Sessions
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/sessions` | List all sessions (includes title, status, color, goal) |
-| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type) |
-| `GET` | `/api/sessions/:id` | Get session details |
-| `DELETE` | `/api/sessions/:id` | Terminate a session |
-| `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
-| `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
-| `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
-| `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
-| `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
-| `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
-
-### Goals
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/goals` | List all goals |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree? }`) |
-| `GET` | `/api/goals/:id` | Get a goal |
-| `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch) |
-| `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
-| `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
-| `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
-| `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal |
-
-### Goal Tasks
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/goals/:id/tasks` | List tasks for a goal |
-| `POST` | `/api/goals/:id/tasks` | Create a task (`{ title, type, spec?, parentTaskId?, dependsOn? }`) |
-
-### Goal Gates
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/goals/:id/gates` | List gates for a goal |
-| `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
-
-### Goal Team
-
-Routes accept both `/team/` and legacy `/swarm/` paths.
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/goals/:id/team` | Get team state for a goal |
-| `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
-| `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
-| `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`) |
-| `POST` | `/api/goals/:id/team/steer` | Steer a team agent mid-turn (`{ sessionId, message }`) |
-| `POST` | `/api/goals/:id/team/abort` | Force-abort a stuck team agent (`{ sessionId }`) |
-| `POST` | `/api/goals/:id/team/prompt` | Send prompt to a team agent, queued if busy (`{ sessionId, message }`) |
-| `GET` | `/api/goals/:id/team/agents` | List agents for a team goal |
-| `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead) |
-| `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
-
-### Tasks
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/tasks/:id` | Get a task |
-| `PUT` | `/api/tasks/:id` | Update a task (title, spec, state, assignedSessionId, dependsOn) |
-| `DELETE` | `/api/tasks/:id` | Delete a task |
-| `POST` | `/api/tasks/:id/assign` | Assign a task to a session (`{ sessionId }`) |
-| `POST` | `/api/tasks/:id/transition` | Transition task state (`{ state }`) |
-| `GET` | `/api/tasks/:id/cost` | Cost for the session assigned to a task |
-
-### Tools
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/tools` | List all available agent tools (with docs, renderer status) |
-| `GET` | `/api/tools/:name` | Get a single tool's full detail |
-| `PUT` | `/api/tools/:name` | Update tool metadata (`{ description?, group?, docs? }`) |
-
-### Roles
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/roles` | List all roles |
-| `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, allowedTools?, accessory? }`) |
-| `GET` | `/api/roles/:name` | Get a role |
-| `PUT` | `/api/roles/:name` | Update a role |
-| `DELETE` | `/api/roles/:name` | Delete a role |
-
-### Personalities
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/personalities` | List all personalities |
-| `POST` | `/api/personalities` | Create a personality (`{ name, label, description, promptFragment }`) |
-| `GET` | `/api/personalities/:name` | Get a personality |
-| `PUT` | `/api/personalities/:name` | Update a personality |
-| `DELETE` | `/api/personalities/:name` | Delete a personality |
-
-### Skills
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/skills` | List available skill definitions (id, name, description) |
-
-### Workflows
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/workflows` | List all workflow templates |
-| `GET` | `/api/workflows/:id` | Get full workflow detail |
-| `POST` | `/api/workflows` | Create a workflow |
-| `PUT` | `/api/workflows/:id` | Update a workflow |
-| `DELETE` | `/api/workflows/:id` | Delete (blocked if in-use by active goals) |
-| `POST` | `/api/workflows/:id/clone` | Deep-copy a workflow with a new ID |
-
-### OAuth
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/oauth/status` | OAuth provider status |
-| `POST` | `/api/oauth/start` | Begin an OAuth flow, returns auth URL |
-| `POST` | `/api/oauth/complete` | Exchange code for tokens (`{ flowId, code }`) |
-
-### Preview
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/preview` | Get preview HTML for a session (`?sessionId=`) |
-| `POST` | `/api/preview` | Set preview HTML for a session (`?sessionId=`, `{ html }`) |
-
-## WebSocket protocol
-
-Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type": "auth", "token": "<token>" }`. After `auth_ok`, the client can send commands and receives streaming events.
-
-### Client → Server
-
-| Type | Fields | Description |
-|---|---|---|
-| `auth` | `token` | Authenticate the connection |
-| `prompt` | `text`, `images?`, `attachments?` | Send a user prompt |
-| `steer` | `text` | Interrupt the agent mid-turn with guidance |
-| `follow_up` | `text` | Send a follow-up message |
-| `steer_queued` | `messageId` | Promote a queued message to steered (priority) |
-| `remove_queued` | `messageId` | Remove a message from the queue |
-| `abort` | — | Abort the current agent turn |
-| `retry` | — | Retry the last failed turn |
-| `set_model` | `provider`, `modelId` | Switch the AI model |
-| `compact` | — | Trigger context compaction |
-| `get_state` | — | Request current agent state |
-| `get_messages` | — | Request full message history |
-| `set_title` | `title` | Set session title |
-| `generate_title` | — | Auto-generate title from conversation |
-| `ping` | — | Keepalive ping |
-| `invoke_skill` | `skillId`, `context?` | Invoke an isolated skill sub-agent |
-| `task_create` | `goalId`, `title`, `taskType`, `parentTaskId?`, `spec?`, `dependsOn?` | Create a task |
-| `task_update` | `taskId`, `updates` | Update a task (title, spec, state, assignment, deps) |
-| `task_delete` | `taskId` | Delete a task |
-
-### Server → Client
-
-| Type | Key Fields | Description |
-|---|---|---|
-| `auth_ok` | — | Authentication succeeded |
-| `auth_failed` | — | Authentication failed |
-| `state` | `data` | Current agent state snapshot |
-| `messages` | `data` | Full message history array |
-| `event` | `data` | Streaming agent event (message_start, content_delta, tool calls, etc.) |
-| `session_status` | `status` | Session status change (idle, streaming, etc.) |
-| `session_title` | `sessionId`, `title` | Title changed |
-| `client_joined` | `clientId` | Another client connected |
-| `client_left` | `clientId` | A client disconnected |
-| `error` | `message`, `code` | Error message |
-| `pong` | — | Keepalive response |
-| `skill_started` | `skillId` | Skill execution began |
-| `skill_completed` | `skillId`, `result` | Skill produced output |
-| `skill_failed` | `skillId`, `error` | Skill execution failed |
-| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Token usage and cost update |
-| `queue_update` | `sessionId`, `queue` | Prompt queue changed |
-| `task_changed` | `task` | A task was created, updated, or deleted |
-| `tasks_list` | `tasks` | Full task list for a goal |
-
 ## Features
 
-### Sessions
+- **Sessions** — Each session is a running agent with its own conversation, persistence, and multi-device support. See [Features](#sessions-goals--more) below.
+- **Goals & Tasks** — Track larger work items with state, specs, and task boards. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+- **Teams** — Coordinate multiple agents working together on a goal with roles (coder, reviewer, tester).
+- **Workflows & Gates** — Define quality stages (design → implement → test → review) with enforced ordering. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+- **Roles & Personalities** — Customise agent behaviour, tool access, and communication style.
+- **Skills** — Reusable templates for isolated sub-agents (code review, test reports).
+- **Cost Tracking** — Per-session token usage and cost, aggregated to goal and task level.
+- **REST API** — Full programmatic access. See [docs/rest-api.md](docs/rest-api.md).
+- **WebSocket Protocol** — Real-time streaming events. See [docs/websocket-protocol.md](docs/websocket-protocol.md).
+- **Security** — Token auth, TLS, rate limiting, PKCE OAuth. See [docs/security.md](docs/security.md).
+- **Networking** — Mesh VPN, dynamic DNS, QR codes, multi-device. See [docs/networking.md](docs/networking.md).
 
-Each session is a running `pi-coding-agent` child process with its own conversation history.
+### Sessions, Goals & More
 
-- **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `.bobbit/state/sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. If an agent was mid-turn when the server died, it is automatically re-prompted.
-- **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
-- **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
-- **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session.
+Each session is a running `pi-coding-agent` child process with its own conversation history. Session metadata persists to disk and survives server restarts. Multiple browser tabs/devices can connect to the same session.
 
-### Goals
+Goals are a task-tracking layer on top of sessions — with title, spec, working directory, state, optional git worktrees, and optional workflows for quality enforcement.
 
-Goals are a task-tracking layer on top of sessions. A goal has a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`).
+Teams coordinate multiple agent sessions on a goal, with a team lead that spawns role agents (coder, reviewer, tester). See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) for the full architecture.
 
-- **Goal assistant**: Sessions created with `assistantType: "goal"` get a special prompt that helps users define clear goals. The assistant outputs structured `<goal_proposal>` blocks parsed by the browser client.
-- **Auto-transition**: Goals move from `todo` to `in-progress` when their first session starts.
-- **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work.
-- **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) for the full architecture.
-
-### Teams
-
-A team is a group of agent sessions working together on a goal, coordinated by a team lead.
-
-- **Team lead**: A special session created when the team starts. Gets a system prompt with team orchestration tools (`team_spawn`, `team_list`, `team_dismiss`, `team_complete`).
-- **Role agents**: Spawned by the team lead with a specific role (coder, reviewer, tester, or custom). Each gets its own git worktree and role-specific system prompt with restricted tool access.
-- **Lifecycle**: Start → spawn role agents → agents work on tasks → complete (dismiss agents, keep lead) or teardown (dismiss all).
-
-### Tasks
-
-Tasks are work items within a goal, managed via REST API or WebSocket commands.
-
-- **State machine**: `todo` → `in-progress` → `complete` | `skipped` | `blocked`. Terminal states (`complete`, `skipped`) have no outgoing transitions.
-- **Assignment**: Tasks can be assigned to sessions. The team manager notifies the team lead when assigned tasks reach terminal or blocked states.
-- **Dependencies**: Tasks can declare dependencies on other tasks via `dependsOn`.
-
-### Roles
-
-Custom role definitions that control agent behaviour and tool access.
-
-- **Built-in tools**: `role-manager.ts` maintains `AVAILABLE_TOOLS` — the master list of agent tool names.
-- **Per-role configuration**: Each role has a name, label, prompt template, allowed tools list, accessory (for the mascot), and optional default traits.
-- **Storage**: Roles persist as YAML files under `.bobbit/config/roles/`.
-
-### Personalities
-
-Personality definitions that modify agent behaviour via prompt fragments.
-
-- Each personality has a name, label, description, and `promptFragment` that gets injected into the system prompt.
-- Sessions can have multiple personalities. Personalities can be set at creation time or updated via `PATCH /api/sessions/:id`.
-- Roles can define default personalities applied when no explicit personalities are provided.
-
-### Skills
-
-Skills are reusable templates for spawning isolated sub-agents that produce structured outputs.
-
-- **Isolation**: Sub-agents receive only skill instructions + explicit context + `AGENTS.md` — never the parent conversation.
-- **Built-in skills**: `correctness-review`, `security-review`, `design-review` (three code review perspectives), and `test-suite-report` (runs tests and produces a structured report).
-- **Invocation**: Via `invoke_skill` WebSocket command. Server broadcasts `skill_started`, then `skill_completed` or `skill_failed`.
-- **Definition sync**: Registered skills are exported to `.bobbit/state/skill-definitions.json` for agent-side tool extensions to discover.
-
-### Cost Tracking
-
-Per-session token usage and cost tracking, aggregated to goal and task level.
-
-- Tracks input tokens, output tokens, cache read/write tokens, and total cost.
-- Updated via `cost_update` WebSocket events broadcast to connected clients.
-- Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost`.
-
-### Prompt Queue
-
-Server-side queuing of user messages when the agent is busy.
-
-- Steered messages sort before non-steered (priority interrupt).
-- Queue auto-drains when the agent finishes a turn.
-- Client can promote queued messages to steered (`steer_queued`) or remove them (`remove_queued`).
-- Queue state broadcast to clients via `queue_update` events.
-
-See [docs/prompt-queue.md](docs/prompt-queue.md) for the full architecture.
-
-### Workflows
-
-Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Stored as YAML in `.bobbit/config/workflows/`. Snapshotted into goals at creation (frozen). See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
-
-### Assistant Registry
-
-A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles:
-
-- `goal` — Goal creation assistant
-- `role` — Role creation assistant
-- `tool` — Tool management assistant
-
-Sessions created with an `assistantType` get the corresponding system prompt automatically.
-
-### Compaction
-
-Context compaction reduces token usage by summarising the conversation.
-
-- **Manual**: User triggers via `compact` WebSocket command. Server calls `rpcClient.compact()` (120s timeout), then refreshes messages and state.
-- **Auto**: Triggered by the agent subprocess when context grows too large. Events flow through the event system and the UI refreshes automatically.
-
-### System Prompt Assembly
-
-Each session's system prompt is assembled from three layers:
-
-1. **Global** — `.bobbit/config/system-prompt.md` from the Bobbit project root
-2. **AGENTS.md** — From the session's working directory, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe)
-3. **Goal spec** — If the session belongs to a goal, the goal's spec is appended
-
-The assembled prompt is written to `.bobbit/state/session-prompts/{sessionId}.md` and cleaned up on session termination.
-
-### Reconnection
-
-`RemoteAgent` auto-reconnects on unexpected disconnects with exponential backoff (1s base, 30s max). On reconnect: re-authenticates, requests current messages and state, server replays the latest `tool_execution_update` per tool call ID from the `EventBuffer`.
-
-### Task Completion Notifications
-
-When the agent finishes a turn, the browser client notifies the user via:
-1. **Browser Notification API** — Shows session title and elapsed time
-2. **Title flash** — Alternates document title with "Done (Xm)" until tab regains focus
-3. **Audio beep** — Two-tone sine wave (880 Hz, 1046 Hz) via Web Audio API
+For the complete feature reference, see the [REST API](docs/rest-api.md) and [WebSocket Protocol](docs/websocket-protocol.md) docs.
 
 ## Dependencies
 
@@ -444,38 +155,6 @@ When the agent finishes a turn, the browser client notifies the user via:
 | `typescript` | TypeScript compiler |
 | `vite` | Frontend build tool and dev server |
 
-## Security model
-
-**This tool grants full shell access to the host machine.** The auth token is equivalent to an SSH key.
-
-- 256-bit cryptographically random token generated on first run, persisted at `.bobbit/state/token` with mode `0600`
-- All API routes and WebSocket connections require the token
-- Constant-time token comparison prevents timing attacks
-- IP-based rate limiting on failed auth attempts (automatic lockout)
-- 5-second auth timeout on WebSocket connections
-- Static file serving has directory traversal prevention (resolved path must start with static dir)
-- Gateway binds to NordLynx mesh IP if available, otherwise `localhost` — never `0.0.0.0` unless explicitly requested
-- TLS on by default for non-loopback addresses; disabled for localhost unless `--tls` is passed
-- OAuth PKCE flow for obtaining API credentials securely
-
-## Networking
-
-By default, Bobbit binds to `localhost` for local-only access (HTTP). Pass `--nord` to bind to the NordLynx interface's IPv4 address with HTTPS, enabling remote access from any device on the NordVPN meshnet.
-
-**Port topology in dev mode:**
-- **Vite** (`:5173`) — User-facing HTTPS, serves UI with HMR, proxies `/api/*` and `/ws/*` to the gateway
-- **Gateway** (`:3001`) — HTTPS, REST API, WebSocket sessions, agent subprocess management
-
-In production (`npm start`), the gateway serves the bundled UI directly on `:3001`.
-
-**deSEC dynamic DNS**: On startup, the gateway updates a deSEC A record so a custom domain (e.g. `bobbit.dedyn.io`) resolves to the current mesh IP. Config stored in `.bobbit/state/desec.json`. Skipped for loopback addresses to avoid clobbering the record during tests.
-
-**TLS** is on by default for non-loopback addresses; disabled for localhost to avoid self-signed certificate warnings. Pass `--tls` to force TLS on localhost. Certs are generated via mkcert (local CA) or openssl fallback. The cert covers the current host IP + localhost and regenerates automatically if the IP changes. Vite reuses the same cert.
-
-**QR code**: Encodes `window.location.origin` + auth token. Scannable from any device on the NordVPN mesh.
-
-See [docs/dev-workflow.md](docs/dev-workflow.md) for the full networking reference, troubleshooting, and local-only setup.
-
 ## Testing
 
 ```bash
@@ -484,30 +163,15 @@ npm test              # Unit tests (Playwright with file:// fixtures)
 npm run test:e2e      # E2E tests (auto-starts sandboxed gateway)
 ```
 
-**E2E tests** use Playwright's `webServer` config in `playwright-e2e.config.ts` to **automatically start a sandboxed gateway on port 3099**. No manual server setup needed. The test server runs with `BOBBIT_DIR` set to an isolated temp directory so all state files are fully separated from the dev server's `.bobbit/`.
-
-**Unit tests** use `file://` fixtures — plain HTML/JS files that test logic without a build step. See `tests/mobile-header.spec.ts` for the pattern.
-
-Pipe Playwright output through the test filter for concise results:
-```bash
-npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
-```
+See [AGENTS.md](AGENTS.md) for detailed testing instructions, test structure, and how to write new tests.
 
 ## Build structure
 
-```
-dist/
-├── server/         # tsc output (Node16 modules)
-│   ├── cli.js      # bin entry point
-│   ├── harness.js  # dev server wrapper
-│   └── ...         # all server modules
-└── ui/             # vite output (browser bundle)
-    └── index.html  # SPA entry
-```
+See [docs/build-structure.md](docs/build-structure.md) for the full build output layout and TypeScript config details.
 
-Two separate TypeScript configs:
-- `tsconfig.server.json` — Node16 module resolution, `src/server/` → `dist/server/`
-- `tsconfig.web.json` — Bundler resolution + DOM libs, `src/ui/` + `src/app/` (bundled by Vite, tsc only type-checks)
+## Contributing / Development
+
+See [docs/dev-workflow.md](docs/dev-workflow.md) for the full development workflow — running modes, making changes, and the restart harness. For agent-facing context (repo layout, common tasks, debugging), see [AGENTS.md](AGENTS.md).
 
 ## Bobbit mascot
 

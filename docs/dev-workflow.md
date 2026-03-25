@@ -242,5 +242,8 @@ E2E tests use `playwright-e2e.config.ts` (at the project root) which starts a sa
 
 ## Related docs
 
-- **[README.md](../README.md)** — Architecture overview, REST API reference, security model, CLI flags
+- **[README.md](../README.md)** — Architecture overview, quick start, CLI flags
+- **[REST API](rest-api.md)** — Full REST API reference
+- **[Security Model](security.md)** — Auth, TLS, and security details
+- **[Networking](networking.md)** — Bind addresses, TLS, deSEC, QR codes
 - **[AGENTS.md](../AGENTS.md)** — Agent context: repo layout, key concepts, common tasks, debugging tips
