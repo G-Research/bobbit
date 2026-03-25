@@ -106,6 +106,7 @@ export class VerificationHarness {
 			goalId: signal.goalId,
 			gateId: signal.gateId,
 			signalId: signal.id,
+			steps: steps.map(s => ({ name: s.name, type: s.type })),
 		});
 
 		try {
@@ -150,7 +151,19 @@ export class VerificationHarness {
 				steps.map(async (step, index) => {
 					const cached = cachedSteps.get(step.name);
 					if (cached) {
-						return { index, stepResult: { ...cached, output: `[cached from prior signal] ${cached.output}` } };
+						const cachedResult = { ...cached, output: `[cached from prior signal] ${cached.output}` };
+						this.broadcastFn(signal.goalId, {
+							type: "gate_verification_step_complete",
+							goalId: signal.goalId,
+							gateId: signal.gateId,
+							signalId: signal.id,
+							stepIndex: index,
+							stepName: step.name,
+							status: cachedResult.passed ? "passed" : "failed",
+							durationMs: cachedResult.duration_ms || 0,
+							output: cachedResult.output,
+						});
+						return { index, stepResult: cachedResult };
 					}
 
 					let result: { passed: boolean; output: string } = { passed: false, output: "No verification result." };
@@ -186,6 +199,17 @@ export class VerificationHarness {
 					}
 
 					const duration_ms = Date.now() - startTime;
+					this.broadcastFn(signal.goalId, {
+						type: "gate_verification_step_complete",
+						goalId: signal.goalId,
+						gateId: signal.gateId,
+						signalId: signal.id,
+						stepIndex: index,
+						stepName: step.name,
+						status: result.passed ? "passed" : "failed",
+						durationMs: duration_ms,
+						output: result.output || "",
+					});
 					return {
 						index,
 						stepResult: {

@@ -650,9 +650,15 @@ export class RemoteAgent {
 				break;
 			}
 
+			case "gate_verification_started":
+			case "gate_verification_step_complete":
+				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				break;
+
 			case "gate_verification_complete": {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
+				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
 				break;
 			}
 
