@@ -20,6 +20,7 @@ import {
 import { renderApp } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { gatewayFetch } from "./api.js";
+import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
 type SettingsTab = "shortcuts" | "palette" | "models";
 let activeTab: SettingsTab = "models";
@@ -596,52 +597,48 @@ function formatTokens(tokens: number): string {
 	return String(tokens);
 }
 
-/** Build a model option list for dropdowns. aigw models use "aigw/" prefix. */
-function getModelOptions(): Array<{ value: string; label: string }> {
-	return aigwModels.map(m => ({
-		value: `aigw/${m.id}`,
-		label: `${m.name}`,
-	}));
+/** Format a "provider/modelId" pref value for display. Shows just the model ID. */
+function formatModelPref(value: string): string {
+	if (!value) return "Auto (best available)";
+	const slash = value.indexOf("/");
+	return slash > 0 ? value.slice(slash + 1) : value;
 }
 
-function renderModelInput(label: string, hint: string, value: string, onChange: (v: string) => void) {
-	let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+function openModelPicker(currentValue: string, onChange: (v: string) => void) {
+	// Build a pseudo-Model from the current pref so the selector can highlight it
+	let currentModel = null;
+	if (currentValue) {
+		const slash = currentValue.indexOf("/");
+		if (slash > 0) {
+			currentModel = { provider: currentValue.slice(0, slash), id: currentValue.slice(slash + 1) } as any;
+		}
+	}
+	ModelSelector.open(currentModel, (model) => {
+		onChange(`${model.provider}/${model.id}`);
+	});
+}
+
+function renderModelPicker(label: string, hint: string, value: string, onChange: (v: string) => void) {
+	const display = formatModelPref(value);
 	return html`
 		<div class="flex flex-col gap-1.5">
 			<label class="text-sm font-medium text-foreground">${label}</label>
-			<input
-				type="text"
-				class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-					focus:outline-none focus:ring-2 focus:ring-ring"
-				placeholder="provider/model-id"
-				.value=${value}
-				@input=${(e: Event) => {
-					const v = (e.target as HTMLInputElement).value;
-					clearTimeout(debounceTimer);
-					debounceTimer = setTimeout(() => onChange(v), 600);
-				}}
-			/>
-			<p class="text-xs text-muted-foreground">${hint}</p>
-		</div>
-	`;
-}
-
-function renderModelSelect(label: string, hint: string, value: string, onChange: (v: string) => void) {
-	const options = getModelOptions();
-	return html`
-		<div class="flex flex-col gap-1.5">
-			<label class="text-sm font-medium text-foreground">${label}</label>
-			<select
-				class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-					focus:outline-none focus:ring-2 focus:ring-ring"
-				.value=${value}
-				@change=${(e: Event) => onChange((e.target as HTMLSelectElement).value)}
-			>
-				<option value="">Auto (best available)</option>
-				${options.map(o => html`
-					<option value=${o.value} ?selected=${value === o.value}>${o.label}</option>
-				`)}
-			</select>
+			<div class="flex gap-2">
+				<button
+					class="flex-1 px-3 py-2 text-left rounded-md border border-input bg-background text-sm
+						hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
+						${value ? "text-foreground" : "text-muted-foreground"}"
+					@click=${() => openModelPicker(value, onChange)}
+				>${display}</button>
+				${value ? html`
+					<button
+						class="px-2 py-2 rounded-md border border-input bg-background text-muted-foreground
+							hover:bg-secondary hover:text-foreground transition-colors"
+						title="Reset to auto"
+						@click=${() => onChange("")}
+					>${icon(X, "sm")}</button>
+				` : ""}
+			</div>
 			<p class="text-xs text-muted-foreground">${hint}</p>
 		</div>
 	`;
@@ -659,34 +656,18 @@ function renderModelsTab() {
 			<!-- Default model preferences -->
 			<div class="flex flex-col gap-4">
 				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
-				${hasModels
-					? html`
-						${renderModelSelect(
-							"Session Model",
-							"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
-							prefSessionModel,
-							setSessionModel,
-						)}
-						${renderModelSelect(
-							"Naming Model",
-							"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
-							prefNamingModel,
-							setNamingModel,
-						)}`
-					: html`
-						${renderModelInput(
-							"Session Model",
-							"Model for new sessions, e.g. anthropic/claude-sonnet-4-6. Leave blank for the built-in default.",
-							prefSessionModel,
-							setSessionModel,
-						)}
-						${renderModelInput(
-							"Naming Model",
-							"Model for auto-titling, e.g. anthropic/claude-haiku-4-5. Leave blank for the built-in default (Claude Haiku via Anthropic API).",
-							prefNamingModel,
-							setNamingModel,
-						)}`
-				}
+				${renderModelPicker(
+					"Session Model",
+					"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
+					prefSessionModel,
+					setSessionModel,
+				)}
+				${renderModelPicker(
+					"Naming Model",
+					"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
+					prefNamingModel,
+					setNamingModel,
+				)}
 			</div>
 
 			<!-- AI Gateway section -->
