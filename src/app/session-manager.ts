@@ -214,10 +214,12 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		throw new Error(`Gateway error: ${healthRes.status}`);
 	}
 
-	// Skip OAuth in localhost mode — only local processes can connect,
-	// and on air-gapped systems OAuth endpoints are unreachable anyway.
+	// Skip OAuth when running on localhost or when an AI Gateway is configured.
+	// Localhost: only local processes can connect, no cloud auth needed.
+	// AI Gateway: the gateway handles LLM auth; Anthropic OAuth endpoints
+	// are likely unreachable on air-gapped networks anyway.
 	const healthData = await healthRes.json();
-	if (!healthData.localhost) {
+	if (!healthData.localhost && !healthData.aigw) {
 		const hasAuth = await checkOAuthStatus();
 		if (!hasAuth) {
 			const success = await openOAuthDialog();
