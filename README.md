@@ -1,8 +1,8 @@
 # Bobbit
 
-**Run AI coding agents on your machine. Orchestrate teams, oversee their work, and ship from any browser.**
+**Your AI dev team, running on your machine, controlled from your browser.**
 
-Bobbit gives you a browser-based command centre for AI coding agents with shell access to your dev machine. Run a single agent or spin up an entire workforce — team leads that break down goals, coders that implement in parallel, reviewers and testers that enforce quality. You watch every agent in real time, steer them mid-task, and stay in control of what ships.
+Bobbit is a command centre for AI coding agents. Spin up teams — leads that plan, coders that build in parallel, reviewers and testers that enforce quality — and point them at anything from a quick bug fix to a full-stack feature. Watch every agent work in real time, steer them mid-task, and stay in control of what ships.
 
 <!-- TODO: Add a demo GIF showing a full session — prompt → agent reading files → editing → running tests → done -->
 
