@@ -390,6 +390,7 @@ export class TeamManager {
 			{
 				rolePrompt: teamLeadPrompt,
 				env: { BOBBIT_GOAL_ID: goalId },
+				allowedTools: storedRole.allowedTools,
 			},
 		);
 
