@@ -477,12 +477,12 @@ export class VerificationHarness {
 				teamGoalId: goalId,
 				accessory: role.accessory || "magnifying-glass",
 				nonInteractive: true,
-			} as any); // cast to any — nonInteractive is being added by parallel coder
+			});
 
 			// Register in team store (if team manager available)
 			if (this.teamManager) {
 				try {
-					await (this.teamManager as any).registerReviewerSession(goalId, sessionId, step.name);
+					await this.teamManager.registerReviewerSession(goalId, sessionId, step.name);
 				} catch (err) {
 					// Non-fatal — session still works even if team registration fails
 					console.warn(`[verification] Failed to register reviewer session in team:`, err);
@@ -536,7 +536,7 @@ export class VerificationHarness {
 				} catch { /* ignore — session may already be terminated */ }
 				if (this.teamManager) {
 					try {
-						await (this.teamManager as any).unregisterReviewerSession(goalId, sessionId);
+						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
 					} catch { /* ignore */ }
 				}
 			}

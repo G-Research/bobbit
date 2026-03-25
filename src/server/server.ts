@@ -1509,7 +1509,7 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
-		if ((session as any).nonInteractive) {
+		if (session.nonInteractive) {
 			json({ error: "Cannot steer a non-interactive (automated review) session" }, 400);
 			return;
 		}
@@ -1576,7 +1576,7 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
-		if ((session as any).nonInteractive) {
+		if (session.nonInteractive) {
 			json({ error: "Cannot prompt a non-interactive (automated review) session" }, 400);
 			return;
 		}
