@@ -523,11 +523,19 @@ export function renderGoalGroup(goal: Goal) {
 	const renderTeamGroup = () => {
 		if (!teamLead) return goalSessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
+		// Archived members belonging to the live lead
+		const archivedForLiveLead = state.archivedSectionExpanded
+			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
+			: [];
 		return html`
-			${renderTeamLeadRow(teamLead, teamChildren.length, tlExpanded)}
+			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${teamChildren.map(renderSessionRow)}
+					${archivedForLiveLead.map(s => html`
+						${renderArchivedSessionRow(s)}
+						${renderArchivedDelegates(s.id)}
+					`)}
 				</div>
 			` : ""}
 			${nonTeamSessions.map(renderSessionRow)}
@@ -563,66 +571,34 @@ export function renderGoalGroup(goal: Goal) {
 						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
-						// If there's a live team lead, archived members collapse with it.
-						// Otherwise, members nest under the last archived lead.
-						if (teamLead) {
-							// Live lead present — archived members show/hide with live lead's toggle
-							const tlExpanded = isTeamLeadExpanded(teamLead.id);
+
+						// Map each member to its lead (live or archived) via teamLeadSessionId.
+						// All leads: live lead first (if any), then archived leads.
+						const allLeads = [...(teamLead ? [teamLead.id] : []), ...archivedLeads.map(s => s.id)];
+						const membersOf = (leadId: string) => archivedMembers.filter(m => m.teamLeadSessionId === leadId);
+						const mappedIds = new Set(archivedMembers.filter(m => m.teamLeadSessionId && allLeads.includes(m.teamLeadSessionId)).map(m => m.id));
+						const unmapped = archivedMembers.filter(m => !mappedIds.has(m.id));
+
+						// Render archived leads, each with their own members
+						const renderLeadWithMembers = (lead: GatewaySession, isLast: boolean) => {
+							const myMembers = [...membersOf(lead.id), ...(isLast ? unmapped : [])];
+							const expanded = isArchivedParentExpanded(lead.id);
 							return html`
-								${archivedLeads.map(s => html`
-									${renderArchivedSessionRow(s)}
-									${renderArchivedDelegates(s.id)}
-								`)}
-								${tlExpanded && archivedMembers.length > 0 ? html`
+								${renderArchivedSessionRow(lead, myMembers.length > 0)}
+								${renderArchivedDelegates(lead.id)}
+								${expanded && myMembers.length > 0 ? html`
 									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-										${archivedMembers.map(s => html`
-											${renderArchivedSessionRow(s)}
-											${renderArchivedDelegates(s.id)}
+										${myMembers.map(m => html`
+											${renderArchivedSessionRow(m)}
+											${renderArchivedDelegates(m.id)}
 										`)}
 									</div>
 								` : ""}
 							`;
-						}
-						// No live lead — group members under each archived lead.
-						// Members with teamLeadSessionId are placed under their specific lead;
-						// legacy members (no teamLeadSessionId) fall under the last lead.
-						const mappedMemberIds = new Set<string>();
-						const membersForLead = (leadId: string, isLast: boolean) => {
-							const matched = archivedMembers.filter(m => m.teamLeadSessionId === leadId);
-							matched.forEach(m => mappedMemberIds.add(m.id));
-							// Last lead also gets legacy members (no teamLeadSessionId) that weren't matched
-							if (isLast) {
-								const legacy = archivedMembers.filter(m => !m.teamLeadSessionId && !mappedMemberIds.has(m.id));
-								return [...matched, ...legacy];
-							}
-							return matched;
 						};
+
 						return html`
-							${archivedLeads.map((s, i) => {
-								const isLast = i === archivedLeads.length - 1;
-								const leadMembers = membersForLead(s.id, isLast);
-								const expanded = isArchivedParentExpanded(s.id);
-								return html`
-									${renderArchivedSessionRow(s, leadMembers.length > 0)}
-									${renderArchivedDelegates(s.id)}
-									${expanded && leadMembers.length > 0 ? html`
-										<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-											${leadMembers.map(m => html`
-												${renderArchivedSessionRow(m)}
-												${renderArchivedDelegates(m.id)}
-											`)}
-										</div>
-									` : ""}
-								`;
-							})}
-							${archivedLeads.length === 0 && archivedMembers.length > 0 ? html`
-								<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-									${archivedMembers.map(s => html`
-										${renderArchivedSessionRow(s)}
-										${renderArchivedDelegates(s.id)}
-									`)}
-								</div>
-							` : ""}
+							${archivedLeads.map((s, i) => renderLeadWithMembers(s, i === archivedLeads.length - 1 && !teamLead))}
 						`;
 					})() : ""}
 				</div>
