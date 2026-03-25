@@ -31,6 +31,10 @@ export interface GatewaySession {
 	worktreePath?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory?: string;
+	/** Whether this session is archived (soft-deleted) */
+	archived?: boolean;
+	/** Epoch ms when this session was archived */
+	archivedAt?: number;
 	/** If this session was created by a staff agent wake */
 	staffId?: string;
 	/** If this is a staff assistant session */
@@ -109,6 +113,10 @@ export const state = {
 
 	/** Whether the sidebar is collapsed */
 	sidebarCollapsed: localStorage.getItem("bobbit-sidebar-collapsed") === "true",
+	/** Whether to show archived sessions in the sidebar */
+	showArchived: localStorage.getItem("bobbit-show-archived") === "true",
+	/** Archived sessions (loaded on demand) */
+	archivedSessions: [] as GatewaySession[],
 
 	/** Active goal proposal from a goal-assistant session */
 	activeGoalProposal: null as { title: string; spec: string; cwd?: string; workflow?: string } | null,
