@@ -615,9 +615,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			};
 			state.chatPanel.agentInterface.onPrMerge = async (method: string) => {
 				const sd = state.gatewaySessions.find((s) => s.id === sessionId);
-				if (!sd?.goalId) return 'No goal linked';
+				const mergeUrl = sd?.goalId
+					? `/api/goals/${sd.goalId}/pr-merge`
+					: `/api/sessions/${sessionId}/pr-merge`;
 				try {
-					const res = await gatewayFetch(`/api/goals/${sd.goalId}/pr-merge`, {
+					const res = await gatewayFetch(mergeUrl, {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify({ method }),
