@@ -152,6 +152,11 @@ export async function refreshSessions(): Promise<void> {
 		_lastPrRefresh = now;
 		refreshPrStatusCache();
 	}
+
+	// If the archived toggle is already on (persisted from previous session), fetch archived sessions
+	if (state.showArchived) {
+		fetchArchivedSessions();
+	}
 }
 
 /** Fetch archived sessions from the API. */

@@ -1527,6 +1527,10 @@ export class SessionManager {
 			(this as any).bgProcessManager.cleanup(id);
 		}
 
+		// Broadcast session_archived event before closing clients
+		const archivedAt = Date.now();
+		broadcast(session.clients, { type: "session_archived", sessionId: id, archivedAt });
+
 		for (const client of session.clients) {
 			client.close(1000, "Session terminated");
 		}

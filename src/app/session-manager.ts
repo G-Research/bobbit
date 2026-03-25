@@ -629,6 +629,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		}
 
+		// Disable input for archived sessions
+		if (state.chatPanel.agentInterface && remote.state.isArchived) {
+			state.chatPanel.agentInterface.readOnly = true;
+		}
+
 		// Set up bg process kill/dismiss handlers
 		if (state.chatPanel.agentInterface) {
 			state.chatPanel.agentInterface.onBgProcessKill = (processId: string) => {

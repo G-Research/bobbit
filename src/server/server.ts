@@ -1605,7 +1605,31 @@ async function handleApiRoute(
 	const teamAgentsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/agents$/);
 	if (teamAgentsMatch && req.method === "GET") {
 		const goalId = teamAgentsMatch[1];
-		json({ agents: teamManager.listAgents(goalId) });
+		const agents = teamManager.listAgents(goalId);
+
+		// Include archived (dismissed) agents when ?include=archived is set
+		const includeArchived = url.searchParams.get("include") === "archived";
+		let archivedAgents: unknown[] = [];
+		if (includeArchived) {
+			const liveSessionIds = new Set(agents.map((a: any) => a.sessionId));
+			archivedAgents = sessionManager.listArchivedSessions()
+				.filter(s => s.teamGoalId === goalId && !liveSessionIds.has(s.id))
+				.map(s => ({
+					sessionId: s.id,
+					role: s.role || "unknown",
+					status: "archived",
+					worktreePath: s.worktreePath || "",
+					branch: "",
+					task: "",
+					createdAt: s.createdAt,
+					archivedAt: s.archivedAt,
+					title: s.title,
+					accessory: s.accessory,
+					taskId: s.taskId,
+				}));
+		}
+
+		json({ agents: [...agents, ...archivedAgents] });
 		return;
 	}
 

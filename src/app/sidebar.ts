@@ -455,16 +455,44 @@ export function renderSidebar() {
 								</div>
 							`}
 							${renderStaffSidebarSection()}
-							${state.showArchived && state.archivedSessions.length > 0 ? html`
-								<div class="border-t border-border/30 my-1 mx-2"></div>
-								<div class="flex flex-col gap-0.5">
-									<div class="flex items-center gap-1 px-1 py-0.5">
-										<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
-										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
-									</div>
-									${state.archivedSessions.map(s => renderArchivedSessionRow(s))}
-								</div>
-							` : ""}
+							${state.showArchived && state.archivedSessions.length > 0 ? (() => {
+								// Categorise archived sessions: those belonging to goals go into their goal group,
+								// delegates nest under parents, standalone ones go into the flat "Archived" section.
+								const goalSessionIds = new Set(sortedGoals.flatMap(g => state.gatewaySessions.filter(s => s.goalId === g.id || s.teamGoalId === g.id).map(s => s.id)));
+								const standaloneArchived = state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf);
+								const goalArchived = state.archivedSessions.filter(s => s.teamGoalId && !goalSessionIds.has(s.id));
+								const delegateArchived = state.archivedSessions.filter(s => s.delegateOf && !s.teamGoalId);
+
+								// Render goal-grouped archived sessions within their goal sections
+								// (they'll show if the goal group is expanded)
+								const goalGroupedHtml = sortedGoals.map(goal => {
+									const archivedForGoal = goalArchived.filter(s => s.teamGoalId === goal.id);
+									if (archivedForGoal.length === 0 || !expandedGoals.has(goal.id)) return "";
+									return archivedForGoal.map(s => html`<div style="padding-left:24px;">${renderArchivedSessionRow(s)}</div>`);
+								});
+
+								// Render delegate archived sessions nested under their parent
+								const delegateHtml = delegateArchived.map(s => {
+									const parentExists = state.gatewaySessions.some(p => p.id === s.delegateOf);
+									if (!parentExists) return renderArchivedSessionRow(s);
+									return html`<div style="padding-left:16px;">${renderArchivedSessionRow(s)}</div>`;
+								});
+
+								return html`
+									${goalGroupedHtml}
+									${standaloneArchived.length > 0 || delegateArchived.length > 0 ? html`
+										<div class="border-t border-border/30 my-1 mx-2"></div>
+										<div class="flex flex-col gap-0.5">
+											<div class="flex items-center gap-1 px-1 py-0.5">
+												<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
+												<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
+											</div>
+											${standaloneArchived.map(s => renderArchivedSessionRow(s))}
+											${delegateHtml}
+										</div>
+									` : ""}
+								`;
+							})() : ""}
 						`
 				}
 			</div>

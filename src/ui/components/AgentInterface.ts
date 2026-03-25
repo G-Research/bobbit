@@ -71,6 +71,8 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onBeforeToolCall?: (toolName: string, args: any) => boolean | Promise<boolean>;
 	// Optional callback called when cost display is clicked
 	@property({ attribute: false }) onCostClick?: () => void;
+	// When true, hide the message editor (for archived/read-only sessions)
+	@property({ type: Boolean }) readOnly = false;
 
 	// References
 	@query("message-editor") private _messageEditor!: MessageEditor;
@@ -679,7 +681,7 @@ export class AgentInterface extends LitElement {
 							></git-status-widget>` : nothing}
 						</div>
 						` : ''}
-						<message-editor
+						${this.readOnly ? nothing : html`<message-editor
 							.sessionId=${this.session?.sessionId}
 							.isStreaming=${state.isStreaming}
 							.currentModel=${state.model}
@@ -712,7 +714,7 @@ export class AgentInterface extends LitElement {
 										}
 									: undefined
 							}
-						></message-editor>
+						></message-editor>`}
 						${this.renderStats()}
 					</div>
 				</div>
