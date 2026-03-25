@@ -223,6 +223,7 @@ export function createGateway(config: GatewayConfig) {
 			}
 		}
 	}
+	teamManager.setBroadcastToGoal(broadcastToGoal);
 	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);

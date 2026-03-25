@@ -238,6 +238,16 @@ async function initApp() {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
+	// Load saved color palette
+	try {
+		const { getAppStorage } = await import("../ui/storage/app-storage.js");
+		const storage = getAppStorage();
+		const palette = await storage.settings.get<string>("palette");
+		if (palette && palette !== "forest") {
+			document.documentElement.dataset.palette = palette;
+		}
+	} catch {}
+
 	state.chatPanel = new ChatPanel();
 
 	// Check for token in URL (passed by gateway auto-open)
@@ -458,4 +468,11 @@ initApp();
 // Register service worker for PWA installability
 if ('serviceWorker' in navigator) {
 	navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+// Vite HMR hot-reload detection
+if (import.meta.hot) {
+	import.meta.hot.on('vite:beforeFullReload', () => {
+		sessionStorage.setItem('bobbit-hot-reload', '1');
+	});
 }

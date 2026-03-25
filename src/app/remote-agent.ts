@@ -2,6 +2,7 @@ import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { state } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
+import { createSystemNotification } from "./custom-messages.js";
 
 /**
  * A remote agent adapter that connects to the Pi Gateway via WebSocket.
@@ -69,6 +70,7 @@ export class RemoteAgent {
 	private _reconnectAttempt = 0;
 	private _intentionalDisconnect = false;
 	private _connectionStatus: ConnectionStatus = "disconnected";
+	private _pendingReconnectNotif = false;
 	private static readonly MAX_RECONNECT_DELAY = 30_000;
 	private static readonly BASE_RECONNECT_DELAY = 1_000;
 
@@ -231,6 +233,7 @@ export class RemoteAgent {
 						resolve();
 						// On reconnect, request current messages to resync state
 						if (!initial) {
+							this._pendingReconnectNotif = true;
 							this.requestMessages();
 							this.send({ type: "get_state" });
 						}
@@ -579,6 +582,11 @@ export class RemoteAgent {
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
 					}
+					// Append reconnect notification after messages are refreshed
+					if (this._pendingReconnectNotif) {
+						this._pendingReconnectNotif = false;
+						this._appendNotification("Reconnected to server", "system");
+					}
 					// Note: we intentionally do NOT try to reconstruct streamMessage
 					// for late-joining clients. The message-list will show all messages
 					// including pending tool calls. The streaming container will pick up
@@ -621,6 +629,44 @@ export class RemoteAgent {
 				this.onGoalSetupEvent?.();
 				break;
 
+			case "task_changed": {
+				const task = msg.task as any;
+				if (task && !task._deleted) {
+					if (task.state === "complete") {
+						this._appendNotification(`Task "${task.title}" completed`, "task");
+					} else if (task.state === "blocked") {
+						this._appendNotification(`Task "${task.title}" blocked`, "task");
+					} else if (task.state === "in-progress" && task.assignedSessionId) {
+						this._appendNotification(`Task "${task.title}" assigned`, "task");
+					}
+				}
+				break;
+			}
+
+			case "gate_status_changed": {
+				const gateCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
+				this._appendNotification(`Gate "${(msg as any).gateId}" \u2192 ${(msg as any).status}`, gateCat);
+				break;
+			}
+
+			case "gate_verification_complete": {
+				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
+				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
+				break;
+			}
+
+			case "team_agent_spawned":
+				this._appendNotification(`Agent ${(msg as any).name} (${(msg as any).role}) started`, "team");
+				break;
+
+			case "team_agent_dismissed":
+				this._appendNotification(`Agent ${(msg as any).name} (${(msg as any).role}) dismissed`, "team");
+				break;
+
+			case "team_agent_finished":
+				this._appendNotification(`Agent ${(msg as any).name} (${(msg as any).role}) finished`, "team");
+				break;
+
 			case "bg_process_created":
 			case "bg_process_output":
 			case "bg_process_exited":
@@ -644,6 +690,7 @@ export class RemoteAgent {
 					timestamp: Date.now(),
 					id: `err_${Date.now()}_${Math.random().toString(36).slice(2)}`,
 				} as any];
+				this._appendNotification(msg.message || "Unknown server error", "error");
 				this.emit({ type: "error", error: msg.message });
 				break;
 		}
@@ -693,6 +740,12 @@ export class RemoteAgent {
 
 			callback(normalized);
 		}
+	}
+
+	private _appendNotification(message: string, category: "system" | "task" | "team" | "error"): void {
+		const notif = createSystemNotification(message, category);
+		this._state.messages = [...this._state.messages, notif];
+		this.emit({ type: "message_end", message: notif });
 	}
 
 	private flushDeferredMessage() {
