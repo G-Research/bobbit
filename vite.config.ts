@@ -53,110 +53,97 @@ const keyPath = path.join(tlsDir, "key.pem");
 const tlsAvailable = proto === "https" && fs.existsSync(certPath) && fs.existsSync(keyPath);
 
 /**
- * Vite plugin: dynamic gateway proxy. Re-reads .bobbit/state/gateway-url
- * on every request so Vite always proxies to the correct port even if the
- * gateway restarts on a different one.
+ * Vite plugin that proxies /api and /ws to the gateway, re-reading the
+ * gateway URL from disk on every request.  This avoids the stale-target
+ * problem that occurs when the gateway port changes after Vite starts.
  */
+// HTTP/2 pseudo-headers and HTTP/1.1 connection headers that are
+// invalid across protocol boundaries (RFC 9113 §8.2.2, §8.3).
+const H2_PSEUDO = (k: string) => k.startsWith(":");
+const H1_CONNECTION = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection"]);
+
+/** Copy headers, stripping HTTP/2 pseudo-headers. */
+function stripH2Request(raw: http.IncomingHttpHeaders, targetHost: string): Record<string, string | string[] | undefined> {
+	const out: Record<string, string | string[] | undefined> = {};
+	for (const [k, v] of Object.entries(raw)) {
+		if (!H2_PSEUDO(k)) out[k] = v;
+	}
+	out.host = targetHost;
+	return out;
+}
+
+/** Copy headers, stripping HTTP/1.1 connection headers forbidden in HTTP/2. */
+function stripH1Response(raw: http.IncomingHttpHeaders): Record<string, string | string[] | undefined> {
+	const out: Record<string, string | string[] | undefined> = {};
+	for (const [k, v] of Object.entries(raw)) {
+		if (!H1_CONNECTION.has(k.toLowerCase())) out[k] = v;
+	}
+	return out;
+}
+
 function dynamicGatewayProxy(): Plugin {
 	return {
-		name: "bobbit-gateway-proxy",
+		name: "dynamic-gateway-proxy",
 		configureServer(server) {
-			// Handle /api/* and /ws/* before Vite's own middleware
+			// --- HTTP proxy for /api/* ----------------------------------
 			server.middlewares.use((req, res, next) => {
-				const url = req.url || "";
-				if (!url.startsWith("/api/") && !url.startsWith("/ws/")) {
-					return next();
-				}
-
-				const gateway = readGatewayUrl();
-				const target = new URL(gateway);
-				const transport = target.protocol === "https:" ? https : http;
-
-				// Filter HTTP/2 pseudo-headers from request (invalid in HTTP/1.1)
-				const fwdHeaders: Record<string, string | string[] | undefined> = {};
-				for (const [k, v] of Object.entries(req.headers)) {
-					if (!k.startsWith(":")) fwdHeaders[k] = v;
-				}
-				fwdHeaders.host = target.host;
-
-				// Headers forbidden in HTTP/2 responses (RFC 9113 §8.2.2)
-				const h2Forbidden = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection"]);
-
-				const proxyReq = transport.request(
-					{
-						hostname: target.hostname,
-						port: target.port,
-						path: url,
-						method: req.method,
-						headers: fwdHeaders,
-						rejectUnauthorized: false, // trust self-signed cert
-					},
-					(proxyRes) => {
-						// Strip HTTP/1.1 connection headers before writing to HTTP/2 client
-						const safeHeaders: Record<string, string | string[] | undefined> = {};
-						for (const [k, v] of Object.entries(proxyRes.headers)) {
-							if (!h2Forbidden.has(k.toLowerCase())) safeHeaders[k] = v;
-						}
-						res.writeHead(proxyRes.statusCode || 502, safeHeaders);
-						proxyRes.pipe(res);
-					},
-				);
-
-				proxyReq.on("error", (err) => {
-					console.warn(`[proxy] ${err.message} — gateway likely restarting`);
+				if (!req.url?.startsWith("/api")) return next();
+				const target = new URL(readGatewayUrl());
+				const opts: http.RequestOptions = {
+					hostname: target.hostname,
+					port: target.port,
+					path: req.url,
+					method: req.method,
+					headers: stripH2Request(req.headers, target.host),
+					rejectUnauthorized: false,
+				};
+				const mod = target.protocol === "https:" ? https : http;
+				const proxyReq = mod.request(opts, (proxyRes: http.IncomingMessage) => {
+					res.writeHead(proxyRes.statusCode ?? 502, stripH1Response(proxyRes.headers));
+					proxyRes.pipe(res, { end: true });
+				});
+				proxyReq.on("error", (err: Error) => {
+					console.warn(`[api proxy] ${err.message} — gateway likely restarting`);
 					if (!res.headersSent) {
 						res.writeHead(502, { "Content-Type": "text/plain" });
+						res.end("Gateway restarting");
 					}
-					res.end("Gateway restarting");
 				});
-
-				req.pipe(proxyReq);
+				req.pipe(proxyReq, { end: true });
 			});
 
-			// Handle WebSocket upgrades for /ws/*
-			server.httpServer?.on("upgrade", (req, socket, head) => {
-				const url = req.url || "";
-				if (!url.startsWith("/ws/")) return; // let Vite handle HMR upgrades
-
-				const gateway = readGatewayUrl();
-				const target = new URL(gateway);
-				const wsPort = target.port || (target.protocol === "https:" ? "443" : "80");
-				const transport = target.protocol === "https:" ? https : http;
-
-				// Filter HTTP/2 pseudo-headers
-				const wsHeaders: Record<string, string | string[] | undefined> = {};
-				for (const [k, v] of Object.entries(req.headers)) {
-					if (!k.startsWith(":")) wsHeaders[k] = v;
-				}
-				wsHeaders.host = target.host;
-
-				const proxyReq = transport.request({
+			// --- WebSocket proxy for /ws/* ------------------------------
+			server.httpServer?.on("upgrade", (req, socket: import("node:net").Socket, head) => {
+				if (!req.url?.startsWith("/ws")) return;
+				const target = new URL(readGatewayUrl());
+				const mod = target.protocol === "https:" ? https : http;
+				const proxyReq = mod.request({
 					hostname: target.hostname,
-					port: wsPort,
-					path: url,
-					method: "GET",
-					headers: wsHeaders,
+					port: target.port,
+					path: req.url,
+					method: req.method,
+					headers: stripH2Request(req.headers, target.host),
 					rejectUnauthorized: false,
 				});
-
-				proxyReq.on("upgrade", (_proxyRes, proxySocket, proxyHead) => {
-					socket.write(
-						"HTTP/1.1 101 Switching Protocols\r\n" +
-						Object.entries(_proxyRes.headers)
-							.map(([k, v]) => `${k}: ${v}`)
-							.join("\r\n") +
-						"\r\n\r\n",
-					);
-					if (proxyHead.length > 0) socket.write(proxyHead);
+				proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+					// Forward the 101 Switching Protocols response to the client
+					let rawResponse = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}\r\n`;
+					for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+						rawResponse += `${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}\r\n`;
+					}
+					rawResponse += "\r\n";
+					socket.write(rawResponse);
+					if (proxyHead.length) socket.write(proxyHead);
 					proxySocket.pipe(socket);
 					socket.pipe(proxySocket);
+					proxySocket.on("error", () => socket.destroy());
+					socket.on("error", () => proxySocket.destroy());
 				});
-
 				proxyReq.on("error", (err) => {
 					console.warn(`[ws proxy] ${err.message} — gateway likely restarting`);
 					socket.destroy();
 				});
-
+				if (head.length) proxyReq.write(head);
 				proxyReq.end();
 			});
 		},

@@ -65,14 +65,12 @@ const DEFAULT_META: ModelMeta = {
  * so we disable features that cause errors.
  */
 const GATEWAY_COMPAT: Record<string, unknown> = {
-	// Gateway proxies typically don't support the `store` param
 	supportsStore: false,
-	// The `developer` role is OpenAI-specific; proxies may reject it
 	supportsDeveloperRole: false,
-	// Use max_tokens (widely supported) instead of max_completion_tokens
-	maxTokensField: "max_tokens",
-	// Strict JSON schema mode is OpenAI-specific
+	supportsUsageInStreaming: false,
+	supportsReasoningEffort: false,
 	supportsStrictMode: false,
+	maxTokensField: "max_tokens",
 };
 
 function inferMeta(modelId: string): ModelMeta {
@@ -184,24 +182,79 @@ function writeModelsJson(data: Record<string, any>): void {
  * Write aigw models into ~/.pi/agent/models.json, merging with existing
  * providers (preserving non-aigw entries).
  */
+/**
+ * Set env vars so agent subprocesses route Bedrock calls through the gateway.
+ * Called both on fresh configuration and on startup when aigw is already configured.
+ */
+function setBedrockEnvVars(aigwUrl: string): void {
+	const bedrockBaseUrl = aigwUrl.replace(/\/+$/, "").replace(/\/v1$/, "") + "/aws";
+	process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME = bedrockBaseUrl;
+	process.env.AWS_BEDROCK_FORCE_HTTP1 = "1";
+	delete process.env.AWS_BEDROCK_SKIP_AUTH;  // pi-ai would override creds with wrong dummy values
+	process.env.AWS_ACCESS_KEY_ID = "anything";
+	process.env.AWS_SECRET_ACCESS_KEY = "anything";
+	if (!process.env.AWS_REGION) process.env.AWS_REGION = "us-east-1";
+	console.log(`[aigw] Bedrock env configured: endpoint=${bedrockBaseUrl}`);
+}
+
 export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void {
 	const data = readModelsJson();
 	if (!data.providers) data.providers = {};
 
+	// AI gateways typically expose both OpenAI-compatible and Bedrock endpoints.
+	// Route Claude models through the Bedrock Converse API (same path as Claude
+	// Code) for full feature parity — native tool use, images, streaming.
+	// Non-Claude models use OpenAI completions with conservative compat.
+	const normalizedUrl = aigwUrl.replace(/\/+$/, "");
+	const bedrockBaseUrl = normalizedUrl.replace(/\/v1$/, "") + "/aws";
+
+	const openaiCompat: Record<string, unknown> = {
+		supportsDeveloperRole: false,
+		supportsStore: false,
+		supportsUsageInStreaming: false,
+		supportsReasoningEffort: false,
+		supportsStrictMode: false,
+		maxTokensField: "max_tokens",
+	};
+
+	const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
+
+	// Strip provider prefix for Bedrock (e.g. "aws/us.anthropic.claude-..." → "us.anthropic.claude-...")
+	const bedrockModelId = (id: string) => {
+		const slash = id.indexOf("/");
+		return slash >= 0 ? id.slice(slash + 1) : id;
+	};
+
 	data.providers.aigw = {
-		baseUrl: aigwUrl.replace(/\/+$/, ""),
+		baseUrl: normalizedUrl,
 		apiKey: "none",
 		api: "openai-completions",
-		models: models.map(m => ({
-			id: m.id,
-			name: m.name,
-			contextWindow: m.contextWindow,
-			maxTokens: m.maxTokens,
-			reasoning: m.reasoning,
-			input: m.input,
-			...(m.compat ? { compat: m.compat } : {}),
-		})),
+		models: models.map(m => {
+			if (isClaudeModel(m.id)) {
+				return {
+					id: bedrockModelId(m.id),
+					name: m.name,
+					contextWindow: m.contextWindow,
+					maxTokens: m.maxTokens,
+					reasoning: m.reasoning,
+					input: m.input,
+					api: "bedrock-converse-stream",
+					...(m.compat ? { compat: m.compat } : {}),
+				};
+			}
+			return {
+				id: m.id,
+				name: m.name,
+				contextWindow: m.contextWindow,
+				maxTokens: m.maxTokens,
+				reasoning: m.reasoning,
+				input: m.input,
+				compat: { ...openaiCompat, ...(m.compat || {}) },
+			};
+		}),
 	};
+
+	setBedrockEnvVars(aigwUrl);
 
 	writeModelsJson(data);
 }
@@ -247,9 +300,11 @@ export async function checkInternetAvailable(): Promise<boolean> {
  * Returns true if aigw is active after this call.
  */
 export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean> {
-	// Already configured — nothing to do
-	if (getAigwUrl(prefs)) {
-		console.log("[aigw] AI Gateway already configured:", getAigwUrl(prefs));
+	// Already configured — ensure env vars are set and models.json is up to date
+	const existingUrl = getAigwUrl(prefs);
+	if (existingUrl) {
+		console.log("[aigw] AI Gateway already configured:", existingUrl);
+		setBedrockEnvVars(existingUrl);
 		return true;
 	}
 
@@ -436,8 +491,18 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
  * Returns the discovered models.
  */
 export async function configureAigw(baseUrl: string, prefs: PreferencesStore): Promise<AigwModel[]> {
-	const models = await discoverAigwModels(baseUrl);
+	const rawModels = await discoverAigwModels(baseUrl);
 	const normalizedUrl = baseUrl.replace(/\/+$/, "");
+
+	// Normalize model IDs: Claude models get the provider prefix stripped
+	// (e.g. "aws/us.anthropic.claude-..." → "us.anthropic.claude-...") because
+	// they use the Bedrock API where the ID is just the Bedrock model ARN.
+	const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
+	const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
+	const models = rawModels.map(m => isClaudeModel(m.id)
+		? { ...m, id: stripPrefix(m.id), api: "bedrock-converse-stream" }
+		: m
+	);
 
 	prefs.set("aigw.url", normalizedUrl);
 	prefs.set("aigw.models", models);

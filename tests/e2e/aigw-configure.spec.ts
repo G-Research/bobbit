@@ -68,10 +68,10 @@ test.describe("AI Gateway Configure Flow", () => {
 		expect(data.ok).toBe(true);
 		expect(data.models).toHaveLength(3);
 
-		// Verify model IDs preserved
+		// Verify model IDs — Claude models get prefix stripped (Bedrock API)
 		const ids = data.models.map((m: any) => m.id);
 		expect(ids).toContain("openai/gpt-5.2");
-		expect(ids).toContain("aws/us.anthropic.claude-sonnet-4-6");
+		expect(ids).toContain("us.anthropic.claude-sonnet-4-6");
 		expect(ids).toContain("gresearch/qwen3-coder-480b-a35b");
 	});
 
@@ -102,7 +102,7 @@ test.describe("AI Gateway Configure Flow", () => {
 		expect(gpt.contextWindow).toBe(400_000);
 		expect(gpt.input).toContain("image");
 
-		const claude = data.models.find((m: any) => m.id === "aws/us.anthropic.claude-sonnet-4-6");
+		const claude = data.models.find((m: any) => m.id === "us.anthropic.claude-sonnet-4-6");
 		expect(claude).toBeTruthy();
 		expect(claude.contextWindow).toBe(1_000_000);
 		expect(claude.reasoning).toBe(true);
