@@ -21,7 +21,7 @@ import { backToSessions, createAndConnectSession, connectToSession, terminateSes
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection } from "./sidebar.js";
 
-import { renderGoalGroup, renderSessionRow } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, INDENT } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -143,12 +143,12 @@ function renderMobileLanding() {
 												${renderRolePickerDropdown()}
 											</div>
 										</div>
-										${isUngroupedExpanded ? ungroupedSessions.map(renderSessionRow) : ""}
+										${isUngroupedExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${ungroupedSessions.map(renderSessionRow)}</div>` : ""}
 									</div>
 								` : ungroupedSessions.length > 0 ? html`
 									<div class="flex flex-col gap-0.5">
 										<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5">
-											<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium flex items-center gap-1.5" style="padding-left:15px;"><span class="shrink-0">${icon(MessagesSquare, "sm")}</span> Sessions</span>
+											<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium flex items-center gap-1.5" style="padding-left:${INDENT}px;"><span class="shrink-0">${icon(MessagesSquare, "sm")}</span> Sessions</span>
 											<div class="flex items-center relative">
 												<button
 													class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
@@ -165,7 +165,7 @@ function renderMobileLanding() {
 												${renderRolePickerDropdown()}
 											</div>
 										</div>
-										${ungroupedSessions.map(renderSessionRow)}
+										<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${ungroupedSessions.map(renderSessionRow)}</div>
 									</div>
 								` : ""}
 								${renderStaffSidebarSection()}
