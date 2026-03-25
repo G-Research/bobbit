@@ -10,7 +10,7 @@ const TEST_PI_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-test-"));
 process.env.BOBBIT_DIR = TEST_PI_DIR;
 
 // Import AFTER setting env var so bobbitDir() picks it up
-const { TeamManager } = await import("../src/server/agent/team-manager.ts");
+const { TeamManager } = await import("../dist/server/agent/team-manager.js");
 
 const TEAM_STORE_FILE = path.join(TEST_PI_DIR, "state", "team-state.json");
 function clearTeamStore() { try { fs.unlinkSync(TEAM_STORE_FILE); } catch { /* ignore */ } }
@@ -356,18 +356,19 @@ describe("TeamManager", () => {
 			});
 		});
 
-		it("should throw if goal has no repoPath", async () => {
+		it("should skip worktree and use goal.cwd when repoPath is undefined", async () => {
 			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({ repoPath: undefined });
+			const goal = createMockGoal({ repoPath: undefined, cwd: "/tmp/no-repo" });
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
 			const team = createTeamManager(sm);
 
 			await team.startTeam("goal-1");
 
-			await assert.rejects(() => team.spawnRole("goal-1", "coder", "code stuff"), {
-				message: /has no repoPath/,
-			});
+			const result = await team.spawnRole("goal-1", "coder", "code stuff");
+			assert.ok(result.sessionId, "should return a sessionId");
+			// worktreePath should be undefined since no worktree was created
+			assert.equal(result.worktreePath, undefined);
 		});
 
 		it("should reject team-lead role in spawnRole", async () => {
@@ -564,7 +565,7 @@ describe("TeamManager", () => {
 			assert.ok(state, "state should be defined");
 			assert.equal(state!.goalId, "goal-1");
 			assert.equal(state!.teamLeadSessionId, session.id);
-			assert.equal(state!.maxConcurrent, 5);
+			assert.equal(state!.maxConcurrent, 12);
 			assert.deepEqual(state!.agents, []);
 		});
 	});
@@ -865,7 +866,7 @@ describe("TeamManager", () => {
 			assert.ok(session.title.startsWith("Reviewer:"), `title should start with "Reviewer:", got: ${session.title}`);
 		});
 
-		it("should dismiss a role agent and clean up the worktree", async () => {
+		it("should dismiss a role agent and preserve the worktree", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal({
 				repoPath,
@@ -886,11 +887,10 @@ describe("TeamManager", () => {
 			const dismissed = await team.dismissRole(result.sessionId);
 			assert.equal(dismissed, true);
 
-			// Worktree should be cleaned up
-			assert.equal(
+			// Worktree is preserved for archived session review (cleanup at purge time)
+			assert.ok(
 				fs.existsSync(result.worktreePath),
-				false,
-				"worktree should be removed after dismissal",
+				"worktree should be preserved after dismissal",
 			);
 
 			// Agent list should be empty
@@ -950,8 +950,8 @@ describe("TeamManager", () => {
 
 			await team.completeTeam("goal-1");
 
-			// Worktree should be cleaned up
-			assert.equal(fs.existsSync(r1.worktreePath), false, "worktree should be gone after completeTeam");
+			// Worktree is preserved for archived session review (cleanup at purge time)
+			assert.ok(fs.existsSync(r1.worktreePath), "worktree should be preserved after completeTeam");
 			assert.equal(goal.state, "complete");
 			// Team state persists (team lead stays alive for reporting)
 			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
