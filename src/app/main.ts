@@ -440,11 +440,11 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "show-shortcuts", label: "Keyboard shortcuts", category: "UI",
-		defaultBindings: [{ key: "/", ctrlOrMeta: true, shift: true, alt: false }],
+		id: "show-settings", label: "Settings", category: "UI",
+		defaultBindings: [{ key: ",", ctrlOrMeta: true, shift: false, alt: false }],
 		handler: async () => {
-			const { showShortcutsDialog } = await import("./shortcuts-dialog.js");
-			showShortcutsDialog();
+			const { toggleSettings } = await import("./settings-page.js");
+			toggleSettings();
 		},
 	});
 

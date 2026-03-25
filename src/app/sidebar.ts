@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Bot, ChevronDown, Drama, Goal as GoalIcon, Keyboard, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Users, Workflow, Wrench } from "lucide";
+import { Bot, ChevronDown, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench } from "lucide";
 import {
 	state,
 	renderApp,
@@ -438,11 +438,11 @@ export function renderSidebar() {
 			<div class="flex items-center border-t border-border/50">
 				<button
 					class="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
-					@click=${() => { import("./shortcuts-dialog.js").then((m) => m.showShortcutsDialog()); }}
-					title="Keyboard shortcuts (Ctrl+Shift+/)"
+					@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
+					title="Settings (Ctrl+,)"
 				>
-					${icon(Keyboard, "sm")}
-					<span>Shortcuts</span>
+					${icon(Settings, "sm")}
+					<span>Settings</span>
 				</button>
 				<span class="flex-1"></span>
 				<button

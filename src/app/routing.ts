@@ -2,7 +2,7 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "settings";
 
 export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string } {
 	const hash = window.location.hash || "";
@@ -49,6 +49,9 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	if (hash === "#/personalities") {
 		return { view: "personalities" };
 	}
+	if (hash === "#/settings") {
+		return { view: "settings" };
+	}
 	return { view: "landing" };
 }
 
@@ -78,6 +81,8 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = `#/personalities/${id}`;
 	} else if (view === "personalities") {
 		newHash = "#/personalities";
+	} else if (view === "settings") {
+		newHash = "#/settings";
 	} else {
 		newHash = "#/";
 	}

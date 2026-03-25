@@ -40,6 +40,7 @@ import "./workflow-page.css";
 import { renderPersonalityManagerPage } from "./personality-manager-page.js";
 import "./personality-manager.css";
 import { renderStaffPage } from "./staff-page.js";
+import { renderSettingsPage } from "./settings-page.js";
 
 // ============================================================================
 // MOBILE LANDING PAGE
@@ -1833,6 +1834,9 @@ export function doRenderApp(): void {
 
 		if (route.view === "staff" || route.view === "staff-edit") {
 			return renderStaffPage();
+		}
+		if (route.view === "settings") {
+			return renderSettingsPage();
 		}
 
 		if (connected && state.assistantType) {
