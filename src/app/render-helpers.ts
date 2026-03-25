@@ -438,7 +438,17 @@ function renderGoalBadge(goalId: string) {
 	const hasTeam = state.gatewaySessions.some(s => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead" && s.status !== "terminated");
 	const allPassed = gs.passed === gs.total;
 	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : "#3b82f6";
-	return html`<span class="shrink-0" style="font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
+	const label = `(${gs.passed}/${gs.total})`;
+	if (gs.verifying) {
+		// Mexican wave: each character gets a staggered animation
+		const chars = label.split("");
+		const totalDur = 1.2; // seconds for full wave cycle
+		const stagger = totalDur / chars.length;
+		return html`<span class="shrink-0 gate-wave" style="font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${gs.passed} of ${gs.total} gates passed — verifying">${chars.map((ch, i) =>
+			html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
+		)}</span>`;
+	}
+	return html`<span class="shrink-0" style="font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${gs.passed} of ${gs.total} gates passed">${label}</span>`;
 }
 
 /**

@@ -184,15 +184,16 @@ async function refreshGateStatusCache() {
 			const gates = await fetchGoalGates(g.id);
 			const passed = gates.filter(gs => gs.status === "passed").length;
 			const total = g.workflow!.gates.length;
-			return { goalId: g.id, passed, total };
+			const verifying = gates.some(gs => gs.signals?.some(s => s.verification?.status === "running"));
+			return { goalId: g.id, passed, total, verifying };
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, passed, total } of results) {
+	for (const { goalId, passed, total, verifying } of results) {
 		const prev = state.gateStatusCache.get(goalId);
-		if (!prev || prev.passed !== passed || prev.total !== total) {
-			state.gateStatusCache.set(goalId, { passed, total });
+		if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying) {
+			state.gateStatusCache.set(goalId, { passed, total, verifying });
 			changed = true;
 		}
 	}
