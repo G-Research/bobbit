@@ -65,17 +65,6 @@ Both the gateway (`:3001`) and Vite (`:5173`) auto-bind to the NordLynx mesh IP.
 
 See [docs/dev-workflow.md](docs/dev-workflow.md) for the full development workflow.
 
-### Dev server harness
-
-Use `npm run dev:harness` when developing Bobbit itself. The harness wraps the server process and watches a sentinel file (`.bobbit/state/gateway-restart`). Running `npm run restart-server` triggers:
-
-1. Kill the running server
-2. Wait for the port to clear
-3. Run `npm run build:server` to recompile TypeScript
-4. Relaunch the server
-
-The harness also auto-restarts on unexpected crashes. Sessions survive restarts thanks to disk persistence.
-
 ### CLI flags
 
 ```
@@ -95,27 +84,17 @@ bobbit [options]
 
 ## Features
 
-- **Sessions** — Each session is a running agent with its own conversation, persistence, and multi-device support. See [Features](#sessions-goals--more) below.
-- **Goals & Tasks** — Track larger work items with state, specs, and task boards. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+- **Sessions** — Each session is a running agent with its own conversation, persistence, and multi-device support.
+- **Goals & Tasks** — Track larger work items with state, specs, and task boards.
 - **Teams** — Coordinate multiple agents working together on a goal with roles (coder, reviewer, tester).
-- **Workflows & Gates** — Define quality stages (design → implement → test → review) with enforced ordering. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+- **Workflows & Gates** — Define quality stages (design → implement → test → review) with enforced ordering.
 - **Roles & Personalities** — Customise agent behaviour, tool access, and communication style.
 - **Skills** — Reusable templates for isolated sub-agents (code review, test reports).
 - **Cost Tracking** — Per-session token usage and cost, aggregated to goal and task level.
-- **REST API** — Full programmatic access. See [docs/rest-api.md](docs/rest-api.md).
-- **WebSocket Protocol** — Real-time streaming events. See [docs/websocket-protocol.md](docs/websocket-protocol.md).
-- **Security** — Token auth, TLS, rate limiting, PKCE OAuth. See [docs/security.md](docs/security.md).
-- **Networking** — Mesh VPN, dynamic DNS, QR codes, multi-device. See [docs/networking.md](docs/networking.md).
 
-### Sessions, Goals & More
+See [docs/features.md](docs/features.md) for detailed feature documentation.
 
-Each session is a running `pi-coding-agent` child process with its own conversation history. Session metadata persists to disk and survives server restarts. Multiple browser tabs/devices can connect to the same session.
-
-Goals are a task-tracking layer on top of sessions — with title, spec, working directory, state, optional git worktrees, and optional workflows for quality enforcement.
-
-Teams coordinate multiple agent sessions on a goal, with a team lead that spawns role agents (coder, reviewer, tester). See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) for the full architecture.
-
-For the complete feature reference, see the [REST API](docs/rest-api.md) and [WebSocket Protocol](docs/websocket-protocol.md) docs.
+**Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md) · [Goals & Workflows](docs/goals-workflows-tasks.md)
 
 ## Dependencies
 
