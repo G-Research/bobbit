@@ -5,7 +5,7 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { createSystemNotification } from "./custom-messages.js";
 
 /**
- * A remote agent adapter that connects to the Pi Gateway via WebSocket.
+ * A remote agent adapter that connects to the Bobbit Gateway via WebSocket.
  * Duck-types the Agent interface from pi-agent-core so it can be used
  * with ChatPanel / AgentInterface without changes.
  */

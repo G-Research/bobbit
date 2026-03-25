@@ -1548,7 +1548,7 @@ export function doRenderApp(): void {
 						<div class="text-muted-foreground empty-state-icon">${icon(Unplug, "lg")}</div>
 						<h2 class="text-lg font-medium text-foreground">Not connected</h2>
 						<p class="text-sm text-muted-foreground max-w-sm">
-							Connect to a Pi Gateway to start working with the coding agent.
+							Connect to a Bobbit gateway to start working with the coding agent.
 						</p>
 					</div>
 					${Button({

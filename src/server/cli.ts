@@ -220,7 +220,7 @@ async function main() {
 	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
 	fs.writeFileSync(gatewayUrlPath, baseUrl, "utf-8");
 
-	console.log(`\nPi Gateway v0.1.0`);
+	console.log(`\nBobbit Gateway v0.1.0`);
 	console.log(`  Listening:  ${baseUrl}`);
 	console.log(`  Auth token: ${authToken}`);
 	console.log(`  Agent CWD:  ${args.cwd}`);

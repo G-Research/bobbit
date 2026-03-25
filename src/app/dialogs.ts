@@ -370,7 +370,7 @@ export function openGatewayDialog(): void {
 								${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
 								<p class="text-xs text-muted-foreground">
 									Start the gateway:
-									<code class="px-1 py-0.5 rounded bg-secondary text-secondary-foreground font-mono text-[11px]">npx pi-gateway --cwd ~/project</code>
+									<code class="px-1 py-0.5 rounded bg-secondary text-secondary-foreground font-mono text-[11px]">npx bobbit</code>
 								</p>
 							</div>
 						`,
