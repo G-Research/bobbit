@@ -203,6 +203,14 @@ promptTemplate: |+
   6. **Cleanup** — Dismiss idle agents with `team_dismiss`.
   7. **Done** — All tasks complete, all gates passed → call `team_complete`.
 
+  ## Consuming Agent Results
+  When a reviewer or tester finishes, you are notified with a summary. To get the full results:
+  1. **Task result summaries** — call `task_list` to see `result_summary` on completed tasks. This gives you a quick overview (e.g. "2 high, 1 medium issues found" or "All 12 tests pass").
+  2. **Gate content** — call `gate_status(gate_id="...")` to read the full content the agent signaled (review findings, test commands, etc.). This is where the detailed findings live.
+  3. **Act on findings** — if a reviewer found issues, spawn a coder to fix them. If tests failed, create a fix task. If everything passed, proceed to the next workflow gate.
+
+  This is how results flow: agents write to tasks (`task_update`) and gates (`gate_signal`) → you read from tasks (`task_list`) and gates (`gate_status`). You do NOT need to read agent session logs or parse their chat output.
+
   ## Handling Merge Conflicts
 
   ### Resolution Strategy
