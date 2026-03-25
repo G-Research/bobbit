@@ -99,6 +99,7 @@ interface LiveVerification {
 }
 let liveVerifications: Map<string, LiveVerification> = new Map();
 let liveVerifTimer: ReturnType<typeof setInterval> | null = null;
+let expandedLiveStepKeys: Set<string> = new Set();
 
 /** Current dashboard tab */
 let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
@@ -204,6 +205,7 @@ export function clearDashboardState(): void {
 	stopGitStatusPolling();
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	liveVerifications = new Map();
+	expandedLiveStepKeys = new Set();
 	stopLiveVerifTimer();
 }
 
@@ -1469,7 +1471,17 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 			</div>
 			${isExpanded ? html`
 				<div class="signal-entry__body">
-					${isLive ? renderLiveVerificationSteps(liveEntry!) : html`
+					${isLive ? renderLiveVerificationSteps(liveEntry!) : vStatus === "running" && signal.verification.steps.length === 0
+						? html`<div class="verify-card verify-card--running" style="padding:8px 10px;">
+							<span class="verify-card__icon verify-card__icon--running">\u25CF</span>
+							<span>Verification in progress\u2026</span>
+						</div>`
+						: signal.verification.steps.length === 0 && vStatus === "passed"
+							? html`<div class="verify-card verify-card--pass" style="padding:8px 10px;">
+								<span class="verify-card__icon verify-card__icon--pass">\u2713</span>
+								<span>Passed (no verification)</span>
+							</div>`
+						: html`
 						${signal.verification.steps.map(step => html`
 							<div class="verify-step verify-step--${step.passed ? "pass" : "fail"}">
 								<div class="verify-step__header">
@@ -1499,28 +1511,92 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 	`;
 }
 
-function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
-	if (entry.steps.length === 0) {
-		return html`<div class="verify-step"><div class="verify-step__header"><span class="verify-step__icon">\u23F3</span><span class="verify-step__name">Verification in progress\u2026</span></div></div>`;
+function toggleLiveStepExpand(key: string): void {
+	if (expandedLiveStepKeys.has(key)) {
+		expandedLiveStepKeys.delete(key);
+	} else {
+		expandedLiveStepKeys.add(key);
 	}
-	return html`${entry.steps.map(step => {
-		const isRunning = step.status === "running";
-		const passed = step.status === "passed";
-		const elapsed = isRunning ? Math.max(0, Math.round((Date.now() - step.startedAt) / 1000)) : 0;
-		const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${String(elapsed % 60).padStart(2, "0")}s`;
-		const durStr = step.durationMs != null ? (step.durationMs < 1000 ? `${Math.round(step.durationMs)}ms` : `${(step.durationMs / 1000).toFixed(1)}s`) : "";
-		return html`
-			<div class="verify-step verify-step--${isRunning ? "running" : passed ? "pass" : "fail"}">
-				<div class="verify-step__header">
-					<span class="verify-step__icon">${isRunning ? "\u23F3" : passed ? "\u2713" : "\u2717"}</span>
-					<span class="verify-step__name">${step.name}</span>
-					<span class="verify-step__type">${step.type}</span>
-					<span class="verify-step__duration">${isRunning ? elapsedStr : durStr}</span>
-				</div>
-				${step.output ? html`<div class="verify-step__output">${step.output}</div>` : nothing}
+	renderApp();
+}
+
+function formatStepElapsed(startedAt: number): string {
+	const s = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+	return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+function formatStepDuration(ms: number): string {
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+	const m = Math.floor(ms / 60000);
+	const s = Math.round((ms % 60000) / 1000);
+	return `${m}m ${s}s`;
+}
+
+function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
+	// Auto-pass: complete with no steps
+	if (entry.steps.length === 0 && entry.overallStatus !== "running") {
+		const isPassed = entry.overallStatus === "passed";
+		return html`<div class="verify-card verify-card--${isPassed ? "pass" : "fail"}" style="padding:8px 10px;">
+			<span class="verify-card__icon verify-card__icon--${isPassed ? "pass" : "fail"}">${isPassed ? "\u2713" : "\u2717"}</span>
+			<span>${isPassed ? "Passed (no verification)" : "Failed"}</span>
+		</div>`;
+	}
+
+	// Still waiting for step definitions
+	if (entry.steps.length === 0) {
+		return html`<div class="verify-card verify-card--running" style="padding:8px 10px;">
+			<span class="verify-card__icon verify-card__icon--running">\u25CF</span>
+			<span>Verification in progress\u2026</span>
+		</div>`;
+	}
+
+	const passedCount = entry.steps.filter(s => s.status === "passed").length;
+	const failedCount = entry.steps.filter(s => s.status === "failed").length;
+	const totalCount = entry.steps.length;
+	const isDone = entry.overallStatus !== "running";
+
+	return html`
+		<div class="verify-cards">
+			<div class="verify-cards__header">
+				${isDone
+					? entry.overallStatus === "passed"
+						? html`<span class="verify-cards__header-status verify-cards__header-status--pass">\u2713 Verified \u2014 passed</span>`
+						: html`<span class="verify-cards__header-status verify-cards__header-status--fail">\u2717 Verified \u2014 failed</span>`
+					: html`<span class="verify-cards__header-status verify-cards__header-status--running">Verifying \u2014 ${passedCount}/${totalCount} checks passed${failedCount > 0 ? html`, <span style="color:var(--destructive)">${failedCount} failed</span>` : nothing}</span>`
+				}
 			</div>
-		`;
-	})}`;
+			${entry.steps.map((step, i) => {
+				const stepKey = `${entry.gateId}:${entry.signalId}:${i}`;
+				const isRunning = step.status === "running";
+				const isPassed = step.status === "passed";
+				const isFailed = step.status === "failed";
+				const hasOutput = !!step.output;
+				const isExpanded = expandedLiveStepKeys.has(stepKey);
+				const isLlm = step.type === "llm-review";
+
+				return html`
+					<div class="verify-card verify-card--${isRunning ? "running" : isPassed ? "pass" : "fail"}">
+						<div class="verify-card__header ${hasOutput ? "verify-card__header--clickable" : ""}"
+							@click=${hasOutput ? () => toggleLiveStepExpand(stepKey) : null}>
+							<span class="verify-card__icon verify-card__icon--${isRunning ? "running" : isPassed ? "pass" : "fail"}">
+								${isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717"}
+							</span>
+							<span class="verify-card__name">${step.name}</span>
+							<span class="verify-card__type-badge ${isLlm ? "verify-card__type-badge--llm" : ""}">${step.type}</span>
+							<span class="verify-card__duration">
+								${isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
+							</span>
+							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
+						</div>
+						${isExpanded && step.output ? html`
+							<pre class="verify-card__output">${step.output}</pre>
+						` : nothing}
+					</div>
+				`;
+			})}
+		</div>
+	`;
 }
 
 // ============================================================================
