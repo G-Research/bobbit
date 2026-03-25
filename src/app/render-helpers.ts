@@ -300,12 +300,12 @@ export { renderSessionRow as renderSidebarSession };
 // ARCHIVED SESSION ROW
 // ============================================================================
 
-export function renderArchivedSessionRow(session: GatewaySession) {
+export function renderArchivedSessionRow(session: GatewaySession, extraChildren = false) {
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const delegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
-	const hasDelegates = delegates.length > 0;
-	const expanded = hasDelegates && isArchivedParentExpanded(session.id);
+	const hasChildren = delegates.length > 0 || extraChildren;
+	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	return html`
 		<div
 			class="group relative flex items-center gap-1 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
@@ -314,11 +314,11 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 			title="${displayTitle} (archived)"
 		>
-			${hasDelegates ? html`<span
+			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer opacity-60"
 				style="width:${CHEVRON_W}px;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
-				title="${expanded ? "Collapse delegates" : "Expand delegates"}"
+				title="${expanded ? "Collapse" : "Expand"}"
 			>${expanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center" style="filter:grayscale(1) opacity(0.7);">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
@@ -570,7 +570,7 @@ export function renderGoalGroup(goal: Goal) {
 							: true;
 						return html`
 							${archivedLeads.map(s => html`
-								${renderArchivedSessionRow(s)}
+								${renderArchivedSessionRow(s, archivedMembers.length > 0)}
 								${renderArchivedDelegates(s.id)}
 							`)}
 							${membersVisible && archivedMembers.length > 0 ? html`
