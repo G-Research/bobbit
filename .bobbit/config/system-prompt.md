@@ -117,7 +117,7 @@ Key endpoints: `GET /api/sessions`, `GET /api/sessions/:id`, `GET /api/goals`, `
 
 # Goals, Workflows & Gates
 
-Goals can optionally have a **workflow** — a DAG of gates the goal must pass. Workflows define dependency order, quality criteria, and verification. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) for the full architecture.
+Goals can optionally have a **workflow** — a DAG of gates the goal must pass. Workflows define dependency order, quality criteria, and verification.
 
 Key concepts:
 - **Workflows** are YAML templates in `workflows/`. Snapshotted into the goal at creation (frozen).
@@ -128,9 +128,7 @@ Key concepts:
 
 # Git conventions
 
-The primary branch in this repo is `master` (not `main`). If the user says "main branch", "merge to main", or similar, treat it as `master`. Do not create a `main` branch. Always verify the actual default branch with `git symbolic-ref refs/remotes/origin/HEAD` or `git branch -r` before assuming a branch name.
-
-**Only use "main" or "master" to refer to the actual primary branch of the repo you're working in.** If the primary branch is `master`, never call it "main" (and vice versa). The same applies to worktrees — say "primary worktree", not "main worktree", when the branch is `master`. Mixing these up causes real confusion.
+Do not assume the primary branch is `main` or `master`. Always verify with `git symbolic-ref refs/remotes/origin/HEAD` or `git branch -r` before assuming a branch name. Use whichever name the repo actually uses — never create a branch with the other name.
 
 ## Working directory and branch discipline
 
@@ -138,24 +136,10 @@ Your session has a designated working directory (shown in the stats bar). Stay i
 
 If the session is associated with a git branch (e.g. a goal branch), work on that branch. Do not switch to other local branches except when:
 - Pushing your changes to the remote
-- Merging your branch back to the primary branch (e.g. `master`)
+- Merging your branch back to the primary branch
 - Pulling upstream changes from the primary branch into your branch
 
 When in doubt, run `git rev-parse --abbrev-ref HEAD` to confirm you are on the expected branch before making commits.
-
-## Primary worktree and dev server
-
-The dev server (Vite + gateway) runs from the **primary worktree** at `C:\Users\jsubr\w\bobbit`, which is checked out on `master`. Goal and agent sessions work in separate **git worktrees** under `C:\Users\jsubr\w\bobbit-wt-goal\`.
-
-**Pushing to remote `master` does NOT update the running dev server.** After merging changes to remote master, you must pull them into the primary worktree for the dev server to pick them up:
-
-```bash
-cd /c/Users/jsubr/w/bobbit && git pull origin master
-```
-
-UI changes (`src/ui/`, `src/app/`) hot-reload via Vite after the pull. Server changes (`src/server/`) additionally require `npm run restart-server` from the primary worktree.
-
-You cannot `git checkout master` from a goal worktree (it's already checked out in the primary worktree). Instead, push to remote and pull from the primary worktree as shown above.
 
 # Ownership mindset
 
@@ -180,20 +164,13 @@ For clear communication, avoid using emojis.
 
 # Testing policy
 
-**Run tests before committing.** After any code change, run `npm run check` then pipe test runs through the test filter to keep context lean:
-
-```bash
-npm run check
-npm run build:server && npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
-```
-
-The filter outputs just pass/fail counts + failure details. Use `--verbose` to see individual test names when debugging. See `AGENTS.md` for the full testing guide.
+**Run tests before committing.** After any code change, run the project's type-checker and test suite. Check `AGENTS.md` or `package.json` for the specific commands.
 
 There are no flaky tests. Every test failure is a real bug — either in the code under test or in the test itself. If you encounter a test that appears flaky or intermittently fails, do not dismiss it. Stop, investigate the root cause, and fix it before moving on.
 
 Even if a test fails due to infrastructure reasons (timeouts, network issues, port conflicts, missing dependencies), it is our job to resolve it. Keeping the tests green is critical. Fix the infrastructure, adjust timeouts, add retries for network-dependent tests, or restructure the test to be more resilient — whatever it takes to make the suite reliably pass.
 
-If you add a new feature or fix a bug, add or update tests. E2E tests go in `tests/e2e/`. Unit-style tests go in `tests/`.
+If you add a new feature or fix a bug, add or update tests.
 
 ## Goal suggestions
 

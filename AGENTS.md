@@ -335,6 +335,20 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 The primary branch is **`master`** (not `main`). If the user refers to "main", treat it as `master`. Never create a `main` branch.
 
+### Primary worktree and dev server
+
+The dev server (Vite + gateway) runs from the **primary worktree** at `C:\Users\jsubr\w\bobbit`, which is checked out on `master`. Goal and agent sessions work in separate **git worktrees** under `C:\Users\jsubr\w\bobbit-wt-goal\`.
+
+**Pushing to remote `master` does NOT update the running dev server.** After merging changes to remote master, you must pull them into the primary worktree for the dev server to pick them up:
+
+```bash
+cd /c/Users/jsubr/w/bobbit && git pull origin master
+```
+
+UI changes (`src/ui/`, `src/app/`) hot-reload via Vite after the pull. Server changes (`src/server/`) additionally require `npm run restart-server` from the primary worktree.
+
+You cannot `git checkout master` from a goal worktree (it's already checked out in the primary worktree). Instead, push to remote and pull from the primary worktree as shown above.
+
 ## Disk state summary
 
 All per-project state lives under `<project-root>/.bobbit/`:
