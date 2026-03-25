@@ -1858,6 +1858,22 @@ async function handleApiRoute(
 			}
 		}
 
+		if (typeof body.teamLeadSessionId === "string") {
+			// Update teamLeadSessionId — works for both live and archived sessions
+			const session = sessionManager.getSession(id);
+			if (session) {
+				sessionManager.updateSessionMeta(id, { teamLeadSessionId: body.teamLeadSessionId });
+			} else {
+				// Try archived session — update store directly
+				const archived = sessionManager.getArchivedSession(id);
+				if (archived) {
+					sessionManager.updateArchivedMeta(id, { teamLeadSessionId: body.teamLeadSessionId });
+				} else {
+					json({ error: "Session not found" }, 404); return;
+				}
+			}
+		}
+
 		if (Array.isArray(body.personalities) && !roleHandledPersonalities) {
 			const newPersonalities = body.personalities as string[];
 			// Validate personality names

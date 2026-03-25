@@ -1639,6 +1639,14 @@ export class SessionManager {
 		return ps?.archived ? ps : undefined;
 	}
 
+	/** Update metadata on an archived session (stored in the session store). */
+	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string }): boolean {
+		const ps = this.store.get(id);
+		if (!ps?.archived) return false;
+		this.store.update(id, updates);
+		return true;
+	}
+
 	/** Parse the .jsonl file for an archived session and return messages. */
 	getArchivedMessages(id: string): unknown[] {
 		const ps = this.store.get(id);
