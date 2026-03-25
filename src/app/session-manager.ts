@@ -343,7 +343,7 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 // CONNECT TO SESSION
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean }): Promise<void> {
 	if (state.connectingSessionId) return;
 	state.connectingSessionId = sessionId;
 
@@ -642,8 +642,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		}
 
-		// Disable input for archived sessions
-		if (state.chatPanel.agentInterface && remote.state.isArchived) {
+		// Disable input for archived or explicitly read-only sessions
+		if (state.chatPanel.agentInterface && (remote.state.isArchived || options?.readOnly)) {
 			state.chatPanel.agentInterface.readOnly = true;
 		}
 

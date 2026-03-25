@@ -218,8 +218,8 @@ export function renderSessionRow(session: GatewaySession) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
 	// Check for children (live delegates + archived delegates)
-	const liveDelegates = state.gatewaySessions.filter(s => s.delegateOf === session.id);
-	const archivedDelegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
+	const liveDelegates = state.gatewaySessions.filter(s => s.delegateOf === session.id && (state.showArchived || s.status !== "terminated"));
+	const archivedDelegates = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf === session.id) : [];
 	const hasChildren = liveDelegates.length > 0 || archivedDelegates.length > 0;
 	const childrenExpanded = hasChildren && isArchivedParentExpanded(session.id);
 
@@ -282,7 +282,7 @@ export function renderSessionRow(session: GatewaySession) {
 
 /** Render live delegate sessions nested under a parent session. */
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
-	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId);
+	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId && (state.showArchived || s.status !== "terminated"));
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 		${delegates.map(s => s.status === "terminated"
@@ -309,7 +309,7 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 			class="group relative flex items-center gap-1 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
 				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${hasDelegates ? 0 : CHEVRON_W}px;"
-			@click=${() => connectToSession(session.id, true)}
+			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 			title="${displayTitle} (archived)"
 		>
 			${hasDelegates ? html`<span
