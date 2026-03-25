@@ -1401,16 +1401,16 @@ html {
 
 /* ===== Magnifying Glass overlay (hand-held, right side) ===== */
 /* When bobbit faces right, magnifier goes behind the body.
-   Busy: eyes right at 34-57% and micro-glance at 96-98%.
+   Busy: eyes right at 34-54%, eyes up at 60-65%, and micro-glance at 96-98%.
    Idle: eyes up-right at 25-45%, right at 55-85%. */
 @keyframes magnifier-depth-busy {
 	0%, 33% { z-index: 1; }
 	34%     { z-index: -1; }
-	57%     { z-index: -1; }
-	58%, 95% { z-index: 1; }
+	54%     { z-index: 1; }
+	60%     { z-index: -1; }
+	65%, 95% { z-index: 1; }
 	96%     { z-index: -1; }
-	98%     { z-index: -1; }
-	99%, 100% { z-index: 1; }
+	98%, 100% { z-index: 1; }
 }
 @keyframes magnifier-depth-idle {
 	0%, 24% { z-index: 1; }
