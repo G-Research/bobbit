@@ -115,6 +115,8 @@ export const state = {
 	sidebarCollapsed: localStorage.getItem("bobbit-sidebar-collapsed") === "true",
 	/** Whether to show archived sessions in the sidebar */
 	showArchived: localStorage.getItem("bobbit-show-archived") === "true",
+	/** Whether the archived section is expanded */
+	archivedSectionExpanded: localStorage.getItem("bobbit-show-archived") === "true",
 	/** Archived sessions (loaded on demand) */
 	archivedSessions: [] as GatewaySession[],
 

@@ -153,10 +153,10 @@ export async function refreshSessions(): Promise<void> {
 		refreshPrStatusCache();
 	}
 
-	// If the archived toggle is already on (persisted from previous session), fetch archived sessions
-	if (state.showArchived) {
-		fetchArchivedSessions();
-	}
+	// Always fetch archived sessions so staff/goal filtering works correctly.
+	// When the toggle is off, we still need the data to hide goal-affiliated
+	// staff agents from the Staff section (they belong under their goal).
+	fetchArchivedSessions();
 }
 
 /** Fetch archived sessions from the API. */

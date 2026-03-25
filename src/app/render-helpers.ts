@@ -263,6 +263,29 @@ export function renderSessionRow(session: GatewaySession) {
 export { renderSessionRow as renderSidebarSession };
 
 // ============================================================================
+// ARCHIVED SESSION ROW
+// ============================================================================
+
+export function renderArchivedSessionRow(session: GatewaySession) {
+	const active = activeSessionId() === session.id;
+	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	return html`
+		<div
+			class="group relative flex items-center gap-1 pl-2 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
+				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+			@click=${() => connectToSession(session.id, true)}
+			title="${displayTitle} (archived)"
+		>
+			<div class="shrink-0 flex items-center justify-center" style="filter:grayscale(1) opacity(0.7);">
+				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
+			</div>
+			<div class="flex-1 min-w-0 text-xs font-normal truncate">${displayTitle}</div>
+			${session.archivedAt ? html`<span class="shrink-0 text-[10px] text-muted-foreground/50">${terseRelativeTime(session.archivedAt)}</span>` : ""}
+		</div>
+	`;
+}
+
+// ============================================================================
 // TEAM LEAD ROW (with collapsible team children)
 // ============================================================================
 
@@ -457,6 +480,9 @@ export function renderGoalGroup(goal: Goal) {
 						Creating…
 					</div>` : ""}
 					${teamControls}
+					${state.archivedSectionExpanded ? state.archivedSessions
+						.filter(s => s.teamGoalId === goal.id)
+						.map(s => renderArchivedSessionRow(s)) : ""}
 				</div>
 			` : ""}
 		</div>

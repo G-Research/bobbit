@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench } from "lucide";
+import { Archive, Bot, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench } from "lucide";
 import {
 	state,
 	renderApp,
@@ -21,7 +21,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { showGoalDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 
 // ============================================================================
@@ -252,7 +252,15 @@ export function renderStaffSidebarSection() {
 					>${icon(Plus, mobile ? "sm" : "xs")}</button>
 				</div>
 			</div>
-			${staffSectionExpanded ? list.map((agent) => {
+			${staffSectionExpanded ? list.filter((agent) => {
+				// Hide staff agents whose current session is archived and belongs to a goal
+				// — those show under their goal's archived section instead
+				if (agent.currentSessionId) {
+					const archivedSession = state.archivedSessions.find(s => s.id === agent.currentSessionId);
+					if (archivedSession?.teamGoalId) return false;
+				}
+				return true;
+			}).map((agent) => {
 				const mobile = !isDesktop();
 				const session = agent.currentSessionId
 					? state.gatewaySessions.find((s) => s.id === agent.currentSessionId)
@@ -296,28 +304,7 @@ export function renderStaffSidebarSection() {
 	`;
 }
 
-// ============================================================================
-// ARCHIVED SESSION ROW
-// ============================================================================
-
-function renderArchivedSessionRow(session: GatewaySession) {
-	const active = activeSessionId() === session.id;
-	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
-	return html`
-		<div
-			class="group relative flex items-center gap-1 pl-2 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
-				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			@click=${() => connectToSession(session.id, true)}
-			title="${displayTitle} (archived)"
-		>
-			<div class="shrink-0 flex items-center justify-center">
-				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
-			</div>
-			<div class="flex-1 min-w-0 text-xs font-normal truncate">${displayTitle}</div>
-			${session.archivedAt ? html`<span class="shrink-0 text-[10px] text-muted-foreground/50">${terseRelativeTime(session.archivedAt)}</span>` : ""}
-		</div>
-	`;
-}
+// renderArchivedSessionRow is now in render-helpers.ts
 
 // ============================================================================
 // RENDER SIDEBAR
@@ -455,44 +442,37 @@ export function renderSidebar() {
 								</div>
 							`}
 							${renderStaffSidebarSection()}
-							${state.showArchived && state.archivedSessions.length > 0 ? (() => {
-								// Categorise archived sessions: those belonging to goals go into their goal group,
-								// delegates nest under parents, standalone ones go into the flat "Archived" section.
-								const goalSessionIds = new Set(sortedGoals.flatMap(g => state.gatewaySessions.filter(s => s.goalId === g.id || s.teamGoalId === g.id).map(s => s.id)));
-								const standaloneArchived = state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf);
-								const goalArchived = state.archivedSessions.filter(s => s.teamGoalId && !goalSessionIds.has(s.id));
-								const delegateArchived = state.archivedSessions.filter(s => s.delegateOf && !s.teamGoalId);
-
-								// Render goal-grouped archived sessions within their goal sections
-								// (they'll show if the goal group is expanded)
-								const goalGroupedHtml = sortedGoals.map(goal => {
-									const archivedForGoal = goalArchived.filter(s => s.teamGoalId === goal.id);
-									if (archivedForGoal.length === 0 || !expandedGoals.has(goal.id)) return "";
-									return archivedForGoal.map(s => html`<div style="padding-left:24px;">${renderArchivedSessionRow(s)}</div>`);
-								});
+							${(() => {
+								// Archived section: standalone and delegate archived sessions
+								// (goal-affiliated archived sessions are rendered inside their goal groups)
+								const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+								const delegateArchived = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf && !s.teamGoalId) : [];
 
 								// Render delegate archived sessions nested under their parent
-								const delegateHtml = delegateArchived.map(s => {
+								const delegateHtml = state.archivedSectionExpanded ? delegateArchived.map(s => {
 									const parentExists = state.gatewaySessions.some(p => p.id === s.delegateOf);
 									if (!parentExists) return renderArchivedSessionRow(s);
 									return html`<div style="padding-left:16px;">${renderArchivedSessionRow(s)}</div>`;
-								});
+								}) : [];
 
 								return html`
-									${goalGroupedHtml}
-									${standaloneArchived.length > 0 || delegateArchived.length > 0 ? html`
-										<div class="border-t border-border/30 my-1 mx-2"></div>
-										<div class="flex flex-col gap-0.5">
-											<div class="flex items-center gap-1 px-1 py-0.5">
-												<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
-												<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
-											</div>
+									<div class="border-t border-border/30 my-1 mx-2"></div>
+									<div class="flex flex-col gap-0.5">
+										<button
+											class="flex items-center gap-1 px-1 py-0.5 w-full text-left hover:bg-secondary/30 rounded-md transition-colors"
+											@click=${() => { state.archivedSectionExpanded = !state.archivedSectionExpanded; renderApp(); }}
+										>
+											<span class="shrink-0 text-muted-foreground opacity-60">${icon(state.archivedSectionExpanded ? ChevronDown : ChevronRight, "xs")}</span>
+											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
+											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
+										</button>
+										${state.archivedSectionExpanded ? html`
 											${standaloneArchived.map(s => renderArchivedSessionRow(s))}
 											${delegateHtml}
-										</div>
-									` : ""}
+										` : ""}
+									</div>
 								`;
-							})() : ""}
+							})()}
 						`
 				}
 			</div>
@@ -510,20 +490,25 @@ export function renderSidebar() {
 					@click=${() => {
 						state.showArchived = !state.showArchived;
 						localStorage.setItem("bobbit-show-archived", String(state.showArchived));
-						if (state.showArchived) { import("./api.js").then(m => m.fetchArchivedSessions()); }
+						if (state.showArchived) {
+							state.archivedSectionExpanded = true;
+							import("./api.js").then(m => m.fetchArchivedSessions());
+						} else {
+							state.archivedSectionExpanded = false;
+						}
 						renderApp();
 					}}
 					title="${state.showArchived ? "Hide archived sessions" : "Show archived sessions"}"
 				>
 					${icon(Archive, "sm")}
+					<span>See Archived</span>
 				</button>
 				<span class="flex-1"></span>
 				<button
-					class="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+					class="flex items-center gap-1.5 px-2 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
 					@click=${toggleSidebar}
 					title="Collapse sidebar (Ctrl+[)"
 				>
-					<span>Collapse</span>
 					${icon(PanelLeftClose, "sm")}
 				</button>
 			</div>
