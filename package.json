@@ -47,7 +47,7 @@
     "pdfjs-dist": "5.4.394",
     "qrcode": "^1.5.4",
     "ws": "^8.18.0",
-    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "xlsx": "file:vendor/xlsx-0.20.3.tgz",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
