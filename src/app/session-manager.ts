@@ -403,6 +403,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (idx >= 0) {
 				state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], isAborting: remote.isAborting };
 			}
+			// Set readOnly when archived status arrives (may come after initial connect)
+			if (status === "archived" && state.chatPanel?.agentInterface) {
+				state.chatPanel.agentInterface.readOnly = true;
+			}
 			// Refresh git status when agent becomes idle (turn finished)
 			if (status === "idle") {
 				refreshGitStatusForSession(sessionId);
@@ -627,6 +631,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.chatPanel.agentInterface.branch = goal.branch;
 				}
 			}
+		}
+
+		// Disable input for archived sessions
+		if (state.chatPanel.agentInterface && remote.state.isArchived) {
+			state.chatPanel.agentInterface.readOnly = true;
 		}
 
 		// Set up bg process kill/dismiss handlers

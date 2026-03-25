@@ -85,6 +85,16 @@ export function handleWebSocketConnection(
 
 			const session = sessionManager.getSession(sessionId);
 			if (!session) {
+				// Check if it's an archived session
+				const archived = sessionManager.getArchivedSession(sessionId);
+				if (archived) {
+					(ws as any).sessionId = sessionId;
+					(ws as any).isArchived = true;
+					send(ws, { type: "auth_ok" });
+					send(ws, { type: "session_status", status: "archived" });
+					send(ws, { type: "session_title", sessionId, title: archived.title });
+					return;
+				}
 				send(ws, { type: "error", message: "Session not found", code: "SESSION_NOT_FOUND" });
 				ws.close(4005, "Session not found");
 				return;
@@ -123,6 +133,30 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_status", status: session.status, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+			return;
+		}
+
+		// Handle archived session commands (read-only)
+		if ((ws as any).isArchived) {
+			switch (msg.type) {
+				case "get_state": {
+					const archived = sessionManager.getArchivedSession(sessionId);
+					if (archived) {
+						send(ws, { type: "state", data: { archived: true, archivedAt: archived.archivedAt, title: archived.title } });
+					}
+					break;
+				}
+				case "get_messages": {
+					const messages = sessionManager.getArchivedMessages(sessionId);
+					send(ws, { type: "messages", data: messages });
+					break;
+				}
+				case "ping":
+					send(ws, { type: "pong" });
+					break;
+				default:
+					send(ws, { type: "error", message: "This session is archived (read-only)", code: "SESSION_ARCHIVED" });
+			}
 			return;
 		}
 

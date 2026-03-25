@@ -152,6 +152,26 @@ export async function refreshSessions(): Promise<void> {
 		_lastPrRefresh = now;
 		refreshPrStatusCache();
 	}
+
+	// If the archived toggle is already on (persisted from previous session), fetch archived sessions
+	if (state.showArchived) {
+		fetchArchivedSessions();
+	}
+}
+
+/** Fetch archived sessions from the API. */
+export async function fetchArchivedSessions(): Promise<void> {
+	try {
+		const res = await gatewayFetch("/api/sessions?include=archived");
+		if (!res.ok) return;
+		const data = await res.json();
+		const sessions: GatewaySession[] = data.sessions || [];
+		// Filter to only archived ones
+		state.archivedSessions = sessions.filter((s: any) => s.archived === true);
+		renderApp();
+	} catch {
+		// Silently fail
+	}
 }
 
 /** Fetch gate statuses for all goals with workflows and update the cache. */

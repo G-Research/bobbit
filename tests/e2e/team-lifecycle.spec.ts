@@ -346,7 +346,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 		// Session should be terminated
 		const session = await apiGetSession(token, coder.data.sessionId);
 		if (session.data) {
-			expect(session.data.status).toBe("terminated");
+			expect(session.data.status).toBe("archived");
 		}
 	});
 
@@ -402,7 +402,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 		// Team lead should still exist and be non-terminated
 		const teamLeadSession = await apiGetSession(token, teamLeadId);
 		expect(teamLeadSession.status).toBe(200);
-		expect(teamLeadSession.data.status).not.toBe("terminated");
+		expect(teamLeadSession.data.status).not.toBe("archived");
 	});
 
 	// ── Tearing down a team ─────────────────────────────────────
@@ -434,7 +434,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 		// Team lead session should be terminated
 		const teamLeadSession = await apiGetSession(token, teamLeadId);
 		if (teamLeadSession.data) {
-			expect(teamLeadSession.data.status).toBe("terminated");
+			expect(teamLeadSession.data.status).toBe("archived");
 		}
 	});
 
@@ -557,7 +557,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 		// Session should be terminated or gone
 		const result = await apiGetSession(token, session.id);
 		if (result.data) {
-			expect(result.data.status).toBe("terminated");
+			expect(result.data.status).toBe("archived");
 		}
 	});
 
@@ -596,7 +596,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 
 		const manualAfter = await apiGetSession(token, manual.id);
 		expect(manualAfter.status).toBe(200);
-		expect(manualAfter.data.status).not.toBe("terminated");
+		expect(manualAfter.data.status).not.toBe("archived");
 	});
 
 	// ── No team state for non-team goals ───────────────────────
@@ -685,7 +685,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 
 		// Team lead should still be alive
 		const session = await apiGetSession(token, startResult.data.sessionId);
-		expect(session.data.status).not.toBe("terminated");
+		expect(session.data.status).not.toBe("archived");
 	});
 
 	test("teardown a nonexistent team returns 400", async () => {
@@ -769,7 +769,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 
 		// Team lead still alive
 		const teamLeadAfterComplete = await apiGetSession(token, firstTeamLeadId);
-		expect(teamLeadAfterComplete.data.status).not.toBe("terminated");
+		expect(teamLeadAfterComplete.data.status).not.toBe("archived");
 
 		// Step 6: Teardown completely
 		const teardownResult = await apiTeardownTeam(token, goal.id);
@@ -782,7 +782,7 @@ test.describe("Team & Goal Session Lifecycle", () => {
 		// Team lead terminated
 		const teamLeadAfterTeardown = await apiGetSession(token, firstTeamLeadId);
 		if (teamLeadAfterTeardown.data) {
-			expect(teamLeadAfterTeardown.data.status).toBe("terminated");
+			expect(teamLeadAfterTeardown.data.status).toBe("archived");
 		}
 
 		// Step 7: Reset goal state and start second team

@@ -286,6 +286,7 @@ export function createGateway(config: GatewayConfig) {
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
+			sessionManager.startPurgeSchedule();
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
 			teamManager.resubscribeTeamEvents();
@@ -392,7 +393,16 @@ async function handleApiRoute(
 			...s,
 			colorIndex: colorStore.get(s.id),
 		}));
-		json({ sessions });
+		// Support ?include=archived to return archived sessions too
+		if (url.searchParams.get("include") === "archived") {
+			const archived = sessionManager.listArchivedSessions().map((s) => ({
+				...s,
+				colorIndex: colorStore.get(s.id),
+			}));
+			json({ sessions: [...sessions, ...archived] });
+		} else {
+			json({ sessions });
+		}
 		return;
 	}
 
@@ -402,6 +412,34 @@ async function handleApiRoute(
 		const id = singleSessionMatch[1];
 		const session = sessionManager.getSession(id);
 		if (!session) {
+			// Check if it's an archived session
+			const archived = sessionManager.getArchivedSession(id);
+			if (archived) {
+				json({
+					id: archived.id,
+					title: archived.title,
+					cwd: archived.cwd,
+					status: "archived",
+					createdAt: archived.createdAt,
+					lastActivity: archived.lastActivity,
+					clientCount: 0,
+					isCompacting: false,
+					goalId: archived.goalId,
+					assistantType: archived.assistantType,
+					delegateOf: archived.delegateOf,
+					role: archived.role,
+					teamGoalId: archived.teamGoalId,
+					worktreePath: archived.worktreePath,
+					taskId: archived.taskId,
+					staffId: archived.staffId,
+					colorIndex: colorStore.get(archived.id),
+					preview: archived.preview,
+					personalities: archived.personalities,
+					archived: true,
+					archivedAt: archived.archivedAt,
+				});
+				return;
+			}
 			res.writeHead(404);
 			res.end(JSON.stringify({ error: "Session not found" }));
 			return;
@@ -1567,7 +1605,31 @@ async function handleApiRoute(
 	const teamAgentsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/agents$/);
 	if (teamAgentsMatch && req.method === "GET") {
 		const goalId = teamAgentsMatch[1];
-		json({ agents: teamManager.listAgents(goalId) });
+		const agents = teamManager.listAgents(goalId);
+
+		// Include archived (dismissed) agents when ?include=archived is set
+		const includeArchived = url.searchParams.get("include") === "archived";
+		let archivedAgents: unknown[] = [];
+		if (includeArchived) {
+			const liveSessionIds = new Set(agents.map((a: any) => a.sessionId));
+			archivedAgents = sessionManager.listArchivedSessions()
+				.filter(s => s.teamGoalId === goalId && !liveSessionIds.has(s.id))
+				.map(s => ({
+					sessionId: s.id,
+					role: s.role || "unknown",
+					status: "archived",
+					worktreePath: s.worktreePath || "",
+					branch: "",
+					task: "",
+					createdAt: s.createdAt,
+					archivedAt: s.archivedAt,
+					title: s.title,
+					accessory: s.accessory,
+					taskId: s.taskId,
+				}));
+		}
+
+		json({ agents: [...agents, ...archivedAgents] });
 		return;
 	}
 
@@ -1620,6 +1682,13 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
+			// Check if it's an archived session — purge immediately
+			const archivedSession = sessionManager.getArchivedSession(id);
+			if (archivedSession) {
+				await sessionManager.purgeArchivedSession(id);
+				json({ ok: true });
+				return;
+			}
 			const terminated = await sessionManager.terminateSession(id);
 			if (!terminated) {
 				json({ error: "Session not found" }, 404);

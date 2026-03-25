@@ -237,6 +237,10 @@ export interface TeamAgent {
 	branch: string;
 	task: string;
 	createdAt: number;
+	archivedAt?: number;
+	title?: string;
+	accessory?: string;
+	taskId?: string;
 }
 
 let agents: TeamAgent[] = [];
@@ -245,7 +249,7 @@ let taskPollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function fetchAgents(goalId: string): Promise<TeamAgent[]> {
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/team/agents`);
+		const res = await gatewayFetch(`/api/goals/${goalId}/team/agents?include=archived`);
 		if (!res.ok) return [];
 		const data = await res.json();
 		return data.agents ?? [];
@@ -472,7 +476,9 @@ function typeLabel(type: TaskType): string {
 
 function findAssigneeSession(sessionId: string | undefined) {
 	if (!sessionId) return null;
-	return state.gatewaySessions.find((s) => s.id === sessionId) || null;
+	return state.gatewaySessions.find((s) => s.id === sessionId)
+		|| state.archivedSessions.find((s) => s.id === sessionId)
+		|| null;
 }
 
 function formatRelativeTime(timestamp: string | number): string {
@@ -505,7 +511,8 @@ function getRoleLabel(role: string): string {
 }
 
 function formatAgentName(agent: TeamAgent): string {
-	const session = state.gatewaySessions.find((s) => s.id === agent.sessionId);
+	const session = state.gatewaySessions.find((s) => s.id === agent.sessionId)
+		|| state.archivedSessions.find((s) => s.id === agent.sessionId);
 	if (session?.title) return session.title;
 	if (agent.role === "team-lead") return "Team Lead";
 	return agent.role.charAt(0).toUpperCase() + agent.role.slice(1);
@@ -950,7 +957,8 @@ function renderSummaryRow(taskList: Task[], agentList: TeamAgent[]): TemplateRes
 				<div class="summary-agents">
 					<div class="bobbit-row">
 						${agentList.map(agent => {
-							const session = state.gatewaySessions.find(s => s.id === agent.sessionId);
+							const session = state.gatewaySessions.find(s => s.id === agent.sessionId)
+								|| state.archivedSessions.find(s => s.id === agent.sessionId);
 							return statusBobbit(
 								session?.status ?? agent.status,
 								session?.isCompacting ?? false,
@@ -1060,7 +1068,7 @@ function renderTabBar(): TemplateResult {
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
 		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
-		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length + (currentGoal?.team && state.gatewaySessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead") ? 1 : 0)) },
+		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length + (currentGoal?.team && (state.gatewaySessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead") || state.archivedSessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")) ? 1 : 0)) },
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },
 	];
 
@@ -1160,7 +1168,8 @@ function renderAgentsTab(): TemplateResult {
 	// Build combined list: team lead (if any) + spawned agents
 	const allAgents: TeamAgent[] = [];
 	const teamLeadSession = currentGoal?.team
-		? state.gatewaySessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")
+		? (state.gatewaySessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")
+			|| state.archivedSessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead"))
 		: null;
 	if (teamLeadSession) {
 		allAgents.push({
@@ -1179,52 +1188,64 @@ function renderAgentsTab(): TemplateResult {
 		return html`<div class="tab-empty">${svgAgents}<span>No active agents</span></div>`;
 	}
 
+	// Separate live and archived agents
+	const liveAgents = allAgents.filter(a => a.status !== "archived");
+	const archivedAgents = allAgents.filter(a => a.status === "archived");
+
+	const renderAgentCard = (agent: TeamAgent, isArchived: boolean) => {
+		const session = state.gatewaySessions.find(s => s.id === agent.sessionId)
+			|| state.archivedSessions.find(s => s.id === agent.sessionId);
+		const isWorking = agent.status === "streaming";
+		const roleColor = getRoleColor(agent.role);
+		const tasksDone = tasks.filter(t => t.assignedSessionId === agent.sessionId && t.state === "complete").length;
+		const agentCommits = commits.filter(c => {
+			const s = state.gatewaySessions.find(gs => gs.id === agent.sessionId)
+				|| state.archivedSessions.find(gs => gs.id === agent.sessionId);
+			return s && c.author === (s.title || s.id.slice(0, 8));
+		}).length;
+		const elapsed = (isArchived && agent.archivedAt ? agent.archivedAt : Date.now()) - agent.createdAt;
+		const mins = Math.floor(elapsed / 60_000);
+		const timeStr = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
+		const displayName = isArchived ? (agent.title || formatAgentName(agent)) : formatAgentName(agent);
+
+		return html`
+			<div class="agent-card ${isArchived ? "opacity-50" : ""}" @click=${() => connectToSession(agent.sessionId, true)} title="${isArchived ? "View archived session" : "Connect to"} ${displayName}">
+				<div class="agent-card-bobbit">
+					${statusBobbit(
+						isArchived ? "terminated" : (session?.status ?? agent.status),
+						session?.isCompacting ?? false,
+						agent.sessionId,
+						false,
+						session?.isAborting ?? false,
+						agent.role === "team-lead",
+						agent.role === "coder",
+						isArchived ? agent.accessory : session?.accessory,
+					)}
+				</div>
+				<div class="agent-card-info">
+					<div class="agent-card-name-row">
+						<span class="agent-card-name">${displayName}</span>
+						<span class="role-tag" style="background:${roleColor.bg};color:${roleColor.text}">${getRoleLabel(agent.role)}</span>
+						${isArchived
+							? html`<span class="role-tag" style="background:var(--muted);color:var(--muted-foreground)">Dismissed</span>`
+							: html`<span class="status-indicator ${isWorking ? "working" : "idle"}"></span>`}
+					</div>
+					<div class="agent-card-task">${agent.task || (isArchived ? "Session archived" : "No active task")}</div>
+					<div class="agent-card-meta">
+						<div class="agent-card-meta-item">${svgTasks} ${tasksDone} completed</div>
+						${agentCommits > 0 ? html`<div class="agent-card-meta-item">${svgCommit} ${agentCommits} commits</div>` : nothing}
+						<div class="agent-card-meta-item">${svgClock} ${timeStr}</div>
+					</div>
+				</div>
+			</div>
+		`;
+	};
+
 	return html`
 		<div class="tab-panel-inner">
 			<div class="agent-grid">
-				${allAgents.map(agent => {
-					const session = state.gatewaySessions.find(s => s.id === agent.sessionId);
-					const isWorking = agent.status === "streaming";
-					const roleColor = getRoleColor(agent.role);
-					const tasksDone = tasks.filter(t => t.assignedSessionId === agent.sessionId && t.state === "complete").length;
-					const agentCommits = commits.filter(c => {
-						const s = state.gatewaySessions.find(gs => gs.id === agent.sessionId);
-						return s && c.author === (s.title || s.id.slice(0, 8));
-					}).length;
-					const elapsed = Date.now() - agent.createdAt;
-					const mins = Math.floor(elapsed / 60_000);
-					const timeStr = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
-
-					return html`
-						<div class="agent-card" @click=${() => connectToSession(agent.sessionId, true)} title="Connect to ${formatAgentName(agent)}">
-							<div class="agent-card-bobbit">
-								${statusBobbit(
-									session?.status ?? agent.status,
-									session?.isCompacting ?? false,
-									agent.sessionId,
-									false,
-									session?.isAborting ?? false,
-									agent.role === "team-lead",
-									agent.role === "coder",
-									session?.accessory,
-								)}
-							</div>
-							<div class="agent-card-info">
-								<div class="agent-card-name-row">
-									<span class="agent-card-name">${formatAgentName(agent)}</span>
-									<span class="role-tag" style="background:${roleColor.bg};color:${roleColor.text}">${getRoleLabel(agent.role)}</span>
-									<span class="status-indicator ${isWorking ? "working" : "idle"}"></span>
-								</div>
-								<div class="agent-card-task">${agent.task || "No active task"}</div>
-								<div class="agent-card-meta">
-									<div class="agent-card-meta-item">${svgTasks} ${tasksDone} completed</div>
-									${agentCommits > 0 ? html`<div class="agent-card-meta-item">${svgCommit} ${agentCommits} commits</div>` : nothing}
-									<div class="agent-card-meta-item">${svgClock} ${timeStr}</div>
-								</div>
-							</div>
-						</div>
-					`;
-				})}
+				${liveAgents.map(agent => renderAgentCard(agent, false))}
+				${archivedAgents.map(agent => renderAgentCard(agent, true))}
 			</div>
 		</div>
 	`;

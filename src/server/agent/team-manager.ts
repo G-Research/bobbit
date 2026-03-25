@@ -782,19 +782,23 @@ export class TeamManager {
 			agent.unsubscribeEvent();
 		}
 
+		// Persist repoPath and branch before archiving so worktree can be cleaned up later
+		const goal = this.goalManager.getGoal(goalId);
+		if (goal?.repoPath && agent.worktreePath) {
+			this.sessionManager.updateSessionMeta(sessionId, {
+				worktreePath: agent.worktreePath,
+			});
+			// Store repoPath and branch in the session store for later purge cleanup
+			const store = (this.sessionManager as any).store;
+			if (store) {
+				store.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
+			}
+		}
+
 		// Terminate the session
 		await this.sessionManager.terminateSession(sessionId);
 
-		// Clean up the worktree
-		const goal = this.goalManager.getGoal(goalId);
-		if (goal?.repoPath && agent.worktreePath) {
-			try {
-				await cleanupWorktree(goal.repoPath, agent.worktreePath, agent.branch, true);
-				console.log(`[team-manager] Cleaned up worktree for ${agent.role} agent: ${agent.worktreePath}`);
-			} catch (err) {
-				console.error(`[team-manager] Failed to clean up worktree for ${agent.role} agent:`, err);
-			}
-		}
+		// Worktree is preserved for archived session review — cleanup happens at purge time
 
 		// Remove from tracking
 		entry.agents.splice(agentIndex, 1);
@@ -917,8 +921,19 @@ export class TeamManager {
 			}
 		}
 
-		// Terminate the team lead session
+		// Terminate the team lead session — persist worktree info first so purge can clean up
 		if (entry.teamLeadSessionId) {
+			const goal = this.goalManager.getGoal(goalId);
+			if (goal?.repoPath) {
+				const store = (this.sessionManager as any).store;
+				if (store) {
+					store.update(entry.teamLeadSessionId, {
+						repoPath: goal.repoPath,
+						branch: goal.branch,
+						worktreePath: goal.worktreePath,
+					});
+				}
+			}
 			try {
 				await this.sessionManager.terminateSession(entry.teamLeadSessionId);
 			} catch (err) {

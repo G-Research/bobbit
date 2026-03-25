@@ -239,61 +239,16 @@ export class GoalManager {
 
 	async deleteGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
+		if (!goal) return false;
+
+		// Worktrees are preserved for 7-day archive — do NOT clean them up here.
+		// The team teardown (called by server.ts before deleteGoal) archives all
+		// sessions via terminateSession/dismissRole, which preserves worktree paths
+		// in the archived session metadata. The periodic purge cleans them up later.
 		if (goal?.team) {
-			console.warn(`[goal-manager] Deleting team goal "${goal.title}" — ensure no active team sessions remain (cannot check from GoalManager)`);
+			console.log(`[goal-manager] Deleting team goal "${goal.title}" — worktrees preserved for archived session review`);
 		}
-		if (goal?.worktreePath && goal?.repoPath) {
-			// Clean up any leftover team agent worktrees in the sibling -wt-goal dir.
-			// Team agents get worktrees like <goalWorktree>-wt-goal/<agentBranch>/
-			// These may survive if dismissRole failed or the process crashed.
-			const teamWorktreeParent = goal.worktreePath + "-wt-goal";
-			if (fs.existsSync(teamWorktreeParent)) {
-				try {
-					const entries = fs.readdirSync(teamWorktreeParent, { withFileTypes: true });
-					for (const entry of entries) {
-						if (entry.isDirectory()) {
-							const agentWtPath = path.join(teamWorktreeParent, entry.name);
-							// Try to detect the branch name so we can delete it too
-							let agentBranch: string | undefined;
-							try {
-								const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-									cwd: agentWtPath,
-								});
-								agentBranch = stdout.toString().trim();
-								if (agentBranch === "HEAD") agentBranch = undefined; // detached
-							} catch {
-								// worktree may already be broken
-							}
-							try {
-								await cleanupWorktree(goal.repoPath, agentWtPath, agentBranch, true);
-							} catch {
-								// Best-effort — directory may already be cleaned
-							}
-						}
-					}
-					// Remove the parent dir itself
-					fs.rmSync(teamWorktreeParent, { recursive: true, force: true });
-					console.log(`[goal-manager] Cleaned up team worktree dir: ${teamWorktreeParent}`);
-				} catch (err) {
-					console.error(`[goal-manager] Failed to clean up team worktree dir ${teamWorktreeParent}:`, err);
-				}
-			}
 
-			// Clean up the goal's own worktree and branch
-			try {
-				await cleanupWorktree(goal.repoPath, goal.worktreePath, goal.branch, true);
-				console.log(`[goal-manager] Cleaned up worktree for goal "${goal.title}": ${goal.worktreePath}`);
-			} catch (err) {
-				console.error(`[goal-manager] Failed to clean up worktree for goal "${goal.title}":`, err);
-			}
-
-			// Prune stale worktree references
-			try {
-				await execFile("git", ["worktree", "prune"], { cwd: goal.repoPath });
-			} catch {
-				// ignore
-			}
-		}
 		this.store.remove(id);
 		return true;
 	}

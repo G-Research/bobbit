@@ -49,6 +49,14 @@ export interface PersistedSession {
 	messageQueue?: QueuedMessage[];
 	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role", "personality") */
 	drafts?: Record<string, unknown>;
+	/** Whether this session is archived (soft-deleted) */
+	archived?: boolean;
+	/** Epoch ms when this session was archived */
+	archivedAt?: number;
+	/** Repository path (preserved from goal for worktree cleanup) */
+	repoPath?: string;
+	/** Branch name (preserved for worktree cleanup) */
+	branch?: string;
 }
 
 const STORE_DIR = bobbitStateDir();
@@ -136,7 +144,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue">>): void {
+	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch">>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		Object.assign(existing, updates);
@@ -171,6 +179,35 @@ export class SessionStore {
 			delete session.drafts;
 		}
 		this.save();
+		return true;
+	}
+
+	/** Mark a session as archived. */
+	archive(id: string): boolean {
+		const existing = this.sessions.get(id);
+		if (!existing) return false;
+		existing.archived = true;
+		existing.archivedAt = Date.now();
+		this.saveNow(); // immediate — structural change
+		return true;
+	}
+
+	/** Get all archived sessions. */
+	getArchived(): PersistedSession[] {
+		return Array.from(this.sessions.values()).filter(s => s.archived === true);
+	}
+
+	/** Get all live (non-archived) sessions. */
+	getLive(): PersistedSession[] {
+		return Array.from(this.sessions.values()).filter(s => !s.archived);
+	}
+
+	/** Permanently remove an archived session from the store. */
+	purge(id: string): boolean {
+		const existing = this.sessions.get(id);
+		if (!existing) return false;
+		this.sessions.delete(id);
+		this.saveNow();
 		return true;
 	}
 
