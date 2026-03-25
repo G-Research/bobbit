@@ -710,6 +710,7 @@ async function handleApiRoute(
 			}
 		}
 		json({ ok: true });
+		broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
 		return;
 	}
 

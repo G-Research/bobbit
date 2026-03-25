@@ -667,6 +667,10 @@ export class RemoteAgent {
 				this._appendNotification(`Agent ${(msg as any).name} (${(msg as any).role}) finished`, "team");
 				break;
 
+			case "preferences_changed":
+				this._applyPreferences(msg.preferences);
+				break;
+
 			case "bg_process_created":
 			case "bg_process_output":
 			case "bg_process_exited":
@@ -739,6 +743,25 @@ export class RemoteAgent {
 			if (missing) continue;
 
 			callback(normalized);
+		}
+	}
+
+	private _applyPreferences(prefs: Record<string, unknown>): void {
+		if (!prefs || typeof prefs !== "object") return;
+
+		// Apply palette
+		if ("palette" in prefs) {
+			const palette = prefs.palette as string;
+			if (!palette || palette === "forest") {
+				delete document.documentElement.dataset.palette;
+			} else {
+				document.documentElement.dataset.palette = palette;
+			}
+		}
+
+		// Apply shortcuts
+		if ("shortcuts" in prefs) {
+			import("./shortcut-registry.js").then((m) => m.loadSavedBindings());
 		}
 	}
 
