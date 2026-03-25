@@ -92,6 +92,8 @@ export interface TeamManagerConfig {
 	gateStore?: GateStore;
 	/** Personality manager for resolving personality names to prompt fragments */
 	personalityManager?: PersonalityManager;
+	/** Broadcast a WS event to all clients viewing a goal */
+	broadcastToGoal?: (goalId: string, event: any) => void;
 }
 
 export class TeamManager {
@@ -114,6 +116,11 @@ export class TeamManager {
 		this.taskManager = config.taskManager;
 		this.store = new TeamStore();
 		this.restoreTeams();
+	}
+
+	/** Set the broadcastToGoal function (called after WebSocket server is created). */
+	setBroadcastToGoal(fn: (goalId: string, event: any) => void): void {
+		this.config.broadcastToGoal = fn;
 	}
 
 	/** Pick a palette index (0-19) not already used by any session, with randomisation. */
@@ -650,6 +657,10 @@ export class TeamManager {
 			// Subscribe to worker events to steer the team lead when the worker goes idle
 			const unsubscribe = session.rpcClient.onEvent((event: any) => {
 				if (event.type !== "agent_end") return;
+				// Broadcast team agent finished event
+				this.config.broadcastToGoal?.(goalId, {
+					type: "team_agent_finished", goalId, sessionId: session.id, role, name: roleName,
+				});
 				this.notifyTeamLead(goalId, session.id, role, agentId).catch((err) => {
 					console.error("[team-manager] Failed to notify team lead:", err);
 				});
@@ -659,6 +670,11 @@ export class TeamManager {
 			console.log(
 				`[team-manager] Spawned ${role} agent (${session.id}) for goal "${goal.title}" — cwd: ${agentCwd}`,
 			);
+
+			// Broadcast team agent spawned event
+			this.config.broadcastToGoal?.(goalId, {
+				type: "team_agent_spawned", goalId, sessionId: session.id, role, name: roleName,
+			});
 
 			return { sessionId: session.id, worktreePath: worktreeResult?.worktreePath };
 		} catch (err) {
@@ -791,6 +807,14 @@ export class TeamManager {
 		}
 
 		console.log(`[team-manager] Dismissed ${agent.role} agent (${sessionId}) for goal ${goalId}`);
+
+		// Broadcast team agent dismissed event
+		const sessionMeta = this.sessionManager.getSession(sessionId);
+		const dismissedName = sessionMeta?.title || `${agent.role}-${sessionId.slice(0, 8)}`;
+		this.config.broadcastToGoal?.(goalId, {
+			type: "team_agent_dismissed", goalId, sessionId, role: agent.role, name: dismissedName,
+		});
+
 		return true;
 	}
 

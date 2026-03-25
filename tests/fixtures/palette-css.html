@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+:root {
+  --notif-system-bg: rgba(100, 120, 160, 0.12);
+  --notif-system-border: rgba(100, 120, 160, 0.30);
+  --notif-system-text: rgba(130, 150, 190, 0.90);
+  --notif-task-bg: rgba(185, 145, 45, 0.12);
+  --user-msg-accent: rgba(80, 140, 80, 1);
+  --user-msg-bg: rgba(80, 140, 80, 0.10);
+}
+
+[data-palette="ocean"] {
+  --notif-system-bg: rgba(60, 120, 190, 0.12);
+  --notif-system-border: rgba(60, 120, 190, 0.30);
+  --notif-system-text: rgba(90, 150, 210, 0.90);
+  --notif-task-bg: rgba(224, 120, 80, 0.12);
+  --user-msg-accent: rgba(50, 150, 140, 1);
+  --user-msg-bg: rgba(50, 150, 140, 0.10);
+}
+
+[data-palette="mono"] {
+  --notif-system-bg: rgba(107, 114, 128, 0.12);
+  --notif-system-border: rgba(107, 114, 128, 0.30);
+  --notif-system-text: rgba(140, 147, 161, 0.90);
+  --notif-task-bg: rgba(209, 213, 219, 0.12);
+  --user-msg-accent: rgba(156, 163, 175, 1);
+  --user-msg-bg: rgba(156, 163, 175, 0.10);
+}
+
+.test-box {
+  width: 100px;
+  height: 20px;
+  background: var(--notif-system-bg);
+  border: 1px solid var(--notif-system-border);
+  color: var(--notif-system-text);
+}
+.user-box {
+  width: 100px;
+  height: 20px;
+  background: var(--user-msg-bg);
+  color: var(--user-msg-accent);
+}
+</style>
+</head>
+<body>
+<div class="test-box" id="system-box">System</div>
+<div class="user-box" id="user-box">User</div>
+</body>
+</html>

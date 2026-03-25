@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+.notification-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  margin: 2px 16px;
+  border: 1px solid transparent;
+  opacity: 0.85;
+}
+.notification-system { background: rgba(100,120,160,0.12); border-color: rgba(100,120,160,0.30); color: rgba(130,150,190,0.90); }
+.notification-task { background: rgba(185,145,45,0.12); border-color: rgba(185,145,45,0.30); color: rgba(205,170,65,0.90); }
+.notification-team { background: rgba(145,105,195,0.12); border-color: rgba(145,105,195,0.30); color: rgba(165,130,210,0.90); }
+.notification-error { background: rgba(195,75,75,0.12); border-color: rgba(195,75,75,0.30); color: rgba(215,100,100,0.90); }
+.notification-icon { font-size: 11px; flex-shrink: 0; }
+.notification-text { flex: 1; }
+.notification-time { font-size: 11px; opacity: 0.6; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<script>
+const CATEGORY_ICONS = {
+  system: '\u27F3',
+  task: '\u2713',
+  team: '\u25CF',
+  error: '\u2715',
+};
+
+function createNotification(message, category) {
+  return {
+    role: 'system-notification',
+    message,
+    variant: 'default',
+    category: category || 'system',
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function renderNotification(notif) {
+  const category = notif.category || 'system';
+  const icon = CATEGORY_ICONS[category] || CATEGORY_ICONS.system;
+  const time = new Date(notif.timestamp).toLocaleTimeString();
+  const div = document.createElement('div');
+  div.className = `notification-inline notification-${category}`;
+  div.innerHTML = `<span class="notification-icon">${icon}</span><span class="notification-text">${notif.message}</span><span class="notification-time">${time}</span>`;
+  return div;
+}
+
+// Render all four categories
+const container = document.getElementById('container');
+const categories = ['system', 'task', 'team', 'error'];
+categories.forEach(cat => {
+  const notif = createNotification(`Test ${cat} notification`, cat);
+  container.appendChild(renderNotification(notif));
+});
+
+// Also render one without category (should default to system)
+const defaultNotif = createNotification('Default notification');
+defaultNotif.category = undefined;
+container.appendChild(renderNotification(defaultNotif));
+</script>
+</body>
+</html>

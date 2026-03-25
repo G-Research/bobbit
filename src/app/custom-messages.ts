@@ -1,4 +1,3 @@
-import { Alert } from "@mariozechner/mini-lit/dist/Alert.js";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentMessage, MessageRenderer } from "../ui/index.js";
 import { defaultConvertToLlm, registerMessageRenderer } from "../ui/index.js";
@@ -8,16 +7,14 @@ import { html } from "lit";
 // 1. EXTEND AppMessage TYPE VIA DECLARATION MERGING
 // ============================================================================
 
-// Define custom message types
 export interface SystemNotificationMessage {
 	role: "system-notification";
 	message: string;
 	variant: "default" | "destructive";
+	category?: "system" | "task" | "team" | "error";
 	timestamp: string;
 }
 
-// Extend CustomAgentMessages interface via declaration merging
-// This must target pi-agent-core where CustomAgentMessages is defined
 declare module "@mariozechner/pi-agent-core" {
 	interface CustomAgentMessages {
 		"system-notification": SystemNotificationMessage;
@@ -25,30 +22,38 @@ declare module "@mariozechner/pi-agent-core" {
 }
 
 // ============================================================================
-// 2. CREATE CUSTOM RENDERER (TYPED TO SystemNotificationMessage)
+// 2. CATEGORY ICONS
+// ============================================================================
+
+const CATEGORY_ICONS: Record<string, string> = {
+	system: "\u27F3",  // ⟳
+	task: "\u2713",    // ✓
+	team: "\u25CF",    // ●
+	error: "\u2715",   // ✕
+};
+
+// ============================================================================
+// 3. COMPACT INLINE NOTIFICATION RENDERER
 // ============================================================================
 
 const systemNotificationRenderer: MessageRenderer<SystemNotificationMessage> = {
 	render: (notification) => {
-		// notification is fully typed as SystemNotificationMessage!
+		const category = notification.category || "system";
+		const icon = CATEGORY_ICONS[category] || CATEGORY_ICONS.system;
+		const time = new Date(notification.timestamp).toLocaleTimeString();
+
 		return html`
-			<div class="px-4">
-				${Alert({
-					variant: notification.variant,
-					children: html`
-						<div class="flex flex-col gap-1">
-							<div>${notification.message}</div>
-							<div class="text-xs opacity-70">${new Date(notification.timestamp).toLocaleTimeString()}</div>
-						</div>
-					`,
-				})}
+			<div class="notification-inline notification-${category}">
+				<span class="notification-icon">${icon}</span>
+				<span class="notification-text">${notification.message}</span>
+				<span class="notification-time">${time}</span>
 			</div>
 		`;
 	},
 };
 
 // ============================================================================
-// 3. REGISTER RENDERER
+// 4. REGISTER RENDERER
 // ============================================================================
 
 export function registerCustomMessageRenderers() {
@@ -56,35 +61,31 @@ export function registerCustomMessageRenderers() {
 }
 
 // ============================================================================
-// 4. HELPER TO CREATE CUSTOM MESSAGES
+// 5. HELPER TO CREATE CUSTOM MESSAGES
 // ============================================================================
 
 export function createSystemNotification(
 	message: string,
+	category: "system" | "task" | "team" | "error" = "system",
 	variant: "default" | "destructive" = "default",
 ): SystemNotificationMessage {
 	return {
 		role: "system-notification",
 		message,
 		variant,
+		category,
 		timestamp: new Date().toISOString(),
 	};
 }
 
 // ============================================================================
-// 5. CUSTOM MESSAGE TRANSFORMER
+// 6. CUSTOM MESSAGE TRANSFORMER
 // ============================================================================
 
-/**
- * Custom message transformer that extends defaultConvertToLlm.
- * Handles system-notification messages by converting them to user messages.
- */
 export function customConvertToLlm(messages: AgentMessage[]): Message[] {
-	// First, handle our custom system-notification type
 	const processed = messages.map((m): AgentMessage => {
 		if (m.role === "system-notification") {
 			const notification = m as SystemNotificationMessage;
-			// Convert to user message with <system> tags
 			return {
 				role: "user",
 				content: `<system>${notification.message}</system>`,
@@ -94,6 +95,5 @@ export function customConvertToLlm(messages: AgentMessage[]): Message[] {
 		return m;
 	});
 
-	// Then use defaultConvertToLlm for standard handling
 	return defaultConvertToLlm(processed);
 }

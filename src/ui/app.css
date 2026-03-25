@@ -70,6 +70,122 @@
 	--sidebar-border: oklch(0.30 0.012 145);
 }
 
+/* ── Notification category colors — Forest palette (default) ── */
+:root {
+	--notif-system-bg: rgba(100, 120, 160, 0.12);
+	--notif-system-border: rgba(100, 120, 160, 0.30);
+	--notif-system-text: rgba(130, 150, 190, 0.90);
+	--notif-task-bg: rgba(185, 145, 45, 0.12);
+	--notif-task-border: rgba(185, 145, 45, 0.30);
+	--notif-task-text: rgba(205, 170, 65, 0.90);
+	--notif-team-bg: rgba(145, 105, 195, 0.12);
+	--notif-team-border: rgba(145, 105, 195, 0.30);
+	--notif-team-text: rgba(165, 130, 210, 0.90);
+	--notif-error-bg: rgba(195, 75, 75, 0.12);
+	--notif-error-border: rgba(195, 75, 75, 0.30);
+	--notif-error-text: rgba(215, 100, 100, 0.90);
+	--user-msg-accent: rgba(80, 140, 80, 1);
+	--user-msg-bg: rgba(80, 140, 80, 0.10);
+	--user-msg-bg2: rgba(90, 150, 85, 0.05);
+	--user-msg-shadow: rgba(80, 140, 80, 0.14);
+	--user-msg-shadow2: rgba(80, 140, 80, 0.08);
+}
+
+/* ── Notification inline styles ── */
+.notification-inline {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	padding: 4px 10px;
+	border-radius: 6px;
+	margin: 2px 16px;
+	border: 1px solid transparent;
+	opacity: 0.85;
+}
+.notification-system {
+	background: var(--notif-system-bg);
+	border-color: var(--notif-system-border);
+	color: var(--notif-system-text);
+}
+.notification-task {
+	background: var(--notif-task-bg);
+	border-color: var(--notif-task-border);
+	color: var(--notif-task-text);
+}
+.notification-team {
+	background: var(--notif-team-bg);
+	border-color: var(--notif-team-border);
+	color: var(--notif-team-text);
+}
+.notification-error {
+	background: var(--notif-error-bg);
+	border-color: var(--notif-error-border);
+	color: var(--notif-error-text);
+}
+.notification-icon { font-size: 11px; flex-shrink: 0; }
+.notification-text { flex: 1; }
+.notification-time { font-size: 11px; opacity: 0.6; flex-shrink: 0; }
+
+/* ── Palette overrides ── */
+[data-palette="ocean"] {
+	--notif-system-bg: rgba(60, 120, 190, 0.12);
+	--notif-system-border: rgba(60, 120, 190, 0.30);
+	--notif-system-text: rgba(90, 150, 210, 0.90);
+	--notif-task-bg: rgba(224, 120, 80, 0.12);
+	--notif-task-border: rgba(224, 120, 80, 0.30);
+	--notif-task-text: rgba(240, 145, 105, 0.90);
+	--notif-team-bg: rgba(140, 140, 154, 0.12);
+	--notif-team-border: rgba(140, 140, 154, 0.30);
+	--notif-team-text: rgba(165, 165, 180, 0.90);
+	--notif-error-bg: rgba(195, 75, 75, 0.12);
+	--notif-error-border: rgba(195, 75, 75, 0.30);
+	--notif-error-text: rgba(215, 100, 100, 0.90);
+	--user-msg-accent: rgba(50, 150, 140, 1);
+	--user-msg-bg: rgba(50, 150, 140, 0.10);
+	--user-msg-bg2: rgba(55, 160, 145, 0.05);
+	--user-msg-shadow: rgba(50, 150, 140, 0.14);
+	--user-msg-shadow2: rgba(50, 150, 140, 0.08);
+}
+[data-palette="dusk"] {
+	--notif-system-bg: rgba(90, 90, 175, 0.12);
+	--notif-system-border: rgba(90, 90, 175, 0.30);
+	--notif-system-text: rgba(120, 120, 200, 0.90);
+	--notif-task-bg: rgba(212, 160, 23, 0.12);
+	--notif-task-border: rgba(212, 160, 23, 0.30);
+	--notif-task-text: rgba(230, 185, 50, 0.90);
+	--notif-team-bg: rgba(139, 95, 207, 0.12);
+	--notif-team-border: rgba(139, 95, 207, 0.30);
+	--notif-team-text: rgba(165, 125, 225, 0.90);
+	--notif-error-bg: rgba(200, 80, 80, 0.12);
+	--notif-error-border: rgba(200, 80, 80, 0.30);
+	--notif-error-text: rgba(220, 105, 105, 0.90);
+	--user-msg-accent: rgba(210, 120, 140, 1);
+	--user-msg-bg: rgba(210, 120, 140, 0.10);
+	--user-msg-bg2: rgba(215, 130, 150, 0.05);
+	--user-msg-shadow: rgba(210, 120, 140, 0.14);
+	--user-msg-shadow2: rgba(210, 120, 140, 0.08);
+}
+[data-palette="mono"] {
+	--notif-system-bg: rgba(107, 114, 128, 0.12);
+	--notif-system-border: rgba(107, 114, 128, 0.30);
+	--notif-system-text: rgba(140, 147, 161, 0.90);
+	--notif-task-bg: rgba(209, 213, 219, 0.12);
+	--notif-task-border: rgba(209, 213, 219, 0.30);
+	--notif-task-text: rgba(225, 228, 233, 0.90);
+	--notif-team-bg: rgba(161, 161, 170, 0.12);
+	--notif-team-border: rgba(161, 161, 170, 0.30);
+	--notif-team-text: rgba(185, 185, 195, 0.90);
+	--notif-error-bg: rgba(239, 68, 68, 0.12);
+	--notif-error-border: rgba(239, 68, 68, 0.30);
+	--notif-error-text: rgba(248, 113, 113, 0.90);
+	--user-msg-accent: rgba(156, 163, 175, 1);
+	--user-msg-bg: rgba(156, 163, 175, 0.10);
+	--user-msg-bg2: rgba(166, 173, 185, 0.05);
+	--user-msg-shadow: rgba(156, 163, 175, 0.14);
+	--user-msg-shadow2: rgba(156, 163, 175, 0.08);
+}
+
 body {
 	font-size: 16px;
 	-webkit-font-smoothing: antialiased;
@@ -2087,12 +2203,12 @@ html {
 .user-message-container {
 	transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 	position: relative;
-	background: linear-gradient(135deg, rgba(80, 140, 80, 0.10), rgba(90, 150, 85, 0.05));
+	background: linear-gradient(135deg, var(--user-msg-bg), var(--user-msg-bg2));
 	border: none;
 	border-radius: 6px;
 	max-width: 100%;
 	padding-left: 24px;
-	box-shadow: 0 1px 4px rgba(80, 140, 80, 0.14), 0 2px 8px rgba(80, 140, 80, 0.08);
+	box-shadow: 0 1px 4px var(--user-msg-shadow), 0 2px 8px var(--user-msg-shadow2);
 }
 /* Sage green chevron marker */
 .user-message-container::before {
@@ -2102,7 +2218,7 @@ html {
 	top: 1.15em;
 	font-size: 12px;
 	font-weight: 700;
-	color: rgba(75, 140, 70, 0.85);
+	color: var(--user-msg-accent);
 	text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 	z-index: 1;
 	line-height: 1;

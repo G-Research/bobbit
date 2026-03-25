@@ -19,8 +19,9 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { getAppStorage } from "../ui/storage/app-storage.js";
 
-type SettingsTab = "shortcuts";
+type SettingsTab = "shortcuts" | "palette";
 let activeTab: SettingsTab = "shortcuts";
 
 // Rebind state (same as shortcuts-dialog)
@@ -296,12 +297,97 @@ function renderShortcutsTab() {
 	`;
 }
 
+// ── Palette chooser ──
+
+interface ColorPalette {
+	id: string;
+	name: string;
+	swatches: [string, string, string, string, string];
+}
+
+const PALETTES: ColorPalette[] = [
+	{ id: "forest", name: "Forest", swatches: ["#508C50", "#6478A0", "#B99130", "#9169C3", "#C34B4B"] },
+	{ id: "ocean",  name: "Ocean",  swatches: ["#32968C", "#3C78BE", "#E07850", "#8C8C9A", "#C34B4B"] },
+	{ id: "dusk",   name: "Dusk",   swatches: ["#D2788C", "#5A5AAF", "#D4A017", "#8B5FCF", "#C85050"] },
+	{ id: "mono",   name: "Mono",   swatches: ["#9CA3AF", "#6B7280", "#D1D5DB", "#A1A1AA", "#EF4444"] },
+];
+
+const SWATCH_LABELS = ["User", "System", "Task", "Team", "Error"];
+
+let activePaletteId = "forest";
+let paletteLoaded = false;
+
+async function loadPalette(): Promise<void> {
+	if (paletteLoaded) return;
+	paletteLoaded = true;
+	try {
+		const storage = getAppStorage();
+		const saved = await storage.settings.get<string>("palette");
+		if (saved) activePaletteId = saved;
+	} catch {}
+}
+
+async function selectPalette(id: string): Promise<void> {
+	activePaletteId = id;
+	if (id === "forest") {
+		delete document.documentElement.dataset.palette;
+	} else {
+		document.documentElement.dataset.palette = id;
+	}
+	try {
+		const storage = getAppStorage();
+		await storage.settings.set("palette", id);
+	} catch {}
+	renderApp();
+}
+
+function renderPaletteTab() {
+	loadPalette();
+
+	return html`
+		<div class="flex flex-col gap-3">
+			<p class="text-sm text-muted-foreground">
+				Choose a color palette for notifications and user messages.
+			</p>
+			<div class="flex flex-col gap-2">
+				${PALETTES.map((palette) => {
+					const isActive = activePaletteId === palette.id;
+					return html`
+						<button
+							class="flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all cursor-pointer text-left w-full
+								${isActive
+									? "border-primary bg-primary/5 ring-1 ring-primary/30"
+									: "border-border hover:border-primary/40 hover:bg-secondary/30"}"
+							@click=${() => selectPalette(palette.id)}
+						>
+							<div class="flex gap-1.5">
+								${palette.swatches.map((color, i) => html`
+									<div
+										class="w-6 h-6 rounded-full border border-black/10"
+										style="background: ${color}"
+										title="${SWATCH_LABELS[i]}"
+									></div>
+								`)}
+							</div>
+							<span class="text-sm font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}">
+								${palette.name}
+							</span>
+							${isActive ? html`<span class="ml-auto text-xs text-primary">Active</span>` : ""}
+						</button>
+					`;
+				})}
+			</div>
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
 
 	const tabs: { id: SettingsTab; label: string }[] = [
 		{ id: "shortcuts", label: "Shortcuts" },
+		{ id: "palette", label: "Color Palette" },
 	];
 
 	return html`
@@ -331,6 +417,7 @@ export function renderSettingsPage() {
 			<div class="flex-1 overflow-y-auto p-4">
 				<div class="max-w-xl">
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
+					${activeTab === "palette" ? renderPaletteTab() : ""}
 				</div>
 			</div>
 		</div>

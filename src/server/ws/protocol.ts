@@ -61,4 +61,7 @@ export type ServerMessage =
 	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: string }
 	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string }
 	| { type: "goal_setup_complete"; goalId: string }
-	| { type: "goal_setup_error"; goalId: string; error: string };
+	| { type: "goal_setup_error"; goalId: string; error: string }
+	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }
+	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
+	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string };
