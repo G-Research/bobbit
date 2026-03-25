@@ -24,12 +24,32 @@ Bobbit wraps [pi-coding-agent](https://github.com/nickarrow/nickarrow) in a WebS
 ## Quick start
 
 ```bash
+npx bobbit
+```
+
+That's it. Bobbit installs, builds, scaffolds a `.bobbit/` directory in your project, and starts the gateway on `http://localhost:3001`. Open the printed URL in your browser.
+
+**Global install** (if you prefer):
+
+```bash
+npm install -g bobbit
+bobbit
+```
+
+### How it binds
+
+- **No mesh network** (most users): Bobbit binds to `localhost:3001` with TLS disabled — plain HTTP, zero friction.
+- **NordLynx detected**: Bobbit auto-binds to the NordVPN mesh IP with HTTPS (self-signed cert). This enables remote access from any device on the mesh.
+- **Explicit host**: Pass `--host <addr>` to bind to a specific address. Non-loopback addresses default to HTTPS.
+
+### From source
+
+```bash
+git clone <repo> && cd bobbit
 npm install
 npm run build     # compile server + bundle UI
 npm start         # start gateway on :3001, serves UI
 ```
-
-The gateway auto-detects the NordLynx (NordVPN mesh) interface and binds to it. Pass `--host <addr>` to override. Open the printed URL from any device on the mesh.
 
 ### Development
 
@@ -59,15 +79,15 @@ The harness also auto-restarts on unexpected crashes. Sessions survive restarts 
 ```
 bobbit [options]
 
---host <addr>       Bind address (default: auto-detect NordLynx mesh IP)
+--host <addr>       Bind address (default: NordLynx mesh IP if found, otherwise localhost)
 --port <n>          Port (default: 3001)
+--tls / --no-tls    Override TLS auto-detection (default: TLS on for non-loopback, off for localhost)
 --cwd <dir>         Working directory for agent sessions (default: .)
 --agent-cli <path>  Path to pi-coding-agent cli.js (auto-resolved from node_modules)
 --static <dir>      Serve a custom UI build directory
 --no-ui             Don't serve any UI (gateway-only mode)
 --new-token         Force-generate a new auth token
 --show-token        Print the current token and exit
---no-tls            Disable TLS (on by default)
 ```
 
 ## Architecture — Server
@@ -559,13 +579,13 @@ Forked from `@mariozechner/pi-web-ui`. Lit-based web components.
 - IP-based rate limiting on failed auth attempts (automatic lockout)
 - 5-second auth timeout on WebSocket connections
 - Static file serving has directory traversal prevention (resolved path must start with static dir)
-- Gateway auto-binds to the NordLynx mesh IP — never `0.0.0.0`
-- TLS on by default with auto-generated certificates
+- Gateway binds to NordLynx mesh IP if available, otherwise `localhost` — never `0.0.0.0` unless explicitly requested
+- TLS on by default for non-loopback addresses; disabled for localhost unless `--tls` is passed
 - OAuth PKCE flow for obtaining API credentials securely
 
 ## Networking
 
-Bobbit is accessed remotely over a **NordVPN mesh network**. The gateway auto-detects the NordLynx interface and binds to its IPv4 address.
+By default, Bobbit binds to `localhost` for local-only access (HTTP). When a **NordVPN mesh network** is detected, the gateway auto-binds to the NordLynx interface's IPv4 address with HTTPS, enabling remote access from any device on the mesh.
 
 **Port topology in dev mode:**
 - **Vite** (`:5173`) — User-facing HTTPS, serves UI with HMR, proxies `/api/*` and `/ws/*` to the gateway
@@ -575,7 +595,7 @@ In production (`npm start`), the gateway serves the bundled UI directly on `:300
 
 **deSEC dynamic DNS**: On startup, the gateway updates a deSEC A record so a custom domain (e.g. `bobbit.dedyn.io`) resolves to the current mesh IP. Config stored in `.bobbit/state/desec.json`. Skipped for loopback addresses to avoid clobbering the record during tests.
 
-**TLS** is on by default. Certs are generated via mkcert (local CA) or openssl fallback. The cert covers the current host IP + localhost and regenerates automatically if the IP changes. Vite reuses the same cert.
+**TLS** is on by default for non-loopback addresses; disabled for localhost to avoid self-signed certificate warnings. Pass `--tls` to force TLS on localhost. Certs are generated via mkcert (local CA) or openssl fallback. The cert covers the current host IP + localhost and regenerates automatically if the IP changes. Vite reuses the same cert.
 
 **QR code**: Encodes `window.location.origin` + auth token. Scannable from any device on the NordVPN mesh.
 
