@@ -126,7 +126,7 @@ export class VerificationHarness {
 			// Run all verification steps in parallel
 			const indexedResults = await Promise.all(
 				steps.map(async (step, index) => {
-					let result: { passed: boolean; output: string };
+					let result: { passed: boolean; output: string } = { passed: false, output: "No verification result." };
 					const startTime = Date.now();
 
 					if (step.type === "command") {
@@ -140,15 +140,21 @@ export class VerificationHarness {
 							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set)." };
 						} else {
 							const prompt = this.substituteVars(step.prompt || "", builtinVars, allGateStates);
-							result = await this.runLlmReviewStep(
-								{ name: step.name, prompt, timeout: step.timeout },
-								cwd,
-								builtinVars,
-								signal.content,
-								signal.metadata,
-								goalSpec,
-								allGateStates,
-							);
+							const maxAttempts = 2; // Retry once on transient failures (timeout, missing verdict)
+							for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+								result = await this.runLlmReviewStep(
+									{ name: step.name, prompt, timeout: step.timeout },
+									cwd,
+									builtinVars,
+									signal.content,
+									signal.metadata,
+									goalSpec,
+									allGateStates,
+								);
+								const isTransient = result.output.includes("timed out") || result.output.includes("no <verdict> tag");
+								if (result.passed || !isTransient || attempt === maxAttempts) break;
+								console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying...`);
+							}
 						}
 					}
 
@@ -235,7 +241,7 @@ export class VerificationHarness {
 		}
 
 		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
-		const timeoutMs = (step.timeout || 300) * 1000;
+		const timeoutMs = (step.timeout || 600) * 1000;
 
 		// Build system prompt from reviewer role template + step prompt + signal context
 		let rolePrompt = role.promptTemplate
