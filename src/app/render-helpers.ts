@@ -207,7 +207,7 @@ export const SESSION_ROW_PY = "py-0.5";
 
 /** Consistent indent per nesting level (px). */
 export const INDENT = 5;
-/** Width of the chevron/spacer slot (px). */
+/** Width of the chevron/spacer slot for session rows (px). */
 export const CHEVRON_W = 5;
 
 export function renderSessionRow(session: GatewaySession) {
@@ -291,7 +291,7 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 		>
 			${hasDelegates ? html`<span
 				class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer opacity-60"
-				style="width:${CHEVRON_W}px;text-align:center;"
+				style="width:8px;text-align:center;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse delegates" : "Expand delegates"}"
 			>${expanded ? "▾" : "▸"}</span>` : ""}
@@ -494,7 +494,7 @@ export function renderGoalGroup(goal: Goal) {
 			<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-0 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
-				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
+				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
