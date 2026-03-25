@@ -520,6 +520,26 @@ async function saveAigwConfig(): Promise<void> {
 	renderApp();
 }
 
+async function refreshAigwModels(): Promise<void> {
+	aigwStatus = "testing";
+	aigwError = "";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/aigw/refresh", { method: "POST" });
+		const data = await res.json();
+		if (!res.ok) {
+			aigwError = data.error || `HTTP ${res.status}`;
+		} else {
+			aigwModels = data.models || [];
+			aigwError = "";
+		}
+	} catch (err: any) {
+		aigwError = err.message || "Refresh failed";
+	}
+	aigwStatus = "idle";
+	renderApp();
+}
+
 async function removeAigwConfig(): Promise<void> {
 	aigwStatus = "removing";
 	aigwError = "";
@@ -613,6 +633,12 @@ function renderAigwTab() {
 						?disabled=${busy}
 						@click=${removeAigwConfig}
 					>${aigwStatus === "removing" ? "Removing..." : "Disconnect"}</button>
+					<button
+						class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
+							hover:bg-secondary transition-colors disabled:opacity-50"
+						?disabled=${busy}
+						@click=${refreshAigwModels}
+					>Refresh Models</button>
 				` : ""}
 			</div>
 

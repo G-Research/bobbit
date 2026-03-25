@@ -989,9 +989,19 @@ export class SessionManager {
 		if (!aigwUrl || !aigwModels || aigwModels.length === 0) return;
 
 		try {
-			const first = aigwModels[0];
-			await session.rpcClient.setModel("aigw", first.id);
-			console.log(`[session-manager] Auto-selected aigw model "${first.id}" for session ${session.id}`);
+			// G5: Check preferred model first, fall back to first available
+			const preferredId = this.preferencesStore.get("aigw.preferredModel") as string | undefined;
+			const preferred = preferredId ? aigwModels.find(m => m.id === preferredId) : undefined;
+			const modelToUse = preferred ?? aigwModels[0];
+
+			await session.rpcClient.setModel("aigw", modelToUse.id);
+			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
+
+			// G3: Broadcast model change to connected clients so the UI updates
+			broadcast(session.clients, {
+				type: "state",
+				data: { model: { provider: "aigw", id: modelToUse.id } },
+			});
 		} catch (err) {
 			console.warn(`[session-manager] Failed to auto-select aigw model for ${session.id}:`, err);
 		}

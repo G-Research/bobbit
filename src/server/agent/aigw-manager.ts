@@ -154,7 +154,9 @@ function writeModelsJson(data: Record<string, any>): void {
 	try {
 		const dir = path.dirname(p);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-		fs.writeFileSync(p, JSON.stringify(data, null, 2), "utf-8");
+		const tmp = p + ".tmp";
+		fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+		fs.renameSync(tmp, p);
 		console.log(`[aigw-manager] Wrote models.json to ${p}`);
 	} catch (err) {
 		console.error("[aigw-manager] Failed to write models.json:", err);
@@ -211,15 +213,12 @@ export async function checkInternetAvailable(): Promise<boolean> {
 		"https://api.openai.com",
 	];
 
-	for (const target of targets) {
-		try {
-			await httpHead(target, 4_000);
-			return true;
-		} catch {
-			// try next
-		}
+	try {
+		await Promise.any(targets.map((t) => httpHead(t, 4_000)));
+		return true;
+	} catch {
+		return false;
 	}
-	return false;
 }
 
 /**
@@ -334,15 +333,43 @@ export function proxyRequest(
 		const headers: Record<string, string> = { "Content-Type": "application/json" };
 		if (body.length > 0) headers["Content-Length"] = String(body.length);
 
+		const RESPONSE_TIMEOUT_MS = 120_000;
+		let responseTimer: ReturnType<typeof setTimeout> | undefined;
+		let completed = false;
+
+		const cleanup = () => {
+			if (responseTimer) {
+				clearTimeout(responseTimer);
+				responseTimer = undefined;
+			}
+			completed = true;
+		};
+
 		const proxyReq = transport.request(parsed, {
 			method: incomingReq.method || "GET",
 			headers,
-			timeout: 120_000,
+			timeout: RESPONSE_TIMEOUT_MS,
 		}, (proxyRes) => {
 			outgoingRes.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
 			proxyRes.pipe(outgoingRes);
+			proxyRes.on("end", cleanup);
+			proxyRes.on("error", cleanup);
 		});
+
+		responseTimer = setTimeout(() => {
+			if (!completed) {
+				console.error(`[aigw-proxy] Response timeout after ${RESPONSE_TIMEOUT_MS}ms proxying to ${targetUrl}`);
+				proxyReq.destroy();
+				if (!outgoingRes.headersSent) {
+					outgoingRes.writeHead(504, { "Content-Type": "application/json" });
+				}
+				outgoingRes.end(JSON.stringify({ error: "Gateway timeout: response not completed within 120s" }));
+				completed = true;
+			}
+		}, RESPONSE_TIMEOUT_MS);
+
 		proxyReq.on("error", (err) => {
+			cleanup();
 			console.error(`[aigw-proxy] Error proxying to ${targetUrl}:`, err.message);
 			if (!outgoingRes.headersSent) {
 				outgoingRes.writeHead(502, { "Content-Type": "application/json" });

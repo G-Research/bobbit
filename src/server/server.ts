@@ -768,7 +768,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/aigw/test — test connection to a URL without saving
+	// POST /api/aigw/test — test connection to a URL without saving
 	if (url.pathname === "/api/aigw/test" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body?.url || typeof body.url !== "string") {
@@ -780,6 +780,23 @@ async function handleApiRoute(
 			json({ ok: true, models });
 		} catch (err: any) {
 			json({ error: err.message }, 502);
+		}
+		return;
+	}
+
+	// POST /api/aigw/refresh — re-discover models from the configured gateway
+	if (url.pathname === "/api/aigw/refresh" && req.method === "POST") {
+		const aigwUrl = getAigwUrl(preferencesStore);
+		if (!aigwUrl) {
+			json({ error: "No AI Gateway configured" }, 400);
+			return;
+		}
+		try {
+			const models = await configureAigw(aigwUrl, preferencesStore);
+			broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+			json({ models });
+		} catch (err: any) {
+			json({ error: err.message || "Refresh failed" }, 502);
 		}
 		return;
 	}
