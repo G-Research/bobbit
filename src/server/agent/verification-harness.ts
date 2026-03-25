@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs, { statSync } from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
-import type { GateStore, GateSignal } from "./gate-store.js";
+import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
@@ -123,10 +123,37 @@ export class VerificationHarness {
 				}
 			}
 
-			// Run all verification steps in parallel
+			// Build cache of previously-passed step results for the same commit SHA.
+			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
+			const cachedSteps = new Map<string, GateSignalStep>();
+			if (signal.commitSha) {
+				const gateState = this.gateStore.getGate(signal.goalId, signal.gateId);
+				if (gateState) {
+					for (const prev of gateState.signals) {
+						if (prev.id === signal.id) continue;
+						if (prev.commitSha !== signal.commitSha) continue;
+						if (prev.verification?.status !== "failed") continue;
+						for (const s of prev.verification.steps) {
+							if (s.passed && !cachedSteps.has(s.name)) {
+								cachedSteps.set(s.name, s);
+							}
+						}
+					}
+				}
+				if (cachedSteps.size > 0) {
+					console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
+				}
+			}
+
+			// Run all verification steps in parallel (skipping cached passes)
 			const indexedResults = await Promise.all(
 				steps.map(async (step, index) => {
-					let result: { passed: boolean; output: string };
+					const cached = cachedSteps.get(step.name);
+					if (cached) {
+						return { index, stepResult: { ...cached, output: `[cached from prior signal] ${cached.output}` } };
+					}
+
+					let result: { passed: boolean; output: string } = { passed: false, output: "No verification result." };
 					const startTime = Date.now();
 
 					if (step.type === "command") {
@@ -140,15 +167,21 @@ export class VerificationHarness {
 							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set)." };
 						} else {
 							const prompt = this.substituteVars(step.prompt || "", builtinVars, allGateStates);
-							result = await this.runLlmReviewStep(
-								{ name: step.name, prompt, timeout: step.timeout },
-								cwd,
-								builtinVars,
-								signal.content,
-								signal.metadata,
-								goalSpec,
-								allGateStates,
-							);
+							const maxAttempts = 2;
+							for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+								result = await this.runLlmReviewStep(
+									{ name: step.name, prompt, timeout: step.timeout },
+									cwd,
+									builtinVars,
+									signal.content,
+									signal.metadata,
+									goalSpec,
+									allGateStates,
+								);
+								const isTransient = result.output.includes("timed out") || result.output.includes("no <verdict> tag");
+								if (result.passed || !isTransient || attempt === maxAttempts) break;
+								console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying...`);
+							}
 						}
 					}
 
@@ -235,7 +268,7 @@ export class VerificationHarness {
 		}
 
 		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
-		const timeoutMs = (step.timeout || 300) * 1000;
+		const timeoutMs = (step.timeout || 600) * 1000;
 
 		// Build system prompt from reviewer role template + step prompt + signal context
 		let rolePrompt = role.promptTemplate
