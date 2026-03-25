@@ -1443,6 +1443,19 @@
 	color: var(--muted-foreground);
 	flex-shrink: 0;
 }
+.verify-card__session-link {
+	font-size: 10px;
+	padding: 1px 5px;
+	border: 1px solid var(--border);
+	border-radius: 3px;
+	color: var(--muted-foreground);
+	text-decoration: none;
+	flex-shrink: 0;
+}
+.verify-card__session-link:hover {
+	color: var(--foreground);
+	background: var(--accent);
+}
 .verify-card__output {
 	background: rgba(0,0,0,0.3);
 	padding: 8px;

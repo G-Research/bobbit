@@ -1084,6 +1084,71 @@ export class SessionManager {
 		return this.sessions.get(id);
 	}
 
+	/**
+	 * Register an externally-created RPC bridge as a viewable session.
+	 * Used for LLM review sub-agents in verification harness so users can watch them live.
+	 * Returns an unsubscribe function to call when the session ends.
+	 */
+	registerExternalSession(id: string, rpcClient: RpcBridge, opts: {
+		title: string;
+		cwd: string;
+		role?: string;
+		goalId?: string;
+		teamGoalId?: string;
+	}): () => void {
+		const eventBuffer = new EventBuffer();
+		const now = Date.now();
+
+		const session: SessionInfo = {
+			id,
+			title: opts.title,
+			cwd: opts.cwd,
+			status: "idle",
+			createdAt: now,
+			lastActivity: now,
+			clients: new Set(),
+			rpcClient,
+			eventBuffer,
+			unsubscribe: () => {},
+			isCompacting: false,
+			titleGenerated: true,
+			goalId: opts.goalId,
+			role: opts.role,
+			teamGoalId: opts.teamGoalId,
+			promptQueue: new PromptQueue(),
+		};
+
+		const unsub = rpcClient.onEvent((event: any) => {
+			session.lastActivity = Date.now();
+			this.handleAgentLifecycle(session, event);
+			eventBuffer.push(event);
+			broadcast(session.clients, { type: "event", data: event });
+			this.trackCostFromEvent(session, event);
+		});
+		session.unsubscribe = unsub;
+
+		this.sessions.set(id, session);
+
+		this.persistSessionMetadata(session).catch((err) => {
+			console.error(`[session-manager] Failed to persist external session ${id}:`, err);
+		});
+
+		console.log(`[session-manager] Registered external session ${id}: ${opts.title}`);
+
+		return () => {
+			unsub();
+			session.status = "terminated";
+			for (const client of session.clients) {
+				client.close(1000, "Session terminated");
+			}
+			session.clients.clear();
+			this.sessions.delete(id);
+			this.store.remove(id);
+			cleanupSessionPrompt(id);
+			console.log(`[session-manager] Unregistered external session ${id}`);
+		};
+	}
+
 	listSessions(): Array<{
 		id: string;
 		title: string;
