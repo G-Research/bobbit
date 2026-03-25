@@ -63,6 +63,7 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onBgProcessKill?: (id: string) => void;
 	@property({ attribute: false }) onBgProcessDismiss?: (id: string) => void;
 	@property({ attribute: false }) onPrMerge?: (method: string) => Promise<string | undefined>;
+	@property({ attribute: false }) onGitPull?: () => Promise<string | undefined>;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
 	@property({ attribute: false }) onApiKeyRequired?: (provider: string) => Promise<boolean>;
 	// Optional callback called before sending a message
@@ -678,6 +679,7 @@ export class AgentInterface extends LitElement {
 								.prTitle=${this.prTitle}
 								.prMergeable=${this.prMergeable ?? false}
 								@pr-merge=${this._handlePrMerge}
+								@git-pull=${this._handleGitPull}
 							></git-status-widget>` : nothing}
 						</div>
 						` : ''}
@@ -730,6 +732,17 @@ export class AgentInterface extends LitElement {
 			widget.setMergeResult(error);
 		} catch (err) {
 			widget.setMergeResult(err instanceof Error ? err.message : 'Network error');
+		}
+	}
+
+	private async _handleGitPull(e: Event): Promise<void> {
+		if (!this.onGitPull) return;
+		const widget = e.target as import('./GitStatusWidget.js').GitStatusWidget;
+		try {
+			const error = await this.onGitPull();
+			widget.setPullResult(error);
+		} catch (err) {
+			widget.setPullResult(err instanceof Error ? err.message : 'Network error');
 		}
 	}
 }

@@ -29,6 +29,8 @@ export class GitStatusWidget extends LitElement {
     @state() private merging = false;
     @state() private mergeError = '';
     @state() private mergeMethod: 'merge' | 'squash' | 'rebase' = 'squash';
+    @state() private pulling = false;
+    @state() private pullError = '';
 
     private _onDocumentClick = (e: MouseEvent) => {
         if (this.expanded && !this.contains(e.target as Node)) {
@@ -98,13 +100,13 @@ export class GitStatusWidget extends LitElement {
         if (this.isOnPrimary) {
             // On primary branch — show ahead/behind vs remote
             if (this.ahead > 0 && this.behind > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} ahead, ${this.behind} behind remote</span>`;
+                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} ahead, ${this.behind} behind remote</span> ${this._renderPullButton()}`;
             }
             if (this.ahead > 0) {
                 return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span>`;
             }
             if (this.behind > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400">${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span>`;
+                return html`<span class="text-amber-600 dark:text-amber-400">${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span> ${this._renderPullButton()}`;
             }
             return html`<span class="text-green-600 dark:text-green-400">up to date with remote</span>`;
         }
@@ -206,6 +208,29 @@ export class GitStatusWidget extends LitElement {
                 ` : nothing}
             </div>
         `;
+    }
+
+    private _renderPullButton() {
+        return html`<button
+            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            ?disabled=${this.pulling}
+            @click=${this._handlePull}
+        >${this.pulling ? 'Pulling\u2026' : 'Pull'}</button>${this.pullError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.pullError}</span>` : nothing}`;
+    }
+
+    private _handlePull() {
+        this.pulling = true;
+        this.pullError = '';
+        this.dispatchEvent(new CustomEvent('git-pull', {
+            bubbles: true,
+            composed: true,
+        }));
+    }
+
+    /** Called by the parent after pull completes or fails */
+    public setPullResult(error?: string) {
+        this.pulling = false;
+        this.pullError = error || '';
     }
 
     private _handleMerge() {

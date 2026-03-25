@@ -646,6 +646,21 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel.agentInterface.onBgProcessDismiss = (processId: string) => {
 				dismissBgProcess(sessionId, processId);
 			};
+			state.chatPanel.agentInterface.onGitPull = async () => {
+				try {
+					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-pull`, {
+						method: 'POST',
+					});
+					if (res.ok) {
+						refreshGitStatusForSession(sessionId);
+						return undefined;
+					}
+					const data = await res.json().catch(() => ({ error: 'Pull failed' }));
+					return data.error || 'Pull failed';
+				} catch (err) {
+					return err instanceof Error ? err.message : 'Network error';
+				}
+			};
 			state.chatPanel.agentInterface.onPrMerge = async (method: string) => {
 				const sd = state.gatewaySessions.find((s) => s.id === sessionId);
 				const mergeUrl = sd?.goalId
