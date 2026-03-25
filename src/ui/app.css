@@ -2083,14 +2083,29 @@ html {
 	to { opacity: 1; }
 }
 
-/* User message with warm amber pill styling — complements Bobbit's green */
+/* User message — sage green tinted card with dot + green shadow */
 .user-message-container {
 	transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 	position: relative;
-	background: linear-gradient(135deg, rgba(180, 120, 20, 0.10), rgba(200, 155, 30, 0.10), rgba(170, 140, 40, 0.08));
-	border: 1px solid rgba(190, 140, 30, 0.22);
-	backdrop-filter: blur(10px);
+	background: linear-gradient(135deg, rgba(80, 140, 80, 0.10), rgba(90, 150, 85, 0.05));
+	border: none;
+	border-radius: 6px;
 	max-width: 100%;
+	padding-left: 24px;
+	box-shadow: 0 1px 4px rgba(80, 140, 80, 0.14), 0 2px 8px rgba(80, 140, 80, 0.08);
+}
+/* Sage green chevron marker */
+.user-message-container::before {
+	content: '❯';
+	position: absolute;
+	left: 8px;
+	top: 10px;
+	font-size: 12px;
+	font-weight: 700;
+	color: rgba(75, 140, 70, 0.85);
+	text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+	z-index: 1;
+	line-height: 1;
 }
 
 /* ── Mobile: add left margin to bobbit so idle position doesn't hug the screen edge

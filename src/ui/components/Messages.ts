@@ -66,8 +66,8 @@ export class UserMessage extends LitElement {
 				: (this.message.content ?? []).find((c) => c.type === "text")?.text || "";
 
 		return html`
-			<div class="flex justify-start mx-2 sm:mx-4">
-				<div class="user-message-container py-2 px-3 sm:px-4 rounded-xl">
+			<div class="flex justify-start mx-2 sm:mx-4 my-1">
+				<div class="user-message-container py-2 px-3 sm:px-4">
 					<markdown-block .content=${content}></markdown-block>
 					${
 						this.message.role === "user-with-attachments" &&
