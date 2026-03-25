@@ -318,18 +318,27 @@ const PALETTES: ColorPalette[] = [
 ];
 
 let activePaletteId = "forest";
-let paletteLoaded = false;
+let _paletteLoadPromise: Promise<void> | null = null;
 
-async function loadPalette(): Promise<void> {
-	if (paletteLoaded) return;
-	paletteLoaded = true;
-	try {
-		const res = await gatewayFetch("/api/preferences");
-		if (res.ok) {
-			const prefs = await res.json();
-			if (prefs.palette) activePaletteId = prefs.palette;
-		}
-	} catch {}
+function loadPalette(): void {
+	// Fire-and-forget fetch; deduped so concurrent renders don't spam
+	if (_paletteLoadPromise) return;
+	_paletteLoadPromise = (async () => {
+		try {
+			const res = await gatewayFetch("/api/preferences");
+			if (res.ok) {
+				const prefs = await res.json();
+				const palette = (prefs.palette as string) || "forest";
+				activePaletteId = palette;
+				if (palette === "forest") {
+					delete document.documentElement.dataset.palette;
+				} else {
+					document.documentElement.dataset.palette = palette;
+				}
+			}
+		} catch {}
+		_paletteLoadPromise = null;
+	})();
 }
 
 async function selectPalette(id: string): Promise<void> {
