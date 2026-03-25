@@ -15,6 +15,95 @@ import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
 import { discoverModels } from "../utils/model-discovery.js";
 
+/**
+ * Assign a recency/tier rank to a model ID so newer flagship models sort first.
+ * Higher rank = shown higher in the list. Models not matching any pattern get 0.
+ */
+function modelRecencyRank(id: string): number {
+	const s = id.toLowerCase();
+
+	// ── Anthropic Claude ──
+	if (s.includes("claude-opus-4-6") || s.includes("claude-opus-4.6")) return 100;
+	if (s.includes("claude-sonnet-4-6") || s.includes("claude-sonnet-4.6")) return 99;
+	if (s.includes("claude-opus-4-5") || s.includes("claude-opus-4.5")) return 98;
+	if (s.includes("claude-sonnet-4-5") || s.includes("claude-sonnet-4.5")) return 97;
+	if (s.includes("claude-opus-4-1") || s.includes("claude-opus-4.1")) return 96;
+	if (s.includes("claude-opus-4") && !s.includes("4-1") && !s.includes("4.1") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 95;
+	if (s.includes("claude-sonnet-4") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 94;
+	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
+	if (s.includes("claude-3-7-sonnet") || s.includes("claude-3.7-sonnet")) return 80;
+	if (s.includes("claude-3-5-sonnet") || s.includes("claude-3.5-sonnet")) return 70;
+	if (s.includes("claude-3-5-haiku") || s.includes("claude-3.5-haiku")) return 65;
+	if (s.includes("claude-3-opus")) return 60;
+	if (s.includes("claude")) return 50;
+
+	// ── OpenAI ──
+	if (s.includes("gpt-5.4")) return 100;
+	if (s.includes("gpt-5.3")) return 98;
+	if (s.includes("gpt-5.2")) return 96;
+	if (s.includes("gpt-5.1")) return 94;
+	if (s.includes("gpt-5") && !s.includes("5.")) return 92;
+	if (s.includes("o4-mini")) return 91;
+	if (s.includes("o3-pro")) return 89;
+	if (s.includes("o3") && !s.includes("o3-mini")) return 88;
+	if (s.includes("o3-mini")) return 85;
+	if (s.includes("o1-pro")) return 80;
+	if (s.includes("o1") && !s.includes("o1-mini")) return 78;
+	if (s.includes("gpt-4o") && !s.includes("mini")) return 70;
+	if (s.includes("gpt-4.1")) return 68;
+	if (s.includes("gpt-4o-mini") || s.includes("gpt-4.1-mini")) return 65;
+	if (s.includes("gpt-4")) return 50;
+
+	// ── Google Gemini ──
+	if (s.includes("gemini-3.1-pro")) return 100;
+	if (s.includes("gemini-3-pro")) return 98;
+	if (s.includes("gemini-3.1-flash") || s.includes("gemini-3-flash")) return 95;
+	if (s.includes("gemini-2.5-pro")) return 90;
+	if (s.includes("gemini-2.5-flash") && !s.includes("lite")) return 85;
+	if (s.includes("gemini-2.5-flash-lite")) return 80;
+	if (s.includes("gemini-2.0")) return 60;
+	if (s.includes("gemini-1.5")) return 40;
+	if (s.includes("gemini")) return 30;
+
+	// ── xAI Grok ──
+	if (s.includes("grok-4")) return 100;
+	if (s.includes("grok-3") && !s.includes("mini")) return 90;
+	if (s.includes("grok-3-mini")) return 85;
+	if (s.includes("grok-2")) return 70;
+	if (s.includes("grok")) return 50;
+
+	// ── DeepSeek ──
+	if (s.includes("deepseek-v3.2")) return 95;
+	if (s.includes("deepseek-v3.1")) return 90;
+	if (s.includes("deepseek-r1")) return 88;
+	if (s.includes("deepseek-v3")) return 85;
+	if (s.includes("deepseek")) return 50;
+
+	// ── Qwen ──
+	if (s.includes("qwen3.5") || s.includes("qwen-3.5")) return 95;
+	if (s.includes("qwen3-coder") || s.includes("qwen-3-coder")) return 90;
+	if (s.includes("qwen3-next") || s.includes("qwen-3-next")) return 88;
+	if (s.includes("qwen3") || s.includes("qwen-3")) return 85;
+	if (s.includes("qwen")) return 50;
+
+	// ── Mistral ──
+	if (s.includes("devstral-medium")) return 90;
+	if (s.includes("magistral")) return 88;
+	if (s.includes("devstral")) return 85;
+	if (s.includes("codestral")) return 80;
+	if (s.includes("mistral-large")) return 75;
+	if (s.includes("mistral-medium")) return 70;
+	if (s.includes("mistral")) return 50;
+
+	// ── Llama ──
+	if (s.includes("llama-4") || s.includes("llama4")) return 90;
+	if (s.includes("llama-3.3") || s.includes("llama3-3")) return 80;
+	if (s.includes("llama-3.2") || s.includes("llama3-2")) return 70;
+	if (s.includes("llama")) return 50;
+
+	return 0;
+}
+
 /** AI Gateway model configuration — set from app layer */
 export interface AigwModelConfig {
 	/** When true, only gateway models are shown (built-in providers hidden) */
@@ -248,7 +337,12 @@ export class ModelSelector extends DialogBase {
 				if (!aHasKey && bHasKey) return 1;
 			}
 
-			return a.provider.localeCompare(b.provider);
+			// Sort by model recency/tier (higher = newer/better)
+			const aRank = modelRecencyRank(a.id);
+			const bRank = modelRecencyRank(b.id);
+			if (aRank !== bRank) return bRank - aRank;
+
+			return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
 		});
 
 		return filteredModels;
