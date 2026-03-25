@@ -27,7 +27,16 @@ const piDir = path.join(os.homedir(), ".pi");
 const hasTlsCert = fs.existsSync(path.join(piDir, "gateway-cert.pem"));
 const noTls = process.env.GATEWAY_NO_TLS === "1";
 const gwProto = noTls ? "http" : (hasTlsCert ? "https" : "http");
-const GATEWAY = process.env.GATEWAY_URL || `${gwProto}://${host}:3001`;
+function resolveGatewayUrl(): string {
+	if (process.env.GATEWAY_URL) return process.env.GATEWAY_URL;
+	try {
+		const stateFile = path.join(process.cwd(), ".bobbit", "state", "gateway-url");
+		const url = fs.readFileSync(stateFile, "utf-8").trim();
+		if (url) return url;
+	} catch { /* file doesn't exist yet */ }
+	return `${gwProto}://${host}:3001`;
+}
+const GATEWAY = resolveGatewayUrl();
 const GATEWAY_WS = GATEWAY.replace(/^https/, "wss").replace(/^http/, "ws");
 
 if (!meshIp && !process.env.VITE_HOST) {

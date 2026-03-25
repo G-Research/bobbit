@@ -75,6 +75,7 @@ export interface TlsConfig {
 export interface GatewayConfig {
 	host: string;
 	port: number;
+	portExplicit?: boolean;
 	authToken: string;
 	defaultCwd: string;
 	staticDir?: string;
@@ -106,7 +107,7 @@ export function createGateway(config: GatewayConfig) {
 		workflowStore,
 	});
 	const protocol = config.tls ? "https" : "http";
-	const gatewayUrl = `${protocol}://${config.host}:${config.port}`;
+	let gatewayUrl = `${protocol}://${config.host}:${config.port}`;
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
@@ -264,15 +265,41 @@ export function createGateway(config: GatewayConfig) {
 	return {
 		server,
 		sessionManager,
-		async start() {
+		async start(): Promise<number> {
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
 			teamManager.resubscribeTeamEvents();
-			return new Promise<void>((resolve) => {
-				server.listen(config.port, config.host, () => resolve());
-			});
+
+			const maxPort = config.portExplicit !== false ? config.port : config.port + 9;
+			let port = config.port;
+
+			while (port <= maxPort) {
+				try {
+					await new Promise<void>((resolve, reject) => {
+						server.once("error", reject);
+						server.listen(port, config.host, () => {
+							server.removeListener("error", reject);
+							resolve();
+						});
+					});
+					// Update the closure gatewayUrl with the actual bound port
+					if (port !== config.port) {
+						gatewayUrl = `${protocol}://${config.host}:${port}`;
+						console.log(`Port ${config.port} in use, using port ${port}`);
+					}
+					return port;
+				} catch (err: any) {
+					if (err.code === "EADDRINUSE" && port < maxPort) {
+						console.log(`Port ${port} in use, trying ${port + 1}...`);
+						port++;
+						continue;
+					}
+					throw err;
+				}
+			}
+			throw new Error(`All ports ${config.port}-${maxPort} in use`);
 		},
 		async shutdown() {
 			clearInterval(cleanupInterval);
