@@ -63,10 +63,19 @@ theme-toggle button {
  * ============================================================================ */
 .sidebar-session-active {
 	position: relative;
+	/* Light mode: sidebar (L=0.915) vs secondary (L=0.905) is only 0.01 apart —
+	   mix secondary with foreground to boost contrast across all palettes. */
+	background: color-mix(in oklch, var(--secondary) 82%, var(--foreground)) !important;
+}
+.dark .sidebar-session-active {
+	background: var(--color-secondary, var(--secondary)) !important;
 }
 
-/* Action buttons overlay: use secondary bg when row is active */
+/* Action buttons overlay: match the active row background */
 .sidebar-session-active .sidebar-actions {
+	background: linear-gradient(to right, transparent 0%, color-mix(in oklch, var(--secondary) 82%, var(--foreground)) 50%) !important;
+}
+.dark .sidebar-session-active .sidebar-actions {
 	background: linear-gradient(to right, transparent 0%, var(--color-secondary, var(--secondary)) 50%) !important;
 }
 

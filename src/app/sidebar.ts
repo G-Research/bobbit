@@ -267,7 +267,7 @@ export function renderStaffSidebarSection() {
 					title="Edit">${icon(Pencil, "xs")}</button>`;
 				return html`
 				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-2 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
-					${active ? "bg-secondary text-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+					${active ? "bg-secondary text-foreground sidebar-session-active" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 					@click=${() => handleStaffClick(agent)}>
 					${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
 					<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1" : "text-xs"} ${active ? "font-medium" : "font-normal"}"><span class="truncate ${mobile ? "text-base" : ""}">${agent.name}</span>${mobile && session ? (() => {
@@ -470,7 +470,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 		const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : s.title;
 		return html`
 			<button
-				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary" : "hover:bg-secondary/50"}"
+				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 				@mouseenter=${(e: MouseEvent) => showSessionTooltip(e, s, displayTitle)}
 				@mouseleave=${hideSessionTooltip}
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
@@ -493,7 +493,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 
 		return html`
 			<button
-				class="flex items-center gap-0.5 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${tlActive ? "bg-secondary" : "hover:bg-secondary/50"}"
+				class="flex items-center gap-0.5 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${tlActive ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 				@mouseenter=${(e: MouseEvent) => showSessionTooltip(e, teamLead, tlTitle)}
 				@mouseleave=${hideSessionTooltip}
 				@click=${() => { if (!tlActive) connectToSession(teamLead.id, true); }}
@@ -549,7 +549,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 					const accessory = session?.accessory;
 					return html`
 						<button
-							class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary" : "hover:bg-secondary/50"}"
+							class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 							title=${agent.name}
 							@click=${() => handleStaffClick(agent)}
 						>

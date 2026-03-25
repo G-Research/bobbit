@@ -604,6 +604,28 @@ function getModelOptions(): Array<{ value: string; label: string }> {
 	}));
 }
 
+function renderModelInput(label: string, hint: string, value: string, onChange: (v: string) => void) {
+	let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+	return html`
+		<div class="flex flex-col gap-1.5">
+			<label class="text-sm font-medium text-foreground">${label}</label>
+			<input
+				type="text"
+				class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+					focus:outline-none focus:ring-2 focus:ring-ring"
+				placeholder="provider/model-id"
+				.value=${value}
+				@input=${(e: Event) => {
+					const v = (e.target as HTMLInputElement).value;
+					clearTimeout(debounceTimer);
+					debounceTimer = setTimeout(() => onChange(v), 600);
+				}}
+			/>
+			<p class="text-xs text-muted-foreground">${hint}</p>
+		</div>
+	`;
+}
+
 function renderModelSelect(label: string, hint: string, value: string, onChange: (v: string) => void) {
 	const options = getModelOptions();
 	return html`
@@ -634,24 +656,38 @@ function renderModelsTab() {
 	return html`
 		<div class="flex flex-col gap-6">
 
-			<!-- Default model preferences (shown when models are available) -->
-			${hasModels ? html`
-				<div class="flex flex-col gap-4">
-					<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
-					${renderModelSelect(
-						"Session Model",
-						"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
-						prefSessionModel,
-						setSessionModel,
-					)}
-					${renderModelSelect(
-						"Naming Model",
-						"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
-						prefNamingModel,
-						setNamingModel,
-					)}
-				</div>
-			` : ""}
+			<!-- Default model preferences -->
+			<div class="flex flex-col gap-4">
+				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
+				${hasModels
+					? html`
+						${renderModelSelect(
+							"Session Model",
+							"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
+							prefSessionModel,
+							setSessionModel,
+						)}
+						${renderModelSelect(
+							"Naming Model",
+							"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
+							prefNamingModel,
+							setNamingModel,
+						)}`
+					: html`
+						${renderModelInput(
+							"Session Model",
+							"Model for new sessions, e.g. anthropic/claude-sonnet-4-6. Leave blank for the built-in default.",
+							prefSessionModel,
+							setSessionModel,
+						)}
+						${renderModelInput(
+							"Naming Model",
+							"Model for auto-titling, e.g. anthropic/claude-haiku-4-5. Leave blank for the built-in default (Claude Haiku via Anthropic API).",
+							prefNamingModel,
+							setNamingModel,
+						)}`
+				}
+			</div>
 
 			<!-- AI Gateway section -->
 			<div class="flex flex-col gap-4 ${hasModels ? "pt-4 border-t border-border" : ""}">
