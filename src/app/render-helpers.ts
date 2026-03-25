@@ -205,6 +205,11 @@ function renderSessionTime(session: GatewaySession) {
  */
 export const SESSION_ROW_PY = "py-0.5";
 
+/** Consistent indent per nesting level (px). */
+export const INDENT = 10;
+/** Width of the chevron/spacer slot (px). */
+export const CHEVRON_W = 10;
+
 export function renderSessionRow(session: GatewaySession) {
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
@@ -227,8 +232,9 @@ export function renderSessionRow(session: GatewaySession) {
 
 	return html`
 		<div
-			class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-2 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
+			class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
 			@mouseleave=${mobile ? null : hideSessionTooltip}
@@ -277,17 +283,17 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 	const expanded = hasDelegates && isArchivedParentExpanded(session.id);
 	return html`
 		<div
-			class="group relative flex items-center gap-1 ${hasDelegates ? "pl-1" : "pl-2"} pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
+			class="group relative flex items-center gap-1 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
 				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			@click=${() => connectToSession(session.id, true)}
 			title="${displayTitle} (archived)"
 		>
 			${hasDelegates ? html`<span
 				class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer opacity-60"
-				style="width:12px;text-align:center;"
+				style="width:${CHEVRON_W}px;text-align:center;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse delegates" : "Expand delegates"}"
-			>${expanded ? "▾" : "▸"}</span>` : ""}
+			>${expanded ? "▾" : "▸"}</span>` : html`<span style="width:${CHEVRON_W}px;" class="shrink-0"></span>`}
 			<div class="shrink-0 flex items-center justify-center" style="filter:grayscale(1) opacity(0.7);">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
@@ -303,7 +309,7 @@ export function renderArchivedDelegates(parentSessionId: string): TemplateResult
 	if (!isArchivedParentExpanded(parentSessionId)) return "";
 	const delegates = state.archivedSessions.filter(s => s.delegateOf === parentSessionId);
 	if (delegates.length === 0) return "";
-	return html`<div class="flex flex-col gap-0.5" style="padding-left:12px;">
+	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 		${delegates.map(s => html`
 			${renderArchivedSessionRow(s)}
 			${renderArchivedDelegates(s.id)}
@@ -340,7 +346,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	const chevron = html`<span
 		class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer"
-		style="width:12px;text-align:center;"
+		style="width:${CHEVRON_W}px;text-align:center;"
 		@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(session.id); renderApp(); }}
 		title="${expanded ? "Collapse agents" : "Expand agents"}"
 	>${expanded ? "▾" : "▸"}</span>`;
@@ -349,7 +355,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	return html`
 		<div
-			class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
+			class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
 			@mouseleave=${mobile ? null : hideSessionTooltip}
@@ -474,7 +480,7 @@ export function renderGoalGroup(goal: Goal) {
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length, tlExpanded)}
 			${tlExpanded ? html`
-				<div class="flex flex-col gap-0.5" style="padding-left:12px;">
+				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${teamChildren.map(renderSessionRow)}
 				</div>
 			` : ""}
@@ -487,7 +493,7 @@ export function renderGoalGroup(goal: Goal) {
 			<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-0 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
-				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
+				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>

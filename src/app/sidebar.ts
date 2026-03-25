@@ -21,7 +21,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { showGoalDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 
 // ============================================================================
@@ -236,7 +236,7 @@ export function renderStaffSidebarSection() {
 		<div class="flex flex-col gap-0.5">
 			<div class="flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 px-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
 				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); renderApp(); }}>
-				<span class="${mobile ? "text-sm" : "text-[11px]"} text-muted-foreground shrink-0 select-none" style="width:${mobile ? "14" : "12"}px;text-align:center;">${staffSectionExpanded ? "▾" : "▸"}</span>
+				<span class="${mobile ? "text-sm" : "text-[11px]"} text-muted-foreground shrink-0 select-none" style="width:${mobile ? "14" : CHEVRON_W}px;text-align:center;">${staffSectionExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
@@ -276,8 +276,9 @@ export function renderStaffSidebarSection() {
 					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
 					title="Edit">${icon(Pencil, "xs")}</button>`;
 				return html`
-				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-2 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
+				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 					${active ? "bg-secondary text-foreground sidebar-session-active" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+					style="padding-left:${CHEVRON_W}px;"
 					@click=${() => handleStaffClick(agent)}>
 					${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
 					<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1" : "text-xs"} ${active ? "font-medium" : "font-normal"}"><span class="truncate ${mobile ? "text-base" : ""}">${agent.name}</span>${mobile && session ? (() => {
@@ -386,7 +387,7 @@ export function renderSidebar() {
 								<div class="flex flex-col gap-0.5">
 									<div class="flex items-center gap-1 px-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
-										<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
+										<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
 										<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "xs")}</span>
 										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 										<div class="flex items-center relative">
@@ -413,7 +414,7 @@ export function renderSidebar() {
 							` : html`
 								<div class="flex flex-col gap-0.5">
 									<div class="flex items-center gap-1 px-1 py-0.5">
-										<span class="flex-1 flex items-center gap-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium" style="padding-left:13px;"><span class="shrink-0">${icon(MessagesSquare, "xs")}</span> Sessions</span>
+										<span class="flex-1 flex items-center gap-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium" style="padding-left:${CHEVRON_W}px;"><span class="shrink-0">${icon(MessagesSquare, "xs")}</span> Sessions</span>
 										<div class="flex items-center relative">
 											<button
 												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
@@ -578,7 +579,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 							title=${goal.title}
 							@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 						>
-							<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${expanded ? "▾" : "▸"}</span>
+							<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 							<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
 						</button>
 						${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
@@ -591,7 +592,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 						title="Ungrouped sessions"
 						@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}
 					>
-						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
+						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
 						<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
 					</button>
 					${ungroupedExpanded ? ungrouped.map(renderCollapsedSession) : ""}
