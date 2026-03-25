@@ -465,6 +465,7 @@ export class RemoteAgent {
 	setModel(model: any): void {
 		this._state.model = model;
 		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
+		state.chatPanel?.requestUpdate();
 	}
 
 	setThinkingLevel(level: any): void {
