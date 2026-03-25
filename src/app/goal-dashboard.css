@@ -1364,6 +1364,99 @@
 	word-break: break-word;
 }
 
+/* ── Verification cards (live + dashboard) ── */
+.verify-cards {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.verify-cards__header {
+	font-size: 12px;
+	font-weight: 500;
+	margin-bottom: 2px;
+}
+.verify-cards__header-status--pass { color: oklch(0.72 0.15 145); }
+.verify-cards__header-status--fail { color: var(--destructive); }
+.verify-cards__header-status--running { color: var(--muted-foreground); }
+
+.verify-card {
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	font-size: 12px;
+	overflow: hidden;
+}
+.verify-card--running { border-color: oklch(0.62 0.15 250 / 0.3); }
+.verify-card--pass { border-color: oklch(0.65 0.15 145 / 0.3); background: oklch(0.65 0.15 145 / 0.03); }
+.verify-card--fail { border-color: color-mix(in oklch, var(--destructive) 30%, transparent); background: color-mix(in oklch, var(--destructive) 3%, transparent); }
+
+.verify-card__header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 8px;
+}
+.verify-card__header--clickable { cursor: pointer; }
+.verify-card__header--clickable:hover { background: var(--accent); }
+
+.verify-card__icon {
+	font-weight: 700;
+	width: 14px;
+	text-align: center;
+	flex-shrink: 0;
+}
+.verify-card__icon--running { color: oklch(0.62 0.15 250); animation: pulse-verify 1.5s ease-in-out infinite; }
+.verify-card__icon--pass { color: oklch(0.72 0.15 145); }
+.verify-card__icon--fail { color: var(--destructive); }
+
+@keyframes pulse-verify {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.4; }
+}
+
+.verify-card__name {
+	font-weight: 500;
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.verify-card__type-badge {
+	font-size: 10px;
+	padding: 1px 5px;
+	border-radius: 3px;
+	background: var(--secondary);
+	color: var(--text-tertiary);
+	flex-shrink: 0;
+}
+.verify-card__type-badge--llm {
+	background: oklch(0.55 0.15 290 / 0.15);
+	color: oklch(0.72 0.15 290);
+}
+.verify-card__duration {
+	font-size: 10px;
+	color: var(--text-tertiary);
+	flex-shrink: 0;
+}
+.verify-card__expand {
+	font-size: 10px;
+	color: var(--muted-foreground);
+	flex-shrink: 0;
+}
+.verify-card__output {
+	background: rgba(0,0,0,0.3);
+	padding: 8px;
+	font-family: var(--font-mono, monospace);
+	font-size: 11px;
+	white-space: pre-wrap;
+	max-height: 300px;
+	overflow-y: auto;
+	border-top: 1px solid var(--border);
+	color: var(--muted-foreground);
+	word-break: break-word;
+	margin: 0;
+}
+
 /* ── Signal metadata ── */
 .signal-metadata {
 	display: flex;
