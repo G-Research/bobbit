@@ -353,7 +353,7 @@ function renderPalettePreview(palette: ColorPalette) {
 		<div
 			data-palette=${palette.id}
 			class=${isDark ? "dark" : ""}
-			style="display:flex; width:200px; height:68px; border-radius:6px; overflow:hidden; flex-shrink:0; border:1px solid var(--border); font-family:system-ui,sans-serif;"
+			style="display:flex; width:100%; height:68px; border-radius:6px; overflow:hidden; border:1px solid var(--border); font-family:system-ui,sans-serif;"
 		>
 			<!-- Sidebar -->
 			<div style="width:44px; background:var(--sidebar); border-right:1px solid var(--sidebar-border); display:flex; flex-direction:column; gap:4px; padding:7px 5px;">
@@ -402,19 +402,19 @@ function renderPaletteTab() {
 			<p class="text-sm text-muted-foreground">
 				Choose a color palette for the app theme.
 			</p>
-			<div class="flex flex-col gap-2">
+			<div class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));">
 				${PALETTES.map((palette) => {
 					const isActive = activePaletteId === palette.id;
 					return html`
 						<button
-							class="flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all cursor-pointer text-left w-full
+							class="flex flex-col gap-1.5 px-3 py-2.5 rounded-lg border transition-all cursor-pointer text-left w-full
 								${isActive
 									? "border-primary bg-primary/5 ring-1 ring-primary/30"
 									: "border-border hover:border-primary/40 hover:bg-secondary/30"}"
 							@click=${() => selectPalette(palette.id)}
 						>
 							${renderPalettePreview(palette)}
-							<div class="flex flex-col gap-0.5">
+							<div class="flex items-center gap-1.5">
 								<span class="text-sm font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}">
 									${palette.name}
 								</span>
@@ -462,7 +462,7 @@ export function renderSettingsPage() {
 			</div>
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto p-4">
-				<div class="max-w-xl">
+				<div class="${activeTab === "palette" ? "max-w-2xl" : "max-w-xl"}">
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}
 				</div>
