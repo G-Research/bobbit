@@ -10,6 +10,8 @@ import {
 	isDesktop,
 	toggleTeamLeadExpanded,
 	isTeamLeadExpanded,
+	toggleArchivedParentExpanded,
+	isArchivedParentExpanded,
 	type GatewaySession,
 	type Goal,
 	type GoalState,
@@ -270,13 +272,22 @@ export { renderSessionRow as renderSidebarSession };
 export function renderArchivedSessionRow(session: GatewaySession) {
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	const delegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
+	const hasDelegates = delegates.length > 0;
+	const expanded = hasDelegates && isArchivedParentExpanded(session.id);
 	return html`
 		<div
-			class="group relative flex items-center gap-1 pl-2 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
+			class="group relative flex items-center gap-1 ${hasDelegates ? "pl-1" : "pl-2"} pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
 				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			@click=${() => connectToSession(session.id, true)}
 			title="${displayTitle} (archived)"
 		>
+			${hasDelegates ? html`<span
+				class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer opacity-60"
+				style="width:12px;text-align:center;"
+				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
+				title="${expanded ? "Collapse delegates" : "Expand delegates"}"
+			>${expanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center" style="filter:grayscale(1) opacity(0.7);">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
@@ -289,6 +300,7 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 /** Render any archived delegate sessions nested under a parent session. */
 export function renderArchivedDelegates(parentSessionId: string): TemplateResult | string {
 	if (!state.archivedSectionExpanded) return "";
+	if (!isArchivedParentExpanded(parentSessionId)) return "";
 	const delegates = state.archivedSessions.filter(s => s.delegateOf === parentSessionId);
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:12px;">

@@ -266,6 +266,24 @@ export function isTeamLeadExpanded(sessionId: string): boolean {
 	return !collapsedTeamLeadSessions.has(sessionId);
 }
 
+const COLLAPSED_ARCHIVED_PARENTS_KEY = "bobbit-collapsed-archived-parents";
+const collapsedArchivedParents: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(COLLAPSED_ARCHIVED_PARENTS_KEY) || "[]"),
+);
+
+export function toggleArchivedParentExpanded(sessionId: string): void {
+	if (collapsedArchivedParents.has(sessionId)) {
+		collapsedArchivedParents.delete(sessionId);
+	} else {
+		collapsedArchivedParents.add(sessionId);
+	}
+	localStorage.setItem(COLLAPSED_ARCHIVED_PARENTS_KEY, JSON.stringify([...collapsedArchivedParents]));
+}
+
+export function isArchivedParentExpanded(sessionId: string): boolean {
+	return !collapsedArchivedParents.has(sessionId);
+}
+
 // ============================================================================
 // RENDER CALLBACK (set during init to break circular deps)
 // ============================================================================
