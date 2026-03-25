@@ -88,6 +88,16 @@ function parseArgs(argv: string[]): CliArgs {
 				result.tls = false;
 				result.tlsExplicit = true;
 				break;
+			case "--nord": {
+				const nordIp = findNordLynxIp();
+				if (nordIp) {
+					result.host = nordIp;
+				} else {
+					console.error("No NordLynx interface found. Is NordVPN meshnet active?");
+					process.exit(1);
+				}
+				break;
+			}
 		}
 	}
 
@@ -118,15 +128,9 @@ async function main() {
 		return;
 	}
 
-	// Auto-detect NordLynx mesh IP if no --host was given
+	// Default to localhost unless --host or --nord was given
 	if (!args.host) {
-		const nordIp = findNordLynxIp();
-		if (nordIp) {
-			args.host = nordIp;
-		} else {
-			args.host = "localhost";
-			console.log("No mesh network found — binding to localhost (local-only access).");
-		}
+		args.host = "localhost";
 	}
 
 	// Set project root early — all stores resolve paths from this

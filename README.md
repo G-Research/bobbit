@@ -38,8 +38,8 @@ bobbit
 
 ### How it binds
 
-- **No mesh network** (most users): Bobbit binds to `localhost:3001` with TLS disabled — plain HTTP, zero friction.
-- **NordLynx detected**: Bobbit auto-binds to the NordVPN mesh IP with HTTPS (self-signed cert). This enables remote access from any device on the mesh.
+- **Default** (most users): Bobbit binds to `localhost:3001` with TLS disabled — plain HTTP, zero friction.
+- **`--nord` flag**: Binds to the NordVPN mesh IP with HTTPS (self-signed cert). Enables remote access from any device on the meshnet.
 - **Explicit host**: Pass `--host <addr>` to bind to a specific address. Non-loopback addresses default to HTTPS.
 
 ### From source
@@ -79,8 +79,9 @@ The harness also auto-restarts on unexpected crashes. Sessions survive restarts 
 ```
 bobbit [options]
 
---host <addr>       Bind address (default: NordLynx mesh IP if found, otherwise localhost)
+--host <addr>       Bind address (default: localhost)
 --port <n>          Port (default: 3001)
+--nord              Bind to NordLynx mesh IP (enables remote access via NordVPN meshnet)
 --tls / --no-tls    Override TLS auto-detection (default: TLS on for non-loopback, off for localhost)
 --cwd <dir>         Working directory for agent sessions (default: .)
 --agent-cli <path>  Path to pi-coding-agent cli.js (auto-resolved from node_modules)
@@ -585,7 +586,7 @@ Forked from `@mariozechner/pi-web-ui`. Lit-based web components.
 
 ## Networking
 
-By default, Bobbit binds to `localhost` for local-only access (HTTP). When a **NordVPN mesh network** is detected, the gateway auto-binds to the NordLynx interface's IPv4 address with HTTPS, enabling remote access from any device on the mesh.
+By default, Bobbit binds to `localhost` for local-only access (HTTP). Pass `--nord` to bind to the NordLynx interface's IPv4 address with HTTPS, enabling remote access from any device on the NordVPN meshnet.
 
 **Port topology in dev mode:**
 - **Vite** (`:5173`) — User-facing HTTPS, serves UI with HMR, proxies `/api/*` and `/ws/*` to the gateway
