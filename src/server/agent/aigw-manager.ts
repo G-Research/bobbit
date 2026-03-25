@@ -123,7 +123,7 @@ const GATEWAY_COMPAT: Record<string, unknown> = {
 	maxTokensField: "max_tokens",
 };
 
-function inferMeta(modelId: string): ModelMeta {
+export function inferMeta(modelId: string): ModelMeta {
 	const id = modelId.toLowerCase();
 
 	// Anthropic models (via Bedrock or direct)
