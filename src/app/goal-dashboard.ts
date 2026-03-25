@@ -97,7 +97,7 @@ let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 interface LiveVerification {
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; startedAt: number }>;
+	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
 	overallStatus: string;
 }
 let liveVerifications: Map<string, LiveVerification> = new Map();
@@ -385,6 +385,17 @@ function handleLiveVerificationEvent(e: Event) {
 			renderApp();
 			break;
 		}
+		case "gate_verification_step_started": {
+			const entry = liveVerifications.get(key);
+			if (entry && entry.steps[detail.stepIndex]) {
+				entry.steps[detail.stepIndex] = {
+					...entry.steps[detail.stepIndex],
+					sessionId: detail.sessionId,
+				};
+				renderApp();
+			}
+			break;
+		}
 		case "gate_verification_step_complete": {
 			let entry = liveVerifications.get(key);
 			if (!entry) {
@@ -403,6 +414,7 @@ function handleLiveVerificationEvent(e: Event) {
 				status: detail.status,
 				durationMs: detail.durationMs,
 				output: detail.output,
+				sessionId: detail.sessionId ?? entry.steps[detail.stepIndex].sessionId,
 			};
 			renderApp();
 			break;
@@ -1689,6 +1701,12 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							<span class="verify-card__duration">
 								${isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
 							</span>
+							${step.sessionId ? html`
+								<a href="/?token=${encodeURIComponent(localStorage.getItem("gateway.token") || "")}#/session/${step.sessionId}"
+								   target="_blank" rel="noopener"
+								   class="verify-card__session-link" title="View live logs"
+								   @click=${(e: Event) => e.stopPropagation()}>view</a>
+							` : nothing}
 							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
 						</div>
 						${isExpanded && step.output ? html`

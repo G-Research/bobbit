@@ -7,6 +7,7 @@ import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
+import type { SessionManager } from "./session-manager.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import type { WorkflowGate, Workflow } from "./workflow-store.js";
 
@@ -49,7 +50,7 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed"; durationMs?: number; output?: string; startedAt: number }>;
+	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed"; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
 	overallStatus: "running" | "passed" | "failed";
 	startedAt: number;
 }
@@ -200,8 +201,27 @@ export class VerificationHarness {
 						return { index, stepResult: cachedResult };
 					}
 
-					let result: { passed: boolean; output: string } = { passed: false, output: "No verification result." };
+					let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "No verification result." };
 					const startTime = Date.now();
+
+					// Pre-generate sessionId for LLM review steps so we can broadcast it before the step starts
+					let stepSessionId: string | undefined;
+					if (step.type === "llm-review") {
+						stepSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
+						this.broadcastFn(signal.goalId, {
+							type: "gate_verification_step_started",
+							goalId: signal.goalId,
+							gateId: signal.gateId,
+							signalId: signal.id,
+							stepIndex: index,
+							stepName: step.name,
+							sessionId: stepSessionId,
+						});
+						const av = this.activeVerifications.get(signal.id);
+						if (av && av.steps[index]) {
+							av.steps[index].sessionId = stepSessionId;
+						}
+					}
 
 					if (step.type === "command") {
 						const cmd = this.substituteVars(step.run || "", builtinVars, allGateStates);
@@ -211,7 +231,7 @@ export class VerificationHarness {
 						// llm-review — spawn a one-shot reviewer sub-agent
 						if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 							// Fast path for test environments without API keys
-							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set)." };
+							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 						} else {
 							const prompt = this.substituteVars(step.prompt || "", builtinVars, allGateStates);
 							const maxAttempts = 2;
@@ -225,6 +245,7 @@ export class VerificationHarness {
 									goalSpec,
 									allGateStates,
 									signal.goalId,
+									stepSessionId,
 								);
 								const isTransient = result.output.includes("timed out") || result.output.includes("no <verdict> tag");
 								if (result.passed || !isTransient || attempt === maxAttempts) break;
@@ -244,10 +265,11 @@ export class VerificationHarness {
 						status: result.passed ? "passed" : "failed",
 						durationMs: duration_ms,
 						output: result.output || "",
+						sessionId: result.sessionId,
 					});
 					const av = this.activeVerifications.get(signal.id);
 					if (av && av.steps[index]) {
-						av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "" };
+						av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
 					}
 					return {
 						index,
@@ -327,11 +349,14 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		goalId?: string,
-	): Promise<{ passed: boolean; output: string }> {
+		sessionId?: string,
+	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const role = this.roleStore.get("reviewer");
 		if (!role) {
-			return { passed: false, output: "LLM review failed: 'reviewer' role not found in role store." };
+			return { passed: false, output: "LLM review failed: 'reviewer' role not found in role store.", sessionId };
 		}
+
+		const subSessionId = sessionId || `llm-review-${randomUUID().slice(0, 12)}`;
 
 		const timeoutMs = (step.timeout || 600) * 1000;
 
@@ -460,7 +485,7 @@ export class VerificationHarness {
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
-	): Promise<{ passed: boolean; output: string }> {
+	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		let sessionId: string | undefined;
 		try {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
@@ -518,16 +543,16 @@ export class VerificationHarness {
 
 			const verdict = parseVerdict(output);
 			if (verdict === null) {
-				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output." };
+				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId };
 			}
 
-			return { passed: verdict, output };
+			return { passed: verdict, output, sessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
 				: `LLM review failed: ${err.message}`;
-			return { passed: false, output: errOutput };
+			return { passed: false, output: errOutput, sessionId };
 		} finally {
 			// Always terminate and unregister, even on error/timeout
 			if (sessionId) {
@@ -554,7 +579,7 @@ export class VerificationHarness {
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
-	): Promise<{ passed: boolean; output: string }> {
+	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 
 		// Assemble system prompt to temp file
@@ -572,9 +597,19 @@ export class VerificationHarness {
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 
 		const rpc = new RpcBridge(bridgeOptions);
+		let unregisterSession: (() => void) | undefined;
 
 		try {
 			await rpc.start();
+
+			// Register as a viewable session so users can watch the review live
+			if (this.sessionManager) {
+				unregisterSession = this.sessionManager.registerExternalSession(subSessionId, rpc, {
+					title: `LLM Review: ${step.name}`,
+					cwd,
+					role: "reviewer",
+				});
+			}
 
 			// Override model if default.reviewModel preference is set
 			if (this.preferencesStore) {
@@ -643,18 +678,20 @@ export class VerificationHarness {
 
 			const verdict = parseVerdict(output);
 			if (verdict === null) {
-				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output." };
+				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId: subSessionId };
 			}
 
-			return { passed: verdict, output };
+			return { passed: verdict, output, sessionId: subSessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out");
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
 				: `LLM review failed: ${err.message}`;
-			return { passed: false, output: errOutput };
+			return { passed: false, output: errOutput, sessionId: subSessionId };
 		} finally {
 			await rpc.stop().catch(() => {});
+			// Unregister the session (archives it so chat history remains viewable)
+			if (unregisterSession) unregisterSession();
 			try {
 				const promptDir = path.join(bobbitStateDir(), "session-prompts");
 				const promptFile = path.join(promptDir, `${subSessionId}.md`);
