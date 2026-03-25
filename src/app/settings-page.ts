@@ -318,32 +318,12 @@ const PALETTES: ColorPalette[] = [
 	{ id: "mono",   name: "Mono" },
 ];
 
-let activePaletteId = "forest";
-let _paletteLoadPromise: Promise<void> | null = null;
-
-function loadPalette(): void {
-	// Fire-and-forget fetch; deduped so concurrent renders don't spam
-	if (_paletteLoadPromise) return;
-	_paletteLoadPromise = (async () => {
-		try {
-			const res = await gatewayFetch("/api/preferences");
-			if (res.ok) {
-				const prefs = await res.json();
-				const palette = (prefs.palette as string) || "forest";
-				activePaletteId = palette;
-				if (palette === "forest") {
-					delete document.documentElement.dataset.palette;
-				} else {
-					document.documentElement.dataset.palette = palette;
-				}
-			}
-		} catch {}
-		_paletteLoadPromise = null;
-	})();
+/** Read the active palette from the DOM (source of truth) or fall back to "forest". */
+function getActivePaletteId(): string {
+	return document.documentElement.dataset.palette || "forest";
 }
 
 async function selectPalette(id: string): Promise<void> {
-	activePaletteId = id;
 	if (id === "forest") {
 		delete document.documentElement.dataset.palette;
 	} else {
@@ -409,7 +389,7 @@ function renderPalettePreview(palette: ColorPalette) {
 }
 
 function renderPaletteTab() {
-	loadPalette();
+	const currentPalette = getActivePaletteId();
 
 	return html`
 		<div class="flex flex-col gap-3">
@@ -418,7 +398,7 @@ function renderPaletteTab() {
 			</p>
 			<div class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));">
 				${PALETTES.map((palette) => {
-					const isActive = activePaletteId === palette.id;
+					const isActive = currentPalette === palette.id;
 					return html`
 						<button
 							class="flex flex-col gap-1.5 px-3 py-2.5 rounded-lg border transition-all cursor-pointer text-left w-full
