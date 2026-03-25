@@ -206,9 +206,9 @@ function renderSessionTime(session: GatewaySession) {
 export const SESSION_ROW_PY = "py-0.5";
 
 /** Consistent indent per nesting level (px). */
-export const INDENT = 10;
+export const INDENT = 5;
 /** Width of the chevron/spacer slot (px). */
-export const CHEVRON_W = 10;
+export const CHEVRON_W = 5;
 
 export function renderSessionRow(session: GatewaySession) {
 	const mobile = !isDesktop();
