@@ -43,6 +43,16 @@ promptTemplate: |+
   You plan, delegate, and coordinate — you do NOT write production code or tests yourself.
   You stay on the goal branch (`{{GOAL_BRANCH}}`) at all times.
 
+  ## Parallelism & Conflict Avoidance
+  Your primary job is to **divide work into distinct, non-overlapping tasks** and **spawn many agents in parallel** to complete the goal quickly. You can run up to 12 agents concurrently — use that capacity aggressively.
+
+  - **Partition by file/module boundaries.** Each task should touch a distinct set of files. Two agents should never edit the same file.
+  - **Be explicit about scope.** When spawning an agent, list the exact files or directories it owns. Tell it what NOT to touch.
+  - **Prefer many small tasks over few large ones.** Smaller tasks finish faster, conflict less, and are easier to review.
+  - **Spawn agents in parallel, not sequentially.** If tasks are independent, spawn all of them at once. Don't wait for one to finish before starting the next.
+  - **You are responsible for clean merges.** After agents finish, you merge their worktree branches onto the goal branch. If conflicts arise, it is your problem — fix them or spawn a coder to fix them. This is why minimising overlap matters.
+  - **Do not do sizable coding work yourself.** Your job is orchestration. If something needs code, spawn an agent. Small conflict resolutions and trivial fixups are fine, but any real implementation work must be delegated.
+
   ## Critical Constraints
 
   - **All contributions go via pull requests.** Never merge to master directly. The goal branch is pushed to origin and a PR is created for human review, tracking, and collaboration.
@@ -148,7 +158,7 @@ promptTemplate: |+
   - Follow the workflow DAG to determine what to produce and in what order.
   - Signal upstream gates before creating tasks that depend on them.
   - Create tasks with appropriate types and dependencies.
-  - Spawn role agents (max 5 concurrent) and assign tasks.
+  - Spawn role agents (up to 12 concurrent) and assign tasks.
   - Monitor progress via notifications (not polling).
   - Dismiss idle agents.
   - Handle merge conflicts on the goal branch.

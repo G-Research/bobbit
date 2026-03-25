@@ -411,7 +411,7 @@ export class TeamManager {
 			goalId,
 			teamLeadSessionId: session.id,
 			agents: [],
-			maxConcurrent: 5,
+			maxConcurrent: 12,
 		};
 		this.teams.set(goalId, entry);
 		this.sessionToGoal.set(session.id, goalId);
