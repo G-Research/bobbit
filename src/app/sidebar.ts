@@ -21,7 +21,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { showGoalDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 
 // ============================================================================
@@ -443,17 +443,10 @@ export function renderSidebar() {
 							`}
 							${renderStaffSidebarSection()}
 							${(() => {
-								// Archived section: standalone and delegate archived sessions
-								// (goal-affiliated archived sessions are rendered inside their goal groups)
+								// Archived section: standalone archived sessions (no goal, not a delegate)
+								// Goal-affiliated archived sessions render inside their goal groups.
+								// Delegates render nested under their parent (live or archived).
 								const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
-								const delegateArchived = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf && !s.teamGoalId) : [];
-
-								// Render delegate archived sessions nested under their parent
-								const delegateHtml = state.archivedSectionExpanded ? delegateArchived.map(s => {
-									const parentExists = state.gatewaySessions.some(p => p.id === s.delegateOf);
-									if (!parentExists) return renderArchivedSessionRow(s);
-									return html`<div style="padding-left:16px;">${renderArchivedSessionRow(s)}</div>`;
-								}) : [];
 
 								return html`
 									<div class="border-t border-border/30 my-1 mx-2"></div>
@@ -467,8 +460,10 @@ export function renderSidebar() {
 											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
 										${state.archivedSectionExpanded ? html`
-											${standaloneArchived.map(s => renderArchivedSessionRow(s))}
-											${delegateHtml}
+											${standaloneArchived.map(s => html`
+												${renderArchivedSessionRow(s)}
+												${renderArchivedDelegates(s.id)}
+											`)}
 										` : ""}
 									</div>
 								`;

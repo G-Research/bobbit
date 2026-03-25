@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import { html, svg } from "lit";
+import { html, svg, type TemplateResult } from "lit";
 import { Goal as GoalIcon, LayoutDashboard, Pencil, Trash2 } from "lucide";
 import {
 	state,
@@ -256,6 +256,7 @@ export function renderSessionRow(session: GatewaySession) {
 					${buttons}
 				</div>`}
 		</div>
+		${renderArchivedDelegates(session.id)}
 	`;
 }
 
@@ -283,6 +284,19 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 			${session.archivedAt ? html`<span class="shrink-0 text-[10px] text-muted-foreground/50">${terseRelativeTime(session.archivedAt)}</span>` : ""}
 		</div>
 	`;
+}
+
+/** Render any archived delegate sessions nested under a parent session. */
+export function renderArchivedDelegates(parentSessionId: string): TemplateResult | string {
+	if (!state.archivedSectionExpanded) return "";
+	const delegates = state.archivedSessions.filter(s => s.delegateOf === parentSessionId);
+	if (delegates.length === 0) return "";
+	return html`<div class="flex flex-col gap-0.5" style="padding-left:12px;">
+		${delegates.map(s => html`
+			${renderArchivedSessionRow(s)}
+			${renderArchivedDelegates(s.id)}
+		`)}
+	</div>`;
 }
 
 // ============================================================================
@@ -481,8 +495,11 @@ export function renderGoalGroup(goal: Goal) {
 					</div>` : ""}
 					${teamControls}
 					${state.archivedSectionExpanded ? state.archivedSessions
-						.filter(s => s.teamGoalId === goal.id)
-						.map(s => renderArchivedSessionRow(s)) : ""}
+						.filter(s => s.teamGoalId === goal.id && !s.delegateOf)
+						.map(s => html`
+							${renderArchivedSessionRow(s)}
+							${renderArchivedDelegates(s.id)}
+						`) : ""}
 				</div>
 			` : ""}
 		</div>
