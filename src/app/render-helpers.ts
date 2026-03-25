@@ -512,12 +512,25 @@ export function renderGoalGroup(goal: Goal) {
 						Creating…
 					</div>` : ""}
 					${teamControls}
-					${state.archivedSectionExpanded ? state.archivedSessions
-						.filter(s => s.teamGoalId === goal.id && !s.delegateOf)
-						.map(s => html`
-							${renderArchivedSessionRow(s)}
-							${renderArchivedDelegates(s.id)}
-						`) : ""}
+					${state.archivedSectionExpanded ? (() => {
+						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
+						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
+						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
+						return html`
+							${archivedLeads.map(s => html`
+								${renderArchivedSessionRow(s)}
+								${renderArchivedDelegates(s.id)}
+							`)}
+							${archivedMembers.length > 0 ? html`
+								<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+									${archivedMembers.map(s => html`
+										${renderArchivedSessionRow(s)}
+										${renderArchivedDelegates(s.id)}
+									`)}
+								</div>
+							` : ""}
+						`;
+					})() : ""}
 				</div>
 			` : ""}
 		</div>
