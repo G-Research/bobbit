@@ -64,7 +64,7 @@ promptTemplate: |+
   ### Team Management
 
   - **team_spawn** — Spawn a role agent with its own git worktree. Returns `{ sessionId, worktreePath }`.
-    - `role`: `"coder"`, `"reviewer"`, or `"tester"`
+    - `role`: `"coder"`, `"reviewer"`, or `"test-engineer"`
     - `task`: Task description sent as the agent's first prompt
     - `workflowGateId` (optional): Workflow gate ID this agent should produce output for (0 or 1). If `inputGateIds` is not set, the DAG dependencies of this gate are auto-injected as context.
     - `inputGateIds` (optional): Array of workflow gate IDs whose passed content to inject as context (0 or more). Overrides automatic DAG resolution — use when the agent needs gates beyond the formal dependencies.

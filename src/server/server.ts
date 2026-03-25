@@ -1143,7 +1143,8 @@ async function handleApiRoute(
 			signal, gateDef, goal.cwd, goal.branch, "master", allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
-		json({ signal: { id: signal.id, gateId, status: "running" } }, 201);
+		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
 		return;
 	}
 
@@ -1154,6 +1155,15 @@ async function handleApiRoute(
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ signals: gate.signals });
+		return;
+	}
+
+	// GET /api/goals/:goalId/verifications/active — get in-flight verification state
+	const activeVerifMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/verifications\/active$/);
+	if (activeVerifMatch && req.method === "GET") {
+		const [, goalId] = activeVerifMatch;
+		const active = verificationHarness.getActiveVerifications(goalId);
+		json({ verifications: active });
 		return;
 	}
 

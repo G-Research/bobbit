@@ -171,6 +171,9 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		startCostPolling(goalId);
 		startGitStatusPolling(goalId);
 
+		// Bootstrap live verification state from REST (catches in-progress verifications)
+		fetchActiveVerifications(goalId);
+
 		loading = false;
 	} catch (err) {
 		error = err instanceof Error ? err.message : String(err);
@@ -178,6 +181,45 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	}
 
 	renderApp();
+}
+
+async function fetchActiveVerifications(goalId: string): Promise<void> {
+	try {
+		const resp = await gatewayFetch(`/api/goals/${goalId}/verifications/active`);
+		if (!resp.ok) return;
+		const data = await resp.json();
+		const verifications: Array<any> = data.verifications || [];
+
+		for (const v of verifications) {
+			const key = `${v.gateId}:${v.signalId}`;
+			// Only seed if we don't already have a live entry (WS events take priority)
+			if (!liveVerifications.has(key)) {
+				liveVerifications.set(key, {
+					gateId: v.gateId,
+					signalId: v.signalId,
+					steps: v.steps.map((s: any) => ({
+						name: s.name,
+						type: s.type,
+						status: s.status,
+						durationMs: s.durationMs,
+						output: s.output,
+						startedAt: s.startedAt,
+					})),
+					overallStatus: v.overallStatus,
+				});
+			}
+		}
+
+		// Start timer if we have running verifications
+		if (verifications.some((v: any) => v.overallStatus === "running")) {
+			startLiveVerifTimer();
+		}
+
+		renderApp();
+	} catch (err) {
+		// Non-fatal — WS events will still work
+		console.warn("[dashboard] Failed to fetch active verifications:", err);
+	}
 }
 
 export function clearDashboardState(): void {
@@ -306,6 +348,8 @@ function startGatePolling(goalId: string): void {
 				gates = newGates;
 				renderApp();
 			}
+			// Also refresh active verifications alongside gate polling
+			fetchActiveVerifications(goalId);
 		} catch { /* ignore */ }
 	}, 8_000);
 }
@@ -333,16 +377,25 @@ function handleLiveVerificationEvent(e: Event) {
 			break;
 		}
 		case "gate_verification_step_complete": {
-			const entry = liveVerifications.get(key);
-			if (entry && entry.steps[detail.stepIndex]) {
-				entry.steps[detail.stepIndex] = {
-					...entry.steps[detail.stepIndex],
-					status: detail.status,
-					durationMs: detail.durationMs,
-					output: detail.output,
-				};
-				renderApp();
+			let entry = liveVerifications.get(key);
+			if (!entry) {
+				// Create entry dynamically — we missed the started event
+				entry = { gateId: detail.gateId, signalId: detail.signalId, steps: [], overallStatus: "running" };
+				liveVerifications.set(key, entry);
+				startLiveVerifTimer();
 			}
+			// Expand steps array if stepIndex is beyond current length
+			while (entry.steps.length <= detail.stepIndex) {
+				entry.steps.push({ name: `Step ${entry.steps.length + 1}`, type: "unknown", status: "running", startedAt: Date.now() });
+			}
+			entry.steps[detail.stepIndex] = {
+				...entry.steps[detail.stepIndex],
+				name: detail.stepName || entry.steps[detail.stepIndex].name,
+				status: detail.status,
+				durationMs: detail.durationMs,
+				output: detail.output,
+			};
+			renderApp();
 			break;
 		}
 		case "gate_verification_complete": {

@@ -5,7 +5,7 @@
  * Uses the shared delegate-cards.ts components to match the delegate UX pattern.
  * Used by GateSignalRenderer (chat) and could be embedded in the dashboard.
  */
-import { LitElement, html, nothing, type TemplateResult } from "lit";
+import { LitElement, html, nothing, type TemplateResult, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import "../../components/LiveTimer.js";
 import {
@@ -54,6 +54,8 @@ export class GateVerificationLive extends LitElement {
 	@property() signalId = "";
 	/** If set, used to show static final state when no events arrive (e.g. chat history). */
 	@property() finalStatus: string | undefined;
+	/** Step definitions from signal response — used to seed placeholder cards before WS events arrive. */
+	@property({ type: Array }) initialSteps: Array<{ name: string; type: string }> = [];
 
 	@state() private steps: VerificationStep[] = [];
 	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
@@ -62,6 +64,19 @@ export class GateVerificationLive extends LitElement {
 	private _boundOnEvent = this._onEvent.bind(this);
 
 	override createRenderRoot() { return this; }
+
+	override willUpdate(_changed: PropertyValues) {
+		// Seed steps from initialSteps once, before the gate_verification_started WS event arrives
+		if (this.overallStatus === "idle" && this.steps.length === 0 && this.initialSteps.length > 0) {
+			this.steps = this.initialSteps.map(s => ({
+				name: s.name,
+				type: s.type,
+				status: "running" as const,
+				startedAt: Date.now(),
+			}));
+			this.overallStatus = "running";
+		}
+	}
 
 	override connectedCallback() {
 		super.connectedCallback();
