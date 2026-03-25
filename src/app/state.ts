@@ -41,6 +41,8 @@ export interface GatewaySession {
 	staffAssistant?: boolean;
 	/** Whether this session has a live HTML preview panel */
 	preview?: boolean;
+	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
+	nonInteractive?: boolean;
 	/** Personality names assigned to this session */
 	personalities?: string[];
 }
