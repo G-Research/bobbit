@@ -238,17 +238,17 @@ export function renderSessionRow(session: GatewaySession) {
 
 	return html`
 		<div
-			class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
+			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${hasChildren ? 0 : CHEVRON_W}px;"
+			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
 			@mouseleave=${mobile ? null : hideSessionTooltip}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 		>
 			${hasChildren ? html`<span
-				class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer"
-				style="width:${CHEVRON_W}px;text-align:center;"
+				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-[11px] text-muted-foreground select-none cursor-pointer"
+				style="width:${CHEVRON_W}px;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${childrenExpanded ? "Collapse delegates" : "Expand delegates"}"
 			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
@@ -308,13 +308,13 @@ export function renderArchivedSessionRow(session: GatewaySession) {
 		<div
 			class="group relative flex items-center gap-1 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
 				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${hasDelegates ? 0 : CHEVRON_W}px;"
+			style="padding-left:${CHEVRON_W}px;"
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 			title="${displayTitle} (archived)"
 		>
 			${hasDelegates ? html`<span
-				class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer opacity-60"
-				style="width:${CHEVRON_W}px;text-align:center;"
+				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-[11px] text-muted-foreground select-none cursor-pointer opacity-60"
+				style="width:${CHEVRON_W}px;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse delegates" : "Expand delegates"}"
 			>${expanded ? "▾" : "▸"}</span>` : ""}
@@ -368,8 +368,8 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	`;
 
 	const chevron = html`<span
-		class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer"
-		style="width:${CHEVRON_W}px;text-align:center;"
+		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-[11px] text-muted-foreground select-none cursor-pointer"
+		style="width:${CHEVRON_W}px;"
 		@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(session.id); renderApp(); }}
 		title="${expanded ? "Collapse agents" : "Expand agents"}"
 	>${expanded ? "▾" : "▸"}</span>`;
@@ -378,8 +378,9 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	return html`
 		<div
-			class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
+			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+			style="padding-left:${CHEVRON_W}px;"
 			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
 			@mouseleave=${mobile ? null : hideSessionTooltip}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
