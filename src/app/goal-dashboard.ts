@@ -76,6 +76,7 @@ interface PrStatus {
 	state: "OPEN" | "MERGED" | "CLOSED";
 	mergeable: boolean;
 	viewerIsAdmin?: boolean;
+	reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
 }
 let prStatus: PrStatus | null = null;
 
@@ -950,6 +951,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.prTitle=${prStatus?.title}
 						.prMergeable=${prStatus?.mergeable ?? false}
 						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
+						.reviewDecision=${prStatus?.reviewDecision}
 						@pr-merge=${handlePrMerge}
 					></git-status-widget>
 					${goal.worktreePath ? html`

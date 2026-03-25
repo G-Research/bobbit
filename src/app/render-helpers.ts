@@ -217,6 +217,12 @@ export function renderSessionRow(session: GatewaySession) {
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
+	// Check for children (live delegates + archived delegates)
+	const liveDelegates = state.gatewaySessions.filter(s => s.delegateOf === session.id);
+	const archivedDelegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
+	const hasChildren = liveDelegates.length > 0 || archivedDelegates.length > 0;
+	const childrenExpanded = hasChildren && isArchivedParentExpanded(session.id);
+
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
 
@@ -234,12 +240,18 @@ export function renderSessionRow(session: GatewaySession) {
 		<div
 			class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${CHEVRON_W}px;"
+			style="padding-left:${hasChildren ? 0 : CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
 			@mouseleave=${mobile ? null : hideSessionTooltip}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 		>
+			${hasChildren ? html`<span
+				class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer"
+				style="width:8px;text-align:center;"
+				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
+				title="${childrenExpanded ? "Collapse delegates" : "Expand delegates"}"
+			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
 				${connecting
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
@@ -264,8 +276,7 @@ export function renderSessionRow(session: GatewaySession) {
 					${buttons}
 				</div>`}
 		</div>
-		${renderLiveDelegates(session.id)}
-		${renderArchivedDelegates(session.id)}
+		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${renderArchivedDelegates(session.id)}` : ""}
 	`;
 }
 
@@ -274,7 +285,9 @@ function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
 	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId);
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-		${delegates.map(s => renderSessionRow(s))}
+		${delegates.map(s => s.status === "terminated"
+			? html`${renderArchivedSessionRow(s)}${renderArchivedDelegates(s.id)}`
+			: renderSessionRow(s))}
 	</div>`;
 }
 

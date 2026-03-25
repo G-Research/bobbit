@@ -64,14 +64,14 @@ async function getCachedPrStatus(cwd: string): Promise<any | null> {
 	const cached = _prCache.get(cwd);
 	if (cached && Date.now() - cached.ts < PR_CACHE_TTL_MS) return cached.data;
 	try {
-		const { stdout } = await execAsync("gh pr view --json state,url,number,title,mergeable,headRefName", {
+		const { stdout } = await execAsync("gh pr view --json state,url,number,title,mergeable,headRefName,reviewDecision", {
 			cwd,
 			encoding: "utf-8",
 			timeout: 10000,
 		});
 		const pr = JSON.parse(stdout);
 		const viewerIsAdmin = await getViewerIsAdmin(cwd);
-		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, viewerIsAdmin };
+		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
 		_prCache.set(cwd, { data, ts: Date.now() });
 		return data;
 	} catch {
