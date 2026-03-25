@@ -21,7 +21,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { showGoalDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, INDENT, CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 
 // ============================================================================
@@ -252,7 +252,7 @@ export function renderStaffSidebarSection() {
 					>${icon(Plus, mobile ? "sm" : "xs")}</button>
 				</div>
 			</div>
-			${staffSectionExpanded ? list.filter((agent) => {
+			${staffSectionExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${list.filter((agent) => {
 				// Hide staff agents whose current session is archived and belongs to a goal
 				// — those show under their goal's archived section instead
 				if (agent.currentSessionId) {
@@ -301,7 +301,7 @@ export function renderStaffSidebarSection() {
 							${editBtn}
 						</div>`}
 				</div>
-			`; }) : ""}
+			`; })}</div>` : ""}
 	`;
 }
 
@@ -409,7 +409,7 @@ export function renderSidebar() {
 											${renderRolePickerDropdown()}
 										</div>
 									</div>
-									${ungroupedExpanded ? ungroupedSessions.map(renderSessionRow) : ""}
+									${ungroupedExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${ungroupedSessions.map(renderSessionRow)}</div>` : ""}
 								</div>
 							` : html`
 								<div class="flex flex-col gap-0.5">
@@ -434,12 +434,14 @@ export function renderSidebar() {
 											${renderRolePickerDropdown()}
 										</div>
 									</div>
+									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 									${ungroupedSessions.length === 0
 										? html`<div class="text-center py-6">
 												<p class="text-xs text-muted-foreground mb-2">No sessions</p>
 												<button class="text-xs text-primary hover:underline" title="Create a new session" @click=${() => createAndConnectSession()}>Create one</button>
 											</div>`
 										: ungroupedSessions.map(renderSessionRow)}
+								</div>
 								</div>
 							`}
 							${renderStaffSidebarSection()}
@@ -461,10 +463,12 @@ export function renderSidebar() {
 											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
 										${state.archivedSectionExpanded ? html`
-											${standaloneArchived.map(s => html`
-												${renderArchivedSessionRow(s)}
-												${renderArchivedDelegates(s.id)}
-											`)}
+											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+												${standaloneArchived.map(s => html`
+													${renderArchivedSessionRow(s)}
+													${renderArchivedDelegates(s.id)}
+												`)}
+											</div>
 										` : ""}
 									</div>
 								`;
