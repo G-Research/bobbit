@@ -38,7 +38,7 @@ const execAsync = promisify(exec);
 
 // ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
 const _prCache = new Map<string, { data: any; ts: number }>();
-const PR_CACHE_TTL_MS = 30_000; // 30 seconds
+const PR_CACHE_TTL_MS = 15_000; // 15 seconds
 
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();

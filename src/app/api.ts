@@ -16,9 +16,9 @@ import { showFaviconBadge } from "./favicon-badge.js";
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
 
-/** Throttle PR status polling — don't hit GitHub API every 5s. */
+/** Throttle PR status polling — don't hit GitHub API on every session poll. */
 let _lastPrRefresh = 0;
-const PR_POLL_INTERVAL_MS = 30_000;
+const PR_POLL_INTERVAL_MS = 15_000;
 
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
 async function showConnectionError(title: string, message: string): Promise<void> {
@@ -201,7 +201,7 @@ async function refreshGateStatusCache() {
 }
 
 /** Fetch PR status for all goals with branches and update the cache. */
-async function refreshPrStatusCache() {
+export async function refreshPrStatusCache() {
 	const goalsWithBranch = state.goals.filter(g => g.branch);
 	if (goalsWithBranch.length === 0) return;
 

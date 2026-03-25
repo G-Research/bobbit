@@ -11,7 +11,7 @@ import {
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache } from "./api.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel } from "./routing.js";
 import { sessionHueRotation } from "./session-colors.js";
@@ -688,6 +688,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					});
 					if (res.ok) {
 						refreshPrStatusForSession(sessionId);
+						refreshPrStatusCache();
 						return undefined;
 					}
 					const data = await res.json().catch(() => ({ error: 'Merge failed' }));

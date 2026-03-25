@@ -1,7 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, type GateState, type GateSignal } from "./api.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -769,6 +769,7 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>
 		if (prRes && prRes.ok) prStatus = await prRes.json();
 		else prStatus = null;
 	} catch { /* ignore */ }
+	refreshPrStatusCache();
 	renderApp();
 }
 
