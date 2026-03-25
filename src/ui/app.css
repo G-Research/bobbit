@@ -2099,7 +2099,7 @@ html {
 	content: '❯';
 	position: absolute;
 	left: 8px;
-	top: 10px;
+	top: 1.3em;
 	font-size: 12px;
 	font-weight: 700;
 	color: rgba(75, 140, 70, 0.85);
