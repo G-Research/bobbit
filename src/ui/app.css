@@ -129,6 +129,68 @@
 
 /* ── Palette overrides ── */
 
+/* ── Forest (hue 148) — explicit rule so palette preview containers can scope it ── */
+[data-palette="forest"] {
+	--background: oklch(0.935 0.012 148);
+	--foreground: oklch(0.18 0.014 142);
+	--card: oklch(0.945 0.010 146);
+	--card-foreground: oklch(0.18 0.014 142);
+	--popover: oklch(0.95 0.009 146);
+	--popover-foreground: oklch(0.18 0.014 142);
+	--secondary: oklch(0.905 0.015 146);
+	--secondary-foreground: oklch(0.22 0.014 142);
+	--muted: oklch(0.905 0.015 146);
+	--muted-foreground: oklch(0.44 0.014 142);
+	--accent: oklch(0.91 0.018 146);
+	--accent-foreground: oklch(0.36 0.08 148);
+	--border: oklch(0.86 0.014 146);
+	--input: oklch(0.88 0.014 146);
+	--ring: oklch(0.48 0.06 148);
+	--primary: oklch(0.38 0.08 148);
+	--primary-foreground: oklch(0.96 0.008 146);
+	--sidebar: oklch(0.915 0.014 148);
+	--sidebar-foreground: oklch(0.18 0.014 142);
+	--sidebar-primary: oklch(0.38 0.08 148);
+	--sidebar-primary-foreground: oklch(0.96 0.008 146);
+	--sidebar-accent: oklch(0.895 0.016 146);
+	--sidebar-accent-foreground: oklch(0.22 0.014 142);
+	--sidebar-border: oklch(0.86 0.014 146);
+	--notif-system-bg: rgba(100, 120, 160, 0.12);
+	--notif-system-border: rgba(100, 120, 160, 0.30);
+	--notif-system-text: rgba(130, 150, 190, 0.90);
+	--user-msg-accent: rgba(80, 140, 80, 1);
+	--user-msg-bg: rgba(80, 140, 80, 0.10);
+	--user-msg-bg2: rgba(90, 150, 85, 0.05);
+	--user-msg-shadow: rgba(80, 140, 80, 0.14);
+	--user-msg-shadow2: rgba(80, 140, 80, 0.08);
+}
+.dark[data-palette="forest"], [data-palette="forest"].dark {
+	--background: oklch(0.21 0.008 145);
+	--foreground: oklch(0.96 0.008 140);
+	--card: oklch(0.24 0.01 145);
+	--card-foreground: oklch(0.96 0.008 140);
+	--popover: oklch(0.27 0.01 145);
+	--popover-foreground: oklch(0.96 0.008 140);
+	--secondary: oklch(0.27 0.012 145);
+	--secondary-foreground: oklch(0.96 0.008 140);
+	--muted: oklch(0.27 0.012 145);
+	--muted-foreground: oklch(0.65 0.012 140);
+	--accent: oklch(0.32 0.015 145);
+	--accent-foreground: oklch(0.78 0.08 130);
+	--border: oklch(0.30 0.012 145);
+	--input: oklch(0.34 0.012 145);
+	--ring: oklch(0.50 0.06 145);
+	--primary: oklch(0.72 0.12 140);
+	--primary-foreground: oklch(0.18 0.01 145);
+	--sidebar: oklch(0.23 0.01 145);
+	--sidebar-foreground: oklch(0.96 0.008 140);
+	--sidebar-primary: oklch(0.72 0.12 140);
+	--sidebar-primary-foreground: oklch(0.18 0.01 145);
+	--sidebar-accent: oklch(0.27 0.012 145);
+	--sidebar-accent-foreground: oklch(0.96 0.008 140);
+	--sidebar-border: oklch(0.30 0.012 145);
+}
+
 /* ── Ocean (hue 230) ── */
 [data-palette="ocean"] {
 	--background: oklch(0.935 0.012 230);

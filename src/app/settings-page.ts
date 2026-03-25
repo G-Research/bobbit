@@ -302,20 +302,19 @@ function renderShortcutsTab() {
 interface ColorPalette {
 	id: string;
 	name: string;
-	swatches: [string, string, string, string, string];
 }
 
 const PALETTES: ColorPalette[] = [
-	{ id: "forest", name: "Forest", swatches: ["#2E6E2E", "#E8E4DC", "#4D7A3A", "#508C50", "#6478A0"] },
-	{ id: "ocean",  name: "Ocean",  swatches: ["#2B4F8C", "#E0E4EC", "#3A5E8C", "#3278BE", "#3C78BE"] },
-	{ id: "dusk",   name: "Dusk",   swatches: ["#6E2E7A", "#ECE0EC", "#7A3A7A", "#A05AB4", "#5A5AAF"] },
-	{ id: "ember",  name: "Ember",  swatches: ["#8C6E2B", "#ECE8E0", "#8C7A3A", "#BE8C28", "#6478A0"] },
-	{ id: "rose",   name: "Rose",   swatches: ["#8C2E36", "#ECE0E0", "#8C3A40", "#BE505A", "#6478A0"] },
-	{ id: "slate",  name: "Slate",  swatches: ["#50506E", "#E4E4EC", "#5A5A72", "#6E6EA0", "#6470A0"] },
-	{ id: "sand",   name: "Sand",   swatches: ["#6E6E2B", "#E8E8E0", "#7A7A3A", "#8C8C32", "#6478A0"] },
-	{ id: "teal",   name: "Teal",   swatches: ["#2B6E72", "#E0E8EC", "#3A7A7E", "#2891A0", "#3C8CA0"] },
-	{ id: "copper", name: "Copper", swatches: ["#8C5A2B", "#ECE4E0", "#8C6E3A", "#B47832", "#6478A0"] },
-	{ id: "mono",   name: "Mono",   swatches: ["#525252", "#E8E8E8", "#5E5E5E", "#9CA3AF", "#6B7280"] },
+	{ id: "forest", name: "Forest" },
+	{ id: "ocean",  name: "Ocean" },
+	{ id: "dusk",   name: "Dusk" },
+	{ id: "ember",  name: "Ember" },
+	{ id: "rose",   name: "Rose" },
+	{ id: "slate",  name: "Slate" },
+	{ id: "sand",   name: "Sand" },
+	{ id: "teal",   name: "Teal" },
+	{ id: "copper", name: "Copper" },
+	{ id: "mono",   name: "Mono" },
 ];
 
 let activePaletteId = "forest";
@@ -346,42 +345,48 @@ async function selectPalette(id: string): Promise<void> {
 }
 
 function renderPalettePreview(palette: ColorPalette) {
-	const [primary, bg, accent, user, notif] = palette.swatches;
+	const isDark = document.documentElement.classList.contains("dark");
 
+	// Each preview gets data-palette + optional dark class so the real
+	// CSS variable rules ([data-palette="xxx"]) apply and cascade.
 	return html`
-		<div style="display:flex; width:180px; height:64px; border-radius:6px; overflow:hidden; flex-shrink:0; border:1px solid ${accent}50; font-family:system-ui,sans-serif;">
-			<!-- Sidebar strip -->
-			<div style="width:40px; background:${bg}; border-right:1px solid ${accent}40; display:flex; flex-direction:column; gap:4px; padding:7px 5px;">
+		<div
+			data-palette=${palette.id}
+			class=${isDark ? "dark" : ""}
+			style="display:flex; width:200px; height:68px; border-radius:6px; overflow:hidden; flex-shrink:0; border:1px solid var(--border); font-family:system-ui,sans-serif;"
+		>
+			<!-- Sidebar -->
+			<div style="width:44px; background:var(--sidebar); border-right:1px solid var(--sidebar-border); display:flex; flex-direction:column; gap:4px; padding:7px 5px;">
 				<div style="display:flex; align-items:center; gap:3px;">
-					<div style="width:10px; height:10px; border-radius:50%; background:${primary}; flex-shrink:0;"></div>
-					<div style="height:4px; flex:1; border-radius:2px; background:${primary}40;"></div>
+					<div style="width:10px; height:10px; border-radius:50%; background:var(--primary); flex-shrink:0;"></div>
+					<div style="height:4px; flex:1; border-radius:2px; background:var(--sidebar-accent);"></div>
 				</div>
-				<div style="display:flex; align-items:center; gap:3px;">
-					<div style="width:10px; height:10px; border-radius:50%; background:${user}; opacity:0.6; flex-shrink:0;"></div>
-					<div style="height:4px; flex:1; border-radius:2px; background:${notif}30;"></div>
+				<div style="display:flex; align-items:center; gap:3px; opacity:0.7;">
+					<div style="width:10px; height:10px; border-radius:50%; background:var(--muted-foreground); flex-shrink:0;"></div>
+					<div style="height:4px; flex:1; border-radius:2px; background:var(--sidebar-accent);"></div>
 				</div>
-				<div style="display:flex; align-items:center; gap:3px;">
-					<div style="width:10px; height:10px; border-radius:50%; background:${notif}; opacity:0.4; flex-shrink:0;"></div>
-					<div style="height:4px; flex:1; border-radius:2px; background:${notif}20;"></div>
+				<div style="display:flex; align-items:center; gap:3px; opacity:0.4;">
+					<div style="width:10px; height:10px; border-radius:50%; background:var(--muted-foreground); flex-shrink:0;"></div>
+					<div style="height:4px; flex:1; border-radius:2px; background:var(--sidebar-accent);"></div>
 				</div>
 			</div>
 			<!-- Chat area -->
-			<div style="flex:1; background:${bg}; padding:6px 8px; display:flex; flex-direction:column; gap:4px; justify-content:center;">
-				<!-- User message -->
-				<div style="display:flex; align-items:center; gap:3px;">
-					<span style="color:${user}; font-size:8px; font-weight:bold; line-height:1;">❯</span>
-					<div style="background:${user}18; border-radius:3px; padding:2px 6px; font-size:7px; color:${primary}; line-height:1.3; white-space:nowrap; overflow:hidden;">How do I fix this?</div>
+			<div style="flex:1; background:var(--background); padding:6px 8px; display:flex; flex-direction:column; gap:4px; justify-content:center;">
+				<!-- User message (mirrors .user-message-container) -->
+				<div style="display:flex; align-items:center; gap:3px; background:linear-gradient(135deg, var(--user-msg-bg), var(--user-msg-bg2)); border-radius:4px; padding:2px 6px 2px 3px; box-shadow:0 1px 3px var(--user-msg-shadow);">
+					<span style="color:var(--user-msg-accent); font-size:7px; font-weight:bold; line-height:1;">❯</span>
+					<span style="font-size:7px; color:var(--foreground); line-height:1.3; white-space:nowrap; overflow:hidden;">How do I fix this?</span>
 				</div>
-				<!-- Assistant response lines -->
-				<div style="padding-left:4px; display:flex; flex-direction:column; gap:2px;">
-					<div style="height:4px; width:90%; border-radius:2px; background:${primary}25;"></div>
-					<div style="height:4px; width:70%; border-radius:2px; background:${primary}18;"></div>
+				<!-- Assistant response (foreground text) -->
+				<div style="padding-left:2px; display:flex; flex-direction:column; gap:2px;">
+					<div style="height:4px; width:92%; border-radius:2px; background:var(--muted-foreground); opacity:0.25;"></div>
+					<div style="height:4px; width:68%; border-radius:2px; background:var(--muted-foreground); opacity:0.15;"></div>
 				</div>
-				<!-- Input bar -->
+				<!-- Input bar (mirrors real input area) -->
 				<div style="display:flex; align-items:center; gap:3px; margin-top:auto;">
-					<div style="flex:1; height:8px; border-radius:3px; border:1px solid ${accent}50; background:${bg};"></div>
-					<div style="width:14px; height:8px; border-radius:3px; background:${primary}; display:flex; align-items:center; justify-content:center;">
-						<span style="color:${bg}; font-size:5px; line-height:1;">↑</span>
+					<div style="flex:1; height:9px; border-radius:4px; border:1px solid var(--input); background:var(--background);"></div>
+					<div style="width:16px; height:9px; border-radius:4px; background:var(--primary); display:flex; align-items:center; justify-content:center;">
+						<span style="color:var(--primary-foreground); font-size:6px; line-height:1;">↑</span>
 					</div>
 				</div>
 			</div>
