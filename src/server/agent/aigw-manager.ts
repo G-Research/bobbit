@@ -58,43 +58,60 @@ const DEFAULT_META: ModelMeta = {
  * Infer model metadata from the model ID.
  * Patterns are matched greedily — first match wins.
  */
+/**
+ * Compat flags for the openai-completions provider in pi-ai.
+ * These control which OpenAI API features are used in requests.
+ * Gateway proxies often don't support the full OpenAI API surface,
+ * so we disable features that cause errors.
+ */
+const GATEWAY_COMPAT: Record<string, unknown> = {
+	// Gateway proxies typically don't support the `store` param
+	supportsStore: false,
+	// The `developer` role is OpenAI-specific; proxies may reject it
+	supportsDeveloperRole: false,
+	// Use max_tokens (widely supported) instead of max_completion_tokens
+	maxTokensField: "max_tokens",
+	// Strict JSON schema mode is OpenAI-specific
+	supportsStrictMode: false,
+};
+
 function inferMeta(modelId: string): ModelMeta {
 	const id = modelId.toLowerCase();
 
 	// Anthropic models (via Bedrock or direct)
 	if (id.includes("claude-opus")) {
-		return { contextWindow: 1_000_000, maxTokens: 32_768, reasoning: true, input: ["text", "image"] };
+		return { contextWindow: 1_000_000, maxTokens: 32_768, reasoning: true, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}
 	if (id.includes("claude-sonnet")) {
-		return { contextWindow: 1_000_000, maxTokens: 16_384, reasoning: true, input: ["text", "image"] };
+		return { contextWindow: 1_000_000, maxTokens: 16_384, reasoning: true, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}
 	if (id.includes("claude-haiku")) {
-		return { contextWindow: 200_000, maxTokens: 8_192, reasoning: false, input: ["text", "image"] };
+		return { contextWindow: 200_000, maxTokens: 8_192, reasoning: false, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}
 	if (id.includes("claude")) {
-		return { contextWindow: 200_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"] };
+		return { contextWindow: 200_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}
 
 	// OpenAI models
 	if (id.includes("gpt-5")) {
-		return { contextWindow: 400_000, maxTokens: 32_768, reasoning: false, input: ["text", "image"] };
+		return { contextWindow: 400_000, maxTokens: 32_768, reasoning: false, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}
 	if (id.includes("o4-mini") || id.includes("o3-mini") || id.includes("o1-mini")) {
-		return { contextWindow: 200_000, maxTokens: 65_536, reasoning: true, input: ["text"] };
+		return { contextWindow: 200_000, maxTokens: 65_536, reasoning: true, input: ["text"], compat: GATEWAY_COMPAT };
 	}
 	if (id.includes("o4") || id.includes("o3") || id.includes("o1")) {
-		return { contextWindow: 200_000, maxTokens: 100_000, reasoning: true, input: ["text", "image"] };
+		return { contextWindow: 200_000, maxTokens: 100_000, reasoning: true, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}
 	if (id.includes("gpt-4")) {
-		return { contextWindow: 128_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"] };
+		return { contextWindow: 128_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}
 
 	// Qwen models
 	if (id.includes("qwen")) {
-		return { contextWindow: 1_000_000, maxTokens: 32_768, reasoning: false, input: ["text"] };
+		return { contextWindow: 1_000_000, maxTokens: 32_768, reasoning: false, input: ["text"], compat: GATEWAY_COMPAT };
 	}
 
-	return { ...DEFAULT_META };
+	return { ...DEFAULT_META, compat: GATEWAY_COMPAT };
 }
 
 /**
