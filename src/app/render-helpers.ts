@@ -534,10 +534,11 @@ export function renderGoalGroup(goal: Goal) {
 
 	return html`
 		<div class="flex flex-col ${goal.state === "shelved" ? "opacity-60" : ""}">
-			<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-0 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
+			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
+				style="padding-left:${CHEVRON_W}px;"
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
-				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
+				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-[11px] text-muted-foreground select-none" style="width:${CHEVRON_W}px;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
@@ -560,12 +561,17 @@ export function renderGoalGroup(goal: Goal) {
 						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
+						// Archived members collapse with the team lead (live or archived)
+						const tlForCollapse = teamLead || archivedLeads[0];
+						const membersVisible = tlForCollapse
+							? (teamLead ? isTeamLeadExpanded(teamLead.id) : isArchivedParentExpanded(tlForCollapse.id))
+							: true;
 						return html`
 							${archivedLeads.map(s => html`
 								${renderArchivedSessionRow(s)}
 								${renderArchivedDelegates(s.id)}
 							`)}
-							${archivedMembers.length > 0 ? html`
+							${membersVisible && archivedMembers.length > 0 ? html`
 								<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 									${archivedMembers.map(s => html`
 										${renderArchivedSessionRow(s)}

@@ -234,9 +234,10 @@ export function renderStaffSidebarSection() {
 	return html`
 		<div class="border-t border-border/30 my-1 mx-2"></div>
 		<div class="flex flex-col gap-0.5">
-			<div class="flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pl-0 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
+			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
+				style="${mobile ? "" : `padding-left:${CHEVRON_W}px;`}"
 				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); renderApp(); }}>
-				<span class="${mobile ? "text-sm" : "text-[11px]"} text-muted-foreground shrink-0 select-none" style="width:${mobile ? "14" : CHEVRON_W}px;text-align:center;">${staffSectionExpanded ? "▾" : "▸"}</span>
+				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-[11px]"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${CHEVRON_W}px;`}">${staffSectionExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
@@ -385,9 +386,10 @@ export function renderSidebar() {
 							${sortedGoals.length > 0 ? html`
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5">
-									<div class="flex items-center gap-1 pl-0 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+										style="padding-left:${CHEVRON_W}px;"
 										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
-										<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
+										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-[11px] text-muted-foreground select-none" style="width:${CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
 										<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 										<div class="flex items-center relative">
@@ -455,10 +457,11 @@ export function renderSidebar() {
 									<div class="border-t border-border/30 my-1 mx-2"></div>
 									<div class="flex flex-col gap-0.5">
 										<button
-											class="flex items-center gap-1 pl-0 pr-1 py-0.5 w-full text-left hover:bg-secondary/30 rounded-md transition-colors"
+											class="relative flex items-center gap-1 pr-1 py-0.5 w-full text-left hover:bg-secondary/30 rounded-md transition-colors"
+											style="padding-left:${CHEVRON_W}px;"
 											@click=${() => { state.archivedSectionExpanded = !state.archivedSectionExpanded; renderApp(); }}
 										>
-											<span class="shrink-0 text-muted-foreground opacity-60">${icon(state.archivedSectionExpanded ? ChevronDown : ChevronRight, "xs")}</span>
+											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-[11px] text-muted-foreground select-none opacity-60" style="width:${CHEVRON_W}px;">${state.archivedSectionExpanded ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
 											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
