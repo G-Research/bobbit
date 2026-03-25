@@ -58,11 +58,12 @@ export class AgentInterface extends LitElement {
 	@property({ type: Number }) prNumber?: number;
 	@property() prTitle?: string;
 	@property({ type: Boolean }) prMergeable?: boolean;
+	@property({ type: Boolean }) viewerIsAdmin?: boolean;
 	// Background processes for this session
 	@property({ attribute: false }) bgProcesses: BgProcessInfo[] = [];
 	@property({ attribute: false }) onBgProcessKill?: (id: string) => void;
 	@property({ attribute: false }) onBgProcessDismiss?: (id: string) => void;
-	@property({ attribute: false }) onPrMerge?: (method: string) => Promise<string | undefined>;
+	@property({ attribute: false }) onPrMerge?: (method: string, admin?: boolean) => Promise<string | undefined>;
 	@property({ attribute: false }) onGitPull?: () => Promise<string | undefined>;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
 	@property({ attribute: false }) onApiKeyRequired?: (provider: string) => Promise<boolean>;
@@ -678,6 +679,7 @@ export class AgentInterface extends LitElement {
 								.prNumber=${this.prNumber}
 								.prTitle=${this.prTitle}
 								.prMergeable=${this.prMergeable ?? false}
+								.viewerIsAdmin=${this.viewerIsAdmin ?? false}
 								@pr-merge=${this._handlePrMerge}
 								@git-pull=${this._handleGitPull}
 							></git-status-widget>` : nothing}
@@ -724,11 +726,11 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
-	private async _handlePrMerge(e: CustomEvent<{ method: string }>): Promise<void> {
+	private async _handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>): Promise<void> {
 		if (!this.onPrMerge) return;
 		const widget = e.target as import('./GitStatusWidget.js').GitStatusWidget;
 		try {
-			const error = await this.onPrMerge(e.detail.method);
+			const error = await this.onPrMerge(e.detail.method, e.detail.admin);
 			widget.setMergeResult(error);
 		} catch (err) {
 			widget.setMergeResult(err instanceof Error ? err.message : 'Network error');

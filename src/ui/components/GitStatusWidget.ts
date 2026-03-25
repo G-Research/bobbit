@@ -24,6 +24,7 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Number }) prNumber?: number;
     @property() prTitle?: string;
     @property({ type: Boolean }) prMergeable?: boolean;
+    @property({ type: Boolean }) viewerIsAdmin = false;
 
     @state() private expanded = false;
     @state() private merging = false;
@@ -202,7 +203,15 @@ export class GitStatusWidget extends LitElement {
                         >
                             ${this.merging ? 'Merging\u2026' : 'Merge PR'}
                         </button>
-                        ${!this.prMergeable && !this.merging ? html`<span style="font-size:10px;color:var(--destructive)">Not mergeable</span>` : nothing}
+                        ${this.viewerIsAdmin ? html`<button
+                            style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
+                            ?disabled=${this.merging}
+                            @click=${this._handleForceMerge}
+                            title="Merge with --admin to bypass branch protection rules"
+                        >
+                            Force Merge
+                        </button>` : nothing}
+                        ${!this.prMergeable && !this.merging && !this.viewerIsAdmin ? html`<span style="font-size:10px;color:var(--destructive)">Not mergeable</span>` : nothing}
                     </div>
                     ${this.mergeError ? html`<div style="font-size:11px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : nothing}
                 ` : nothing}
@@ -240,6 +249,16 @@ export class GitStatusWidget extends LitElement {
             bubbles: true,
             composed: true,
             detail: { method: this.mergeMethod },
+        }));
+    }
+
+    private _handleForceMerge() {
+        this.merging = true;
+        this.mergeError = '';
+        this.dispatchEvent(new CustomEvent('pr-merge', {
+            bubbles: true,
+            composed: true,
+            detail: { method: this.mergeMethod, admin: true },
         }));
     }
 

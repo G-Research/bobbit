@@ -40,6 +40,26 @@ const execAsync = promisify(exec);
 const _prCache = new Map<string, { data: any; ts: number }>();
 const PR_CACHE_TTL_MS = 30_000; // 30 seconds
 
+// Cache viewer permission per repo (rarely changes, long TTL)
+const _repoPermCache = new Map<string, { perm: string; ts: number }>();
+const REPO_PERM_CACHE_TTL_MS = 300_000; // 5 minutes
+
+async function getViewerIsAdmin(cwd: string): Promise<boolean> {
+	const cached = _repoPermCache.get(cwd);
+	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
+	try {
+		const { stdout } = await execAsync("gh repo view --json viewerPermission", {
+			cwd, encoding: "utf-8", timeout: 10000,
+		});
+		const perm = JSON.parse(stdout).viewerPermission ?? "";
+		_repoPermCache.set(cwd, { perm, ts: Date.now() });
+		return perm === "ADMIN";
+	} catch {
+		_repoPermCache.set(cwd, { perm: "", ts: Date.now() });
+		return false;
+	}
+}
+
 async function getCachedPrStatus(cwd: string): Promise<any | null> {
 	const cached = _prCache.get(cwd);
 	if (cached && Date.now() - cached.ts < PR_CACHE_TTL_MS) return cached.data;
@@ -50,7 +70,8 @@ async function getCachedPrStatus(cwd: string): Promise<any | null> {
 			timeout: 10000,
 		});
 		const pr = JSON.parse(stdout);
-		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName };
+		const viewerIsAdmin = await getViewerIsAdmin(cwd);
+		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, viewerIsAdmin };
 		_prCache.set(cwd, { data, ts: Date.now() });
 		return data;
 	} catch {
@@ -1465,8 +1486,9 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
+		const goalAdminFlag = body?.admin ? " --admin" : "";
 		try {
-			await execAsync(`gh pr merge --${method}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execAsync(`gh pr merge --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			json({ ok: true });
 		} catch (err: unknown) {
@@ -2097,8 +2119,9 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
+		const sessAdminFlag = body?.admin ? " --admin" : "";
 		try {
-			await execAsync(`gh pr merge --${method}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execAsync(`gh pr merge --${method}${sessAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			json({ ok: true });
 		} catch (err: unknown) {

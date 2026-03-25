@@ -670,7 +670,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					return err instanceof Error ? err.message : 'Network error';
 				}
 			};
-			state.chatPanel.agentInterface.onPrMerge = async (method: string) => {
+			state.chatPanel.agentInterface.onPrMerge = async (method: string, admin?: boolean) => {
 				const sd = state.gatewaySessions.find((s) => s.id === sessionId);
 				const mergeUrl = sd?.goalId
 					? `/api/goals/${sd.goalId}/pr-merge`
@@ -679,7 +679,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					const res = await gatewayFetch(mergeUrl, {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({ method }),
+						body: JSON.stringify({ method, ...(admin ? { admin: true } : {}) }),
 					});
 					if (res.ok) {
 						refreshPrStatusForSession(sessionId);
@@ -1006,6 +1006,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 				ai.prNumber = undefined;
 				ai.prTitle = undefined;
 				ai.prMergeable = undefined;
+				ai.viewerIsAdmin = undefined;
 			}
 			return;
 		}
@@ -1016,6 +1017,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prNumber = data.number;
 			ai.prTitle = data.title;
 			ai.prMergeable = data.mergeable;
+			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
 		}
 	} catch {
 		if (activeSessionId() === sessionId) {
@@ -1024,6 +1026,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prNumber = undefined;
 			ai.prTitle = undefined;
 			ai.prMergeable = undefined;
+			ai.viewerIsAdmin = undefined;
 		}
 	}
 }

@@ -75,6 +75,7 @@ interface PrStatus {
 	title: string;
 	state: "OPEN" | "MERGED" | "CLOSED";
 	mergeable: boolean;
+	viewerIsAdmin?: boolean;
 }
 let prStatus: PrStatus | null = null;
 
@@ -715,7 +716,7 @@ async function handleEndTeam(goalId: string): Promise<void> {
 // PR MERGE HANDLER
 // ============================================================================
 
-async function handlePrMerge(e: CustomEvent<{ method: string }>): Promise<void> {
+async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>): Promise<void> {
 	if (!currentGoalId) return;
 	const widget = e.target as import('../ui/components/GitStatusWidget.js').GitStatusWidget;
 	const goalId = currentGoalId;
@@ -723,7 +724,7 @@ async function handlePrMerge(e: CustomEvent<{ method: string }>): Promise<void> 
 		const res = await gatewayFetch(`/api/goals/${goalId}/pr-merge`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ method: e.detail.method }),
+			body: JSON.stringify({ method: e.detail.method, ...(e.detail.admin ? { admin: true } : {}) }),
 		});
 		if (res.ok) {
 			widget.setMergeResult();
@@ -948,6 +949,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.prNumber=${prStatus?.number}
 						.prTitle=${prStatus?.title}
 						.prMergeable=${prStatus?.mergeable ?? false}
+						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
 						@pr-merge=${handlePrMerge}
 					></git-status-widget>
 					${goal.worktreePath ? html`
