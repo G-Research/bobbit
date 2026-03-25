@@ -283,6 +283,37 @@ describe("TeamManager", () => {
 			assert.equal(session.cwd, "/tmp/fallback");
 		});
 
+		it("should pass allowedTools from team-lead role to createSession", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+
+			// Track the opts argument passed to createSession
+			let capturedOpts: any = undefined;
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (
+				cwd: string,
+				args?: string[],
+				goalId?: string,
+				goalAssistant?: boolean,
+				opts?: any,
+			) => {
+				capturedOpts = opts;
+				return origCreateSession(cwd, args, goalId, goalAssistant, opts);
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			assert.ok(capturedOpts, "createSession should have been called with opts");
+			assert.deepEqual(
+				capturedOpts.allowedTools,
+				["bash", "read", "write"],
+				"opts.allowedTools should match the team-lead role's allowedTools",
+			);
+		});
+
 		it("should store session metadata with role and teamGoalId", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
