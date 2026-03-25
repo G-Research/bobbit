@@ -443,7 +443,7 @@ function renderPaletteTab() {
 
 // ── Models tab ──
 
-let aigwUrl = "";
+let aigwUrl = "http://aigw-local.c3.zone/v1";
 let aigwStatus: "idle" | "testing" | "saving" | "removing" = "idle";
 let aigwError = "";
 let aigwConfigured = false;
@@ -669,7 +669,7 @@ function renderModelsTab() {
 							type="text"
 							class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
 								focus:outline-none focus:ring-2 focus:ring-ring"
-							placeholder="http://aigw-local.c3.zone/v1"
+							placeholder="http://gateway-host/v1"
 							.value=${aigwUrl}
 							?disabled=${busy}
 							@input=${(e: Event) => { aigwUrl = (e.target as HTMLInputElement).value; }}
