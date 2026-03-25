@@ -2,7 +2,6 @@ import { parseAsync } from "docx-preview";
 import JSZip from "jszip";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import * as pdfjsLib from "pdfjs-dist";
-import * as XLSX from "xlsx";
 import { i18n } from "./i18n.js";
 
 // Configure PDF.js worker - we'll need to bundle this
@@ -122,30 +121,6 @@ export async function loadAttachment(
 			type: "document",
 			fileName: detectedFileName,
 			mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-			size,
-			content: base64Content,
-			extractedText,
-		};
-	}
-
-	// Check if it's an Excel file (XLSX/XLS)
-	const excelMimeTypes = [
-		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		"application/vnd.ms-excel",
-	];
-	if (
-		excelMimeTypes.includes(mimeType) ||
-		detectedFileName.toLowerCase().endsWith(".xlsx") ||
-		detectedFileName.toLowerCase().endsWith(".xls")
-	) {
-		const { extractedText } = await processExcel(arrayBuffer, detectedFileName);
-		return {
-			id,
-			type: "document",
-			fileName: detectedFileName,
-			mimeType: mimeType.startsWith("application/vnd")
-				? mimeType
-				: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 			size,
 			content: base64Content,
 			extractedText,
@@ -446,27 +421,4 @@ async function processPptx(arrayBuffer: ArrayBuffer, fileName: string): Promise<
 	}
 }
 
-async function processExcel(arrayBuffer: ArrayBuffer, fileName: string): Promise<{ extractedText: string }> {
-	try {
-		// Read the workbook
-		const workbook = XLSX.read(arrayBuffer, { type: "array" });
 
-		let extractedText = `<excel filename="${fileName}">`;
-
-		// Process each sheet
-		for (const [index, sheetName] of workbook.SheetNames.entries()) {
-			const worksheet = workbook.Sheets[sheetName];
-
-			// Extract text as CSV for the extractedText field
-			const csvText = XLSX.utils.sheet_to_csv(worksheet);
-			extractedText += `\n<sheet name="${sheetName}" index="${index + 1}">\n${csvText}\n</sheet>`;
-		}
-
-		extractedText += "\n</excel>";
-
-		return { extractedText };
-	} catch (error) {
-		console.error("Error processing Excel:", error);
-		throw new Error(`Failed to process Excel: ${String(error)}`);
-	}
-}

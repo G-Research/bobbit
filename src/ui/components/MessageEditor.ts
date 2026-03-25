@@ -60,7 +60,7 @@ export class MessageEditor extends LitElement {
 	@property() maxFiles = 10;
 	@property() maxFileSize = 20 * 1024 * 1024; // 20MB
 	@property() acceptedTypes =
-		"image/*,application/pdf,.docx,.pptx,.xlsx,.xls,.txt,.md,.json,.xml,.html,.css,.js,.ts,.jsx,.tsx,.yml,.yaml";
+		"image/*,application/pdf,.docx,.pptx,.txt,.md,.json,.xml,.html,.css,.js,.ts,.jsx,.tsx,.yml,.yaml";
 
 	@state() processingFiles = false;
 	@state() isDragging = false;

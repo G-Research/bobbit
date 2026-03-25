@@ -15,19 +15,18 @@ Execute JavaScript code in a sandboxed browser environment with full Web APIs.
 ## When to Use
 - Quick calculations or data transformations
 - Testing JavaScript code snippets in isolation
-- Processing data with libraries (XLSX, CSV, etc.)
+- Processing data with libraries (CSV, etc.)
 - Creating artifacts from data
 
 ## Environment
 - ES2023+ JavaScript (async/await, optional chaining, nullish coalescing, etc.)
 - All browser APIs: DOM, Canvas, WebGL, Fetch, Web Workers, WebSockets, Crypto, etc.
-- Import any npm package: await import('https://esm.run/package-name')
+- For libraries, use only what is available in the browser or pre-loaded on the page.
 
 ## Common Libraries
-- XLSX: const XLSX = await import('https://esm.run/xlsx');
-- CSV: const Papa = (await import('https://esm.run/papaparse')).default;
-- Chart.js: const Chart = (await import('https://esm.run/chart.js/auto')).default;
-- Three.js: const THREE = await import('https://esm.run/three');
+- CSV: parse manually with split('\\n').map(row => row.split(',')) or use DOMParser for complex cases
+- Chart.js: use Canvas 2D API directly (bindbindbindbindbindbindbindbindgetContext('2d'))
+- Visualization: use SVG or Canvas APIs directly (no external libraries needed)
 
 ## Persistence between tool calls
 - Objects stored on global scope do not persist between calls.
@@ -125,7 +124,7 @@ Interactive HTML applications that can visualize data from other artifacts.
 ### Requirements
 - Self-contained single file
 - Import ES modules from esm.sh: <script type="module">import X from 'https://esm.sh/pkg';</script>
-- Use Tailwind CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Use inline styles or plain CSS (no external CDN dependencies)
 - Can embed images from any domain: <img src="https://example.com/image.jpg">
 - MUST set background color explicitly (avoid transparent)
 - Inline CSS or Tailwind utility classes
@@ -237,7 +236,7 @@ export const ATTACHMENTS_RUNTIME_DESCRIPTION = `
 Read files the user uploaded to the conversation.
 
 #### When to Use
-- Process user-uploaded files (CSV, JSON, Excel, images, PDFs)
+- Process user-uploaded files (CSV, JSON, images, PDFs)
 
 #### Functions
 - listAttachments() - List all attachments, returns array of {id, fileName, mimeType, size}
@@ -253,15 +252,6 @@ const csvData = readTextAttachment(csvFile.id);
 const rows = csvData.split('\\n').map(row => row.split(','));
 \`\`\`
 
-Excel file:
-\`\`\`javascript
-const XLSX = await import('https://esm.run/xlsx');
-const files = listAttachments();
-const xlsxFile = files.find(f => f.fileName.endsWith('.xlsx'));
-const bytes = readBinaryAttachment(xlsxFile.id);
-const workbook = XLSX.read(bytes);
-const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
-\`\`\`
 `;
 
 // ============================================================================
@@ -270,13 +260,13 @@ const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
 
 export const EXTRACT_DOCUMENT_DESCRIPTION = `# Extract Document
 
-Extract plain text from documents on the web (PDF, DOCX, XLSX, PPTX).
+Extract plain text from documents on the web (PDF, DOCX, PPTX).
 
 ## When to Use
 User wants you to read a document at a URL.
 
 ## Input
-- { url: "https://example.com/document.pdf" } - URL to PDF, DOCX, XLSX, or PPTX
+- { url: "https://example.com/document.pdf" } - URL to PDF, DOCX, or PPTX
 
 ## Returns
-Structured plain text with page/sheet/slide delimiters.`;
+Structured plain text with page/slide delimiters.`;

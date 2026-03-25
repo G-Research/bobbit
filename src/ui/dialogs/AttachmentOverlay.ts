@@ -6,11 +6,10 @@ import { html, LitElement } from "lit";
 import { state } from "lit/decorators.js";
 import { Download, X } from "lucide";
 import * as pdfjsLib from "pdfjs-dist";
-import * as XLSX from "xlsx";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 
-type FileType = "image" | "pdf" | "docx" | "pptx" | "excel" | "text";
+type FileType = "image" | "pdf" | "docx" | "pptx" | "text";
 
 export class AttachmentOverlay extends LitElement {
 	@state() private attachment?: Attachment;
@@ -63,13 +62,6 @@ export class AttachmentOverlay extends LitElement {
 			this.attachment.fileName.toLowerCase().endsWith(".pptx")
 		)
 			return "pptx";
-		if (
-			this.attachment.mimeType?.includes("spreadsheetml") ||
-			this.attachment.mimeType?.includes("ms-excel") ||
-			this.attachment.fileName.toLowerCase().endsWith(".xlsx") ||
-			this.attachment.fileName.toLowerCase().endsWith(".xls")
-		)
-			return "excel";
 
 		return "text";
 	}
@@ -83,8 +75,6 @@ export class AttachmentOverlay extends LitElement {
 				return i18n("Document");
 			case "pptx":
 				return i18n("Presentation");
-			case "excel":
-				return i18n("Spreadsheet");
 			default:
 				return "";
 		}
@@ -249,9 +239,6 @@ export class AttachmentOverlay extends LitElement {
 					></div>
 				`;
 
-			case "excel":
-				return html` <div id="excel-container" class="bg-card text-foreground overflow-auto w-full h-full"></div> `;
-
 			case "pptx":
 				return html`
 					<div
@@ -289,9 +276,6 @@ export class AttachmentOverlay extends LitElement {
 					break;
 				case "docx":
 					await this.renderDocx();
-					break;
-				case "excel":
-					await this.renderExcel();
 					break;
 				case "pptx":
 					await this.renderExtractedText();
@@ -479,122 +463,6 @@ export class AttachmentOverlay extends LitElement {
 			console.error("Error rendering DOCX:", error);
 			this.error = error?.message || i18n("Failed to load document");
 		}
-	}
-
-	private async renderExcel() {
-		const container = this.querySelector("#excel-container");
-		if (!container || !this.attachment) return;
-
-		try {
-			// Convert base64 to ArrayBuffer
-			const arrayBuffer = this.base64ToArrayBuffer(this.attachment.content);
-
-			// Read the workbook
-			const workbook = XLSX.read(arrayBuffer, { type: "array" });
-
-			// Clear container
-			container.innerHTML = "";
-			const wrapper = document.createElement("div");
-			wrapper.className = "overflow-auto h-full flex flex-col";
-			container.appendChild(wrapper);
-
-			// Create tabs for multiple sheets
-			if (workbook.SheetNames.length > 1) {
-				const tabContainer = document.createElement("div");
-				tabContainer.className = "flex gap-2 mb-4 border-b border-border sticky top-0 bg-card z-10";
-
-				const sheetContents: HTMLElement[] = [];
-
-				workbook.SheetNames.forEach((sheetName, index) => {
-					// Create tab button
-					const tab = document.createElement("button");
-					tab.textContent = sheetName;
-					tab.className =
-						index === 0
-							? "px-4 py-2 text-sm font-medium border-b-2 border-primary text-primary"
-							: "px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-b-2 hover:border-border transition-colors";
-
-					// Create sheet content
-					const sheetDiv = document.createElement("div");
-					sheetDiv.style.display = index === 0 ? "flex" : "none";
-					sheetDiv.className = "flex-1 overflow-auto";
-					sheetDiv.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
-					sheetContents.push(sheetDiv);
-
-					// Tab click handler
-					tab.onclick = () => {
-						// Update tab styles
-						tabContainer.querySelectorAll("button").forEach((btn, btnIndex) => {
-							if (btnIndex === index) {
-								btn.className = "px-4 py-2 text-sm font-medium border-b-2 border-primary text-primary";
-							} else {
-								btn.className =
-									"px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-b-2 hover:border-border transition-colors";
-							}
-						});
-						// Show/hide sheets
-						sheetContents.forEach((content, contentIndex) => {
-							content.style.display = contentIndex === index ? "flex" : "none";
-						});
-					};
-
-					tabContainer.appendChild(tab);
-				});
-
-				wrapper.appendChild(tabContainer);
-				sheetContents.forEach((content) => {
-					wrapper.appendChild(content);
-				});
-			} else {
-				// Single sheet
-				const sheetName = workbook.SheetNames[0];
-				wrapper.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
-			}
-		} catch (error: any) {
-			console.error("Error rendering Excel:", error);
-			this.error = error?.message || i18n("Failed to load spreadsheet");
-		}
-	}
-
-	private renderExcelSheet(worksheet: any, sheetName: string): HTMLElement {
-		const sheetDiv = document.createElement("div");
-
-		// Generate HTML table
-		const htmlTable = XLSX.utils.sheet_to_html(worksheet, { id: `sheet-${sheetName}` });
-		const tempDiv = document.createElement("div");
-		tempDiv.innerHTML = htmlTable;
-
-		// Find and style the table
-		const table = tempDiv.querySelector("table");
-		if (table) {
-			table.className = "w-full border-collapse text-foreground";
-
-			// Style all cells
-			table.querySelectorAll("td, th").forEach((cell) => {
-				const cellEl = cell as HTMLElement;
-				cellEl.className = "border border-border px-3 py-2 text-sm text-left";
-			});
-
-			// Style header row
-			const headerCells = table.querySelectorAll("thead th, tr:first-child td");
-			if (headerCells.length > 0) {
-				headerCells.forEach((th) => {
-					const thEl = th as HTMLElement;
-					thEl.className =
-						"border border-border px-3 py-2 text-sm font-semibold bg-muted text-foreground sticky top-0";
-				});
-			}
-
-			// Alternate row colors
-			table.querySelectorAll("tbody tr:nth-child(even)").forEach((row) => {
-				const rowEl = row as HTMLElement;
-				rowEl.className = "bg-muted/30";
-			});
-
-			sheetDiv.appendChild(table);
-		}
-
-		return sheetDiv;
 	}
 
 	private base64ToArrayBuffer(base64: string): ArrayBuffer {

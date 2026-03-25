@@ -21,7 +21,6 @@ import type { Attachment } from "../../utils/attachment-utils.js";
 import { i18n } from "../../utils/i18n.js";
 import type { ArtifactElement } from "./ArtifactElement.js";
 import { DocxArtifact } from "./DocxArtifact.js";
-import { ExcelArtifact } from "./ExcelArtifact.js";
 import { GenericArtifact } from "./GenericArtifact.js";
 import { HtmlArtifact } from "./HtmlArtifact.js";
 import { ImageArtifact } from "./ImageArtifact.js";
@@ -131,13 +130,12 @@ export class ArtifactsPanel extends LitElement {
 	// Helper to determine file type from extension
 	private getFileType(
 		filename: string,
-	): "html" | "svg" | "markdown" | "image" | "pdf" | "excel" | "docx" | "text" | "generic" {
+	): "html" | "svg" | "markdown" | "image" | "pdf" | "docx" | "text" | "generic" {
 		const ext = filename.split(".").pop()?.toLowerCase();
 		if (ext === "html") return "html";
 		if (ext === "svg") return "svg";
 		if (ext === "md" || ext === "markdown") return "markdown";
 		if (ext === "pdf") return "pdf";
-		if (ext === "xlsx" || ext === "xls") return "excel";
 		if (ext === "docx") return "docx";
 		if (
 			ext === "png" ||
@@ -197,8 +195,6 @@ export class ArtifactsPanel extends LitElement {
 				element = new ImageArtifact();
 			} else if (type === "pdf") {
 				element = new PdfArtifact();
-			} else if (type === "excel") {
-				element = new ExcelArtifact();
 			} else if (type === "docx") {
 				element = new DocxArtifact();
 			} else if (type === "text") {

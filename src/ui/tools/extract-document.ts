@@ -16,7 +16,7 @@ import type { ToolRenderer, ToolRenderResult } from "./types.js";
 
 const extractDocumentSchema = Type.Object({
 	url: Type.String({
-		description: "URL of the document to extract text from (PDF, DOCX, XLSX, or PPTX)",
+		description: "URL of the document to extract text from (PDF, DOCX, or PPTX)",
 	}),
 });
 
@@ -149,7 +149,6 @@ export function createExtractDocumentTool(): AgentTool<typeof extractDocumentSch
 					`Document format not supported. Supported formats:\n` +
 						`- PDF (.pdf)\n` +
 						`- Word (.docx)\n` +
-						`- Excel (.xlsx, .xls)\n` +
 						`- PowerPoint (.pptx)`,
 				);
 			}
@@ -160,8 +159,6 @@ export function createExtractDocumentTool(): AgentTool<typeof extractDocumentSch
 				format = "pdf";
 			} else if (attachment.mimeType.includes("wordprocessingml")) {
 				format = "docx";
-			} else if (attachment.mimeType.includes("spreadsheetml") || attachment.mimeType.includes("ms-excel")) {
-				format = "xlsx";
 			} else if (attachment.mimeType.includes("presentationml")) {
 				format = "pptx";
 			}

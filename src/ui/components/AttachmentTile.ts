@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit/dist/icons.js";
 import { LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { html } from "lit/html.js";
-import { FileSpreadsheet, FileText, X } from "lucide";
+import { FileText, X } from "lucide";
 import { AttachmentOverlay } from "../dialogs/AttachmentOverlay.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
@@ -31,14 +31,8 @@ export class AttachmentTile extends LitElement {
 		const hasPreview = !!this.attachment.preview;
 		const isImage = this.attachment.type === "image";
 		const isPdf = this.attachment.mimeType === "application/pdf";
-		const isExcel =
-			this.attachment.mimeType?.includes("spreadsheetml") ||
-			this.attachment.fileName.toLowerCase().endsWith(".xlsx") ||
-			this.attachment.fileName.toLowerCase().endsWith(".xls");
-
 		// Choose the appropriate icon
 		const getDocumentIcon = () => {
-			if (isExcel) return icon(FileSpreadsheet, "md");
 			return icon(FileText, "md");
 		};
 
