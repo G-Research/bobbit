@@ -1835,6 +1835,61 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/sessions/:id/file-content?path=<relative-or-absolute>&snapshotId=<id>
+	// Reads a text file for inline preview. When snapshotId is provided:
+	//   - If a snapshot exists on disk, returns the snapshot (historical state)
+	//   - Otherwise reads the live file and saves a snapshot for future refreshes
+	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/file-content")) {
+		const id = url.pathname.split("/")[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+
+		const filePath = url.searchParams.get("path");
+		if (!filePath) { json({ error: "Missing path parameter" }, 400); return; }
+
+		const snapshotId = url.searchParams.get("snapshotId");
+		const snapshotDir = path.join(bobbitStateDir(), "html-snapshots");
+		const snapshotFile = snapshotId ? path.join(snapshotDir, `${snapshotId.replace(/[^a-zA-Z0-9_-]/g, "")}.html`) : null;
+
+		// Return existing snapshot if available
+		if (snapshotFile && fs.existsSync(snapshotFile)) {
+			try {
+				const content = fs.readFileSync(snapshotFile, "utf-8");
+				json({ content });
+			} catch {
+				json({ error: "Snapshot read failed" }, 500);
+			}
+			return;
+		}
+
+		// Read live file
+		const resolved = path.isAbsolute(filePath)
+			? path.resolve(filePath)
+			: path.resolve(session.cwd, filePath);
+
+		try {
+			const stat = fs.statSync(resolved);
+			if (stat.isDirectory() || stat.size > 512 * 1024) {
+				json({ error: "File too large or is a directory" }, 400);
+				return;
+			}
+			const content = fs.readFileSync(resolved, "utf-8");
+
+			// Save snapshot for future refreshes
+			if (snapshotFile) {
+				try {
+					fs.mkdirSync(snapshotDir, { recursive: true });
+					fs.writeFileSync(snapshotFile, content, "utf-8");
+				} catch { /* best-effort */ }
+			}
+
+			json({ content });
+		} catch {
+			json({ error: "File not found" }, 404);
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id/git-status — get git status for session's working directory (async)
 	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-status')) {
 		const id = url.pathname.split('/')[3];

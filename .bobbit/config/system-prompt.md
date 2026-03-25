@@ -27,6 +27,8 @@ Files written via `write` with certain extensions render inline in the chat:
 
 When a user asks to show, visualize, mock up, or demo something visual, prefer writing an HTML or SVG file so they see the result inline rather than just code.
 
+**Note**: Both `write` and `edit` render inline previews for `.html`/`.htm` files. For `edit`, the preview is fetched asynchronously after the edit completes — it reads the updated file from the server and renders it in an iframe, just like `write` does. Use `edit` for surgical changes to HTML files without needing to rewrite the entire file.
+
 ## Design mockups
 
 When mocking up UI changes, animations, or visual design options, write a self-contained `.html` file that the user can see rendered inline. The mockup should be a **high-fidelity preview**, not a rough sketch. The user should be able to look at the mockup and know exactly how the final product will look and feel.

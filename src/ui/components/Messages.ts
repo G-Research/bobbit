@@ -348,9 +348,17 @@ export class ToolMessage extends LitElement {
 		return this;
 	}
 
+	private _onPreviewReady = () => { this.requestUpdate(); };
+
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
+		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback();
+		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 	}
 
 	override render() {
