@@ -538,12 +538,25 @@ export class SessionManager {
 			const resolvedPersonalities = (ps.personalities && ps.personalities.length > 0 && this.personalityManager)
 				? this.personalityManager.resolvePersonalities(ps.personalities)
 				: undefined;
+
+			// Re-attach role prompt for team agents (lost on restart since rolePrompt isn't persisted)
+			let goalSpec = goal?.spec;
+			if (ps.role && this.roleManager) {
+				const role = this.roleManager.getRole(ps.role);
+				if (role?.promptTemplate) {
+					let rolePrompt = role.promptTemplate;
+					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
+					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
+					goalSpec = (goalSpec ? goalSpec + "\n\n---\n\n" : "") + rolePrompt;
+				}
+			}
+
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: this.systemPromptPath,
 				cwd: ps.cwd,
 				goalTitle: goal?.title,
 				goalState: goal?.state,
-				goalSpec: goal?.spec,
+				goalSpec,
 				personalities: resolvedPersonalities,
 				allowedTools: restoredAllowedTools,
 			});
