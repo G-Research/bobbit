@@ -318,8 +318,6 @@ const PALETTES: ColorPalette[] = [
 	{ id: "mono",   name: "Mono",   swatches: ["#525252", "#E8E8E8", "#5E5E5E", "#9CA3AF", "#6B7280"] },
 ];
 
-const SWATCH_LABELS = ["Primary", "Background", "Accent", "User", "Notif"];
-
 let activePaletteId = "forest";
 let paletteLoaded = false;
 
@@ -347,6 +345,50 @@ async function selectPalette(id: string): Promise<void> {
 	renderApp();
 }
 
+function renderPalettePreview(palette: ColorPalette) {
+	const [primary, bg, accent, user, notif] = palette.swatches;
+
+	return html`
+		<div style="display:flex; width:180px; height:64px; border-radius:6px; overflow:hidden; flex-shrink:0; border:1px solid ${accent}50; font-family:system-ui,sans-serif;">
+			<!-- Sidebar strip -->
+			<div style="width:40px; background:${bg}; border-right:1px solid ${accent}40; display:flex; flex-direction:column; gap:4px; padding:7px 5px;">
+				<div style="display:flex; align-items:center; gap:3px;">
+					<div style="width:10px; height:10px; border-radius:50%; background:${primary}; flex-shrink:0;"></div>
+					<div style="height:4px; flex:1; border-radius:2px; background:${primary}40;"></div>
+				</div>
+				<div style="display:flex; align-items:center; gap:3px;">
+					<div style="width:10px; height:10px; border-radius:50%; background:${user}; opacity:0.6; flex-shrink:0;"></div>
+					<div style="height:4px; flex:1; border-radius:2px; background:${notif}30;"></div>
+				</div>
+				<div style="display:flex; align-items:center; gap:3px;">
+					<div style="width:10px; height:10px; border-radius:50%; background:${notif}; opacity:0.4; flex-shrink:0;"></div>
+					<div style="height:4px; flex:1; border-radius:2px; background:${notif}20;"></div>
+				</div>
+			</div>
+			<!-- Chat area -->
+			<div style="flex:1; background:${bg}; padding:6px 8px; display:flex; flex-direction:column; gap:4px; justify-content:center;">
+				<!-- User message -->
+				<div style="display:flex; align-items:center; gap:3px;">
+					<span style="color:${user}; font-size:8px; font-weight:bold; line-height:1;">❯</span>
+					<div style="background:${user}18; border-radius:3px; padding:2px 6px; font-size:7px; color:${primary}; line-height:1.3; white-space:nowrap; overflow:hidden;">How do I fix this?</div>
+				</div>
+				<!-- Assistant response lines -->
+				<div style="padding-left:4px; display:flex; flex-direction:column; gap:2px;">
+					<div style="height:4px; width:90%; border-radius:2px; background:${primary}25;"></div>
+					<div style="height:4px; width:70%; border-radius:2px; background:${primary}18;"></div>
+				</div>
+				<!-- Input bar -->
+				<div style="display:flex; align-items:center; gap:3px; margin-top:auto;">
+					<div style="flex:1; height:8px; border-radius:3px; border:1px solid ${accent}50; background:${bg};"></div>
+					<div style="width:14px; height:8px; border-radius:3px; background:${primary}; display:flex; align-items:center; justify-content:center;">
+						<span style="color:${bg}; font-size:5px; line-height:1;">↑</span>
+					</div>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
 function renderPaletteTab() {
 	loadPalette();
 
@@ -366,19 +408,13 @@ function renderPaletteTab() {
 									: "border-border hover:border-primary/40 hover:bg-secondary/30"}"
 							@click=${() => selectPalette(palette.id)}
 						>
-							<div class="flex gap-1.5">
-								${palette.swatches.map((color, i) => html`
-									<div
-										class="w-6 h-6 rounded-full border border-black/10"
-										style="background: ${color}"
-										title="${SWATCH_LABELS[i]}"
-									></div>
-								`)}
+							${renderPalettePreview(palette)}
+							<div class="flex flex-col gap-0.5">
+								<span class="text-sm font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}">
+									${palette.name}
+								</span>
+								${isActive ? html`<span class="text-xs text-primary">Active</span>` : ""}
 							</div>
-							<span class="text-sm font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}">
-								${palette.name}
-							</span>
-							${isActive ? html`<span class="ml-auto text-xs text-primary">Active</span>` : ""}
 						</button>
 					`;
 				})}
