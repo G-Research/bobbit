@@ -238,15 +238,7 @@ async function initApp() {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
-	// Load saved color palette
-	try {
-		const { getAppStorage } = await import("../ui/storage/app-storage.js");
-		const storage = getAppStorage();
-		const palette = await storage.settings.get<string>("palette");
-		if (palette && palette !== "forest") {
-			document.documentElement.dataset.palette = palette;
-		}
-	} catch {}
+	// Palette is loaded from server preferences after gateway auth (see below)
 
 	state.chatPanel = new ChatPanel();
 
@@ -267,6 +259,17 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		try {
 			await authenticateGateway(savedUrl, savedToken);
+
+			// Load saved color palette from server preferences
+			try {
+				const prefRes = await gatewayFetch("/api/preferences");
+				if (prefRes.ok) {
+					const prefs = await prefRes.json();
+					if (prefs.palette && prefs.palette !== "forest") {
+						document.documentElement.dataset.palette = prefs.palette;
+					}
+				}
+			} catch {}
 
 			const route = getRouteFromHash();
 			if (route.view === "goal" && route.goalId) {

@@ -5,7 +5,7 @@
  * registry that supports rebinding, persistence, and conflict detection.
  */
 
-import { getAppStorage } from "../ui/storage/app-storage.js";
+import { gatewayFetch } from "./api.js";
 
 // ============================================================================
 // TYPES
@@ -249,8 +249,10 @@ export function stopListening(): void {
 
 export async function loadSavedBindings(): Promise<void> {
 	try {
-		const store = getAppStorage().shortcutBindings;
-		const saved = await store.getBindings();
+		const res = await gatewayFetch("/api/preferences");
+		if (!res.ok) return;
+		const prefs = await res.json();
+		const saved = prefs.shortcuts as Record<string, KeyBinding[]> | undefined;
 		if (!saved) return;
 
 		for (const [id, bindings] of Object.entries(saved)) {
@@ -266,7 +268,6 @@ export async function loadSavedBindings(): Promise<void> {
 
 export async function saveBindings(): Promise<void> {
 	try {
-		const store = getAppStorage().shortcutBindings;
 		const data: Record<string, KeyBinding[]> = {};
 		for (const entry of shortcuts.values()) {
 			// Only save if current differs from default
@@ -277,11 +278,11 @@ export async function saveBindings(): Promise<void> {
 				data[entry.id] = entry.currentBindings.map((b) => ({ ...b }));
 			}
 		}
-		if (Object.keys(data).length > 0) {
-			await store.saveBindings(data);
-		} else {
-			await store.clearBindings();
-		}
+		const value = Object.keys(data).length > 0 ? data : null;
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ shortcuts: value }),
+		});
 	} catch {
 		// Silently ignore
 	}

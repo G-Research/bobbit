@@ -19,7 +19,7 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { getAppStorage } from "../ui/storage/app-storage.js";
+import { gatewayFetch } from "./api.js";
 
 type SettingsTab = "shortcuts" | "palette";
 let activeTab: SettingsTab = "shortcuts";
@@ -324,9 +324,11 @@ async function loadPalette(): Promise<void> {
 	if (paletteLoaded) return;
 	paletteLoaded = true;
 	try {
-		const storage = getAppStorage();
-		const saved = await storage.settings.get<string>("palette");
-		if (saved) activePaletteId = saved;
+		const res = await gatewayFetch("/api/preferences");
+		if (res.ok) {
+			const prefs = await res.json();
+			if (prefs.palette) activePaletteId = prefs.palette;
+		}
 	} catch {}
 }
 
@@ -338,8 +340,10 @@ async function selectPalette(id: string): Promise<void> {
 		document.documentElement.dataset.palette = id;
 	}
 	try {
-		const storage = getAppStorage();
-		await storage.settings.set("palette", id);
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ palette: id }),
+		});
 	} catch {}
 	renderApp();
 }

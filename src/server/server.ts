@@ -29,6 +29,7 @@ import { WorkflowManager } from "./agent/workflow-manager.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
+import { PreferencesStore } from "./agent/preferences-store.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -89,6 +90,7 @@ export function createGateway(config: GatewayConfig) {
 	exportSkillDefinitions();
 
 	const colorStore = new ColorStore();
+	const preferencesStore = new PreferencesStore();
 	const personalityStore = new PersonalityStore();
 	const personalityManager = new PersonalityManager(personalityStore);
 	fs.mkdirSync(bobbitStateDir(), { recursive: true });
@@ -167,7 +169,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, broadcastToGoal, broadcastToAll);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, broadcastToGoal, broadcastToAll);
 
 			return;
 		}
@@ -328,6 +330,7 @@ async function handleApiRoute(
 	staffManager: StaffManager,
 	workflowManager: WorkflowManager,
 	verificationHarness: VerificationHarness,
+	preferencesStore: PreferencesStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
 ) {
@@ -685,6 +688,29 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// ── Preferences ──
+
+	// GET /api/preferences — return all preferences
+	if (url.pathname === "/api/preferences" && req.method === "GET") {
+		json(preferencesStore.getAll());
+		return;
+	}
+
+	// PUT /api/preferences — merge preferences
+	if (url.pathname === "/api/preferences" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		for (const [key, value] of Object.entries(body)) {
+			if (value === null || value === undefined) {
+				preferencesStore.remove(key);
+			} else {
+				preferencesStore.set(key, value);
+			}
+		}
+		json({ ok: true });
+		return;
 	}
 
 	// GET /api/roles
