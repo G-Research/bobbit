@@ -784,8 +784,8 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
-		// Auto-select aigw model when gateway is configured and internet is unavailable
-		this.tryAutoSelectAigwModel(session);
+		// Auto-select aigw model when gateway is configured
+		await this.tryAutoSelectAigwModel(session);
 
 		// Capture the agent's session file path and persist
 		this.persistSessionMetadata(session).catch((err) => {

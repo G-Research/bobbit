@@ -29,7 +29,17 @@ function findNordLynxIp(): string | null {
 const nordMode = process.env.BOBBIT_NORD === "1";
 const host = process.env.VITE_HOST || (nordMode ? findNordLynxIp() || "localhost" : "localhost");
 const proto = host === "localhost" ? "http" : "https";
-const GATEWAY = process.env.GATEWAY_URL || `${proto}://${host}:3001`;
+
+// Read the actual gateway URL from disk (written by cli.ts after the server
+// binds, so it reflects the real port even if 3001 was in use).
+function readGatewayUrl(): string {
+	const gwFile = path.join(process.cwd(), ".bobbit", "state", "gateway-url");
+	try {
+		if (fs.existsSync(gwFile)) return fs.readFileSync(gwFile, "utf-8").trim();
+	} catch {}
+	return `${proto}://${host}:3001`;  // fallback before first startup
+}
+const GATEWAY = process.env.GATEWAY_URL || readGatewayUrl();
 const GATEWAY_WS = GATEWAY.replace(/^https/, "wss").replace(/^http/, "ws");
 
 // Load TLS cert for vite's own HTTPS server + proxy trust
