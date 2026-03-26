@@ -54,7 +54,8 @@ async function handleHashChange(): Promise<void> {
 			await loadDashboardData(route.goalId);
 		} else if (route.view === "session" && route.sessionId) {
 			clearDashboardState();
-			if (state.remoteAgent?.gatewaySessionId === route.sessionId) {
+			if (state.remoteAgent?.gatewaySessionId === route.sessionId
+				|| state.selectedSessionId === route.sessionId) {
 				return;
 			}
 			if (state.remoteAgent) {
