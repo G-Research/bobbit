@@ -10,7 +10,7 @@ export function getRecentCwds(): Array<{ path: string; source: string }> {
 
 	// Sessions (sorted by lastActivity descending)
 	const sessions = [...state.gatewaySessions]
-		.filter((s) => s.cwd && s.assistantType !== "goal" && !s.delegateOf && !s.teamGoalId)
+		.filter((s) => s.cwd && s.assistantType !== "goal" && !s.delegateOf && !s.teamGoalId && !s.staffId)
 		.sort((a, b) => b.lastActivity - a.lastActivity);
 	for (const s of sessions) {
 		const p = s.cwd;

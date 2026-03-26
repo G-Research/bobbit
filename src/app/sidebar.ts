@@ -42,6 +42,8 @@ let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
 /** Goal ID context for the picker (if launched from a goal). */
 let _pickerGoalId: string | undefined;
+/** Anchor rect for positioning the popover near the button. */
+let _pickerAnchorRect: { top: number; right: number; bottom: number } | null = null;
 
 async function ensurePersonalitiesLoaded(): Promise<void> {
 	if (_personalitiesLoaded) return;
@@ -57,14 +59,22 @@ export async function toggleRolePicker(e: Event, goalId?: string): Promise<void>
 		renderApp();
 		return;
 	}
-	_pickerRole = "";
 	_pickerPersonalities = new Set();
 	_pickerCwd = "";
 	_pickerCwdDropdownOpen = false;
 	_pickerCwdHighlightIndex = -1;
 	_pickerGoalId = goalId;
+	// Capture the button position for anchoring the popover
+	const btn = e.currentTarget as HTMLElement;
+	if (btn) {
+		const r = btn.getBoundingClientRect();
+		_pickerAnchorRect = { top: r.top, right: r.right, bottom: r.bottom };
+	}
 	if (state.roles.length === 0) await fetchRoles();
 	await ensurePersonalitiesLoaded();
+	// Pre-select the "general" role (server default) if it exists
+	const generalRole = state.roles.find(r => r.name === "general");
+	_pickerRole = generalRole ? "general" : "";
 	state.rolePickerOpen = true;
 	renderApp();
 }
@@ -93,10 +103,30 @@ export function renderRolePickerDropdown() {
 		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
 	};
 
+	// All roles including general (the server default)
+	const allRoles = state.roles;
+
+	// Compute fixed position: anchor below button, clamp to viewport edges
+	const MARGIN = 8;
+	const popoverWidth = Math.min(420, window.innerWidth - MARGIN * 2);
+	const anchor = _pickerAnchorRect ?? { top: 40, right: 260, bottom: 56 };
+	const spaceBelow = window.innerHeight - anchor.bottom - 4 - MARGIN;
+	// If enough room below the button, anchor there; otherwise anchor to bottom edge
+	const usesBottom = spaceBelow < 300;
+	const topStyle = usesBottom ? `bottom: ${MARGIN}px` : `top: ${anchor.bottom + 4}px`;
+	const maxHStyle = usesBottom
+		? `max-height: ${window.innerHeight - MARGIN * 2}px`
+		: `max-height: ${spaceBelow}px`;
+	// Clamp right so the left edge stays >= MARGIN from the viewport left
+	const maxRight = window.innerWidth - popoverWidth - MARGIN;
+	const right = Math.min(maxRight, Math.max(MARGIN, window.innerWidth - anchor.right));
+
 	return html`
-		<div class="absolute right-0 top-full mt-1 z-50 rounded-md shadow-lg py-1 min-w-[200px] max-w-[280px]"
-			style="background: var(--popover); border: 1px solid var(--border);"
+		<div class="fixed z-50 rounded-md shadow-lg py-1"
+			style="background: var(--popover); border: 1px solid var(--border); width: ${popoverWidth}px; ${topStyle}; right: ${right}px; ${maxHStyle}; display: flex; flex-direction: column;"
 			@click=${(e: Event) => e.stopPropagation()}>
+			<div class="px-3 pt-2 pb-1.5 text-xs font-semibold text-foreground shrink-0">Create New Session</div>
+			<div class="overflow-y-auto flex-1" style="min-height: 0;">
 			<!-- Personalities -->
 			${_cachedPersonalities.length > 0 ? html`
 				<div class="px-3 pt-1 pb-1.5 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Personalities</div>
@@ -113,23 +143,25 @@ export function renderRolePickerDropdown() {
 					})}
 				</div>
 			` : ""}
-			<!-- Roles -->
+			<!-- Roles (2-column grid) -->
 			<div class="${_cachedPersonalities.length > 0 ? "border-t border-border/50 mt-1 pt-1" : ""}">
-				<div class="px-3 pt-1 pb-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Role</div>
-				${state.roles.filter(r => r.name !== "general").length === 0
+				<div class="px-3 pt-1 pb-1.5 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Role</div>
+				${allRoles.length === 0
 					? html`<div class="px-3 py-1 text-xs text-muted-foreground">No roles defined</div>`
-					: state.roles.filter(r => r.name !== "general").map(role => html`
-						<button class="w-full text-left px-3 py-1.5 text-sm hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-2 ${_pickerRole === role.name ? "bg-primary/10" : ""}"
-							@click=${() => selectRole(role.name)}
-							title="Select ${role.label} role">
-							<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
-							<span class="flex-1 ${_pickerRole === role.name ? "text-primary font-medium" : ""}">${role.label}</span>
-							${_pickerRole === role.name ? html`<span class="text-primary text-xs">✓</span>` : ""}
-						</button>
-					`)}
+					: html`<div class="px-2 pb-1 grid gap-0.5" style="grid-template-columns: 1fr 1fr;">
+						${allRoles.map(role => html`
+							<button class="text-left px-2 py-1 text-xs rounded hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-1.5 ${_pickerRole === role.name ? "bg-primary/10 ring-1 ring-primary/30" : ""}"
+								@click=${() => selectRole(role.name)}
+								title="Select ${role.label} role">
+								<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
+								<span class="flex-1 truncate ${_pickerRole === role.name ? "text-primary font-medium" : ""}">${role.label}</span>
+							</button>
+						`)}
+					</div>`}
 			</div>
-			<!-- Working Directory -->
-			<div class="border-t border-border/50 px-3 py-2" style="overflow: visible;">
+			</div>
+			<!-- Working Directory (pinned at bottom) -->
+			<div class="border-t border-border/50 px-3 py-2 shrink-0" style="overflow: visible;">
 				<div class="text-[10px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
 				${cwdCombobox({
 					value: _pickerCwd,
@@ -141,8 +173,8 @@ export function renderRolePickerDropdown() {
 					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; renderApp(); },
 				})}
 			</div>
-			<!-- Create button -->
-			<div class="border-t border-border/50 px-3 py-2">
+			<!-- Create button (pinned at bottom) -->
+			<div class="border-t border-border/50 px-3 py-2 shrink-0">
 				<button
 					class="w-full text-center px-3 py-1.5 text-sm rounded-md font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
 					@click=${doCreate}
