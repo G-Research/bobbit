@@ -19,6 +19,42 @@ test.describe("Bug 1: Project config API", () => {
 		const resp = await apiFetch("/api/project-config");
 		expect(resp.status, "Expected GET /api/project-config to return 200 but got 404 — endpoint does not exist yet").toBe(200);
 	});
+
+	test("GET /api/project-config/defaults returns built-in defaults", async () => {
+		const resp = await apiFetch("/api/project-config/defaults");
+		expect(resp.status).toBe(200);
+		const data = await resp.json();
+		expect(data.typecheck_command).toBe("npm run check");
+		expect(data.build_command).toBe("npm run build");
+		expect(data.test_unit_command).toBe("npm run test:unit");
+	});
+
+	test("PUT /api/project-config accepts arbitrary keys", async () => {
+		// Set a custom key
+		const putResp = await apiFetch("/api/project-config", {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ my_custom_var: "hello world" }),
+		});
+		expect(putResp.status).toBe(200);
+
+		// Verify it appears in GET
+		const getResp = await apiFetch("/api/project-config");
+		const data = await getResp.json();
+		expect(data.my_custom_var).toBe("hello world");
+		// Defaults still present
+		expect(data.typecheck_command).toBe("npm run check");
+
+		// Clean up: remove the custom key
+		await apiFetch("/api/project-config", {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ my_custom_var: null }),
+		});
+		const cleanResp = await apiFetch("/api/project-config");
+		const cleanData = await cleanResp.json();
+		expect(cleanData.my_custom_var).toBeUndefined();
+	});
 });
 
 // ---------------------------------------------------------------------------

@@ -792,14 +792,14 @@ export function renderSidebar() {
 				}
 			</div>
 			<div class="flex items-center border-t border-border/50">
-				<button
-					class="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+				${(() => { const isSettings = window.location.hash === "#/settings"; return html`<button
+					class="flex items-center gap-1.5 px-3 py-2 text-xs transition-colors ${isSettings ? "text-foreground bg-secondary/70 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 					@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
 					title="Settings (Ctrl+,)"
 				>
 					${icon(Settings, "sm")}
 					<span>Settings</span>
-				</button>
+				</button>`; })()}
 				<button
 					class="flex items-center gap-1.5 px-2 py-2 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
 					@click=${() => {

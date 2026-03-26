@@ -5,15 +5,9 @@ import { bobbitConfigDir } from "../bobbit-dir.js";
 
 const CONFIG_FILE = path.join(bobbitConfigDir(), "project.yaml");
 
-export interface ProjectConfig {
-	build_command?: string;
-	test_command?: string;
-	typecheck_command?: string;
-	test_unit_command?: string;
-	test_e2e_command?: string;
-}
+export type ProjectConfig = Record<string, string>;
 
-const DEFAULTS: Required<ProjectConfig> = {
+const DEFAULTS: Record<string, string> = {
 	build_command: "npm run build",
 	test_command: "npm test",
 	typecheck_command: "npm run check",
@@ -23,8 +17,8 @@ const DEFAULTS: Required<ProjectConfig> = {
 
 /**
  * Project config store persisted to .bobbit/config/project.yaml.
- * Stores build/test/typecheck commands for the project.
- * Auto-saves on every set. Handles missing file gracefully.
+ * Stores arbitrary string key-value pairs (build/test commands, custom settings, etc.).
+ * Auto-saves on every set/remove. Handles missing file gracefully.
  */
 export class ProjectConfigStore {
 	private data: ProjectConfig = {};
@@ -38,7 +32,14 @@ export class ProjectConfigStore {
 			if (fs.existsSync(CONFIG_FILE)) {
 				const raw = yaml.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
 				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-					this.data = raw as ProjectConfig;
+					// Only keep string values
+					const cleaned: ProjectConfig = {};
+					for (const [k, v] of Object.entries(raw)) {
+						if (typeof v === "string") {
+							cleaned[k] = v;
+						}
+					}
+					this.data = cleaned;
 				}
 			}
 		} catch (err) {
@@ -58,12 +59,17 @@ export class ProjectConfigStore {
 		}
 	}
 
-	get(key: keyof ProjectConfig): string | undefined {
+	get(key: string): string | undefined {
 		return this.data[key];
 	}
 
-	set(key: keyof ProjectConfig, value: string): void {
+	set(key: string, value: string): void {
 		this.data[key] = value;
+		this.save();
+	}
+
+	remove(key: string): void {
+		delete this.data[key];
 		this.save();
 	}
 
@@ -71,10 +77,15 @@ export class ProjectConfigStore {
 		return { ...this.data };
 	}
 
+	/** Returns a copy of the built-in defaults. */
+	getDefaults(): Record<string, string> {
+		return { ...DEFAULTS };
+	}
+
 	/** Returns all fields with defaults applied for any missing values.
 	 *  Re-reads from disk to pick up changes made by external processes (e.g. setup wizard agent).
 	 */
-	getWithDefaults(): Required<ProjectConfig> {
+	getWithDefaults(): Record<string, string> {
 		this.load();
 		return { ...DEFAULTS, ...this.data };
 	}

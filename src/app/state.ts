@@ -360,6 +360,8 @@ export function hasActiveSession(): boolean {
 }
 
 export function activeSessionId(): string | undefined {
+	// Don't highlight any session when settings (or other non-session views) are open
+	if (window.location.hash === "#/settings") return undefined;
 	return state.selectedSessionId ?? state.remoteAgent?.gatewaySessionId;
 }
 

@@ -44,6 +44,7 @@ let projectConfig: Record<string, string> = {};
 let projectDefaults: Record<string, string> = {};
 let projectConfigLoaded = false;
 let projectSaveStatus: "" | "saving" | "saved" | "error" = "";
+let projectNewEntries: { key: string; value: string }[] = [];
 
 function resetRebindState(): void {
 	rebindingId = null;
@@ -793,19 +794,21 @@ function loadProjectConfig(): void {
 	projectConfigLoaded = true;
 	(async () => {
 		try {
-			const res = await gatewayFetch("/api/project-config");
-			if (res.ok) {
-				const data = await res.json();
-				// Store defaults for placeholder display only.
-				// Config values start empty — users type explicit overrides.
-				projectDefaults = { ...data };
-				projectConfig = {
-					build_command: "",
-					test_command: "",
-					typecheck_command: "",
-					test_unit_command: "",
-					test_e2e_command: "",
-				};
+			const [configRes, defaultsRes] = await Promise.all([
+				gatewayFetch("/api/project-config"),
+				gatewayFetch("/api/project-config/defaults"),
+			]);
+			if (configRes.ok && defaultsRes.ok) {
+				const merged: Record<string, string> = await configRes.json();
+				projectDefaults = await defaultsRes.json();
+				// Derive user-set values: keys where value differs from default, or keys not in defaults
+				projectConfig = {};
+				for (const [key, value] of Object.entries(merged)) {
+					if (!(key in projectDefaults) || value !== projectDefaults[key]) {
+						projectConfig[key] = value;
+					}
+				}
+				projectNewEntries = [];
 			}
 		} catch {}
 		renderApp();
@@ -816,16 +819,39 @@ async function saveProjectConfig(): Promise<void> {
 	projectSaveStatus = "saving";
 	renderApp();
 	try {
-		// Only send non-empty fields — empty strings are omitted to preserve server defaults.
-		const body: Record<string, string> = {};
-		for (const key of Object.keys(projectConfig)) {
-			if (projectConfig[key]) body[key] = projectConfig[key];
+		const body: Record<string, string | null> = {};
+		// For default keys: send value if user set one, otherwise send null to revert
+		for (const key of Object.keys(projectDefaults)) {
+			if (projectConfig[key]) {
+				body[key] = projectConfig[key];
+			} else {
+				body[key] = null;
+			}
+		}
+		// For custom (non-default) keys: send value
+		for (const [key, value] of Object.entries(projectConfig)) {
+			if (!(key in projectDefaults) && key && value) {
+				body[key] = value;
+			}
+		}
+		// Include new entries with non-empty key and value
+		for (const entry of projectNewEntries) {
+			if (entry.key && entry.value) {
+				body[entry.key] = entry.value;
+			}
 		}
 		const res = await gatewayFetch("/api/project-config", {
 			method: "PUT",
 			body: JSON.stringify(body),
 		});
 		if (res.ok) {
+			// Merge new entries into projectConfig and clear the new-entries list
+			for (const entry of projectNewEntries) {
+				if (entry.key && entry.value) {
+					projectConfig[entry.key] = entry.value;
+				}
+			}
+			projectNewEntries = [];
 			projectSaveStatus = "saved";
 			setTimeout(() => { projectSaveStatus = ""; renderApp(); }, 2000);
 		} else {
@@ -840,29 +866,136 @@ async function saveProjectConfig(): Promise<void> {
 function renderProjectTab() {
 	loadProjectConfig();
 
-	const fields: { key: string; label: string }[] = [
-		{ key: "build_command", label: "Build Command" },
-		{ key: "test_command", label: "Test Command" },
-		{ key: "typecheck_command", label: "Type Check Command" },
-		{ key: "test_unit_command", label: "Unit Test Command" },
-		{ key: "test_e2e_command", label: "E2E Test Command" },
-	];
+	// Collect all keys: defaults first, then custom user keys
+	const defaultKeys = Object.keys(projectDefaults);
+	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults));
 
 	return html`
-		<div class="flex flex-col gap-4">
-			${fields.map((f) => html`
-				<div class="flex flex-col gap-1.5">
-					<label class="text-sm font-medium text-foreground">${f.label}</label>
-					<input
-						type="text"
-						class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-							focus:outline-none focus:ring-2 focus:ring-ring"
-						placeholder=${projectDefaults[f.key] || ""}
-						.value=${projectConfig[f.key] || ""}
-						@input=${(e: Event) => { projectConfig[f.key] = (e.target as HTMLInputElement).value; projectSaveStatus = ""; renderApp(); }}
-					/>
+		<div class="flex flex-col gap-3">
+			<!-- Default entries -->
+			${defaultKeys.map((key) => html`
+				<div class="flex items-end gap-2">
+					<div class="flex flex-col gap-1 flex-1 min-w-0">
+						<label class="text-xs text-muted-foreground">Key</label>
+						<input
+							type="text"
+							class="px-3 py-2 rounded-md border border-input bg-muted/50 text-muted-foreground text-sm
+								focus:outline-none cursor-not-allowed"
+							.value=${key}
+							disabled
+						/>
+					</div>
+					<div class="flex flex-col gap-1 flex-[2] min-w-0">
+						<label class="text-xs text-muted-foreground">Value</label>
+						<input
+							type="text"
+							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+								focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder=${projectDefaults[key] || ""}
+							.value=${projectConfig[key] || ""}
+							@input=${(e: Event) => {
+								const v = (e.target as HTMLInputElement).value;
+								if (v) { projectConfig[key] = v; } else { delete projectConfig[key]; }
+								projectSaveStatus = "";
+								renderApp();
+							}}
+						/>
+					</div>
+					<div class="w-9 shrink-0"></div>
 				</div>
 			`)}
+
+			<!-- Custom user entries -->
+			${customKeys.map((key) => html`
+				<div class="flex items-end gap-2">
+					<div class="flex flex-col gap-1 flex-1 min-w-0">
+						<label class="text-xs text-muted-foreground">Key</label>
+						<input
+							type="text"
+							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+								focus:outline-none focus:ring-2 focus:ring-ring"
+							.value=${key}
+							@input=${(e: Event) => {
+								const newKey = (e.target as HTMLInputElement).value;
+								const val = projectConfig[key];
+								delete projectConfig[key];
+								if (newKey) projectConfig[newKey] = val;
+								projectSaveStatus = "";
+								renderApp();
+							}}
+						/>
+					</div>
+					<div class="flex flex-col gap-1 flex-[2] min-w-0">
+						<label class="text-xs text-muted-foreground">Value</label>
+						<input
+							type="text"
+							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+								focus:outline-none focus:ring-2 focus:ring-ring"
+							.value=${projectConfig[key] || ""}
+							@input=${(e: Event) => {
+								projectConfig[key] = (e.target as HTMLInputElement).value;
+								projectSaveStatus = "";
+								renderApp();
+							}}
+						/>
+					</div>
+					<button
+						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+						title="Remove"
+						@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; renderApp(); }}
+					>${icon(X, "xs")}</button>
+				</div>
+			`)}
+
+			<!-- New entries being added -->
+			${projectNewEntries.map((entry, i) => html`
+				<div class="flex items-end gap-2">
+					<div class="flex flex-col gap-1 flex-1 min-w-0">
+						<label class="text-xs text-muted-foreground">Key</label>
+						<input
+							type="text"
+							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+								focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="setting_name"
+							.value=${entry.key}
+							@input=${(e: Event) => {
+								projectNewEntries[i].key = (e.target as HTMLInputElement).value;
+								projectSaveStatus = "";
+								renderApp();
+							}}
+						/>
+					</div>
+					<div class="flex flex-col gap-1 flex-[2] min-w-0">
+						<label class="text-xs text-muted-foreground">Value</label>
+						<input
+							type="text"
+							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+								focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="value"
+							.value=${entry.value}
+							@input=${(e: Event) => {
+								projectNewEntries[i].value = (e.target as HTMLInputElement).value;
+								projectSaveStatus = "";
+								renderApp();
+							}}
+						/>
+					</div>
+					<button
+						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+						title="Remove"
+						@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; renderApp(); }}
+					>${icon(X, "xs")}</button>
+				</div>
+			`)}
+
+			<!-- Add Setting button -->
+			<button
+				class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground
+					hover:bg-muted rounded-md transition-colors self-start"
+				@click=${() => { projectNewEntries.push({ key: "", value: "" }); renderApp(); }}
+			>${icon(Plus, "xs")} Add Setting</button>
+
+			<!-- Save button -->
 			<div class="flex items-center gap-3 pt-2">
 				<button
 					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground

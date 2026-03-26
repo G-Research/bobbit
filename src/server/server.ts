@@ -861,9 +861,15 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/project-config — return project config with defaults
+	// GET /api/project-config — return project settings
 	if (url.pathname === "/api/project-config" && req.method === "GET") {
 		json(projectConfigStore.getWithDefaults());
+		return;
+	}
+
+	// GET /api/project-config/defaults — return just the defaults
+	if (url.pathname === "/api/project-config/defaults" && req.method === "GET") {
+		json(projectConfigStore.getDefaults());
 		return;
 	}
 
@@ -871,10 +877,11 @@ async function handleApiRoute(
 	if (url.pathname === "/api/project-config" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const VALID_KEYS = new Set(["build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command"]);
 		for (const [key, value] of Object.entries(body)) {
-			if (typeof value === "string" && VALID_KEYS.has(key)) {
-				projectConfigStore.set(key as keyof import("./agent/project-config-store.js").ProjectConfig, value);
+			if (value === null || value === "") {
+				projectConfigStore.remove(key);
+			} else if (typeof value === "string") {
+				projectConfigStore.set(key, value);
 			}
 		}
 		json({ ok: true });

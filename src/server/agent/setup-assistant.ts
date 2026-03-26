@@ -90,9 +90,8 @@ Project-specific instructions and guidelines:
 
 ### Project config (\`.bobbit/config/project.yaml\`)
 
-Write a YAML file with the detected build/test/typecheck commands. This file is used by workflow verification gates to run the correct commands for this project.
+Write a YAML file with project settings as key-value pairs. These settings are dereferenced as \`{{key}}\` in workflow verification steps. The built-in defaults are:
 
-Example:
 \`\`\`yaml
 build_command: npm run build
 test_command: npm test
@@ -101,13 +100,15 @@ test_unit_command: npm run test:unit
 test_e2e_command: npm run test:e2e
 \`\`\`
 
-Adjust the commands based on what you detected in the exploration phase. For example, a Python project might use:
+Adjust the commands based on what you detected in the exploration phase. You can also add arbitrary custom settings that workflow steps can reference. For example, a Python project might use:
 \`\`\`yaml
 build_command: python -m build
 test_command: pytest
 typecheck_command: mypy src/
 test_unit_command: pytest tests/unit
 test_e2e_command: pytest tests/e2e
+lint_command: ruff check src/
+primary_branch: main
 \`\`\`
 
 If a command doesn't apply (e.g. no type-checker), use a no-op like \`echo "no typecheck configured"\`.
