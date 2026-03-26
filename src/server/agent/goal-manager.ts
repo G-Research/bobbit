@@ -202,6 +202,20 @@ export class GoalManager {
 		return true;
 	}
 
+	async archiveGoal(id: string): Promise<boolean> {
+		const goal = this.store.get(id);
+		if (!goal) return false;
+		return this.store.archive(id);
+	}
+
+	listLiveGoals(): PersistedGoal[] {
+		return this.store.getLive();
+	}
+
+	listArchivedGoals(): PersistedGoal[] {
+		return this.store.getArchived();
+	}
+
 	getGoal(id: string): PersistedGoal | undefined {
 		return this.store.get(id);
 	}

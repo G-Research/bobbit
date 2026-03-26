@@ -698,6 +698,8 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
+			const putGoal = sessionManager.goalManager.getGoal(id);
+			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			const ok = await sessionManager.goalManager.updateGoal(id, {
@@ -725,9 +727,8 @@ async function handleApiRoute(
 					console.error(`[api] Error tearing down team for goal ${id}:`, err);
 				}
 			}
-			sessionManager.taskManager.deleteTasksForGoal(id);
-			gateStore.removeGoalGates(id);
-			await sessionManager.goalManager.deleteGoal(id);
+			// Archive instead of hard-delete — tasks, gates, team state remain intact
+			await sessionManager.goalManager.archiveGoal(id);
 			json({ ok: true });
 			return;
 		}
@@ -1002,6 +1003,7 @@ async function handleApiRoute(
 		const goalId = goalTasksMatch[1];
 		const goal = sessionManager.goalManager.getGoal(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
 
 		const body = await readBody(req);
 		const title = body?.title;
@@ -1065,6 +1067,7 @@ async function handleApiRoute(
 		const [, goalId, gateId] = gateSignalMatch;
 		const goal = sessionManager.goalManager.getGoal(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
@@ -1338,8 +1341,13 @@ async function handleApiRoute(
 	const teamSpawnMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/spawn$/);
 	if (teamSpawnMatch && req.method === "POST") {
 		const goalId = teamSpawnMatch[1];
-		// Guard: reject spawn if goal worktree is not ready
+		// Guard: reject spawn if goal is archived
 		const spawnGoal = sessionManager.goalManager.getGoal(goalId);
+		if (spawnGoal?.archived) {
+			json({ error: "Goal is archived" }, 409);
+			return;
+		}
+		// Guard: reject spawn if goal worktree is not ready
 		if (spawnGoal && spawnGoal.setupStatus !== "ready") {
 			json({ error: "Goal setup not complete" }, 409);
 			return;
