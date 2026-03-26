@@ -29,6 +29,7 @@ function isConfigPageRoute() {
 const state = {
   selectedSessionId: null,
   remoteAgent: null, // { gatewaySessionId: string, connected: boolean } | null
+  connectingSessionId: null,
   connectionStatus: "disconnected",
   goalDashboardId: null,
 };
@@ -36,7 +37,12 @@ const state = {
 // Exact reproduction of activeSessionId() from src/app/state.ts
 function activeSessionId() {
   if (isConfigPageRoute()) return undefined;
-  return state.selectedSessionId ?? state.remoteAgent?.gatewaySessionId;
+  if (state.selectedSessionId) {
+    // Only return selectedSessionId if we're connected/connecting to that session
+    if (state.remoteAgent || state.connectingSessionId) return state.selectedSessionId;
+    return undefined;
+  }
+  return state.remoteAgent?.gatewaySessionId;
 }
 
 // --- handleHashChange() branch simulations (from src/app/main.ts) ---
@@ -44,31 +50,31 @@ function activeSessionId() {
 
 function simulateNavigateToGoalView(goalId) {
   currentRouteView = "goal";
-  // Current code: disconnects remoteAgent but does NOT clear selectedSessionId
   if (state.remoteAgent) {
     state.remoteAgent = null;
     state.connectionStatus = "disconnected";
   }
+  state.selectedSessionId = null;
   state.goalDashboardId = goalId;
 }
 
 function simulateNavigateToGoalDashboard(goalId) {
   currentRouteView = "goal-dashboard";
-  // Current code: disconnects remoteAgent but does NOT clear selectedSessionId
   if (state.remoteAgent) {
     state.remoteAgent = null;
     state.connectionStatus = "disconnected";
   }
+  state.selectedSessionId = null;
   state.goalDashboardId = goalId;
 }
 
 function simulateNavigateToLanding() {
   currentRouteView = "landing";
-  // Current code: disconnects remoteAgent but does NOT clear selectedSessionId
   if (state.remoteAgent) {
     state.remoteAgent = null;
     state.connectionStatus = "disconnected";
   }
+  state.selectedSessionId = null;
   state.goalDashboardId = null;
 }
 
