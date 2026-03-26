@@ -174,10 +174,12 @@ export function stopTimeRefresh(): void {
 // SESSION TIME + UNSEEN BADGE
 // ============================================================================
 
-/** Render session title with a subtle rolling highlight when active. */
+/** Render session title with a subtle rolling shadow when active. */
+let _waveIndex = 0;
 export function renderSessionTitle(title: string, isActive?: boolean) {
-	if (!isActive) return title;
-	return html`<span class="title-wave">${title}</span>`;
+	if (!isActive) { return title; }
+	const delay = -((_waveIndex++ % 7) * 0.6);
+	return html`<span class="title-wave" style="animation-delay:${delay}s">${title}</span>`;
 }
 
 /** Render a pulsing dot with conic sweep to indicate active session. */
