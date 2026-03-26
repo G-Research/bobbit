@@ -27,8 +27,8 @@ export interface SlashSkill {
 	userInvocable?: boolean;
 	/** Raw markdown content (instructions) */
 	content: string;
-	/** Source: "project", "personal", or "legacy" */
-	source: "project" | "personal" | "legacy";
+	/** Source: "project", "personal", "legacy", or "built-in" */
+	source: "project" | "personal" | "legacy" | "built-in";
 	/** Absolute path to the SKILL.md or command .md file */
 	filePath: string;
 	/** Optional allowed tools list */
@@ -187,6 +187,17 @@ function scanCommandsDir(dir: string): SlashSkill[] {
 	return skills;
 }
 
+/** Built-in slash commands that are always available. */
+const BUILTIN_SKILLS: SlashSkill[] = [
+	{
+		name: "compact",
+		description: "Compact conversation context to reduce token usage",
+		content: "",
+		source: "built-in" as SlashSkill["source"],
+		filePath: "(built-in)",
+	},
+];
+
 // Simple TTL cache
 let _cache: { skills: SlashSkill[]; cwd: string; ts: number } | null = null;
 const CACHE_TTL_MS = 5_000;
@@ -213,9 +224,10 @@ export function discoverSlashSkills(cwd: string): SlashSkill[] {
 	const bobbitPersonalSkills = scanSkillDir(bobbitPersonalSkillsDir, "personal");
 	const legacyCommands = scanCommandsDir(legacyCommandsDir);
 
-	// Merge with priority: project > personal > legacy
+	// Merge with priority: project > personal > legacy > built-in
 	// .claude takes precedence over .bobbit at the same level
 	const byName = new Map<string, SlashSkill>();
+	for (const skill of BUILTIN_SKILLS) byName.set(skill.name, skill);
 	for (const skill of legacyCommands) byName.set(skill.name, skill);
 	for (const skill of bobbitPersonalSkills) byName.set(skill.name, skill);
 	for (const skill of personalSkills) byName.set(skill.name, skill);

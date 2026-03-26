@@ -73,48 +73,46 @@ function sourceLabel(source: string): TemplateResult {
 	return html`<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-full ${cls}">${source}</span>`;
 }
 
-function renderSlashSkills(): TemplateResult {
-	if (slashSkills.length === 0) {
-		return html`<p class="text-sm text-muted-foreground italic">No slash skills found. Add SKILL.md files to <code class="text-[11px]">.claude/skills/</code> to define skills.</p>`;
-	}
-
+function renderSkillCard(skill: typeof slashSkills[0]): TemplateResult {
+	const key = `slash-${skill.name}`;
+	const isExpanded = expandedSkill === key;
+	const isBuiltIn = skill.source === "built-in";
 	return html`
-		<div class="flex flex-col gap-2">
-			${slashSkills.map((skill) => {
-				const key = `slash-${skill.name}`;
-				const isExpanded = expandedSkill === key;
-				return html`
-					<div class="rounded-lg border border-border overflow-hidden">
-						<button
-							class="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/30 transition-colors cursor-pointer"
-							@click=${() => toggleSkill(key)}
-						>
-							<span class="text-muted-foreground shrink-0">${icon(BookOpen, "sm")}</span>
-							<div class="flex-1 min-w-0">
-								<div class="flex items-center gap-2">
-									<span class="text-sm font-medium">/${skill.name}</span>
-									${sourceLabel(skill.source)}
-								</div>
-								<div class="text-xs text-muted-foreground mt-0.5 truncate">${skill.description}</div>
-							</div>
-							<span class="text-muted-foreground text-xs shrink-0">${isExpanded ? "▾" : "▸"}</span>
-						</button>
-						${isExpanded ? html`
-							<div class="border-t border-border px-4 py-3 bg-secondary/10">
-								<div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-3">
-									${icon(FolderOpen, "xs")}
-									<code class="text-[11px] break-all">${skill.filePath}</code>
-								</div>
-								<div class="rounded-md border border-border bg-background p-3 overflow-x-auto">
-									<pre class="text-xs font-mono whitespace-pre-wrap break-words text-foreground/80">${skill.content}</pre>
-								</div>
-							</div>
-						` : ""}
+		<div class="rounded-lg border border-border overflow-hidden">
+			<button
+				class="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/30 transition-colors cursor-pointer"
+				@click=${() => toggleSkill(key)}
+			>
+				<span class="text-muted-foreground shrink-0">${icon(BookOpen, "sm")}</span>
+				<div class="flex-1 min-w-0">
+					<div class="flex items-center gap-2">
+						<span class="text-sm font-medium">/${skill.name}</span>
+						${sourceLabel(skill.source)}
 					</div>
-				`;
-			})}
+					<div class="text-xs text-muted-foreground mt-0.5 truncate">${skill.description}</div>
+				</div>
+				${isBuiltIn ? "" : html`<span class="text-muted-foreground text-xs shrink-0">${isExpanded ? "▾" : "▸"}</span>`}
+			</button>
+			${isExpanded && !isBuiltIn ? html`
+				<div class="border-t border-border px-4 py-3 bg-secondary/10">
+					<div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-3">
+						${icon(FolderOpen, "xs")}
+						<code class="text-[11px] break-all">${skill.filePath}</code>
+					</div>
+					<div class="rounded-md border border-border bg-background p-3 overflow-x-auto">
+						<pre class="text-xs font-mono whitespace-pre-wrap break-words text-foreground/80">${skill.content}</pre>
+					</div>
+				</div>
+			` : ""}
 		</div>
 	`;
+}
+
+function renderSkillList(skills: typeof slashSkills): TemplateResult {
+	if (skills.length === 0) {
+		return html`<p class="text-sm text-muted-foreground italic">No skills found.</p>`;
+	}
+	return html`<div class="flex flex-col gap-2">${skills.map(renderSkillCard)}</div>`;
 }
 
 export function renderSkillsPage(): TemplateResult {
@@ -143,6 +141,8 @@ export function renderSkillsPage(): TemplateResult {
 		`;
 	}
 
+	const userSkills = slashSkills.filter((s) => s.source !== "built-in");
+	const builtInSkills = slashSkills.filter((s) => s.source === "built-in");
 	const total = slashSkills.length;
 
 	return html`
@@ -158,10 +158,23 @@ export function renderSkillsPage(): TemplateResult {
 						<h2 class="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
 							${icon(BookOpen, "sm")}
 							Slash Skills
-							<span class="text-xs font-normal text-muted-foreground">(from .claude/skills/ and .claude/commands/)</span>
+							<span class="text-xs font-normal text-muted-foreground">(from .claude/skills/ and .bobbit/skills/)</span>
 						</h2>
-						${renderSlashSkills()}
+						${userSkills.length > 0
+							? renderSkillList(userSkills)
+							: html`<p class="text-sm text-muted-foreground italic">No custom skills found. Add SKILL.md files to <code class="text-[11px]">.claude/skills/</code> or <code class="text-[11px]">.bobbit/skills/</code> to define skills.</p>`
+						}
 					</div>
+
+					${builtInSkills.length > 0 ? html`
+						<div>
+							<h2 class="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+								${icon(Zap, "sm")}
+								Built-in
+							</h2>
+							${renderSkillList(builtInSkills)}
+						</div>
+					` : ""}
 				</div>
 			</div>
 		</div>

@@ -143,11 +143,7 @@ export class MessageEditor extends LitElement {
 			const res = await gatewayFetch(`/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`);
 			if (res.ok) {
 				const data = await res.json();
-				// Include built-in /compact command
-				this._slashSkills = [
-					{ name: "compact", description: "Compact conversation context to reduce token usage", source: "project" as const },
-					...(data.skills || []),
-				];
+				this._slashSkills = data.skills || [];
 			}
 		} catch {
 			// Best effort
