@@ -46,9 +46,11 @@
      */
   }
 
-  /* --- Current CSS from src/app/app.css (mobile header rule) --- */
-  /* This rule ONLY targets agent-interface chat messages, NOT goal-preview-panel */
+  /* --- Current CSS from src/app/app.css (mobile header rules) --- */
   [data-mobile-header] agent-interface .overflow-y-auto > .max-w-5xl {
+    padding-top: var(--mobile-header-height, 60px) !important;
+  }
+  [data-mobile-header] .goal-preview-panel > .overflow-y-auto {
     padding-top: var(--mobile-header-height, 60px) !important;
   }
 
