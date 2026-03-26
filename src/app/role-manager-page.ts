@@ -24,9 +24,9 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 		? `bobbit-${accId === "crown" ? "crowned" : accId}`
 		: "";
 	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
-	// The sprite margin-box is 37×37px but accessories overflow it.
+	// The sprite margin-box is ~40×36px at 4× scale but accessories overflow it.
 	// Use a larger viewport to capture everything, then scale down.
-	const naturalSize = 66;
+	const naturalSize = 76;
 	const s = size / naturalSize;
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
 	// Offset animations so multiple blobs don't blink/shimmer in sync

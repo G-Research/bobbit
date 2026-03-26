@@ -910,7 +910,7 @@ html {
 	align-items: end;
 	position: relative;
 	padding: 0;
-	margin-bottom: -24px;
+	margin-bottom: -28px;
 	overflow: visible;
 	filter: hue-rotate(var(--bobbit-hue-rotate, 0deg));
 }
@@ -925,9 +925,10 @@ html {
 	height: 1px;
 	overflow: visible;
 	position: absolute;
+	z-index: -1;
 	/* Match sprite positioning exactly */
 	transform-origin: 5px 8px;
-	transform: scale(3.5);
+	transform: scale(4);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	/* Shadow sits at y=9, right below the sprite (which ends at y=8) */
@@ -1017,7 +1018,7 @@ html {
 /* Idle shadow — offset left to match idle position */
 .bobbit-blob--idle .bobbit-blob__shadow {
 	animation: none !important;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 
 /* Shadow follows sprite horizontally during transitions */
@@ -1035,40 +1036,42 @@ html {
 }
 
 @keyframes blob-shadow-exit {
-	0%   { transform: scale(3.5) translateX(0); }
-	35%  { transform: scale(3.5) translateX(-1.5px); }
-	50%  { transform: scale(3.5) translateX(-3.5px); }
-	65%  { transform: scale(3.5) translateX(-5.5px); }
-	100% { transform: scale(3.5) translateX(-7px); }
+	0%   { transform: scale(4) translateX(0); }
+	35%  { transform: scale(4) translateX(-2px); }
+	50%  { transform: scale(4) translateX(-4px); }
+	65%  { transform: scale(4) translateX(-6px); }
+	100% { transform: scale(4) translateX(-7px); }
 }
 @keyframes blob-shadow-exit-roll {
-	0%   { transform: scale(3.5) translateX(0); }
-	30%  { transform: scale(3.5) translateX(-2px); }
-	50%  { transform: scale(3.5) translateX(-4px); }
-	70%  { transform: scale(3.5) translateX(-6px); }
-	100% { transform: scale(3.5) translateX(-7px); }
+	0%   { transform: scale(4) translateX(0); }
+	30%  { transform: scale(4) translateX(-2px); }
+	50%  { transform: scale(4) translateX(-4px); }
+	70%  { transform: scale(4) translateX(-6px); }
+	100% { transform: scale(4) translateX(-7px); }
 }
 @keyframes blob-shadow-enter {
-	0%   { transform: scale(3.5) translateX(-7px); }
-	35%  { transform: scale(3.5) translateX(-5px); }
-	55%  { transform: scale(3.5) translateX(-3px); }
-	75%  { transform: scale(3.5) translateX(0); }
-	100% { transform: scale(3.5) translateX(0); }
+	0%   { transform: scale(4) translateX(-7px); }
+	35%  { transform: scale(4) translateX(-5px); }
+	55%  { transform: scale(4) translateX(-3px); }
+	75%  { transform: scale(4) translateX(0); }
+	100% { transform: scale(4) translateX(0); }
 }
 @keyframes blob-shadow-enter-roll {
-	0%   { transform: scale(3.5) translateX(-7px); }
-	30%  { transform: scale(3.5) translateX(-5px); }
-	50%  { transform: scale(3.5) translateX(-3px); }
-	70%  { transform: scale(3.5) translateX(-1px); }
-	100% { transform: scale(3.5) translateX(0); }
+	0%   { transform: scale(4) translateX(-7px); }
+	30%  { transform: scale(4) translateX(-5px); }
+	50%  { transform: scale(4) translateX(-3px); }
+	70%  { transform: scale(4) translateX(-1px); }
+	100% { transform: scale(4) translateX(0); }
 }
 
 .bobbit-blob__sprite {
 	width: 1px;
 	height: 1px;
 	overflow: visible;
+	position: relative;
+	z-index: 1;
 	transform-origin: 5px 8px; /* center of 10×9 grid */
-	transform: scale(3.5) translateZ(0);
+	transform: scale(4) translateZ(0);
 	will-change: transform;
 	backface-visibility: hidden;
 	margin: 8px 18px 28px 18px;
@@ -1171,8 +1174,8 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px; /* same as sprite */
-	transform: scale(3.5);
-	margin: 8px 18px 28px 16.5px;
+	transform: scale(4);
+	margin: 8px 18px 28px 17px;
 	image-rendering: pixelated;
 	/* Counter hue-rotate so crown stays gold */
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
@@ -1190,7 +1193,7 @@ html {
 /* Crown follows all sprite state animations */
 .bobbit-blob--idle .bobbit-blob__crown {
 	animation: none;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__crown {
 	animation: blob-exit 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1225,8 +1228,8 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px; /* same as sprite */
-	transform: scale(3.5);
-	translate: 0 -1.75px; /* half bobbit pixel up: 0.5 × 3.5 = 1.75 CSS px */
+	transform: scale(4);
+	translate: 0 -2px; /* half bobbit pixel up: 0.5 × 4 = 2 CSS px */
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	/* Counter hue-rotate so bandana stays red */
@@ -1250,9 +1253,9 @@ html {
 
 /* Bandana vertical shift: half-pixel up when eyes look up (60-65%) */
 @keyframes blob-bandana-adjust {
-	0%  { translate: 0 -1.75px; }  /* baseline half-pixel up */
+	0%  { translate: 0 -2px; }  /* baseline half-pixel up */
 	60% { translate: 0 -3.5px; }   /* half-pixel shift: 1 × 3.5 = 3.5 */
-	65% { translate: 0 -1.75px; }  /* back to baseline */
+	65% { translate: 0 -2px; }  /* back to baseline */
 }
 
 /* Bandana shadow states synced to blob-busy-eyes:
@@ -1322,17 +1325,17 @@ html {
 	animation-duration: 10s, 10s;
 	animation-timing-function: step-end, step-end;
 	animation-iteration-count: infinite, infinite;
-	transform: scale(3.5) translateX(-7px);
-	translate: 0 -1.75px;
+	transform: scale(4) translateX(-7px);
+	translate: 0 -2px;
 }
 
 /* Bandana idle vertical shift: up when eyes look up-right (25-45%, 70-85%) */
 @keyframes blob-bandana-idle-adjust {
-	0%  { translate: 0 -1.75px; }
+	0%  { translate: 0 -2px; }
 	25% { translate: 0 -3.5px; }
-	45% { translate: 0 -1.75px; }
+	45% { translate: 0 -2px; }
 	70% { translate: 0 -3.5px; }
-	85% { translate: 0 -1.75px; }
+	85% { translate: 0 -2px; }
 }
 
 /* Bandana idle shadow: hide tail when eyes face right (25-45%, 55-67%, 70-85%)
@@ -1437,7 +1440,7 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px;
-	transform: scale(3.5);
+	transform: scale(4);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
@@ -1455,7 +1458,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__magnifier {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__magnifier {
 	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1490,7 +1493,7 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px;
-	transform: scale(3.5) translate(-0.5px, -0.5px);
+	transform: scale(4) translate(-0.5px, -0.5px);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
@@ -1507,7 +1510,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__palette {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
-	transform: scale(3.5) translate(-7.5px, -0.5px);
+	transform: scale(4) translate(-7.5px, -0.5px);
 }
 .bobbit-blob--exit .bobbit-blob__palette {
 	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1542,7 +1545,7 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px;
-	transform: scale(3.5);
+	transform: scale(4);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
@@ -1565,7 +1568,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__pencil {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__pencil {
 	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1600,7 +1603,7 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px;
-	transform: scale(3.5);
+	transform: scale(4);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
@@ -1618,7 +1621,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__shield {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__shield {
 	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1653,7 +1656,7 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px;
-	transform: scale(3.5);
+	transform: scale(4);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
@@ -1671,7 +1674,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__set-square {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__set-square {
 	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1706,7 +1709,7 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px;
-	transform: scale(3.5);
+	transform: scale(4);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	box-shadow:
@@ -1764,7 +1767,7 @@ html {
 
 .bobbit-blob--idle .bobbit-blob__flask {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__flask {
 	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1803,7 +1806,7 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px;
-	transform: scale(3.5);
+	transform: scale(4);
 	margin: 8px 18px 28px 18px;
 	image-rendering: pixelated;
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
@@ -1818,7 +1821,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__wizard-hat {
 	animation: none;
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__wizard-hat {
 	animation: blob-exit 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
@@ -1847,47 +1850,47 @@ html {
 @keyframes blob-bounce {
 	/* Rest / anticipation squat — crouches before the jump */
 	0% {
-		transform: scale(3.5) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 	/* Squat down — squash wide, compress tall */
 	8% {
-		transform: scale(3.5) translateY(1px) scaleX(1.15) scaleY(0.82) rotate(0deg);
+		transform: scale(4) translateY(1px) scaleX(1.15) scaleY(0.82) rotate(0deg);
 	}
 	/* Launch! — stretch tall and thin, shoot upward */
 	18% {
-		transform: scale(3.5) translateY(-3px) scaleX(0.88) scaleY(1.18) rotate(-2deg);
+		transform: scale(4) translateY(-3px) scaleX(0.88) scaleY(1.18) rotate(-2deg);
 	}
 	/* Airborne peak — slow hang, slight tilt for personality */
 	30% {
-		transform: scale(3.5) translateY(-5px) scaleX(0.95) scaleY(1.06) rotate(2deg);
+		transform: scale(4) translateY(-5px) scaleX(0.95) scaleY(1.06) rotate(2deg);
 	}
 	/* Still floating — the "Disney hang" — linger at the top */
 	38% {
-		transform: scale(3.5) translateY(-4.5px) scaleX(1) scaleY(1) rotate(-1deg);
+		transform: scale(4) translateY(-4px) scaleX(1) scaleY(1) rotate(-1deg);
 	}
 	/* Falling — stretch downward */
 	48% {
-		transform: scale(3.5) translateY(-1px) scaleX(0.92) scaleY(1.1) rotate(1deg);
+		transform: scale(4) translateY(-1px) scaleX(0.92) scaleY(1.1) rotate(1deg);
 	}
 	/* LAND — big squash, overshoot, full of weight */
 	55% {
-		transform: scale(3.5) translateY(1px) scaleX(1.18) scaleY(0.78) rotate(0deg);
+		transform: scale(4) translateY(1px) scaleX(1.18) scaleY(0.78) rotate(0deg);
 	}
 	/* Rebound — spring back up a little */
 	65% {
-		transform: scale(3.5) translateY(-1px) scaleX(0.95) scaleY(1.08) rotate(-1deg);
+		transform: scale(4) translateY(-1px) scaleX(0.95) scaleY(1.08) rotate(-1deg);
 	}
 	/* Settle squash — smaller secondary bounce */
 	73% {
-		transform: scale(3.5) translateY(0px) scaleX(1.06) scaleY(0.94) rotate(0.5deg);
+		transform: scale(4) translateY(0px) scaleX(1.06) scaleY(0.94) rotate(0.5deg);
 	}
 	/* Gentle breathe / idle wiggle */
 	85% {
-		transform: scale(3.5) translateY(0) scaleX(1) scaleY(1.02) rotate(-0.5deg);
+		transform: scale(4) translateY(0) scaleX(1) scaleY(1.02) rotate(-0.5deg);
 	}
 	/* Back to rest */
 	100% {
-		transform: scale(3.5) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 }
 
@@ -1906,100 +1909,100 @@ html {
    Step 5: Asymmetric follow-through settle + moving hold */
 @keyframes blob-busy-move {
 	/* ── Bounce 1: "Oh! What's that?" — big, surprised, full of gravitas ── */
-	0%   { transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	0%   { transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 	/* Deep anticipation squat — leans forward eagerly [Step 2: deeper 0.72] */
-	2%   { transform: scale(3.5) translateX(0) translateY(1.5px) scaleX(1.22) scaleY(0.72) rotate(2deg); }
+	2%   { transform: scale(4) translateX(0) translateY(2px) scaleX(1.22) scaleY(0.72) rotate(2deg); }
 	/* Hold the squat one extra beat — tension builds [Step 2: extra hold] */
-	3%   { transform: scale(3.5) translateX(0) translateY(1.5px) scaleX(1.22) scaleY(0.72) rotate(2deg); }
+	3%   { transform: scale(4) translateX(0) translateY(2px) scaleX(1.22) scaleY(0.72) rotate(2deg); }
 	/* Launch! — big stretch upward with stronger forward lean [Step 2: rotate 4deg] */
-	5%   { transform: scale(3.5) translateX(0) translateY(-4px) scaleX(0.85) scaleY(1.2) rotate(4deg); }
+	5%   { transform: scale(4) translateX(0) translateY(-4px) scaleX(0.85) scaleY(1.2) rotate(4deg); }
 	/* Peak — Disney hang, higher apex [Step 2: -6px] */
-	8%   { transform: scale(3.5) translateX(0) translateY(-6px) scaleX(0.95) scaleY(1.05) rotate(3deg); }
+	8%   { transform: scale(4) translateX(0) translateY(-6px) scaleX(0.95) scaleY(1.05) rotate(3deg); }
 	/* Linger at top — weightless moment */
-	10%  { transform: scale(3.5) translateX(0) translateY(-5.5px) scaleX(1) scaleY(1) rotate(-1deg); }
+	10%  { transform: scale(4) translateX(0) translateY(-6px) scaleX(1) scaleY(1) rotate(-1deg); }
 	/* Falling fast */
-	12%  { transform: scale(3.5) translateX(0) translateY(-1px) scaleX(0.92) scaleY(1.12) rotate(1deg); }
+	12%  { transform: scale(4) translateX(0) translateY(-1px) scaleX(0.92) scaleY(1.12) rotate(1deg); }
 	/* LAND — satisfying squash full of weight */
-	14%  { transform: scale(3.5) translateX(0) translateY(1.5px) scaleX(1.2) scaleY(0.75) rotate(0deg); }
+	14%  { transform: scale(4) translateX(0) translateY(2px) scaleX(1.2) scaleY(0.75) rotate(0deg); }
 	/* Rebound spring */
-	16%  { transform: scale(3.5) translateX(0) translateY(-0.5px) scaleX(0.96) scaleY(1.06) rotate(-1deg); }
+	16%  { transform: scale(4) translateX(0) translateY(0px) scaleX(0.96) scaleY(1.06) rotate(-1deg); }
 	/* Settle with micro-wiggle */
-	18%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1.04) scaleY(0.96) rotate(0.5deg); }
-	19%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	18%  { transform: scale(4) translateX(0) translateY(0) scaleX(1.04) scaleY(0.96) rotate(0.5deg); }
+	19%  { transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 	/* ── Bounce 2: "Yep, let's go!" — smaller, breezy, quick confirmation ── */
 	/* Shallower squat [Step 2: 0.88 vs 0.85] */
-	21%  { transform: scale(3.5) translateX(0) translateY(0.8px) scaleX(1.1) scaleY(0.88) rotate(-1deg); }
+	21%  { transform: scale(4) translateX(0) translateY(1px) scaleX(1.1) scaleY(0.88) rotate(-1deg); }
 	/* Lower peak [Step 2: -3.5px] with distinct head tilt [Step 2: -3.5deg] */
-	23%  { transform: scale(3.5) translateX(0) translateY(-2.5px) scaleX(0.92) scaleY(1.12) rotate(2deg); }
-	25%  { transform: scale(3.5) translateX(0) translateY(-3.5px) scaleX(0.97) scaleY(1.03) rotate(-3.5deg); }
+	23%  { transform: scale(4) translateX(0) translateY(-2px) scaleX(0.92) scaleY(1.12) rotate(2deg); }
+	25%  { transform: scale(4) translateX(0) translateY(-4px) scaleX(0.97) scaleY(1.03) rotate(-3.5deg); }
 	/* Falling — quick, not lingering */
-	27%  { transform: scale(3.5) translateX(0) translateY(0.8px) scaleX(1.12) scaleY(0.85) rotate(0deg); }
+	27%  { transform: scale(4) translateX(0) translateY(1px) scaleX(1.12) scaleY(0.85) rotate(0deg); }
 	/* Compressed settle — two frames, breezy [Step 2: fewer settle frames] */
-	29%  { transform: scale(3.5) translateX(0) translateY(-0.3px) scaleX(0.98) scaleY(1.03) rotate(-0.5deg); }
-	31%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1.02) scaleY(0.98) rotate(0.2deg); }
-	33%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	29%  { transform: scale(4) translateX(0) translateY(0px) scaleX(0.98) scaleY(1.03) rotate(-0.5deg); }
+	31%  { transform: scale(4) translateX(0) translateY(0) scaleX(1.02) scaleY(0.98) rotate(0.2deg); }
+	33%  { transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 	/* ── Anticipation crouch — "what's over there?" — held pose [Step 3] ── */
 	/* Start slow crouch */
-	35%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1.08) scaleY(0.88) rotate(2deg); }
+	35%  { transform: scale(4) translateX(0) translateY(0) scaleX(1.08) scaleY(0.88) rotate(2deg); }
 	/* Deeper crouch — loading up with excitement */
-	36%  { transform: scale(3.5) translateX(0) translateY(0.5px) scaleX(1.12) scaleY(0.83) rotate(4deg); }
+	36%  { transform: scale(4) translateX(0) translateY(1px) scaleX(1.12) scaleY(0.83) rotate(4deg); }
 	/* HOLD the crouch — the "wound spring" beat [Step 3: held anticipation] */
-	37%  { transform: scale(3.5) translateX(0) translateY(0.5px) scaleX(1.12) scaleY(0.83) rotate(4deg); }
+	37%  { transform: scale(4) translateX(0) translateY(1px) scaleX(1.12) scaleY(0.83) rotate(4deg); }
 	/* Begin uncoiling — release into hop */
-	38%  { transform: scale(3.5) translateX(0) translateY(0.3px) scaleX(1.06) scaleY(0.90) rotate(3deg); }
+	38%  { transform: scale(4) translateX(0) translateY(0px) scaleX(1.06) scaleY(0.90) rotate(3deg); }
 	/* ── Hop right: two eager hops with body english (39-57%) [Step 4: eager] ── */
 	/* Squat for hop 1 — strong forward lean [Step 4: rotate 4deg] */
-	41%  { transform: scale(3.5) translateX(0) translateY(1px) scaleX(1.15) scaleY(0.82) rotate(4deg); }
+	41%  { transform: scale(4) translateX(0) translateY(1px) scaleX(1.15) scaleY(0.82) rotate(4deg); }
 	/* Airborne hop 1 — higher arc [Step 4: -3.5px] */
-	44%  { transform: scale(3.5) translateX(1.5px) translateY(-3.5px) scaleX(0.88) scaleY(1.12) rotate(-2deg); }
+	44%  { transform: scale(4) translateX(2px) translateY(-4px) scaleX(0.88) scaleY(1.12) rotate(-2deg); }
 	/* Land hop 1 with squash */
-	47%  { transform: scale(3.5) translateX(3px) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(1deg); }
-	48%  { transform: scale(3.5) translateX(3px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	47%  { transform: scale(4) translateX(3px) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(1deg); }
+	48%  { transform: scale(4) translateX(3px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 	/* Squat for hop 2 — escalating excitement */
-	49%  { transform: scale(3.5) translateX(3px) translateY(1px) scaleX(1.15) scaleY(0.82) rotate(4deg); }
+	49%  { transform: scale(4) translateX(3px) translateY(1px) scaleX(1.15) scaleY(0.82) rotate(4deg); }
 	/* Airborne hop 2 — even higher [Step 4: -4px] */
-	52%  { transform: scale(3.5) translateX(4.5px) translateY(-4px) scaleX(0.88) scaleY(1.12) rotate(-2deg); }
+	52%  { transform: scale(4) translateX(4px) translateY(-4px) scaleX(0.88) scaleY(1.12) rotate(-2deg); }
 	/* Land hop 2 */
-	55%  { transform: scale(3.5) translateX(6px) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(1deg); }
-	57%  { transform: scale(3.5) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	55%  { transform: scale(4) translateX(6px) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(1deg); }
+	57%  { transform: scale(4) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 	/* ── At +6px: curious look-around with micro-movements (57-70%) ── */
 	/* Tiny excited arrival bounce — "I'm here!" */
-	59%  { transform: scale(3.5) translateX(6px) translateY(0.5px) scaleX(1.08) scaleY(0.92) rotate(0deg); }
-	61%  { transform: scale(3.5) translateX(6px) translateY(-1.5px) scaleX(0.95) scaleY(1.06) rotate(-2deg); }
-	62%  { transform: scale(3.5) translateX(6px) translateY(0) scaleX(1.03) scaleY(0.97) rotate(0deg); }
+	59%  { transform: scale(4) translateX(6px) translateY(1px) scaleX(1.08) scaleY(0.92) rotate(0deg); }
+	61%  { transform: scale(4) translateX(6px) translateY(-2px) scaleX(0.95) scaleY(1.06) rotate(-2deg); }
+	62%  { transform: scale(4) translateX(6px) translateY(0) scaleX(1.03) scaleY(0.97) rotate(0deg); }
 	/* Lean left — looking back thoughtfully */
-	64%  { transform: scale(3.5) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(-4deg); }
+	64%  { transform: scale(4) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(-4deg); }
 	/* Lean right — peering further */
-	67%  { transform: scale(3.5) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(3deg); }
+	67%  { transform: scale(4) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(3deg); }
 	/* Settle center */
-	69%  { transform: scale(3.5) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
-	70%  { transform: scale(3.5) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	69%  { transform: scale(4) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	70%  { transform: scale(4) translateX(6px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 	/* ── Hop back left — relaxed trot home (70-87%) [Step 4: relaxed] ── */
 	/* Squat — less lean than outbound [Step 4: rotate capped at 1.5deg] */
-	72%  { transform: scale(3.5) translateX(6px) translateY(1px) scaleX(1.12) scaleY(0.85) rotate(-1.5deg); }
+	72%  { transform: scale(4) translateX(6px) translateY(1px) scaleX(1.12) scaleY(0.85) rotate(-1.5deg); }
 	/* Airborne hop back 1 — lower arc [Step 4: -2.5px] */
-	75%  { transform: scale(3.5) translateX(4.5px) translateY(-2.5px) scaleX(0.9) scaleY(1.1) rotate(1.5deg); }
+	75%  { transform: scale(4) translateX(4px) translateY(-2px) scaleX(0.9) scaleY(1.1) rotate(1.5deg); }
 	/* Gentler landing squash [Step 4: 0.87 vs 0.78] */
-	78%  { transform: scale(3.5) translateX(3px) translateY(0.8px) scaleX(1.12) scaleY(0.87) rotate(-0.5deg); }
-	79%  { transform: scale(3.5) translateX(3px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	78%  { transform: scale(4) translateX(3px) translateY(1px) scaleX(1.12) scaleY(0.87) rotate(-0.5deg); }
+	79%  { transform: scale(4) translateX(3px) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 	/* Squat for hop back 2 — gentle [Step 4: wider spacing] */
-	81%  { transform: scale(3.5) translateX(3px) translateY(0.8px) scaleX(1.12) scaleY(0.85) rotate(-1.5deg); }
+	81%  { transform: scale(4) translateX(3px) translateY(1px) scaleX(1.12) scaleY(0.85) rotate(-1.5deg); }
 	/* Airborne hop back 2 — low easy arc [Step 4: -2.5px] */
-	84%  { transform: scale(3.5) translateX(1.5px) translateY(-2.5px) scaleX(0.9) scaleY(1.1) rotate(1.5deg); }
+	84%  { transform: scale(4) translateX(2px) translateY(-2px) scaleX(0.9) scaleY(1.1) rotate(1.5deg); }
 	/* Land at home — satisfying squash */
-	87%  { transform: scale(3.5) translateX(0) translateY(1px) scaleX(1.18) scaleY(0.80) rotate(0deg); }
+	87%  { transform: scale(4) translateX(0) translateY(1px) scaleX(1.18) scaleY(0.80) rotate(0deg); }
 	/* ── Expressive settle — asymmetric follow-through [Step 5] ── */
 	/* Overshoot — lean back catching balance */
-	89%  { transform: scale(3.5) translateX(0) translateY(-0.3px) scaleX(0.94) scaleY(1.07) rotate(-2.5deg); }
+	89%  { transform: scale(4) translateX(0) translateY(0px) scaleX(0.94) scaleY(1.07) rotate(-2.5deg); }
 	/* Counter-correct forward */
-	91%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1.04) scaleY(0.96) rotate(1.5deg); }
+	91%  { transform: scale(4) translateX(0) translateY(0) scaleX(1.04) scaleY(0.96) rotate(1.5deg); }
 	/* Damping — almost settled */
-	93%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1.01) scaleY(1.01) rotate(-0.5deg); }
+	93%  { transform: scale(4) translateX(0) translateY(0) scaleX(1.01) scaleY(1.01) rotate(-0.5deg); }
 	/* ── Moving hold / "satisfied sigh" — never fully static [Step 5] ── */
-	95%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1.012) rotate(0.2deg); }
-	97%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(-0.15deg); }
-	99%  { transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1.008) rotate(0.1deg); }
-	100% { transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
+	95%  { transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1.012) rotate(0.2deg); }
+	97%  { transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(-0.15deg); }
+	99%  { transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1.008) rotate(0.1deg); }
+	100% { transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg); }
 }
 
 
@@ -2090,96 +2093,94 @@ html {
 /* Shadow follows horizontal position during busy hops */
 @keyframes blob-busy-shadow {
 	/* Bouncing in place — shadow stays at X=0 */
-	0%   { transform: scale(3.5) translateX(0); }
-	41%  { transform: scale(3.5) translateX(0); }
+	0%   { transform: scale(4) translateX(0); }
+	41%  { transform: scale(4) translateX(0); }
 	/* Hop 1 right — airborne */
-	44%  { transform: scale(3.5) translateX(1.5px); }
+	44%  { transform: scale(4) translateX(2px); }
 	/* Landed hop 1 */
-	47%  { transform: scale(3.5) translateX(3px); }
-	49%  { transform: scale(3.5) translateX(3px); }
+	47%  { transform: scale(4) translateX(3px); }
+	49%  { transform: scale(4) translateX(3px); }
 	/* Hop 2 right — airborne */
-	52%  { transform: scale(3.5) translateX(4.5px); }
+	52%  { transform: scale(4) translateX(4px); }
 	/* Landed hop 2 + look-around */
-	55%  { transform: scale(3.5) translateX(6px); }
-	70%  { transform: scale(3.5) translateX(6px); }
+	55%  { transform: scale(4) translateX(6px); }
+	70%  { transform: scale(4) translateX(6px); }
 	/* Squat before hop back */
-	72%  { transform: scale(3.5) translateX(6px); }
+	72%  { transform: scale(4) translateX(6px); }
 	/* Hop back 1 — airborne [Step 4: wider spacing for relaxed trot] */
-	75%  { transform: scale(3.5) translateX(4.5px); }
+	75%  { transform: scale(4) translateX(4px); }
 	/* Landed */
-	78%  { transform: scale(3.5) translateX(3px); }
-	81%  { transform: scale(3.5) translateX(3px); }
+	78%  { transform: scale(4) translateX(3px); }
+	81%  { transform: scale(4) translateX(3px); }
 	/* Hop back 2 — airborne [Step 4: wider spacing] */
-	84%  { transform: scale(3.5) translateX(1.5px); }
+	84%  { transform: scale(4) translateX(2px); }
 	/* Landed back at origin */
-	87%  { transform: scale(3.5) translateX(0); }
-	100% { transform: scale(3.5) translateX(0); }
+	87%  { transform: scale(4) translateX(0); }
+	100% { transform: scale(4) translateX(0); }
 }
 /* Exit animation A — squish, wiggle, hop left and settle */
 .bobbit-blob--exit .bobbit-blob__sprite {
 	animation:
 		blob-exit 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 /* Exit animation B — barrel roll through the air into idle position */
 .bobbit-blob--exit-roll .bobbit-blob__sprite {
 	animation:
 		blob-exit-roll 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 @keyframes blob-exit {
 	0% {
-		transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 	20% {
-		transform: scale(3.5) translateX(0) translateY(1px) scaleX(1.3) scaleY(0.6) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(1px) scaleX(1.3) scaleY(0.6) rotate(0deg);
 	}
 	35% {
-		transform: scale(3.5) translateX(-1.5px) translateY(1px) scaleX(1.25) scaleY(0.65) rotate(-6deg);
+		transform: scale(4) translateX(-2px) translateY(1px) scaleX(1.25) scaleY(0.65) rotate(-6deg);
 	}
 	50% {
-		transform: scale(3.5) translateX(-3.5px) translateY(1px) scaleX(1.2) scaleY(0.7) rotate(4deg);
+		transform: scale(4) translateX(-4px) translateY(1px) scaleX(1.2) scaleY(0.7) rotate(4deg);
 	}
 	65% {
-		transform: scale(3.5) translateX(-5.5px) translateY(-2px) scaleX(0.9) scaleY(1.1) rotate(-2deg);
+		transform: scale(4) translateX(-6px) translateY(-2px) scaleX(0.9) scaleY(1.1) rotate(-2deg);
 	}
 	80% {
-		transform: scale(3.5) translateX(-7px) translateY(0) scaleX(1.1) scaleY(0.9) rotate(1deg);
+		transform: scale(4) translateX(-7px) translateY(0) scaleX(1.1) scaleY(0.9) rotate(1deg);
 	}
 	100% {
-		transform: scale(3.5) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 }
 
 @keyframes blob-exit-roll {
 	0% {
-		transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 	/* Squat before launch */
 	12% {
-		transform: scale(3.5) translateX(0) translateY(1px) scaleX(1.2) scaleY(0.7) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(1px) scaleX(1.2) scaleY(0.7) rotate(0deg);
 	}
 	/* Launch up and start spinning */
 	30% {
-		transform: scale(3.5) translateX(-2px) translateY(-5px) scaleX(0.9) scaleY(1.1) rotate(-120deg);
+		transform: scale(4) translateX(-2px) translateY(-5px) scaleX(0.9) scaleY(1.1) rotate(-120deg);
 	}
 	/* Peak of arc — mid roll */
 	50% {
-		transform: scale(3.5) translateX(-4px) translateY(-7px) scaleX(1) scaleY(1) rotate(-250deg);
+		transform: scale(4) translateX(-4px) translateY(-7px) scaleX(1) scaleY(1) rotate(-250deg);
 	}
 	/* Coming down, finishing roll */
 	70% {
-		transform: scale(3.5) translateX(-6px) translateY(-3px) scaleX(1) scaleY(1) rotate(-340deg);
+		transform: scale(4) translateX(-6px) translateY(-3px) scaleX(1) scaleY(1) rotate(-340deg);
 	}
 	/* Land with squash */
 	85% {
-		transform: scale(3.5) translateX(-7px) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(-360deg);
+		transform: scale(4) translateX(-7px) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(-360deg);
 	}
 	/* Settle */
 	100% {
-		transform: scale(3.5) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(-360deg);
+		transform: scale(4) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(-360deg);
 	}
 }
 
@@ -2190,293 +2191,293 @@ html {
 
 @keyframes blob-busy-move-rigid {
 	/* ── Bounce 1: "Oh! What's that?" — big, surprised, full of gravitas ── */
-	0%   { transform: scale(3.5) translateX(0) translateY(0) rotate(0deg); }
+	0%   { transform: scale(4) translateX(0) translateY(0) rotate(0deg); }
 	/* Deep anticipation squat — leans forward eagerly [Step 2: deeper 0.72] */
-	2%   { transform: scale(3.5) translateX(0) translateY(1.5px) rotate(2deg); }
+	2%   { transform: scale(4) translateX(0) translateY(2px) rotate(2deg); }
 	/* Hold the squat one extra beat — tension builds [Step 2: extra hold] */
-	3%   { transform: scale(3.5) translateX(0) translateY(1.5px) rotate(2deg); }
+	3%   { transform: scale(4) translateX(0) translateY(2px) rotate(2deg); }
 	/* Launch! — big stretch upward with stronger forward lean [Step 2: rotate 4deg] */
-	5%   { transform: scale(3.5) translateX(0) translateY(-4px) rotate(4deg); }
+	5%   { transform: scale(4) translateX(0) translateY(-4px) rotate(4deg); }
 	/* Peak — Disney hang, higher apex [Step 2: -6px] */
-	8%   { transform: scale(3.5) translateX(0) translateY(-6px) rotate(3deg); }
+	8%   { transform: scale(4) translateX(0) translateY(-6px) rotate(3deg); }
 	/* Linger at top — weightless moment */
-	10%  { transform: scale(3.5) translateX(0) translateY(-5.5px) rotate(-1deg); }
+	10%  { transform: scale(4) translateX(0) translateY(-6px) rotate(-1deg); }
 	/* Falling fast */
-	12%  { transform: scale(3.5) translateX(0) translateY(-1px) rotate(1deg); }
+	12%  { transform: scale(4) translateX(0) translateY(-1px) rotate(1deg); }
 	/* LAND — satisfying squash full of weight */
-	14%  { transform: scale(3.5) translateX(0) translateY(1.5px) rotate(0deg); }
+	14%  { transform: scale(4) translateX(0) translateY(2px) rotate(0deg); }
 	/* Rebound spring */
-	16%  { transform: scale(3.5) translateX(0) translateY(-0.5px) rotate(-1deg); }
+	16%  { transform: scale(4) translateX(0) translateY(0px) rotate(-1deg); }
 	/* Settle with micro-wiggle */
-	18%  { transform: scale(3.5) translateX(0) translateY(0) rotate(0.5deg); }
-	19%  { transform: scale(3.5) translateX(0) translateY(0) rotate(0deg); }
+	18%  { transform: scale(4) translateX(0) translateY(0) rotate(0.5deg); }
+	19%  { transform: scale(4) translateX(0) translateY(0) rotate(0deg); }
 	/* ── Bounce 2: "Yep, let's go!" — smaller, breezy, quick confirmation ── */
 	/* Shallower squat [Step 2: 0.88 vs 0.85] */
-	21%  { transform: scale(3.5) translateX(0) translateY(0.8px) rotate(-1deg); }
+	21%  { transform: scale(4) translateX(0) translateY(1px) rotate(-1deg); }
 	/* Lower peak [Step 2: -3.5px] with distinct head tilt [Step 2: -3.5deg] */
-	23%  { transform: scale(3.5) translateX(0) translateY(-2.5px) rotate(2deg); }
-	25%  { transform: scale(3.5) translateX(0) translateY(-3.5px) rotate(-3.5deg); }
+	23%  { transform: scale(4) translateX(0) translateY(-2px) rotate(2deg); }
+	25%  { transform: scale(4) translateX(0) translateY(-4px) rotate(-3.5deg); }
 	/* Falling — quick, not lingering */
-	27%  { transform: scale(3.5) translateX(0) translateY(0.8px) rotate(0deg); }
+	27%  { transform: scale(4) translateX(0) translateY(1px) rotate(0deg); }
 	/* Compressed settle — two frames, breezy [Step 2: fewer settle frames] */
-	29%  { transform: scale(3.5) translateX(0) translateY(-0.3px) rotate(-0.5deg); }
-	31%  { transform: scale(3.5) translateX(0) translateY(0) rotate(0.2deg); }
-	33%  { transform: scale(3.5) translateX(0) translateY(0) rotate(0deg); }
+	29%  { transform: scale(4) translateX(0) translateY(0px) rotate(-0.5deg); }
+	31%  { transform: scale(4) translateX(0) translateY(0) rotate(0.2deg); }
+	33%  { transform: scale(4) translateX(0) translateY(0) rotate(0deg); }
 	/* ── Anticipation crouch — "what's over there?" — held pose [Step 3] ── */
 	/* Start slow crouch */
-	35%  { transform: scale(3.5) translateX(0) translateY(0) rotate(2deg); }
+	35%  { transform: scale(4) translateX(0) translateY(0) rotate(2deg); }
 	/* Deeper crouch — loading up with excitement */
-	36%  { transform: scale(3.5) translateX(0) translateY(0.5px) rotate(4deg); }
+	36%  { transform: scale(4) translateX(0) translateY(1px) rotate(4deg); }
 	/* HOLD the crouch — the "wound spring" beat [Step 3: held anticipation] */
-	37%  { transform: scale(3.5) translateX(0) translateY(0.5px) rotate(4deg); }
+	37%  { transform: scale(4) translateX(0) translateY(1px) rotate(4deg); }
 	/* Begin uncoiling — release into hop */
-	38%  { transform: scale(3.5) translateX(0) translateY(0.3px) rotate(3deg); }
+	38%  { transform: scale(4) translateX(0) translateY(0px) rotate(3deg); }
 	/* ── Hop right: two eager hops with body english (39-57%) [Step 4: eager] ── */
 	/* Squat for hop 1 — strong forward lean [Step 4: rotate 4deg] */
-	41%  { transform: scale(3.5) translateX(0) translateY(1px) rotate(4deg); }
+	41%  { transform: scale(4) translateX(0) translateY(1px) rotate(4deg); }
 	/* Airborne hop 1 — higher arc [Step 4: -3.5px] */
-	44%  { transform: scale(3.5) translateX(1.5px) translateY(-3.5px) rotate(-2deg); }
+	44%  { transform: scale(4) translateX(2px) translateY(-4px) rotate(-2deg); }
 	/* Land hop 1 with squash */
-	47%  { transform: scale(3.5) translateX(3px) translateY(1px) rotate(1deg); }
-	48%  { transform: scale(3.5) translateX(3px) translateY(0) rotate(0deg); }
+	47%  { transform: scale(4) translateX(3px) translateY(1px) rotate(1deg); }
+	48%  { transform: scale(4) translateX(3px) translateY(0) rotate(0deg); }
 	/* Squat for hop 2 — escalating excitement */
-	49%  { transform: scale(3.5) translateX(3px) translateY(1px) rotate(4deg); }
+	49%  { transform: scale(4) translateX(3px) translateY(1px) rotate(4deg); }
 	/* Airborne hop 2 — even higher [Step 4: -4px] */
-	52%  { transform: scale(3.5) translateX(4.5px) translateY(-4px) rotate(-2deg); }
+	52%  { transform: scale(4) translateX(4px) translateY(-4px) rotate(-2deg); }
 	/* Land hop 2 */
-	55%  { transform: scale(3.5) translateX(6px) translateY(1px) rotate(1deg); }
-	57%  { transform: scale(3.5) translateX(6px) translateY(0) rotate(0deg); }
+	55%  { transform: scale(4) translateX(6px) translateY(1px) rotate(1deg); }
+	57%  { transform: scale(4) translateX(6px) translateY(0) rotate(0deg); }
 	/* ── At +6px: curious look-around with micro-movements (57-70%) ── */
 	/* Tiny excited arrival bounce — "I'm here!" */
-	59%  { transform: scale(3.5) translateX(6px) translateY(0.5px) rotate(0deg); }
-	61%  { transform: scale(3.5) translateX(6px) translateY(-1.5px) rotate(-2deg); }
-	62%  { transform: scale(3.5) translateX(6px) translateY(0) rotate(0deg); }
+	59%  { transform: scale(4) translateX(6px) translateY(1px) rotate(0deg); }
+	61%  { transform: scale(4) translateX(6px) translateY(-2px) rotate(-2deg); }
+	62%  { transform: scale(4) translateX(6px) translateY(0) rotate(0deg); }
 	/* Lean left — looking back thoughtfully */
-	64%  { transform: scale(3.5) translateX(6px) translateY(0) rotate(-4deg); }
+	64%  { transform: scale(4) translateX(6px) translateY(0) rotate(-4deg); }
 	/* Lean right — peering further */
-	67%  { transform: scale(3.5) translateX(6px) translateY(0) rotate(3deg); }
+	67%  { transform: scale(4) translateX(6px) translateY(0) rotate(3deg); }
 	/* Settle center */
-	69%  { transform: scale(3.5) translateX(6px) translateY(0) rotate(0deg); }
-	70%  { transform: scale(3.5) translateX(6px) translateY(0) rotate(0deg); }
+	69%  { transform: scale(4) translateX(6px) translateY(0) rotate(0deg); }
+	70%  { transform: scale(4) translateX(6px) translateY(0) rotate(0deg); }
 	/* ── Hop back left — relaxed trot home (70-87%) [Step 4: relaxed] ── */
 	/* Squat — less lean than outbound [Step 4: rotate capped at 1.5deg] */
-	72%  { transform: scale(3.5) translateX(6px) translateY(1px) rotate(-1.5deg); }
+	72%  { transform: scale(4) translateX(6px) translateY(1px) rotate(-1.5deg); }
 	/* Airborne hop back 1 — lower arc [Step 4: -2.5px] */
-	75%  { transform: scale(3.5) translateX(4.5px) translateY(-2.5px) rotate(1.5deg); }
+	75%  { transform: scale(4) translateX(4px) translateY(-2px) rotate(1.5deg); }
 	/* Gentler landing squash [Step 4: 0.87 vs 0.78] */
-	78%  { transform: scale(3.5) translateX(3px) translateY(0.8px) rotate(-0.5deg); }
-	79%  { transform: scale(3.5) translateX(3px) translateY(0) rotate(0deg); }
+	78%  { transform: scale(4) translateX(3px) translateY(1px) rotate(-0.5deg); }
+	79%  { transform: scale(4) translateX(3px) translateY(0) rotate(0deg); }
 	/* Squat for hop back 2 — gentle [Step 4: wider spacing] */
-	81%  { transform: scale(3.5) translateX(3px) translateY(0.8px) rotate(-1.5deg); }
+	81%  { transform: scale(4) translateX(3px) translateY(1px) rotate(-1.5deg); }
 	/* Airborne hop back 2 — low easy arc [Step 4: -2.5px] */
-	84%  { transform: scale(3.5) translateX(1.5px) translateY(-2.5px) rotate(1.5deg); }
+	84%  { transform: scale(4) translateX(2px) translateY(-2px) rotate(1.5deg); }
 	/* Land at home — satisfying squash */
-	87%  { transform: scale(3.5) translateX(0) translateY(1px) rotate(0deg); }
+	87%  { transform: scale(4) translateX(0) translateY(1px) rotate(0deg); }
 	/* ── Expressive settle — asymmetric follow-through [Step 5] ── */
 	/* Overshoot — lean back catching balance */
-	89%  { transform: scale(3.5) translateX(0) translateY(-0.3px) rotate(-2.5deg); }
+	89%  { transform: scale(4) translateX(0) translateY(0px) rotate(-2.5deg); }
 	/* Counter-correct forward */
-	91%  { transform: scale(3.5) translateX(0) translateY(0) rotate(1.5deg); }
+	91%  { transform: scale(4) translateX(0) translateY(0) rotate(1.5deg); }
 	/* Damping — almost settled */
-	93%  { transform: scale(3.5) translateX(0) translateY(0) rotate(-0.5deg); }
+	93%  { transform: scale(4) translateX(0) translateY(0) rotate(-0.5deg); }
 	/* ── Moving hold / "satisfied sigh" — never fully static [Step 5] ── */
-	95%  { transform: scale(3.5) translateX(0) translateY(0) rotate(0.2deg); }
-	97%  { transform: scale(3.5) translateX(0) translateY(0) rotate(-0.15deg); }
-	99%  { transform: scale(3.5) translateX(0) translateY(0) rotate(0.1deg); }
-	100% { transform: scale(3.5) translateX(0) translateY(0) rotate(0deg); }
+	95%  { transform: scale(4) translateX(0) translateY(0) rotate(0.2deg); }
+	97%  { transform: scale(4) translateX(0) translateY(0) rotate(-0.15deg); }
+	99%  { transform: scale(4) translateX(0) translateY(0) rotate(0.1deg); }
+	100% { transform: scale(4) translateX(0) translateY(0) rotate(0deg); }
 }
 
 @keyframes blob-compact-shake-rigid {
 	/* Start normal, then increasingly frantic vibration */
-	0%   { transform: scale(3.5) translateX(0); }
-	8%   { transform: scale(3.5) translateX(-0.3px); }
-	16%  { transform: scale(3.5) translateX(0.3px); }
-	22%  { transform: scale(3.5) translateX(-0.5px); }
-	28%  { transform: scale(3.5) translateX(0.5px); }
-	34%  { transform: scale(3.5) translateX(-0.7px); }
-	40%  { transform: scale(3.5) translateX(0.7px); }
-	46%  { transform: scale(3.5) translateX(-0.8px); }
-	52%  { transform: scale(3.5) translateX(0.9px); }
-	58%  { transform: scale(3.5) translateX(-1px); }
-	64%  { transform: scale(3.5) translateX(1px); }
-	70%  { transform: scale(3.5) translateX(-1.1px); }
-	76%  { transform: scale(3.5) translateX(1.1px); }
-	82%  { transform: scale(3.5) translateX(-1.2px); }
-	88%  { transform: scale(3.5) translateX(1.2px); }
+	0%   { transform: scale(4) translateX(0); }
+	8%   { transform: scale(4) translateX(0px); }
+	16%  { transform: scale(4) translateX(0px); }
+	22%  { transform: scale(4) translateX(0px); }
+	28%  { transform: scale(4) translateX(0px); }
+	34%  { transform: scale(4) translateX(-1px); }
+	40%  { transform: scale(4) translateX(1px); }
+	46%  { transform: scale(4) translateX(-1px); }
+	52%  { transform: scale(4) translateX(1px); }
+	58%  { transform: scale(4) translateX(-1px); }
+	64%  { transform: scale(4) translateX(1px); }
+	70%  { transform: scale(4) translateX(-1px); }
+	76%  { transform: scale(4) translateX(1px); }
+	82%  { transform: scale(4) translateX(-1px); }
+	88%  { transform: scale(4) translateX(1px); }
 	/* Final crouch — anticipation before the squash hits */
-	95%  { transform: scale(3.5) translateX(0) translateY(-1px); }
-	100% { transform: scale(3.5) translateX(0) translateY(-1px); }
+	95%  { transform: scale(4) translateX(0) translateY(-1px); }
+	100% { transform: scale(4) translateX(0) translateY(-1px); }
 }
 
 @keyframes blob-compact-squash-rigid {
 	/* Start from crouched position (where shake ends) */
 	0% {
-		transform: scale(3.5) translateY(-1px);
+		transform: scale(4) translateY(-1px);
 	}
 	/* SLAM down — first big squash */
 	8% {
-		transform: scale(3.5) translateY(2px);
+		transform: scale(4) translateY(2px);
 	}
 	/* First press — moderate squash */
 	20% {
-		transform: scale(3.5) translateY(2px);
+		transform: scale(4) translateY(2px);
 	}
 	/* Partial recovery — but not full */
 	30% {
-		transform: scale(3.5) translateY(1px);
+		transform: scale(4) translateY(1px);
 	}
 	/* Second press — squashier */
 	42% {
-		transform: scale(3.5) translateY(2px);
+		transform: scale(4) translateY(2px);
 	}
 	/* Tiny recovery */
 	52% {
-		transform: scale(3.5) translateY(1px);
+		transform: scale(4) translateY(1px);
 	}
 	/* Third press — good squash but still recognizable */
 	65% {
-		transform: scale(3.5) translateY(3px);
+		transform: scale(4) translateY(3px);
 	}
 	/* Hold at maximum squash with a wobble */
 	75% {
-		transform: scale(3.5) translateY(3px);
+		transform: scale(4) translateY(3px);
 	}
 	82% {
-		transform: scale(3.5) translateY(3px);
+		transform: scale(4) translateY(3px);
 	}
 	/* Slowly ease back up for loop */
 	92% {
-		transform: scale(3.5) translateY(1px);
+		transform: scale(4) translateY(1px);
 	}
 	100% {
-		transform: scale(3.5) translateY(0);
+		transform: scale(4) translateY(0);
 	}
 }
 
 @keyframes blob-compact-pop-rigid {
 	/* Start from squashed */
 	0% {
-		transform: scale(3.5) translateY(3px);
+		transform: scale(4) translateY(3px);
 	}
 	/* Overshoot — spring tall */
 	40% {
-		transform: scale(3.5) translateY(-2px);
+		transform: scale(4) translateY(-2px);
 	}
 	/* Settle back */
 	70% {
-		transform: scale(3.5) translateY(0);
+		transform: scale(4) translateY(0);
 	}
 	100% {
-		transform: scale(3.5) translateY(0);
+		transform: scale(4) translateY(0);
 	}
 }
 
 @keyframes blob-enter-rigid {
 	0% {
-		transform: scale(3.5) translateX(-7px) translateY(0) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(0) rotate(0deg);
 	}
 	/* Squat before hop */
 	15% {
-		transform: scale(3.5) translateX(-7px) translateY(1px) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(1px) rotate(0deg);
 	}
 	/* Launch right */
 	35% {
-		transform: scale(3.5) translateX(-7px) translateY(-2px) rotate(3deg);
+		transform: scale(4) translateX(-7px) translateY(-2px) rotate(3deg);
 	}
 	55% {
-		transform: scale(3.5) translateX(-3px) translateY(-1px) rotate(-2deg);
+		transform: scale(4) translateX(-3px) translateY(-1px) rotate(-2deg);
 	}
 	/* Land with squash */
 	75% {
-		transform: scale(3.5) translateX(0) translateY(1px) rotate(1deg);
+		transform: scale(4) translateX(0) translateY(1px) rotate(1deg);
 	}
 	/* Settle */
 	100% {
-		transform: scale(3.5) translateX(0) translateY(0) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(0) rotate(0deg);
 	}
 }
 
 @keyframes blob-exit-rigid {
 	0% {
-		transform: scale(3.5) translateX(0) translateY(0) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(0) rotate(0deg);
 	}
 	20% {
-		transform: scale(3.5) translateX(0) translateY(1px) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(1px) rotate(0deg);
 	}
 	35% {
-		transform: scale(3.5) translateX(-1.5px) translateY(1px) rotate(-6deg);
+		transform: scale(4) translateX(-2px) translateY(1px) rotate(-6deg);
 	}
 	50% {
-		transform: scale(3.5) translateX(-3.5px) translateY(1px) rotate(4deg);
+		transform: scale(4) translateX(-4px) translateY(1px) rotate(4deg);
 	}
 	65% {
-		transform: scale(3.5) translateX(-5.5px) translateY(-2px) rotate(-2deg);
+		transform: scale(4) translateX(-6px) translateY(-2px) rotate(-2deg);
 	}
 	80% {
-		transform: scale(3.5) translateX(-7px) translateY(0) rotate(1deg);
+		transform: scale(4) translateX(-7px) translateY(0) rotate(1deg);
 	}
 	100% {
-		transform: scale(3.5) translateX(-7px) translateY(0) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(0) rotate(0deg);
 	}
 }
 
 @keyframes blob-enter-roll-rigid {
 	0% {
-		transform: scale(3.5) translateX(-7px) translateY(0) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(0) rotate(0deg);
 	}
 	/* Squat */
 	12% {
-		transform: scale(3.5) translateX(-7px) translateY(1px) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(1px) rotate(0deg);
 	}
 	/* Launch up spinning */
 	30% {
-		transform: scale(3.5) translateX(-7px) translateY(-5px) rotate(120deg);
+		transform: scale(4) translateX(-7px) translateY(-5px) rotate(120deg);
 	}
 	/* Peak — mid roll */
 	50% {
-		transform: scale(3.5) translateX(-4px) translateY(-7px) rotate(250deg);
+		transform: scale(4) translateX(-4px) translateY(-7px) rotate(250deg);
 	}
 	/* Coming down */
 	70% {
-		transform: scale(3.5) translateX(-1px) translateY(-3px) rotate(340deg);
+		transform: scale(4) translateX(-1px) translateY(-3px) rotate(340deg);
 	}
 	/* Land with squash */
 	85% {
-		transform: scale(3.5) translateX(0) translateY(1px) rotate(360deg);
+		transform: scale(4) translateX(0) translateY(1px) rotate(360deg);
 	}
 	/* Settle */
 	100% {
-		transform: scale(3.5) translateX(0) translateY(0) rotate(360deg);
+		transform: scale(4) translateX(0) translateY(0) rotate(360deg);
 	}
 }
 
 @keyframes blob-exit-roll-rigid {
 	0% {
-		transform: scale(3.5) translateX(0) translateY(0) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(0) rotate(0deg);
 	}
 	/* Squat before launch */
 	12% {
-		transform: scale(3.5) translateX(0) translateY(1px) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(1px) rotate(0deg);
 	}
 	/* Launch up and start spinning */
 	30% {
-		transform: scale(3.5) translateX(-2px) translateY(-5px) rotate(-120deg);
+		transform: scale(4) translateX(-2px) translateY(-5px) rotate(-120deg);
 	}
 	/* Peak of arc — mid roll */
 	50% {
-		transform: scale(3.5) translateX(-4px) translateY(-7px) rotate(-250deg);
+		transform: scale(4) translateX(-4px) translateY(-7px) rotate(-250deg);
 	}
 	/* Coming down, finishing roll */
 	70% {
-		transform: scale(3.5) translateX(-6px) translateY(-3px) rotate(-340deg);
+		transform: scale(4) translateX(-6px) translateY(-3px) rotate(-340deg);
 	}
 	/* Land with squash */
 	85% {
-		transform: scale(3.5) translateX(-7px) translateY(1px) rotate(-360deg);
+		transform: scale(4) translateX(-7px) translateY(1px) rotate(-360deg);
 	}
 	/* Settle */
 	100% {
-		transform: scale(3.5) translateX(-7px) translateY(0) rotate(-360deg);
+		transform: scale(4) translateX(-7px) translateY(0) rotate(-360deg);
 	}
 }
 
@@ -2484,68 +2485,66 @@ html {
 .bobbit-blob--enter .bobbit-blob__sprite {
 	animation:
 		blob-enter 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 /* Entry animation B — barrel roll from idle into center */
 .bobbit-blob--enter-roll .bobbit-blob__sprite {
 	animation:
 		blob-enter-roll 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 @keyframes blob-enter {
 	0% {
-		transform: scale(3.5) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 	/* Squat before hop */
 	15% {
-		transform: scale(3.5) translateX(-7px) translateY(1px) scaleX(1.25) scaleY(0.65) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(1px) scaleX(1.25) scaleY(0.65) rotate(0deg);
 	}
 	/* Launch right */
 	35% {
-		transform: scale(3.5) translateX(-7px) translateY(-2px) scaleX(0.9) scaleY(1.1) rotate(3deg);
+		transform: scale(4) translateX(-7px) translateY(-2px) scaleX(0.9) scaleY(1.1) rotate(3deg);
 	}
 	55% {
-		transform: scale(3.5) translateX(-3px) translateY(-1px) scaleX(1) scaleY(1) rotate(-2deg);
+		transform: scale(4) translateX(-3px) translateY(-1px) scaleX(1) scaleY(1) rotate(-2deg);
 	}
 	/* Land with squash */
 	75% {
-		transform: scale(3.5) translateX(0) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(1deg);
+		transform: scale(4) translateX(0) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(1deg);
 	}
 	/* Settle */
 	100% {
-		transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 }
 
 @keyframes blob-enter-roll {
 	0% {
-		transform: scale(3.5) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(0) scaleX(1) scaleY(1) rotate(0deg);
 	}
 	/* Squat */
 	12% {
-		transform: scale(3.5) translateX(-7px) translateY(1px) scaleX(1.2) scaleY(0.7) rotate(0deg);
+		transform: scale(4) translateX(-7px) translateY(1px) scaleX(1.2) scaleY(0.7) rotate(0deg);
 	}
 	/* Launch up spinning */
 	30% {
-		transform: scale(3.5) translateX(-7px) translateY(-5px) scaleX(0.9) scaleY(1.1) rotate(120deg);
+		transform: scale(4) translateX(-7px) translateY(-5px) scaleX(0.9) scaleY(1.1) rotate(120deg);
 	}
 	/* Peak — mid roll */
 	50% {
-		transform: scale(3.5) translateX(-4px) translateY(-7px) scaleX(1) scaleY(1) rotate(250deg);
+		transform: scale(4) translateX(-4px) translateY(-7px) scaleX(1) scaleY(1) rotate(250deg);
 	}
 	/* Coming down */
 	70% {
-		transform: scale(3.5) translateX(-1px) translateY(-3px) scaleX(1) scaleY(1) rotate(340deg);
+		transform: scale(4) translateX(-1px) translateY(-3px) scaleX(1) scaleY(1) rotate(340deg);
 	}
 	/* Land with squash */
 	85% {
-		transform: scale(3.5) translateX(0) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(360deg);
+		transform: scale(4) translateX(0) translateY(1px) scaleX(1.15) scaleY(0.85) rotate(360deg);
 	}
 	/* Settle */
 	100% {
-		transform: scale(3.5) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(360deg);
+		transform: scale(4) translateX(0) translateY(0) scaleX(1) scaleY(1) rotate(360deg);
 	}
 }
 
@@ -2565,7 +2564,6 @@ html {
 .bobbit-blob--compact-shake .bobbit-blob__sprite {
 	animation:
 		blob-compact-shake 0.8s ease-in-out forwards !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 .bobbit-blob--compact-shake .bobbit-blob__shadow {
@@ -2579,31 +2577,30 @@ html {
 
 @keyframes blob-compact-shake {
 	/* Start normal, then increasingly frantic vibration */
-	0%   { transform: scale(3.5) translateX(0); }
-	8%   { transform: scale(3.5) translateX(-0.3px); }
-	16%  { transform: scale(3.5) translateX(0.3px); }
-	22%  { transform: scale(3.5) translateX(-0.5px) scaleY(1.03); }
-	28%  { transform: scale(3.5) translateX(0.5px) scaleY(0.97); }
-	34%  { transform: scale(3.5) translateX(-0.7px) scaleY(1.05); }
-	40%  { transform: scale(3.5) translateX(0.7px) scaleY(0.95); }
-	46%  { transform: scale(3.5) translateX(-0.8px) scaleY(1.06); }
-	52%  { transform: scale(3.5) translateX(0.9px) scaleY(0.94); }
-	58%  { transform: scale(3.5) translateX(-1px) scaleY(1.08); }
-	64%  { transform: scale(3.5) translateX(1px) scaleY(0.92); }
-	70%  { transform: scale(3.5) translateX(-1.1px) scaleY(1.1); }
-	76%  { transform: scale(3.5) translateX(1.1px) scaleY(0.9); }
-	82%  { transform: scale(3.5) translateX(-1.2px) scaleY(1.12); }
-	88%  { transform: scale(3.5) translateX(1.2px) scaleY(0.88); }
+	0%   { transform: scale(4) translateX(0); }
+	8%   { transform: scale(4) translateX(0px); }
+	16%  { transform: scale(4) translateX(0px); }
+	22%  { transform: scale(4) translateX(0px) scaleY(1.03); }
+	28%  { transform: scale(4) translateX(0px) scaleY(0.97); }
+	34%  { transform: scale(4) translateX(-1px) scaleY(1.05); }
+	40%  { transform: scale(4) translateX(1px) scaleY(0.95); }
+	46%  { transform: scale(4) translateX(-1px) scaleY(1.06); }
+	52%  { transform: scale(4) translateX(1px) scaleY(0.94); }
+	58%  { transform: scale(4) translateX(-1px) scaleY(1.08); }
+	64%  { transform: scale(4) translateX(1px) scaleY(0.92); }
+	70%  { transform: scale(4) translateX(-1px) scaleY(1.1); }
+	76%  { transform: scale(4) translateX(1px) scaleY(0.9); }
+	82%  { transform: scale(4) translateX(-1px) scaleY(1.12); }
+	88%  { transform: scale(4) translateX(1px) scaleY(0.88); }
 	/* Final crouch — anticipation before the squash hits */
-	95%  { transform: scale(3.5) translateX(0) scaleX(0.9) scaleY(1.15) translateY(-1px); }
-	100% { transform: scale(3.5) translateX(0) scaleX(0.9) scaleY(1.15) translateY(-1px); }
+	95%  { transform: scale(4) translateX(0) scaleX(0.9) scaleY(1.15) translateY(-1px); }
+	100% { transform: scale(4) translateX(0) scaleX(0.9) scaleY(1.15) translateY(-1px); }
 }
 
 /* Compacting state — progressive squash, looping */
 .bobbit-blob--compacting .bobbit-blob__sprite {
 	animation:
 		blob-compact-squash 3s ease-in-out infinite !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 /* Hide shadow during squash — the sprite's scaleX/scaleY changes make
@@ -2621,45 +2618,45 @@ html {
 @keyframes blob-compact-squash {
 	/* Start from crouched position (where shake ends) */
 	0% {
-		transform: scale(3.5) scaleX(0.9) scaleY(1.15) translateY(-1px);
+		transform: scale(4) scaleX(0.9) scaleY(1.15) translateY(-1px);
 	}
 	/* SLAM down — first big squash */
 	8% {
-		transform: scale(3.5) scaleX(1.2) scaleY(0.7) translateY(2px);
+		transform: scale(4) scaleX(1.2) scaleY(0.7) translateY(2px);
 	}
 	/* First press — moderate squash */
 	20% {
-		transform: scale(3.5) scaleX(1.15) scaleY(0.75) translateY(2px);
+		transform: scale(4) scaleX(1.15) scaleY(0.75) translateY(2px);
 	}
 	/* Partial recovery — but not full */
 	30% {
-		transform: scale(3.5) scaleX(1.05) scaleY(0.88) translateY(1px);
+		transform: scale(4) scaleX(1.05) scaleY(0.88) translateY(1px);
 	}
 	/* Second press — squashier */
 	42% {
-		transform: scale(3.5) scaleX(1.25) scaleY(0.6) translateY(2px);
+		transform: scale(4) scaleX(1.25) scaleY(0.6) translateY(2px);
 	}
 	/* Tiny recovery */
 	52% {
-		transform: scale(3.5) scaleX(1.12) scaleY(0.72) translateY(1px);
+		transform: scale(4) scaleX(1.12) scaleY(0.72) translateY(1px);
 	}
 	/* Third press — good squash but still recognizable */
 	65% {
-		transform: scale(3.5) scaleX(1.35) scaleY(0.5) translateY(3px);
+		transform: scale(4) scaleX(1.35) scaleY(0.5) translateY(3px);
 	}
 	/* Hold at maximum squash with a wobble */
 	75% {
-		transform: scale(3.5) scaleX(1.38) scaleY(0.48) translateY(3px);
+		transform: scale(4) scaleX(1.38) scaleY(0.48) translateY(3px);
 	}
 	82% {
-		transform: scale(3.5) scaleX(1.32) scaleY(0.52) translateY(3px);
+		transform: scale(4) scaleX(1.32) scaleY(0.52) translateY(3px);
 	}
 	/* Slowly ease back up for loop */
 	92% {
-		transform: scale(3.5) scaleX(1.1) scaleY(0.8) translateY(1px);
+		transform: scale(4) scaleX(1.1) scaleY(0.8) translateY(1px);
 	}
 	100% {
-		transform: scale(3.5) scaleX(1) scaleY(1) translateY(0);
+		transform: scale(4) scaleX(1) scaleY(1) translateY(0);
 	}
 }
 
@@ -2694,7 +2691,6 @@ html {
 .bobbit-blob--compact-pop .bobbit-blob__sprite {
 	animation:
 		blob-compact-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 .bobbit-blob--compact-pop .bobbit-blob__shadow {
@@ -2709,26 +2705,25 @@ html {
 @keyframes blob-compact-pop {
 	/* Start from squashed */
 	0% {
-		transform: scale(3.5) scaleX(1.35) scaleY(0.5) translateY(3px);
+		transform: scale(4) scaleX(1.35) scaleY(0.5) translateY(3px);
 	}
 	/* Overshoot — spring tall */
 	40% {
-		transform: scale(3.5) scaleX(0.8) scaleY(1.3) translateY(-2px);
+		transform: scale(4) scaleX(0.8) scaleY(1.3) translateY(-2px);
 	}
 	/* Settle back */
 	70% {
-		transform: scale(3.5) scaleX(1.05) scaleY(0.95) translateY(0);
+		transform: scale(4) scaleX(1.05) scaleY(0.95) translateY(0);
 	}
 	100% {
-		transform: scale(3.5) scaleX(1) scaleY(1) translateY(0);
+		transform: scale(4) scaleX(1) scaleY(1) translateY(0);
 	}
 }
 
 /* Idle state — sitting still, offset left, eyes looking around */
 .bobbit-blob--idle .bobbit-blob__sprite {
-	transform: scale(3.5) translateX(-7px);
+	transform: scale(4) translateX(-7px);
 	animation: blob-idle-eyes 10s steps(1) infinite !important;
-	filter: drop-shadow(0 0 0.3px black);
 }
 
 /* Idle eye cycle: center → look at user → blink left → look up-right →
@@ -2737,47 +2732,47 @@ html {
    Timing is irregular (22%, 67%, 93%) to feel natural. */
 @keyframes blob-idle-eyes {
 	/* 0% — Center eyes */
-	0% { transform: scale(3.5) translateX(-7px); box-shadow:
+	0% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #1a3010, 4px 4px 0 #8ec63f, 5px 4px 0 #8ec63f, 6px 4px 0 #1a3010, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #1a3010, 4px 5px 0 #8ec63f, 5px 5px 0 #8ec63f, 6px 5px 0 #1a3010, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 10% — Look left (at user) */
-	10% { transform: scale(3.5) translateX(-7px); box-shadow:
+	10% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #1a3010, 3px 4px 0 #8ec63f, 4px 4px 0 #8ec63f, 5px 4px 0 #1a3010, 6px 4px 0 #8ec63f, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #1a3010, 3px 5px 0 #8ec63f, 4px 5px 0 #8ec63f, 5px 5px 0 #1a3010, 6px 5px 0 #8ec63f, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 22% — Left-blink: pupils squish to row 5 at left position (2,5 + 5,5) */
-	22% { transform: scale(3.5) translateX(-7px); box-shadow:
+	22% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #8ec63f, 4px 4px 0 #8ec63f, 5px 4px 0 #8ec63f, 6px 4px 0 #8ec63f, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #1a3010, 3px 5px 0 #8ec63f, 4px 5px 0 #8ec63f, 5px 5px 0 #1a3010, 6px 5px 0 #8ec63f, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 25% — Look up-right (at chat history) */
-	25% { transform: scale(3.5) translateX(-7px); box-shadow:
+	25% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #1a3010, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #1a3010, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #8ec63f, 4px 4px 0 #1a3010, 5px 4px 0 #8ec63f, 6px 4px 0 #8ec63f, 7px 4px 0 #1a3010, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #8ec63f, 4px 5px 0 #8ec63f, 5px 5px 0 #8ec63f, 6px 5px 0 #8ec63f, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 45% — Center eyes */
-	45% { transform: scale(3.5) translateX(-7px); box-shadow:
+	45% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #1a3010, 4px 4px 0 #8ec63f, 5px 4px 0 #8ec63f, 6px 4px 0 #1a3010, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #1a3010, 4px 5px 0 #8ec63f, 5px 5px 0 #8ec63f, 6px 5px 0 #1a3010, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 55% — Look right (at chat area) */
-	55% { transform: scale(3.5) translateX(-7px); box-shadow:
+	55% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #8ec63f, 4px 4px 0 #1a3010, 5px 4px 0 #8ec63f, 6px 4px 0 #8ec63f, 7px 4px 0 #1a3010, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #8ec63f, 4px 5px 0 #1a3010, 5px 5px 0 #8ec63f, 6px 5px 0 #8ec63f, 7px 5px 0 #1a3010, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 67% — Right-blink: pupils squish to row 5 at right position (4,5 + 7,5) */
-	67% { transform: scale(3.5) translateX(-7px); box-shadow:
+	67% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #8ec63f, 4px 4px 0 #8ec63f, 5px 4px 0 #8ec63f, 6px 4px 0 #8ec63f, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #8ec63f, 4px 5px 0 #1a3010, 5px 5px 0 #8ec63f, 6px 5px 0 #8ec63f, 7px 5px 0 #1a3010, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 70% — Look up-right (at chat history) */
-	70% { transform: scale(3.5) translateX(-7px); box-shadow:
+	70% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #1a3010, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #1a3010, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #8ec63f, 4px 4px 0 #1a3010, 5px 4px 0 #8ec63f, 6px 4px 0 #8ec63f, 7px 4px 0 #1a3010, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #8ec63f, 4px 5px 0 #8ec63f, 5px 5px 0 #8ec63f, 6px 5px 0 #8ec63f, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 85% — Back to center */
-	85% { transform: scale(3.5) translateX(-7px); box-shadow:
+	85% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #1a3010, 4px 4px 0 #8ec63f, 5px 4px 0 #8ec63f, 6px 4px 0 #1a3010, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #1a3010, 4px 5px 0 #8ec63f, 5px 5px 0 #8ec63f, 6px 5px 0 #1a3010, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 93% — Center-blink: third blink breaks the two-blink pattern */
-	93% { transform: scale(3.5) translateX(-7px); box-shadow:
+	93% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #8ec63f, 4px 4px 0 #8ec63f, 5px 4px 0 #8ec63f, 6px 4px 0 #8ec63f, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #1a3010, 4px 5px 0 #8ec63f, 5px 5px 0 #8ec63f, 6px 5px 0 #1a3010, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 	/* 96% — Center eyes (recover from blink, hold to loop) */
-	96% { transform: scale(3.5) translateX(-7px); box-shadow:
+	96% { transform: scale(4) translateX(-7px); box-shadow:
 		3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #000, 2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000, 1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000, 0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000, 0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #1a3010, 4px 4px 0 #8ec63f, 5px 4px 0 #8ec63f, 6px 4px 0 #1a3010, 7px 4px 0 #8ec63f, 8px 4px 0 #8ec63f, 9px 4px 0 #000, 0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #1a3010, 4px 5px 0 #8ec63f, 5px 5px 0 #8ec63f, 6px 5px 0 #1a3010, 7px 5px 0 #8ec63f, 8px 5px 0 #8ec63f, 9px 5px 0 #000, 0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000, 1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000, 2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
 	}
 }
@@ -2807,39 +2802,39 @@ html {
 /* Reptilian shimmer — subtle pearlescent skin shift */
 @keyframes blob-shimmer {
 	0%, 100% {
-		filter: hue-rotate(0deg) brightness(1) saturate(1) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(0deg) brightness(1) saturate(1);
 		opacity: 0.94;
 	}
 	10% {
-		filter: hue-rotate(8deg) brightness(1.04) saturate(1.05) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(8deg) brightness(1.04) saturate(1.05);
 		opacity: 0.93;
 	}
 	22% {
-		filter: hue-rotate(25deg) brightness(1.08) saturate(1.15) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(25deg) brightness(1.08) saturate(1.15);
 		opacity: 0.9;
 	}
 	32% {
-		filter: hue-rotate(35deg) brightness(1.1) saturate(1.18) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(35deg) brightness(1.1) saturate(1.18);
 		opacity: 0.89;
 	}
 	42% {
-		filter: hue-rotate(20deg) brightness(1.06) saturate(1.1) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(20deg) brightness(1.06) saturate(1.1);
 		opacity: 0.91;
 	}
 	52% {
-		filter: hue-rotate(3deg) brightness(1.01) saturate(1.02) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(3deg) brightness(1.01) saturate(1.02);
 		opacity: 0.94;
 	}
 	65% {
-		filter: hue-rotate(-5deg) brightness(1) saturate(1.05) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(-5deg) brightness(1) saturate(1.05);
 		opacity: 0.93;
 	}
 	78% {
-		filter: hue-rotate(28deg) brightness(1.09) saturate(1.15) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(28deg) brightness(1.09) saturate(1.15);
 		opacity: 0.9;
 	}
 	88% {
-		filter: hue-rotate(14deg) brightness(1.05) saturate(1.08) drop-shadow(0 0 0.3px black);
+		filter: hue-rotate(14deg) brightness(1.05) saturate(1.08);
 		opacity: 0.93;
 	}
 }

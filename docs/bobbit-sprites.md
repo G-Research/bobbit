@@ -31,7 +31,7 @@ The native sprite grid is **10 columns × 9 rows** (coordinates 0–9 horizontal
 | Context | Scale | Display size | CSS |
 |---------|-------|-------------|-----|
 | Sidebar | 1.6× | ~16×14px | `transform: scale(1.6)` |
-| Chat blob | 3.5× | ~35×31px | `transform: scale(3.5)` |
+| Chat blob | 4× | ~40×36px | `transform: scale(4)` |
 | Role page inline | Variable | Arbitrary via outer container | Viewport wrapper with `transform: scale(size/66)` |
 
 ### image-rendering: pixelated
