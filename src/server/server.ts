@@ -115,6 +115,10 @@ export function createGateway(config: GatewayConfig) {
 
 	const colorStore = new ColorStore();
 	const preferencesStore = new PreferencesStore();
+	const savedCwd = preferencesStore.get("defaultCwd");
+	if (savedCwd && typeof savedCwd === "string") {
+		config.defaultCwd = savedCwd;
+	}
 	const personalityStore = new PersonalityStore();
 	const personalityManager = new PersonalityManager(personalityStore);
 	fs.mkdirSync(bobbitStateDir(), { recursive: true });
@@ -766,6 +770,27 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// ── Config: default cwd ──
+
+	// GET /api/config/cwd
+	if (url.pathname === "/api/config/cwd" && req.method === "GET") {
+		json({ cwd: config.defaultCwd });
+		return;
+	}
+
+	// PUT /api/config/cwd
+	if (url.pathname === "/api/config/cwd" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body?.cwd || typeof body.cwd !== "string") {
+			json({ error: "Missing or invalid cwd" }, 400);
+			return;
+		}
+		config.defaultCwd = body.cwd;
+		preferencesStore.set("defaultCwd", body.cwd);
+		json({ cwd: config.defaultCwd });
+		return;
 	}
 
 	// ── Preferences ──

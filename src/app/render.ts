@@ -319,7 +319,6 @@ function goalPreviewPanel() {
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
 					${cwdCombobox({
 						value: state.previewCwd,
-						placeholder: "(server default)",
 						onInput: (v) => {
 							state.previewCwd = v;
 							state.previewCwdEdited = true;
@@ -985,7 +984,7 @@ function staffPreviewPanel() {
 					${Input({
 						type: "text",
 						value: state.staffPreviewCwd,
-						placeholder: "(server default)",
+						placeholder: (state as any).defaultCwd || "(server default)",
 						onInput: (e: Event) => {
 							state.staffPreviewCwd = (e.target as HTMLInputElement).value;
 							state.staffPreviewCwdEdited = true;
@@ -1277,7 +1276,6 @@ function goalProposalPanel() {
 				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
 				${cwdCombobox({
 					value: _proposalCwd,
-					placeholder: "(server default)",
 					onInput: (v) => { _proposalCwd = v; renderApp(); },
 					onSelect: (v) => { _proposalCwd = v; renderApp(); },
 					dropdownOpen: _proposalCwdDropdownOpen,

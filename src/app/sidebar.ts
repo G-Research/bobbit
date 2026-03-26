@@ -18,6 +18,7 @@ import {
 	type GoalState,
 } from "./state.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
+import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
@@ -36,6 +37,9 @@ let _personalitiesLoaded = false;
 let _pickerRole = "";
 /** Currently selected personalities in the picker. */
 let _pickerPersonalities = new Set<string>();
+let _pickerCwd = "";
+let _pickerCwdDropdownOpen = false;
+let _pickerCwdHighlightIndex = -1;
 /** Goal ID context for the picker (if launched from a goal). */
 let _pickerGoalId: string | undefined;
 
@@ -55,6 +59,9 @@ export async function toggleRolePicker(e: Event, goalId?: string): Promise<void>
 	}
 	_pickerRole = "";
 	_pickerPersonalities = new Set();
+	_pickerCwd = "";
+	_pickerCwdDropdownOpen = false;
+	_pickerCwdHighlightIndex = -1;
 	_pickerGoalId = goalId;
 	if (state.roles.length === 0) await fetchRoles();
 	await ensurePersonalitiesLoaded();
@@ -80,7 +87,10 @@ export function renderRolePickerDropdown() {
 	const doCreate = () => {
 		state.rolePickerOpen = false;
 		const personalities = [..._pickerPersonalities];
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined);
+		const cwd = _pickerCwd || undefined;
+		_pickerCwd = "";
+		_pickerCwdDropdownOpen = false;
+		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
 	};
 
 	return html`
@@ -117,6 +127,19 @@ export function renderRolePickerDropdown() {
 							${_pickerRole === role.name ? html`<span class="text-primary text-xs">✓</span>` : ""}
 						</button>
 					`)}
+			</div>
+			<!-- Working Directory -->
+			<div class="border-t border-border/50 px-3 py-2" style="overflow: visible;">
+				<div class="text-[10px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
+				${cwdCombobox({
+					value: _pickerCwd,
+					onInput: (v: string) => { _pickerCwd = v; renderApp(); },
+					onSelect: (v: string) => { _pickerCwd = v; _pickerCwdDropdownOpen = false; renderApp(); },
+					dropdownOpen: _pickerCwdDropdownOpen,
+					onToggle: (open: boolean) => { _pickerCwdDropdownOpen = open; renderApp(); },
+					highlightedIndex: _pickerCwdHighlightIndex,
+					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; renderApp(); },
+				})}
 			</div>
 			<!-- Create button -->
 			<div class="border-t border-border/50 px-3 py-2">
