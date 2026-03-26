@@ -268,7 +268,7 @@ export function renderSessionRow(session: GatewaySession) {
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
 			<div class="flex-1 min-w-0 flex flex-col justify-center">
-				<div class="${mobile ? "flex items-baseline gap-1 min-w-0" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
+				<div class="${mobile ? "flex items-center gap-1 min-w-0" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 				${session.personalities && session.personalities.length > 0 ? html`
 					<div class="flex flex-wrap gap-0.5 mt-0.5">
 						${session.personalities.map((t) => html`<span
@@ -282,7 +282,7 @@ export function renderSessionRow(session: GatewaySession) {
 			${mobile
 				? buttons
 				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					<span class="group-hover:hidden">${renderSessionTime(session, active)}</span>
+					<span class="group-hover:hidden flex items-center">${renderSessionTime(session, active)}</span>
 					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 						${buttons}
 					</div>
@@ -417,11 +417,11 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory)}
 			</div>
-			<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
+			<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 			${mobile
 				? buttons
 				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					<span class="group-hover:hidden">${renderSessionTime(session, active)}</span>
+					<span class="group-hover:hidden flex items-center">${renderSessionTime(session, active)}</span>
 					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 						${buttons}
 					</div>
