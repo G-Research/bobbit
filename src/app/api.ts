@@ -213,24 +213,26 @@ export async function refreshPrStatusCache() {
 		goalsWithBranch.map(async (g) => {
 			try {
 				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status`);
-				if (!res.ok) return { goalId: g.id, pr: null };
+				if (res.status === 404) return { goalId: g.id, pr: null, noPr: true };
+				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
 				const data = await res.json();
-				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string } };
+				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string }, noPr: false };
 			} catch {
-				return { goalId: g.id, pr: null };
+				return { goalId: g.id, pr: null, noPr: false };
 			}
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, pr } of results) {
+	for (const { goalId, pr, noPr } of results) {
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
 			if (!prev || prev.state !== pr.state || prev.reviewDecision !== pr.reviewDecision) {
 				state.prStatusCache.set(goalId, pr);
 				changed = true;
 			}
-		} else if (prev) {
+		} else if (noPr && prev) {
+			// Only clear cache on explicit 404 (no PR exists), not on transient errors
 			state.prStatusCache.delete(goalId);
 			changed = true;
 		}
