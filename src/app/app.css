@@ -64,22 +64,43 @@ theme-toggle button {
 /* ============================================================================
  * SIDEBAR SESSION — active state
  * ============================================================================ */
+/* ── Active session: primary tint fill + gradient border (strong left, subtle right) ── */
 .sidebar-session-active {
 	position: relative;
-	/* Light mode: sidebar (L=0.915) vs secondary (L=0.905) is only 0.01 apart —
-	   mix secondary with foreground to boost contrast across all palettes. */
-	background: color-mix(in oklch, var(--secondary) 82%, var(--foreground)) !important;
+	background: oklch(from var(--primary) l c h / 0.12) !important;
+	color: var(--foreground) !important;
+	border-radius: 6px;
 }
-.dark .sidebar-session-active {
-	background: color-mix(in oklch, var(--secondary) 94%, var(--foreground)) !important;
+.sidebar-session-active::before {
+	content: '';
+	position: absolute;
+	inset: -1.5px -1.5px -1.5px -1.5px;
+	border-radius: 6px;
+	padding: 1.5px;
+	background: linear-gradient(90deg, var(--primary) 0%, oklch(from var(--primary) l c h / 0.4) 100%);
+	-webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+	mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+	-webkit-mask-composite: xor;
+	mask-composite: exclude;
+	pointer-events: none;
+	z-index: 2;
 }
 
-/* Action buttons overlay: match the active row background */
-.sidebar-session-active .sidebar-actions {
-	background: linear-gradient(to right, transparent 0%, color-mix(in oklch, var(--secondary) 82%, var(--foreground)) 50%) !important;
+/* No-chevron rows: pull left edge inward */
+.sidebar-active-no-chevron {
+	background: linear-gradient(90deg, transparent 6px, oklch(from var(--primary) l c h / 0.12) 6px) !important;
 }
-.dark .sidebar-session-active .sidebar-actions {
-	background: linear-gradient(to right, transparent 0%, color-mix(in oklch, var(--secondary) 94%, var(--foreground)) 50%) !important;
+.sidebar-active-no-chevron::before {
+	inset: -1.5px -1.5px -1.5px 6px !important;
+}
+
+/* Gradient overlay (time + action buttons): match the active row's composited appearance.
+   The tint is 12% primary over the sidebar background — approximate the composited result
+   by mixing them explicitly so the fade-in gradient matches. */
+.sidebar-session-active > .absolute {
+	background: linear-gradient(to right, transparent 0%, color-mix(in oklch, var(--primary) 12%, var(--sidebar)) 50%) !important;
+	border-radius: 6px;
+	z-index: 1;
 }
 
 /* ============================================================================

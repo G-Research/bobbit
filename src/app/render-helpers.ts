@@ -249,7 +249,7 @@ export function renderSessionRow(session: GatewaySession) {
 	return html`
 		<div
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
-				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
@@ -281,7 +281,7 @@ export function renderSessionRow(session: GatewaySession) {
 			</div>
 			${mobile
 				? buttons
-				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, ${active ? "var(--color-secondary)" : "var(--sidebar)"} 50%);">
+				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 					${renderSessionTime(session, active)}
 					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 						${buttons}
@@ -321,7 +321,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	return html`
 		<div
 			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm opacity-70
-				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px; filter:grayscale(1);"
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 			title="${displayTitle} (archived)"
@@ -420,7 +420,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 			${mobile
 				? buttons
-				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, ${active ? "var(--color-secondary)" : "var(--sidebar)"} 50%);">
+				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 					${renderSessionTime(session, active)}
 					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 						${buttons}
