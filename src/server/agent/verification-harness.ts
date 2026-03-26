@@ -846,10 +846,11 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
-			// On Windows, use cmd.exe for npm/node commands, Git Bash for commands with Unix tools (grep, etc.)
-			const needsUnixShell = /\b(grep|awk|sed|cat|head|tail|wc|sort|uniq|xargs|find\s)\b/.test(command);
+			// On Windows, always use Git Bash so that bash syntax (pipes, redirects like
+			// 2>/dev/null, $(), etc.) works reliably. Falling back to cmd.exe only if
+			// Git Bash is unavailable.
 			let child;
-			if (process.platform === "win32" && needsUnixShell && GIT_BASH) {
+			if (process.platform === "win32" && GIT_BASH) {
 				child = spawn(GIT_BASH, ["--login", "-c", command], {
 					cwd: normalizedCwd,
 					timeout: timeoutSec * 1000,
