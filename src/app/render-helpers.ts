@@ -174,13 +174,13 @@ export function stopTimeRefresh(): void {
 // SESSION TIME + UNSEEN BADGE
 // ============================================================================
 
-/** Render session title with Mexican wave font-weight when active. */
+/** Render session title with a subtle rolling weight increase when active. */
 export function renderSessionTitle(title: string, isActive?: boolean) {
 	if (!isActive) return title;
 	const chars = title.split("");
-	// Wave takes ~3s to roll through; total cycle = roll + dwell
-	const roll = 3;
-	const dur = roll + 2; // seconds for full cycle
+	const roll = 3.5; // seconds for wave to cross full title
+	const dwell = 1.5; // pause before next wave
+	const dur = roll + dwell;
 	const stagger = chars.length > 1 ? roll / chars.length : 0;
 	return html`<span class="title-wave" style="--tw-dur:${dur}s">${chars.map((ch, i) =>
 		html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch === " " ? "\u00a0" : ch}</span>`

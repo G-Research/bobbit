@@ -26,6 +26,15 @@ import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArch
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
+/** Preview the worktree path that goal-manager will create. */
+function worktreePreviewPath(cwd: string, title: string): string {
+	const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+	const lastSlash = normalized.lastIndexOf("/");
+	const parent = lastSlash > 0 ? normalized.slice(0, lastSlash) : normalized;
+	const base = lastSlash > 0 ? normalized.slice(lastSlash + 1) : normalized;
+	const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 10) || "goal";
+	return `${parent}/${base}-wt/goal-${slug}-{id}/`;
+}
 
 function skipSetup(): void {
 	dismissSetup();
@@ -356,7 +365,7 @@ function goalPreviewPanel() {
 						highlightedIndex: state.cwdHighlightIndex,
 						onHighlight: (i) => { state.cwdHighlightIndex = i; renderApp(); },
 					})}
-					<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree derived from this path.</p>
+					<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(state.previewCwd, state.previewTitle)}</code></p>
 					</div>
 				${_cachedWorkflows.length > 0 ? html`
 					<div>
@@ -1302,7 +1311,7 @@ function goalProposalPanel() {
 					highlightedIndex: _proposalCwdHighlightIndex,
 					onHighlight: (i) => { _proposalCwdHighlightIndex = i; renderApp(); },
 				})}
-				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree derived from this path.</p>
+				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(_proposalCwd, _proposalTitle)}</code></p>
 				</div>
 			${_cachedWorkflows.length > 0 ? html`
 				<div>

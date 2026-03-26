@@ -486,12 +486,13 @@ theme-toggle button {
 	animation: gate-wave 1.6s ease-in-out infinite;
 }
 
-/* Mexican-wave font-weight on active session titles */
+/* Mexican-wave weight increase on active session titles */
 @keyframes title-wave {
-	0%, 100% { font-weight: 400; opacity: 0.72; }
-	50% { font-weight: 500; opacity: 0.92; }
+	0%, 100% { font-weight: 400; opacity: 0.75; }
+	50%      { font-weight: 500; opacity: 1; }
 }
 .title-wave > span {
 	display: inline;
-	animation: title-wave var(--tw-dur, 4s) ease-in-out infinite;
+	animation: title-wave var(--tw-dur, 5s) ease-in-out infinite;
+	will-change: opacity;
 }
