@@ -458,6 +458,24 @@ async function initApp() {
 
 	// NEW shortcuts
 	registerShortcut({
+		id: "new-session-popover", label: "New session (with options)", category: "Sessions",
+		defaultBindings: [
+			{ key: "t", ctrlOrMeta: true, shift: true, alt: false },
+			{ key: "n", ctrlOrMeta: false, shift: true, alt: true },
+		],
+		allowInInput: true,
+		handler: async () => {
+			if (state.appView !== "authenticated") return;
+			const { toggleRolePicker } = await import("./sidebar.js");
+			// Synthesize a click event targeting the new-session button area
+			const chevron = document.querySelector("[title='New session with role']");
+			const syntheticEvent = new MouseEvent("click", { bubbles: true });
+			if (chevron) Object.defineProperty(syntheticEvent, "currentTarget", { value: chevron });
+			toggleRolePicker(syntheticEvent);
+		},
+	});
+
+	registerShortcut({
 		id: "new-goal", label: "New goal", category: "Goals",
 		defaultBindings: [{ key: "g", ctrlOrMeta: false, shift: false, alt: true }],
 		handler: () => {
