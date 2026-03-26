@@ -409,6 +409,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	// Phase 2: async hydrate
 	const gen = state.switchGeneration;
 	const isStale = () => state.switchGeneration !== gen;
+	// Only null out state.remoteAgent if it's still OUR remote instance.
+	// A concurrent connectToSession() for a different session may have already
+	// replaced it — blindly nulling would wipe the newer session's agent.
+	const cleanupRemote = (remote: RemoteAgent) => {
+		remote.disconnect();
+		if (state.remoteAgent === remote) state.remoteAgent = null;
+	};
 
 	state.connectingSessionId = sessionId;
 
@@ -639,7 +646,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Refresh sessions so newly created sessions have role/accessory data
 		await refreshSessions();
-		if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
+		if (isStale()) { cleanupRemote(remote); return; }
 
 		// Re-apply accessory class after refreshSessions (may have new data)
 		const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
@@ -683,13 +690,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		const modelProvider = remote.state.model?.provider || "anthropic";
 		await storage.providerKeys.set(modelProvider, "gateway-managed");
-		if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
+		if (isStale()) { cleanupRemote(remote); return; }
 
 		state.chatPanel = new ChatPanel();
 		await state.chatPanel.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
 		});
-		if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
+		if (isStale()) { cleanupRemote(remote); return; }
 
 		// Listen for suggest-goal events from assistant messages
 		state.chatPanel.addEventListener('suggest-goal', () => {
@@ -787,7 +794,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (state.assistantType === "goal") {
 			// Try to restore persisted draft state; fall back to fresh defaults
 			const restored = await restoreGoalDraft(sessionId);
-			if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
+			if (isStale()) { cleanupRemote(remote); return; }
 			if (!restored) {
 				state.assistantTab = "chat";
 				state.previewTitle = "";
@@ -808,7 +815,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		if (state.assistantType === "role") {
 			const restored = await restoreRoleDraft(sessionId);
-			if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
+			if (isStale()) { cleanupRemote(remote); return; }
 			if (!restored) {
 				state.assistantTab = "chat";
 				state.rolePreviewName = "";
@@ -841,7 +848,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		if (state.assistantType === "personality") {
 			const restored = await restorePersonalityDraft(sessionId);
-			if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
+			if (isStale()) { cleanupRemote(remote); return; }
 			if (!restored) {
 				state.assistantTab = "chat";
 				state.personalityPreviewName = "";
@@ -900,10 +907,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
 		}
 	} finally {
-		if (!isStale()) {
+		// Always clear connectingSessionId for our session — even if stale.
+		// When stale, the newer connectToSession already overwrote it, so
+		// clearing is a no-op for our id. But if we DON'T clear, and the
+		// newer call hasn't reached the assignment yet, we'd leave a stuck
+		// connecting indicator.
+		if (state.connectingSessionId === sessionId) {
 			state.connectingSessionId = null;
-			renderApp();
 		}
+		renderApp();
 	}
 }
 
