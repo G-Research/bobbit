@@ -147,15 +147,17 @@
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 30px;
+	gap: 5px;
 	height: 30px;
-	padding: 0;
+	padding: 0 10px;
 	border-radius: var(--radius-sm);
 	border: 1px solid var(--border);
 	background: transparent;
 	color: var(--muted-foreground);
 	cursor: pointer;
 	transition: all 150ms;
+	font-size: 12px;
+	white-space: nowrap;
 }
 .btn-icon:hover { background: var(--accent); color: var(--foreground); }
 .btn-icon.danger:hover {
@@ -878,6 +880,8 @@
 }
 @media (max-width: 600px) {
 	.nav { padding: 8px 12px; flex-wrap: wrap; }
+	.nav-left { flex: 1 1 100%; }
+	.nav-right { flex: 1 1 100%; justify-content: flex-end; }
 	.tab-panel-inner { padding: 14px; }
 	.task-table th:nth-child(5), .task-table td:nth-child(5) { display: none; }
 	.task-table th:nth-child(2), .task-table td:nth-child(2) { display: none; }

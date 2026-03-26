@@ -887,8 +887,8 @@ function renderNavBar(goal: Goal): TemplateResult {
 			</div>
 			<div class="nav-right">
 				${goal.archived ? nothing : html`
-					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}</button>
-					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}</button>
+					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
+					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}<span>Archive</span></button>
 					${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
 				`}
 			</div>
@@ -1332,7 +1332,7 @@ function renderAgentsTab(): TemplateResult {
 		const displayName = isArchived ? (agent.title || formatAgentName(agent)) : formatAgentName(agent);
 
 		return html`
-			<div class="agent-card ${isArchived ? "opacity-50" : ""}" @click=${() => connectToSession(agent.sessionId, true)} title="${isArchived ? "View archived session" : "Connect to"} ${displayName}">
+			<div class="agent-card ${isArchived ? "opacity-70" : ""}" @click=${() => connectToSession(agent.sessionId, true)} title="${isArchived ? "View archived session" : "Connect to"} ${displayName}">
 				<div class="agent-card-bobbit">
 					${statusBobbit(
 						isArchived ? "terminated" : (session?.status ?? agent.status),
