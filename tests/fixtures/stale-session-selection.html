@@ -7,7 +7,7 @@
 <body>
 <script>
 // ============================================================================
-// Simulates the CURRENT (BUGGY) behavior of the app
+// Simulates the FIXED behavior of the app
 // ============================================================================
 
 // --- Config views (from src/app/routing.ts) ---
@@ -42,8 +42,7 @@ window.__activeSessionId = activeSessionId;
 // --- Session guard from handleHashChange (src/app/main.ts line 57-59) ---
 // Returns true if navigation should be short-circuited (no reconnect)
 function sessionGuardShouldSkip(routeSessionId) {
-  if (state.remoteAgent?.gatewaySessionId === routeSessionId
-      || state.selectedSessionId === routeSessionId) {
+  if (state.remoteAgent?.gatewaySessionId === routeSessionId) {
     return true;
   }
   return false;
@@ -85,22 +84,21 @@ function navigateToGoalDashboard() {
   state.currentRouteView = "goal-dashboard";
   // Disconnect remoteAgent (as the real code does)
   state.remoteAgent = null;
-  // BUG: selectedSessionId is NOT cleared here
-  // The fix would add: state.selectedSessionId = null;
+  state.selectedSessionId = null;
 }
 window.__navigateToGoalDashboard = navigateToGoalDashboard;
 
 function navigateToGoal() {
   state.currentRouteView = "goal";
   state.remoteAgent = null;
-  // BUG: selectedSessionId is NOT cleared here
+  state.selectedSessionId = null;
 }
 window.__navigateToGoal = navigateToGoal;
 
 function navigateToConfigPage(view) {
   state.currentRouteView = view || "roles";
   state.remoteAgent = null;
-  // BUG: selectedSessionId is NOT cleared here
+  state.selectedSessionId = null;
 }
 window.__navigateToConfigPage = navigateToConfigPage;
 
