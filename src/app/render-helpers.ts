@@ -301,14 +301,16 @@ export { renderSessionRow as renderSidebarSession };
 // ============================================================================
 
 export function renderArchivedSessionRow(session: GatewaySession, extraChildren = false) {
+	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const delegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
+	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	return html`
 		<div
-			class="group relative flex items-center gap-1 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-70
+			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm opacity-70
 				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px; filter:grayscale(1);"
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
@@ -323,8 +325,8 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			<div class="shrink-0 flex items-center justify-center" style="filter:opacity(0.85);">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
-			<div class="flex-1 min-w-0 text-xs font-normal truncate">${displayTitle}</div>
-			${session.archivedAt ? html`<span class="shrink-0 text-[10px] text-muted-foreground/50">${terseRelativeTime(session.archivedAt)}</span>` : ""}
+			<div class="flex-1 min-w-0 font-normal truncate ${mobile ? "text-base" : "text-xs"}">${displayTitle}</div>
+			${session.archivedAt ? html`<span class="shrink-0 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground/50">${terseRelativeTime(session.archivedAt)}</span>` : ""}
 		</div>
 	`;
 }
