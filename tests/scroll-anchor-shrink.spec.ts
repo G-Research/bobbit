@@ -124,4 +124,42 @@ test.describe("Scroll anchor on shrink", () => {
 		// scrollTop should not change — new content below viewport shouldn't pull user down
 		expect(scrollTopAfter).toBe(scrollTopBefore);
 	});
+
+	test("preserves viewport position when content shrinks while stuck to bottom", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		// Scroll to bottom so stickToBottom = true
+		await page.evaluate(() => {
+			const sc = document.getElementById("scroll-container")!;
+			(window as any).__scrollTo(sc.scrollHeight);
+		});
+		await page.waitForTimeout(200);
+
+		const state = await page.evaluate(() => (window as any).__getState());
+		expect(state.stickToBottom).toBe(true);
+
+		// Record scrollTop before collapse
+		const scrollTopBefore = await page.evaluate(() =>
+			document.getElementById("scroll-container")!.scrollTop,
+		);
+
+		// Collapse the element and trigger resize handler
+		await page.evaluate(() => {
+			(window as any).__collapseElement();
+			(window as any).__handleResize();
+		});
+		await page.waitForTimeout(100);
+
+		const scrollTopAfter = await page.evaluate(() =>
+			document.getElementById("scroll-container")!.scrollTop,
+		);
+
+		// The collapsible shrank by 400px. scrollTop should be preserved (not snapped
+		// to the new, lower bottom). Currently FAILS because the ResizeObserver callback
+		// unconditionally scrolls to bottom when _stickToBottom is true.
+		expect(
+			scrollTopAfter,
+			"scrollTop should be preserved during collapse when stickToBottom is true",
+		).toBe(scrollTopBefore);
+	});
 });
