@@ -1,5 +1,5 @@
 ---
-name: cleanup-pr
+name: resolve-pr-conflicts
 description: Rebase a PR branch onto the primary branch, resolve any merge conflicts, and force-push to get it ready for merge.
 argument-hint: [branch-name]
 ---
