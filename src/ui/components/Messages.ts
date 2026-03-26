@@ -60,10 +60,13 @@ export class UserMessage extends LitElement {
 	}
 
 	override render() {
-		const content =
+		const rawContent =
 			typeof this.message.content === "string"
 				? this.message.content
 				: (this.message.content ?? []).find((c) => c.type === "text")?.text || "";
+		// Preserve user line breaks: append two trailing spaces before each newline
+		// so markdown renders them as <br> instead of collapsing to a single space.
+		const content = rawContent.replace(/\n/g, "  \n");
 
 		return html`
 			<div class="flex justify-start mx-2 sm:mx-4 my-1">

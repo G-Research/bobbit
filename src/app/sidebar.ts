@@ -535,7 +535,7 @@ export function renderStaffSidebarSection() {
 					style="padding-left:${CHEVRON_W}px;"
 					@click=${() => handleStaffClick(agent)}>
 					${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting)}</span>${mobile && session ? (() => {
+					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
 							const time = terseRelativeTime(session.lastActivity);
@@ -546,7 +546,7 @@ export function renderStaffSidebarSection() {
 					${mobile
 						? editBtn
 						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-							<span class="group-hover:hidden">${session ? (() => {
+							<span class="group-hover:hidden flex items-center">${session ? (() => {
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
 								const unseen = hasUnseenActivity(session);
