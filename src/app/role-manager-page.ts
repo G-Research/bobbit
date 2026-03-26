@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
+import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, BOBBIT_HUE_ROTATIONS, getAccessory } from "./session-colors.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
@@ -76,6 +76,8 @@ let deleting = false;
 // Assistant sub-prompt state
 let assistantPrompts: AssistantPromptInfo[] = [];
 let activePromptTab: string = "baseline"; // "baseline" or assistant type key
+let editedPrompts: Map<string, string> = new Map(); // type -> edited content
+let originalPrompts: Map<string, string> = new Map(); // type -> original content (for dirty detection)
 
 // ============================================================================
 // DATA LOADING
@@ -124,9 +126,13 @@ function showEdit(role: RoleData): void {
 	saving = false;
 	deleting = false;
 	activePromptTab = "baseline";
+	editedPrompts = new Map();
+	originalPrompts = new Map();
 	if (role.name === "assistant") {
 		fetchAssistantPrompts().then((prompts) => {
 			assistantPrompts = prompts;
+			editedPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
+			originalPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
 			renderApp();
 		});
 	} else {
@@ -149,9 +155,13 @@ export function navigateToRoleEdit(roleName: string): void {
 		saving = false;
 		deleting = false;
 		activePromptTab = "baseline";
+		editedPrompts = new Map();
+		originalPrompts = new Map();
 		if (role.name === "assistant") {
 			fetchAssistantPrompts().then((prompts) => {
 				assistantPrompts = prompts;
+				editedPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
+				originalPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
 				renderApp();
 			});
 		} else {
@@ -202,6 +212,17 @@ async function handleSave(): Promise<void> {
 			allowedTools: editTools,
 			accessory: editAccessory,
 		});
+
+		// Save dirty sub-prompts
+		const dirtyPrompts = Array.from(editedPrompts.entries()).filter(
+			([type, content]) => content !== (originalPrompts.get(type) ?? ""),
+		);
+		if (dirtyPrompts.length > 0) {
+			await Promise.all(
+				dirtyPrompts.map(([type, content]) => updateAssistantPrompt(type, content)),
+			);
+		}
+
 		if (ok) {
 			const [r] = await Promise.all([fetchRoles()]);
 			roles = r;
@@ -267,11 +288,15 @@ function toggleToolGroup(group: string): void {
 
 function renderNavBar(): TemplateResult {
 	if (currentView !== "list" && selectedRole) {
+		const subPromptsDirty = Array.from(editedPrompts.entries()).some(
+			([type, content]) => content !== (originalPrompts.get(type) ?? ""),
+		);
 		const hasChanges = selectedRole && (
 			editLabel !== selectedRole.label ||
 			editPrompt !== selectedRole.promptTemplate ||
 			JSON.stringify([...editTools].sort()) !== JSON.stringify([...selectedRole.allowedTools].sort()) ||
-			editAccessory !== selectedRole.accessory
+			editAccessory !== selectedRole.accessory ||
+			subPromptsDirty
 		);
 		// Edit view: back goes to roles list, breadcrumb shows hierarchy, actions on right
 		return html`
@@ -527,11 +552,11 @@ function renderEditView(): TemplateResult {
 							@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
 						></textarea>
 					` : html`
-						<p class="roles-prompt-hint">This prompt is appended after the shared baseline when a ${assistantPrompts.find((p) => p.type === activePromptTab)?.title ?? activePromptTab} session is created.</p>
+						<p class="roles-prompt-hint">This prompt is appended after the shared baseline for ${assistantPrompts.find((p) => p.type === activePromptTab)?.title ?? activePromptTab} sessions.</p>
 						<textarea
-							class="roles-prompt-editor roles-prompt-readonly"
-							.value=${assistantPrompts.find((p) => p.type === activePromptTab)?.prompt ?? ""}
-							readonly
+							class="roles-prompt-editor"
+							.value=${editedPrompts.get(activePromptTab) ?? ""}
+							@input=${(e: Event) => { editedPrompts.set(activePromptTab, (e.target as HTMLTextAreaElement).value); renderApp(); }}
 						></textarea>
 					`}
 				</div>

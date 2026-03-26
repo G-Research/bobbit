@@ -322,12 +322,6 @@
 	background: var(--background);
 }
 
-.roles-prompt-readonly {
-	opacity: 0.75;
-	background: var(--secondary) !important;
-	cursor: default;
-}
-
 .roles-prompt-hint {
 	font-size: 11px;
 	color: var(--muted-foreground);

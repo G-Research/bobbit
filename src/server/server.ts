@@ -979,9 +979,32 @@ async function handleApiRoute(
 		const prompts = Object.values(ASSISTANT_REGISTRY).map((def) => ({
 			type: def.type,
 			title: def.title,
+			promptTitle: def.promptTitle,
 			prompt: def.prompt,
 		}));
 		json({ prompts });
+		return;
+	}
+
+	// PUT /api/roles/assistant/prompts/:type
+	if (url.pathname.startsWith("/api/roles/assistant/prompts/") && req.method === "PUT") {
+		const type = url.pathname.slice("/api/roles/assistant/prompts/".length);
+		if (!type) {
+			json({ error: "Missing type parameter" }, 400);
+			return;
+		}
+		const body = await readBody(req);
+		const { updateAssistantDef } = await import("./agent/assistant-registry.js");
+		const updated = updateAssistantDef(type, {
+			prompt: body?.prompt,
+			title: body?.title,
+			promptTitle: body?.promptTitle,
+		});
+		if (!updated) {
+			json({ error: `Unknown assistant type: ${type}` }, 404);
+			return;
+		}
+		json(updated);
 		return;
 	}
 

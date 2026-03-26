@@ -802,6 +802,14 @@ export interface AssistantPromptInfo {
 	prompt: string;
 }
 
+export async function updateAssistantPrompt(type: string, prompt: string): Promise<boolean> {
+	const res = await gatewayFetch(`/api/roles/assistant/prompts/${encodeURIComponent(type)}`, {
+		method: 'PUT',
+		body: JSON.stringify({ prompt }),
+	});
+	return res.ok;
+}
+
 export async function fetchAssistantPrompts(): Promise<AssistantPromptInfo[]> {
 	try {
 		const res = await gatewayFetch("/api/roles/assistant/prompts");

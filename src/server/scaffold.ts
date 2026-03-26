@@ -55,6 +55,17 @@ export function scaffoldBobbitDir(projectRoot: string): void {
         }
       }
     }
+    // Incremental scaffolding: add roles/assistant/ sub-prompts if missing
+    const assistantConfigDir = path.join(dotBobbit, "config", "roles", "assistant");
+    if (!fs.existsSync(assistantConfigDir)) {
+      const defaultsDir2 = path.join(__dirname, "defaults");
+      const defaultAssistantDir = path.join(defaultsDir2, "roles", "assistant");
+      if (fs.existsSync(defaultAssistantDir)) {
+        console.log("Adding .bobbit/config/roles/assistant/ to existing installation...");
+        copyDir(defaultAssistantDir, assistantConfigDir);
+      }
+    }
+
     return;
   }
 
