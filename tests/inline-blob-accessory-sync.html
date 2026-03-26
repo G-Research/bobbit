@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Inline blob accessory animation-delay sync test</title>
+<style>
+/* Minimal reproduction of the idle accessory animations from src/ui/app.css */
+
+@keyframes magnifier-depth-idle {
+	0%, 24% { z-index: 1; }
+	25%     { z-index: -1; }
+	45%     { z-index: -1; }
+	46%, 54% { z-index: 1; }
+	55%     { z-index: -1; }
+	85%     { z-index: -1; }
+	86%, 100% { z-index: 1; }
+}
+
+@keyframes blob-bandana-idle-adjust {
+	0%  { translate: 0 -2px; }
+	25% { translate: 0 -6px; }
+	45% { translate: 0 -2px; }
+	55% { translate: 0 -2px; }
+	70% { translate: 0 -6px; }
+	85% { translate: 0 -2px; }
+}
+
+@keyframes blob-bandana-idle-shadow {
+	0%   { filter: drop-shadow(5px 3px 0 rgba(0,0,0,0.18)); }
+	25%  { filter: none; }
+	45%  { filter: drop-shadow(5px 3px 0 rgba(0,0,0,0.18)); }
+	55%  { filter: drop-shadow(5px 3px 0 rgba(0,0,0,0.18)); }
+	70%  { filter: none; }
+	85%  { filter: drop-shadow(5px 3px 0 rgba(0,0,0,0.18)); }
+}
+
+/* Minimal sprite idle animation placeholder */
+@keyframes blob-idle-eyes {
+	0%   { background: red; }
+	100% { background: blue; }
+}
+
+/* --- Accessory base styles (from app.css) --- */
+.bobbit-blob__magnifier { display: none; }
+.bobbit-magnifier .bobbit-blob__magnifier { display: block; }
+
+.bobbit-blob__bandana { display: none; }
+.bobbit-bandana .bobbit-blob__bandana { display: block; }
+
+.bobbit-blob__palette { display: none; }
+.bobbit-palette .bobbit-blob__palette { display: block; }
+
+.bobbit-blob__pencil { display: none; }
+.bobbit-pencil .bobbit-blob__pencil { display: block; }
+
+.bobbit-blob__shield { display: none; }
+.bobbit-shield .bobbit-blob__shield { display: block; }
+
+.bobbit-blob__set-square { display: none; }
+.bobbit-set-square .bobbit-blob__set-square { display: block; }
+
+.bobbit-blob__flask { display: none; }
+.bobbit-flask .bobbit-blob__flask { display: block; }
+
+/* Idle-state animations (from app.css) */
+.bobbit-blob--idle .bobbit-blob__magnifier {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__palette {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__pencil {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__shield {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__set-square {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__flask {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__bandana {
+	animation-name: blob-bandana-idle-adjust, blob-bandana-idle-shadow;
+	animation-duration: 10s, 10s;
+	animation-timing-function: step-end, step-end;
+	animation-iteration-count: infinite, infinite;
+}
+
+.bobbit-blob--idle .bobbit-blob__sprite {
+	animation: blob-idle-eyes 10s steps(1) infinite;
+}
+
+/* --- Inline blob overrides (from role-manager.css) --- */
+
+/* The sprite gets the delay (this is the existing rule) */
+.bobbit-blob--inline .bobbit-blob__sprite {
+	animation-delay: var(--bobbit-eye-delay, 0s) !important;
+}
+
+/* Hide all accessories by default in inline context */
+.bobbit-blob--inline .bobbit-blob__magnifier,
+.bobbit-blob--inline .bobbit-blob__bandana,
+.bobbit-blob--inline .bobbit-blob__palette,
+.bobbit-blob--inline .bobbit-blob__pencil,
+.bobbit-blob--inline .bobbit-blob__shield,
+.bobbit-blob--inline .bobbit-blob__set-square,
+.bobbit-blob--inline .bobbit-blob__flask {
+	display: none !important;
+}
+
+/* Show the accessory when the class is on the blob div itself */
+.bobbit-blob--inline.bobbit-magnifier .bobbit-blob__magnifier { display: block !important; }
+.bobbit-blob--inline.bobbit-bandana .bobbit-blob__bandana { display: block !important; }
+.bobbit-blob--inline.bobbit-palette .bobbit-blob__palette { display: block !important; }
+.bobbit-blob--inline.bobbit-pencil .bobbit-blob__pencil { display: block !important; }
+.bobbit-blob--inline.bobbit-shield .bobbit-blob__shield { display: block !important; }
+.bobbit-blob--inline.bobbit-set-square .bobbit-blob__set-square { display: block !important; }
+.bobbit-blob--inline.bobbit-flask .bobbit-blob__flask { display: block !important; }
+
+/* Sync accessory idle animations with the eye-delay stagger */
+.bobbit-blob--inline.bobbit-bandana .bobbit-blob__bandana,
+.bobbit-blob--inline.bobbit-magnifier .bobbit-blob__magnifier,
+.bobbit-blob--inline.bobbit-palette .bobbit-blob__palette,
+.bobbit-blob--inline.bobbit-pencil .bobbit-blob__pencil,
+.bobbit-blob--inline.bobbit-shield .bobbit-blob__shield,
+.bobbit-blob--inline.bobbit-set-square .bobbit-blob__set-square,
+.bobbit-blob--inline.bobbit-flask .bobbit-blob__flask {
+    animation-delay: var(--bobbit-eye-delay, 0s) !important;
+}
+</style>
+</head>
+<body>
+
+<!-- Inline blob with magnifier accessory and a 3s eye delay -->
+<div class="bobbit-blob--inline bobbit-blob--idle bobbit-magnifier" style="--bobbit-eye-delay: 3s;" data-testid="blob-magnifier">
+	<div class="bobbit-blob__sprite"></div>
+	<div class="bobbit-blob__magnifier"></div>
+</div>
+
+<!-- Inline blob with bandana accessory and a 5s eye delay -->
+<div class="bobbit-blob--inline bobbit-blob--idle bobbit-bandana" style="--bobbit-eye-delay: 5s;" data-testid="blob-bandana">
+	<div class="bobbit-blob__sprite"></div>
+	<div class="bobbit-blob__bandana"></div>
+</div>
+
+<!-- Inline blob with palette accessory and a 2s eye delay -->
+<div class="bobbit-blob--inline bobbit-blob--idle bobbit-palette" style="--bobbit-eye-delay: 2s;" data-testid="blob-palette">
+	<div class="bobbit-blob__sprite"></div>
+	<div class="bobbit-blob__palette"></div>
+</div>
+
+<!-- Inline blob with pencil accessory and a 4s eye delay -->
+<div class="bobbit-blob--inline bobbit-blob--idle bobbit-pencil" style="--bobbit-eye-delay: 4s;" data-testid="blob-pencil">
+	<div class="bobbit-blob__sprite"></div>
+	<div class="bobbit-blob__pencil"></div>
+</div>
+
+<!-- Inline blob with shield accessory and a 7s eye delay -->
+<div class="bobbit-blob--inline bobbit-blob--idle bobbit-shield" style="--bobbit-eye-delay: 7s;" data-testid="blob-shield">
+	<div class="bobbit-blob__sprite"></div>
+	<div class="bobbit-blob__shield"></div>
+</div>
+
+<!-- Inline blob with set-square accessory and a 1s eye delay -->
+<div class="bobbit-blob--inline bobbit-blob--idle bobbit-set-square" style="--bobbit-eye-delay: 1s;" data-testid="blob-set-square">
+	<div class="bobbit-blob__sprite"></div>
+	<div class="bobbit-blob__set-square"></div>
+</div>
+
+<!-- Inline blob with flask accessory and a 6s eye delay -->
+<div class="bobbit-blob--inline bobbit-blob--idle bobbit-flask" style="--bobbit-eye-delay: 6s;" data-testid="blob-flask">
+	<div class="bobbit-blob__sprite"></div>
+	<div class="bobbit-blob__flask"></div>
+</div>
+
+</body>
+</html>
