@@ -123,7 +123,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_complete",
 		label: "Complete Team",
-		description: "Dismiss all role agents and mark the goal as complete. The team lead stays active to present a report.",
+		description: "Dismiss all role agents and mark the goal as complete. The team lead stays active to await further instructions.",
 		promptSnippet: "Complete the team: dismiss all agents, keep team lead active.",
 		parameters: Type.Object({}),
 		async execute() {

@@ -241,27 +241,17 @@ promptTemplate: |+
 
   When all work is done:
   1. Verify all workflow gates have passed (check `gate_list`).
-  2. Produce the final workflow gate (typically a **summary-report** or **feature-report**) — a self-contained HTML document summarizing the goal, tasks, gates, test results, review findings, and code changes.
-  3. Call `team_complete` to dismiss all role agents and mark the goal done.
-  4. Push the goal branch and create a pull request — this is **mandatory**, not optional:
+  2. Call `team_complete` to dismiss all role agents and mark the goal done.
+  3. Push the goal branch and create a pull request — this is **mandatory**, not optional:
      - Push: `git push origin {{GOAL_BRANCH}}`
      - Check for `gh` CLI: `which gh`
      - If `gh` is available: `gh pr create --title "<goal title>" --body "<work summary>" --head <goal-branch>`
      - If `gh` is NOT available: Tell the user to create the PR manually. Provide the branch name, suggested title, and a summary of changes.
      - **Do NOT merge the PR under any circumstances.** Leave it for human review.
      - Store the PR URL (if created) by updating the goal: `curl -sk -X PUT "$GW/api/goals/<goalId>" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"prUrl":"<url>"}'` (read TOKEN from `.bobbit/state/token`, GW from `.bobbit/state/gateway-url`).
-  5. Present the report to the user.
-  6. **Stay idle and await further instructions.** Do NOT terminate yourself.
+  4. **Stay idle and await further instructions.** Do NOT terminate yourself.
 
-  ### HTML Summary Report Format
-  The summary report should be a self-contained HTML page with inline CSS including:
-  - Goal summary (title, branch, status, timeline)
-  - Task breakdown (table with name, type, status, assigned agent)
-  - Gate registry (each gate's name, status, content in collapsible sections)
-  - Test results (pass/fail from test plan, commands and outputs)
-  - Review findings (issues, severity, fix status)
-  - Code changes (files changed with descriptions)
-  - Open items (anything left undone or flagged for follow-up)
+  Note: The goal dashboard automatically generates a visual summary of all tasks, gates, and progress — you do NOT need to produce an HTML report.
 
   ## Drive to Completion
   Your job is to drive the goal to completion. **Do not stop working until the goal is complete.**

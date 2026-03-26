@@ -894,7 +894,7 @@ export class TeamManager {
 
 	/**
 	 * Complete a team: dismiss all role agents but keep the team lead alive.
-	 * The team lead remains active to present a report and await further instructions.
+	 * The team lead remains active to await further instructions.
 	 */
 	async completeTeam(goalId: string): Promise<void> {
 		const entry = this.teams.get(goalId);
@@ -932,7 +932,7 @@ export class TeamManager {
 		}
 
 		// Keep the team lead session alive — do NOT terminate it.
-		// The team lead will present a report and await further instructions.
+		// The team lead will await further instructions.
 
 		// Update goal state
 		await this.goalManager.updateGoal(goalId, { state: "complete" });
