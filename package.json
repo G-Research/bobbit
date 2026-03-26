@@ -20,7 +20,7 @@
     "restart-server": "node dist/server/harness-signal.js",
     "start": "node dist/server/cli.js --cwd .",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test:unit": "playwright test --config tests/playwright.config.ts",
+    "test:unit": "npm run build:server && playwright test --config tests/playwright.config.ts",
     "test:node": "npx tsx --test --test-force-exit tests/workflow-manager-logic.test.ts tests/task-state-machine.test.ts tests/name-validation.test.ts tests/gate-store-logic.test.ts tests/system-prompt.test.ts tests/session-store.test.ts tests/cost-tracker.test.ts tests/event-buffer.test.ts tests/staff-trigger-engine.test.ts",
     "test:e2e": "npm run build:server && npx playwright test --config playwright-e2e.config.ts",
     "test:unit-coverage": "npx c8 --reporter=text --temp-directory=coverage/unit-tmp --reports-dir=coverage/unit --src=src/server npx tsx --test --test-force-exit tests/workflow-manager-logic.test.ts tests/task-state-machine.test.ts tests/name-validation.test.ts tests/gate-store-logic.test.ts tests/system-prompt.test.ts tests/session-store.test.ts tests/cost-tracker.test.ts tests/event-buffer.test.ts tests/staff-trigger-engine.test.ts",
