@@ -1,0 +1,2 @@
+run        text eol=lf
+run.cmd    text eol=crlf
