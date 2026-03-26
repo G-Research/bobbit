@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head><title>Slash Skills Test</title></head>
+<body>
+<script>
+// Inline the applySubstitutions logic for testing
+function applySubstitutions(content, args) {
+    const argParts = args.trim() ? args.trim().split(/\s+/) : [];
+    let result = content.replace(/\$ARGUMENTS\[(\d+)\]/g, (_, idx) => argParts[parseInt(idx)] ?? "");
+    result = result.replace(/\$(\d+)/g, (_, idx) => argParts[parseInt(idx)] ?? "");
+    result = result.replace(/\$ARGUMENTS/g, args);
+    return result;
+}
+
+// Export for test
+window.applySubstitutions = applySubstitutions;
+
+// Test results
+window.testResults = {
+    fullArgs: applySubstitutions("Fix issue $ARGUMENTS", "123"),
+    indexedArgs: applySubstitutions("Migrate $ARGUMENTS[0] from $ARGUMENTS[1] to $ARGUMENTS[2]", "SearchBar React Vue"),
+    shorthand: applySubstitutions("Migrate $0 from $1 to $2", "SearchBar React Vue"),
+    noArgs: applySubstitutions("Do something", ""),
+    mixedArgs: applySubstitutions("$ARGUMENTS and also $0", "hello world"),
+};
+</script>
+</body>
+</html>

@@ -691,6 +691,7 @@ export class AgentInterface extends LitElement {
 						` : ''}
 						${this.readOnly ? nothing : html`<message-editor
 							.sessionId=${this.session?.sessionId}
+							.cwd=${this.cwd}
 							.isStreaming=${state.isStreaming}
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}

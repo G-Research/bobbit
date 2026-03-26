@@ -15,6 +15,7 @@ import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { exportSkillDefinitions, listSkills } from "./skills/index.js";
+import { discoverSlashSkills } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
@@ -2276,6 +2277,14 @@ async function handleApiRoute(
 	// GET /api/skills — list available skill definitions
 	if (url.pathname === "/api/skills" && req.method === "GET") {
 		json({ skills: listSkills().map((s) => ({ id: s.id, name: s.name, description: s.description })) });
+		return;
+	}
+
+	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
+	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
+		const cwd = url.searchParams.get("cwd") || process.cwd();
+		const skills = discoverSlashSkills(cwd);
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
 		return;
 	}
 

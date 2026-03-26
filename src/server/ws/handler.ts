@@ -8,6 +8,7 @@ import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { getSkill } from "../skills/registry.js";
 import { runSkillAgent, createSkillRequest } from "../skills/sub-agent.js";
+import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 
 /**
@@ -184,13 +185,28 @@ export function handleWebSocketConnection(
 
 		try {
 			switch (msg.type) {
-				case "prompt":
+				case "prompt": {
 					console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
-					await sessionManager.enqueuePrompt(sessionId, msg.text, {
+					let promptText = msg.text;
+
+					// Check for slash skill invocation (e.g. "/deploy staging")
+					const slashMatch = msg.text.match(/^\/([\w-]+)(?:\s+(.*))?$/);
+					if (slashMatch) {
+						const skillName = slashMatch[1];
+						const skillArgs = slashMatch[2] || "";
+						const skill = getSlashSkill(session.cwd, skillName);
+						if (skill) {
+							promptText = buildSlashSkillPrompt(skill, skillArgs);
+							console.log(`[ws-handler] Slash skill "${skillName}" invoked for session ${sessionId}`);
+						}
+					}
+
+					await sessionManager.enqueuePrompt(sessionId, promptText, {
 						images: msg.images,
 						attachments: msg.attachments,
 					});
 					break;
+				}
 				case "steer":
 					// Live steer: if agent is streaming, send directly via RPC
 					// (real-time interrupt, bypasses queue intentionally).

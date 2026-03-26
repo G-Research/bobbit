@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import type { Model } from "@mariozechner/pi-ai";
-import { html, LitElement } from "lit";
+import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { live } from "lit/directives/live.js";
@@ -10,8 +10,17 @@ import { Brain, Loader2, Mic, MicOff, Paperclip, Send, Sparkles, Square, Zap, X 
 import { type Attachment, loadAttachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
+import { gatewayFetch } from "../../app/api.js";
 import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+
+/** Slash skill metadata from the server */
+interface SlashSkillInfo {
+	name: string;
+	description: string;
+	argumentHint?: string;
+	source: "project" | "personal" | "legacy";
+}
 
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
 export interface QueuedMessage {
@@ -61,6 +70,8 @@ export class MessageEditor extends LitElement {
 	@property() maxFileSize = 20 * 1024 * 1024; // 20MB
 	@property() acceptedTypes =
 		"image/*,application/pdf,.docx,.pptx,.txt,.md,.json,.xml,.html,.css,.js,.ts,.jsx,.tsx,.yml,.yaml";
+	/** Working directory — used to discover slash skills */
+	@property() cwd?: string;
 
 	@state() processingFiles = false;
 	@state() isDragging = false;
@@ -72,6 +83,14 @@ export class MessageEditor extends LitElement {
 	private _historyIndex = -1; // -1 = not browsing history
 	private _savedDraft = ""; // draft saved when entering history mode
 	private _historyLoaded = false;
+
+	// Slash skill autocomplete state
+	@state() private _slashSkills: SlashSkillInfo[] = [];
+	@state() private _slashFilteredSkills: SlashSkillInfo[] = [];
+	@state() private _slashMenuOpen = false;
+	@state() private _slashSelectedIndex = 0;
+	private _slashSkillsLoaded = false;
+	private _slashSkillsCwd?: string;
 
 	// Speech recognition
 	private speechRecognition: SpeechRecognition | null = null;
@@ -117,6 +136,56 @@ export class MessageEditor extends LitElement {
 		this._historyIndex = -1;
 	}
 
+	private async _loadSlashSkills() {
+		if (!this.cwd) return;
+		if (this._slashSkillsLoaded && this._slashSkillsCwd === this.cwd) return;
+		try {
+			const res = await gatewayFetch(`/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`);
+			if (res.ok) {
+				const data = await res.json();
+				// Include built-in /compact command
+				this._slashSkills = [
+					{ name: "compact", description: "Compact conversation context to reduce token usage", source: "project" as const },
+					...(data.skills || []),
+				];
+			}
+		} catch {
+			// Best effort
+		}
+		this._slashSkillsCwd = this.cwd;
+		this._slashSkillsLoaded = true;
+	}
+
+	private _updateSlashAutocomplete() {
+		const text = this.value;
+		// Show autocomplete when input is "/" or "/partial-match"
+		const match = text.match(/^\/([a-zA-Z0-9-]*)$/);
+		if (match) {
+			const query = match[1].toLowerCase();
+			this._slashFilteredSkills = query
+				? this._slashSkills.filter((s) => s.name.toLowerCase().includes(query))
+				: this._slashSkills;
+			this._slashMenuOpen = this._slashFilteredSkills.length > 0;
+			this._slashSelectedIndex = 0;
+		} else {
+			this._slashMenuOpen = false;
+		}
+	}
+
+	private _selectSlashSkill(skill: SlashSkillInfo) {
+		// Insert the slash command name, adding a trailing space for arguments
+		this.value = `/${skill.name} `;
+		this._slashMenuOpen = false;
+		this.onInput?.(this.value);
+		// Focus textarea and move cursor to end
+		const textarea = this.textareaRef.value;
+		if (textarea) {
+			textarea.value = this.value;
+			textarea.focus();
+			textarea.setSelectionRange(this.value.length, this.value.length);
+		}
+	}
+
 	private _isCursorOnFirstLine(): boolean {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return true;
@@ -129,9 +198,33 @@ export class MessageEditor extends LitElement {
 		const textarea = e.target as HTMLTextAreaElement;
 		this.value = textarea.value;
 		this.onInput?.(this.value);
+		this._updateSlashAutocomplete();
 	};
 
 	private handleKeyDown = (e: KeyboardEvent) => {
+		// Slash autocomplete keyboard handling
+		if (this._slashMenuOpen) {
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				this._slashSelectedIndex = Math.min(this._slashSelectedIndex + 1, this._slashFilteredSkills.length - 1);
+				return;
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				this._slashSelectedIndex = Math.max(this._slashSelectedIndex - 1, 0);
+				return;
+			} else if (e.key === "Enter" || e.key === "Tab") {
+				e.preventDefault();
+				if (this._slashFilteredSkills[this._slashSelectedIndex]) {
+					this._selectSlashSkill(this._slashFilteredSkills[this._slashSelectedIndex]);
+				}
+				return;
+			} else if (e.key === "Escape") {
+				e.preventDefault();
+				this._slashMenuOpen = false;
+				return;
+			}
+		}
+
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			if (!this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {
@@ -494,6 +587,10 @@ export class MessageEditor extends LitElement {
 				this._loadHistory();
 			}
 		}
+		if (changed.has("cwd") && this.cwd) {
+			this._slashSkillsLoaded = false;
+			this._loadSlashSkills();
+		}
 	}
 
 	override render() {
@@ -603,6 +700,23 @@ export class MessageEditor extends LitElement {
 						`)}
 					</div>
 				` : ""}
+
+				<!-- Slash skill autocomplete -->
+				${this._slashMenuOpen ? html`
+					<div class="border-b border-border max-h-48 overflow-y-auto">
+						${this._slashFilteredSkills.map((skill, i) => html`
+							<button
+								class="w-full text-left px-3 py-2 flex items-start gap-2 cursor-pointer transition-colors ${i === this._slashSelectedIndex ? "bg-accent text-accent-foreground" : "hover:bg-muted/50"}"
+								@mousedown=${(e: Event) => { e.preventDefault(); this._selectSlashSkill(skill); }}
+								@mouseenter=${() => { this._slashSelectedIndex = i; }}
+							>
+								<span class="font-mono text-sm text-primary shrink-0">/${skill.name}</span>
+								${skill.argumentHint ? html`<span class="text-xs text-muted-foreground/60 shrink-0">${skill.argumentHint}</span>` : nothing}
+								<span class="text-xs text-muted-foreground truncate">${skill.description}</span>
+							</button>
+						`)}
+					</div>
+				` : nothing}
 
 				<!-- Compact input row: [attach] [textarea] [mic] [send] -->
 				<div class="flex items-center gap-1 px-2 py-2">
