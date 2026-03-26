@@ -219,6 +219,10 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	// AI Gateway: the gateway handles LLM auth; Anthropic OAuth endpoints
 	// are likely unreachable on air-gapped networks anyway.
 	const healthData = await healthRes.json();
+	// Extract setup status from health response (avoids extra fetch)
+	if (typeof healthData.setupComplete === "boolean") {
+		state.setupComplete = healthData.setupComplete;
+	}
 	if (!healthData.localhost && !healthData.aigw) {
 		const hasAuth = await checkOAuthStatus();
 		if (!hasAuth) {
@@ -560,6 +564,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 			savePersonalityDraft(sessionId);
 			renderApp();
+		};
+
+		remote.onSetupProposal = (proposal) => {
+			if (proposal.action === "complete") {
+				state.setupComplete = true;
+				renderApp();
+			}
 		};
 
 		remote.onStaffProposal = (proposal) => {

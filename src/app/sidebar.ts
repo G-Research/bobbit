@@ -336,7 +336,7 @@ export function renderStaffSidebarSection() {
 // SETUP WIZARD BANNER
 // ============================================================================
 
-async function launchSetupWizard(): Promise<void> {
+export async function launchSetupWizard(): Promise<void> {
 	try {
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
