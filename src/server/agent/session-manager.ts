@@ -11,7 +11,7 @@ import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { assembleSystemPrompt, cleanupSessionPrompt } from "./system-prompt.js";
-import { generateSessionTitle } from "./title-generator.js";
+import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
@@ -1227,6 +1227,28 @@ export class SessionManager {
 		this.store.update(id, { title });
 		broadcast(session.clients, { type: "session_title", sessionId: id, title });
 		return true;
+	}
+
+	/**
+	 * Generate an AI-summarized goal title and rename the session.
+	 * Fire-and-forget — does NOT check titleGenerated (independent of first-message auto-title).
+	 */
+	generateGoalTitle(sessionId: string, goalTitle: string): void {
+		const session = this.sessions.get(sessionId);
+		if (!session) return;
+		this._generateGoalTitleAsync(session, goalTitle).catch(err => {
+			console.error(`[session ${session.id}] Goal title generation failed:`, err);
+		});
+	}
+
+	private async _generateGoalTitleAsync(session: SessionInfo, goalTitle: string): Promise<void> {
+		const title = await generateGoalSummaryTitle(goalTitle, this.getTitleGenOptions());
+		if (title) {
+			const finalTitle = `New goal: ${title}`;
+			session.title = finalTitle;
+			this.store.update(session.id, { title: finalTitle });
+			broadcast(session.clients, { type: "session_title", sessionId: session.id, title: finalTitle });
+		}
 	}
 
 	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory, teamLeadSessionId) and persist. */

@@ -502,6 +502,10 @@ export class RemoteAgent {
 		this.send({ type: "generate_title" });
 	}
 
+	summarizeGoalTitle(goalTitle: string): void {
+		this.send({ type: "summarize_goal_title", goalTitle });
+	}
+
 	clearSteeringQueue(): void {}
 	clearFollowUpQueue(): void {}
 	clearAllQueues(): void {}

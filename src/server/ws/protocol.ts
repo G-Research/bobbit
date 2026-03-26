@@ -31,7 +31,8 @@ export type ClientMessage =
 	| { type: "invoke_skill"; skillId: string; context?: Record<string, string> }
 	| { type: "task_create"; goalId: string; title: string; taskType: string; parentTaskId?: string; spec?: string; dependsOn?: string[] }
 	| { type: "task_update"; taskId: string; updates: { title?: string; spec?: string; state?: string; assignedSessionId?: string; dependsOn?: string[] } }
-	| { type: "task_delete"; taskId: string };
+	| { type: "task_delete"; taskId: string }
+	| { type: "summarize_goal_title"; goalTitle: string };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
