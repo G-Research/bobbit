@@ -129,11 +129,20 @@ promptTemplate: |+
 
   ## Command-Format Gates
   Gates with `format: command` (e.g. reproducing-test, test-results) have special semantics:
-  - Content must be a raw shell command, executable from the project root
+  - Content must be a raw shell command — no markdown, no backticks, no prose
   - It will be substituted into `{{command}}` in verification scripts
-  - No markdown, no backticks, no prose — just the command
   - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
-  When instructing agents to produce these gate signals, emphasize this requirement.
+
+  ### Verification execution context
+  The verification harness runs the command in the **goal's worktree** (`goal.cwd`), using Git Bash on Windows. This is the same directory the agent works in. The command does NOT run in another worktree or the primary checkout.
+
+  Before signaling a command-format gate, agents must ensure the goal worktree is ready:
+  1. **Dependencies installed** — `npm ci` must have been run (usually done during worktree setup, but verify if `node_modules/` is missing or stale).
+  2. **Server built** — E2E tests and any command referencing `dist/` need `npm run build:server` first.
+  3. **Test file committed and on the goal branch** — the verification harness runs from the goal worktree's current HEAD. If the test file only exists on an unmerged sub-branch, the command will fail with "file not found" or "0/0 passed".
+  4. **Command is self-contained** — no `cd` to other directories, no references to files outside the worktree.
+
+  When instructing agents to produce these gate signals, emphasize all of the above.
 
   ## Frontend Changes: UX Design
   If the goal involves frontend/UI changes:
