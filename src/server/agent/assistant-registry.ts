@@ -3,6 +3,7 @@ import { ROLE_ASSISTANT_PROMPT } from "./role-assistant.js";
 import { TOOL_ASSISTANT_PROMPT } from "./tool-assistant.js";
 import { PERSONALITY_ASSISTANT_PROMPT } from "./personality-assistant.js";
 import { STAFF_ASSISTANT_PROMPT } from "./staff-assistant.js";
+import { SETUP_ASSISTANT_PROMPT } from "./setup-assistant.js";
 
 export interface AssistantDef {
 	type: string;
@@ -41,6 +42,12 @@ export const ASSISTANT_REGISTRY: Record<string, AssistantDef> = {
 		title: "Staff Assistant",
 		promptTitle: "Staff Agent Creation Assistant",
 		prompt: STAFF_ASSISTANT_PROMPT,
+	},
+	setup: {
+		type: "setup",
+		title: "Setup Wizard",
+		promptTitle: "Project Setup Assistant",
+		prompt: SETUP_ASSISTANT_PROMPT,
 	},
 };
 
