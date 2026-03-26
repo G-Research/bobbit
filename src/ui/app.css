@@ -3002,6 +3002,23 @@ html {
 	line-height: 1;
 }
 
+/* Message timestamps — hidden by default, shown when preference enabled */
+.message-timestamp {
+	display: none;
+	font-size: 0.7rem;
+	color: var(--muted-foreground);
+	white-space: nowrap;
+	user-select: none;
+	align-self: flex-end;
+	padding: 0 0.25rem;
+	line-height: 1;
+	opacity: 0.7;
+}
+
+[data-show-timestamps="true"] .message-timestamp {
+	display: inline-block;
+}
+
 /* ── Mobile: add left margin to bobbit so idle position doesn't hug the screen edge
       when container padding is tighter (p-2 vs p-4). This avoids changing translateX
       which would break the seamless exit/enter transition animations. ── */

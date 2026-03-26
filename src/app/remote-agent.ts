@@ -794,6 +794,11 @@ export class RemoteAgent {
 			}
 		}
 
+		// Apply showTimestamps
+		if ("showTimestamps" in prefs) {
+			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+		}
+
 		// Apply shortcuts
 		if ("shortcuts" in prefs) {
 			import("./shortcut-registry.js").then((m) => m.loadSavedBindings());

@@ -16,6 +16,14 @@ import "./LiveTimer.js";
 import "./ToolGroup.js";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 
+/** Format a message timestamp for display (locale-appropriate time). */
+export function formatTimestamp(ts: number | string | undefined): string {
+	if (!ts) return "";
+	const date = typeof ts === "string" ? new Date(ts) : new Date(ts);
+	if (isNaN(date.getTime())) return "";
+	return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
 /** Minimum consecutive same-name completed tool calls to form a group */
 const MIN_GROUP_SIZE = 2;
 
@@ -86,6 +94,7 @@ export class UserMessage extends LitElement {
 							: ""
 					}
 				</div>
+				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>
 		`;
 	}
@@ -231,6 +240,7 @@ export class AssistantMessage extends LitElement {
 		return html`
 			<div>
 				${orderedParts.length ? html` <div class="px-2 sm:px-4 flex flex-col gap-3">${orderedParts}</div> ` : ""}
+				${!this.isStreaming && this.message.timestamp ? html`<div class="px-2 sm:px-4 text-right"><span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span></div>` : ""}
 				${
 					this.isStreaming && this.turnStartTime
 						? html` <div class="px-2 sm:px-4 -mt-2 text-xs text-muted-foreground text-right tabular-nums">

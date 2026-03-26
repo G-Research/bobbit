@@ -39,6 +39,9 @@ let settingsCwd = "";
 let settingsCwdLoaded = false;
 let settingsCwdSaveStatus: "" | "saving" | "saved" | "error" = "";
 
+let settingsShowTimestamps = false;
+let settingsShowTimestampsLoaded = false;
+
 // ── Project tab state ──
 let projectConfig: Record<string, string> = {};
 let projectDefaults: Record<string, string> = {};
@@ -992,9 +995,34 @@ function renderProjectTab() {
 }
 
 function loadGeneralSettings() {
-	if (settingsCwdLoaded) return;
-	settingsCwd = state.defaultCwd;
-	settingsCwdLoaded = true;
+	if (!settingsCwdLoaded) {
+		settingsCwd = state.defaultCwd;
+		settingsCwdLoaded = true;
+	}
+	if (!settingsShowTimestampsLoaded) {
+		settingsShowTimestampsLoaded = true;
+		(async () => {
+			try {
+				const res = await gatewayFetch("/api/preferences");
+				if (res.ok) {
+					const prefs = await res.json();
+					settingsShowTimestamps = !!prefs.showTimestamps;
+					renderApp();
+				}
+			} catch {}
+		})();
+	}
+}
+
+async function toggleShowTimestamps(): Promise<void> {
+	settingsShowTimestamps = !settingsShowTimestamps;
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ showTimestamps: settingsShowTimestamps }),
+		});
+	} catch {}
 }
 
 async function saveDefaultCwd(): Promise<void> {
@@ -1046,6 +1074,21 @@ function renderGeneralTab() {
 				</div>
 				${settingsCwdSaveStatus === "saved" ? html`<p class="text-xs text-green-600">Saved successfully.</p>` : ""}
 				${settingsCwdSaveStatus === "error" ? html`<p class="text-xs text-destructive">Failed to save.</p>` : ""}
+			</div>
+
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						.checked=${settingsShowTimestamps}
+						@change=${toggleShowTimestamps}
+					/>
+					<span class="text-sm font-medium text-foreground">Show message timestamps</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Display timestamps next to user and assistant messages.
+				</p>
 			</div>
 		</div>
 	`;
