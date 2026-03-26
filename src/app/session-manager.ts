@@ -219,6 +219,10 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	// AI Gateway: the gateway handles LLM auth; Anthropic OAuth endpoints
 	// are likely unreachable on air-gapped networks anyway.
 	const healthData = await healthRes.json();
+	// Extract setup status from health response (avoids extra fetch)
+	if (typeof healthData.setupComplete === "boolean") {
+		state.setupComplete = healthData.setupComplete;
+	}
 	if (!healthData.localhost && !healthData.aigw) {
 		const hasAuth = await checkOAuthStatus();
 		if (!hasAuth) {
@@ -234,6 +238,13 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	}
 	renderApp();
 	await refreshSessions();
+	try {
+		const cwdRes = await gatewayFetch("/api/config/cwd");
+		if (cwdRes.ok) {
+			const cwdData = await cwdRes.json();
+			state.defaultCwd = cwdData.cwd || "";
+		}
+	} catch {}
 	startSessionPolling();
 	startTimeRefresh();
 }
@@ -555,6 +566,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		remote.onSetupProposal = (proposal) => {
+			if (proposal.action === "complete") {
+				state.setupComplete = true;
+				renderApp();
+			}
+		};
+
 		remote.onStaffProposal = (proposal) => {
 			state.activeStaffProposal = proposal;
 			if (!state.staffPreviewNameEdited) state.staffPreviewName = proposal.name;
@@ -844,7 +862,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 // CREATE & CONNECT
 // ============================================================================
 
-export async function createAndConnectSession(goalId?: string, roleId?: string, personalities?: string[]): Promise<void> {
+export async function createAndConnectSession(goalId?: string, roleId?: string, personalities?: string[], cwd?: string): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = goalId || null;
@@ -854,6 +872,7 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		if (goalId) body.goalId = goalId;
 		if (roleId) body.roleId = roleId;
 		if (personalities && personalities.length > 0) body.personalities = personalities;
+		if (cwd) body.cwd = cwd;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(body),

@@ -16,30 +16,16 @@ import {
 
 	resetArchivedExpandState,
 } from "./state.js";
-import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSetupStatus, dismissSetup } from "./api.js";
+import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup } from "./api.js";
 import { clearSessionModel } from "./routing.js";
 import { backToSessions, createAndConnectSession, connectToSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard } from "./sidebar.js";
 
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, INDENT } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
-async function launchSetupWizard(): Promise<void> {
-	try {
-		const res = await gatewayFetch("/api/sessions", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ assistantType: "setup" }),
-		});
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
-		const { id } = await res.json();
-		await connectToSession(id, false, { assistantType: "setup" });
-	} catch (err) {
-		console.error("[setup] Failed to create setup assistant session:", err);
-	}
-}
 
 function skipSetup(): void {
 	dismissSetup();
@@ -351,7 +337,6 @@ function goalPreviewPanel() {
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
 					${cwdCombobox({
 						value: state.previewCwd,
-						placeholder: "(server default)",
 						onInput: (v) => {
 							state.previewCwd = v;
 							state.previewCwdEdited = true;
@@ -1017,7 +1002,7 @@ function staffPreviewPanel() {
 					${Input({
 						type: "text",
 						value: state.staffPreviewCwd,
-						placeholder: "(server default)",
+						placeholder: (state as any).defaultCwd || "(server default)",
 						onInput: (e: Event) => {
 							state.staffPreviewCwd = (e.target as HTMLInputElement).value;
 							state.staffPreviewCwdEdited = true;
@@ -1309,7 +1294,6 @@ function goalProposalPanel() {
 				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
 				${cwdCombobox({
 					value: _proposalCwd,
-					placeholder: "(server default)",
 					onInput: (v) => { _proposalCwd = v; renderApp(); },
 					onSelect: (v) => { _proposalCwd = v; renderApp(); },
 					dropdownOpen: _proposalCwdDropdownOpen,

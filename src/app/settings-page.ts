@@ -17,13 +17,13 @@ import {
 	type KeyBinding,
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
-import { renderApp } from "./state.js";
+import { renderApp, state } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
-type SettingsTab = "shortcuts" | "palette" | "models";
-let activeTab: SettingsTab = "shortcuts";
+type SettingsTab = "general" | "shortcuts" | "palette" | "models";
+let activeTab: SettingsTab = "general";
 
 // Rebind state (same as shortcuts-dialog)
 let rebindingId: string | null = null;
@@ -32,6 +32,10 @@ let pendingBinding: KeyBinding | null = null;
 let conflictEntry: ShortcutEntry | null = null;
 let browserReservedWarning = false;
 let _listening = false;
+
+let settingsCwd = "";
+let settingsCwdLoaded = false;
+let settingsCwdSaveStatus: "" | "saving" | "saved" | "error" = "";
 
 function resetRebindState(): void {
 	rebindingId = null;
@@ -257,6 +261,8 @@ function renderShortcutRow(entry: ShortcutEntry) {
 			: ""}
 	`;
 }
+
+// ── General tab (see module-level state and renderGeneralTab above) ──
 
 function renderShortcutsTab() {
 	const allShortcuts = getShortcuts();
@@ -767,11 +773,72 @@ function renderModelsTab() {
 	`;
 }
 
+function loadGeneralSettings() {
+	if (settingsCwdLoaded) return;
+	settingsCwd = state.defaultCwd;
+	settingsCwdLoaded = true;
+}
+
+async function saveDefaultCwd(): Promise<void> {
+	settingsCwdSaveStatus = "saving";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/config/cwd", {
+			method: "PUT",
+			body: JSON.stringify({ cwd: settingsCwd }),
+		});
+		if (res.ok) {
+			const data = await res.json();
+			state.defaultCwd = data.cwd;
+			settingsCwdSaveStatus = "saved";
+			setTimeout(() => { settingsCwdSaveStatus = ""; renderApp(); }, 2000);
+		} else {
+			settingsCwdSaveStatus = "error";
+		}
+	} catch {
+		settingsCwdSaveStatus = "error";
+	}
+	renderApp();
+}
+
+function renderGeneralTab() {
+	loadGeneralSettings();
+	return html`
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-1.5">
+				<label class="text-sm font-medium text-foreground">Default Working Directory</label>
+				<p class="text-xs text-muted-foreground">
+					The default directory used when creating new sessions and goals without an explicit path.
+				</p>
+				<div class="flex gap-2">
+					<input
+						type="text"
+						class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+							focus:outline-none focus:ring-2 focus:ring-ring"
+						.value=${settingsCwd}
+						placeholder="e.g. C:\\Users\\you\\projects"
+						@input=${(e: Event) => { settingsCwd = (e.target as HTMLInputElement).value; settingsCwdSaveStatus = ""; renderApp(); }}
+					/>
+					<button
+						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
+							hover:bg-primary/90 transition-colors disabled:opacity-50"
+						?disabled=${settingsCwdSaveStatus === "saving"}
+						@click=${saveDefaultCwd}
+					>${settingsCwdSaveStatus === "saving" ? "Saving..." : "Save"}</button>
+				</div>
+				${settingsCwdSaveStatus === "saved" ? html`<p class="text-xs text-green-600">Saved successfully.</p>` : ""}
+				${settingsCwdSaveStatus === "error" ? html`<p class="text-xs text-destructive">Failed to save.</p>` : ""}
+			</div>
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
 
 	const tabs: { id: SettingsTab; label: string }[] = [
+		{ id: "general" as SettingsTab, label: "General" },
 		{ id: "shortcuts", label: "Shortcuts" },
 		{ id: "models", label: "Models" },
 		{ id: "palette", label: "Color Palette" },
@@ -783,7 +850,7 @@ export function renderSettingsPage() {
 			<div class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border">
 				<button
 					class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
-					@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
+					@click=${() => { resetRebindState(); cleanupListener(); settingsCwdLoaded = false; toggleSettings(); }}
 					title="Back"
 				>${icon(ArrowLeft, "sm")}</button>
 				<h1 class="text-lg font-semibold">Settings</h1>
@@ -804,6 +871,7 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto p-4">
 				<div class="${activeTab === "palette" ? "max-w-2xl" : "max-w-xl"}">
+					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}

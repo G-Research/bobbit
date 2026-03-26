@@ -10,7 +10,7 @@ export function getRecentCwds(): Array<{ path: string; source: string }> {
 
 	// Sessions (sorted by lastActivity descending)
 	const sessions = [...state.gatewaySessions]
-		.filter((s) => s.cwd && s.assistantType !== "goal" && !s.delegateOf)
+		.filter((s) => s.cwd && s.assistantType !== "goal" && !s.delegateOf && !s.teamGoalId)
 		.sort((a, b) => b.lastActivity - a.lastActivity);
 	for (const s of sessions) {
 		const p = s.cwd;
@@ -29,7 +29,7 @@ export function getRecentCwds(): Array<{ path: string; source: string }> {
 			results.push({ path: p, source: "goal" });
 		}
 	}
-	return results;
+	return results.filter(r => !/-wt[/\\]/.test(r.path));
 }
 
 export interface CwdComboboxProps {
@@ -108,7 +108,7 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 					aria-controls="cwd-listbox"
 					class="flex w-full min-w-0 rounded-md border border-input bg-transparent text-foreground shadow-xs h-9 px-3 py-1 text-sm pr-8 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none dark:bg-input/30"
 					.value=${opts.value}
-					placeholder=${opts.placeholder || "(server default)"}
+					placeholder=${opts.placeholder || state.defaultCwd || "(server default)"}
 					@input=${(e: Event) => {
 						opts.onInput((e.target as HTMLInputElement).value);
 						if (!opts.dropdownOpen) opts.onToggle(true);

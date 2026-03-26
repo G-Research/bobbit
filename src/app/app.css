@@ -15,6 +15,9 @@ theme-toggle button {
 [data-mobile-header] agent-interface .overflow-y-auto > .max-w-5xl {
 	padding-top: var(--mobile-header-height, 60px) !important; /* header + breathing room */
 }
+[data-mobile-header] .goal-preview-panel > .overflow-y-auto {
+	padding-top: var(--mobile-header-height, 60px) !important;
+}
 
 /* ============================================================================
  * STREAMING STATUS DOT — pulsing glow for active sessions
