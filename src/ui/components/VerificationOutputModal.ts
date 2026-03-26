@@ -5,6 +5,8 @@
  */
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 
 interface OutputChunk {
 	stream: "stdout" | "stderr";
@@ -147,10 +149,13 @@ export class VerificationOutputModal extends LitElement {
 		if (this._chunks.length === 0) {
 			return html`<span style="color:#71717a;">Waiting for output\u2026</span>`;
 		}
-		return html`${this._chunks.map(c =>
-			c.stream === "stderr"
+		return html`${this._chunks.map(c => {
+			if (hasAnsi(c.text)) {
+				return html`<span style="color:${c.stream === "stderr" ? "#fbbf24" : "#d4d4d8"};">${unsafeHTML(ansiToHtml(c.text))}</span>`;
+			}
+			return c.stream === "stderr"
 				? html`<span style="color:#fbbf24;">${c.text}</span>`
-				: html`<span style="color:#d4d4d8;">${c.text}</span>`
-		)}`;
+				: html`<span style="color:#d4d4d8;">${c.text}</span>`;
+		})}`;
 	}
 }

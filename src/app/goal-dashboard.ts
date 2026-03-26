@@ -1,5 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import "../ui/components/VerificationOutputModal.js";
+import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, type GateState, type GateSignal } from "./api.js";
@@ -1636,7 +1638,7 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 									<span class="verify-step__duration">${step.duration_ms}ms</span>
 								</div>
 								${step.output ? html`
-									<div class="verify-step__output">${step.output}</div>
+									<div class="verify-step__output">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</div>
 								` : nothing}
 							</div>
 						`)}
@@ -1750,7 +1752,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
 						</div>
 						${isExpanded && step.output ? html`
-							<pre class="verify-card__output">${step.output}</pre>
+							<pre class="verify-card__output">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>
 						` : nothing}
 					</div>
 				`;

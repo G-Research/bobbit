@@ -7,8 +7,10 @@
  */
 import { LitElement, html, nothing, type TemplateResult, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import "../../components/LiveTimer.js";
 import "../../components/VerificationOutputModal.js";
+import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
 import {
 	type DelegateCardEntry,
 	statusColor,
@@ -351,7 +353,7 @@ export class GateVerificationLive extends LitElement {
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
 				</div>
 				${isExpanded && step.output ? html`
-					<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${step.output}</pre>
+					<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>
 				` : nothing}
 			</div>
 		`;
