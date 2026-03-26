@@ -25,6 +25,7 @@ import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
+import { isRouteActive, toggleConfigPage } from "./routing.js";
 
 // ============================================================================
 // ROLE + PERSONALITY PICKER
@@ -619,29 +620,35 @@ export function renderSidebar() {
 		return renderCollapsedSidebar(liveGoals, ungroupedSessions, archivedGoals);
 	}
 
+	const isRolesActive = isRouteActive("roles", "role-edit");
+	const isPersonalitiesActive = isRouteActive("personalities", "personality-edit");
+	const isToolsActive = isRouteActive("tools", "tool-edit");
+	const isWorkflowsActive = isRouteActive("workflows", "workflow-edit");
+	const isSkillsActive = isRouteActive("skills");
+
 	return html`
 		<div class="w-[240px] shrink-0 h-full flex flex-col sidebar-edge" style="background: var(--sidebar);">
 			<div class="flex flex-col border-b border-border/50 px-0.5 py-1 gap-0.5">
 				<div class="flex items-center">
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
-						@click=${() => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); import("./routing.js").then((m) => m.setHashRoute("roles")); }}
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); import("./routing.js").then((m) => m.setHashRoute("roles")); })}
 						title="Manage roles"
 					>
 						${icon(Users, "xs", "!w-3.5 !h-3.5")}
 						<span>Roles</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
-						@click=${() => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); import("./routing.js").then((m) => m.setHashRoute("personalities")); }}
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs ${isPersonalitiesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						@click=${() => toggleConfigPage(["personalities", "personality-edit"], () => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); import("./routing.js").then((m) => m.setHashRoute("personalities")); })}
 						title="Manage personalities"
 					>
 						${icon(Drama, "xs", "!w-3.5 !h-3.5")}
 						<span>Personalities</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
-						@click=${() => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); import("./routing.js").then((m) => m.setHashRoute("tools")); }}
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); import("./routing.js").then((m) => m.setHashRoute("tools")); })}
 						title="Manage tools"
 					>
 						${icon(Wrench, "xs", "!w-3.5 !h-3.5")}
@@ -650,16 +657,16 @@ export function renderSidebar() {
 				</div>
 				<div class="flex items-center">
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
-						@click=${() => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); import("./routing.js").then((m) => m.setHashRoute("workflows")); }}
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); import("./routing.js").then((m) => m.setHashRoute("workflows")); })}
 						title="Manage workflows"
 					>
 						${icon(Workflow, "xs", "!w-3.5 !h-3.5")}
 						<span>Workflows</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
-						@click=${() => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); }}
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); })}
 						title="View skills"
 					>
 						${icon(Zap, "xs", "!w-3.5 !h-3.5")}
@@ -800,7 +807,7 @@ export function renderSidebar() {
 				}
 			</div>
 			<div class="flex items-center border-t border-border/50">
-				${(() => { const isSettings = window.location.hash === "#/settings"; return html`<button
+				${(() => { const isSettings = isRouteActive("settings"); return html`<button
 					class="flex items-center gap-1.5 px-3 py-2 text-xs transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 					@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
 					title="Settings (Ctrl+,)"
