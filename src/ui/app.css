@@ -1826,9 +1826,16 @@ html {
 	image-rendering: pixelated;
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
 	box-shadow:
-		11px 2px 0 #fef08a, 12px 2px 0 #fbbf24,
-		10px 3px 0 #fde047, 11px 3px 0 #fff, 12px 3px 0 #fde047,
-		10px 4px 0 #fbbf24, 11px 4px 0 #fbbf24,
+		/* Outlined diamond star */
+		11px 2px 0 #000,
+		10px 3px 0 #000, 12px 3px 0 #000,
+		9px 4px 0 #000, 13px 4px 0 #000,
+		10px 5px 0 #000, 12px 5px 0 #000,
+		11px 6px 0 #000,
+		11px 3px 0 #fef9c4,
+		10px 4px 0 #fde047, 11px 4px 0 #fff, 12px 4px 0 #fde047,
+		11px 5px 0 #fef9c4,
+		/* Handle */
 		9px 5px 0 #000, 10px 5px 0 #cd853f, 11px 5px 0 #000,
 		8px 6px 0 #000, 9px 6px 0 #cd853f, 10px 6px 0 #000,
 		7px 7px 0 #000, 8px 7px 0 #8b4513, 9px 7px 0 #000,
@@ -1838,6 +1845,52 @@ html {
 		blob-busy-move-rigid 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,
 		wand-depth-busy 10s steps(1) infinite;
 }
+
+/* Wand sparkle animations — continuous spawn, two staggered layers */
+.bobbit-wand .bobbit-blob__wand::before {
+	content: '';
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	image-rendering: pixelated;
+	box-shadow:
+		8px 2px 0 #fff,
+		14px 6px 0 #fef9c4;
+	animation: wand-sparkle-a 1.6s ease-in-out infinite;
+}
+.bobbit-wand .bobbit-blob__wand::after {
+	content: '';
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	image-rendering: pixelated;
+	box-shadow:
+		14px 2px 0 #fef08a,
+		8px 6px 0 #fff;
+	animation: wand-sparkle-b 1.9s ease-in-out 0.5s infinite;
+}
+
+@keyframes wand-sparkle-a {
+	0%   { opacity: 0.6; transform: translate(0, 0); }
+	15%  { opacity: 1;   transform: translate(-0.3px, -0.4px); }
+	40%  { opacity: 0.7; transform: translate(-0.7px, -0.9px); }
+	60%  { opacity: 0.2; transform: translate(-1px, -1.2px); }
+	65%  { opacity: 0.3; transform: translate(0.1px, 0.1px); }
+	80%  { opacity: 1;   transform: translate(0.4px, -0.3px); }
+	95%  { opacity: 0.5; transform: translate(0.7px, -0.7px); }
+	100% { opacity: 0.6; transform: translate(0, 0); }
+}
+@keyframes wand-sparkle-b {
+	0%   { opacity: 0.5; transform: translate(0, 0); }
+	12%  { opacity: 1;   transform: translate(0.3px, 0.2px); }
+	35%  { opacity: 0.6; transform: translate(0.6px, -0.4px); }
+	55%  { opacity: 0.15;transform: translate(0.9px, -0.8px); }
+	60%  { opacity: 0.4; transform: translate(-0.1px, 0.15px); }
+	75%  { opacity: 0.95;transform: translate(-0.4px, -0.2px); }
+	90%  { opacity: 0.5; transform: translate(-0.7px, -0.5px); }
+	100% { opacity: 0.5; transform: translate(0, 0); }
+}
+
 .bobbit-blob--idle .bobbit-blob__wand {
 	animation: wand-depth-idle 10s steps(1) infinite;
 	transform: scale(4) translateX(-7px);
