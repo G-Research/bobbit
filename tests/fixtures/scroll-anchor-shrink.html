@@ -72,6 +72,7 @@ let _stickToBottom = true;
 let _isAutoScrolling = false;
 let _autoScrollTimer;
 let _lastScrollHeight = scrollContainer.scrollHeight;
+let _collapseCompensation = 0;
 
 // The resize handler — same logic as the ResizeObserver callback in AgentInterface.ts.
 // Called manually in the test since ResizeObserver doesn't fire in headless Chromium.
@@ -82,8 +83,33 @@ function handleResize() {
   _lastScrollHeight = newScrollHeight;
 
   if (_stickToBottom) {
-    _isAutoScrolling = true;
-    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    if (delta < 0) {
+      // Content shrunk (e.g. tool collapsed) while stuck to bottom.
+      // Add bottom padding to compensate so scrollHeight is maintained
+      // and the browser doesn't clamp scrollTop (which causes a jolt).
+      const wrapper = document.getElementById('content-wrapper');
+      if (wrapper) {
+        _collapseCompensation += Math.abs(delta);
+        wrapper.style.paddingBottom = _collapseCompensation + 'px';
+      }
+      _lastScrollHeight = scrollContainer.scrollHeight;
+      _isAutoScrolling = true;
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    } else if (delta > 0 && _collapseCompensation > 0) {
+      // Content grew while we have compensation padding — absorb growth
+      const wrapper = document.getElementById('content-wrapper');
+      if (wrapper) {
+        const absorbed = Math.min(delta, _collapseCompensation);
+        _collapseCompensation -= absorbed;
+        wrapper.style.paddingBottom = _collapseCompensation + 'px';
+        _lastScrollHeight = scrollContainer.scrollHeight;
+      }
+      _isAutoScrolling = true;
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    } else {
+      _isAutoScrolling = true;
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    }
     clearTimeout(_autoScrollTimer);
     _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
   } else if (delta < 0) {
