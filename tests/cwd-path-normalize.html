@@ -20,7 +20,9 @@ const state = {
   defaultCwd: "C:\\Users\\foo",
 };
 
-// ---- Current (buggy) getRecentCwds() logic copied from src/app/cwd-combobox.ts ----
+// ---- getRecentCwds() logic copied from src/app/cwd-combobox.ts (with normalization fix) ----
+const normalizePath = (p) => p.replace(/\\/g, '/');
+
 function getRecentCwds() {
   const seen = new Set();
   const results = [];
@@ -30,7 +32,7 @@ function getRecentCwds() {
     .filter((s) => s.cwd && s.assistantType !== "goal" && !s.delegateOf && !s.teamGoalId && !s.staffId)
     .sort((a, b) => b.lastActivity - a.lastActivity);
   for (const s of sessions) {
-    const p = s.cwd;
+    const p = normalizePath(s.cwd);
     if (!seen.has(p)) {
       seen.add(p);
       results.push({ path: p, source: "session" });
@@ -40,7 +42,7 @@ function getRecentCwds() {
   // Goals
   const goals = [...state.goals].sort((a, b) => b.updatedAt - a.updatedAt);
   for (const g of goals) {
-    const p = g.repoPath || g.cwd;
+    const p = normalizePath(g.repoPath || g.cwd);
     if (p && !seen.has(p)) {
       seen.add(p);
       results.push({ path: p, source: "goal" });
@@ -52,7 +54,7 @@ function getRecentCwds() {
 // Expose results for Playwright
 window.__results = {
   cwds: getRecentCwds(),
-  defaultCwd: state.defaultCwd,
+  defaultCwd: state.defaultCwd ? normalizePath(state.defaultCwd) : "(server default)",
 };
 </script>
 </body>
