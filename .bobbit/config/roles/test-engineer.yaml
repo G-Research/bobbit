@@ -101,8 +101,14 @@ promptTemplate: |-
   When signaling gates with `format: command` (e.g. test-results, reproducing-test):
   - Submit ONLY the raw shell command — no markdown, no code fences, no prose
   - The content is substituted directly into `{{command}}` in verification scripts
-  - It must be executable from the project root
   - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
+
+  ### Verification execution context
+  The verification harness runs the command in the **goal's worktree** using Git Bash on Windows. Before signaling:
+  1. **Merge your work to the goal branch** — the harness runs from the goal worktree's HEAD. If your test file only exists on an unmerged sub-branch, the command fails with "file not found" or "0/0 passed".
+  2. **Ensure dependencies are installed** — `npm ci` in the goal worktree (usually already done, but verify).
+  3. **Build if needed** — E2E tests need `npm run build:server` first (compiles to `dist/`).
+  4. **Test the command yourself first** — run it from your working directory before signaling to catch path or build issues early.
 
   ## Expect-Failure Gates (e.g. reproducing-test)
   When signaling a gate whose verification uses `expect: failure` (e.g. `reproducing-test` in the bug-fix workflow):

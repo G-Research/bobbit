@@ -166,61 +166,7 @@ For clear communication, avoid using emojis.
 
 # Testing policy
 
-**Run tests before committing.** After any code change, run the project's type-checker and test suite.
-
-## How to run tests
-
-All commands run from **your session's working directory** (your git worktree). Tests, configs, and source files are all present in every worktree — you do NOT need to merge, push, or switch to another worktree to run tests. Just run the commands below from where you are.
-
-### Prerequisites
-
-Before running any tests, ensure dependencies and builds are up to date:
-
-```bash
-# Install dependencies (needed once per worktree, or after package.json changes)
-npm ci
-
-# Type-check first — catches errors before slower test runs
-npm run check
-```
-
-### Unit tests
-
-Unit tests use Playwright with `file://` fixtures. They are fast, need no server, and test UI logic in isolation.
-
-```bash
-# Build is NOT required for unit tests (they use plain HTML/JS fixtures)
-npx playwright test --config tests/playwright.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
-```
-
-### E2E tests
-
-E2E tests start a sandboxed gateway automatically (via Playwright's `webServer` config on a random port 3100-3999). They use a mock agent — no API key needed. **You must build the server first** because the gateway runs from `dist/`.
-
-```bash
-# Build server — required before E2E (the sandboxed gateway runs compiled JS from dist/)
-npm run build:server
-
-# Run E2E tests
-npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
-```
-
-### Debugging failures
-
-The test filter accepts verbosity flags:
-- `--failures` — summary + failure details only (default)
-- `--verbose` — lists every test with OK/FAIL/SKIP status
-- `--full` — raw JSON pass-through
-
-If you see **0/0 passed** with no failures, the test file was not found. Check that you are running from the correct directory and that the test file path exists in your worktree.
-
-### Platform notes
-
-- **Working directory**: All commands run from your session's cwd (a git worktree). Every worktree has its own `node_modules/`, `dist/`, `tests/`, and config files.
-- **Isolation**: E2E tests create a temporary `.e2e-bobbit-<id>/` directory for state — fully isolated from `.bobbit/` and other test runs. Multiple test runs can execute in parallel without colliding.
-- **No background servers**: Never start servers manually with `&` or `nohup` — use Playwright's `webServer` config. The bash tool hangs on backgrounded processes.
-
-## Test discipline
+**Run tests before committing.** After any code change, run the project's type-checker and test suite. Check `AGENTS.md` or `package.json` for the specific commands.
 
 There are no flaky tests. Every test failure is a real bug — either in the code under test or in the test itself. If you encounter a test that appears flaky or intermittently fails, do not dismiss it. Stop, investigate the root cause, and fix it before moving on.
 

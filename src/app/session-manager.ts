@@ -790,9 +790,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
 
-		if (isExisting) {
-			remote.requestMessages();
-		}
+		// NOTE: requestMessages() is deferred until after all draft restores
+		// complete (see below). Calling it here would race: the WS response
+		// can arrive while draft restores are awaiting, detect a proposal via
+		// _checkProposals, fill the form — then the restore completes with
+		// "no draft" and wipes the form to empty.
 
 		// Clear goal proposal when connecting to a non-goal-assistant session
 		// to prevent stale proposals from showing in unrelated sessions
@@ -890,6 +892,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.staffPreviewTriggersEdited = false;
 			state.staffPreviewCwdEdited = false;
 			state.assistantHasProposal = false;
+		}
+
+		// Now that all draft restores have completed and default state is
+		// established, request messages. Any proposals found during the message
+		// scan will correctly fill the form without being overwritten.
+		if (isExisting) {
+			remote.requestMessages();
 		}
 
 		// Auto-prompt for new assistant sessions
