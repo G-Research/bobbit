@@ -645,11 +645,6 @@ async function handleApiRoute(
 				sessionManager.updateSessionMeta(session.id, { role: roleForMeta.name, accessory: roleForMeta.accessory });
 				session.role = roleForMeta.name;
 				session.accessory = roleForMeta.accessory;
-			} else if (assistantType) {
-				// All assistant/wizard sessions use the "assistant" role
-				sessionManager.updateSessionMeta(session.id, { role: "assistant", accessory: "wizard-hat" });
-				session.role = "assistant";
-				session.accessory = "wizard-hat";
 			}
 
 			json({
