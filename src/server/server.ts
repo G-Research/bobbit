@@ -2288,6 +2288,14 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/slash-skills/details — full slash skill details including content and file paths
+	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
+		const cwd = url.searchParams.get("cwd") || process.cwd();
+		const skills = discoverSlashSkills(cwd);
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })) });
+		return;
+	}
+
 	// ── Workflow endpoints ──────────────────────────────────────────
 
 	// POST /api/workflows/:id/clone (must be checked BEFORE single-workflow route)

@@ -161,6 +161,19 @@ async function handleHashChange(): Promise<void> {
 			await loadWorkflowPageData();
 			navigateToWorkflowEdit(route.workflowId);
 			await refreshSessions();
+		} else if (route.view === "skills") {
+			clearDashboardState();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
+			const { loadSkillsPageData } = await import("./skills-page.js");
+			loadSkillsPageData();
+			renderApp();
+			await refreshSessions();
 		} else if (route.view === "staff") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -327,6 +340,9 @@ async function initApp() {
 				const { loadWorkflowPageData, navigateToWorkflowEdit } = await import("./workflow-page.js");
 				await loadWorkflowPageData();
 				navigateToWorkflowEdit(route.workflowId);
+			} else if (route.view === "skills") {
+				const { loadSkillsPageData } = await import("./skills-page.js");
+				loadSkillsPageData();
 			} else if (route.view === "staff") {
 				const { loadStaffPageData } = await import("./staff-page.js");
 				loadStaffPageData();

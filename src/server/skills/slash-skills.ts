@@ -203,16 +203,23 @@ export function discoverSlashSkills(cwd: string): SlashSkill[] {
 
 	const projectSkillsDir = path.join(cwd, ".claude", "skills");
 	const personalSkillsDir = path.join(os.homedir(), ".claude", "skills");
+	const bobbitProjectSkillsDir = path.join(cwd, ".bobbit", "skills");
+	const bobbitPersonalSkillsDir = path.join(os.homedir(), ".bobbit", "skills");
 	const legacyCommandsDir = path.join(cwd, ".claude", "commands");
 
 	const projectSkills = scanSkillDir(projectSkillsDir, "project");
 	const personalSkills = scanSkillDir(personalSkillsDir, "personal");
+	const bobbitProjectSkills = scanSkillDir(bobbitProjectSkillsDir, "project");
+	const bobbitPersonalSkills = scanSkillDir(bobbitPersonalSkillsDir, "personal");
 	const legacyCommands = scanCommandsDir(legacyCommandsDir);
 
 	// Merge with priority: project > personal > legacy
+	// .claude takes precedence over .bobbit at the same level
 	const byName = new Map<string, SlashSkill>();
 	for (const skill of legacyCommands) byName.set(skill.name, skill);
+	for (const skill of bobbitPersonalSkills) byName.set(skill.name, skill);
 	for (const skill of personalSkills) byName.set(skill.name, skill);
+	for (const skill of bobbitProjectSkills) byName.set(skill.name, skill);
 	for (const skill of projectSkills) byName.set(skill.name, skill);
 
 	// Filter to user-invocable skills only (default is true)

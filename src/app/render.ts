@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { Archive, ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench } from "lucide";
+import { Archive, ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -55,6 +55,7 @@ import "./workflow-page.css";
 import { renderPersonalityManagerPage } from "./personality-manager-page.js";
 import "./personality-manager.css";
 import { renderStaffPage } from "./staff-page.js";
+import { renderSkillsPage } from "./skills-page.js";
 import { renderSettingsPage } from "./settings-page.js";
 
 // ============================================================================
@@ -97,6 +98,11 @@ function renderMobileLanding() {
 							title="Manage workflows"
 							@click=${() => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); }}>
 							${icon(WorkflowIcon, "xs")} Workflows
+						</button>
+						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+							title="View skills"
+							@click=${() => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); }}>
+							${icon(Zap, "xs")} Skills
 						</button>
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
 							@click=${() => showGoalDialog()}
@@ -2036,6 +2042,9 @@ export function doRenderApp(): void {
 
 		if (route.view === "staff" || route.view === "staff-edit") {
 			return renderStaffPage();
+		}
+		if (route.view === "skills") {
+			return renderSkillsPage();
 		}
 		if (route.view === "settings") {
 			return renderSettingsPage();

@@ -2,7 +2,7 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "settings";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "skills" | "settings";
 
 export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string } {
 	const hash = window.location.hash || "";
@@ -42,6 +42,9 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	if (hash === "#/staff") {
 		return { view: "staff" };
 	}
+	if (hash === "#/skills") {
+		return { view: "skills" };
+	}
 	const personalityEditMatch = hash.match(/^#\/personalities\/([a-zA-Z0-9_-]+)$/);
 	if (personalityEditMatch) {
 		return { view: "personality-edit", personalityName: personalityEditMatch[1] };
@@ -77,6 +80,8 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = `#/staff/${id}`;
 	} else if (view === "staff") {
 		newHash = "#/staff";
+	} else if (view === "skills") {
+		newHash = "#/skills";
 	} else if (view === "personality-edit" && id) {
 		newHash = `#/personalities/${id}`;
 	} else if (view === "personalities") {
