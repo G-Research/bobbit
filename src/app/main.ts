@@ -11,7 +11,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, refreshSessions } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession } from "./session-manager.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, selectSession } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
@@ -380,7 +380,7 @@ async function initApp() {
 		for (const s of staffSessions) ordered.push(s.id);
 
 		if (ordered.length > 1) {
-			const currentId = activeSessionId();
+			const currentId = state.selectedSessionId ?? activeSessionId();
 			const currentIndex = currentId ? ordered.indexOf(currentId) : -1;
 			let nextIndex: number;
 			if (direction === "up") {

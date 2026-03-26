@@ -351,18 +351,18 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 }
 
 // ============================================================================
-// CONNECT TO SESSION
+// SYNCHRONOUS SESSION SELECTION
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean }): Promise<void> {
-	if (state.connectingSessionId) return;
-	state.connectingSessionId = sessionId;
+/**
+ * Synchronous "select" phase — updates visual state immediately on keypress.
+ * No async work. Bumps generation counter to invalidate in-flight hydrations.
+ */
+export function selectSession(sessionId: string, replaceHistory?: boolean): void {
+	state.switchGeneration++;
+	state.selectedSessionId = sessionId;
 
-	// Capture the current route BEFORE any async work. If we're on a goal dashboard,
-	// we'll replace the history entry instead of pushing, so browser-back skips it.
-	// Must be captured here because event bubbling during the async gap can change the hash.
-	const startingRoute = getRouteFromHash();
-
+	// Disconnect previous agent immediately
 	if (state.remoteAgent) {
 		state.remoteAgent.disconnect();
 		state.remoteAgent = null;
@@ -370,7 +370,47 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	}
 	state.cwdDropdownOpen = false;
 
+	// Update hash route synchronously
+	setHashRoute("session", sessionId, replaceHistory);
+
+	// Update hue rotation synchronously
+	document.documentElement.style.setProperty("--bobbit-hue-rotate", `${sessionHueRotation(sessionId)}deg`);
+
+	// Update accessory class synchronously
+	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+	const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat"];
+	accClasses.forEach((c) => document.documentElement.classList.remove(c));
+	const accId = sessionData?.accessory
+		?? (sessionData?.role === "team-lead" ? "crown" : sessionData?.role === "coder" ? "bandana" : undefined);
+	if (accId && accId !== "none") {
+		const cls = accId === "crown" ? "bobbit-crowned" : `bobbit-${accId}`;
+		document.documentElement.classList.add(cls);
+	}
+
+	// Store in localStorage for restore
+	localStorage.setItem(GW_SESSION_KEY, sessionId);
+
+	// Synchronous render — sidebar highlight + header update instantly
 	renderApp();
+}
+
+// ============================================================================
+// CONNECT TO SESSION (select + hydrate)
+// ============================================================================
+
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean }): Promise<void> {
+	// Capture the current route BEFORE selectSession changes the hash.
+	const startingRoute = getRouteFromHash();
+	const replaceHistory = startingRoute.view === "goal-dashboard";
+
+	// Phase 1: synchronous select
+	selectSession(sessionId, replaceHistory);
+
+	// Phase 2: async hydrate
+	const gen = state.switchGeneration;
+	const isStale = () => state.switchGeneration !== gen;
+
+	state.connectingSessionId = sessionId;
 
 	try {
 		const url = localStorage.getItem(GW_URL_KEY)!;
@@ -378,6 +418,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		const remote = new RemoteAgent();
 		await remote.connect(url, token, sessionId);
+		if (isStale()) { remote.disconnect(); return; }
 
 		// Restore saved model
 		const savedModel = loadSessionModel(sessionId);
@@ -390,6 +431,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Model no longer available
 			}
 		}
+
+		if (isStale()) { remote.disconnect(); return; }
 
 		// Intercept setModel to persist
 		const originalSetModel = remote.setModel.bind(remote);
@@ -587,23 +630,24 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		if (isStale()) { remote.disconnect(); return; }
+
 		state.connectionStatus = "connected";
 		state.remoteAgent = remote;
 		state.appView = "authenticated";
-		localStorage.setItem(GW_SESSION_KEY, sessionId);
 		markSessionVisited(sessionId);
 
-		document.documentElement.style.setProperty("--bobbit-hue-rotate", `${sessionHueRotation(sessionId)}deg`);
 		// Refresh sessions so newly created sessions have role/accessory data
 		await refreshSessions();
+		if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
+
+		// Re-apply accessory class after refreshSessions (may have new data)
 		const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
-		// Remove all accessory classes, then add the active one
 		const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat"];
 		accClasses.forEach((c) => document.documentElement.classList.remove(c));
 		const accId = sessionForRole?.accessory
 			?? (sessionForRole?.role === "team-lead" ? "crown" : sessionForRole?.role === "coder" ? "bandana" : undefined);
 		if (accId && accId !== "none") {
-			// Crown uses "bobbit-crowned" for backward compat; others use "bobbit-{id}"
 			const cls = accId === "crown" ? "bobbit-crowned" : `bobbit-${accId}`;
 			document.documentElement.classList.add(cls);
 		}
@@ -628,27 +672,24 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		else stopPreviewPolling();
 
 		// Render immediately so the mobile header appears without waiting
-		// for ChatPanel setup or other async work below.  This fixes a race
-		// where the first render after connect still saw `hasActiveSession()
-		// === false` because renderApp() hadn't been called since
-		// `state.remoteAgent` was set.
+		// for ChatPanel setup or other async work below.
 		renderApp();
 
-		// Replace history entry when navigating from goal dashboard so browser-back
-		// goes to the landing page instead of back to the goal dashboard.
-		// Also replace if the hash changed during the async connect (e.g. event bubbling
-		// caused a goal-dashboard navigation while we were connecting).
+		// Replace history if the hash changed to a goal-dashboard during the async gap
 		const currentRoute = getRouteFromHash();
-		const replaceHistory = startingRoute.view === "goal-dashboard" || currentRoute.view === "goal-dashboard";
-		setHashRoute("session", sessionId, replaceHistory);
+		if (currentRoute.view === "goal-dashboard") {
+			setHashRoute("session", sessionId, true);
+		}
 
 		const modelProvider = remote.state.model?.provider || "anthropic";
 		await storage.providerKeys.set(modelProvider, "gateway-managed");
+		if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
 
 		state.chatPanel = new ChatPanel();
 		await state.chatPanel.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
 		});
+		if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
 
 		// Listen for suggest-goal events from assistant messages
 		state.chatPanel.addEventListener('suggest-goal', () => {
@@ -746,6 +787,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (state.assistantType === "goal") {
 			// Try to restore persisted draft state; fall back to fresh defaults
 			const restored = await restoreGoalDraft(sessionId);
+			if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
 			if (!restored) {
 				state.assistantTab = "chat";
 				state.previewTitle = "";
@@ -766,6 +808,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		if (state.assistantType === "role") {
 			const restored = await restoreRoleDraft(sessionId);
+			if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
 			if (!restored) {
 				state.assistantTab = "chat";
 				state.rolePreviewName = "";
@@ -798,6 +841,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		if (state.assistantType === "personality") {
 			const restored = await restorePersonalityDraft(sessionId);
+			if (isStale()) { remote.disconnect(); state.remoteAgent = null; return; }
 			if (!restored) {
 				state.assistantTab = "chat";
 				state.personalityPreviewName = "";
@@ -851,11 +895,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		refreshSessions();
 	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
+		if (!isStale()) {
+			const msg = err instanceof Error ? err.message : String(err);
+			showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
+		}
 	} finally {
-		state.connectingSessionId = null;
-		renderApp();
+		if (!isStale()) {
+			state.connectingSessionId = null;
+			renderApp();
+		}
 	}
 }
 
@@ -934,6 +982,7 @@ export function backToSessions(): void {
 	state.remoteAgent?.disconnect();
 	state.remoteAgent = null;
 	state.connectionStatus = "disconnected";
+	state.selectedSessionId = null;
 	state.activeGoalProposal = null;
 	state.activeRoleProposal = null;
 	state.assistantType = null;
@@ -954,6 +1003,7 @@ export function disconnectGateway(): void {
 	state.remoteAgent?.disconnect();
 	state.remoteAgent = null;
 	state.connectionStatus = "disconnected";
+	state.selectedSessionId = null;
 	state.assistantType = null;
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;

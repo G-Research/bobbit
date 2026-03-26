@@ -115,6 +115,10 @@ export const state = {
 	creatingSession: false,
 	creatingSessionForGoalId: null as string | null,
 	connectingSessionId: null as string | null,
+	/** The session ID the user has selected (visual highlight). Updated synchronously. */
+	selectedSessionId: null as string | null,
+	/** Monotonically increasing counter. Bumped on every select. Used to detect stale hydrations. */
+	switchGeneration: 0,
 	sessionPollTimer: null as ReturnType<typeof setInterval> | null,
 
 	/** Persisted default working directory from server */
@@ -351,7 +355,7 @@ export function hasActiveSession(): boolean {
 }
 
 export function activeSessionId(): string | undefined {
-	return state.remoteAgent?.gatewaySessionId;
+	return state.selectedSessionId ?? state.remoteAgent?.gatewaySessionId;
 }
 
 // ============================================================================
