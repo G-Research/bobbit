@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Gate Verification Reconcile Logic Test Fixture</title>
+</head>
+<body>
+<div id="results"></div>
+<script>
+/**
+ * This fixture tests the reconciliation logic that should be added to
+ * GateVerificationLive.ts to fix the stuck "running" state bug.
+ *
+ * The bug: <gate-verification-live> relies exclusively on transient
+ * CustomEvents for state. When it misses the completion event (disconnect/
+ * reconnect, historical scrollback, page refresh), it stays stuck showing
+ * "running" forever.
+ *
+ * The fix: on connectedCallback, if still "running"/"idle", fetch the gate
+ * state from REST and reconcile. These functions define the expected
+ * reconciliation behaviour.
+ */
+
+/**
+ * Determine whether reconciliation should run.
+ * Returns true if status is non-terminal AND all required IDs are present.
+ */
+function shouldReconcile(overallStatus, goalId, gateId, signalId) {
+	if (overallStatus !== "running" && overallStatus !== "idle") return false;
+	if (!goalId || !gateId || !signalId) return false;
+	return true;
+}
+
+/**
+ * Map a GateSignalStep (REST format) to a VerificationStep (component format).
+ *
+ * GateSignalStep: { name, type, passed (bool|null), output, duration_ms }
+ * VerificationStep: { name, type, status ("running"|"passed"|"failed"), durationMs, output, startedAt }
+ */
+function mapGateSignalStep(gateStep) {
+	let status;
+	if (gateStep.passed === true) status = "passed";
+	else if (gateStep.passed === false) status = "failed";
+	else status = "running";
+
+	const durationMs = gateStep.duration_ms ?? 0;
+	const startedAt = durationMs > 0 ? Date.now() - durationMs : 0;
+
+	return {
+		name: gateStep.name,
+		type: gateStep.type,
+		status: status,
+		durationMs: durationMs,
+		output: gateStep.output,
+		startedAt: startedAt,
+	};
+}
+
+/**
+ * Reconcile a component's state with data from the REST API.
+ *
+ * @param {Object} componentState - { steps: VerificationStep[], overallStatus: string }
+ * @param {Object} gateData - REST response from GET /api/goals/:goalId/gates/:gateId
+ * @param {string} signalId - The signal ID this component is tracking
+ * @returns {Object} - { steps, overallStatus } — reconciled state
+ */
+function reconcileFromGateData(componentState, gateData, signalId) {
+	// If already in terminal state, no-op
+	if (componentState.overallStatus === "passed" || componentState.overallStatus === "failed") {
+		return { steps: componentState.steps, overallStatus: componentState.overallStatus };
+	}
+
+	// Find matching signal
+	const signals = gateData.signals || [];
+	const signal = signals.find(s => s.id === signalId);
+	if (!signal || !signal.verification) {
+		return { steps: componentState.steps, overallStatus: componentState.overallStatus };
+	}
+
+	const verificationStatus = signal.verification.status;
+
+	// Only reconcile if the REST data shows a terminal state
+	if (verificationStatus !== "passed" && verificationStatus !== "failed") {
+		return { steps: componentState.steps, overallStatus: componentState.overallStatus };
+	}
+
+	// Map steps from GateSignalStep format to VerificationStep format
+	const reconciledSteps = (signal.verification.steps || []).map(mapGateSignalStep);
+
+	return {
+		steps: reconciledSteps,
+		overallStatus: verificationStatus,
+	};
+}
+
+// Expose functions globally for Playwright tests
+window.shouldReconcile = shouldReconcile;
+window.reconcileFromGateData = reconcileFromGateData;
+window.mapGateSignalStep = mapGateSignalStep;
+</script>
+</body>
+</html>

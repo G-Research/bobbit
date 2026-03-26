@@ -69,6 +69,7 @@ export class GateVerificationLive extends LitElement {
 	private _stepOutputs = new Map<number, string>();
 
 	private _boundOnEvent = this._onEvent.bind(this);
+	private _reconcileTimer?: ReturnType<typeof setTimeout>;
 
 	override createRenderRoot() { return this; }
 
@@ -88,11 +89,78 @@ export class GateVerificationLive extends LitElement {
 	override connectedCallback() {
 		super.connectedCallback();
 		document.addEventListener("gate-verification-event", this._boundOnEvent);
+		this._reconcileTimer = setTimeout(() => {
+			if (this.overallStatus === "running" || this.overallStatus === "idle") {
+				this._fetchAndReconcile();
+			}
+		}, 300);
 	}
 
 	override disconnectedCallback() {
 		super.disconnectedCallback();
 		document.removeEventListener("gate-verification-event", this._boundOnEvent);
+		if (this._reconcileTimer) {
+			clearTimeout(this._reconcileTimer);
+			this._reconcileTimer = undefined;
+		}
+	}
+
+	private async _fetchAndReconcile(): Promise<void> {
+		if (!this.goalId || !this.gateId || !this.signalId) return;
+
+		const token = localStorage.getItem("gateway.token") || "";
+		const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+
+		try {
+			const res = await fetch(`/api/goals/${this.goalId}/gates/${this.gateId}`, { headers });
+			if (!res.ok) return;
+			const gate = await res.json();
+
+			// Find matching signal
+			const signal = gate.signals?.find((s: any) => s.id === this.signalId);
+			if (!signal?.verification) return;
+
+			const vStatus = signal.verification.status;
+
+			if (vStatus === "passed" || vStatus === "failed") {
+				// Map GateSignalStep[] to VerificationStep[]
+				const steps: VerificationStep[] = (signal.verification.steps || []).map((s: any) => ({
+					name: s.name,
+					type: s.type,
+					status: s.passed === true ? "passed" as const : s.passed === false ? "failed" as const : "running" as const,
+					durationMs: s.duration_ms ?? 0,
+					output: s.output,
+					startedAt: s.duration_ms ? Date.now() - s.duration_ms : 0,
+				}));
+				this.steps = steps;
+				this.overallStatus = vStatus;
+				return;
+			}
+
+			// Still running — try active verifications for real-time step state
+			if (vStatus === "running") {
+				const activeRes = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
+				if (!activeRes.ok) return;
+				const activeData = await activeRes.json();
+				const active = activeData.verifications?.find(
+					(v: any) => v.signalId === this.signalId
+				);
+				if (active?.steps?.length) {
+					this.steps = active.steps.map((s: any) => ({
+						name: s.name,
+						type: s.type,
+						status: s.status,
+						durationMs: s.durationMs,
+						output: s.output,
+						startedAt: s.startedAt || Date.now(),
+						sessionId: s.sessionId,
+					}));
+					this.overallStatus = "running";
+				}
+			}
+		} catch {
+			// Silently ignore fetch errors — this is a best-effort reconciliation
+		}
 	}
 
 	private _onEvent(e: Event) {
