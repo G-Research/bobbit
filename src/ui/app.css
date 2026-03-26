@@ -1068,7 +1068,9 @@ html {
 	height: 1px;
 	overflow: visible;
 	transform-origin: 5px 8px; /* center of 10×9 grid */
-	transform: scale(3.5);
+	transform: scale(3.5) translateZ(0);
+	will-change: transform;
+	backface-visibility: hidden;
 	margin: 8px 18px 28px 18px;
 	animation:
 		blob-busy-move 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,

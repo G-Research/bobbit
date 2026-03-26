@@ -302,7 +302,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	const eyeTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
 	const eyeLeft = "0";
 	const eyeLayer = isSelected
-		? html`<span style="position:absolute;left:${eyeLeft};top:${eyeTop};display:block;width:1px;height:1px;image-rendering:pixelated;box-shadow:${eyeShadow};${eyeAnim}"></span>`
+		? html`<span style="position:absolute;left:${eyeLeft};top:${eyeTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;box-shadow:${eyeShadow};${eyeAnim}"></span>`
 		: "";
 
 	// Accessory overlay layer — counter-hue-rotated to keep fixed colours
@@ -320,7 +320,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		: `transform:scale(1.6)${isBandanaStyle ? " translateY(-0.5px)" : ""}${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 0;`;
 	const accTop = addsHeight ? `${acc.yOffset + compactTopOffset}px` : `${compactTopOffset}px`;
 	const accessoryLayer = hasAccessory
-		? html`<span style="position:absolute;left:0;top:${accTop};display:block;width:1px;height:1px;image-rendering:pixelated;box-shadow:${acc.shadow};${accTransform}${accFilter}"></span>`
+		? html`<span style="position:absolute;left:0;top:${accTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;box-shadow:${acc.shadow};${accTransform}${accFilter}"></span>`
 		: "";
 
 	// Shift inner content down when accessory adds height so tips aren't clipped
@@ -330,5 +330,5 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	const containerWidth = "20px";
 
 	const innerLeft = "0";
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><span style="position:absolute;left:${innerLeft};top:${innerTop};display:block;width:1px;height:1px;image-rendering:pixelated;${baseTransform}box-shadow:${shadow};${shimmer}"></span>${eyeLayer}${accessoryLayer}</span>`;
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><span style="position:absolute;left:${innerLeft};top:${innerTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;${baseTransform}box-shadow:${shadow};${shimmer}"></span>${eyeLayer}${accessoryLayer}</span>`;
 }
