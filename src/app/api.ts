@@ -18,7 +18,7 @@ const _prevSessionStatus = new Map<string, string>();
 
 /** Throttle PR status polling — don't hit GitHub API on every session poll. */
 let _lastPrRefresh = 0;
-const PR_POLL_INTERVAL_MS = 15_000;
+const PR_POLL_INTERVAL_MS = 60_000;
 
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
 async function showConnectionError(title: string, message: string): Promise<void> {
@@ -148,7 +148,7 @@ export async function refreshSessions(): Promise<void> {
 	// These call renderApp() only if data actually changed, avoiding redundant re-renders.
 	refreshGateStatusCache();
 	const now = Date.now();
-	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS) {
+	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS && document.visibilityState === "visible") {
 		_lastPrRefresh = now;
 		refreshPrStatusCache();
 	}
@@ -201,7 +201,11 @@ async function refreshGateStatusCache() {
 }
 
 /** Fetch PR status for all goals with branches and update the cache. */
+let _prRefreshInFlight = false;
 export async function refreshPrStatusCache() {
+	if (_prRefreshInFlight) return;
+	_prRefreshInFlight = true;
+	try {
 	const goalsWithBranch = state.goals.filter(g => g.branch);
 	if (goalsWithBranch.length === 0) return;
 
@@ -232,6 +236,9 @@ export async function refreshPrStatusCache() {
 		}
 	}
 	if (changed) renderApp();
+	} finally {
+		_prRefreshInFlight = false;
+	}
 }
 
 // ============================================================================

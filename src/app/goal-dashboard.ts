@@ -494,6 +494,7 @@ function startGitStatusPolling(goalId: string): void {
 	stopGitStatusPolling();
 	gitStatusPollTimer = setInterval(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
+		if (document.visibilityState !== "visible") return;
 		let needRender = false;
 		try {
 			const res = await gatewayFetch(`/api/goals/${goalId}/git-status`);
@@ -519,7 +520,7 @@ function startGitStatusPolling(goalId: string): void {
 			}
 		} catch { /* ignore */ }
 		if (needRender) renderApp();
-	}, 30_000);
+	}, 60_000);
 }
 
 function stopGitStatusPolling(): void {
