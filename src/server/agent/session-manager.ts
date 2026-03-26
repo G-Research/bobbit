@@ -528,13 +528,22 @@ export class SessionManager {
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		if (assistantDef) {
-			// Assistant sessions get their specialized prompt
+			// Combine assistant role's shared prompt with per-type specialized prompt
+			const assistantRole = this.roleManager?.getRole("assistant");
+			let assistantGoalSpec = "";
+			if (assistantRole?.promptTemplate) {
+				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
+				assistantGoalSpec += "\n\n---\n\n";
+			}
+			assistantGoalSpec += assistantDef.prompt;
+
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: undefined,
 				cwd: ps.cwd,
-				goalSpec: assistantDef.prompt,
+				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
+				allowedTools: restoredAllowedTools,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
@@ -683,13 +692,27 @@ export class SessionManager {
 
 		const assistantDef = assistantType ? getAssistantDef(assistantType) : undefined;
 		if (assistantDef) {
-			// Assistant sessions get their specialized prompt
+			// Combine assistant role's shared prompt with per-type specialized prompt
+			const assistantRole = this.roleManager?.getRole("assistant");
+			let assistantGoalSpec = "";
+			if (assistantRole?.promptTemplate) {
+				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(goalId || id).slice(0, 8)}`);
+				assistantGoalSpec += "\n\n---\n\n";
+			}
+			assistantGoalSpec += assistantDef.prompt;
+
+			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
+			if (assistantRole && assistantRole.allowedTools.length > 0) {
+				effectiveAllowedTools = assistantRole.allowedTools;
+			}
+
 			const promptPath = this.assemblePrompt(id, {
 				baseSystemPromptPath: undefined,
 				cwd,
-				goalSpec: assistantDef.prompt,
+				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
+				allowedTools: effectiveAllowedTools,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {

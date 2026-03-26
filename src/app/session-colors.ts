@@ -157,6 +157,22 @@ export const ACCESSORIES: Record<string, AccessoryDefinition> = {
 		yOffset: 2,
 		addsHeight: true,
 	},
+	wand: {
+		id: "wand",
+		label: "Wand",
+		shadow: `
+			11px 2px 0 #fef08a,12px 2px 0 #fbbf24,
+			10px 3px 0 #fde047,11px 3px 0 #fff,12px 3px 0 #fde047,
+			10px 4px 0 #fbbf24,11px 4px 0 #fbbf24,
+			9px 5px 0 #000,10px 5px 0 #cd853f,11px 5px 0 #000,
+			8px 6px 0 #000,9px 6px 0 #cd853f,10px 6px 0 #000,
+			7px 7px 0 #000,8px 7px 0 #8b4513,9px 7px 0 #000,
+			6px 8px 0 #000,7px 8px 0 #8b4513,8px 8px 0 #000,
+			5px 9px 0 #000,6px 9px 0 #000
+		`,
+		yOffset: 0,
+		addsHeight: false,
+	},
 };
 
 /** List of all accessory IDs (for iteration/UI selectors) */
