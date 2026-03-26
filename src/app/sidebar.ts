@@ -450,23 +450,8 @@ export function renderSidebar() {
 								</div>
 							`}
 							${renderStaffSidebarSection()}
-							${state.showArchived && archivedGoals.length > 0 ? html`
-								<div class="border-t border-border/30 my-1 mx-2"></div>
-								<div class="flex flex-col gap-0.5">
-									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
-										style="padding-left:${HEADER_CHEVRON_W}px;">
-										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">▾</span>
-										<span class="shrink-0 text-muted-foreground opacity-60" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
-										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived Goals</span>
-									</div>
-									${archivedGoals.map((goal, i) => html`
-										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-										<div class="opacity-60">${renderGoalGroup(goal)}</div>
-									`)}
-								</div>
-							` : ""}
 							${(() => {
-								// Archived section: standalone archived sessions (no goal, not a delegate)
+								// Archived section: archived goals + standalone archived sessions
 								// Goal-affiliated archived sessions render inside their goal groups.
 								// Delegates render nested under their parent (live or archived).
 								const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
@@ -493,6 +478,9 @@ export function renderSidebar() {
 											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
 										${state.showArchived ? html`
+											${archivedGoals.map(goal => html`
+												<div class="opacity-60">${renderGoalGroup(goal)}</div>
+											`)}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 												${standaloneArchived.map(s => html`
 													${renderArchivedSessionRow(s)}
@@ -516,7 +504,7 @@ export function renderSidebar() {
 					<span>Settings</span>
 				</button>
 				<button
-					class="flex items-center gap-1.5 px-2 py-2 text-xs ${state.showArchived ? "text-primary" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 transition-colors"
+					class="flex items-center gap-1.5 px-2 py-2 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
 					@click=${() => {
 						state.showArchived = !state.showArchived;
 						localStorage.setItem("bobbit-show-archived", String(state.showArchived));

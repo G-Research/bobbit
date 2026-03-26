@@ -171,28 +171,18 @@ function renderMobileLanding() {
 									</div>
 								` : ""}
 								${renderStaffSidebarSection()}
-								${state.showArchived && archivedGoals.length > 0 ? html`
-									<div class="border-t border-border/30 my-1 mx-2"></div>
-									<div class="flex flex-col gap-0.5">
-										<div class="flex items-center gap-1.5 pl-1 pr-2 py-1.5">
-											<span class="shrink-0 text-muted-foreground opacity-60">${icon(GoalIcon, "sm")}</span>
-											<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived Goals</span>
-										</div>
-										${archivedGoals.map((goal, i) => html`
-											${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-											<div class="opacity-60">${renderGoalGroup(goal)}</div>
-										`)}
-									</div>
-								` : ""}
 								${(() => {
 									const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
-									return standaloneArchived.length > 0 ? html`
+									return state.showArchived ? html`
 										<div class="border-t border-border/30 my-1 mx-2"></div>
 										<div class="flex flex-col gap-0.5">
 											<div class="flex items-center gap-1.5 pl-1 pr-2 py-1.5">
 												<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "sm")}</span>
 												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 											</div>
+											${archivedGoals.map(goal => html`
+												<div class="opacity-60">${renderGoalGroup(goal)}</div>
+											`)}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 												${standaloneArchived.map(s => html`
 													${renderArchivedSessionRow(s)}
@@ -212,7 +202,7 @@ function renderMobileLanding() {
 				${icon(Settings, "sm")}
 				<span>Settings</span>
 			</button>
-			<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs ${state.showArchived ? "text-primary" : "text-muted-foreground"} active:bg-secondary/50 rounded transition-colors"
+			<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} active:bg-secondary/50 rounded transition-colors"
 				@click=${() => {
 					state.showArchived = !state.showArchived;
 					localStorage.setItem("bobbit-show-archived", String(state.showArchived));

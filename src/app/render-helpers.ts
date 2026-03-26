@@ -518,7 +518,7 @@ export function renderGoalGroup(goal: Goal) {
 	`;
 
 	const pr = state.prStatusCache.get(goal.id);
-	const canArchive = pr?.state === "MERGED" && !hasActiveTeam;
+	const canArchive = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
 	const archiveBtn = canArchive ? html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}
@@ -581,7 +581,7 @@ export function renderGoalGroup(goal: Goal) {
 			</div>
 			${isExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${goalSessions.length === 0 && !isCreatingHere ? emptyState : (isTeamGoal ? renderTeamGroup() : goalSessions.map(renderSessionRow))}
+					${goalSessions.length === 0 && !isCreatingHere ? (goal.archived ? nothing : emptyState) : (isTeamGoal ? renderTeamGroup() : goalSessions.map(renderSessionRow))}
 					${isCreatingHere ? html`<div style="padding-left:${CHEVRON_W}px;" class="py-1 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground flex items-center gap-1">
 						<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
 						Creating…
