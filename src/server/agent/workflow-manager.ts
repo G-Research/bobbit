@@ -1,6 +1,8 @@
 import { WorkflowStore, type Workflow, type WorkflowGate } from "./workflow-store.js";
 
 /** Valid workflow ID pattern: lowercase alphanumeric + hyphens */
+/** Lowercase alphanumeric + hyphens only. Dots are banned to avoid collisions
+ *  with the namespaced template variable syntax ({{gate_id.meta.key}}). */
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
 export class WorkflowManager {

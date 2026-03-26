@@ -64,6 +64,9 @@ export class ProjectConfigStore {
 	}
 
 	set(key: string, value: string): void {
+		if (key.includes(".")) {
+			throw new Error(`Project config key "${key}" must not contain dots — dots are reserved for namespace separators in {{project.key}} template variables`);
+		}
 		this.data[key] = value;
 		this.save();
 	}

@@ -883,6 +883,10 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 		for (const [key, value] of Object.entries(body)) {
+			if (key.includes(".")) {
+				json({ error: `Config key "${key}" must not contain dots` }, 400);
+				return;
+			}
 			if (value === null || value === "") {
 				projectConfigStore.remove(key);
 			} else if (typeof value === "string") {
