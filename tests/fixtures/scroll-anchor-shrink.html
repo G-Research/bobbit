@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+
+  .container {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .scroll-container {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    overflow-anchor: none; /* Disable browser CSS scroll anchoring — test JS logic only */
+  }
+
+  .message {
+    padding: 16px;
+    margin: 8px;
+    background: #f0f0f0;
+    border-radius: 8px;
+  }
+
+  .collapsible {
+    overflow: hidden;
+    background: #d0e0ff;
+    transition: none; /* no transition for test — instant shrink */
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="scroll-container" id="scroll-container">
+    <div class="content-wrapper" id="content-wrapper">
+      <div id="before-messages"></div>
+      <div class="collapsible" id="collapsible" style="height: 400px;">
+        <div style="padding: 16px;">Tool output content (will collapse)</div>
+      </div>
+      <div id="after-messages"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Generate messages
+const before = document.getElementById('before-messages');
+for (let i = 0; i < 30; i++) {
+  const div = document.createElement('div');
+  div.className = 'message';
+  div.textContent = `Message ${i + 1}: Content before collapsible element.`;
+  before.appendChild(div);
+}
+const after = document.getElementById('after-messages');
+for (let i = 0; i < 30; i++) {
+  const div = document.createElement('div');
+  div.className = 'message';
+  div.textContent = `Message ${31 + i}: Content after collapsible element.`;
+  after.appendChild(div);
+}
+
+// --- Scroll-anchor logic (mirrors AgentInterface.ts) ---
+const scrollContainer = document.getElementById('scroll-container');
+
+let _stickToBottom = true;
+let _isAutoScrolling = false;
+let _autoScrollTimer;
+let _lastScrollHeight = scrollContainer.scrollHeight;
+
+// The resize handler — same logic as the ResizeObserver callback in AgentInterface.ts.
+// Called manually in the test since ResizeObserver doesn't fire in headless Chromium.
+function handleResize() {
+  if (!scrollContainer) return;
+  const newScrollHeight = scrollContainer.scrollHeight;
+  const delta = newScrollHeight - _lastScrollHeight;
+  _lastScrollHeight = newScrollHeight;
+
+  if (_stickToBottom) {
+    _isAutoScrolling = true;
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    clearTimeout(_autoScrollTimer);
+    _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
+  } else if (delta < 0) {
+    // Content shrunk — adjust scroll to keep viewport stable
+    _isAutoScrolling = true;
+    scrollContainer.scrollTop += delta;
+    clearTimeout(_autoScrollTimer);
+    _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
+  }
+}
+
+// Scroll handler — mirrors AgentInterface.ts _handleScroll.
+// Only updates _stickToBottom on genuine user scrolls (scrollHeight unchanged),
+// not on browser-initiated scroll clamps during content resize.
+scrollContainer.addEventListener('scroll', () => {
+  if (_isAutoScrolling) return;
+  const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
+  if (scrollHeight === _lastScrollHeight) {
+    _stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+  }
+}, { passive: true });
+
+// Expose helpers for the test
+window.__scrollTo = (top) => {
+  scrollContainer.scrollTop = top;
+  // Manually trigger stickToBottom check (simulates user scroll)
+  const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
+  _lastScrollHeight = scrollHeight;
+  _stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+};
+
+window.__getState = () => ({
+  scrollTop: scrollContainer.scrollTop,
+  scrollHeight: scrollContainer.scrollHeight,
+  clientHeight: scrollContainer.clientHeight,
+  stickToBottom: _stickToBottom,
+  lastScrollHeight: _lastScrollHeight,
+});
+
+window.__collapseElement = () => {
+  document.getElementById('collapsible').style.height = '0px';
+};
+
+// Manually invoke the resize handler (since ResizeObserver doesn't fire in headless)
+window.__handleResize = handleResize;
+</script>
+</body>
+</html>

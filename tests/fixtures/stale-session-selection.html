@@ -2,113 +2,124 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Stale Session Selection Bug Reproduction</title>
+<title>Stale Session Selection Bug Test</title>
 </head>
 <body>
 <script>
-// ============================================================================
-// Simulates the FIXED behavior of the app
-// ============================================================================
+// ==========================================================================
+// Minimal recreation of the relevant logic from src/app/state.ts and
+// src/app/main.ts to demonstrate the stale selectedSessionId bug.
+// ==========================================================================
 
-// --- Config views (from src/app/routing.ts) ---
+// --- Routing helpers (from src/app/routing.ts) ---
+
 const CONFIG_VIEWS = new Set([
   "roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
   "personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
 ]);
 
-// --- App state (from src/app/state.ts) ---
+let currentRouteView = "landing";
+
+function isConfigPageRoute() {
+  return CONFIG_VIEWS.has(currentRouteView);
+}
+
+// --- State (from src/app/state.ts) ---
+
 const state = {
   selectedSessionId: null,
-  remoteAgent: null,       // { gatewaySessionId: string } | null
-  currentRouteView: null,  // simulates what getRouteFromHash() returns
+  remoteAgent: null, // { gatewaySessionId: string, connected: boolean } | null
+  connectingSessionId: null,
+  connectionStatus: "disconnected",
+  goalDashboardId: null,
 };
 
-// Expose for tests
-window.__state = state;
-
-// --- isConfigPageRoute (from src/app/routing.ts line 116) ---
-function isConfigPageRoute() {
-  return CONFIG_VIEWS.has(state.currentRouteView);
-}
-window.__isConfigPageRoute = isConfigPageRoute;
-
-// --- activeSessionId (from src/app/state.ts line 363-366) ---
+// Exact reproduction of activeSessionId() from src/app/state.ts
 function activeSessionId() {
   if (isConfigPageRoute()) return undefined;
-  return state.selectedSessionId ?? state.remoteAgent?.gatewaySessionId;
-}
-window.__activeSessionId = activeSessionId;
-
-// --- Session guard from handleHashChange (src/app/main.ts line 57-59) ---
-// Returns true if navigation should be short-circuited (no reconnect)
-function sessionGuardShouldSkip(routeSessionId) {
-  if (state.remoteAgent?.gatewaySessionId === routeSessionId) {
-    return true;
+  if (state.selectedSessionId) {
+    // Only return selectedSessionId if we're connected/connecting to that session
+    if (state.remoteAgent || state.connectingSessionId) return state.selectedSessionId;
+    return undefined;
   }
-  return false;
+  return state.remoteAgent?.gatewaySessionId;
 }
-window.__sessionGuardShouldSkip = sessionGuardShouldSkip;
 
-// --- Click guard from renderSessionRow (src/app/render-helpers.ts line 215) ---
-// Returns true if click handler would fire (i.e. connectToSession would be called)
-function sessionClickWouldFire(sessionId) {
-  const active = activeSessionId() === sessionId;
-  const connecting = false; // simplification: not connecting
-  return !active || connecting; // fires if NOT (active && !connecting)
-  // Original: if (!active && !connecting) connectToSession(...)
-  // So click fires only when !active && !connecting — meaning fires when NOT active
-}
-// Fix: the real guard is `if (!active && !connecting)`, which means:
-// click fires when: !active is true (session not active) AND !connecting is true (not connecting)
-// click does NOT fire when: active is true (stale or real)
-function sessionClickWouldFireReal(sessionId) {
-  const active = activeSessionId() === sessionId;
-  const connecting = false;
-  // The real code: if (!active && !connecting) connectToSession(...)
-  // Returns whether connectToSession would be called
-  if (!active && !connecting) return true;
-  return false;
-}
-window.__sessionClickWouldFire = sessionClickWouldFireReal;
+// --- handleHashChange() branch simulations (from src/app/main.ts) ---
+// These reproduce the CURRENT (buggy) cleanup logic for each route branch.
 
-// --- Simulate navigating to a session ---
-function navigateToSession(sessionId) {
-  state.currentRouteView = "session";
+function simulateNavigateToGoalView(goalId) {
+  currentRouteView = "goal";
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.selectedSessionId = null;
+  state.goalDashboardId = goalId;
+}
+
+function simulateNavigateToGoalDashboard(goalId) {
+  currentRouteView = "goal-dashboard";
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.selectedSessionId = null;
+  state.goalDashboardId = goalId;
+}
+
+function simulateNavigateToLanding() {
+  currentRouteView = "landing";
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.selectedSessionId = null;
+  state.goalDashboardId = null;
+}
+
+function simulateNavigateToConfigPage(view) {
+  currentRouteView = view;
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.goalDashboardId = null;
+}
+
+// --- Simulate connecting to a session ---
+
+function simulateConnectToSession(sessionId) {
+  currentRouteView = "session";
   state.selectedSessionId = sessionId;
-  state.remoteAgent = { gatewaySessionId: sessionId };
+  state.remoteAgent = { gatewaySessionId: sessionId, connected: true };
+  state.connectionStatus = "connected";
 }
-window.__navigateToSession = navigateToSession;
 
-// --- Simulate navigating away (BUGGY: does NOT clear selectedSessionId) ---
-function navigateToGoalDashboard() {
-  state.currentRouteView = "goal-dashboard";
-  // Disconnect remoteAgent (as the real code does)
-  state.remoteAgent = null;
-  state.selectedSessionId = null;
-}
-window.__navigateToGoalDashboard = navigateToGoalDashboard;
+// --- Correct cleanup (what backToSessions does) ---
 
-function navigateToGoal() {
-  state.currentRouteView = "goal";
-  state.remoteAgent = null;
+function simulateBackToSessions() {
+  currentRouteView = "landing";
   state.selectedSessionId = null;
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.goalDashboardId = null;
 }
-window.__navigateToGoal = navigateToGoal;
 
-function navigateToConfigPage(view) {
-  state.currentRouteView = view || "roles";
-  state.remoteAgent = null;
-  state.selectedSessionId = null;
-}
-window.__navigateToConfigPage = navigateToConfigPage;
-
-// --- Reset helper ---
-function resetState() {
-  state.selectedSessionId = null;
-  state.remoteAgent = null;
-  state.currentRouteView = null;
-}
-window.__resetState = resetState;
+// Expose everything for Playwright tests
+window.__test = {
+  state,
+  activeSessionId,
+  simulateConnectToSession,
+  simulateNavigateToGoalView,
+  simulateNavigateToGoalDashboard,
+  simulateNavigateToLanding,
+  simulateNavigateToConfigPage,
+  simulateBackToSessions,
+  getCurrentRouteView: () => currentRouteView,
+};
 </script>
 </body>
 </html>

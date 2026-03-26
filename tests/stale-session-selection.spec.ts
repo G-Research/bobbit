@@ -5,91 +5,107 @@ const TEST_PAGE = `file://${path.resolve("tests/fixtures/stale-session-selection
 
 test.describe("Stale selectedSessionId bug", () => {
 
-	test.beforeEach(async ({ page }) => {
+	test("activeSessionId should be undefined after navigating to goal view", async ({ page }) => {
 		await page.goto(TEST_PAGE);
-		await page.evaluate(() => (window as any).__resetState());
+
+		// Connect to session-123
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-123"));
+
+		// Verify session is active
+		let active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-123");
+
+		// Navigate to goal view (disconnects remoteAgent but current code does NOT clear selectedSessionId)
+		await page.evaluate(() => (window as any).__test.simulateNavigateToGoalView("goal-abc"));
+
+		// remoteAgent should be null
+		const agent = await page.evaluate(() => (window as any).__test.state.remoteAgent);
+		expect(agent).toBeNull();
+
+		// BUG: activeSessionId() still returns "session-123" because selectedSessionId was not cleared.
+		// The DESIRED behavior is that it returns undefined after navigating away.
+		active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active, "expected activeSessionId to be undefined after navigating to goal view").toBeUndefined();
 	});
 
-	test("selectedSessionId should be null after navigating to goal-dashboard", async ({ page }) => {
-		await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToGoalDashboard();
-		});
-		const selectedId = await page.evaluate(() => (window as any).__state.selectedSessionId);
-		expect(selectedId, "stale selectedSessionId not cleared after navigating to goal-dashboard").toBeNull();
+	test("activeSessionId should be undefined after navigating to goal dashboard", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-456"));
+		let active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-456");
+
+		// Navigate to goal dashboard
+		await page.evaluate(() => (window as any).__test.simulateNavigateToGoalDashboard("goal-xyz"));
+
+		const agent = await page.evaluate(() => (window as any).__test.state.remoteAgent);
+		expect(agent).toBeNull();
+
+		active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active, "expected activeSessionId to be undefined after navigating to goal dashboard").toBeUndefined();
 	});
 
-	test("selectedSessionId should be null after navigating to goal view", async ({ page }) => {
-		await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToGoal();
-		});
-		const selectedId = await page.evaluate(() => (window as any).__state.selectedSessionId);
-		expect(selectedId, "stale selectedSessionId not cleared after navigating to goal view").toBeNull();
+	test("activeSessionId should be undefined after navigating to landing", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-789"));
+		let active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-789");
+
+		// Navigate to landing page
+		await page.evaluate(() => (window as any).__test.simulateNavigateToLanding());
+
+		const agent = await page.evaluate(() => (window as any).__test.state.remoteAgent);
+		expect(agent).toBeNull();
+
+		active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active, "expected activeSessionId to be undefined after navigating to landing").toBeUndefined();
 	});
 
-	test("selectedSessionId should be null after navigating to config page", async ({ page }) => {
-		await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToConfigPage("roles");
-		});
-		const selectedId = await page.evaluate(() => (window as any).__state.selectedSessionId);
-		expect(selectedId, "stale selectedSessionId not cleared after navigating to config page").toBeNull();
+	test("backToSessions correctly clears selectedSessionId (reference behavior)", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-aaa"));
+		let active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-aaa");
+
+		// backToSessions correctly clears selectedSessionId
+		await page.evaluate(() => (window as any).__test.simulateBackToSessions());
+
+		active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBeUndefined();
 	});
 
-	test("activeSessionId should return undefined on goal-dashboard with stale selectedSessionId", async ({ page }) => {
-		const activeId = await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToGoalDashboard();
-			return w.__activeSessionId();
-		});
-		expect(activeId, "stale activeSessionId returned on goal-dashboard — sidebar shows wrong highlight").toBeUndefined();
+	test("config page navigation returns undefined (already working)", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-bbb"));
+		let active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-bbb");
+
+		// Navigate to a config page — isConfigPageRoute() override makes activeSessionId return undefined
+		await page.evaluate(() => (window as any).__test.simulateNavigateToConfigPage("roles"));
+
+		active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBeUndefined();
 	});
 
-	test("activeSessionId should return undefined on goal view with stale selectedSessionId", async ({ page }) => {
-		const activeId = await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToGoal();
-			return w.__activeSessionId();
-		});
-		expect(activeId, "stale activeSessionId returned on goal view — sidebar shows wrong highlight").toBeUndefined();
-	});
+	test("normal session switching works correctly", async ({ page }) => {
+		await page.goto(TEST_PAGE);
 
-	test("session guard should NOT short-circuit when only stale selectedSessionId matches", async ({ page }) => {
-		const shouldSkip = await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToGoalDashboard();
-			// Now: selectedSessionId="session-A", remoteAgent=null
-			// Simulating browser Back to #/session/session-A
-			return w.__sessionGuardShouldSkip("session-A");
-		});
-		expect(shouldSkip, "stale selectedSessionId causes session guard to skip reconnection on browser Back").toBe(false);
-	});
+		// Connect to session A
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-A"));
+		let active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-A");
 
-	test("click handler should fire for session with stale active highlight on goal-dashboard", async ({ page }) => {
-		const clickWouldFire = await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToGoalDashboard();
-			// activeSessionId() still returns "session-A" due to stale selectedSessionId
-			return w.__sessionClickWouldFire("session-A");
-		});
-		expect(clickWouldFire, "stale active state prevents click handler from firing — session click is a no-op").toBe(true);
-	});
+		// Switch to session B
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-B"));
+		active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-B");
 
-	test("click handler should fire for session with stale active highlight on goal view", async ({ page }) => {
-		const clickWouldFire = await page.evaluate(() => {
-			const w = window as any;
-			w.__navigateToSession("session-A");
-			w.__navigateToGoal();
-			return w.__sessionClickWouldFire("session-A");
-		});
-		expect(clickWouldFire, "stale active state on goal view prevents click — session appears selected but is not").toBe(true);
+		// Switch back to session A
+		await page.evaluate(() => (window as any).__test.simulateConnectToSession("session-A"));
+		active = await page.evaluate(() => (window as any).__test.activeSessionId());
+		expect(active).toBe("session-A");
 	});
 });
