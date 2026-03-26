@@ -227,7 +227,7 @@ function renderMobileLanding() {
 			</div>
 		</div>
 		<div class="fixed bottom-0 left-0 right-0 flex items-center justify-between px-4 py-2 border-t border-border bg-background z-10">
-			${(() => { const isSettings = window.location.hash === "#/settings"; return html`<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs rounded transition-colors ${isSettings ? "text-foreground bg-secondary/70 font-medium" : "text-muted-foreground active:bg-secondary/50"}"
+			${(() => { const isSettings = window.location.hash === "#/settings"; return html`<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs rounded transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground active:bg-secondary/50"}"
 				@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
 				title="Settings">
 				${icon(Settings, "sm")}

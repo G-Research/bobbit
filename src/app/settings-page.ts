@@ -801,13 +801,8 @@ function loadProjectConfig(): void {
 			if (configRes.ok && defaultsRes.ok) {
 				const merged: Record<string, string> = await configRes.json();
 				projectDefaults = await defaultsRes.json();
-				// Derive user-set values: keys where value differs from default, or keys not in defaults
-				projectConfig = {};
-				for (const [key, value] of Object.entries(merged)) {
-					if (!(key in projectDefaults) || value !== projectDefaults[key]) {
-						projectConfig[key] = value;
-					}
-				}
+				// Pre-populate all values including defaults so the user sees what workflows will use
+				projectConfig = { ...merged };
 				projectNewEntries = [];
 			}
 		} catch {}
@@ -820,17 +815,14 @@ async function saveProjectConfig(): Promise<void> {
 	renderApp();
 	try {
 		const body: Record<string, string | null> = {};
-		// For default keys: send value if user set one, otherwise send null to revert
-		for (const key of Object.keys(projectDefaults)) {
-			if (projectConfig[key]) {
-				body[key] = projectConfig[key];
-			} else {
-				body[key] = null;
-			}
-		}
-		// For custom (non-default) keys: send value
+		// For each key in projectConfig: send null if value matches the default (don't persist redundant entries),
+		// otherwise send the value.
 		for (const [key, value] of Object.entries(projectConfig)) {
-			if (!(key in projectDefaults) && key && value) {
+			if (!value) {
+				body[key] = null;
+			} else if (key in projectDefaults && value === projectDefaults[key]) {
+				body[key] = null; // matches default — no need to persist
+			} else {
 				body[key] = value;
 			}
 		}
@@ -895,7 +887,7 @@ function renderProjectTab() {
 							.value=${projectConfig[key] || ""}
 							@input=${(e: Event) => {
 								const v = (e.target as HTMLInputElement).value;
-								if (v) { projectConfig[key] = v; } else { delete projectConfig[key]; }
+								projectConfig[key] = v || projectDefaults[key] || "";
 								projectSaveStatus = "";
 								renderApp();
 							}}
@@ -1108,7 +1100,8 @@ export function renderSettingsPage() {
 				`)}
 			</div>
 			<!-- Tab content -->
-			<div class="flex-1 overflow-y-auto p-4">
+			<div class="flex-1 overflow-y-auto">
+			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
 				<div class="${activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
 					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "project" ? renderProjectTab() : ""}
@@ -1116,6 +1109,7 @@ export function renderSettingsPage() {
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}
 				</div>
+			 </div>
 			</div>
 		</div>
 	`;
