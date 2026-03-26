@@ -125,7 +125,7 @@ export function renderRolePickerDropdown() {
 		<div class="fixed z-50 rounded-md shadow-lg py-1"
 			style="background: var(--popover); border: 1px solid var(--border); width: ${popoverWidth}px; ${topStyle}; right: ${right}px; ${maxHStyle}; display: flex; flex-direction: column;"
 			@click=${(e: Event) => e.stopPropagation()}
-			@keydown=${(e: KeyboardEvent) => { if (e.key === "Escape") { state.rolePickerOpen = false; renderApp(); } }}>
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Escape") { state.rolePickerOpen = false; renderApp(); } if (e.key === "Enter") { e.preventDefault(); doCreate(); } }}>
 			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
 				<span class="flex-1 text-xs font-semibold text-foreground">Create New Session</span>
 				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
