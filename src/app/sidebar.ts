@@ -124,8 +124,7 @@ export function renderRolePickerDropdown() {
 	return html`
 		<div class="fixed z-50 rounded-md shadow-lg py-1"
 			style="background: var(--popover); border: 1px solid var(--border); width: ${popoverWidth}px; ${topStyle}; right: ${right}px; ${maxHStyle}; display: flex; flex-direction: column;"
-			@click=${(e: Event) => e.stopPropagation()}
-			@keydown=${(e: KeyboardEvent) => { if (e.key === "Escape") { state.rolePickerOpen = false; renderApp(); } if (e.key === "Enter") { e.preventDefault(); doCreate(); } }}>
+			@click=${(e: Event) => e.stopPropagation()}>
 			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
 				<span class="flex-1 text-xs font-semibold text-foreground">Create New Session</span>
 				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
@@ -198,6 +197,28 @@ document.addEventListener("click", () => {
 		renderApp();
 	}
 });
+
+// Global keyboard handler for role picker popover (Enter to create, Escape to close)
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+	if (!state.rolePickerOpen) return;
+	if (e.key === "Escape") {
+		e.preventDefault();
+		e.stopPropagation();
+		state.rolePickerOpen = false;
+		renderApp();
+	} else if (e.key === "Enter") {
+		// Don't intercept Enter when the cwd combobox dropdown is open (user is selecting a directory)
+		if (_pickerCwdDropdownOpen) return;
+		e.preventDefault();
+		e.stopPropagation();
+		state.rolePickerOpen = false;
+		const personalities = [..._pickerPersonalities];
+		const cwd = _pickerCwd || undefined;
+		_pickerCwd = "";
+		_pickerCwdDropdownOpen = false;
+		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
+	}
+}, true); // capture phase so it fires before other handlers
 
 // ============================================================================
 // SIDEBAR TOGGLE
