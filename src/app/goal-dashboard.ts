@@ -886,9 +886,11 @@ function renderNavBar(goal: Goal): TemplateResult {
 				${goal.workflow ? html`<span class="nav-workflow-badge" title="Uses workflow: ${goal.workflow.name}">${goal.workflow.name}</span>` : nothing}
 			</div>
 			<div class="nav-right">
-				<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}</button>
-				<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Delete goal">${svgTrash}</button>
-				${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
+				${goal.archived ? nothing : html`
+					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}</button>
+					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}</button>
+					${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
+				`}
 			</div>
 		</div>
 	`;
@@ -1793,9 +1795,16 @@ export function renderGoalDashboard(): TemplateResult {
 
 	const activeTab = dashboardTab;
 
+	const isArchived = currentGoal.archived === true;
+
 	return html`
 		<div class="dashboard-container">
 			${renderNavBar(currentGoal)}
+			${isArchived ? html`
+				<div style="margin:0 16px 8px;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--muted);color:var(--muted-foreground);font-size:13px;">
+					This goal was archived on ${new Date(currentGoal.archivedAt!).toLocaleDateString()}. Dashboard is read-only.
+				</div>
+			` : nothing}
 			${renderSetupBanner(currentGoal)}
 			${renderMetaRows(currentGoal)}
 			${renderSummaryRow(tasks, agents)}

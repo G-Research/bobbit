@@ -317,9 +317,11 @@ export function renderSidebar() {
 	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
 	const stateOrder: Record<GoalState, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
 	const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
+	const liveGoals = sortedGoals.filter(g => !g.archived);
+	const archivedGoals = sortedGoals.filter(g => g.archived);
 
 	if (state.sidebarCollapsed) {
-		return renderCollapsedSidebar(sortedGoals, ungroupedSessions);
+		return renderCollapsedSidebar(liveGoals, ungroupedSessions, archivedGoals);
 	}
 
 	return html`
@@ -379,11 +381,11 @@ export function renderSidebar() {
 								<button class="text-xs text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: html`
-							${sortedGoals.map((goal, i) => html`
+							${liveGoals.map((goal, i) => html`
 								${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 								${renderGoalGroup(goal)}
 							`)}
-							${sortedGoals.length > 0 ? html`
+							${liveGoals.length > 0 ? html`
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5">
 									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
@@ -447,6 +449,21 @@ export function renderSidebar() {
 								</div>
 							`}
 							${renderStaffSidebarSection()}
+							${state.showArchived && archivedGoals.length > 0 ? html`
+								<div class="border-t border-border/30 my-1 mx-2"></div>
+								<div class="flex flex-col gap-0.5">
+									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+										style="padding-left:${HEADER_CHEVRON_W}px;">
+										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">▾</span>
+										<span class="shrink-0 text-muted-foreground opacity-60" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
+										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived Goals</span>
+									</div>
+									${archivedGoals.map((goal, i) => html`
+										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
+										<div class="opacity-60">${renderGoalGroup(goal)}</div>
+									`)}
+								</div>
+							` : ""}
 							${(() => {
 								// Archived section: standalone archived sessions (no goal, not a delegate)
 								// Goal-affiliated archived sessions render inside their goal groups.
@@ -530,7 +547,7 @@ export function renderSidebar() {
 // COLLAPSED SIDEBAR
 // ============================================================================
 
-function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewaySession[]) {
+function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewaySession[], archivedGoals: Goal[] = []) {
 	const allSessions = state.gatewaySessions;
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
 	const ungrouped = allSessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
@@ -630,6 +647,26 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 						</button>
 					`;
 				})}
+				${state.showArchived && archivedGoals.length > 0 ? html`
+					<div class="w-7 border-t border-border/50 my-1.5"></div>
+					${archivedGoals.map((goal) => {
+						const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
+						const expanded = expandedGoals.has(goal.id);
+						return html`
+							<div class="opacity-60">
+								<button
+									class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+									title=${goal.title}
+									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
+								>
+									<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
+									<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
+								</button>
+								${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
+							</div>
+						`;
+					})}
+				` : ""}
 			</div>
 			<button
 				class="p-2 mb-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"

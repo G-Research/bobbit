@@ -285,15 +285,26 @@ test.describe("Goals API", () => {
 		expect(data.state).toBe("in-progress");
 	});
 
-	test("DELETE removes a goal", async () => {
+	test("DELETE archives a goal (soft-delete)", async () => {
 		const resp1 = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title: "Delete test", cwd: nonGitCwd() }),
+			body: JSON.stringify({ title: "Archive test", cwd: nonGitCwd() }),
 		});
 		goalId = (await resp1.json()).id;
 		const resp = await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
 		expect(resp.status).toBe(200);
-		expect((await apiFetch(`/api/goals/${goalId}`)).status).toBe(404);
+		// Goal still exists but is archived
+		const getResp = await apiFetch(`/api/goals/${goalId}`);
+		expect(getResp.status).toBe(200);
+		const data = await getResp.json();
+		expect(data.archived).toBe(true);
+		expect(data.archivedAt).toBeGreaterThan(0);
+		// Mutations should be rejected with 409
+		const putResp = await apiFetch(`/api/goals/${goalId}`, {
+			method: "PUT",
+			body: JSON.stringify({ title: "Should fail" }),
+		});
+		expect(putResp.status).toBe(409);
 		goalId = "";
 	});
 

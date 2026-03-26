@@ -316,18 +316,14 @@ export async function deleteGoal(id: string): Promise<void> {
 		message += ` Its ${sessionsUnderGoal.length} session(s) will become ungrouped.`;
 	}
 
-	const confirmed = await confirmAction("Delete Goal", message, "Delete", true);
+	const confirmed = await confirmAction("Archive Goal", `Archive "${goalTitle}"? It will move to the archived section.`, "Archive", false);
 	if (!confirmed) return;
 
 	try {
 		await gatewayFetch(`/api/goals/${id}`, { method: "DELETE" });
-		expandedGoals.delete(id);
-		saveExpandedGoals();
-		// Navigate away from the deleted goal's dashboard
-		setHashRoute("landing");
 		await refreshSessions();
 	} catch (err) {
-		showConnectionError("Failed to delete goal", err instanceof Error ? err.message : String(err));
+		showConnectionError("Failed to archive goal", err instanceof Error ? err.message : String(err));
 	}
 }
 

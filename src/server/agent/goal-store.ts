@@ -36,6 +36,10 @@ export interface PersistedGoal {
 	setupError?: string;
 	/** GitHub PR URL (set by team lead after creating PR) */
 	prUrl?: string;
+	/** Whether this goal has been archived (soft-deleted) */
+	archived?: boolean;
+	/** Epoch ms when the goal was archived */
+	archivedAt?: number;
 }
 
 const STORE_DIR = bobbitStateDir();
@@ -111,6 +115,23 @@ export class GoalStore {
 
 	getAll(): PersistedGoal[] {
 		return Array.from(this.goals.values());
+	}
+
+	archive(id: string): boolean {
+		const existing = this.goals.get(id);
+		if (!existing) return false;
+		existing.archived = true;
+		existing.archivedAt = Date.now();
+		this.save();
+		return true;
+	}
+
+	getLive(): PersistedGoal[] {
+		return Array.from(this.goals.values()).filter(g => !g.archived);
+	}
+
+	getArchived(): PersistedGoal[] {
+		return Array.from(this.goals.values()).filter(g => g.archived === true);
 	}
 
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
