@@ -169,6 +169,8 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		if (prStatusRes && prStatusRes.ok) {
 			prStatus = await prStatusRes.json();
+			// Sync to sidebar cache so badge persists even if polling skips this goal
+			if (prStatus && currentGoalId) state.prStatusCache.set(currentGoalId, prStatus);
 		}
 
 		const teamState = await getTeamState(goalId);
@@ -513,6 +515,8 @@ function startGitStatusPolling(goalId: string): void {
 				if (JSON.stringify(newPr) !== JSON.stringify(prStatus)) {
 					prStatus = newPr;
 					needRender = true;
+					// Sync to sidebar cache
+					if (goalId) state.prStatusCache.set(goalId, newPr);
 				}
 			} else if (prStatus !== null) {
 				prStatus = null;
