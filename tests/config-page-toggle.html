@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Config Page Toggle Bug Reproducer</title>
+</head>
+<body>
+<script>
+// ==========================================================================
+// Reproduces the CURRENT (buggy) routing + activeSessionId logic.
+// Copied from src/app/routing.ts and src/app/state.ts verbatim.
+// ==========================================================================
+
+// --- getRouteFromHash() from src/app/routing.ts (current) ---
+function getRouteFromHash() {
+  const hash = window.location.hash || "";
+  const sessionMatch = hash.match(/^#\/session\/([a-f0-9-]+)$/i);
+  if (sessionMatch) return { view: "session", sessionId: sessionMatch[1] };
+  const goalMatch = hash.match(/^#\/goal\/([a-f0-9-]+)$/i);
+  if (goalMatch) return { view: "goal-dashboard", goalId: goalMatch[1] };
+  const roleEditMatch = hash.match(/^#\/roles\/([a-zA-Z0-9_-]+)$/);
+  if (roleEditMatch) return { view: "role-edit", roleName: roleEditMatch[1] };
+  if (hash === "#/roles") return { view: "roles" };
+  const toolEditMatch = hash.match(/^#\/tools\/([a-zA-Z0-9_-]+)$/);
+  if (toolEditMatch) return { view: "tool-edit", toolName: toolEditMatch[1] };
+  if (hash === "#/tools") return { view: "tools" };
+  const workflowEditMatch = hash.match(/^#\/workflows\/([a-zA-Z0-9_-]+)$/);
+  if (workflowEditMatch) return { view: "workflow-edit", workflowId: workflowEditMatch[1] };
+  if (hash === "#/workflows") return { view: "workflows" };
+  const staffEditMatch = hash.match(/^#\/staff\/([a-f0-9-]+)$/i);
+  if (staffEditMatch) return { view: "staff-edit", staffId: staffEditMatch[1] };
+  if (hash === "#/staff") return { view: "staff" };
+  if (hash === "#/skills") return { view: "skills" };
+  const personalityEditMatch = hash.match(/^#\/personalities\/([a-zA-Z0-9_-]+)$/);
+  if (personalityEditMatch) return { view: "personality-edit", personalityName: personalityEditMatch[1] };
+  if (hash === "#/personalities") return { view: "personalities" };
+  if (hash === "#/settings") return { view: "settings" };
+  return { view: "landing" };
+}
+
+// --- isConfigPageRoute() from src/app/routing.ts (fixed version) ---
+const CONFIG_VIEWS = new Set([
+  "roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
+  "personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
+]);
+
+function isConfigPageRoute() {
+  return CONFIG_VIEWS.has(getRouteFromHash().view);
+}
+
+// --- Mock state (simulates a connected session) ---
+const state = {
+  selectedSessionId: "mock-session-123",
+  remoteAgent: null,
+};
+
+// --- activeSessionId() from src/app/state.ts (fixed version) ---
+// FIXED: Suppresses highlighting for ALL config pages, not just settings.
+function activeSessionId() {
+  if (isConfigPageRoute()) return undefined;
+  return state.selectedSessionId ?? (state.remoteAgent ? state.remoteAgent.gatewaySessionId : undefined);
+}
+
+// Expose to tests
+window.getRouteFromHash = getRouteFromHash;
+window.activeSessionId = activeSessionId;
+window.mockState = state;
+</script>
+</body>
+</html>

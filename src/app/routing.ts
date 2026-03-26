@@ -103,6 +103,49 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 }
 
 // ============================================================================
+// CONFIG PAGE HELPERS
+// ============================================================================
+
+/** Config page route views (not landing, session, or goal-dashboard). */
+const CONFIG_VIEWS: Set<RouteView> = new Set([
+	"roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
+	"personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
+]);
+
+/** Returns true if the current hash route is a config page (not a session or landing). */
+export function isConfigPageRoute(): boolean {
+	return CONFIG_VIEWS.has(getRouteFromHash().view);
+}
+
+/** Check if the current route view matches any of the given view names. */
+export function isRouteActive(...views: RouteView[]): boolean {
+	const current = getRouteFromHash().view;
+	return views.some(v => v === current);
+}
+
+/** Shared previous-hash for all config page toggle buttons. */
+let _configPreviousHash: string | null = null;
+
+/**
+ * Toggle a config page. If already on a matching route, navigate back.
+ * Otherwise save current hash and call navigateFn.
+ */
+export function toggleConfigPage(activeViews: RouteView[], navigateFn: () => void): void {
+	const current = getRouteFromHash().view;
+	if (activeViews.some(v => v === current)) {
+		const hash = _configPreviousHash || "#/";
+		_configPreviousHash = null;
+		if (window.location.hash !== hash) {
+			history.replaceState({}, "", hash);
+			window.dispatchEvent(new HashChangeEvent("hashchange"));
+		}
+	} else {
+		_configPreviousHash = window.location.hash || "#/";
+		navigateFn();
+	}
+}
+
+// ============================================================================
 // PER-SESSION MODEL PERSISTENCE
 // ============================================================================
 

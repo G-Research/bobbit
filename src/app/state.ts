@@ -1,5 +1,6 @@
 import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
+import { isConfigPageRoute } from "./routing.js";
 
 // ============================================================================
 // TYPES
@@ -360,8 +361,8 @@ export function hasActiveSession(): boolean {
 }
 
 export function activeSessionId(): string | undefined {
-	// Don't highlight any session when settings (or other non-session views) are open
-	if (window.location.hash === "#/settings") return undefined;
+	// Don't highlight any session when a config page is open
+	if (isConfigPageRoute()) return undefined;
 	return state.selectedSessionId ?? state.remoteAgent?.gatewaySessionId;
 }
 

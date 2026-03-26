@@ -43,7 +43,7 @@ function skipSetup(): void {
 import { cwdCombobox } from "./cwd-combobox.js";
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
-import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
 import { renderGoalDashboard } from "./goal-dashboard.js";
 import "./goal-dashboard.css";
 import { renderRoleManagerPage, loadRolePageData } from "./role-manager-page.js";
@@ -76,32 +76,39 @@ function renderMobileLanding() {
 		<div class="flex-1 flex flex-col overflow-y-auto">
 			<div class="w-full max-w-xl mx-auto px-2 py-4 pb-16 flex flex-col gap-1">
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
+					${(() => {
+						const isRolesActive = isRouteActive("roles", "role-edit");
+						const isPersonalitiesActive = isRouteActive("personalities", "personality-edit");
+						const isToolsActive = isRouteActive("tools", "tool-edit");
+						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit");
+						const isSkillsActive = isRouteActive("skills");
+						return html`
 					<div class="flex items-center gap-1">
-						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="Manage roles"
-							@click=${() => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); }}>
+							@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); })}>
 							${icon(Users, "xs")} Roles
 						</button>
-						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isPersonalitiesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="Manage personalities"
-							@click=${() => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); setHashRoute("personalities"); }}>
+							@click=${() => toggleConfigPage(["personalities", "personality-edit"], () => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); setHashRoute("personalities"); })}>
 							${icon(Drama, "xs")} Personalities
 						</button>
-						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="Manage tools"
-							@click=${() => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); }}>
+							@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}>
 							${icon(Wrench, "xs")} Tools
 						</button>
 					</div>
 					<div class="flex items-center gap-1">
-						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="Manage workflows"
-							@click=${() => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); }}>
+							@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); })}>
 							${icon(WorkflowIcon, "xs")} Workflows
 						</button>
-						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
+						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="View skills"
-							@click=${() => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); }}>
+							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
 							${icon(Zap, "xs")} Skills
 						</button>
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
@@ -110,6 +117,8 @@ function renderMobileLanding() {
 							${icon(GoalIcon, "xs")} New Goal
 						</button>
 					</div>
+					`;
+					})()}
 				</div>
 				${renderSetupBanner(true)}
 				${state.sessionsLoading
@@ -233,7 +242,7 @@ function renderMobileLanding() {
 			</div>
 		</div>
 		<div class="fixed bottom-0 left-0 right-0 flex items-center justify-between px-4 py-2 border-t border-border bg-background z-10">
-			${(() => { const isSettings = window.location.hash === "#/settings"; return html`<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs rounded transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground active:bg-secondary/50"}"
+			${(() => { const isSettings = isRouteActive("settings"); return html`<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs rounded transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground active:bg-secondary/50"}"
 				@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
 				title="Settings">
 				${icon(Settings, "sm")}

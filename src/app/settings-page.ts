@@ -18,7 +18,7 @@ import {
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
 import { renderApp, state } from "./state.js";
-import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, toggleConfigPage } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
@@ -54,20 +54,8 @@ function resetRebindState(): void {
 	browserReservedWarning = false;
 }
 
-let _previousHash: string | null = null;
-
 export function toggleSettings(): void {
-	if (getRouteFromHash().view === "settings") {
-		const hash = _previousHash || "#/";
-		_previousHash = null;
-		if (window.location.hash !== hash) {
-			history.replaceState({}, "", hash);
-			window.dispatchEvent(new HashChangeEvent("hashchange"));
-		}
-	} else {
-		_previousHash = window.location.hash || "#/";
-		setHashRoute("settings");
-	}
+	toggleConfigPage(["settings"], () => setHashRoute("settings"));
 }
 
 function handleRebindKeydown(e: KeyboardEvent): void {
