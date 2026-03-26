@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Verification Timer Logic Test Fixture</title>
+</head>
+<body>
+<div id="results"></div>
+<script>
+/**
+ * This fixture extracts and tests the core timer logic from GateVerificationLive.ts:
+ *
+ * 1. When gate_verification_started has a startedAt field, steps should use that
+ *    server timestamp instead of Date.now().
+ * 2. When startedAt is missing, it falls back to Date.now().
+ * 3. toCardEntry() computes durationMs = Date.now() - step.startedAt for running steps.
+ * 4. For completed steps, durationMs uses the provided value.
+ */
+
+// ---- Extracted logic from GateVerificationLive.ts ----
+
+/**
+ * Simulates the _onEvent handler for gate_verification_started.
+ * Returns the steps array that would be set on the component.
+ */
+function handleVerificationStarted(detail, stepDefs) {
+    const now = detail.startedAt || Date.now();
+    return stepDefs.map(s => ({
+        name: s.name,
+        type: s.type,
+        status: "running",
+        startedAt: now,
+    }));
+}
+
+/**
+ * Simulates the _onEvent handler for gate_verification_step_started.
+ * Returns updated steps array.
+ */
+function handleStepStarted(detail, steps) {
+    const idx = detail.stepIndex;
+    if (idx >= 0 && idx < steps.length) {
+        const updated = [...steps];
+        updated[idx] = {
+            ...updated[idx],
+            startedAt: detail.startedAt || updated[idx].startedAt,
+            sessionId: detail.sessionId,
+        };
+        return updated;
+    }
+    return steps;
+}
+
+/**
+ * Simulates the toCardEntry() function.
+ * For running steps: durationMs = Date.now() - step.startedAt
+ * For completed steps: durationMs = step.durationMs ?? 0
+ */
+function toCardEntry(step, index) {
+    const delegateStatus = step.status === "passed" ? "completed" :
+                           step.status === "failed" ? "error" : "running";
+    const durationMs = step.status === "running"
+        ? Date.now() - step.startedAt
+        : (step.durationMs ?? 0);
+    return {
+        id: "step-" + index,
+        name: step.name || "step",
+        status: delegateStatus,
+        durationMs: durationMs,
+        sessionId: step.sessionId,
+    };
+}
+
+// ---- Expose test functions globally ----
+window.handleVerificationStarted = handleVerificationStarted;
+window.handleStepStarted = handleStepStarted;
+window.toCardEntry = toCardEntry;
+</script>
+</body>
+</html>

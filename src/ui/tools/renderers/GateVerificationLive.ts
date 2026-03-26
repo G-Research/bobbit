@@ -8,6 +8,7 @@
 import { LitElement, html, nothing, type TemplateResult, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import "../../components/LiveTimer.js";
+import "../../components/VerificationOutputModal.js";
 import {
 	type DelegateCardEntry,
 	statusColor,
@@ -63,6 +64,9 @@ export class GateVerificationLive extends LitElement {
 	@state() private steps: VerificationStep[] = [];
 	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
 	@state() private expandedSteps = new Set<number>();
+	@state() private modalStep: { index: number; name: string; output: string } | null = null;
+	/** Accumulated streamed output per step index */
+	private _stepOutputs = new Map<number, string>();
 
 	private _boundOnEvent = this._onEvent.bind(this);
 
@@ -100,12 +104,15 @@ export class GateVerificationLive extends LitElement {
 
 		switch (detail.type) {
 			case "gate_verification_started": {
+				this._stepOutputs = new Map();
+				this.modalStep = null;
 				const stepDefs: Array<{ name: string; type: string }> = detail.steps || [];
+				const now = detail.startedAt || Date.now();
 				this.steps = stepDefs.map(s => ({
 					name: s.name,
 					type: s.type,
 					status: "running" as const,
-					startedAt: Date.now(),
+					startedAt: now,
 				}));
 				this.overallStatus = "running";
 				break;
@@ -116,6 +123,7 @@ export class GateVerificationLive extends LitElement {
 					const updated = [...this.steps];
 					updated[idx] = {
 						...updated[idx],
+						startedAt: detail.startedAt || updated[idx].startedAt,
 						sessionId: detail.sessionId,
 					};
 					this.steps = updated;
@@ -151,6 +159,17 @@ export class GateVerificationLive extends LitElement {
 					this.steps = updated;
 				}
 				this.requestUpdate();
+				break;
+			}
+			case "gate_verification_step_output": {
+				const idx = detail.stepIndex as number;
+				const prev = this._stepOutputs.get(idx) || "";
+				let next = prev + (detail.text || "");
+				if (next.length > 512 * 1024) next = next.slice(-512 * 1024);
+				this._stepOutputs.set(idx, next);
+				if (this.modalStep && this.modalStep.index === idx) {
+					this.modalStep = { ...this.modalStep, output: next };
+				}
 				break;
 			}
 			case "gate_verification_complete": {
@@ -194,6 +213,18 @@ export class GateVerificationLive extends LitElement {
 				${this._renderHeader(passedCount, failedCount, total)}
 				${this.steps.map((step, i) => this._renderStepCard(step, i))}
 			</div>
+			${this.modalStep ? html`
+				<verification-output-modal
+					.goalId=${this.goalId}
+					.gateId=${this.gateId}
+					.signalId=${this.signalId}
+					.stepIndex=${this.modalStep.index}
+					.stepName=${this.modalStep.name}
+					.open=${true}
+					.initialOutput=${this.modalStep.output}
+					@close=${this._closeModal}
+				></verification-output-modal>
+			` : nothing}
 		`;
 	}
 
@@ -209,28 +240,46 @@ export class GateVerificationLive extends LitElement {
 		return html`<div class="text-xs font-medium ${statusColor("running")} mb-1">Verifying <code class="text-[10px]">${this.gateId}</code> — <span class="text-xs">${completedCount}/${total} steps</span>${failed > 0 ? html` <span class="text-red-500">(${failed} failed)</span>` : nothing}</div>`;
 	}
 
+	private _openModal(index: number, name: string) {
+		const output = this._stepOutputs.get(index) || "";
+		this.modalStep = { index, name, output };
+	}
+
+	private _closeModal() {
+		this.modalStep = null;
+	}
+
 	private _renderStepCard(step: VerificationStep, index: number): TemplateResult {
 		const isExpanded = this.expandedSteps.has(index);
 		const hasOutput = !!step.output;
 		const dStatus = toDelegateStatus(step.status);
 		const entry = toCardEntry(step, index);
+		const isRunningCommand = step.status === "running" && step.type === "command";
 
-		// Type badge (verification-specific, not in delegate-cards)
 		const typeBadgeCls = step.type === "command"
 			? "bg-muted text-muted-foreground"
 			: "bg-purple-500/20 text-purple-600 dark:text-purple-400";
 
+		const clickable = hasOutput || isRunningCommand;
+
 		return html`
 			<div class="border border-border rounded text-sm">
 				<div
-					class="p-2 flex items-center gap-2 ${hasOutput ? "cursor-pointer hover:bg-accent/50" : ""}"
-					@click=${hasOutput ? () => this._toggleStep(index) : null}
+					class="p-2 flex items-center gap-2 ${clickable ? "cursor-pointer hover:bg-accent/50" : ""}"
+					@click=${clickable ? () => {
+						if (isRunningCommand) {
+							this._openModal(index, step.name);
+						} else if (hasOutput) {
+							this._toggleStep(index);
+						}
+					} : null}
 				>
 					<span class="${statusColor(dStatus)}">${statusIcon(dStatus)}</span>
 					<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name || "step"}</span>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
 					${renderDuration(entry)}
 					${step.sessionId ? renderSessionLink(step.sessionId) : nothing}
+					${isRunningCommand ? html`<span class="text-muted-foreground text-[10px] shrink-0" title="View live output">▸</span>` : nothing}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
 				</div>
 				${isExpanded && step.output ? html`

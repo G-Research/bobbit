@@ -123,11 +123,13 @@ export class VerificationHarness {
 		}
 
 		// Broadcast verification started
+		const verificationStartedAt = Date.now();
 		this.broadcastFn(signal.goalId, {
 			type: "gate_verification_started",
 			goalId: signal.goalId,
 			gateId: signal.gateId,
 			signalId: signal.id,
+			startedAt: verificationStartedAt,
 			steps: steps.map(s => ({ name: s.name, type: s.type })),
 		});
 
@@ -136,9 +138,9 @@ export class VerificationHarness {
 			goalId: signal.goalId,
 			gateId: signal.gateId,
 			signalId: signal.id,
-			steps: steps.map(s => ({ name: s.name, type: s.type, status: "running" as const, startedAt: Date.now() })),
+			steps: steps.map(s => ({ name: s.name, type: s.type, status: "running" as const, startedAt: verificationStartedAt })),
 			overallStatus: "running",
-			startedAt: Date.now(),
+			startedAt: verificationStartedAt,
 		};
 		this.activeVerifications.set(signal.id, active);
 
@@ -210,6 +212,7 @@ export class VerificationHarness {
 					let stepSessionId: string | undefined;
 					if (step.type === "llm-review") {
 						stepSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
+						active.steps[index].startedAt = Date.now();
 						this.broadcastFn(signal.goalId, {
 							type: "gate_verification_step_started",
 							goalId: signal.goalId,
@@ -217,6 +220,7 @@ export class VerificationHarness {
 							signalId: signal.id,
 							stepIndex: index,
 							stepName: step.name,
+							startedAt: active.steps[index].startedAt,
 							sessionId: stepSessionId,
 						});
 						const av = this.activeVerifications.get(signal.id);
@@ -226,9 +230,24 @@ export class VerificationHarness {
 					}
 
 					if (step.type === "command") {
+						active.steps[index].startedAt = Date.now();
+						this.broadcastFn(signal.goalId, {
+							type: "gate_verification_step_started",
+							goalId: signal.goalId,
+							gateId: signal.gateId,
+							signalId: signal.id,
+							stepIndex: index,
+							stepName: step.name,
+							startedAt: active.steps[index].startedAt,
+						});
 						const cmd = this.substituteVars(step.run || "", builtinVars, allGateStates);
 						const expectFailure = step.expect === "failure";
-						result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure);
+						result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure, {
+							goalId: signal.goalId,
+							gateId: signal.gateId,
+							signalId: signal.id,
+							stepIndex: index,
+						});
 					} else {
 						// llm-review — spawn a one-shot reviewer sub-agent
 						if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -778,6 +797,7 @@ export class VerificationHarness {
 		cwd: string,
 		timeoutSec: number,
 		expectFailure: boolean,
+		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
 	): Promise<{ passed: boolean; output: string }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
@@ -808,8 +828,56 @@ export class VerificationHarness {
 			}
 			let stdout = "";
 			let stderr = "";
-			child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); if (stdout.length > 1024 * 1024) stdout = stdout.slice(-512 * 1024); });
-			child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024); });
+			child.stdout.on("data", (d: Buffer) => {
+				const text = d.toString();
+				stdout += text;
+				if (stdout.length > 1024 * 1024) stdout = stdout.slice(-512 * 1024);
+				if (streamCtx) {
+					this.broadcastFn(streamCtx.goalId, {
+						type: "gate_verification_step_output",
+						goalId: streamCtx.goalId,
+						gateId: streamCtx.gateId,
+						signalId: streamCtx.signalId,
+						stepIndex: streamCtx.stepIndex,
+						stream: "stdout" as const,
+						text,
+						ts: Date.now(),
+					});
+					const av = this.activeVerifications.get(streamCtx.signalId);
+					if (av && av.steps[streamCtx.stepIndex]) {
+						const step = av.steps[streamCtx.stepIndex];
+						step.output = (step.output || "") + text;
+						if (step.output.length > 512 * 1024) {
+							step.output = step.output.slice(-512 * 1024);
+						}
+					}
+				}
+			});
+			child.stderr.on("data", (d: Buffer) => {
+				const text = d.toString();
+				stderr += text;
+				if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
+				if (streamCtx) {
+					this.broadcastFn(streamCtx.goalId, {
+						type: "gate_verification_step_output",
+						goalId: streamCtx.goalId,
+						gateId: streamCtx.gateId,
+						signalId: streamCtx.signalId,
+						stepIndex: streamCtx.stepIndex,
+						stream: "stderr" as const,
+						text,
+						ts: Date.now(),
+					});
+					const av = this.activeVerifications.get(streamCtx.signalId);
+					if (av && av.steps[streamCtx.stepIndex]) {
+						const step = av.steps[streamCtx.stepIndex];
+						step.output = (step.output || "") + text;
+						if (step.output.length > 512 * 1024) {
+							step.output = step.output.slice(-512 * 1024);
+						}
+					}
+				}
+			});
 			child.on("close", (code) => {
 				const output = (stdout + "\n" + stderr).trim().slice(-5000);
 				const exitedNonZero = code !== 0;

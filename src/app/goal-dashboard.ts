@@ -1,4 +1,5 @@
 import { html, nothing, type TemplateResult } from "lit";
+import "../ui/components/VerificationOutputModal.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, type GateState, type GateSignal } from "./api.js";
@@ -97,12 +98,13 @@ let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 interface LiveVerification {
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
+	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; liveOutput?: string; startedAt: number; sessionId?: string }>;
 	overallStatus: string;
 }
 let liveVerifications: Map<string, LiveVerification> = new Map();
 let liveVerifTimer: ReturnType<typeof setInterval> | null = null;
 let expandedLiveStepKeys: Set<string> = new Set();
+let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; stepName: string; liveOutput: string } | null = null;
 
 /** Current dashboard tab */
 let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
@@ -257,6 +259,7 @@ export function clearDashboardState(): void {
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	liveVerifications = new Map();
 	expandedLiveStepKeys = new Set();
+	dashboardModalStep = null;
 	stopLiveVerifTimer();
 }
 
@@ -377,8 +380,9 @@ function handleLiveVerificationEvent(e: Event) {
 
 	switch (detail.type) {
 		case "gate_verification_started": {
+			const now = detail.startedAt || Date.now();
 			const steps = (detail.steps || []).map((s: any) => ({
-				name: s.name, type: s.type, status: "running", startedAt: Date.now(),
+				name: s.name, type: s.type, status: "running", startedAt: now,
 			}));
 			liveVerifications.set(key, { gateId: detail.gateId, signalId: detail.signalId, steps, overallStatus: "running" });
 			startLiveVerifTimer();
@@ -390,6 +394,7 @@ function handleLiveVerificationEvent(e: Event) {
 			if (entry && entry.steps[detail.stepIndex]) {
 				entry.steps[detail.stepIndex] = {
 					...entry.steps[detail.stepIndex],
+					startedAt: detail.startedAt || entry.steps[detail.stepIndex].startedAt,
 					sessionId: detail.sessionId,
 				};
 				renderApp();
@@ -417,6 +422,16 @@ function handleLiveVerificationEvent(e: Event) {
 				sessionId: detail.sessionId ?? entry.steps[detail.stepIndex].sessionId,
 			};
 			renderApp();
+			break;
+		}
+		case "gate_verification_step_output": {
+			const entry = liveVerifications.get(key);
+			if (entry && entry.steps[detail.stepIndex]) {
+				const step = entry.steps[detail.stepIndex];
+				let out = (step.liveOutput || "") + (detail.text || "");
+				if (out.length > 512 * 1024) out = out.slice(-512 * 1024);
+				step.liveOutput = out;
+			}
 			break;
 		}
 		case "gate_verification_complete": {
@@ -1701,11 +1716,20 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 				const hasOutput = !!step.output;
 				const isExpanded = expandedLiveStepKeys.has(stepKey);
 				const isLlm = step.type === "llm-review";
+				const isRunningCmd = isRunning && step.type === "command";
+				const clickable = hasOutput || isRunningCmd;
 
 				return html`
 					<div class="verify-card verify-card--${isRunning ? "running" : isPassed ? "pass" : "fail"}">
-						<div class="verify-card__header ${hasOutput ? "verify-card__header--clickable" : ""}"
-							@click=${hasOutput ? () => toggleLiveStepExpand(stepKey) : null}>
+						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
+							@click=${clickable ? () => {
+								if (isRunningCmd) {
+									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || "" };
+									renderApp();
+								} else if (hasOutput) {
+									toggleLiveStepExpand(stepKey);
+								}
+							} : null}>
 							<span class="verify-card__icon verify-card__icon--${isRunning ? "running" : isPassed ? "pass" : "fail"}">
 								${isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717"}
 							</span>
@@ -1720,6 +1744,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 								   class="verify-card__session-link" title="View live logs"
 								   @click=${(e: Event) => e.stopPropagation()}>view</a>
 							` : nothing}
+							${isRunningCmd ? html`<span class="verify-card__expand" title="View live output">▸</span>` : nothing}
 							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
 						</div>
 						${isExpanded && step.output ? html`
@@ -1784,6 +1809,18 @@ export function renderGoalDashboard(): TemplateResult {
 				<div class="tab-panel ${activeTab === "commits" ? "active" : ""}">${activeTab === "commits" ? renderCommitsTab() : nothing}</div>
 			</div>
 		</div>
+		${dashboardModalStep ? html`
+			<verification-output-modal
+				.goalId=${currentGoalId || ""}
+				.gateId=${dashboardModalStep.gateId}
+				.signalId=${dashboardModalStep.signalId}
+				.stepIndex=${dashboardModalStep.stepIndex}
+				.stepName=${dashboardModalStep.stepName}
+				.open=${true}
+				.initialOutput=${dashboardModalStep.liveOutput}
+				@close=${() => { dashboardModalStep = null; renderApp(); }}
+			></verification-output-modal>
+		` : nothing}
 	`;
 }
 
