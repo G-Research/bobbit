@@ -396,12 +396,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			return;
 		}
 
-		// Success — NOW tear down the old agent
+		// Success — NOW tear down the old agent and swap in the new one atomically.
+		// Assign remote BEFORE any await to prevent a transient null window
+		// where an event-triggered renderApp() could flash a blank screen.
 		if (oldAgent) {
 			oldAgent.disconnect();
 		}
-		state.remoteAgent = null;
-		state.connectionStatus = "disconnected";
+		state.remoteAgent = remote;
+		state.connectionStatus = "connected";
 
 		// Restore saved model
 		const savedModel = loadSessionModel(sessionId);
@@ -611,8 +613,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		state.connectionStatus = "connected";
-		state.remoteAgent = remote;
 		state.appView = "authenticated";
 		localStorage.setItem(GW_SESSION_KEY, sessionId);
 		markSessionVisited(sessionId);
