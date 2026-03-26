@@ -378,7 +378,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	// Update accessory class synchronously
 	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
-	const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat"];
+	const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat", "bobbit-wand"];
 	accClasses.forEach((c) => document.documentElement.classList.remove(c));
 	const accId = sessionData?.accessory
 		?? (sessionData?.role === "team-lead" ? "crown" : sessionData?.role === "coder" ? "bandana" : undefined);
@@ -656,7 +656,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Re-apply accessory class after refreshSessions (may have new data)
 		const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
-		const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat"];
+		const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat", "bobbit-wand"];
 		accClasses.forEach((c) => document.documentElement.classList.remove(c));
 		const accId = sessionForRole?.accessory
 			?? (sessionForRole?.role === "team-lead" ? "crown" : sessionForRole?.role === "coder" ? "bandana" : undefined);

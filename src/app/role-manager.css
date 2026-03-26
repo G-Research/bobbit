@@ -668,6 +668,7 @@
 .bobbit-blob--inline .bobbit-blob__shield,
 .bobbit-blob--inline .bobbit-blob__set-square,
 .bobbit-blob--inline .bobbit-blob__flask,
+.bobbit-blob--inline .bobbit-blob__wand,
 .bobbit-blob--inline .bobbit-blob__wizard-hat {
 	display: none !important;
 }
@@ -680,4 +681,5 @@
 .bobbit-blob--inline.bobbit-shield .bobbit-blob__shield { display: block !important; }
 .bobbit-blob--inline.bobbit-set-square .bobbit-blob__set-square { display: block !important; }
 .bobbit-blob--inline.bobbit-flask .bobbit-blob__flask { display: block !important; }
+.bobbit-blob--inline.bobbit-wand .bobbit-blob__wand { display: block !important; }
 .bobbit-blob--inline.bobbit-wizard-hat .bobbit-blob__wizard-hat { display: block !important; }
