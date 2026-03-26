@@ -174,6 +174,19 @@ export function stopTimeRefresh(): void {
 // SESSION TIME + UNSEEN BADGE
 // ============================================================================
 
+/** Render session title with Mexican wave font-weight when active. */
+export function renderSessionTitle(title: string, isActive?: boolean) {
+	if (!isActive) return title;
+	const chars = title.split("");
+	// Wave takes ~3s to roll through; total cycle = roll + dwell
+	const roll = 3;
+	const dur = roll + 2; // seconds for full cycle
+	const stagger = chars.length > 1 ? roll / chars.length : 0;
+	return html`<span class="title-wave" style="--tw-dur:${dur}s">${chars.map((ch, i) =>
+		html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch === " " ? "\u00a0" : ch}</span>`
+	)}</span>`;
+}
+
 /** Render a pulsing dot with conic sweep to indicate active session. */
 let _dotIndex = 0;
 function renderActiveShimmer() {
@@ -260,7 +273,7 @@ export function renderSessionRow(session: GatewaySession) {
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
 			<div class="flex-1 min-w-0 flex flex-col justify-center">
-				<div class="${mobile ? "flex items-baseline gap-1 min-w-0" : "text-xs"} ${isActive ? "font-semibold" : "font-normal"}"><span class="truncate ${mobile ? "text-base" : ""}">${displayTitle}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
+				<div class="${mobile ? "flex items-baseline gap-1 min-w-0" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 				${session.personalities && session.personalities.length > 0 ? html`
 					<div class="flex flex-wrap gap-0.5 mt-0.5">
 						${session.personalities.map((t) => html`<span
@@ -407,7 +420,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory)}
 			</div>
-			<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1 text-base" : "truncate text-xs"} ${isActive ? "font-semibold" : "font-normal"}"><span class="${mobile ? "truncate" : ""}">${displayTitle}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
+			<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 			${!mobile ? renderSessionTime(session) : ""}
 			${mobile
 				? buttons

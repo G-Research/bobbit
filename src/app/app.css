@@ -485,3 +485,13 @@ theme-toggle button {
 	display: inline-block;
 	animation: gate-wave 1.6s ease-in-out infinite;
 }
+
+/* Mexican-wave font-weight on active session titles */
+@keyframes title-wave {
+	0%, 100% { font-weight: 400; opacity: 0.72; }
+	50% { font-weight: 500; opacity: 0.92; }
+}
+.title-wave > span {
+	display: inline;
+	animation: title-wave var(--tw-dur, 4s) ease-in-out infinite;
+}

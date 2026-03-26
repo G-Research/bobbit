@@ -22,7 +22,7 @@ import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, dismissSetup, gatewayFetch, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 
@@ -535,7 +535,7 @@ export function renderStaffSidebarSection() {
 					style="padding-left:${CHEVRON_W}px;"
 					@click=${() => handleStaffClick(agent)}>
 					${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1" : "text-xs"} ${active ? "font-medium" : "font-normal"}"><span class="truncate ${mobile ? "text-base" : ""}">${agent.name}</span>${mobile && session ? (() => {
+					<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
 							const time = terseRelativeTime(session.lastActivity);

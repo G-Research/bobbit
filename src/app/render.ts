@@ -356,6 +356,7 @@ function goalPreviewPanel() {
 						highlightedIndex: state.cwdHighlightIndex,
 						onHighlight: (i) => { state.cwdHighlightIndex = i; renderApp(); },
 					})}
+					<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree derived from this path.</p>
 					</div>
 				${_cachedWorkflows.length > 0 ? html`
 					<div>
@@ -1301,6 +1302,7 @@ function goalProposalPanel() {
 					highlightedIndex: _proposalCwdHighlightIndex,
 					onHighlight: (i) => { _proposalCwdHighlightIndex = i; renderApp(); },
 				})}
+				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree derived from this path.</p>
 				</div>
 			${_cachedWorkflows.length > 0 ? html`
 				<div>
