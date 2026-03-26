@@ -40,7 +40,9 @@ const execAsync = promisify(exec);
 
 // ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
 const _prCache = new Map<string, { data: any; ts: number }>();
-const PR_CACHE_TTL_MS = 15_000; // 15 seconds
+const PR_CACHE_TTL_MS = 60_000; // 60 seconds
+const PR_NULL_CACHE_TTL_MS = 300_000; // 5 minutes for null (no-PR) results
+const _prInFlight = new Map<string, Promise<any | null>>();
 
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
@@ -62,9 +64,7 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
-async function getCachedPrStatus(cwd: string): Promise<any | null> {
-	const cached = _prCache.get(cwd);
-	if (cached && Date.now() - cached.ts < PR_CACHE_TTL_MS) return cached.data;
+async function _fetchPrStatus(cwd: string): Promise<any | null> {
 	try {
 		const { stdout } = await execAsync("gh pr view --json state,url,number,title,mergeable,headRefName,reviewDecision", {
 			cwd,
@@ -80,6 +80,21 @@ async function getCachedPrStatus(cwd: string): Promise<any | null> {
 		_prCache.set(cwd, { data: null, ts: Date.now() });
 		return null;
 	}
+}
+
+async function getCachedPrStatus(cwd: string): Promise<any | null> {
+	const cached = _prCache.get(cwd);
+	if (cached) {
+		const ttl = cached.data === null ? PR_NULL_CACHE_TTL_MS : PR_CACHE_TTL_MS;
+		if (Date.now() - cached.ts < ttl) return cached.data;
+	}
+
+	const existing = _prInFlight.get(cwd);
+	if (existing) return existing;
+
+	const p = _fetchPrStatus(cwd);
+	_prInFlight.set(cwd, p);
+	try { return await p; } finally { _prInFlight.delete(cwd); }
 }
 
 // ── Async git helpers (avoid blocking event loop) ──
