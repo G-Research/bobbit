@@ -115,6 +115,10 @@ export function createGateway(config: GatewayConfig) {
 
 	const colorStore = new ColorStore();
 	const preferencesStore = new PreferencesStore();
+	const savedCwd = preferencesStore.get("defaultCwd");
+	if (savedCwd && typeof savedCwd === "string") {
+		config.defaultCwd = savedCwd;
+	}
 	const personalityStore = new PersonalityStore();
 	const personalityManager = new PersonalityManager(personalityStore);
 	fs.mkdirSync(bobbitStateDir(), { recursive: true });
@@ -304,12 +308,6 @@ export function createGateway(config: GatewayConfig) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
-
-			// Restore persisted defaultCwd preference
-			const savedCwd = preferencesStore.get("defaultCwd");
-			if (savedCwd && typeof savedCwd === "string") {
-				config.defaultCwd = savedCwd;
-			}
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();

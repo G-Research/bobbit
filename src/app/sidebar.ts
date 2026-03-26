@@ -37,12 +37,11 @@ let _personalitiesLoaded = false;
 let _pickerRole = "";
 /** Currently selected personalities in the picker. */
 let _pickerPersonalities = new Set<string>();
-/** Goal ID context for the picker (if launched from a goal). */
-let _pickerGoalId: string | undefined;
-/** Cwd picker state for the role picker dropdown. */
 let _pickerCwd = "";
 let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
+/** Goal ID context for the picker (if launched from a goal). */
+let _pickerGoalId: string | undefined;
 
 async function ensurePersonalitiesLoaded(): Promise<void> {
 	if (_personalitiesLoaded) return;
@@ -88,10 +87,10 @@ export function renderRolePickerDropdown() {
 	const doCreate = () => {
 		state.rolePickerOpen = false;
 		const personalities = [..._pickerPersonalities];
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, _pickerCwd || undefined);
+		const cwd = _pickerCwd || undefined;
 		_pickerCwd = "";
 		_pickerCwdDropdownOpen = false;
-		_pickerCwdHighlightIndex = -1;
+		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
 	};
 
 	return html`
@@ -130,19 +129,17 @@ export function renderRolePickerDropdown() {
 					`)}
 			</div>
 			<!-- Working Directory -->
-			<div class="border-t border-border/50 px-3 py-2">
+			<div class="border-t border-border/50 px-3 py-2" style="overflow: visible;">
 				<div class="text-[10px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
-				<div style="overflow:visible;">
-					${cwdCombobox({
-						value: _pickerCwd,
-						onInput: (v: string) => { _pickerCwd = v; renderApp(); },
-						onSelect: (v: string) => { _pickerCwd = v; renderApp(); },
-						dropdownOpen: _pickerCwdDropdownOpen,
-						onToggle: (open: boolean) => { _pickerCwdDropdownOpen = open; renderApp(); },
-						highlightedIndex: _pickerCwdHighlightIndex,
-						onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; renderApp(); },
-					})}
-				</div>
+				${cwdCombobox({
+					value: _pickerCwd,
+					onInput: (v: string) => { _pickerCwd = v; renderApp(); },
+					onSelect: (v: string) => { _pickerCwd = v; _pickerCwdDropdownOpen = false; renderApp(); },
+					dropdownOpen: _pickerCwdDropdownOpen,
+					onToggle: (open: boolean) => { _pickerCwdDropdownOpen = open; renderApp(); },
+					highlightedIndex: _pickerCwdHighlightIndex,
+					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; renderApp(); },
+				})}
 			</div>
 			<!-- Create button -->
 			<div class="border-t border-border/50 px-3 py-2">

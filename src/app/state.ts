@@ -117,6 +117,9 @@ export const state = {
 	connectingSessionId: null as string | null,
 	sessionPollTimer: null as ReturnType<typeof setInterval> | null,
 
+	/** Persisted default working directory from server */
+	defaultCwd: "",
+
 	/** Whether the sidebar is collapsed */
 	sidebarCollapsed: localStorage.getItem("bobbit-sidebar-collapsed") === "true",
 	/** Whether to show archived sessions in the sidebar */
@@ -216,9 +219,6 @@ export const state = {
 	staffPreviewTriggersEdited: false,
 	staffPreviewCwdEdited: false,
 	staffPreviewPromptEditMode: false,
-
-	/** Server's default working directory */
-	defaultCwd: "",
 
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,

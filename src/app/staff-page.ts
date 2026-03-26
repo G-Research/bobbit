@@ -537,7 +537,7 @@ function renderEditView(): TemplateResult {
 					${Input({
 						type: "text",
 						value: editCwd,
-						placeholder: (state as any).defaultCwd || "(server default)",
+						placeholder: state.defaultCwd || "(server default)",
 						onInput: (e: Event) => { editCwd = (e.target as HTMLInputElement).value; renderApp(); },
 					})}
 				</div>

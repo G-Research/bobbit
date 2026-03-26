@@ -234,16 +234,13 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	}
 	renderApp();
 	await refreshSessions();
-	// Fetch default cwd from server
 	try {
-		const cwdRes = await fetch(`${url}/api/config/cwd`, {
-			headers: { Authorization: `Bearer ${token}` },
-		});
+		const cwdRes = await gatewayFetch("/api/config/cwd");
 		if (cwdRes.ok) {
 			const cwdData = await cwdRes.json();
-			if (cwdData.cwd) (state as any).defaultCwd = cwdData.cwd;
+			state.defaultCwd = cwdData.cwd || "";
 		}
-	} catch { /* ignore — server may not support this endpoint yet */ }
+	} catch {}
 	startSessionPolling();
 	startTimeRefresh();
 }

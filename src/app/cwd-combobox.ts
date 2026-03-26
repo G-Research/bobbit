@@ -29,7 +29,6 @@ export function getRecentCwds(): Array<{ path: string; source: string }> {
 			results.push({ path: p, source: "goal" });
 		}
 	}
-	// Filter out worktree paths (contain -wt/ or -wt\ directory segments)
 	return results.filter(r => !/-wt[/\\]/.test(r.path));
 }
 
@@ -109,7 +108,7 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 					aria-controls="cwd-listbox"
 					class="flex w-full min-w-0 rounded-md border border-input bg-transparent text-foreground shadow-xs h-9 px-3 py-1 text-sm pr-8 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none dark:bg-input/30"
 					.value=${opts.value}
-					placeholder=${opts.placeholder || (state as any).defaultCwd || "(server default)"}
+					placeholder=${opts.placeholder || state.defaultCwd || "(server default)"}
 					@input=${(e: Event) => {
 						opts.onInput((e.target as HTMLInputElement).value);
 						if (!opts.dropdownOpen) opts.onToggle(true);
