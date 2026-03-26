@@ -496,7 +496,7 @@ theme-toggle button {
 }
 .title-wave {
 	--tw-lo: var(--color-foreground, currentColor);
-	--tw-hi: color-mix(in srgb, var(--color-foreground, currentColor) 50%, transparent);
+	--tw-hi: color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent);
 	background:
 		repeating-linear-gradient(
 			90deg,
