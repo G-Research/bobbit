@@ -490,6 +490,15 @@ export class RemoteAgent {
 		this._state.messages = msgs.map(enrichUserMessage);
 	}
 
+	/** Pre-populate messages from cache for instant rendering before WS responds. */
+	preloadMessages(msgs: any[]): void {
+		this._state.messages = msgs.map(enrichUserMessage);
+		// Emit so the UI re-renders with cached messages immediately
+		for (const m of this._state.messages) {
+			this.emit({ type: "message_end", message: m });
+		}
+	}
+
 	appendMessage(msg: any): void {
 		this._state.messages = [...this._state.messages, msg];
 	}
