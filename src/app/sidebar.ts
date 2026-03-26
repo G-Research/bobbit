@@ -44,6 +44,22 @@ let _pickerCwdHighlightIndex = -1;
 let _pickerGoalId: string | undefined;
 /** Anchor rect for positioning the popover near the button. */
 let _pickerAnchorRect: { top: number; right: number; bottom: number } | null = null;
+/** Keyboard focus index for popover navigation (-1 = none). */
+let _pickerFocusIndex = -1;
+
+/** Item types in the flat focus list. */
+type PickerItemType = "personality" | "role" | "cwd" | "create";
+interface PickerItem { type: PickerItemType; id: string; }
+
+/** Build the flat ordered list of focusable items. */
+function _buildPickerItems(): PickerItem[] {
+	const items: PickerItem[] = [];
+	for (const p of _cachedPersonalities) items.push({ type: "personality", id: p.name });
+	for (const r of state.roles) items.push({ type: "role", id: r.name });
+	items.push({ type: "cwd", id: "cwd" });
+	items.push({ type: "create", id: "create" });
+	return items;
+}
 
 async function ensurePersonalitiesLoaded(): Promise<void> {
 	if (_personalitiesLoaded) return;
@@ -75,6 +91,7 @@ export async function toggleRolePicker(e: Event, goalId?: string): Promise<void>
 	// Pre-select the "general" role (server default) if it exists
 	const generalRole = state.roles.find(r => r.name === "general");
 	_pickerRole = generalRole ? "general" : "";
+	_pickerFocusIndex = -1;
 	state.rolePickerOpen = true;
 	renderApp();
 }
@@ -105,6 +122,9 @@ export function renderRolePickerDropdown() {
 
 	// All roles including general (the server default)
 	const allRoles = state.roles;
+	const pickerItems = _buildPickerItems();
+	const focusedItem = _pickerFocusIndex >= 0 && _pickerFocusIndex < pickerItems.length ? pickerItems[_pickerFocusIndex] : null;
+	const isFocused = (type: PickerItemType, id: string) => focusedItem?.type === type && focusedItem?.id === id;
 
 	// Compute fixed position: anchor below button, clamp to viewport edges
 	const MARGIN = 8;
@@ -138,10 +158,11 @@ export function renderRolePickerDropdown() {
 				<div class="px-3 pb-2 flex flex-wrap gap-1">
 					${_cachedPersonalities.map(personality => {
 						const selected = _pickerPersonalities.has(personality.name);
+						const focused = isFocused("personality", personality.name);
 						return html`<button
 							class="px-2 py-0.5 text-[11px] rounded-xl border transition-colors cursor-pointer ${selected
 								? "bg-primary/15 text-primary border-primary/30"
-								: "bg-muted/60 text-foreground/70 border-border"}"
+								: "bg-muted/60 text-foreground/70 border-border"} ${focused ? "ring-2 ring-ring" : ""}"
 							title=${personality.description}
 							@click=${() => togglePersonality(personality.name)}
 						>${personality.label}</button>`;
@@ -154,14 +175,16 @@ export function renderRolePickerDropdown() {
 				${allRoles.length === 0
 					? html`<div class="px-3 py-1 text-xs text-muted-foreground">No roles defined</div>`
 					: html`<div class="px-2 pb-1 grid gap-0.5" style="grid-template-columns: 1fr 1fr;">
-						${allRoles.map(role => html`
-							<button class="text-left px-2 py-1 text-xs rounded hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-1.5 ${_pickerRole === role.name ? "bg-primary/10 ring-1 ring-primary/30" : ""}"
+						${allRoles.map(role => {
+							const focused = isFocused("role", role.name);
+							return html`
+							<button class="text-left px-2 py-1 text-xs rounded hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-1.5 ${_pickerRole === role.name ? "bg-primary/10 ring-1 ring-primary/30" : ""} ${focused ? "ring-2 ring-ring" : ""}"
 								@click=${() => selectRole(role.name)}
 								title="Select ${role.label} role">
 								<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
 								<span class="flex-1 truncate ${_pickerRole === role.name ? "text-primary font-medium" : ""}">${role.label}</span>
 							</button>
-						`)}
+						`; })}
 					</div>`}
 			</div>
 			</div>
@@ -181,7 +204,7 @@ export function renderRolePickerDropdown() {
 			<!-- Create button (pinned at bottom) -->
 			<div class="border-t border-border/50 px-3 py-2 shrink-0">
 				<button
-					class="w-full text-center px-3 py-1.5 text-sm rounded-md font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+					class="w-full text-center px-3 py-1.5 text-sm rounded-md font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90 ${isFocused("create", "create") ? "ring-2 ring-ring ring-offset-1 ring-offset-background" : ""}"
 					@click=${doCreate}
 					title="Create session with selected role"
 				>Create Session</button>
@@ -198,27 +221,174 @@ document.addEventListener("click", () => {
 	}
 });
 
-// Global keyboard handler for role picker popover (Enter to create, Escape to close)
+// Global keyboard handler for role picker popover
 document.addEventListener("keydown", (e: KeyboardEvent) => {
 	if (!state.rolePickerOpen) return;
+	const items = _buildPickerItems();
+	const total = items.length;
+	if (total === 0) return;
+
+	const focusedItem = _pickerFocusIndex >= 0 && _pickerFocusIndex < total ? items[_pickerFocusIndex] : null;
+
+	// If the cwd input has DOM focus, let it handle its own keys (typing, combobox nav)
+	// Only intercept Escape and Tab out of cwd
+	if (focusedItem?.type === "cwd") {
+		const cwdInput = document.querySelector(".cwd-combobox input") as HTMLElement | null;
+		const hasCwdFocus = cwdInput && document.activeElement === cwdInput;
+		if (hasCwdFocus) {
+			if (e.key === "Escape") {
+				if (_pickerCwdDropdownOpen) {
+					// Close cwd dropdown first
+					_pickerCwdDropdownOpen = false;
+					renderApp();
+				} else {
+					state.rolePickerOpen = false;
+					renderApp();
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
+			// Let cwd combobox handle ArrowUp/Down when its dropdown is open
+			if (_pickerCwdDropdownOpen) return;
+			// Tab / ArrowDown moves out of cwd to create button
+			if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
+				e.preventDefault();
+				e.stopPropagation();
+				_pickerFocusIndex = total - 1; // create button
+				cwdInput.blur();
+				renderApp();
+				return;
+			}
+			// ArrowUp moves back to roles
+			if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
+				e.preventDefault();
+				e.stopPropagation();
+				_pickerFocusIndex = Math.max(0, _pickerFocusIndex - 1);
+				cwdInput.blur();
+				renderApp();
+				return;
+			}
+			// Let all other keys pass through to the input
+			return;
+		}
+	}
+
 	if (e.key === "Escape") {
 		e.preventDefault();
 		e.stopPropagation();
 		state.rolePickerOpen = false;
 		renderApp();
-	} else if (e.key === "Enter") {
-		// Don't intercept Enter when the cwd combobox dropdown is open (user is selecting a directory)
-		if (_pickerCwdDropdownOpen) return;
+		return;
+	}
+
+	if (e.key === "Enter") {
 		e.preventDefault();
 		e.stopPropagation();
-		state.rolePickerOpen = false;
-		const personalities = [..._pickerPersonalities];
-		const cwd = _pickerCwd || undefined;
-		_pickerCwd = "";
-		_pickerCwdDropdownOpen = false;
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
+		// If focused on a specific item, activate it; otherwise create session
+		if (focusedItem?.type === "personality") {
+			if (_pickerPersonalities.has(focusedItem.id)) _pickerPersonalities.delete(focusedItem.id);
+			else _pickerPersonalities.add(focusedItem.id);
+			renderApp();
+		} else if (focusedItem?.type === "role") {
+			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
+			renderApp();
+		} else {
+			// create button or no focus — create session
+			state.rolePickerOpen = false;
+			const personalities = [..._pickerPersonalities];
+			const cwd = _pickerCwd || undefined;
+			_pickerCwd = "";
+			_pickerCwdDropdownOpen = false;
+			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
+		}
+		return;
+	}
+
+	if (e.key === " " && focusedItem) {
+		e.preventDefault();
+		e.stopPropagation();
+		if (focusedItem.type === "personality") {
+			if (_pickerPersonalities.has(focusedItem.id)) _pickerPersonalities.delete(focusedItem.id);
+			else _pickerPersonalities.add(focusedItem.id);
+			renderApp();
+		} else if (focusedItem.type === "role") {
+			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
+			renderApp();
+		} else if (focusedItem.type === "create") {
+			state.rolePickerOpen = false;
+			const personalities = [..._pickerPersonalities];
+			const cwd = _pickerCwd || undefined;
+			_pickerCwd = "";
+			_pickerCwdDropdownOpen = false;
+			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
+		}
+		return;
+	}
+
+	// Arrow navigation
+	if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
+		e.preventDefault();
+		e.stopPropagation();
+		if (_pickerFocusIndex < 0) {
+			_pickerFocusIndex = 0;
+		} else {
+			// In the 2-column role grid, ArrowDown skips a row (2 items)
+			const item = items[_pickerFocusIndex];
+			const step = item?.type === "role" ? 2 : 1;
+			_pickerFocusIndex = Math.min(total - 1, _pickerFocusIndex + step);
+		}
+		_focusCwdIfNeeded(items);
+		renderApp();
+		return;
+	}
+
+	if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
+		e.preventDefault();
+		e.stopPropagation();
+		if (_pickerFocusIndex < 0) {
+			_pickerFocusIndex = total - 1;
+		} else {
+			const item = items[_pickerFocusIndex];
+			const step = item?.type === "role" ? 2 : 1;
+			_pickerFocusIndex = Math.max(0, _pickerFocusIndex - step);
+		}
+		_focusCwdIfNeeded(items);
+		renderApp();
+		return;
+	}
+
+	if (e.key === "ArrowRight") {
+		e.preventDefault();
+		e.stopPropagation();
+		if (_pickerFocusIndex < 0) { _pickerFocusIndex = 0; }
+		else { _pickerFocusIndex = Math.min(total - 1, _pickerFocusIndex + 1); }
+		_focusCwdIfNeeded(items);
+		renderApp();
+		return;
+	}
+
+	if (e.key === "ArrowLeft") {
+		e.preventDefault();
+		e.stopPropagation();
+		if (_pickerFocusIndex < 0) { _pickerFocusIndex = 0; }
+		else { _pickerFocusIndex = Math.max(0, _pickerFocusIndex - 1); }
+		_focusCwdIfNeeded(items);
+		renderApp();
+		return;
 	}
 }, true); // capture phase so it fires before other handlers
+
+/** When focus lands on the cwd item, move DOM focus to its input. */
+function _focusCwdIfNeeded(items: PickerItem[]): void {
+	const item = _pickerFocusIndex >= 0 ? items[_pickerFocusIndex] : null;
+	if (item?.type === "cwd") {
+		requestAnimationFrame(() => {
+			const input = document.querySelector(".cwd-combobox input") as HTMLElement | null;
+			input?.focus();
+		});
+	}
+}
 
 // ============================================================================
 // SIDEBAR TOGGLE
