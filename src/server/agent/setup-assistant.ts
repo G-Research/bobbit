@@ -127,15 +127,21 @@ After writing the project config, emit a progress block:
 <content>Configured project settings: [list of commands/settings that were customized].</content>
 </setup_proposal>
 
-### Model preferences
+### Preferences (\`.bobbit/state/preferences.json\`)
 
-If the user expresses preferences about AI model or behavior, write them via the preferences store. For most projects, skip this unless the user specifically asks.
+Read the current preferences file (if it exists) and ask the user if they want to set model preferences. Available preference keys:
 
-If you do write preferences, emit:
+- \`default.sessionModel\` — model for coding sessions (e.g. \`anthropic/claude-sonnet-4-20250514\`)
+- \`default.reviewModel\` — model for automated gate reviews (e.g. \`anthropic/claude-sonnet-4-20250514\`)
+- \`default.namingModel\` — model for session title generation (e.g. \`anthropic/claude-haiku-4-20250414\`)
+
+The file is a flat JSON object. Merge any new keys with existing content — don't overwrite unrelated preferences.
+
+If the user has no model preferences (or the file doesn't exist), write the file unchanged and note that defaults are being used. Either way, always emit:
 
 <setup_proposal>
 <action>preferences</action>
-<content>Set model preferences: [details].</content>
+<content>Preferences: [summary — e.g. "using defaults" or "set session model to X"].</content>
 </setup_proposal>
 
 ## Completion
