@@ -869,6 +869,9 @@ html {
 	cursor: pointer;
 }
 
+/* Spinner for git merge operations */
+@keyframes git-spin { to { transform: rotate(360deg); } }
+
 /* Shimmer animation for thinking text */
 @keyframes shimmer {
 	0% {

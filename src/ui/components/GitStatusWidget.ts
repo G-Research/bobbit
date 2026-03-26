@@ -236,22 +236,23 @@ export class GitStatusWidget extends LitElement {
                             <option value="squash">Squash</option>
                             <option value="rebase">Rebase</option>
                         </select>
+                        ${this.merging ? html`<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted-foreground)"><span style="display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>Merging\u2026</span>` : html`
                         <button
                             style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
-                            ?disabled=${this.merging || !this.prMergeable}
+                            ?disabled=${!this.prMergeable}
                             @click=${this._handleMerge}
                         >
-                            ${this.merging ? 'Merging\u2026' : 'Merge PR'}
+                            Merge PR
                         </button>
                         ${this.viewerIsAdmin ? html`<button
                             style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
-                            ?disabled=${this.merging}
                             @click=${this._handleForceMerge}
                             title="Merge with --admin to bypass branch protection rules"
                         >
                             Force Merge
                         </button>` : nothing}
-                        ${!this.prMergeable && !this.merging && !this.viewerIsAdmin ? html`<span style="font-size:10px;color:var(--destructive)">Not mergeable</span>` : nothing}
+                        ${!this.prMergeable && !this.viewerIsAdmin ? html`<span style="font-size:10px;color:var(--destructive)">Not mergeable</span>` : nothing}
+                        `}
                     </div>
                     ${this.mergeError ? html`<div style="font-size:11px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : nothing}
                 ` : nothing}
@@ -306,6 +307,11 @@ export class GitStatusWidget extends LitElement {
     public setMergeResult(error?: string) {
         this.merging = false;
         this.mergeError = error || '';
+        // Refresh git status after merge attempt
+        this.dispatchEvent(new CustomEvent('git-fetch', {
+            bubbles: true,
+            composed: true,
+        }));
     }
 
     render() {
