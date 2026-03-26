@@ -206,7 +206,9 @@ export async function refreshPrStatusCache() {
 	if (_prRefreshInFlight) return;
 	_prRefreshInFlight = true;
 	try {
-	const goalsWithBranch = state.goals.filter(g => g.branch);
+	// Only poll active goals — completed/archived goals keep their cached PR status
+	// Only poll active goals — completed/archived goals keep their cached PR status
+	const goalsWithBranch = state.goals.filter(g => g.branch && g.state !== 'complete' && !g.archived);
 	if (goalsWithBranch.length === 0) return;
 
 	const results = await Promise.all(
