@@ -31,6 +31,7 @@ import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
+import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { configureAigw, removeAigw, getAigwUrl, getAigwModels, discoverAigwModels, proxyRequest, startupAigwCheck } from "./agent/aigw-manager.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
@@ -116,6 +117,7 @@ export function createGateway(config: GatewayConfig) {
 
 	const colorStore = new ColorStore();
 	const preferencesStore = new PreferencesStore();
+	const projectConfigStore = new ProjectConfigStore();
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
@@ -203,7 +205,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, broadcastToGoal, broadcastToAll);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, broadcastToGoal, broadcastToAll);
 
 			return;
 		}
@@ -261,7 +263,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 	teamManager.setBroadcastToGoal(broadcastToGoal);
-	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager);
+	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
 		if (!team?.teamLeadSessionId) return;
@@ -398,6 +400,7 @@ async function handleApiRoute(
 	workflowManager: WorkflowManager,
 	verificationHarness: VerificationHarness,
 	preferencesStore: PreferencesStore,
+	projectConfigStore: ProjectConfigStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
 ) {
@@ -855,6 +858,25 @@ async function handleApiRoute(
 		}
 		json({ ok: true });
 		broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+		return;
+	}
+
+	// GET /api/project-config — return project config with defaults
+	if (url.pathname === "/api/project-config" && req.method === "GET") {
+		json(projectConfigStore.getWithDefaults());
+		return;
+	}
+
+	// PUT /api/project-config — update project config fields
+	if (url.pathname === "/api/project-config" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		for (const [key, value] of Object.entries(body)) {
+			if (typeof value === "string") {
+				projectConfigStore.set(key as any, value);
+			}
+		}
+		json({ ok: true });
 		return;
 	}
 
