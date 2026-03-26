@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Resolve BOBBIT_HOME — follow symlinks to find the real script location
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BOBBIT_HOME="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# 2. Check node is available
+if ! command -v node &>/dev/null; then
+  echo "Error: Node.js is required but not found on PATH." >&2
+  exit 1
+fi
+
+# 3. Auto-bootstrap if needed
+if [ ! -d "$BOBBIT_HOME/node_modules" ] || [ ! -f "$BOBBIT_HOME/dist/server/cli.js" ]; then
+  echo "First run — installing dependencies and building..."
+  (cd "$BOBBIT_HOME" && npm install && npm run build)
+fi
+
+# 4. Launch, forwarding all args after implicit --cwd
+exec node "$BOBBIT_HOME/dist/server/cli.js" --cwd "$(pwd)" "$@"
