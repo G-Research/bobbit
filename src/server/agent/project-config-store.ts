@@ -71,8 +71,11 @@ export class ProjectConfigStore {
 		return { ...this.data };
 	}
 
-	/** Returns all fields with defaults applied for any missing values. */
+	/** Returns all fields with defaults applied for any missing values.
+	 *  Re-reads from disk to pick up changes made by external processes (e.g. setup wizard agent).
+	 */
 	getWithDefaults(): Required<ProjectConfig> {
+		this.load();
 		return { ...DEFAULTS, ...this.data };
 	}
 }

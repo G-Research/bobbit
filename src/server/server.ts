@@ -871,9 +871,10 @@ async function handleApiRoute(
 	if (url.pathname === "/api/project-config" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const VALID_KEYS = new Set(["build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command"]);
 		for (const [key, value] of Object.entries(body)) {
-			if (typeof value === "string") {
-				projectConfigStore.set(key as any, value);
+			if (typeof value === "string" && VALID_KEYS.has(key)) {
+				projectConfigStore.set(key as keyof import("./agent/project-config-store.js").ProjectConfig, value);
 			}
 		}
 		json({ ok: true });

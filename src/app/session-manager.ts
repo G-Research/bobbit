@@ -679,6 +679,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			: null);
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
+		state.setupPreviewSteps = [];
+		state.setupPreviewContent = "";
+		state.setupPreviewAction = "";
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelHtml = ""; // Clear stale preview from previous session
 		if (state.isPreviewSession) startPreviewPolling();
