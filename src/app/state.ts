@@ -363,7 +363,12 @@ export function hasActiveSession(): boolean {
 export function activeSessionId(): string | undefined {
 	// Don't highlight any session when a config page is open
 	if (isConfigPageRoute()) return undefined;
-	return state.selectedSessionId ?? state.remoteAgent?.gatewaySessionId;
+	if (state.selectedSessionId) {
+		// Only return selectedSessionId if we're connected/connecting to that session
+		if (state.remoteAgent || state.connectingSessionId) return state.selectedSessionId;
+		return undefined;
+	}
+	return state.remoteAgent?.gatewaySessionId;
 }
 
 // ============================================================================

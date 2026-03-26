@@ -49,6 +49,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.appView = "authenticated";
 			await refreshSessions();
 			await loadDashboardData(route.goalId);
@@ -79,6 +80,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = route.goalId;
 			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
@@ -234,6 +236,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			renderApp();

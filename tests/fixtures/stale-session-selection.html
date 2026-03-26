@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Stale Session Selection Bug Test</title>
+</head>
+<body>
+<script>
+// ==========================================================================
+// Minimal recreation of the relevant logic from src/app/state.ts and
+// src/app/main.ts to demonstrate the stale selectedSessionId bug.
+// ==========================================================================
+
+// --- Routing helpers (from src/app/routing.ts) ---
+
+const CONFIG_VIEWS = new Set([
+  "roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
+  "personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
+]);
+
+let currentRouteView = "landing";
+
+function isConfigPageRoute() {
+  return CONFIG_VIEWS.has(currentRouteView);
+}
+
+// --- State (from src/app/state.ts) ---
+
+const state = {
+  selectedSessionId: null,
+  remoteAgent: null, // { gatewaySessionId: string, connected: boolean } | null
+  connectingSessionId: null,
+  connectionStatus: "disconnected",
+  goalDashboardId: null,
+};
+
+// Exact reproduction of activeSessionId() from src/app/state.ts
+function activeSessionId() {
+  if (isConfigPageRoute()) return undefined;
+  if (state.selectedSessionId) {
+    // Only return selectedSessionId if we're connected/connecting to that session
+    if (state.remoteAgent || state.connectingSessionId) return state.selectedSessionId;
+    return undefined;
+  }
+  return state.remoteAgent?.gatewaySessionId;
+}
+
+// --- handleHashChange() branch simulations (from src/app/main.ts) ---
+// These reproduce the CURRENT (buggy) cleanup logic for each route branch.
+
+function simulateNavigateToGoalView(goalId) {
+  currentRouteView = "goal";
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.selectedSessionId = null;
+  state.goalDashboardId = goalId;
+}
+
+function simulateNavigateToGoalDashboard(goalId) {
+  currentRouteView = "goal-dashboard";
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.selectedSessionId = null;
+  state.goalDashboardId = goalId;
+}
+
+function simulateNavigateToLanding() {
+  currentRouteView = "landing";
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.selectedSessionId = null;
+  state.goalDashboardId = null;
+}
+
+function simulateNavigateToConfigPage(view) {
+  currentRouteView = view;
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.goalDashboardId = null;
+}
+
+// --- Simulate connecting to a session ---
+
+function simulateConnectToSession(sessionId) {
+  currentRouteView = "session";
+  state.selectedSessionId = sessionId;
+  state.remoteAgent = { gatewaySessionId: sessionId, connected: true };
+  state.connectionStatus = "connected";
+}
+
+// --- Correct cleanup (what backToSessions does) ---
+
+function simulateBackToSessions() {
+  currentRouteView = "landing";
+  state.selectedSessionId = null;
+  if (state.remoteAgent) {
+    state.remoteAgent = null;
+    state.connectionStatus = "disconnected";
+  }
+  state.goalDashboardId = null;
+}
+
+// Expose everything for Playwright tests
+window.__test = {
+  state,
+  activeSessionId,
+  simulateConnectToSession,
+  simulateNavigateToGoalView,
+  simulateNavigateToGoalDashboard,
+  simulateNavigateToLanding,
+  simulateNavigateToConfigPage,
+  simulateBackToSessions,
+  getCurrentRouteView: () => currentRouteView,
+};
+</script>
+</body>
+</html>
