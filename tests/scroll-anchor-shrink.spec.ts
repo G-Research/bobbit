@@ -7,10 +7,7 @@ test.describe("Scroll anchor on shrink", () => {
 	test("compensates scrollTop when content shrinks while scrolled up", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 
-		// Wait for the fixture's ResizeObserver to be set up (deferred to rAF)
-		await page.waitForFunction(() => (window as any).__isReady?.() === true);
-
-		// First scroll to bottom so stickToBottom = true, then scroll up
+		// Scroll to bottom so stickToBottom = true, then scroll up
 		await page.evaluate(() => {
 			const sc = document.getElementById("scroll-container")!;
 			sc.scrollTop = sc.scrollHeight;
@@ -33,30 +30,98 @@ test.describe("Scroll anchor on shrink", () => {
 			document.getElementById("scroll-container")!.scrollTop,
 		);
 
-		// Get the height of the collapsible element before collapse
+		// Verify collapsible is 400px
 		const collapsibleHeight = await page.evaluate(() =>
 			document.getElementById("collapsible")!.getBoundingClientRect().height,
 		);
 		expect(collapsibleHeight).toBe(400);
 
-		// Collapse the element — this shrinks content above/at the scroll position
-		await page.evaluate(() => (window as any).__collapseElement());
+		// Collapse the element then trigger the resize handler
+		// (ResizeObserver doesn't fire in headless Chromium, so we call it manually)
+		await page.evaluate(() => {
+			(window as any).__collapseElement();
+			(window as any).__handleResize();
+		});
 
-		// Wait for ResizeObserver to fire
-		await page.waitForTimeout(300);
+		await page.waitForTimeout(100);
 
 		const scrollTopAfter = await page.evaluate(() =>
 			document.getElementById("scroll-container")!.scrollTop,
 		);
 
-		// The collapsible element (400px) collapsed to 0px.
-		// If scroll anchoring works, scrollTop should decrease by ~400px to keep
-		// the same content visible. The current buggy code does NOT adjust scrollTop
-		// when _stickToBottom is false, so scrollTopAfter === scrollTopBefore.
-		//
-		// We assert that scrollTop was adjusted (decreased by roughly the collapse amount).
-		// This WILL FAIL on the buggy code — proving the bug.
+		// The collapsible (400px) collapsed to 0px. The resize handler should
+		// adjust scrollTop down by ~400px to keep the same content visible.
+		// Without compensation, scrollTop stays the same (or is browser-clamped),
+		// causing the viewport to shift.
 		const delta = scrollTopBefore - scrollTopAfter;
 		expect(delta, "scroll position was not compensated after content shrink").toBeGreaterThanOrEqual(350);
+	});
+
+	test("does not adjust scrollTop when stuck to bottom", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		// Scroll to bottom (stickToBottom = true)
+		await page.evaluate(() => {
+			const sc = document.getElementById("scroll-container")!;
+			(window as any).__scrollTo(sc.scrollHeight);
+		});
+		await page.waitForTimeout(200);
+
+		const state = await page.evaluate(() => (window as any).__getState());
+		expect(state.stickToBottom).toBe(true);
+
+		// Collapse and trigger resize
+		await page.evaluate(() => {
+			(window as any).__collapseElement();
+			(window as any).__handleResize();
+		});
+		await page.waitForTimeout(100);
+
+		// Should remain at the bottom
+		const afterState = await page.evaluate(() => {
+			const sc = document.getElementById("scroll-container")!;
+			return {
+				scrollTop: sc.scrollTop,
+				scrollHeight: sc.scrollHeight,
+				clientHeight: sc.clientHeight,
+			};
+		});
+		const distFromBottom = afterState.scrollHeight - afterState.scrollTop - afterState.clientHeight;
+		expect(distFromBottom).toBeLessThan(5);
+	});
+
+	test("does not adjust scrollTop when content grows while scrolled up", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		// Scroll up
+		await page.evaluate(() => {
+			const sc = document.getElementById("scroll-container")!;
+			(window as any).__scrollTo(sc.scrollHeight - sc.clientHeight - 300);
+		});
+		await page.waitForTimeout(200);
+
+		const scrollTopBefore = await page.evaluate(() =>
+			document.getElementById("scroll-container")!.scrollTop,
+		);
+
+		// Grow content (simulate new messages appearing below) and trigger resize
+		await page.evaluate(() => {
+			const after = document.getElementById("after-messages")!;
+			for (let i = 0; i < 10; i++) {
+				const div = document.createElement("div");
+				div.className = "message";
+				div.textContent = `New message ${i}`;
+				after.appendChild(div);
+			}
+			(window as any).__handleResize();
+		});
+		await page.waitForTimeout(100);
+
+		const scrollTopAfter = await page.evaluate(() =>
+			document.getElementById("scroll-container")!.scrollTop,
+		);
+
+		// scrollTop should not change — new content below viewport shouldn't pull user down
+		expect(scrollTopAfter).toBe(scrollTopBefore);
 	});
 });

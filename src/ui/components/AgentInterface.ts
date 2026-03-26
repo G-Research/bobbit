@@ -155,12 +155,9 @@ export class AgentInterface extends LitElement {
 						this._isAutoScrolling = false;
 					}, 150);
 				} else if (delta < 0) {
-					// Content shrunk (e.g. tool collapsed) — adjust scroll to keep
-					// viewport stable. The target position is current scrollTop + delta,
-					// but the browser may have already clamped scrollTop to the new max.
-					// Use Math.max to avoid going negative.
+					// Content shrunk (e.g. tool collapsed) — adjust scroll to keep viewport stable
 					this._isAutoScrolling = true;
-					this._scrollContainer.scrollTop = Math.max(0, this._scrollContainer.scrollTop + delta);
+					this._scrollContainer.scrollTop += delta;
 					clearTimeout(this._autoScrollTimer);
 					this._autoScrollTimer = setTimeout(() => {
 						this._isAutoScrolling = false;
@@ -364,10 +361,14 @@ export class AgentInterface extends LitElement {
 	private _handleScroll = () => {
 		if (!this._scrollContainer || this._isAutoScrolling) return;
 		const { scrollTop, scrollHeight, clientHeight } = this._scrollContainer;
-		// If scrollHeight changed since last observation, this scroll was triggered
-		// by content resize (browser clamping scrollTop), not by the user — skip it.
-		if (scrollHeight !== this._lastScrollHeight) return;
-		this._stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+		// Only update stickToBottom on genuine user scrolls, not browser-initiated
+		// scroll clamps during content resize. When content shrinks, the browser
+		// clamps scrollTop to the new max and fires a scroll event before the
+		// ResizeObserver runs — if we updated _stickToBottom here, it would
+		// incorrectly flip to true and prevent shrink compensation.
+		if (scrollHeight === this._lastScrollHeight) {
+			this._stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+		}
 	};
 
 	public async sendMessage(input: string, attachments?: Attachment[]) {
