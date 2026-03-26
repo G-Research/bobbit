@@ -546,12 +546,12 @@ export function renderStaffSidebarSection() {
 					${mobile
 						? editBtn
 						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-							${session ? (() => {
+							<span class="group-hover:hidden">${session ? (() => {
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
 								const unseen = hasUnseenActivity(session);
 								return html`<span class="shrink-0 flex items-center gap-0.5 text-[10px] tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
-							})() : ""}
+							})() : ""}</span>
 							<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 								${editBtn}
 							</div>
