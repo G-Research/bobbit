@@ -17,9 +17,16 @@ if ! command -v node &>/dev/null; then
 fi
 
 # 3. Auto-bootstrap if needed
-if [ ! -d "$BOBBIT_HOME/node_modules" ] || [ ! -f "$BOBBIT_HOME/dist/server/cli.js" ]; then
+if [ ! -d "$BOBBIT_HOME/node_modules" ]; then
   echo "First run — installing dependencies and building..."
   (cd "$BOBBIT_HOME" && npm install && npm run build)
+elif [ ! -f "$BOBBIT_HOME/dist/server/cli.js" ]; then
+  echo "Building server..."
+  (cd "$BOBBIT_HOME" && npm run build:server)
+fi
+if [ ! -f "$BOBBIT_HOME/dist/ui/index.html" ]; then
+  echo "Building UI..."
+  (cd "$BOBBIT_HOME" && npm run build:ui)
 fi
 
 # 4. Launch, forwarding all args after implicit --cwd

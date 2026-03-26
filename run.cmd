@@ -14,26 +14,45 @@ if errorlevel 1 (
 )
 
 rem 3. Auto-bootstrap if needed
-if not exist "%BOBBIT_HOME%\node_modules" goto :bootstrap
-if not exist "%BOBBIT_HOME%\dist\server\cli.js" goto :bootstrap
-goto :launch
-
-:bootstrap
-echo First run — installing dependencies and building...
-pushd "%BOBBIT_HOME%"
-call npm install
-if errorlevel 1 (
-    echo Error: npm install failed. >&2
+if not exist "%BOBBIT_HOME%\node_modules" (
+    echo First run — installing dependencies and building...
+    pushd "%BOBBIT_HOME%"
+    call npm install
+    if errorlevel 1 (
+        echo Error: npm install failed. >&2
+        popd
+        exit /b 1
+    )
+    call npm run build
+    if errorlevel 1 (
+        echo Error: npm run build failed. >&2
+        popd
+        exit /b 1
+    )
     popd
-    exit /b 1
 )
-call npm run build
-if errorlevel 1 (
-    echo Error: npm run build failed. >&2
+if not exist "%BOBBIT_HOME%\dist\server\cli.js" (
+    echo Building server...
+    pushd "%BOBBIT_HOME%"
+    call npm run build:server
+    if errorlevel 1 (
+        echo Error: build:server failed. >&2
+        popd
+        exit /b 1
+    )
     popd
-    exit /b 1
 )
-popd
+if not exist "%BOBBIT_HOME%\dist\ui\index.html" (
+    echo Building UI...
+    pushd "%BOBBIT_HOME%"
+    call npm run build:ui
+    if errorlevel 1 (
+        echo Error: build:ui failed. >&2
+        popd
+        exit /b 1
+    )
+    popd
+)
 
 :launch
 rem 4. Launch with implicit --cwd as current directory, forwarding all args
