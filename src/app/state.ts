@@ -67,6 +67,8 @@ export interface Goal {
 	workflowId?: string;
 	setupStatus?: "ready" | "preparing" | "error";
 	setupError?: string;
+	archived?: boolean;
+	archivedAt?: number;
 	workflow?: {
 		id: string;
 		name: string;
