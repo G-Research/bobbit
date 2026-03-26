@@ -282,26 +282,31 @@ function renderShortcutsTab() {
 	});
 
 	return html`
-		<div class="flex flex-col gap-4">
-			${sortedCategories.map(
-				([category, entries]) => html`
-					<div>
-						<div class="text-[10px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5 px-1">
-							${category}
+		<div class="flex gap-6 items-start">
+			<div class="flex-1 min-w-0 flex flex-col gap-4">
+				${sortedCategories.map(
+					([category, entries]) => html`
+						<div>
+							<div class="text-[10px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5 px-1">
+								${category}
+							</div>
+							<div class="flex flex-col gap-0.5">
+								${entries.map((entry) => renderShortcutRow(entry))}
+							</div>
 						</div>
-						<div class="flex flex-col gap-0.5">
-							${entries.map((entry) => renderShortcutRow(entry))}
-						</div>
-					</div>
-				`,
-			)}
-			<div class="pt-2 border-t border-border">
-				${Button({
-					variant: "ghost",
-					size: "sm",
-					onClick: handleResetAll,
-					children: html`${icon(RotateCcw, "xs")}<span class="ml-1">Reset All Defaults</span>`,
-				})}
+					`,
+				)}
+				<div class="pt-2 border-t border-border">
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						onClick: handleResetAll,
+						children: html`${icon(RotateCcw, "xs")}<span class="ml-1">Reset All Defaults</span>`,
+					})}
+				</div>
+			</div>
+			<div class="shrink-0 w-48 rounded-md border border-border/60 bg-secondary/30 p-3 text-xs text-muted-foreground leading-relaxed">
+				<span class="font-medium text-foreground/80">Tip:</span> When running Bobbit as a browser tab, some shortcut combinations are intercepted by the browser. Install Bobbit as a PWA app to regain complete control.
 			</div>
 		</div>
 	`;
@@ -873,7 +878,7 @@ export function renderSettingsPage() {
 			</div>
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto p-4">
-				<div class="${activeTab === "palette" ? "max-w-2xl" : "max-w-xl"}">
+				<div class="${activeTab === "palette" || activeTab === "shortcuts" ? "max-w-2xl" : "max-w-xl"}">
 					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
