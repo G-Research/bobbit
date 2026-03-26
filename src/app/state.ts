@@ -220,6 +220,9 @@ export const state = {
 	staffPreviewCwdEdited: false,
 	staffPreviewPromptEditMode: false,
 
+	/** Whether the setup wizard has been completed (safe default: true — don't show banner until we know) */
+	setupComplete: true,
+
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,
 	/** Whether the new-session role picker dropdown is open */
