@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { Archive, ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench } from "lucide";
+import { Archive, ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench } from "lucide";
 import {
 	state,
 	renderApp,
@@ -16,15 +16,20 @@ import {
 
 	resetArchivedExpandState,
 } from "./state.js";
-import { createGoal, createRole, gatewayFetch, refreshSessions } from "./api.js";
+import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup } from "./api.js";
 import { clearSessionModel } from "./routing.js";
 import { backToSessions, createAndConnectSession, connectToSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard } from "./sidebar.js";
 
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, INDENT } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
+
+
+function skipSetup(): void {
+	dismissSetup();
+}
 
 import { cwdCombobox } from "./cwd-combobox.js";
 
@@ -91,6 +96,7 @@ function renderMobileLanding() {
 						</button>
 					</div>
 				</div>
+				${renderSetupBanner(true)}
 				${state.sessionsLoading
 					? html`<div class="text-center py-12 text-muted-foreground text-xs">Loading…</div>`
 					: state.sessionsError
@@ -99,7 +105,19 @@ function renderMobileLanding() {
 								<button class="text-xs text-muted-foreground underline" title="Retry" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
-							? html`<div class="text-center py-12">
+							? !state.setupComplete
+								? html`<div class="text-center py-12">
+										<div class="text-muted-foreground mb-3 empty-state-icon">${icon(WandSparkles, "lg")}</div>
+										<p class="text-lg font-medium text-foreground mb-1">Welcome to Bobbit</p>
+										<p class="text-sm text-muted-foreground mb-4">Set up your project to get the best results from AI agents</p>
+										${Button({
+											variant: "default",
+											onClick: () => launchSetupWizard(),
+											children: html`<span class="inline-flex items-center gap-1.5">${icon(WandSparkles, "sm")} Start Setup</span>`,
+										})}
+										<button class="block mx-auto mt-3 text-xs text-muted-foreground hover:underline cursor-pointer bg-transparent border-none" @click=${skipSetup}>Skip setup</button>
+									</div>`
+								: html`<div class="text-center py-12">
 									<div class="text-muted-foreground mb-3 empty-state-icon">${icon(Server, "lg")}</div>
 									<p class="text-base text-muted-foreground mb-4">No goals or sessions yet</p>
 									<div class="flex items-center justify-center gap-2">
@@ -1986,6 +2004,21 @@ export function doRenderApp(): void {
 		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
 
 		if (desktop) {
+			if (!state.setupComplete) {
+				return html`
+					<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
+						<div class="text-muted-foreground empty-state-icon">${icon(WandSparkles, "lg")}</div>
+						<p class="text-lg font-medium text-foreground">Welcome to Bobbit</p>
+						<p class="text-sm text-muted-foreground">Set up your project to get the best results from AI agents</p>
+						${Button({
+							variant: "default",
+							onClick: () => launchSetupWizard(),
+							children: html`<span class="inline-flex items-center gap-1.5">${icon(WandSparkles, "sm")} Start Setup</span>`,
+						})}
+						<button class="text-xs text-muted-foreground hover:underline cursor-pointer bg-transparent border-none" @click=${skipSetup}>Skip setup</button>
+					</div>
+				`;
+			}
 			return html`
 				<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
 					<div class="text-muted-foreground empty-state-icon">${icon(Server, "lg")}</div>

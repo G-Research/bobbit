@@ -921,6 +921,29 @@ export async function deleteRole(name: string): Promise<boolean> {
 }
 
 // ============================================================================
+// SETUP STATUS API
+// ============================================================================
+
+export async function fetchSetupStatus(): Promise<boolean> {
+	try {
+		const res = await gatewayFetch("/api/setup-status");
+		if (!res.ok) return true; // assume complete on error
+		const data = await res.json();
+		return data.complete;
+	} catch {
+		return true;
+	}
+}
+
+export async function dismissSetup(): Promise<void> {
+	try {
+		await gatewayFetch("/api/setup-status/dismiss", { method: "POST" });
+	} catch { /* ignore */ }
+	state.setupComplete = true;
+	renderApp();
+}
+
+// ============================================================================
 // DRAFT API
 // ============================================================================
 
