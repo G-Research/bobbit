@@ -21,7 +21,7 @@ import { backToSessions, createAndConnectSession, connectToSession, terminateSes
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection } from "./sidebar.js";
 
-import { renderGoalGroup, renderSessionRow, INDENT } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, INDENT } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -53,6 +53,8 @@ function renderMobileLanding() {
 	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
 	const stateOrder: Record<GoalState, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
 	const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
+	const liveGoals = sortedGoals.filter(g => !g.archived);
+	const archivedGoals = sortedGoals.filter(g => g.archived);
 	const isUngroupedExpanded = ungroupedExpanded;
 
 	return html`
@@ -115,11 +117,11 @@ function renderMobileLanding() {
 									</div>
 								</div>`
 							: html`
-								${sortedGoals.map((goal, i) => html`
+								${liveGoals.map((goal, i) => html`
 									${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 									${renderGoalGroup(goal)}
 								`)}
-								${sortedGoals.length > 0 ? html`
+								${liveGoals.length > 0 ? html`
 									<div class="border-t border-border/30 my-1 mx-2"></div>
 									<div class="flex flex-col gap-0.5">
 										<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
@@ -169,7 +171,37 @@ function renderMobileLanding() {
 									</div>
 								` : ""}
 								${renderStaffSidebarSection()}
-
+								${state.showArchived && archivedGoals.length > 0 ? html`
+									<div class="border-t border-border/30 my-1 mx-2"></div>
+									<div class="flex flex-col gap-0.5">
+										<div class="flex items-center gap-1.5 pl-1 pr-2 py-1.5">
+											<span class="shrink-0 text-muted-foreground opacity-60">${icon(GoalIcon, "sm")}</span>
+											<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived Goals</span>
+										</div>
+										${archivedGoals.map((goal, i) => html`
+											${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
+											<div class="opacity-60">${renderGoalGroup(goal)}</div>
+										`)}
+									</div>
+								` : ""}
+								${(() => {
+									const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+									return standaloneArchived.length > 0 ? html`
+										<div class="border-t border-border/30 my-1 mx-2"></div>
+										<div class="flex flex-col gap-0.5">
+											<div class="flex items-center gap-1.5 pl-1 pr-2 py-1.5">
+												<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "sm")}</span>
+												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
+											</div>
+											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+												${standaloneArchived.map(s => html`
+													${renderArchivedSessionRow(s)}
+													${renderArchivedDelegates(s.id)}
+												`)}
+											</div>
+										</div>
+									` : "";
+								})()}
 							`}
 			</div>
 		</div>

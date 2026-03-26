@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Mobile Archived Sections Test</title>
+<style>
+  .opacity-60 { opacity: 0.6; }
+  .hidden { display: none; }
+  .goal-item { padding: 4px 8px; }
+  .section-header { padding: 4px 8px; font-weight: bold; text-transform: uppercase; font-size: 12px; }
+  .separator { border-top: 1px solid #ccc; margin: 4px 8px; }
+  .archived-session { padding: 4px 8px; }
+</style>
+</head>
+<body>
+
+<div id="main-goals"></div>
+<div id="archived-goals-section" class="hidden"></div>
+<div id="archived-sessions-section" class="hidden"></div>
+
+<script>
+// Mock state
+const mockState = {
+  goals: [
+    { id: "g1", title: "Live Goal 1", state: "in-progress", archived: false },
+    { id: "g2", title: "Live Goal 2", state: "todo", archived: false },
+    { id: "g3", title: "Archived Goal 1", state: "complete", archived: true },
+  ],
+  archivedSessions: [
+    { id: "s1", title: "Standalone archived", teamGoalId: null, delegateOf: null },
+    { id: "s2", title: "Goal-linked archived", teamGoalId: "g3", delegateOf: null },
+    { id: "s3", title: "Delegate archived", teamGoalId: null, delegateOf: "s1" },
+  ],
+  showArchived: false,
+};
+
+function renderMobileLanding() {
+  const sortedGoals = [...mockState.goals];
+  const liveGoals = sortedGoals.filter(g => !g.archived);
+  const archivedGoals = sortedGoals.filter(g => g.archived);
+
+  // Render main goals (live only)
+  const mainEl = document.getElementById("main-goals");
+  mainEl.innerHTML = liveGoals.map(g =>
+    `<div class="goal-item" data-goal-id="${g.id}" data-archived="false">${g.title}</div>`
+  ).join("");
+
+  // Render archived goals section
+  const archivedGoalsEl = document.getElementById("archived-goals-section");
+  if (mockState.showArchived && archivedGoals.length > 0) {
+    archivedGoalsEl.classList.remove("hidden");
+    archivedGoalsEl.innerHTML =
+      `<div class="section-header">Archived Goals</div>` +
+      archivedGoals.map(g =>
+        `<div class="goal-item opacity-60" data-goal-id="${g.id}" data-archived="true">${g.title}</div>`
+      ).join("");
+  } else {
+    archivedGoalsEl.classList.add("hidden");
+    archivedGoalsEl.innerHTML = "";
+  }
+
+  // Render archived standalone sessions section
+  const archivedSessionsEl = document.getElementById("archived-sessions-section");
+  const standaloneArchived = mockState.showArchived
+    ? mockState.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf)
+    : [];
+  if (standaloneArchived.length > 0) {
+    archivedSessionsEl.classList.remove("hidden");
+    archivedSessionsEl.innerHTML =
+      `<div class="section-header">Archived</div>` +
+      standaloneArchived.map(s =>
+        `<div class="archived-session" data-session-id="${s.id}">${s.title}</div>`
+      ).join("");
+  } else {
+    archivedSessionsEl.classList.add("hidden");
+    archivedSessionsEl.innerHTML = "";
+  }
+}
+
+function setShowArchived(val) {
+  mockState.showArchived = val;
+  renderMobileLanding();
+}
+
+// Initial render
+renderMobileLanding();
+</script>
+</body>
+</html>
