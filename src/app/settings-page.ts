@@ -23,7 +23,9 @@ import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
 type SettingsTab = "general" | "shortcuts" | "palette" | "models";
-let activeTab: SettingsTab = "general";
+// Shortcuts is the default tab so that Ctrl+, acts as a quick toggle for a
+// keyboard-shortcut reference — press once to open, press again to dismiss.
+let activeTab: SettingsTab = "shortcuts";
 
 // Rebind state (same as shortcuts-dialog)
 let rebindingId: string | null = null;
@@ -837,9 +839,10 @@ export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
 
+	// Shortcuts first so the default tab doubles as a quick shortcut reference (Ctrl+,)
 	const tabs: { id: SettingsTab; label: string }[] = [
-		{ id: "general" as SettingsTab, label: "General" },
 		{ id: "shortcuts", label: "Shortcuts" },
+		{ id: "general" as SettingsTab, label: "General" },
 		{ id: "models", label: "Models" },
 		{ id: "palette", label: "Color Palette" },
 	];
