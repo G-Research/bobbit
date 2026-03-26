@@ -5,7 +5,8 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import { bobbitStateDir } from "./bobbit-dir.js";
+import { fileURLToPath } from "node:url";
+import { bobbitStateDir, bobbitConfigDir } from "./bobbit-dir.js";
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { SessionManager } from "./agent/session-manager.js";
@@ -355,6 +356,31 @@ export function createGateway(config: GatewayConfig) {
 	};
 }
 
+/** Check if project setup has been completed (sentinel exists or system-prompt.md has been customized). */
+function isSetupComplete(): boolean {
+	// Check sentinel file
+	const sentinelPath = path.join(bobbitStateDir(), "setup-complete");
+	if (fs.existsSync(sentinelPath)) return true;
+
+	// Check if system-prompt.md has been customized beyond the default template
+	const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
+	if (!fs.existsSync(systemPromptPath)) return false;
+
+	// Compare with default template — if the file differs, setup is considered done
+	const defaultTemplatePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "system-prompt.md");
+	if (!fs.existsSync(defaultTemplatePath)) {
+		// Can't find default template; if the file exists at all, assume customized
+		return true;
+	}
+	try {
+		const current = fs.readFileSync(systemPromptPath, "utf-8");
+		const defaultContent = fs.readFileSync(defaultTemplatePath, "utf-8");
+		return current.trim() !== defaultContent.trim();
+	} catch {
+		return false;
+	}
+}
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -383,7 +409,22 @@ async function handleApiRoute(
 	// GET /api/health — unauthenticated so the client can probe localhost mode
 	if (url.pathname === "/api/health" && req.method === "GET") {
 		const isLocalhost = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
-		json({ status: "ok", sessions: sessionManager.listSessions().length, localhost: isLocalhost, aigw: !!getAigwUrl(preferencesStore) });
+		json({ status: "ok", sessions: sessionManager.listSessions().length, localhost: isLocalhost, aigw: !!getAigwUrl(preferencesStore), setupComplete: isSetupComplete() });
+		return;
+	}
+
+	// GET /api/setup-status — check if project setup has been completed
+	if (url.pathname === "/api/setup-status" && req.method === "GET") {
+		json({ complete: isSetupComplete() });
+		return;
+	}
+
+	// POST /api/setup-status/dismiss — mark setup as dismissed (writes sentinel file)
+	if (url.pathname === "/api/setup-status/dismiss" && req.method === "POST") {
+		const stateDir = bobbitStateDir();
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, "setup-complete"), "dismissed\n");
+		json({ ok: true });
 		return;
 	}
 
