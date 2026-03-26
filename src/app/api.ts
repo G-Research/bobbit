@@ -792,6 +792,27 @@ export interface RoleData {
 	updatedAt: number;
 }
 
+// ============================================================================
+// ASSISTANT PROMPT API
+// ============================================================================
+
+export interface AssistantPromptInfo {
+	type: string;
+	title: string;
+	prompt: string;
+}
+
+export async function fetchAssistantPrompts(): Promise<AssistantPromptInfo[]> {
+	try {
+		const res = await gatewayFetch("/api/roles/assistant/prompts");
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.prompts || [];
+	} catch {
+		return [];
+	}
+}
+
 export async function fetchRoles(): Promise<RoleData[]> {
 	try {
 		const res = await gatewayFetch("/api/roles");

@@ -973,6 +973,18 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/roles/assistant/prompts — must come before :name route
+	if (url.pathname === "/api/roles/assistant/prompts" && req.method === "GET") {
+		const { ASSISTANT_REGISTRY } = await import("./agent/assistant-registry.js");
+		const prompts = Object.values(ASSISTANT_REGISTRY).map((def) => ({
+			type: def.type,
+			title: def.title,
+			prompt: def.prompt,
+		}));
+		json({ prompts });
+		return;
+	}
+
 	// GET /api/roles
 	if (url.pathname === "/api/roles" && req.method === "GET") {
 		json({ roles: roleManager.listRoles() });

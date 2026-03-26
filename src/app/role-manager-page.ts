@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, type RoleData, type ToolInfo } from "./api.js";
+import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, BOBBIT_HUE_ROTATIONS, getAccessory } from "./session-colors.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
@@ -73,6 +73,10 @@ let editName = "";
 let saving = false;
 let deleting = false;
 
+// Assistant sub-prompt state
+let assistantPrompts: AssistantPromptInfo[] = [];
+let activePromptTab: string = "baseline"; // "baseline" or assistant type key
+
 // ============================================================================
 // DATA LOADING
 // ============================================================================
@@ -119,6 +123,15 @@ function showEdit(role: RoleData): void {
 	editName = role.name;
 	saving = false;
 	deleting = false;
+	activePromptTab = "baseline";
+	if (role.name === "assistant") {
+		fetchAssistantPrompts().then((prompts) => {
+			assistantPrompts = prompts;
+			renderApp();
+		});
+	} else {
+		assistantPrompts = [];
+	}
 	setHashRoute("role-edit", role.name);
 }
 
@@ -135,6 +148,15 @@ export function navigateToRoleEdit(roleName: string): void {
 		editName = role.name;
 		saving = false;
 		deleting = false;
+		activePromptTab = "baseline";
+		if (role.name === "assistant") {
+			fetchAssistantPrompts().then((prompts) => {
+				assistantPrompts = prompts;
+				renderApp();
+			});
+		} else {
+			assistantPrompts = [];
+		}
 	} else {
 		currentView = "list";
 		selectedRole = null;
@@ -483,12 +505,35 @@ function renderEditView(): TemplateResult {
 				<!-- System prompt section -->
 				<div class="roles-edit-section">
 					<h2 class="roles-section-title">System Prompt</h2>
-					<textarea
-						class="roles-prompt-editor"
-						.value=${editPrompt}
-						placeholder="Markdown system prompt template. Supports {{GOAL_BRANCH}} and {{AGENT_ID}} placeholders."
-						@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
-					></textarea>
+					${editName === "assistant" && assistantPrompts.length > 0 ? html`
+						<div class="roles-prompt-tabs">
+							<button
+								class="roles-prompt-tab ${activePromptTab === "baseline" ? "roles-prompt-tab--active" : ""}"
+								@click=${() => { activePromptTab = "baseline"; renderApp(); }}
+							>Shared Baseline</button>
+							${assistantPrompts.map((p) => html`
+								<button
+									class="roles-prompt-tab ${activePromptTab === p.type ? "roles-prompt-tab--active" : ""}"
+									@click=${() => { activePromptTab = p.type; renderApp(); }}
+								>${p.title.replace(" Assistant", "").replace(" Wizard", "")}</button>
+							`)}
+						</div>
+					` : nothing}
+					${activePromptTab === "baseline" || editName !== "assistant" || assistantPrompts.length === 0 ? html`
+						<textarea
+							class="roles-prompt-editor"
+							.value=${editPrompt}
+							placeholder="Markdown system prompt template. Supports {{GOAL_BRANCH}} and {{AGENT_ID}} placeholders."
+							@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
+						></textarea>
+					` : html`
+						<p class="roles-prompt-hint">This prompt is appended after the shared baseline when a ${assistantPrompts.find((p) => p.type === activePromptTab)?.title ?? activePromptTab} session is created.</p>
+						<textarea
+							class="roles-prompt-editor roles-prompt-readonly"
+							.value=${assistantPrompts.find((p) => p.type === activePromptTab)?.prompt ?? ""}
+							readonly
+						></textarea>
+					`}
 				</div>
 			</div>
 

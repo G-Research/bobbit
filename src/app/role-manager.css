@@ -280,6 +280,62 @@
 	border: 1px solid var(--border);
 }
 
+/* ============================================================================
+ * ASSISTANT SUB-PROMPT TABS
+ * ============================================================================ */
+
+.roles-prompt-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 2px;
+	padding: 3px;
+	background: var(--secondary);
+	border-radius: 8px;
+	border: 1px solid var(--border);
+}
+
+.roles-prompt-tab {
+	padding: 4px 10px;
+	border-radius: 6px;
+	border: none;
+	background: transparent;
+	color: var(--muted-foreground);
+	font-size: 11px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 120ms;
+	white-space: nowrap;
+}
+
+.roles-prompt-tab:hover {
+	color: var(--foreground);
+	background: color-mix(in oklch, var(--background) 50%, transparent);
+}
+
+.roles-prompt-tab--active {
+	background: var(--background);
+	color: var(--foreground);
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.roles-prompt-tab--active:hover {
+	background: var(--background);
+}
+
+.roles-prompt-readonly {
+	opacity: 0.75;
+	background: var(--secondary) !important;
+	cursor: default;
+}
+
+.roles-prompt-hint {
+	font-size: 11px;
+	color: var(--muted-foreground);
+	margin: 0;
+	line-height: 1.4;
+	font-style: italic;
+}
+
 /* System prompt editor */
 .roles-prompt-editor {
 	width: 100%;
