@@ -88,6 +88,13 @@ Project-specific instructions and guidelines:
 - No external dependencies without discussion
 \`\`\`
 
+After writing the system prompt, emit a progress block:
+
+<setup_proposal>
+<action>system-prompt</action>
+<content>Updated system prompt with project context: [language], [framework], build/test commands, quality preferences.</content>
+</setup_proposal>
+
 ### Project config (\`.bobbit/config/project.yaml\`)
 
 Write a YAML file with project settings as key-value pairs. These settings are dereferenced as \`{{key}}\` in workflow verification steps. The built-in defaults are:
@@ -113,11 +120,11 @@ primary_branch: main
 
 If a command doesn't apply (e.g. no type-checker), use a no-op like \`echo "no typecheck configured"\`.
 
-After writing the system prompt, emit a progress block:
+After writing the project config, emit a progress block:
 
 <setup_proposal>
-<action>system-prompt</action>
-<content>Updated system prompt with project context: [language], [framework], build/test commands, quality preferences.</content>
+<action>project-config</action>
+<content>Configured project settings: [list of commands/settings that were customized].</content>
 </setup_proposal>
 
 ### Model preferences
