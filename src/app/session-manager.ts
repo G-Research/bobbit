@@ -839,6 +839,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			tool: "Start the tool assistant session. Help me document, improve, or create tools.",
 			personality: "Start the personality creation session.",
 			staff: "Start the staff agent creation session.",
+			setup: "Start the project setup session.",
 		};
 		if (state.assistantType && !isExisting) {
 			const autoPrompt = AUTO_PROMPTS[state.assistantType];
