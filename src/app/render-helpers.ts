@@ -174,17 +174,10 @@ export function stopTimeRefresh(): void {
 // SESSION TIME + UNSEEN BADGE
 // ============================================================================
 
-/** Render session title with a subtle rolling weight increase when active. */
+/** Render session title with a subtle rolling highlight when active. */
 export function renderSessionTitle(title: string, isActive?: boolean) {
 	if (!isActive) return title;
-	const chars = title.split("");
-	const roll = 3.5; // seconds for wave to cross full title
-	const dwell = 1.5; // pause before next wave
-	const dur = roll + dwell;
-	const stagger = chars.length > 1 ? roll / chars.length : 0;
-	return html`<span class="title-wave" style="--tw-dur:${dur}s">${chars.map((ch, i) =>
-		html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch === " " ? "\u00a0" : ch}</span>`
-	)}</span>`;
+	return html`<span class="title-wave">${title}</span>`;
 }
 
 /** Render a pulsing dot with conic sweep to indicate active session. */
@@ -547,8 +540,8 @@ export function renderGoalGroup(goal: Goal) {
 	const emptyState = html`
 		<div class="pl-2 py-1 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground">
 			${isTeamGoal
-				? html`No agents — <button class="text-primary ${mobile ? "" : "hover:underline"}" title="Start team" @click=${handleStartTeam}>${isLoading ? "starting\u2026" : "start team"}</button>`
-				: html`No sessions — <button class="text-primary ${mobile ? "" : "hover:underline"}" title="Start a session" @click=${() => createAndConnectSession(goal.id)}>start one</button>`}
+				? html`No agents — <button class="text-primary font-semibold ${mobile ? "" : "hover:underline"}" title="Start team" @click=${handleStartTeam}>${isLoading ? "starting\u2026" : "start team"}</button>`
+				: html`No sessions — <button class="text-primary font-semibold ${mobile ? "" : "hover:underline"}" title="Start a session" @click=${() => createAndConnectSession(goal.id)}>start one</button>`}
 		</div>
 	`;
 

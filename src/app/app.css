@@ -486,13 +486,26 @@ theme-toggle button {
 	animation: gate-wave 1.6s ease-in-out infinite;
 }
 
-/* Mexican-wave weight increase on active session titles */
+/* Rolling masked shadow on active session titles —
+   a soft spotlight slides across via background-clip:text.
+   Base is 72% opacity foreground; peak is full foreground. */
 @keyframes title-wave {
-	0%, 100% { font-weight: 400; opacity: 0.75; }
-	50%      { font-weight: 500; opacity: 1; }
+	0%       { background-position: 120% 0; }
+	60%, 100% { background-position: -20% 0; }
 }
-.title-wave > span {
-	display: inline;
-	animation: title-wave var(--tw-dur, 5s) ease-in-out infinite;
-	will-change: opacity;
+.title-wave {
+	background:
+		linear-gradient(
+			90deg,
+			color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent) 0%,
+			var(--color-foreground, currentColor) 50%,
+			color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent) 100%
+		);
+	background-size: 40% 100%;
+	background-repeat: no-repeat;
+	-webkit-background-clip: text;
+	background-clip: text;
+	-webkit-text-fill-color: color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent);
+	animation: title-wave 5s ease-in-out infinite;
+	will-change: background-position;
 }
