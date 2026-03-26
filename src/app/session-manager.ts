@@ -20,6 +20,7 @@ import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
+import { cacheMessages, getCachedMessages, evictCachedMessages } from "./session-cache.js";
 
 // ============================================================================
 // GOAL DRAFT PERSISTENCE HELPERS
@@ -363,21 +364,46 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	// Must be captured here because event bubbling during the async gap can change the hash.
 	const startingRoute = getRouteFromHash();
 
-	if (state.remoteAgent) {
-		state.remoteAgent.disconnect();
-		state.remoteAgent = null;
-		state.connectionStatus = "disconnected";
+	// Cache old session's messages before switching (not for archived sessions)
+	const oldAgent = state.remoteAgent;
+	const oldSessionId = activeSessionId();
+	if (oldAgent && oldSessionId && !oldAgent.state.isArchived) {
+		cacheMessages(oldSessionId, oldAgent.state.messages);
 	}
-	state.cwdDropdownOpen = false;
 
-	renderApp();
+	state.cwdDropdownOpen = false;
 
 	try {
 		const url = localStorage.getItem(GW_URL_KEY)!;
 		const token = localStorage.getItem(GW_TOKEN_KEY)!;
 
 		const remote = new RemoteAgent();
-		await remote.connect(url, token, sessionId);
+
+		// Preload cached messages for instant rendering
+		const cached = getCachedMessages(sessionId);
+		if (cached) {
+			remote.preloadMessages(cached);
+		}
+
+		try {
+			await remote.connect(url, token, sessionId);
+		} catch (connectErr) {
+			// Connection failed — keep old session active
+			state.connectingSessionId = null;
+			const msg = connectErr instanceof Error ? connectErr.message : String(connectErr);
+			showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
+			renderApp();
+			return;
+		}
+
+		// Success — NOW tear down the old agent and swap in the new one atomically.
+		// Assign remote BEFORE any await to prevent a transient null window
+		// where an event-triggered renderApp() could flash a blank screen.
+		if (oldAgent) {
+			oldAgent.disconnect();
+		}
+		state.remoteAgent = remote;
+		state.connectionStatus = "connected";
 
 		// Restore saved model
 		const savedModel = loadSessionModel(sessionId);
@@ -587,8 +613,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		state.connectionStatus = "connected";
-		state.remoteAgent = remote;
 		state.appView = "authenticated";
 		localStorage.setItem(GW_SESSION_KEY, sessionId);
 		markSessionVisited(sessionId);
@@ -919,6 +943,7 @@ export async function terminateSession(sessionId: string): Promise<void> {
 	if (!res.ok && res.status !== 404) {
 		throw new Error(`Failed to terminate session: ${res.status}`);
 	}
+	evictCachedMessages(sessionId);
 	clearSessionModel(sessionId);
 	deleteGoalDraft(sessionId);
 	deleteRoleDraft(sessionId);
@@ -931,6 +956,12 @@ export async function terminateSession(sessionId: string): Promise<void> {
 // ============================================================================
 
 export function backToSessions(): void {
+	// Cache messages before disconnecting (not for archived sessions)
+	const curAgent = state.remoteAgent;
+	const curSessionId = activeSessionId();
+	if (curAgent && curSessionId && !curAgent.state.isArchived) {
+		cacheMessages(curSessionId, curAgent.state.messages);
+	}
 	state.remoteAgent?.disconnect();
 	state.remoteAgent = null;
 	state.connectionStatus = "disconnected";
