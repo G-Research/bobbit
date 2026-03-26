@@ -39,8 +39,7 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
 const execAsync = promisify(exec);
 
 // ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
-const _prCache = new Map<string, { data: any; ts: number }>();
-const PR_CACHE_TTL_MS = 60_000; // 60 seconds
+const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 300_000; // 5 minutes for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
 
@@ -74,20 +73,18 @@ async function _fetchPrStatus(cwd: string): Promise<any | null> {
 		const pr = JSON.parse(stdout);
 		const viewerIsAdmin = await getViewerIsAdmin(cwd);
 		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
-		_prCache.set(cwd, { data, ts: Date.now() });
+		const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
+		_prCache.set(cwd, { data, ts: Date.now(), ttl });
 		return data;
 	} catch {
-		_prCache.set(cwd, { data: null, ts: Date.now() });
+		_prCache.set(cwd, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
 		return null;
 	}
 }
 
 async function getCachedPrStatus(cwd: string): Promise<any | null> {
 	const cached = _prCache.get(cwd);
-	if (cached) {
-		const ttl = cached.data === null ? PR_NULL_CACHE_TTL_MS : PR_CACHE_TTL_MS;
-		if (Date.now() - cached.ts < ttl) return cached.data;
-	}
+	if (cached && Date.now() - cached.ts < cached.ttl) return cached.data;
 
 	const existing = _prInFlight.get(cwd);
 	if (existing) return existing;
