@@ -134,15 +134,27 @@ promptTemplate: |+
   - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
 
   ### Verification execution context
-  The verification harness runs the command in the **goal's worktree** (`goal.cwd`), using Git Bash on Windows. This is the same directory the agent works in. The command does NOT run in another worktree or the primary checkout.
+  The verification harness runs the command in the **goal's worktree** (`goal.cwd`), using Git Bash on Windows — specifically, from the goal branch's current HEAD. The command does NOT run on agent sub-branches.
 
-  Before signaling a command-format gate, agents must ensure the goal worktree is ready:
-  1. **Dependencies installed** — `npm ci` must have been run (usually done during worktree setup, but verify if `node_modules/` is missing or stale).
-  2. **Server built** — E2E tests and any command referencing `dist/` need `npm run build:server` first.
-  3. **Test file committed and on the goal branch** — the verification harness runs from the goal worktree's current HEAD. If the test file only exists on an unmerged sub-branch, the command will fail with "file not found" or "0/0 passed".
-  4. **Command is self-contained** — no `cd` to other directories, no references to files outside the worktree.
+  **This means: if an agent wrote a test on its sub-branch but the sub-branch hasn't been merged to the goal branch, the test file won't exist when verification runs.** The result is 0/0 tests found, or "file not found". This is the #1 cause of gate verification failures.
 
-  When instructing agents to produce these gate signals, emphasize all of the above.
+  ### Before signaling a command-format gate — YOUR checklist
+  You (the team lead) must ensure the goal branch is ready. Do NOT signal the gate until all of these are true:
+  1. **Agent's sub-branch is merged to the goal branch.** Run `git merge <agent-sub-branch>` on the goal branch, then `git push`. If the agent's role instructions say "go idle after pushing", that means they pushed their sub-branch — you still need to merge it.
+  2. **Dependencies installed** — `npm ci` if `node_modules/` is missing or stale.
+  3. **Server built** — E2E tests need `npm run build:server` first (compiles to `dist/`).
+  4. **Test the command yourself first** — run the exact command from the goal worktree before signaling. If it shows 0/0 or file-not-found, the merge hasn't happened yet.
+  5. **Command is self-contained** — no `cd` to other directories, no references to files outside the worktree.
+
+  ### Common mistake: agent pushed but you didn't merge
+  Agents work on sub-branches (e.g. `goal-branch/test-foo`). When they finish and "go idle", their work is on that sub-branch. It is YOUR responsibility to merge it to the goal branch before signaling any gate that depends on that work. The typical flow:
+  ```
+  git checkout {{GOAL_BRANCH}}
+  git pull
+  git merge <agent-sub-branch>
+  git push
+  # NOW signal the gate
+  ```
 
   ## Frontend Changes: UX Design
   If the goal involves frontend/UI changes:
