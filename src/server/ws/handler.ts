@@ -104,7 +104,7 @@ export function handleWebSocketConnection(
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
 					send(ws, { type: "auth_ok" });
-					send(ws, { type: "session_status", status: "archived" });
+					send(ws, { type: "session_status", status: "archived", archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
 					return;
 				}

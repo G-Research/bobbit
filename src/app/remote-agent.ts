@@ -622,6 +622,7 @@ export class RemoteAgent {
 				if (msg.status === "archived") {
 					this._state.isStreaming = false;
 					this._state.isArchived = true;
+					if (msg.archivedAt) this._state.archivedAt = msg.archivedAt;
 					this._state.turnStartTime = null;
 				} else {
 					this._state.isStreaming = msg.status === "streaming";
