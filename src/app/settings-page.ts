@@ -878,7 +878,7 @@ export function renderSettingsPage() {
 			</div>
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto p-4">
-				<div class="${activeTab === "palette" || activeTab === "shortcuts" ? "max-w-2xl" : "max-w-xl"}">
+				<div class="${activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
 					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
