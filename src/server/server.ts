@@ -14,7 +14,6 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
-import { exportSkillDefinitions, listSkills } from "./skills/index.js";
 import { discoverSlashSkills } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -113,9 +112,6 @@ export interface GatewayConfig {
 }
 
 export function createGateway(config: GatewayConfig) {
-	// Export skill definitions so agent-side extensions can discover them
-	exportSkillDefinitions();
-
 	const colorStore = new ColorStore();
 	const preferencesStore = new PreferencesStore();
 	const projectConfigStore = new ProjectConfigStore();
@@ -2271,12 +2267,6 @@ async function handleApiRoute(
 			const msg = err instanceof Error ? err.message : String(err);
 			json({ error: msg }, 500);
 		}
-		return;
-	}
-
-	// GET /api/skills — list available skill definitions
-	if (url.pathname === "/api/skills" && req.method === "GET") {
-		json({ skills: listSkills().map((s) => ({ id: s.id, name: s.name, description: s.description })) });
 		return;
 	}
 

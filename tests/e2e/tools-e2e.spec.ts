@@ -459,28 +459,6 @@ test.describe("Artifacts API", () => {
 	});
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 6. REST API — Skills
-// ═══════════════════════════════════════════════════════════════════════════
-
-test.describe("Skills API", () => {
-	test("GET /api/skills returns built-in skills", async () => {
-		const resp = await apiFetch("/api/skills");
-		expect(resp.status).toBe(200);
-		const { skills } = await resp.json();
-		expect(Array.isArray(skills)).toBe(true);
-		const ids = skills.map((s: any) => s.id);
-		expect(ids).toContain("correctness-review");
-		expect(ids).toContain("security-review");
-		expect(ids).toContain("design-review");
-		expect(ids).toContain("test-suite-report");
-		for (const skill of skills) {
-			expect(skill.name).toBeTruthy();
-			expect(skill.description).toBeTruthy();
-		}
-	});
-});
-
 test.describe("Slash Skills API", () => {
 	test("GET /api/slash-skills discovers SKILL.md files", async () => {
 		// Create a test skill in .claude/skills/ under an isolated temp dir
@@ -539,7 +517,6 @@ test.describe("Auth enforcement", () => {
 	test("rejects unauthenticated requests", async () => {
 		expect((await fetch(`${BASE}/api/sessions`)).status).toBe(401);
 		expect((await fetch(`${BASE}/api/goals`)).status).toBe(401);
-		expect((await fetch(`${BASE}/api/skills`)).status).toBe(401);
 	});
 
 	test("rejects invalid token", async () => {

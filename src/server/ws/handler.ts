@@ -6,8 +6,6 @@ import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
-import { getSkill } from "../skills/registry.js";
-import { runSkillAgent, createSkillRequest } from "../skills/sub-agent.js";
 import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 
@@ -326,30 +324,6 @@ export function handleWebSocketConnection(
 					} else {
 						send(ws, { type: "error", message: `Task ${msg.taskId} not found`, code: "TASK_NOT_FOUND" });
 					}
-					break;
-				}
-				case "invoke_skill": {
-					const skill = getSkill(msg.skillId);
-					if (!skill) {
-						send(ws, { type: "skill_failed", skillId: msg.skillId, error: `Unknown skill: ${msg.skillId}` });
-						break;
-					}
-					const session = sessionManager.getSession(sessionId);
-					if (!session) {
-						send(ws, { type: "skill_failed", skillId: msg.skillId, error: "Session not found" });
-						break;
-					}
-					send(ws, { type: "skill_started", skillId: msg.skillId });
-					const request = createSkillRequest(skill, session.cwd, sessionId, msg.context);
-					runSkillAgent(request).then((result) => {
-						if (result.status === "completed") {
-							broadcast(session.clients, { type: "skill_completed", skillId: msg.skillId, result: result.output });
-						} else {
-							broadcast(session.clients, { type: "skill_failed", skillId: msg.skillId, error: result.error || "Skill execution failed" });
-						}
-					}).catch((err) => {
-						broadcast(session.clients, { type: "skill_failed", skillId: msg.skillId, error: String(err) });
-					});
 					break;
 				}
 				case "ping":

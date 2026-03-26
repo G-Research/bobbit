@@ -28,7 +28,6 @@ export type ClientMessage =
 	| { type: "set_title"; title: string }
 	| { type: "generate_title" }
 	| { type: "ping" }
-	| { type: "invoke_skill"; skillId: string; context?: Record<string, string> }
 	| { type: "task_create"; goalId: string; title: string; taskType: string; parentTaskId?: string; spec?: string; dependsOn?: string[] }
 	| { type: "task_update"; taskId: string; updates: { title?: string; spec?: string; state?: string; assignedSessionId?: string; dependsOn?: string[] } }
 	| { type: "task_delete"; taskId: string }
@@ -48,9 +47,6 @@ export type ServerMessage =
 	| { type: "session_archived"; sessionId: string; archivedAt: number }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
-	| { type: "skill_started"; skillId: string }
-	| { type: "skill_completed"; skillId: string; result: string }
-	| { type: "skill_failed"; skillId: string; error: string }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }
 	| { type: "task_changed"; task: unknown }

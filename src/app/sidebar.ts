@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, List, MessagesSquare, Network, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -628,7 +628,7 @@ export function renderSidebar() {
 						@click=${() => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); import("./routing.js").then((m) => m.setHashRoute("roles")); }}
 						title="Manage roles"
 					>
-						${icon(Users, "sm")}
+						${icon(Users, "xs")}
 						<span>Roles</span>
 					</button>
 					<button
@@ -636,7 +636,7 @@ export function renderSidebar() {
 						@click=${() => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); import("./routing.js").then((m) => m.setHashRoute("personalities")); }}
 						title="Manage personalities"
 					>
-						${icon(Drama, "sm")}
+						${icon(Drama, "xs")}
 						<span>Personalities</span>
 					</button>
 					<button
@@ -644,7 +644,7 @@ export function renderSidebar() {
 						@click=${() => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); import("./routing.js").then((m) => m.setHashRoute("tools")); }}
 						title="Manage tools"
 					>
-						${icon(Wrench, "sm")}
+						${icon(Wrench, "xs")}
 						<span>Tools</span>
 					</button>
 				</div>
@@ -654,7 +654,7 @@ export function renderSidebar() {
 						@click=${() => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); import("./routing.js").then((m) => m.setHashRoute("workflows")); }}
 						title="Manage workflows"
 					>
-						${icon(Workflow, "sm")}
+						${icon(Network, "xs")}
 						<span>Workflows</span>
 					</button>
 					<button
@@ -662,7 +662,7 @@ export function renderSidebar() {
 						@click=${() => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); }}
 						title="View skills"
 					>
-						${icon(Zap, "sm")}
+						${icon(Zap, "xs")}
 						<span>Skills</span>
 					</button>
 					<button
@@ -670,7 +670,7 @@ export function renderSidebar() {
 						@click=${() => showGoalDialog()}
 						title="New goal (Alt+G)"
 					>
-						${icon(GoalIcon, "sm")}
+						${icon(GoalIcon, "xs")}
 						<span>New Goal</span>
 					</button>
 				</div>

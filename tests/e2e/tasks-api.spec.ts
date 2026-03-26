@@ -69,17 +69,4 @@ test.describe("Task creation — no artifact enforcement", () => {
 	});
 });
 
-test.describe("Skills API", () => {
-	test("GET /api/skills returns skill definitions", async () => {
-		const resp = await apiFetch("/api/skills");
-		expect(resp.status).toBe(200);
-		const { skills } = await resp.json();
-		expect(Array.isArray(skills)).toBe(true);
-		// Should have the built-in skills
-		const ids = skills.map((s: any) => s.id);
-		expect(ids).toContain("correctness-review");
-		expect(ids).toContain("security-review");
-		expect(ids).toContain("design-review");
-		expect(ids).toContain("test-suite-report");
-	});
-});
+
