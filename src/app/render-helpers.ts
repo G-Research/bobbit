@@ -284,11 +284,13 @@ export function renderSessionRow(session: GatewaySession) {
 					</div>
 				` : ""}
 			</div>
-			${!mobile ? renderSessionTime(session) : ""}
 			${mobile
 				? buttons
-				: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					${buttons}
+				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+					${renderSessionTime(session)}
+					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
+						${buttons}
+					</div>
 				</div>`}
 		</div>
 		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${renderArchivedDelegates(session.id)}` : ""}
@@ -421,11 +423,13 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory)}
 			</div>
 			<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
-			${!mobile ? renderSessionTime(session) : ""}
 			${mobile
 				? buttons
-				: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					${buttons}
+				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+					${renderSessionTime(session)}
+					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
+						${buttons}
+					</div>
 				</div>`}
 		</div>
 	`;
