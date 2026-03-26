@@ -487,25 +487,28 @@ theme-toggle button {
 }
 
 /* Rolling masked shadow on active session titles —
-   a soft spotlight slides across via background-clip:text.
-   Base is 72% opacity foreground; peak is full foreground. */
+   a soft spotlight slides L→R via background-clip:text.
+   Base is 72% opacity foreground; peak is full foreground.
+   Uses a wide repeating gradient so the highlight wraps seamlessly. */
 @keyframes title-wave {
-	0%       { background-position: 120% 0; }
-	60%, 100% { background-position: -20% 0; }
+	from { background-position: 0% 0; }
+	to   { background-position: 200% 0; }
 }
 .title-wave {
+	--tw-lo: color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent);
+	--tw-hi: var(--color-foreground, currentColor);
 	background:
-		linear-gradient(
+		repeating-linear-gradient(
 			90deg,
-			color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent) 0%,
-			var(--color-foreground, currentColor) 50%,
-			color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent) 100%
+			var(--tw-lo) 0%,
+			var(--tw-hi) 15%,
+			var(--tw-lo) 30%,
+			var(--tw-lo) 50%
 		);
-	background-size: 40% 100%;
-	background-repeat: no-repeat;
+	background-size: 200% 100%;
 	-webkit-background-clip: text;
 	background-clip: text;
-	-webkit-text-fill-color: color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent);
-	animation: title-wave 5s ease-in-out infinite;
+	-webkit-text-fill-color: var(--tw-lo);
+	animation: title-wave 5s linear infinite;
 	will-change: background-position;
 }
