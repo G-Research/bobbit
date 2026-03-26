@@ -45,6 +45,8 @@ export function parseVerdict(output: string): boolean | null {
 	return match[1].toLowerCase() === "pass";
 }
 
+const VERDICT_FOLLOWUP_PROMPT = "Your review is complete but you did not include the required <verdict> tag. Based on your review findings above, respond with ONLY a <verdict>pass</verdict> or <verdict>fail</verdict> tag. Use <verdict>fail</verdict> if you found any critical or high severity issues, otherwise <verdict>pass</verdict>.";
+
 /** In-flight verification state for REST bootstrapping */
 export interface ActiveVerification {
 	goalId: string;
@@ -543,7 +545,16 @@ export class VerificationHarness {
 
 			const verdict = parseVerdict(output);
 			if (verdict === null) {
-				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId };
+				// Follow-up: ask the agent to emit the verdict tag
+				console.log(`[verification] No verdict tag found, sending follow-up prompt to ${sessionId}`);
+				await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
+				await this.sessionManager!.waitForIdle(sessionId!, timeoutMs);
+				const fullOutput = await this.sessionManager!.getSessionOutput(sessionId!);
+				const retryVerdict = parseVerdict(fullOutput);
+				if (retryVerdict === null) {
+					return { passed: false, output: fullOutput || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId };
+				}
+				return { passed: retryVerdict, output: fullOutput, sessionId };
 			}
 
 			return { passed: verdict, output, sessionId };
@@ -678,7 +689,39 @@ export class VerificationHarness {
 
 			const verdict = parseVerdict(output);
 			if (verdict === null) {
-				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId: subSessionId };
+				// Follow-up: ask the agent to emit the verdict tag
+				console.log(`[verification] No verdict tag found, sending follow-up prompt to ${subSessionId}`);
+
+				const followupPromise = new Promise<void>((resolve, reject) => {
+					const timer = setTimeout(() => {
+						reject(new Error(`Follow-up timed out after ${timeoutMs / 1000}s`));
+					}, timeoutMs);
+					const eventUnsub = rpc.onEvent((event: any) => {
+						if (event.type === "agent_end") {
+							clearTimeout(timer);
+							eventUnsub();
+							resolve();
+						}
+					});
+				});
+
+				await rpc.prompt(VERDICT_FOLLOWUP_PROMPT);
+				await followupPromise;
+
+				let fullOutput = "";
+				try {
+					const msgsResp = await rpc.getMessages();
+					if (msgsResp.success && Array.isArray(msgsResp.data)) {
+						fullOutput = extractAllAssistantOutput(msgsResp.data);
+					}
+				} catch {}
+				if (!fullOutput) fullOutput = output; // fallback to original
+
+				const retryVerdict = parseVerdict(fullOutput);
+				if (retryVerdict === null) {
+					return { passed: false, output: fullOutput || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId: subSessionId };
+				}
+				return { passed: retryVerdict, output: fullOutput, sessionId: subSessionId };
 			}
 
 			return { passed: verdict, output, sessionId: subSessionId };
@@ -781,6 +824,23 @@ export class VerificationHarness {
 			});
 		});
 	}
+}
+
+/**
+ * Extract ALL assistant message text from agent messages (concatenated).
+ * Used after follow-up prompts to find the verdict anywhere in the full conversation.
+ */
+function extractAllAssistantOutput(messages: any[]): string {
+	return messages
+		.filter((m: any) => m?.role === "assistant")
+		.map((m: any) => {
+			if (Array.isArray(m.content)) {
+				return m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+			}
+			return typeof m.content === "string" ? m.content : "";
+		})
+		.filter(Boolean)
+		.join("\n");
 }
 
 /**
