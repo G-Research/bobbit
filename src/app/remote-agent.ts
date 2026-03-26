@@ -672,6 +672,7 @@ export class RemoteAgent {
 			case "gate_verification_started":
 			case "gate_verification_step_complete":
 			case "gate_verification_step_started":
+			case "gate_verification_step_output":
 				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
 				break;
 
