@@ -701,6 +701,11 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 
+			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
+			if (assistantRole && assistantRole.allowedTools.length > 0) {
+				effectiveAllowedTools = assistantRole.allowedTools;
+			}
+
 			const promptPath = this.assemblePrompt(id, {
 				baseSystemPromptPath: undefined,
 				cwd,
@@ -710,11 +715,6 @@ export class SessionManager {
 				allowedTools: effectiveAllowedTools,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-
-			// Use assistant role's tool restrictions
-			if (assistantRole && assistantRole.allowedTools.length > 0) {
-				effectiveAllowedTools = assistantRole.allowedTools;
-			}
 		} else {
 			// Normal sessions: global base + AGENTS.md from cwd + goal spec
 			const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
