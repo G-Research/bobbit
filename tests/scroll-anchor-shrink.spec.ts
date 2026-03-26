@@ -7,6 +7,9 @@ test.describe("Scroll anchor on shrink", () => {
 	test("compensates scrollTop when content shrinks while scrolled up", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 
+		// Wait for the fixture's ResizeObserver to be set up (deferred to rAF)
+		await page.waitForFunction(() => (window as any).__isReady?.() === true);
+
 		// First scroll to bottom so stickToBottom = true, then scroll up
 		await page.evaluate(() => {
 			const sc = document.getElementById("scroll-container")!;

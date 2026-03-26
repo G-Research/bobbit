@@ -76,33 +76,57 @@ for (let i = 0; i < 30; i++) {
   after.appendChild(div);
 }
 
-// --- Buggy ResizeObserver logic (mirrors current AgentInterface.ts) ---
 const scrollContainer = document.getElementById('scroll-container');
 const contentWrapper = document.getElementById('content-wrapper');
 
 let _stickToBottom = true;
 let _isAutoScrolling = false;
 let _autoScrollTimer;
+let _lastScrollHeight = 0;
+let _ready = false;
 
-// CURRENT BUGGY LOGIC: only handles stickToBottom, no shrink compensation
-const resizeObserver = new ResizeObserver(() => {
-  if (_stickToBottom && scrollContainer) {
-    _isAutoScrolling = true;
-    scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    clearTimeout(_autoScrollTimer);
-    _autoScrollTimer = setTimeout(() => {
-      _isAutoScrolling = false;
-    }, 150);
-  }
-  // BUG: no handling when _stickToBottom is false and content shrinks
+// Set up ResizeObserver after layout settles (mirrors AgentInterface.ts connectedCallback
+// which awaits updateComplete before creating the observer)
+requestAnimationFrame(() => {
+  _lastScrollHeight = scrollContainer.scrollHeight;
+
+  const resizeObserver = new ResizeObserver(() => {
+    if (!scrollContainer) return;
+    const newScrollHeight = scrollContainer.scrollHeight;
+    const delta = newScrollHeight - _lastScrollHeight;
+    _lastScrollHeight = newScrollHeight;
+
+    if (_stickToBottom) {
+      _isAutoScrolling = true;
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      clearTimeout(_autoScrollTimer);
+      _autoScrollTimer = setTimeout(() => {
+        _isAutoScrolling = false;
+      }, 150);
+    } else if (delta < 0) {
+      // Content shrunk (e.g. tool collapsed) — adjust scroll to keep
+      // viewport stable. The target is current scrollTop + delta,
+      // but the browser may have already clamped scrollTop to the new max.
+      _isAutoScrolling = true;
+      scrollContainer.scrollTop = Math.max(0, scrollContainer.scrollTop + delta);
+      clearTimeout(_autoScrollTimer);
+      _autoScrollTimer = setTimeout(() => {
+        _isAutoScrolling = false;
+      }, 150);
+    }
+  });
+
+  resizeObserver.observe(contentWrapper);
+  _ready = true;
 });
 
-resizeObserver.observe(contentWrapper);
-
-// Scroll handler — same logic as AgentInterface.ts
+// Scroll handler — mirrors AgentInterface.ts _handleScroll
 scrollContainer.addEventListener('scroll', () => {
   if (_isAutoScrolling) return;
   const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
+  // If scrollHeight changed since last observation, this scroll was triggered
+  // by content resize (browser clamping scrollTop), not by the user — skip it.
+  if (scrollHeight !== _lastScrollHeight) return;
   _stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
 }, { passive: true });
 
@@ -123,6 +147,8 @@ window.__collapseElement = () => {
   const el = document.getElementById('collapsible');
   el.style.height = '0px';
 };
+
+window.__isReady = () => _ready;
 </script>
 </body>
 </html>
