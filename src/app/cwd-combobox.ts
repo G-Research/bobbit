@@ -3,6 +3,8 @@ import { html } from "lit";
 import { ChevronDown } from "lucide";
 import { state } from "./state.js";
 
+const normalizePath = (p: string) => p.replace(/\\/g, '/');
+
 /** Collect unique working directories from sessions and goals, most recent first. */
 export function getRecentCwds(): Array<{ path: string; source: string }> {
 	const seen = new Set<string>();
@@ -13,7 +15,7 @@ export function getRecentCwds(): Array<{ path: string; source: string }> {
 		.filter((s) => s.cwd && s.assistantType !== "goal" && !s.delegateOf && !s.teamGoalId && !s.staffId)
 		.sort((a, b) => b.lastActivity - a.lastActivity);
 	for (const s of sessions) {
-		const p = s.cwd;
+		const p = normalizePath(s.cwd);
 		if (!seen.has(p)) {
 			seen.add(p);
 			results.push({ path: p, source: "session" });
@@ -23,7 +25,7 @@ export function getRecentCwds(): Array<{ path: string; source: string }> {
 	// Goals
 	const goals = [...state.goals].sort((a, b) => b.updatedAt - a.updatedAt);
 	for (const g of goals) {
-		const p = g.repoPath || g.cwd;
+		const p = normalizePath(g.repoPath || g.cwd);
 		if (p && !seen.has(p)) {
 			seen.add(p);
 			results.push({ path: p, source: "goal" });
@@ -108,7 +110,7 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 					aria-controls="cwd-listbox"
 					class="flex w-full min-w-0 rounded-md border border-input bg-transparent text-foreground shadow-xs h-9 px-3 py-1 text-sm pr-8 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none dark:bg-input/30"
 					.value=${opts.value}
-					placeholder=${opts.placeholder || state.defaultCwd || "(server default)"}
+					placeholder=${opts.placeholder || (state.defaultCwd ? normalizePath(state.defaultCwd) : "(server default)")}
 					@input=${(e: Event) => {
 						opts.onInput((e.target as HTMLInputElement).value);
 						if (!opts.dropdownOpen) opts.onToggle(true);

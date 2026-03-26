@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CWD Path Normalize Test Fixture</title>
+</head>
+<body>
+<script>
+// Mock state matching the shape used by cwd-combobox.ts getRecentCwds()
+const state = {
+  gatewaySessions: [
+    { cwd: "C:\\Users\\foo\\project", assistantType: "chat", delegateOf: null, teamGoalId: null, staffId: null, lastActivity: 1000 },
+    { cwd: "C:/Users/foo/project",    assistantType: "chat", delegateOf: null, teamGoalId: null, staffId: null, lastActivity: 900 },
+    { cwd: "C:\\Users\\baz\\other",   assistantType: "chat", delegateOf: null, teamGoalId: null, staffId: null, lastActivity: 800 },
+  ],
+  goals: [
+    { repoPath: null, cwd: "C:\\Users\\bar\\work", updatedAt: 500 },
+    { repoPath: "C:/Users/bar/work",  cwd: null,             updatedAt: 400 },
+  ],
+  defaultCwd: "C:\\Users\\foo",
+};
+
+// ---- getRecentCwds() logic copied from src/app/cwd-combobox.ts (with normalization fix) ----
+const normalizePath = (p) => p.replace(/\\/g, '/');
+
+function getRecentCwds() {
+  const seen = new Set();
+  const results = [];
+
+  // Sessions (sorted by lastActivity descending)
+  const sessions = [...state.gatewaySessions]
+    .filter((s) => s.cwd && s.assistantType !== "goal" && !s.delegateOf && !s.teamGoalId && !s.staffId)
+    .sort((a, b) => b.lastActivity - a.lastActivity);
+  for (const s of sessions) {
+    const p = normalizePath(s.cwd);
+    if (!seen.has(p)) {
+      seen.add(p);
+      results.push({ path: p, source: "session" });
+    }
+  }
+
+  // Goals
+  const goals = [...state.goals].sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const g of goals) {
+    const p = normalizePath(g.repoPath || g.cwd);
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      results.push({ path: p, source: "goal" });
+    }
+  }
+  return results.filter(r => !/-wt[/\\]/.test(r.path));
+}
+
+// Expose results for Playwright
+window.__results = {
+  cwds: getRecentCwds(),
+  defaultCwd: state.defaultCwd ? normalizePath(state.defaultCwd) : "(server default)",
+};
+</script>
+</body>
+</html>
