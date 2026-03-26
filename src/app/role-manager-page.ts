@@ -45,6 +45,8 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 					<div class="bobbit-blob__shield"></div>
 					<div class="bobbit-blob__set-square"></div>
 					<div class="bobbit-blob__flask"></div>
+					<div class="bobbit-blob__wand"></div>
+					<div class="bobbit-blob__wizard-hat"></div>
 				</div>
 			</div>
 		</div>
