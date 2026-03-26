@@ -38,16 +38,26 @@ function getRouteFromHash() {
   return { view: "landing" };
 }
 
+// --- isConfigPageRoute() from src/app/routing.ts (fixed version) ---
+const CONFIG_VIEWS = new Set([
+  "roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
+  "personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
+]);
+
+function isConfigPageRoute() {
+  return CONFIG_VIEWS.has(getRouteFromHash().view);
+}
+
 // --- Mock state (simulates a connected session) ---
 const state = {
   selectedSessionId: "mock-session-123",
   remoteAgent: null,
 };
 
-// --- activeSessionId() from src/app/state.ts (current buggy version) ---
-// BUG: Only suppresses highlighting for #/settings, not other config pages.
+// --- activeSessionId() from src/app/state.ts (fixed version) ---
+// FIXED: Suppresses highlighting for ALL config pages, not just settings.
 function activeSessionId() {
-  if (window.location.hash === "#/settings") return undefined;
+  if (isConfigPageRoute()) return undefined;
   return state.selectedSessionId ?? (state.remoteAgent ? state.remoteAgent.gatewaySessionId : undefined);
 }
 
