@@ -49,6 +49,17 @@ npm run build     # compile server + bundle UI
 npm start         # start gateway on :3001
 ```
 
+### Run from checkout
+
+Have a Bobbit source checkout? Use the `run` script to launch it against any project directory — no global install needed. On first run it auto-installs dependencies and builds.
+
+```bash
+/path/to/bobbit/run                    # Linux/macOS
+C:\path\to\bobbit\run.cmd              # Windows
+```
+
+See **[Run from Checkout](docs/run-from-checkout.md)** for setup, PATH integration, and troubleshooting.
+
 ## Why Bobbit?
 
 Most AI coding tools are either locked inside an IDE or limited to a terminal. Bobbit is different:
