@@ -785,6 +785,18 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>
 	renderApp();
 }
 
+async function handleGitFetch(): Promise<void> {
+	if (!currentGoalId) return;
+	const goalId = currentGoalId;
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/git-status?fetch=true`).catch(() => null);
+		if (res && res.ok) {
+			gitStatus = await res.json();
+			renderApp();
+		}
+	} catch { /* ignore */ }
+}
+
 // ============================================================================
 // SVG ICON HELPERS
 // ============================================================================
@@ -989,6 +1001,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
 						.reviewDecision=${prStatus?.reviewDecision}
 						@pr-merge=${handlePrMerge}
+						@git-fetch=${handleGitFetch}
 					></git-status-widget>
 					${goal.worktreePath ? html`
 						<span class="meta-sep">\u00B7</span>

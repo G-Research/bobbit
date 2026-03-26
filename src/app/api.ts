@@ -254,9 +254,10 @@ export interface GitStatusData {
 	status: Array<{ file: string; status: string }>;
 }
 
-export async function fetchGitStatus(sessionId: string): Promise<GitStatusData | null> {
+export async function fetchGitStatus(sessionId: string, opts?: { fetch?: boolean }): Promise<GitStatusData | null> {
 	try {
-		const res = await gatewayFetch(`/api/sessions/${sessionId}/git-status`);
+		const qs = opts?.fetch ? '?fetch=true' : '';
+		const res = await gatewayFetch(`/api/sessions/${sessionId}/git-status${qs}`);
 		if (!res.ok) return null;
 		return await res.json();
 	} catch {

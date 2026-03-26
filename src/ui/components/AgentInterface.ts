@@ -66,6 +66,7 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onBgProcessDismiss?: (id: string) => void;
 	@property({ attribute: false }) onPrMerge?: (method: string, admin?: boolean) => Promise<string | undefined>;
 	@property({ attribute: false }) onGitPull?: () => Promise<string | undefined>;
+	@property({ attribute: false }) onGitFetch?: () => void;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
 	@property({ attribute: false }) onApiKeyRequired?: (provider: string) => Promise<boolean>;
 	// Optional callback called before sending a message
@@ -684,6 +685,7 @@ export class AgentInterface extends LitElement {
 								.reviewDecision=${this.reviewDecision}
 								@pr-merge=${this._handlePrMerge}
 								@git-pull=${this._handleGitPull}
+								@git-fetch=${this._handleGitFetch}
 							></git-status-widget>` : nothing}
 						</div>
 						` : ''}
@@ -737,6 +739,10 @@ export class AgentInterface extends LitElement {
 		} catch (err) {
 			widget.setMergeResult(err instanceof Error ? err.message : 'Network error');
 		}
+	}
+
+	private _handleGitFetch(): void {
+		this.onGitFetch?.();
 	}
 
 	private async _handleGitPull(e: Event): Promise<void> {

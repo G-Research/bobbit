@@ -1431,6 +1431,9 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		if (url.searchParams.get('fetch') === 'true') {
+			try { await execAsync('git fetch --quiet', { cwd, encoding: 'utf-8', timeout: 15000 }); } catch { /* best-effort */ }
+		}
 		try {
 			let branch = "";
 			try { branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd); }
@@ -2027,6 +2030,11 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = session.cwd;
+
+		// Optional: run git fetch first when ?fetch=true is passed
+		if (url.searchParams.get('fetch') === 'true') {
+			try { await execAsync('git fetch --quiet', { cwd, encoding: 'utf-8', timeout: 15000 }); } catch { /* best-effort */ }
+		}
 
 		try {
 			let branch = '';

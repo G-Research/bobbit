@@ -57,6 +57,12 @@ export class GitStatusWidget extends LitElement {
     private _toggle(e: MouseEvent) {
         e.stopPropagation();
         this.expanded = !this.expanded;
+        if (this.expanded) {
+            this.dispatchEvent(new CustomEvent('git-fetch', {
+                bubbles: true,
+                composed: true,
+            }));
+        }
     }
 
     private _statusColor(status: string): string {

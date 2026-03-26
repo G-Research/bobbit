@@ -669,6 +669,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel.agentInterface.onBgProcessDismiss = (processId: string) => {
 				dismissBgProcess(sessionId, processId);
 			};
+			state.chatPanel.agentInterface.onGitFetch = () => {
+				refreshGitStatusForSession(sessionId, true);
+			};
 			state.chatPanel.agentInterface.onGitPull = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-pull`, {
@@ -978,13 +981,13 @@ async function dismissBgProcess(sessionId: string, processId: string): Promise<v
 	} catch { /* ignore */ }
 }
 
-async function refreshGitStatusForSession(sessionId: string): Promise<void> {
+async function refreshGitStatusForSession(sessionId: string, fetch?: boolean): Promise<void> {
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
 
 	ai.gitStatusLoading = true;
 	try {
-		const data = await fetchGitStatus(sessionId);
+		const data = await fetchGitStatus(sessionId, fetch ? { fetch: true } : undefined);
 		if (data && activeSessionId() === sessionId) {
 			ai.gitStatus = data;
 			// Also update the branch in the stats bar
