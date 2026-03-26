@@ -13,7 +13,7 @@ import {
 	activeSessionId,
 	ungroupedExpanded,
 	setUngroupedExpanded,
-	type GoalState,
+
 	resetArchivedExpandState,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions } from "./api.js";
@@ -52,8 +52,7 @@ import { renderSettingsPage } from "./settings-page.js";
 function renderMobileLanding() {
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
 	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
-	const stateOrder: Record<GoalState, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
-	const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
+	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
 	const liveGoals = sortedGoals.filter(g => !g.archived);
 	const archivedGoals = sortedGoals.filter(g => g.archived);
 	const isUngroupedExpanded = ungroupedExpanded;
