@@ -911,9 +911,11 @@ function renderTeamButton(goal: Goal): TemplateResult {
 	}
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" title="Start the goal team" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
-				${svgPlay}
-				<span>${teamStarting ? "Starting\u2026" : "Start Team"}</span>
+			<button class="btn-split-main" title="${goal.setupStatus === "preparing" ? "Setting up worktree\u2026" : "Start the goal team"}" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
+				${goal.setupStatus === "preparing"
+					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
+					: svgPlay}
+				<span>${teamStarting ? "Starting\u2026" : goal.setupStatus === "preparing" ? "Setting up\u2026" : "Start Team"}</span>
 			</button>
 		</div>
 	`;
