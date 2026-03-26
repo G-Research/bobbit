@@ -508,8 +508,8 @@ theme-toggle button {
 	background-size: 200% 100%;
 	-webkit-background-clip: text;
 	background-clip: text;
-	-webkit-text-fill-color: var(--tw-lo);
-	color: var(--tw-lo);
+	-webkit-text-fill-color: transparent;
+	color: transparent;
 	animation: title-wave 4s linear infinite;
 	will-change: background-position;
 }
