@@ -816,9 +816,14 @@ async function saveProjectConfig(): Promise<void> {
 	projectSaveStatus = "saving";
 	renderApp();
 	try {
+		// Only send non-empty fields — empty strings are omitted to preserve server defaults.
+		const body: Record<string, string> = {};
+		for (const key of Object.keys(projectConfig)) {
+			if (projectConfig[key]) body[key] = projectConfig[key];
+		}
 		const res = await gatewayFetch("/api/project-config", {
 			method: "PUT",
-			body: JSON.stringify(projectConfig),
+			body: JSON.stringify(body),
 		});
 		if (res.ok) {
 			projectSaveStatus = "saved";
