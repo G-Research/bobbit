@@ -134,9 +134,9 @@ export const ACCESSORIES: Record<string, AccessoryDefinition> = {
 		id: "flask",
 		label: "Flask",
 		shadow: `
-			8px 4px 0 #000,9px 4px 0 #8b4513,10px 4px 0 #000,
+			8px 4px 0 #000,9px 4px 0 #fff,10px 4px 0 #000,
 			8px 5px 0 #000,9px 5px 0 #7dd3fc,10px 5px 0 #000,
-			7px 6px 0 #000,8px 6px 0 #1e3a5f,9px 6px 0 #38bdf8,10px 6px 0 #0ea5e9,11px 6px 0 #000,
+			7px 6px 0 #000,8px 6px 0 #0369a1,9px 6px 0 #38bdf8,10px 6px 0 #0ea5e9,11px 6px 0 #000,
 			6px 7px 0 #000,7px 7px 0 #1e3a5f,8px 7px 0 #0ea5e9,9px 7px 0 #0284c7,10px 7px 0 #0369a1,11px 7px 0 #1e3a5f,12px 7px 0 #000,
 			6px 8px 0 #000,7px 8px 0 #1e3a5f,8px 8px 0 #0284c7,9px 8px 0 #0c4a6e,10px 8px 0 #082f49,11px 8px 0 #1e3a5f,12px 8px 0 #000,
 			6px 9px 0 #000,7px 9px 0 #000,8px 9px 0 #000,9px 9px 0 #000,10px 9px 0 #000,11px 9px 0 #000,12px 9px 0 #000
