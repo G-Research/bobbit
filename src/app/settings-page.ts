@@ -22,7 +22,7 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
-type SettingsTab = "general" | "shortcuts" | "palette" | "models";
+type SettingsTab = "general" | "shortcuts" | "palette" | "models" | "project";
 // Shortcuts is the default tab so that Ctrl+, acts as a quick toggle for a
 // keyboard-shortcut reference — press once to open, press again to dismiss.
 let activeTab: SettingsTab = "shortcuts";
@@ -38,6 +38,12 @@ let _listening = false;
 let settingsCwd = "";
 let settingsCwdLoaded = false;
 let settingsCwdSaveStatus: "" | "saving" | "saved" | "error" = "";
+
+// ── Project tab state ──
+let projectConfig: Record<string, string> = {};
+let projectDefaults: Record<string, string> = {};
+let projectConfigLoaded = false;
+let projectSaveStatus: "" | "saving" | "saved" | "error" = "";
 
 function resetRebindState(): void {
 	rebindingId = null;
@@ -780,6 +786,97 @@ function renderModelsTab() {
 	`;
 }
 
+// ── Project tab ──
+
+function loadProjectConfig(): void {
+	if (projectConfigLoaded) return;
+	projectConfigLoaded = true;
+	(async () => {
+		try {
+			const res = await gatewayFetch("/api/project-config");
+			if (res.ok) {
+				const data = await res.json();
+				// Store defaults for placeholder display only.
+				// Config values start empty — users type explicit overrides.
+				projectDefaults = { ...data };
+				projectConfig = {
+					build_command: "",
+					test_command: "",
+					typecheck_command: "",
+					test_unit_command: "",
+					test_e2e_command: "",
+				};
+			}
+		} catch {}
+		renderApp();
+	})();
+}
+
+async function saveProjectConfig(): Promise<void> {
+	projectSaveStatus = "saving";
+	renderApp();
+	try {
+		// Only send non-empty fields — empty strings are omitted to preserve server defaults.
+		const body: Record<string, string> = {};
+		for (const key of Object.keys(projectConfig)) {
+			if (projectConfig[key]) body[key] = projectConfig[key];
+		}
+		const res = await gatewayFetch("/api/project-config", {
+			method: "PUT",
+			body: JSON.stringify(body),
+		});
+		if (res.ok) {
+			projectSaveStatus = "saved";
+			setTimeout(() => { projectSaveStatus = ""; renderApp(); }, 2000);
+		} else {
+			projectSaveStatus = "error";
+		}
+	} catch {
+		projectSaveStatus = "error";
+	}
+	renderApp();
+}
+
+function renderProjectTab() {
+	loadProjectConfig();
+
+	const fields: { key: string; label: string }[] = [
+		{ key: "build_command", label: "Build Command" },
+		{ key: "test_command", label: "Test Command" },
+		{ key: "typecheck_command", label: "Type Check Command" },
+		{ key: "test_unit_command", label: "Unit Test Command" },
+		{ key: "test_e2e_command", label: "E2E Test Command" },
+	];
+
+	return html`
+		<div class="flex flex-col gap-4">
+			${fields.map((f) => html`
+				<div class="flex flex-col gap-1.5">
+					<label class="text-sm font-medium text-foreground">${f.label}</label>
+					<input
+						type="text"
+						class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+							focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder=${projectDefaults[f.key] || ""}
+						.value=${projectConfig[f.key] || ""}
+						@input=${(e: Event) => { projectConfig[f.key] = (e.target as HTMLInputElement).value; projectSaveStatus = ""; renderApp(); }}
+					/>
+				</div>
+			`)}
+			<div class="flex items-center gap-3 pt-2">
+				<button
+					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
+						hover:bg-primary/90 transition-colors disabled:opacity-50"
+					?disabled=${projectSaveStatus === "saving"}
+					@click=${saveProjectConfig}
+				>${projectSaveStatus === "saving" ? "Saving..." : "Save"}</button>
+				${projectSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved successfully.</span>` : ""}
+				${projectSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+			</div>
+		</div>
+	`;
+}
+
 function loadGeneralSettings() {
 	if (settingsCwdLoaded) return;
 	settingsCwd = state.defaultCwd;
@@ -848,6 +945,7 @@ export function renderSettingsPage() {
 	const tabs: { id: SettingsTab; label: string }[] = [
 		{ id: "shortcuts", label: "Shortcuts" },
 		{ id: "general" as SettingsTab, label: "General" },
+		{ id: "project", label: "Project" },
 		{ id: "models", label: "Models" },
 		{ id: "palette", label: "Color Palette" },
 	];
@@ -880,6 +978,7 @@ export function renderSettingsPage() {
 			<div class="flex-1 overflow-y-auto p-4">
 				<div class="${activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
 					${activeTab === "general" ? renderGeneralTab() : ""}
+					${activeTab === "project" ? renderProjectTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}
