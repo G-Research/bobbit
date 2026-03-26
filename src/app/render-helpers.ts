@@ -320,23 +320,23 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	return html`
 		<div
-			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm opacity-70
+			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${CHEVRON_W}px; filter:grayscale(1);"
+			style="padding-left:${CHEVRON_W}px; filter:grayscale(1); opacity:0.75;"
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 			title="${displayTitle} (archived)"
 		>
 			${hasChildren ? html`<span
-				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer opacity-60"
+				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse" : "Expand"}"
 			>${expanded ? "▾" : "▸"}</span>` : ""}
-			<div class="shrink-0 flex items-center justify-center" style="filter:opacity(0.85);">
+			<div class="shrink-0 flex items-center justify-center">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
 			<div class="flex-1 min-w-0 font-normal truncate ${mobile ? "text-base" : "text-xs"}">${displayTitle}</div>
-			${session.archivedAt ? html`<span class="shrink-0 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground/50">${terseRelativeTime(session.archivedAt)}</span>` : ""}
+			${session.archivedAt ? html`<span class="shrink-0 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground">${terseRelativeTime(session.archivedAt)}</span>` : ""}
 		</div>
 	`;
 }

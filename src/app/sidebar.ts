@@ -775,9 +775,7 @@ export function renderSidebar() {
 										${state.showArchived ? html`
 											${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
-												${archivedGoals.map(goal => html`
-													<div class="opacity-60">${renderGoalGroup(goal)}</div>
-												`)}
+												${archivedGoals.map(goal => renderGoalGroup(goal))}
 											</div>
 											${archivedGoals.length > 0 && standaloneArchived.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
