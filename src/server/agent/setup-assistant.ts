@@ -97,7 +97,7 @@ After writing the system prompt, emit a progress block:
 
 ### Project config (\`.bobbit/config/project.yaml\`)
 
-Write a YAML file with project settings as key-value pairs. These settings are dereferenced as \`{{key}}\` in workflow verification steps. The built-in defaults are:
+Write a YAML file with project settings as key-value pairs. These settings are dereferenced as \`{{project.key}}\` in workflow verification steps. The built-in defaults are:
 
 \`\`\`yaml
 build_command: npm run build

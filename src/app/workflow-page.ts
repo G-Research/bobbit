@@ -453,7 +453,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						steps[stepIdx] = { ...steps[stepIdx], run: (e.target as HTMLInputElement).value };
 						updateGateField(gateIdx, "verify", steps);
 					}} />
-				<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{gate_id.field}}</div>
+				<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>
 			` : html`
 				<textarea class="wf-textarea" .value=${step.prompt || ""} placeholder="Review prompt..."
 					@input=${(e: Event) => {

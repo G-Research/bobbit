@@ -154,20 +154,13 @@ export class VerificationHarness {
 				goal_spec: goalSpec || "",
 			};
 
-			// Load project config into builtinVars so {{typecheck_command}} etc. resolve
-			if (this.projectConfigStore) {
-				const projectConfig = this.projectConfigStore.getWithDefaults();
-				for (const [k, v] of Object.entries(projectConfig)) {
-					builtinVars[k] = v;
-				}
-			}
+			// Project config — resolved via {{project.key}}
+			const projectVars: Record<string, string> = this.projectConfigStore
+				? this.projectConfigStore.getWithDefaults()
+				: {};
 
-			// Also include the current signal's metadata as bare variables
-			if (signal.metadata) {
-				for (const [k, v] of Object.entries(signal.metadata)) {
-					builtinVars[k] = v;
-				}
-			}
+			// Signal metadata — resolved via {{agent.key}}
+			const agentVars: Record<string, string> = signal.metadata || {};
 
 			// Build cache of previously-passed step results for the same commit SHA.
 			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
@@ -250,13 +243,13 @@ export class VerificationHarness {
 							stepName: step.name,
 							startedAt: active.steps[index].startedAt,
 						});
-						const cmd = this.substituteVars(step.run || "", builtinVars, allGateStates);
+						const cmd = this.substituteVars(step.run || "", builtinVars, projectVars, agentVars, allGateStates);
 						const expectFailure = step.expect === "failure";
 
 						// Look up error_pattern for expect: failure steps
 						let errorPattern: string | undefined;
 						if (expectFailure) {
-							errorPattern = builtinVars["error_pattern"];
+							errorPattern = agentVars["error_pattern"];
 							if (!errorPattern && allGateStates) {
 								// Check upstream gates for error_pattern in metadata
 								for (const [, gs] of allGateStates) {
@@ -280,7 +273,7 @@ export class VerificationHarness {
 							// Fast path for test environments without API keys
 							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 						} else {
-							const prompt = this.substituteVars(step.prompt || "", builtinVars, allGateStates);
+							const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
 							const maxAttempts = 2;
 							for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 								result = await this.runLlmReviewStep(
@@ -789,30 +782,55 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Substitute variables in a template string.
-	 * Supports: {{var}}, {{gate_id.field}} (for upstream gate metadata)
+	 * Substitute namespaced variables in a template string.
+	 *
+	 * Namespaces:
+	 * - {{branch}}, {{master}}, etc. — built-in goal variables
+	 * - {{project.key}} — from project config (.bobbit/config/project.yaml)
+	 * - {{agent.key}} — from the signal's metadata (provided by the agent)
+	 * - {{gate_id.meta.key}} — from an upstream gate's metadata
+	 * - {{goal_spec}} — the goal specification text
+	 *
+	 * Legacy bare references like {{typecheck_command}} are NOT resolved to
+	 * prevent accidental cross-namespace collisions. Use the explicit namespace.
 	 */
 	private substituteVars(
 		template: string,
 		builtinVars: Record<string, string>,
+		projectVars: Record<string, string>,
+		agentVars: Record<string, string>,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 	): string {
 		return template.replace(/\{\{([^}]+)\}\}/g, (match, key: string) => {
 			const trimmed = key.trim();
 
-			// Check builtin vars first
-			if (trimmed in builtinVars) return builtinVars[trimmed];
+			// {{project.key}} — project config
+			if (trimmed.startsWith("project.")) {
+				const field = trimmed.slice("project.".length);
+				if (field in projectVars) return projectVars[field];
+				return match;
+			}
 
-			// Check for gate_id.field syntax
-			const dotIndex = trimmed.indexOf(".");
-			if (dotIndex > 0 && allGateStates) {
-				const gateId = trimmed.slice(0, dotIndex);
-				const field = trimmed.slice(dotIndex + 1);
+			// {{agent.key}} — signal metadata from the agent
+			if (trimmed.startsWith("agent.")) {
+				const field = trimmed.slice("agent.".length);
+				if (field in agentVars) return agentVars[field];
+				return match;
+			}
+
+			// {{gate_id.meta.key}} — upstream gate metadata
+			const metaMatch = trimmed.match(/^([^.]+)\.meta\.(.+)$/);
+			if (metaMatch && allGateStates) {
+				const [, gateId, field] = metaMatch;
 				const gateState = allGateStates.get(gateId);
 				if (gateState?.metadata && field in gateState.metadata) {
 					return gateState.metadata[field];
 				}
+				return match;
 			}
+
+			// Bare variables — builtins only (branch, master, cwd, goal_spec)
+			if (trimmed in builtinVars) return builtinVars[trimmed];
 
 			return match; // Leave unresolved
 		});

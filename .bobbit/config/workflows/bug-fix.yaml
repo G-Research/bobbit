@@ -38,7 +38,7 @@ gates:
     verify:
       - name: "Test fails (bug exists)"
         type: command
-        run: "{{test_command}}"
+        run: "{{agent.test_command}}"
         expect: failure
 
   - id: implementation
@@ -47,17 +47,17 @@ gates:
     verify:
       - name: "Type check"
         type: command
-        run: "{{typecheck_command}}"
+        run: "{{project.typecheck_command}}"
       - name: "Repro test passes (bug fixed)"
         type: command
-        run: "{{reproducing-test.test_command}}"
+        run: "{{reproducing-test.meta.test_command}}"
         expect: success
       - name: "Unit tests"
         type: command
-        run: "{{test_unit_command}}"
+        run: "{{project.test_unit_command}}"
       - name: "E2E tests"
         type: command
-        run: "{{test_e2e_command}}"
+        run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
         prompt: |

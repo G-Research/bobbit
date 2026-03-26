@@ -39,13 +39,13 @@ gates:
     verify:
       - name: "Type check passes"
         type: command
-        run: "{{typecheck_command}}"
+        run: "{{project.typecheck_command}}"
       - name: "Unit tests"
         type: command
-        run: "{{test_unit_command}}"
+        run: "{{project.test_unit_command}}"
       - name: "E2E tests"
         type: command
-        run: "{{test_e2e_command}}"
+        run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
         prompt: |

@@ -62,7 +62,7 @@ test.describe("Bug 1: Project config API", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("Bug 2: Workflow verification uses template variables", () => {
-	test("general workflow implementation gate uses {{typecheck_command}} not hardcoded npm run check", async () => {
+	test("general workflow implementation gate uses {{project.typecheck_command}} not hardcoded npm run check", async () => {
 		const goal = await createGoal({
 			title: `Setup Bug Test ${Date.now()}`,
 			cwd: nonGitCwd(),
@@ -84,14 +84,14 @@ test.describe("Bug 2: Workflow verification uses template variables", () => {
 			expect(typeCheckStep, "Expected a type-check verification step in implementation gate").toBeTruthy();
 
 			// This assertion will FAIL on unfixed code because `run` is "npm run check"
-			// After fix, it should be "{{typecheck_command}}"
-			expect(typeCheckStep.run).toContain("{{typecheck_command}}");
+			// After fix, it should be "{{project.typecheck_command}}"
+			expect(typeCheckStep.run).toContain("{{project.typecheck_command}}");
 		} finally {
 			await deleteGoal(goal.id);
 		}
 	});
 
-	test("general workflow implementation gate uses {{test_unit_command}} not hardcoded npm run test:unit", async () => {
+	test("general workflow implementation gate uses {{project.test_unit_command}} not hardcoded npm run test:unit", async () => {
 		const goal = await createGoal({
 			title: `Setup Bug Test Unit ${Date.now()}`,
 			cwd: nonGitCwd(),
@@ -106,14 +106,14 @@ test.describe("Bug 2: Workflow verification uses template variables", () => {
 			expect(unitTestStep, "Expected a unit-test verification step in implementation gate").toBeTruthy();
 
 			// This assertion will FAIL on unfixed code because `run` is "npm run test:unit"
-			// After fix, it should be "{{test_unit_command}}"
-			expect(unitTestStep.run).toContain("{{test_unit_command}}");
+			// After fix, it should be "{{project.test_unit_command}}"
+			expect(unitTestStep.run).toContain("{{project.test_unit_command}}");
 		} finally {
 			await deleteGoal(goal.id);
 		}
 	});
 
-	test("bug-fix workflow implementation gate uses {{typecheck_command}} not hardcoded npm run check", async () => {
+	test("bug-fix workflow implementation gate uses {{project.typecheck_command}} not hardcoded npm run check", async () => {
 		const goal = await createGoal({
 			title: `Setup Bug Test BugFix ${Date.now()}`,
 			cwd: nonGitCwd(),
@@ -128,7 +128,7 @@ test.describe("Bug 2: Workflow verification uses template variables", () => {
 			expect(typeCheckStep, "Expected a type-check verification step in bug-fix implementation gate").toBeTruthy();
 
 			// This assertion will FAIL on unfixed code because `run` is "npm run check"
-			expect(typeCheckStep.run).toContain("{{typecheck_command}}");
+			expect(typeCheckStep.run).toContain("{{project.typecheck_command}}");
 		} finally {
 			await deleteGoal(goal.id);
 		}
