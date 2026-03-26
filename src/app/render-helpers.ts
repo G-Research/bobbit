@@ -190,14 +190,14 @@ function renderActiveShimmer() {
 }
 
 /** Render terse relative time with optional unseen indicator dot. */
-function renderSessionTime(session: GatewaySession) {
+function renderSessionTime(session: GatewaySession, selected = false) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 	if (isActive) return renderActiveShimmer();
 	const time = terseRelativeTime(session.lastActivity);
 	if (!time) return "";
 	const unseen = hasUnseenActivity(session);
 	return html`<span
-		class="shrink-0 inline-flex items-center gap-0.5 text-[11px] tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}"
+		class="shrink-0 inline-flex items-center gap-0.5 text-[11px] tabular-nums ${selected ? (unseen ? "text-foreground font-medium" : "text-foreground/50") : (unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50")}"
 		style="vertical-align:middle;"
 		title="${formatSessionAge(session.lastActivity)}"
 	>${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
@@ -281,8 +281,8 @@ export function renderSessionRow(session: GatewaySession) {
 			</div>
 			${mobile
 				? buttons
-				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					${renderSessionTime(session)}
+				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, ${active ? "var(--color-secondary)" : "var(--sidebar)"} 50%);">
+					${renderSessionTime(session, active)}
 					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 						${buttons}
 					</div>
@@ -420,8 +420,8 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			<div class="flex-1 min-w-0 ${mobile ? "flex items-baseline gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 			${mobile
 				? buttons
-				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					${renderSessionTime(session)}
+				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, ${active ? "var(--color-secondary)" : "var(--sidebar)"} 50%);">
+					${renderSessionTime(session, active)}
 					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 						${buttons}
 					</div>
@@ -542,7 +542,7 @@ export function renderGoalGroup(goal: Goal) {
 	const emptyState = html`
 		<div class="pl-2 py-1 ${mobile ? "text-xs" : "text-[11px]"} text-muted-foreground">
 			${isTeamGoal
-				? html`No agents — <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start team" @click=${handleStartTeam}><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 12h12v1.5H2V12zm0-1L1 4l4 3 3-5 3 5 4-3-1 7H2z"/></svg>${isLoading ? "Starting\u2026" : "Start Team"}</button>`
+				? html`<span style="vertical-align:middle">No agents —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary text-[10px] font-semibold hover:bg-primary/20 transition-colors align-middle" title="Start team" @click=${handleStartTeam}><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 12h12v1.5H2V12zm0-1L1 4l4 3 3-5 3 5 4-3-1 7H2z"/></svg>${isLoading ? "Starting\u2026" : "Start Team"}</button>`
 				: html`No sessions — <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start a session" @click=${() => createAndConnectSession(goal.id)}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>start one</button>`}
 		</div>
 	`;

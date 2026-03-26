@@ -545,7 +545,7 @@ export function renderStaffSidebarSection() {
 						})() : ""}</div>
 					${mobile
 						? editBtn
-						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, ${active ? "var(--color-secondary)" : "var(--sidebar)"} 50%);">
 							${session ? (() => {
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
