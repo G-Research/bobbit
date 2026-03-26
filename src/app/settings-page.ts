@@ -181,7 +181,7 @@ function updateKeydownListener(): void {
 	}
 }
 
-function renderShortcutRow(entry: ShortcutEntry) {
+function renderShortcutRow(entry: ShortcutEntry, index = 0) {
 	const isActiveRebind = rebindingId === entry.id;
 	const showConflict = isActiveRebind && conflictEntry !== null && pendingBinding !== null;
 	const showBrowserWarning = isActiveRebind && browserReservedWarning && pendingBinding !== null;
@@ -190,7 +190,7 @@ function renderShortcutRow(entry: ShortcutEntry) {
 		!entry.currentBindings.every((cb, i) => bindingsEqual(cb, entry.defaultBindings[i]));
 
 	return html`
-		<div class="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/30 transition-colors group">
+		<div class="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/30 transition-colors group ${index % 2 === 0 ? "bg-secondary/10" : ""}">
 			<span class="flex-1 text-sm text-foreground">${entry.label}</span>
 			<div class="flex items-center gap-1.5">
 				${entry.currentBindings.map((binding, idx) => {
@@ -291,7 +291,7 @@ function renderShortcutsTab() {
 								${category}
 							</div>
 							<div class="flex flex-col gap-0.5">
-								${entries.map((entry) => renderShortcutRow(entry))}
+								${entries.map((entry, i) => renderShortcutRow(entry, i))}
 							</div>
 						</div>
 					`,
