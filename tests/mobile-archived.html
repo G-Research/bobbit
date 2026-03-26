@@ -36,22 +36,45 @@ const mockState = {
 
 function renderMobileLanding() {
   const sortedGoals = [...mockState.goals];
+  const liveGoals = sortedGoals.filter(g => !g.archived);
+  const archivedGoals = sortedGoals.filter(g => g.archived);
 
-  // BUG: renders ALL goals (live + archived) together without separation
+  // Render main goals (live only)
   const mainEl = document.getElementById("main-goals");
-  mainEl.innerHTML = sortedGoals.map(g =>
-    `<div class="goal-item" data-goal-id="${g.id}" data-archived="${!!g.archived}">${g.title}</div>`
+  mainEl.innerHTML = liveGoals.map(g =>
+    `<div class="goal-item" data-goal-id="${g.id}" data-archived="false">${g.title}</div>`
   ).join("");
 
-  // BUG: no archived goals section rendered
+  // Render archived goals section
   const archivedGoalsEl = document.getElementById("archived-goals-section");
-  archivedGoalsEl.classList.add("hidden");
-  archivedGoalsEl.innerHTML = "";
+  if (mockState.showArchived && archivedGoals.length > 0) {
+    archivedGoalsEl.classList.remove("hidden");
+    archivedGoalsEl.innerHTML =
+      `<div class="section-header">Archived Goals</div>` +
+      archivedGoals.map(g =>
+        `<div class="goal-item opacity-60" data-goal-id="${g.id}" data-archived="true">${g.title}</div>`
+      ).join("");
+  } else {
+    archivedGoalsEl.classList.add("hidden");
+    archivedGoalsEl.innerHTML = "";
+  }
 
-  // BUG: no standalone archived sessions section rendered
+  // Render archived standalone sessions section
   const archivedSessionsEl = document.getElementById("archived-sessions-section");
-  archivedSessionsEl.classList.add("hidden");
-  archivedSessionsEl.innerHTML = "";
+  const standaloneArchived = mockState.showArchived
+    ? mockState.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf)
+    : [];
+  if (standaloneArchived.length > 0) {
+    archivedSessionsEl.classList.remove("hidden");
+    archivedSessionsEl.innerHTML =
+      `<div class="section-header">Archived</div>` +
+      standaloneArchived.map(s =>
+        `<div class="archived-session" data-session-id="${s.id}">${s.title}</div>`
+      ).join("");
+  } else {
+    archivedSessionsEl.classList.add("hidden");
+    archivedSessionsEl.innerHTML = "";
+  }
 }
 
 function setShowArchived(val) {
