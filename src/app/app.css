@@ -173,49 +173,6 @@ theme-toggle button {
 }
 
 /* ============================================================================
- * SIDEBAR TOOLTIP — rich hover tooltip positioned to the right of the sidebar
- * ============================================================================ */
-.sidebar-tooltip {
-	position: fixed;
-	z-index: 100;
-	pointer-events: none;
-	padding: 8px 12px;
-	border-radius: 8px;
-	background: var(--color-popover, var(--popover));
-	border: 1px solid var(--color-border, var(--border));
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-	opacity: 0;
-	transition: opacity 120ms ease;
-	white-space: nowrap;
-	max-width: 280px;
-}
-.sidebar-tooltip.visible {
-	opacity: 1;
-}
-.sidebar-tooltip .tt-title {
-	font-size: 12px;
-	font-weight: 600;
-	color: var(--color-foreground);
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.sidebar-tooltip .tt-cwd {
-	font-size: 10px;
-	font-family: ui-monospace, monospace;
-	color: var(--color-muted-foreground);
-	opacity: 0.7;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	margin-top: 2px;
-}
-.sidebar-tooltip .tt-meta {
-	font-size: 10px;
-	color: var(--color-muted-foreground);
-	opacity: 0.7;
-	margin-top: 2px;
-}
-
-/* ============================================================================
  * EMPTY STATE — gentle floating animation for placeholder icons
  * ============================================================================ */
 .empty-state-icon {

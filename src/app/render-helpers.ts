@@ -23,46 +23,6 @@ import { setHashRoute } from "./routing.js";
 import { startTeam, teardownTeam, refreshSessions, deleteGoal } from "./api.js";
 
 // ============================================================================
-// TOOLTIP (desktop only — mouse hover)
-// ============================================================================
-
-let _tooltipEl: HTMLDivElement | null = null;
-let _tooltipTimer: ReturnType<typeof setTimeout> | null = null;
-
-function getTooltipEl(): HTMLDivElement {
-	if (!_tooltipEl) {
-		_tooltipEl = document.createElement("div");
-		_tooltipEl.className = "sidebar-tooltip";
-		document.body.appendChild(_tooltipEl);
-	}
-	return _tooltipEl;
-}
-
-export function showSessionTooltip(e: MouseEvent, session: GatewaySession, displayTitle: string): void {
-	if (_tooltipTimer) clearTimeout(_tooltipTimer);
-	const el = getTooltipEl();
-	const roleLabel = session.assistantType === "goal" ? "Goal Assistant" : (session.role && session.role !== "general" ? session.role : "");
-	el.innerHTML = `
-		<div class="tt-title">${escapeHtml(displayTitle)}</div>
-		<div class="tt-cwd">${escapeHtml(session.cwd)}</div>
-		${roleLabel ? `<div class="tt-meta" style="color:var(--primary);opacity:0.8">${escapeHtml(roleLabel)}</div>` : ""}
-		<div class="tt-meta">${escapeHtml(formatSessionAge(session.lastActivity))}</div>
-	`;
-	const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-	el.style.left = `${rect.right + 8}px`;
-	el.style.top = `${rect.top + rect.height / 2}px`;
-	el.style.transform = "translateY(-50%)";
-	el.classList.add("visible");
-}
-
-export function hideSessionTooltip(): void {
-	if (_tooltipTimer) clearTimeout(_tooltipTimer);
-	_tooltipTimer = setTimeout(() => {
-		getTooltipEl().classList.remove("visible");
-	}, 80);
-}
-
-// ============================================================================
 // FORMATTING
 // ============================================================================
 
@@ -252,15 +212,12 @@ export function renderSessionRow(session: GatewaySession) {
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
-			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
-			@mouseleave=${mobile ? null : hideSessionTooltip}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 		>
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
-				title="${childrenExpanded ? "Collapse delegates" : "Expand delegates"}"
 			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
 				${connecting
@@ -324,7 +281,6 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px; filter:grayscale(1); opacity:0.75;"
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
-			title="${displayTitle} (archived)"
 		>
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
@@ -407,8 +363,6 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
-			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
-			@mouseleave=${mobile ? null : hideSessionTooltip}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 		>
 			${chevron}
