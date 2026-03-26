@@ -148,6 +148,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `staff.json` | `StaffStore` | Staff agent definitions and state |
 | `session-costs.json` | `CostTracker` | Per-session token and cost data |
 | `session-colors.json` | `ColorStore` | Session → color index (0-13) mapping |
+| `preferences.json` | `PreferencesStore` | Key-value preferences (AI gateway config, etc.) |
 | `skill-definitions.json` | `definitions-sync.ts` | Exported skill definitions for agent discovery |
 | `session-prompts/` | `system-prompt.ts` | Assembled per-session prompt files (cleaned up on terminate) |
 | `tls/` | `tls.ts` | TLS certificates and keys |
