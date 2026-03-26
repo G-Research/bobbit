@@ -456,11 +456,12 @@ let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxToke
 let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
 let prefReviewModel = "";    // same format
 let prefNamingModel = "";    // same format
-let _modelsLoadPromise: Promise<void> | null = null;
+let _modelsLoaded = false;
 
 function loadModelsState(): void {
-	if (_modelsLoadPromise) return;
-	_modelsLoadPromise = (async () => {
+	if (_modelsLoaded) return;
+	_modelsLoaded = true;
+	(async () => {
 		try {
 			const [statusRes, prefsRes] = await Promise.all([
 				gatewayFetch("/api/aigw/status"),
@@ -482,7 +483,7 @@ function loadModelsState(): void {
 				prefNamingModel = prefs["default.namingModel"] || "";
 			}
 		} catch {}
-		_modelsLoadPromise = null;
+		renderApp();
 	})();
 }
 
