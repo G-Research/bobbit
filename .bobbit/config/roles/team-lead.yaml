@@ -140,6 +140,12 @@ promptTemplate: |+
   - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
   When instructing agents to produce these gate signals, emphasize this requirement.
 
+  ## Expect-Failure Gates
+  Gates with `expect: failure` verification (e.g. `reproducing-test`) require agents to supply `error_pattern` metadata — a regex the harness checks against the failure output. When instructing agents to produce reproducing tests:
+  - Emphasize they must write tests with specific, identifiable error messages
+  - The `error_pattern` regex must match the expected error (not infrastructure noise)
+  - If `error_pattern` is missing or doesn't match the output, the gate fails
+
   ## Frontend Changes: UX Design
   If the goal involves frontend/UI changes:
   - Spawn a **ux-designer** agent to create interactive HTML prototypes.

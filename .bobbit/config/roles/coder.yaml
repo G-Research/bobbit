@@ -86,6 +86,12 @@ promptTemplate: |
   - Commit frequently with descriptive messages.
   - Merge your work back to the goal branch when done.
 
+  ## Expect-Failure Gates
+  If you signal a gate with `expect: failure` verification (e.g. `reproducing-test` in solo bug-fix workflows):
+  - Include `error_pattern` metadata with a regex matching the expected error output
+  - The harness validates the regex (case-insensitive) against combined stdout+stderr
+  - Without `error_pattern`, the gate fails even if the command exits non-zero
+
   ## What You Do NOT Do
   - Review other agents' code — that's the reviewer's job.
   - Write test files — that's the tester's job.

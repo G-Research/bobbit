@@ -104,6 +104,13 @@ promptTemplate: |-
   - It must be executable from the project root
   - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
 
+  ## Expect-Failure Gates (e.g. reproducing-test)
+  When signaling a gate whose verification uses `expect: failure` (e.g. `reproducing-test` in the bug-fix workflow):
+  - You **MUST** include `error_pattern` in the metadata — a regex that matches the expected error in the test output.
+  - Write reproducing tests that assert with specific, descriptive error messages (not generic assertion failures).
+  - Example: if the bug is "goal preview doesn't render", the test should assert with something like `"Expected goal preview element to exist"`, and `error_pattern` should be `Expected goal preview element to exist`.
+  - The harness checks the regex (case-insensitive) against the combined stdout+stderr output. If the error doesn't match, the gate fails even though the command exited non-zero.
+
   ## What You Do NOT Do
   - Write or modify production code (only test files).
   - Review code for design or style.
