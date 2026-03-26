@@ -472,3 +472,13 @@ theme-toggle button {
 @keyframes sidebar-conic-spin {
 	to { transform: rotate(360deg); }
 }
+
+/* Mexican-wave highlight on gate badge characters during verification */
+@keyframes gate-wave {
+	0%, 100% { opacity: 0.5; }
+	30% { opacity: 0.9; }
+}
+.gate-wave > span {
+	display: inline-block;
+	animation: gate-wave 1.6s ease-in-out infinite;
+}

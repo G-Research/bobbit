@@ -27,6 +27,8 @@ export interface GatewaySession {
 	role?: string;
 	/** The team goal this agent belongs to */
 	teamGoalId?: string;
+	/** Session ID of the team lead that spawned this agent */
+	teamLeadSessionId?: string;
 	/** Git worktree path */
 	worktreePath?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
@@ -41,6 +43,8 @@ export interface GatewaySession {
 	staffAssistant?: boolean;
 	/** Whether this session has a live HTML preview panel */
 	preview?: boolean;
+	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
+	nonInteractive?: boolean;
 	/** Personality names assigned to this session */
 	personalities?: string[];
 }
@@ -100,10 +104,10 @@ export const state = {
 
 	gatewaySessions: [] as GatewaySession[],
 	goals: [] as Goal[],
-	/** Gate status cache: goalId → { passed, total } */
-	gateStatusCache: new Map<string, { passed: number; total: number }>(),
-	/** PR status cache: goalId → { state, url, number } */
-	prStatusCache: new Map<string, { state: string; url?: string; number?: number }>(),
+	/** Gate status cache: goalId → { passed, total, verifying } */
+	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean }>(),
+	/** PR status cache: goalId → { state, url, number, reviewDecision } */
+	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string }>(),
 	sessionsLoading: false,
 	sessionsError: "",
 	creatingSession: false,
@@ -116,7 +120,7 @@ export const state = {
 	/** Whether to show archived sessions in the sidebar */
 	showArchived: localStorage.getItem("bobbit-show-archived") === "true",
 	/** Whether the archived section is expanded */
-	archivedSectionExpanded: localStorage.getItem("bobbit-show-archived") === "true",
+
 	/** Archived sessions (loaded on demand) */
 	archivedSessions: [] as GatewaySession[],
 

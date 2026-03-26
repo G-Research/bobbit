@@ -16,9 +16,9 @@ import { showFaviconBadge } from "./favicon-badge.js";
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
 
-/** Throttle PR status polling — don't hit GitHub API every 5s. */
+/** Throttle PR status polling — don't hit GitHub API on every session poll. */
 let _lastPrRefresh = 0;
-const PR_POLL_INTERVAL_MS = 30_000;
+const PR_POLL_INTERVAL_MS = 15_000;
 
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
 async function showConnectionError(title: string, message: string): Promise<void> {
@@ -184,15 +184,16 @@ async function refreshGateStatusCache() {
 			const gates = await fetchGoalGates(g.id);
 			const passed = gates.filter(gs => gs.status === "passed").length;
 			const total = g.workflow!.gates.length;
-			return { goalId: g.id, passed, total };
+			const verifying = gates.some(gs => gs.signals?.some(s => s.verification?.status === "running"));
+			return { goalId: g.id, passed, total, verifying };
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, passed, total } of results) {
+	for (const { goalId, passed, total, verifying } of results) {
 		const prev = state.gateStatusCache.get(goalId);
-		if (!prev || prev.passed !== passed || prev.total !== total) {
-			state.gateStatusCache.set(goalId, { passed, total });
+		if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying) {
+			state.gateStatusCache.set(goalId, { passed, total, verifying });
 			changed = true;
 		}
 	}
@@ -200,7 +201,7 @@ async function refreshGateStatusCache() {
 }
 
 /** Fetch PR status for all goals with branches and update the cache. */
-async function refreshPrStatusCache() {
+export async function refreshPrStatusCache() {
 	const goalsWithBranch = state.goals.filter(g => g.branch);
 	if (goalsWithBranch.length === 0) return;
 
@@ -210,7 +211,7 @@ async function refreshPrStatusCache() {
 				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status`);
 				if (!res.ok) return { goalId: g.id, pr: null };
 				const data = await res.json();
-				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number } };
+				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string } };
 			} catch {
 				return { goalId: g.id, pr: null };
 			}
@@ -221,7 +222,7 @@ async function refreshPrStatusCache() {
 	for (const { goalId, pr } of results) {
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
-			if (!prev || prev.state !== pr.state) {
+			if (!prev || prev.state !== pr.state || prev.reviewDecision !== pr.reviewDecision) {
 				state.prStatusCache.set(goalId, pr);
 				changed = true;
 			}

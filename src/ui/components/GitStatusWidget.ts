@@ -25,6 +25,7 @@ export class GitStatusWidget extends LitElement {
     @property() prTitle?: string;
     @property({ type: Boolean }) prMergeable?: boolean;
     @property({ type: Boolean }) viewerIsAdmin = false;
+    @property() reviewDecision?: string; // "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null
 
     @state() private expanded = false;
     @state() private merging = false;
@@ -153,10 +154,42 @@ export class GitStatusWidget extends LitElement {
     /** Small PR status icon + number for the pill */
     private _prPillIcon() {
         if (!this.prState) return nothing;
-        const colorClass = this.prState === 'OPEN' ? 'text-green-600/70 dark:text-green-400/70'
-            : this.prState === 'MERGED' ? 'text-purple-600/70 dark:text-purple-400/70'
-            : 'text-red-600/70 dark:text-red-400/70';
-        return html`<span class="${colorClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title="PR #${this.prNumber} ${this.prState.toLowerCase()}"><span style="font-size:10px">⦿</span>${this.prNumber != null ? html`<span style="font-size:10px">#${this.prNumber}</span>` : nothing}</span>`;
+        // When PR is open, color reflects review status
+        let colorClass: string;
+        let title: string;
+        if (this.prState === 'MERGED') {
+            colorClass = 'text-purple-600/70 dark:text-purple-400/70';
+            title = `PR #${this.prNumber} merged`;
+        } else if (this.prState === 'CLOSED') {
+            colorClass = 'text-red-600/70 dark:text-red-400/70';
+            title = `PR #${this.prNumber} closed`;
+        } else if (this.reviewDecision === 'APPROVED') {
+            colorClass = 'text-green-600/70 dark:text-green-400/70';
+            title = `PR #${this.prNumber} approved`;
+        } else if (this.reviewDecision === 'CHANGES_REQUESTED') {
+            colorClass = 'text-red-600/70 dark:text-red-400/70';
+            title = `PR #${this.prNumber} changes requested`;
+        } else if (this.reviewDecision === 'REVIEW_REQUIRED') {
+            colorClass = 'text-amber-600/70 dark:text-amber-400/70';
+            title = `PR #${this.prNumber} awaiting review`;
+        } else {
+            colorClass = 'text-green-600/70 dark:text-green-400/70';
+            title = `PR #${this.prNumber} open`;
+        }
+        return html`<span class="${colorClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title=${title}><span style="font-size:10px">⦿</span>${this.prNumber != null ? html`<span style="font-size:10px">#${this.prNumber}</span>` : nothing}</span>`;
+    }
+
+    /** Review decision badge for inside the PR section */
+    private _renderReviewBadge() {
+        if (!this.reviewDecision || this.prState !== 'OPEN') return nothing;
+        const cfg: Record<string, { label: string; color: string; bg: string }> = {
+            APPROVED: { label: 'Approved', color: 'oklch(0.68 0.12 145)', bg: 'oklch(0.68 0.12 145 / 0.12)' },
+            CHANGES_REQUESTED: { label: 'Changes Requested', color: 'oklch(0.62 0.14 25)', bg: 'oklch(0.62 0.14 25 / 0.12)' },
+            REVIEW_REQUIRED: { label: 'Awaiting Review', color: 'oklch(0.65 0.12 60)', bg: 'oklch(0.65 0.12 60 / 0.12)' },
+        };
+        const c = cfg[this.reviewDecision];
+        if (!c) return nothing;
+        return html`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:${c.color};background:${c.bg}">${c.label}</span>`;
     }
 
     /** PR section for the expanded dropdown */
@@ -183,6 +216,7 @@ export class GitStatusWidget extends LitElement {
                     <span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:${badgeColor};background:${badgeBg}">
                         ${this.prState}
                     </span>
+                    ${this._renderReviewBadge()}
                 </div>
                 ${this.prState === 'OPEN' ? html`
                     <div style="display:flex;align-items:center;gap:6px;margin-top:6px">

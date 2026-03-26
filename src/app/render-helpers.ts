@@ -206,9 +206,11 @@ function renderSessionTime(session: GatewaySession) {
 export const SESSION_ROW_PY = "py-0.5";
 
 /** Consistent indent per nesting level (px). */
-export const INDENT = 5;
-/** Width of the chevron/spacer slot for session rows (px). */
-export const CHEVRON_W = 5;
+export const INDENT = 10;
+/** Width of the chevron/spacer slot (px) — same for all chevrons. */
+export const CHEVRON_W = 14;
+/** Wider chevron slot for level-0 section headers (extra right breathing room). */
+export const HEADER_CHEVRON_W = 20;
 
 export function renderSessionRow(session: GatewaySession) {
 	const mobile = !isDesktop();
@@ -216,6 +218,12 @@ export function renderSessionRow(session: GatewaySession) {
 	const connecting = state.connectingSessionId === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
+
+	// Check for children (live delegates + archived delegates)
+	const liveDelegates = state.gatewaySessions.filter(s => s.delegateOf === session.id && (state.showArchived || s.status !== "terminated"));
+	const archivedDelegates = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf === session.id) : [];
+	const hasChildren = liveDelegates.length > 0 || archivedDelegates.length > 0;
+	const childrenExpanded = hasChildren && isArchivedParentExpanded(session.id);
 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
@@ -232,7 +240,7 @@ export function renderSessionRow(session: GatewaySession) {
 
 	return html`
 		<div
-			class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
+			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
@@ -240,6 +248,12 @@ export function renderSessionRow(session: GatewaySession) {
 			@mouseleave=${mobile ? null : hideSessionTooltip}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 		>
+			${hasChildren ? html`<span
+				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
+				style="width:${CHEVRON_W}px;"
+				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
+				title="${childrenExpanded ? "Collapse delegates" : "Expand delegates"}"
+			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
 				${connecting
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
@@ -264,17 +278,18 @@ export function renderSessionRow(session: GatewaySession) {
 					${buttons}
 				</div>`}
 		</div>
-		${renderLiveDelegates(session.id)}
-		${renderArchivedDelegates(session.id)}
+		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${renderArchivedDelegates(session.id)}` : ""}
 	`;
 }
 
 /** Render live delegate sessions nested under a parent session. */
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
-	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId);
+	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId && (state.showArchived || s.status !== "terminated"));
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-		${delegates.map(s => renderSessionRow(s))}
+		${delegates.map(s => s.status === "terminated"
+			? html`${renderArchivedSessionRow(s)}${renderArchivedDelegates(s.id)}`
+			: renderSessionRow(s))}
 	</div>`;
 }
 
@@ -285,25 +300,25 @@ export { renderSessionRow as renderSidebarSession };
 // ARCHIVED SESSION ROW
 // ============================================================================
 
-export function renderArchivedSessionRow(session: GatewaySession) {
+export function renderArchivedSessionRow(session: GatewaySession, extraChildren = false) {
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const delegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
-	const hasDelegates = delegates.length > 0;
-	const expanded = hasDelegates && isArchivedParentExpanded(session.id);
+	const hasChildren = delegates.length > 0 || extraChildren;
+	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	return html`
 		<div
 			class="group relative flex items-center gap-1 pr-1 ${SESSION_ROW_PY} rounded-md cursor-pointer transition-colors text-sm opacity-50
 				${active ? "bg-secondary text-foreground sidebar-session-active" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:${hasDelegates ? 0 : CHEVRON_W}px;"
-			@click=${() => connectToSession(session.id, true)}
+			style="padding-left:${CHEVRON_W}px;"
+			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 			title="${displayTitle} (archived)"
 		>
-			${hasDelegates ? html`<span
-				class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer opacity-60"
-				style="width:8px;text-align:center;"
+			${hasChildren ? html`<span
+				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer opacity-60"
+				style="width:${CHEVRON_W}px;"
 				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
-				title="${expanded ? "Collapse delegates" : "Expand delegates"}"
+				title="${expanded ? "Collapse" : "Expand"}"
 			>${expanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center" style="filter:grayscale(1) opacity(0.7);">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
@@ -355,8 +370,8 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	`;
 
 	const chevron = html`<span
-		class="text-[11px] text-muted-foreground shrink-0 select-none cursor-pointer"
-		style="width:${CHEVRON_W}px;text-align:center;"
+		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
+		style="width:${CHEVRON_W}px;"
 		@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(session.id); renderApp(); }}
 		title="${expanded ? "Collapse agents" : "Expand agents"}"
 	>${expanded ? "▾" : "▸"}</span>`;
@@ -365,8 +380,9 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	return html`
 		<div
-			class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
+			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+			style="padding-left:${CHEVRON_W}px;"
 			@mouseenter=${mobile ? null : (e: MouseEvent) => showSessionTooltip(e, session, displayTitle)}
 			@mouseleave=${mobile ? null : hideSessionTooltip}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
@@ -400,8 +416,18 @@ function renderGoalBadge(goalId: string) {
 	// PR status takes priority over gate counts
 	const pr = state.prStatusCache.get(goalId);
 	if (pr) {
-		const color = pr.state === "OPEN" ? "#6bc485" : pr.state === "MERGED" ? "#a87fd4" : "#c47070";
-		const label = pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`;
+		let color: string;
+		if (pr.state === "MERGED") color = "#a87fd4";
+		else if (pr.state === "CLOSED") color = "#c47070";
+		else if (pr.reviewDecision === "APPROVED") color = "#6bc485";
+		else if (pr.reviewDecision === "CHANGES_REQUESTED") color = "#c47070";
+		else if (pr.reviewDecision === "REVIEW_REQUIRED") color = "#d4a04a";
+		else color = "#6bc485";
+		const reviewLabel = pr.state === "OPEN" && pr.reviewDecision === "REVIEW_REQUIRED" ? " — awaiting review"
+			: pr.state === "OPEN" && pr.reviewDecision === "CHANGES_REQUESTED" ? " — changes requested"
+			: pr.state === "OPEN" && pr.reviewDecision === "APPROVED" ? " — approved"
+			: "";
+		const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel;
 		const icon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
 		if (pr.url) {
 			return html`<a class="shrink-0 flex items-center" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${icon}</a>`;
@@ -415,7 +441,17 @@ function renderGoalBadge(goalId: string) {
 	const hasTeam = state.gatewaySessions.some(s => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead" && s.status !== "terminated");
 	const allPassed = gs.passed === gs.total;
 	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : "#3b82f6";
-	return html`<span class="shrink-0" style="font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
+	const label = `(${gs.passed}/${gs.total})`;
+	if (gs.verifying) {
+		// Mexican wave: each character gets a staggered animation
+		const chars = label.split("");
+		const totalDur = 1.2; // seconds for full wave cycle
+		const stagger = totalDur / chars.length;
+		return html`<span class="shrink-0 gate-wave" style="font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${gs.passed} of ${gs.total} gates passed — verifying">${chars.map((ch, i) =>
+			html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
+		)}</span>`;
+	}
+	return html`<span class="shrink-0" style="font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${gs.passed} of ${gs.total} gates passed">${label}</span>`;
 }
 
 /**
@@ -487,11 +523,19 @@ export function renderGoalGroup(goal: Goal) {
 	const renderTeamGroup = () => {
 		if (!teamLead) return goalSessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
+		// Archived members belonging to the live lead
+		const archivedForLiveLead = state.showArchived
+			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
+			: [];
 		return html`
-			${renderTeamLeadRow(teamLead, teamChildren.length, tlExpanded)}
+			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${teamChildren.map(renderSessionRow)}
+					${archivedForLiveLead.map(s => html`
+						${renderArchivedSessionRow(s)}
+						${renderArchivedDelegates(s.id)}
+					`)}
 				</div>
 			` : ""}
 			${nonTeamSessions.map(renderSessionRow)}
@@ -500,10 +544,11 @@ export function renderGoalGroup(goal: Goal) {
 
 	return html`
 		<div class="flex flex-col ${goal.state === "shelved" ? "opacity-60" : ""}">
-			<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pl-0 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
+			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
+				style="padding-left:${HEADER_CHEVRON_W}px;"
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
-				<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
+				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
@@ -522,23 +567,38 @@ export function renderGoalGroup(goal: Goal) {
 						Creating…
 					</div>` : ""}
 					${teamControls}
-					${state.archivedSectionExpanded ? (() => {
+					${state.showArchived ? (() => {
 						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
+
+						// Map each member to its lead (live or archived) via teamLeadSessionId.
+						// All leads: live lead first (if any), then archived leads.
+						const allLeads = [...(teamLead ? [teamLead.id] : []), ...archivedLeads.map(s => s.id)];
+						const membersOf = (leadId: string) => archivedMembers.filter(m => m.teamLeadSessionId === leadId);
+						const mappedIds = new Set(archivedMembers.filter(m => m.teamLeadSessionId && allLeads.includes(m.teamLeadSessionId)).map(m => m.id));
+						const unmapped = archivedMembers.filter(m => !mappedIds.has(m.id));
+
+						// Render archived leads, each with their own members
+						const renderLeadWithMembers = (lead: GatewaySession, isLast: boolean) => {
+							const myMembers = [...membersOf(lead.id), ...(isLast ? unmapped : [])];
+							const expanded = isArchivedParentExpanded(lead.id);
+							return html`
+								${renderArchivedSessionRow(lead, myMembers.length > 0)}
+								${renderArchivedDelegates(lead.id)}
+								${expanded && myMembers.length > 0 ? html`
+									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+										${myMembers.map(m => html`
+											${renderArchivedSessionRow(m)}
+											${renderArchivedDelegates(m.id)}
+										`)}
+									</div>
+								` : ""}
+							`;
+						};
+
 						return html`
-							${archivedLeads.map(s => html`
-								${renderArchivedSessionRow(s)}
-								${renderArchivedDelegates(s.id)}
-							`)}
-							${archivedMembers.length > 0 ? html`
-								<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-									${archivedMembers.map(s => html`
-										${renderArchivedSessionRow(s)}
-										${renderArchivedDelegates(s.id)}
-									`)}
-								</div>
-							` : ""}
+							${archivedLeads.map((s, i) => renderLeadWithMembers(s, i === archivedLeads.length - 1 && !teamLead))}
 						`;
 					})() : ""}
 				</div>

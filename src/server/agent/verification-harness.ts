@@ -7,6 +7,7 @@ import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
+import type { SessionManager } from "./session-manager.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import type { WorkflowGate, Workflow } from "./workflow-store.js";
 
@@ -49,7 +50,7 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed"; durationMs?: number; output?: string; startedAt: number }>;
+	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed"; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
 	overallStatus: "running" | "passed" | "failed";
 	startedAt: number;
 }
@@ -69,6 +70,8 @@ export class VerificationHarness {
 		private broadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
 		private preferencesStore?: PreferencesStore,
+		private sessionManager?: import("./session-manager.js").SessionManager,
+		private teamManager?: import("./team-manager.js").TeamManager,
 	) {}
 
 	/** Register a callback to notify the team lead agent when verification completes. */
@@ -198,8 +201,27 @@ export class VerificationHarness {
 						return { index, stepResult: cachedResult };
 					}
 
-					let result: { passed: boolean; output: string } = { passed: false, output: "No verification result." };
+					let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "No verification result." };
 					const startTime = Date.now();
+
+					// Pre-generate sessionId for LLM review steps so we can broadcast it before the step starts
+					let stepSessionId: string | undefined;
+					if (step.type === "llm-review") {
+						stepSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
+						this.broadcastFn(signal.goalId, {
+							type: "gate_verification_step_started",
+							goalId: signal.goalId,
+							gateId: signal.gateId,
+							signalId: signal.id,
+							stepIndex: index,
+							stepName: step.name,
+							sessionId: stepSessionId,
+						});
+						const av = this.activeVerifications.get(signal.id);
+						if (av && av.steps[index]) {
+							av.steps[index].sessionId = stepSessionId;
+						}
+					}
 
 					if (step.type === "command") {
 						const cmd = this.substituteVars(step.run || "", builtinVars, allGateStates);
@@ -209,7 +231,7 @@ export class VerificationHarness {
 						// llm-review — spawn a one-shot reviewer sub-agent
 						if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 							// Fast path for test environments without API keys
-							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set)." };
+							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 						} else {
 							const prompt = this.substituteVars(step.prompt || "", builtinVars, allGateStates);
 							const maxAttempts = 2;
@@ -222,6 +244,8 @@ export class VerificationHarness {
 									signal.metadata,
 									goalSpec,
 									allGateStates,
+									signal.goalId,
+									stepSessionId,
 								);
 								const isTransient = result.output.includes("timed out") || result.output.includes("no <verdict> tag");
 								if (result.passed || !isTransient || attempt === maxAttempts) break;
@@ -241,10 +265,11 @@ export class VerificationHarness {
 						status: result.passed ? "passed" : "failed",
 						durationMs: duration_ms,
 						output: result.output || "",
+						sessionId: result.sessionId,
 					});
 					const av = this.activeVerifications.get(signal.id);
 					if (av && av.steps[index]) {
-						av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "" };
+						av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
 					}
 					return {
 						index,
@@ -323,19 +348,78 @@ export class VerificationHarness {
 		signalMetadata?: Record<string, string>,
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
-	): Promise<{ passed: boolean; output: string }> {
+		goalId?: string,
+		sessionId?: string,
+	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const role = this.roleStore.get("reviewer");
 		if (!role) {
-			return { passed: false, output: "LLM review failed: 'reviewer' role not found in role store." };
+			return { passed: false, output: "LLM review failed: 'reviewer' role not found in role store.", sessionId };
 		}
 
-		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
+		const subSessionId = sessionId || `llm-review-${randomUUID().slice(0, 12)}`;
+
 		const timeoutMs = (step.timeout || 600) * 1000;
 
-		// Build system prompt from reviewer role template + step prompt + signal context
+		// Build the combined prompt sections (shared between session-based and direct-RpcBridge paths)
+		const combinedPrompt = this.buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates);
+
+		// Build the kickoff message (shared between both paths)
+		const kickoff = [
+			`Perform a code review for the gate verification step: "${step.name}".`,
+			"",
+			step.prompt || "",
+			"",
+			"## Required Output Format",
+			"",
+			"Produce your review, then end with a <verdict> tag. Example:",
+			"",
+			"```",
+			"## Summary",
+			"Brief overview of what was reviewed and the outcome.",
+			"",
+			"## Findings",
+			"[critical] file.ts:line — Description",
+			"[high] file.ts:line — Description",
+			"[medium] file.ts:line — Description",
+			"[low] file.ts:line — Description",
+			"",
+			"## Verdict",
+			"Explanation of pass/fail decision.",
+			"",
+			"<verdict>pass</verdict>",
+			"```",
+			"",
+			"## Rules",
+			"- **<verdict>fail</verdict>** if any critical or high severity findings exist",
+			"- **<verdict>pass</verdict>** if no critical or high severity findings",
+			"- **You MUST include exactly one `<verdict>pass</verdict>` or `<verdict>fail</verdict>` tag — if you omit it, the review fails automatically regardless of your findings**",
+		].join("\n");
+
+		// ── Session-based path (visible in UI) ──
+		if (this.sessionManager && goalId) {
+			return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs);
+		}
+
+		// ── Legacy direct-RpcBridge path (fallback when SessionManager unavailable) ──
+		return this.runLlmReviewDirect(step, cwd, role, combinedPrompt, kickoff, timeoutMs);
+	}
+
+	/**
+	 * Build the combined system prompt for a review step.
+	 */
+	private buildReviewPrompt(
+		role: { promptTemplate: string; allowedTools: string[] },
+		step: { name: string; prompt?: string },
+		cwd: string,
+		builtinVars: Record<string, string>,
+		signalContent?: string,
+		signalMetadata?: Record<string, string>,
+		goalSpec?: string,
+		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
+	): string {
 		let rolePrompt = role.promptTemplate
 			.replace(/\{\{GOAL_BRANCH\}\}/g, builtinVars.branch || "HEAD")
-			.replace(/\{\{AGENT_ID\}\}/g, subSessionId);
+			.replace(/\{\{AGENT_ID\}\}/g, "reviewer");
 
 		const sections: string[] = [rolePrompt];
 
@@ -343,7 +427,6 @@ export class VerificationHarness {
 			sections.push(`\n## Review Step Instructions\n\n${step.prompt}`);
 		}
 
-		// Reinforce verdict requirement in system prompt (LLMs prioritise system prompt over user messages)
 		sections.push([
 			"\n## CRITICAL: Verdict Tag Requirement",
 			"",
@@ -355,12 +438,10 @@ export class VerificationHarness {
 			"This is the single most important formatting requirement. Never omit it.",
 		].join("\n"));
 
-		// Goal specification context
 		if (goalSpec) {
 			sections.push(`\n## Goal Specification\n\n${goalSpec}`);
 		}
 
-		// Upstream gate content (from passed gates with injectDownstream)
 		if (allGateStates) {
 			const upstreamParts: string[] = [];
 			for (const [gateId, gs] of allGateStates) {
@@ -373,7 +454,6 @@ export class VerificationHarness {
 			}
 		}
 
-		// Signal context
 		const contextLines: string[] = [
 			"\n## Signal Context",
 			`- Branch: ${builtinVars.branch || "HEAD"}`,
@@ -391,7 +471,116 @@ export class VerificationHarness {
 		}
 		sections.push(contextLines.join("\n"));
 
-		const combinedPrompt = sections.join("\n");
+		return sections.join("\n");
+	}
+
+	/**
+	 * Run an LLM review step via SessionManager (visible in UI as a proper session).
+	 */
+	private async runLlmReviewViaSession(
+		step: { name: string; prompt?: string; timeout?: number },
+		cwd: string,
+		goalId: string,
+		role: { promptTemplate: string; allowedTools: string[]; accessory?: string },
+		combinedPrompt: string,
+		kickoff: string,
+		timeoutMs: number,
+	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+		let sessionId: string | undefined;
+		try {
+			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
+			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+				rolePrompt: combinedPrompt,
+				allowedTools: role.allowedTools,
+			});
+			sessionId = session.id;
+
+			// Set title and metadata
+			this.sessionManager!.setTitle(sessionId, `Reviewer: ${step.name}`);
+			this.sessionManager!.updateSessionMeta(sessionId, {
+				role: "reviewer",
+				teamGoalId: goalId,
+				accessory: role.accessory || "magnifying-glass",
+				nonInteractive: true,
+			});
+
+			// Register in team store (if team manager available)
+			if (this.teamManager) {
+				try {
+					await this.teamManager.registerReviewerSession(goalId, sessionId, step.name);
+				} catch (err) {
+					// Non-fatal — session still works even if team registration fails
+					console.warn(`[verification] Failed to register reviewer session in team:`, err);
+				}
+			}
+
+			// Override model if default.reviewModel preference is set
+			if (this.preferencesStore) {
+				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
+				if (reviewModelPref) {
+					const slash = reviewModelPref.indexOf("/");
+					if (slash > 0 && slash < reviewModelPref.length - 1) {
+						const provider = reviewModelPref.slice(0, slash);
+						const modelId = reviewModelPref.slice(slash + 1);
+						try {
+							await session.rpcClient.setModel(provider, modelId);
+							console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
+						} catch (err) {
+							console.warn(`[verification] Failed to set review model "${reviewModelPref}", using default:`, err);
+						}
+					} else {
+						console.warn(`[verification] Malformed default.reviewModel preference: "${reviewModelPref}", ignoring`);
+					}
+				}
+			}
+
+			// Send kickoff prompt and wait for idle
+			await session.rpcClient.prompt(kickoff);
+			await this.sessionManager!.waitForIdle(sessionId, timeoutMs);
+
+			// Get output from the session
+			const output = await this.sessionManager!.getSessionOutput(sessionId);
+
+			const verdict = parseVerdict(output);
+			if (verdict === null) {
+				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId };
+			}
+
+			return { passed: verdict, output, sessionId };
+		} catch (err: any) {
+			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
+			const errOutput = isTimeout
+				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
+				: `LLM review failed: ${err.message}`;
+			return { passed: false, output: errOutput, sessionId };
+		} finally {
+			// Always terminate and unregister, even on error/timeout
+			if (sessionId) {
+				try {
+					await this.sessionManager!.terminateSession(sessionId);
+				} catch { /* ignore — session may already be terminated */ }
+				if (this.teamManager) {
+					try {
+						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
+					} catch { /* ignore */ }
+				}
+			}
+		}
+	}
+
+	/**
+	 * Legacy direct-RpcBridge path for LLM review (invisible to UI).
+	 * Used when SessionManager is not available.
+	 */
+	private async runLlmReviewDirect(
+		step: { name: string; prompt?: string; timeout?: number },
+		cwd: string,
+		role: { promptTemplate: string; allowedTools: string[] },
+		combinedPrompt: string,
+		kickoff: string,
+		timeoutMs: number,
+	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 
 		// Assemble system prompt to temp file
 		const systemPromptPath = assembleSystemPrompt(subSessionId, {
@@ -408,9 +597,19 @@ export class VerificationHarness {
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 
 		const rpc = new RpcBridge(bridgeOptions);
+		let unregisterSession: (() => void) | undefined;
 
 		try {
 			await rpc.start();
+
+			// Register as a viewable session so users can watch the review live
+			if (this.sessionManager) {
+				unregisterSession = this.sessionManager.registerExternalSession(subSessionId, rpc, {
+					title: `LLM Review: ${step.name}`,
+					cwd,
+					role: "reviewer",
+				});
+			}
 
 			// Override model if default.reviewModel preference is set
 			if (this.preferencesStore) {
@@ -433,18 +632,14 @@ export class VerificationHarness {
 			}
 
 			// Collect assistant text from streaming events as a fallback
-			// in case getMessages() fails after agent_end (race with process exit).
 			let streamedAssistantText = "";
 
-			// Wait for agent_end event with timeout
 			const completionPromise = new Promise<void>((resolve, reject) => {
 				const timer = setTimeout(() => {
 					reject(new Error(`LLM review sub-agent timed out after ${timeoutMs / 1000}s`));
 				}, timeoutMs);
 
 				const eventUnsub = rpc.onEvent((event: any) => {
-					// Capture assistant text from message_end events as they arrive.
-					// This serves as a fallback if getMessages() fails after agent_end.
 					if (event.type === "message_end" && event.message?.role === "assistant") {
 						const msg = event.message;
 						if (Array.isArray(msg.content)) {
@@ -465,42 +660,9 @@ export class VerificationHarness {
 				});
 			});
 
-			// Send kickoff prompt
-			const kickoff = [
-				`Perform a code review for the gate verification step: "${step.name}".`,
-				"",
-				step.prompt || "",
-				"",
-				"## Required Output Format",
-				"",
-				"Produce your review, then end with a <verdict> tag. Example:",
-				"",
-				"```",
-				"## Summary",
-				"Brief overview of what was reviewed and the outcome.",
-				"",
-				"## Findings",
-				"[critical] file.ts:line — Description",
-				"[high] file.ts:line — Description",
-				"[medium] file.ts:line — Description",
-				"[low] file.ts:line — Description",
-				"",
-				"## Verdict",
-				"Explanation of pass/fail decision.",
-				"",
-				"<verdict>pass</verdict>",
-				"```",
-				"",
-				"## Rules",
-				"- **<verdict>fail</verdict>** if any critical or high severity findings exist",
-				"- **<verdict>pass</verdict>** if no critical or high severity findings",
-				"- **You MUST include exactly one `<verdict>pass</verdict>` or `<verdict>fail</verdict>` tag — if you omit it, the review fails automatically regardless of your findings**",
-			].join("\n");
-
 			await rpc.prompt(kickoff);
 			await completionPromise;
 
-			// Extract last assistant message — try getMessages() first, fall back to streamed text
 			let output = "";
 			try {
 				const msgsResp = await rpc.getMessages();
@@ -508,28 +670,28 @@ export class VerificationHarness {
 					output = extractLastAssistantOutput(msgsResp.data);
 				}
 			} catch {
-				// Non-fatal — we may still have partial output from streaming
+				// Non-fatal
 			}
-			// If getMessages() returned nothing (race with process exit), use streamed text
 			if (!output && streamedAssistantText) {
 				output = streamedAssistantText;
 			}
 
 			const verdict = parseVerdict(output);
 			if (verdict === null) {
-				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output." };
+				return { passed: false, output: output || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId: subSessionId };
 			}
 
-			return { passed: verdict, output };
+			return { passed: verdict, output, sessionId: subSessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out");
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
 				: `LLM review failed: ${err.message}`;
-			return { passed: false, output: errOutput };
+			return { passed: false, output: errOutput, sessionId: subSessionId };
 		} finally {
 			await rpc.stop().catch(() => {});
-			// Clean up temporary system prompt
+			// Unregister the session (archives it so chat history remains viewable)
+			if (unregisterSession) unregisterSession();
 			try {
 				const promptDir = path.join(bobbitStateDir(), "session-prompts");
 				const promptFile = path.join(promptDir, `${subSessionId}.md`);

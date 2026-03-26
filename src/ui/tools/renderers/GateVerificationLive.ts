@@ -14,6 +14,7 @@ import {
 	statusIcon,
 	formatDuration,
 	renderDuration,
+	renderSessionLink,
 } from "./delegate-cards.js";
 
 interface VerificationStep {
@@ -23,6 +24,7 @@ interface VerificationStep {
 	durationMs?: number;
 	output?: string;
 	startedAt: number;
+	sessionId?: string;
 }
 
 /** Map verification step status to delegate-cards status strings */
@@ -44,6 +46,7 @@ function toCardEntry(step: VerificationStep, index: number): DelegateCardEntry {
 		name: step.name || "step",
 		status: delegateStatus,
 		durationMs,
+		sessionId: step.sessionId,
 	};
 }
 
@@ -107,6 +110,19 @@ export class GateVerificationLive extends LitElement {
 				this.overallStatus = "running";
 				break;
 			}
+			case "gate_verification_step_started": {
+				const idx = detail.stepIndex as number;
+				if (idx >= 0 && idx < this.steps.length) {
+					const updated = [...this.steps];
+					updated[idx] = {
+						...updated[idx],
+						sessionId: detail.sessionId,
+					};
+					this.steps = updated;
+				}
+				this.requestUpdate();
+				break;
+			}
 			case "gate_verification_step_complete": {
 				const idx = detail.stepIndex as number;
 				if (idx >= 0 && idx < this.steps.length) {
@@ -116,6 +132,7 @@ export class GateVerificationLive extends LitElement {
 						status: detail.status,
 						durationMs: detail.durationMs,
 						output: detail.output,
+						sessionId: detail.sessionId ?? updated[idx].sessionId,
 					};
 					this.steps = updated;
 				} else if (idx >= this.steps.length) {
@@ -213,6 +230,7 @@ export class GateVerificationLive extends LitElement {
 					<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name || "step"}</span>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
 					${renderDuration(entry)}
+					${step.sessionId ? renderSessionLink(step.sessionId) : nothing}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
 				</div>
 				${isExpanded && step.output ? html`

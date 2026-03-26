@@ -38,7 +38,7 @@ const execAsync = promisify(exec);
 
 // ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
 const _prCache = new Map<string, { data: any; ts: number }>();
-const PR_CACHE_TTL_MS = 30_000; // 30 seconds
+const PR_CACHE_TTL_MS = 15_000; // 15 seconds
 
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
@@ -64,14 +64,14 @@ async function getCachedPrStatus(cwd: string): Promise<any | null> {
 	const cached = _prCache.get(cwd);
 	if (cached && Date.now() - cached.ts < PR_CACHE_TTL_MS) return cached.data;
 	try {
-		const { stdout } = await execAsync("gh pr view --json state,url,number,title,mergeable,headRefName", {
+		const { stdout } = await execAsync("gh pr view --json state,url,number,title,mergeable,headRefName,reviewDecision", {
 			cwd,
 			encoding: "utf-8",
 			timeout: 10000,
 		});
 		const pr = JSON.parse(stdout);
 		const viewerIsAdmin = await getViewerIsAdmin(cwd);
-		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, viewerIsAdmin };
+		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
 		_prCache.set(cwd, { data, ts: Date.now() });
 		return data;
 	} catch {
@@ -256,7 +256,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 	teamManager.setBroadcastToGoal(broadcastToGoal);
-	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore);
+	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
 		if (!team?.teamLeadSessionId) return;
@@ -450,6 +450,7 @@ async function handleApiRoute(
 					delegateOf: archived.delegateOf,
 					role: archived.role,
 					teamGoalId: archived.teamGoalId,
+					teamLeadSessionId: archived.teamLeadSessionId,
 					worktreePath: archived.worktreePath,
 					taskId: archived.taskId,
 					staffId: archived.staffId,
@@ -483,6 +484,7 @@ async function handleApiRoute(
 			delegateOf: session.delegateOf,
 			role: session.role,
 			teamGoalId: session.teamGoalId,
+			teamLeadSessionId: session.teamLeadSessionId,
 			worktreePath: session.worktreePath,
 			taskId: session.taskId,
 			staffId: session.staffId,
@@ -1531,6 +1533,10 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
+		if (session.nonInteractive) {
+			json({ error: "Cannot steer a non-interactive (automated review) session" }, 400);
+			return;
+		}
 		if (session.status !== "streaming") {
 			json({ error: "Agent is not currently streaming — use team/prompt instead" }, 409);
 			return;
@@ -1592,6 +1598,10 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(body.sessionId);
 		if (!session) {
 			json({ error: "Session not found" }, 404);
+			return;
+		}
+		if (session.nonInteractive) {
+			json({ error: "Cannot prompt a non-interactive (automated review) session" }, 400);
 			return;
 		}
 		// Enforce gate dependency check for team/prompt
@@ -1845,6 +1855,22 @@ async function handleApiRoute(
 			if (session) {
 				session.accessory = body.accessory || undefined;
 				sessionManager.persistSessionMetadata(session).catch(() => {});
+			}
+		}
+
+		if (typeof body.teamLeadSessionId === "string") {
+			// Update teamLeadSessionId — works for both live and archived sessions
+			const session = sessionManager.getSession(id);
+			if (session) {
+				sessionManager.updateSessionMeta(id, { teamLeadSessionId: body.teamLeadSessionId });
+			} else {
+				// Try archived session — update store directly
+				const archived = sessionManager.getArchivedSession(id);
+				if (archived) {
+					sessionManager.updateArchivedMeta(id, { teamLeadSessionId: body.teamLeadSessionId });
+				} else {
+					json({ error: "Session not found" }, 404); return;
+				}
 			}
 		}
 

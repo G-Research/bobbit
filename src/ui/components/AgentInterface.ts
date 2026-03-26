@@ -59,6 +59,7 @@ export class AgentInterface extends LitElement {
 	@property() prTitle?: string;
 	@property({ type: Boolean }) prMergeable?: boolean;
 	@property({ type: Boolean }) viewerIsAdmin?: boolean;
+	@property() reviewDecision?: string;
 	// Background processes for this session
 	@property({ attribute: false }) bgProcesses: BgProcessInfo[] = [];
 	@property({ attribute: false }) onBgProcessKill?: (id: string) => void;
@@ -680,6 +681,7 @@ export class AgentInterface extends LitElement {
 								.prTitle=${this.prTitle}
 								.prMergeable=${this.prMergeable ?? false}
 								.viewerIsAdmin=${this.viewerIsAdmin ?? false}
+								.reviewDecision=${this.reviewDecision}
 								@pr-merge=${this._handlePrMerge}
 								@git-pull=${this._handleGitPull}
 							></git-status-widget>` : nothing}

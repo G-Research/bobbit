@@ -54,6 +54,8 @@ export interface SessionInfo {
 	role?: string;
 	/** The team goal ID this agent belongs to */
 	teamGoalId?: string;
+	/** Session ID of the team lead that spawned this agent */
+	teamLeadSessionId?: string;
 	/** Path to the git worktree for this session */
 	worktreePath?: string;
 	/** Task ID this session is working on */
@@ -62,6 +64,8 @@ export interface SessionInfo {
 	staffId?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory?: string;
+	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
+	nonInteractive?: boolean;
 	/** Personality names */
 	personalities?: string[];
 	/** Allowed tools for this session */
@@ -584,6 +588,7 @@ export class SessionManager {
 			assistantType: ps.assistantType,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
+			teamLeadSessionId: ps.teamLeadSessionId,
 			worktreePath: ps.worktreePath,
 			taskId: ps.taskId,
 			staffId: ps.staffId,
@@ -1069,6 +1074,7 @@ export class SessionManager {
 			taskId: session.taskId,
 			staffId: session.staffId,
 			accessory: session.accessory,
+			nonInteractive: session.nonInteractive,
 			preview: session.preview,
 			personalities: session.personalities,
 		});
@@ -1076,6 +1082,71 @@ export class SessionManager {
 
 	getSession(id: string): SessionInfo | undefined {
 		return this.sessions.get(id);
+	}
+
+	/**
+	 * Register an externally-created RPC bridge as a viewable session.
+	 * Used for LLM review sub-agents in verification harness so users can watch them live.
+	 * Returns an unsubscribe function to call when the session ends.
+	 */
+	registerExternalSession(id: string, rpcClient: RpcBridge, opts: {
+		title: string;
+		cwd: string;
+		role?: string;
+		goalId?: string;
+		teamGoalId?: string;
+	}): () => void {
+		const eventBuffer = new EventBuffer();
+		const now = Date.now();
+
+		const session: SessionInfo = {
+			id,
+			title: opts.title,
+			cwd: opts.cwd,
+			status: "idle",
+			createdAt: now,
+			lastActivity: now,
+			clients: new Set(),
+			rpcClient,
+			eventBuffer,
+			unsubscribe: () => {},
+			isCompacting: false,
+			titleGenerated: true,
+			goalId: opts.goalId,
+			role: opts.role,
+			teamGoalId: opts.teamGoalId,
+			promptQueue: new PromptQueue(),
+		};
+
+		const unsub = rpcClient.onEvent((event: any) => {
+			session.lastActivity = Date.now();
+			this.handleAgentLifecycle(session, event);
+			eventBuffer.push(event);
+			broadcast(session.clients, { type: "event", data: event });
+			this.trackCostFromEvent(session, event);
+		});
+		session.unsubscribe = unsub;
+
+		this.sessions.set(id, session);
+
+		this.persistSessionMetadata(session).catch((err) => {
+			console.error(`[session-manager] Failed to persist external session ${id}:`, err);
+		});
+
+		console.log(`[session-manager] Registered external session ${id}: ${opts.title}`);
+
+		return () => {
+			unsub();
+			session.status = "terminated";
+			for (const client of session.clients) {
+				client.close(1000, "Session terminated");
+			}
+			session.clients.clear();
+			this.sessions.delete(id);
+			this.store.remove(id);
+			cleanupSessionPrompt(id);
+			console.log(`[session-manager] Unregistered external session ${id}`);
+		};
 	}
 
 	listSessions(): Array<{
@@ -1095,10 +1166,12 @@ export class SessionManager {
 		delegateOf?: string;
 		role?: string;
 		teamGoalId?: string;
+		teamLeadSessionId?: string;
 		worktreePath?: string;
 		taskId?: string;
 		staffId?: string;
 		accessory?: string;
+		nonInteractive?: boolean;
 		preview?: boolean;
 		personalities?: string[];
 	}> {
@@ -1120,10 +1193,12 @@ export class SessionManager {
 			delegateOf: s.delegateOf,
 			role: s.role,
 			teamGoalId: s.teamGoalId,
+			teamLeadSessionId: s.teamLeadSessionId,
 			worktreePath: s.worktreePath,
 			taskId: s.taskId,
 			staffId: s.staffId,
 			accessory: s.accessory,
+			nonInteractive: s.nonInteractive,
 			preview: s.preview,
 			personalities: s.personalities,
 		}));
@@ -1176,14 +1251,16 @@ export class SessionManager {
 		}
 	}
 
-	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory) and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string }): boolean {
+	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory, teamLeadSessionId) and persist. */
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (updates.role !== undefined) session.role = updates.role;
 		if (updates.teamGoalId !== undefined) session.teamGoalId = updates.teamGoalId;
 		if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
 		if (updates.accessory !== undefined) session.accessory = updates.accessory;
+		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
+		if (updates.teamLeadSessionId !== undefined) session.teamLeadSessionId = updates.teamLeadSessionId;
 		this.store.update(id, updates);
 		return true;
 	}
@@ -1584,6 +1661,14 @@ export class SessionManager {
 		return ps?.archived ? ps : undefined;
 	}
 
+	/** Update metadata on an archived session (stored in the session store). */
+	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string }): boolean {
+		const ps = this.store.get(id);
+		if (!ps?.archived) return false;
+		this.store.update(id, updates);
+		return true;
+	}
+
 	/** Parse the .jsonl file for an archived session and return messages. */
 	getArchivedMessages(id: string): unknown[] {
 		const ps = this.store.get(id);
@@ -1626,6 +1711,7 @@ export class SessionManager {
 		delegateOf?: string;
 		role?: string;
 		teamGoalId?: string;
+		teamLeadSessionId?: string;
 		worktreePath?: string;
 		taskId?: string;
 		staffId?: string;
@@ -1649,6 +1735,7 @@ export class SessionManager {
 			delegateOf: ps.delegateOf,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
+			teamLeadSessionId: ps.teamLeadSessionId,
 			worktreePath: ps.worktreePath,
 			taskId: ps.taskId,
 			staffId: ps.staffId,

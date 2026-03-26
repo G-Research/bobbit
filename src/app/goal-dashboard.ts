@@ -1,7 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, type GateState, type GateSignal } from "./api.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -76,6 +76,7 @@ interface PrStatus {
 	state: "OPEN" | "MERGED" | "CLOSED";
 	mergeable: boolean;
 	viewerIsAdmin?: boolean;
+	reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
 }
 let prStatus: PrStatus | null = null;
 
@@ -90,12 +91,13 @@ interface GoalCost {
 let goalCost: GoalCost | null = null;
 let costPollTimer: ReturnType<typeof setInterval> | null = null;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Live verification tracking */
 interface LiveVerification {
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; startedAt: number }>;
+	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
 	overallStatus: string;
 }
 let liveVerifications: Map<string, LiveVerification> = new Map();
@@ -172,6 +174,11 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		startCostPolling(goalId);
 		startGitStatusPolling(goalId);
 
+		// Start setup status polling if worktree is still being prepared
+		if (currentGoal && currentGoal.setupStatus === "preparing") {
+			startSetupStatusPoll(goalId);
+		}
+
 		// Bootstrap live verification state from REST (catches in-progress verifications)
 		fetchActiveVerifications(goalId);
 
@@ -246,6 +253,7 @@ export function clearDashboardState(): void {
 	stopGatePolling();
 	stopCostPolling();
 	stopGitStatusPolling();
+	stopSetupStatusPoll();
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	liveVerifications = new Map();
 	expandedLiveStepKeys = new Set();
@@ -377,6 +385,17 @@ function handleLiveVerificationEvent(e: Event) {
 			renderApp();
 			break;
 		}
+		case "gate_verification_step_started": {
+			const entry = liveVerifications.get(key);
+			if (entry && entry.steps[detail.stepIndex]) {
+				entry.steps[detail.stepIndex] = {
+					...entry.steps[detail.stepIndex],
+					sessionId: detail.sessionId,
+				};
+				renderApp();
+			}
+			break;
+		}
 		case "gate_verification_step_complete": {
 			let entry = liveVerifications.get(key);
 			if (!entry) {
@@ -395,6 +414,7 @@ function handleLiveVerificationEvent(e: Event) {
 				status: detail.status,
 				durationMs: detail.durationMs,
 				output: detail.output,
+				sessionId: detail.sessionId ?? entry.steps[detail.stepIndex].sessionId,
 			};
 			renderApp();
 			break;
@@ -487,6 +507,22 @@ function startGitStatusPolling(goalId: string): void {
 
 function stopGitStatusPolling(): void {
 	if (gitStatusPollTimer) { clearInterval(gitStatusPollTimer); gitStatusPollTimer = null; }
+}
+
+function startSetupStatusPoll(goalId: string): void {
+	stopSetupStatusPoll();
+	setupPollTimer = setInterval(async () => {
+		if (!currentGoalId || currentGoalId !== goalId) return;
+		await refreshDashboardGoal();
+		// Stop polling once status changes away from "preparing"
+		if (currentGoal && currentGoal.setupStatus !== "preparing") {
+			stopSetupStatusPoll();
+		}
+	}, 3000);
+}
+
+function stopSetupStatusPoll(): void {
+	if (setupPollTimer) { clearInterval(setupPollTimer); setupPollTimer = null; }
 }
 
 // ============================================================================
@@ -745,6 +781,7 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>
 		if (prRes && prRes.ok) prStatus = await prRes.json();
 		else prStatus = null;
 	} catch { /* ignore */ }
+	refreshPrStatusCache();
 	renderApp();
 }
 
@@ -950,6 +987,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.prTitle=${prStatus?.title}
 						.prMergeable=${prStatus?.mergeable ?? false}
 						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
+						.reviewDecision=${prStatus?.reviewDecision}
 						@pr-merge=${handlePrMerge}
 					></git-status-widget>
 					${goal.worktreePath ? html`
@@ -1663,6 +1701,12 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							<span class="verify-card__duration">
 								${isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
 							</span>
+							${step.sessionId ? html`
+								<a href="/?token=${encodeURIComponent(localStorage.getItem("gateway.token") || "")}#/session/${step.sessionId}"
+								   target="_blank" rel="noopener"
+								   class="verify-card__session-link" title="View live logs"
+								   @click=${(e: Event) => e.stopPropagation()}>view</a>
+							` : nothing}
 							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
 						</div>
 						${isExpanded && step.output ? html`

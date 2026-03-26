@@ -11,7 +11,7 @@ import {
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache } from "./api.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel } from "./routing.js";
 import { sessionHueRotation } from "./session-colors.js";
@@ -343,7 +343,7 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 // CONNECT TO SESSION
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean }): Promise<void> {
 	if (state.connectingSessionId) return;
 	state.connectingSessionId = sessionId;
 
@@ -651,8 +651,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		}
 
-		// Disable input for archived sessions
-		if (state.chatPanel.agentInterface && remote.state.isArchived) {
+		// Disable input for archived or explicitly read-only sessions
+		if (state.chatPanel.agentInterface && (remote.state.isArchived || options?.readOnly)) {
+			state.chatPanel.agentInterface.readOnly = true;
+		}
+
+		// Disable input for non-interactive sessions (e.g. verification reviewers)
+		if (state.chatPanel.agentInterface && sessionData?.nonInteractive) {
 			state.chatPanel.agentInterface.readOnly = true;
 		}
 
@@ -692,6 +697,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					});
 					if (res.ok) {
 						refreshPrStatusForSession(sessionId);
+						refreshPrStatusCache();
 						return undefined;
 					}
 					const data = await res.json().catch(() => ({ error: 'Merge failed' }));
@@ -1016,6 +1022,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 				ai.prTitle = undefined;
 				ai.prMergeable = undefined;
 				ai.viewerIsAdmin = undefined;
+				ai.reviewDecision = undefined;
 			}
 			return;
 		}
@@ -1027,6 +1034,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = data.title;
 			ai.prMergeable = data.mergeable;
 			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
+			ai.reviewDecision = data.reviewDecision ?? undefined;
 		}
 	} catch {
 		if (activeSessionId() === sessionId) {
@@ -1036,6 +1044,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prTitle = undefined;
 			ai.prMergeable = undefined;
 			ai.viewerIsAdmin = undefined;
+			ai.reviewDecision = undefined;
 		}
 	}
 }
