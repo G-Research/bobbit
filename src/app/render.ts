@@ -1807,6 +1807,7 @@ export function doRenderApp(): void {
 
 	const assistantTabBar = () => {
 		if (!state.assistantType) return "";
+		if (!getAssistantPreviewPanel(state.assistantType)) return "";
 		return html`
 			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
 				<button
@@ -1966,6 +1967,13 @@ export function doRenderApp(): void {
 
 		if (connected && state.assistantType) {
 			const previewPanel = getAssistantPreviewPanel(state.assistantType);
+			if (!previewPanel) {
+				// No preview panel (e.g. setup wizard) — use full-width chat
+				return html`
+					${reconnectBanner()}
+					<div class="flex-1 flex flex-col min-h-0">${state.chatPanel}</div>
+				`;
+			}
 			if (desktop) {
 				return html`
 					${reconnectBanner()}
