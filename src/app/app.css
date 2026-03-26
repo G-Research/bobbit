@@ -492,11 +492,11 @@ theme-toggle button {
    Uses a wide repeating gradient so the highlight wraps seamlessly. */
 @keyframes title-wave {
 	from { background-position: 0% 0; }
-	to   { background-position: 200% 0; }
+	to   { background-position: -200% 0; }
 }
 .title-wave {
-	--tw-lo: color-mix(in srgb, var(--color-foreground, currentColor) 50%, transparent);
-	--tw-hi: var(--color-foreground, currentColor);
+	--tw-lo: var(--color-foreground, currentColor);
+	--tw-hi: color-mix(in srgb, var(--color-foreground, currentColor) 50%, transparent);
 	background:
 		repeating-linear-gradient(
 			90deg,
@@ -509,6 +509,7 @@ theme-toggle button {
 	-webkit-background-clip: text;
 	background-clip: text;
 	-webkit-text-fill-color: var(--tw-lo);
+	color: var(--tw-lo);
 	animation: title-wave 4s linear infinite;
 	will-change: background-position;
 }
