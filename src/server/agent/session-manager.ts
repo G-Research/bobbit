@@ -532,7 +532,7 @@ export class SessionManager {
 			const assistantRole = this.roleManager?.getRole("assistant");
 			let assistantGoalSpec = "";
 			if (assistantRole?.promptTemplate) {
-				assistantGoalSpec = assistantRole.promptTemplate;
+				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
@@ -696,7 +696,7 @@ export class SessionManager {
 			const assistantRole = this.roleManager?.getRole("assistant");
 			let assistantGoalSpec = "";
 			if (assistantRole?.promptTemplate) {
-				assistantGoalSpec = assistantRole.promptTemplate;
+				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(goalId || id).slice(0, 8)}`);
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
@@ -707,6 +707,7 @@ export class SessionManager {
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
+				allowedTools: effectiveAllowedTools,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 
