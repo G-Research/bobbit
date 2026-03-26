@@ -88,6 +88,7 @@ export class AgentInterface extends LitElement {
 	private _scrollContainer?: HTMLElement;
 	private _resizeObserver?: ResizeObserver;
 	private _lastScrollHeight = 0;
+	private _collapseCompensation = 0;
 	private _unsubscribeSession?: () => void;
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
@@ -145,23 +146,53 @@ export class AgentInterface extends LitElement {
 				if (!this._scrollContainer) return;
 				const newScrollHeight = this._scrollContainer.scrollHeight;
 				const delta = newScrollHeight - this._lastScrollHeight;
-				this._lastScrollHeight = newScrollHeight;
 
 				if (this._stickToBottom) {
-					this._isAutoScrolling = true;
-					this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+					if (delta < 0) {
+						// Content shrunk (e.g. tool collapsed) while stuck to bottom.
+						// Add bottom padding to compensate so scrollHeight is maintained
+						// and the browser doesn't clamp scrollTop (which causes a jolt).
+						// Subsequent content growth will gradually consume this padding.
+						const wrapper = this._scrollContainer.querySelector(".max-w-5xl") as HTMLElement;
+						if (wrapper) {
+							this._collapseCompensation += Math.abs(delta);
+							wrapper.style.paddingBottom = this._collapseCompensation + "px";
+						}
+						this._lastScrollHeight = this._scrollContainer.scrollHeight;
+						this._isAutoScrolling = true;
+						this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+					} else if (delta > 0 && this._collapseCompensation > 0) {
+						// Content grew while we have compensation padding — absorb
+						// the growth into the padding so scrollHeight stays stable.
+						const wrapper = this._scrollContainer.querySelector(".max-w-5xl") as HTMLElement;
+						if (wrapper) {
+							const absorbed = Math.min(delta, this._collapseCompensation);
+							this._collapseCompensation -= absorbed;
+							wrapper.style.paddingBottom = this._collapseCompensation > 0 ? this._collapseCompensation + "px" : "";
+						}
+						this._lastScrollHeight = this._scrollContainer.scrollHeight;
+						this._isAutoScrolling = true;
+						this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+					} else {
+						this._lastScrollHeight = newScrollHeight;
+						this._isAutoScrolling = true;
+						this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+					}
 					clearTimeout(this._autoScrollTimer);
 					this._autoScrollTimer = setTimeout(() => {
 						this._isAutoScrolling = false;
 					}, 150);
 				} else if (delta < 0) {
 					// Content shrunk (e.g. tool collapsed) — adjust scroll to keep viewport stable
+					this._lastScrollHeight = newScrollHeight;
 					this._isAutoScrolling = true;
 					this._scrollContainer.scrollTop += delta;
 					clearTimeout(this._autoScrollTimer);
 					this._autoScrollTimer = setTimeout(() => {
 						this._isAutoScrolling = false;
 					}, 150);
+				} else {
+					this._lastScrollHeight = newScrollHeight;
 				}
 			});
 
