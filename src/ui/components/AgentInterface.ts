@@ -87,6 +87,7 @@ export class AgentInterface extends LitElement {
 	private _autoScrollTimer?: ReturnType<typeof setTimeout>;
 	private _scrollContainer?: HTMLElement;
 	private _resizeObserver?: ResizeObserver;
+	private _lastScrollHeight = 0;
 	private _unsubscribeSession?: () => void;
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
@@ -132,6 +133,8 @@ export class AgentInterface extends LitElement {
 		this._scrollContainer = this.querySelector(".overflow-y-auto") as HTMLElement;
 
 		if (this._scrollContainer) {
+			this._lastScrollHeight = this._scrollContainer.scrollHeight;
+
 			// When content changes size, scroll to bottom if we're already there.
 			// Uses _stickToBottom flag — no keyboard/focus/viewport tracking needed.
 			// We set _isAutoScrolling to prevent the scroll event handler from
@@ -139,13 +142,22 @@ export class AgentInterface extends LitElement {
 			// can happen when content grows between the programmatic scroll and
 			// the resulting scroll event).
 			this._resizeObserver = new ResizeObserver(() => {
-				if (this._stickToBottom && this._scrollContainer) {
+				if (!this._scrollContainer) return;
+				const newScrollHeight = this._scrollContainer.scrollHeight;
+				const delta = newScrollHeight - this._lastScrollHeight;
+				this._lastScrollHeight = newScrollHeight;
+
+				if (this._stickToBottom) {
 					this._isAutoScrolling = true;
 					this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
-					// Clear the flag on a timeout rather than rAF — in Chrome,
-					// scroll events fire *after* rAF callbacks (during "run the
-					// scroll steps"), so an rAF-based reset races with the
-					// scroll handler and can falsely set _stickToBottom = false.
+					clearTimeout(this._autoScrollTimer);
+					this._autoScrollTimer = setTimeout(() => {
+						this._isAutoScrolling = false;
+					}, 150);
+				} else if (delta < 0) {
+					// Content shrunk (e.g. tool collapsed) — adjust scroll to keep viewport stable
+					this._isAutoScrolling = true;
+					this._scrollContainer.scrollTop += delta;
 					clearTimeout(this._autoScrollTimer);
 					this._autoScrollTimer = setTimeout(() => {
 						this._isAutoScrolling = false;
@@ -349,7 +361,14 @@ export class AgentInterface extends LitElement {
 	private _handleScroll = () => {
 		if (!this._scrollContainer || this._isAutoScrolling) return;
 		const { scrollTop, scrollHeight, clientHeight } = this._scrollContainer;
-		this._stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+		// Only update stickToBottom on genuine user scrolls, not browser-initiated
+		// scroll clamps during content resize. When content shrinks, the browser
+		// clamps scrollTop to the new max and fires a scroll event before the
+		// ResizeObserver runs — if we updated _stickToBottom here, it would
+		// incorrectly flip to true and prevent shrink compensation.
+		if (scrollHeight === this._lastScrollHeight) {
+			this._stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+		}
 	};
 
 	public async sendMessage(input: string, attachments?: Attachment[]) {
