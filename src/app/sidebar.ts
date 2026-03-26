@@ -23,6 +23,7 @@ import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffA
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, showSessionTooltip, hideSessionTooltip, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
+import { resetArchivedExpandState } from "./state.js";
 
 // ============================================================================
 // ROLE + PERSONALITY PICKER
@@ -481,6 +482,8 @@ export function renderSidebar() {
 												localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 												if (state.showArchived) {
 													import("./api.js").then(m => m.fetchArchivedSessions());
+												} else {
+													resetArchivedExpandState();
 												}
 												renderApp();
 											}}
@@ -522,6 +525,7 @@ export function renderSidebar() {
 							import("./api.js").then(m => m.fetchArchivedSessions());
 						} else {
 							state.showArchived = false;
+							resetArchivedExpandState();
 						}
 						renderApp();
 					}}

@@ -272,22 +272,39 @@ export function isTeamLeadExpanded(sessionId: string): boolean {
 	return !collapsedTeamLeadSessions.has(sessionId);
 }
 
-const COLLAPSED_ARCHIVED_PARENTS_KEY = "bobbit-collapsed-archived-parents";
-const collapsedArchivedParents: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(COLLAPSED_ARCHIVED_PARENTS_KEY) || "[]"),
+const EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
+const expandedDelegateParents: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(EXPANDED_DELEGATE_PARENTS_KEY) || "[]"),
 );
 
 export function toggleArchivedParentExpanded(sessionId: string): void {
-	if (collapsedArchivedParents.has(sessionId)) {
-		collapsedArchivedParents.delete(sessionId);
+	if (expandedDelegateParents.has(sessionId)) {
+		expandedDelegateParents.delete(sessionId);
 	} else {
-		collapsedArchivedParents.add(sessionId);
+		expandedDelegateParents.add(sessionId);
 	}
-	localStorage.setItem(COLLAPSED_ARCHIVED_PARENTS_KEY, JSON.stringify([...collapsedArchivedParents]));
+	localStorage.setItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
 }
 
 export function isArchivedParentExpanded(sessionId: string): boolean {
-	return !collapsedArchivedParents.has(sessionId);
+	return expandedDelegateParents.has(sessionId);
+}
+
+export function resetArchivedExpandState(): void {
+	// Remove archived goal IDs from expandedGoals
+	const archivedGoalIds = new Set(state.goals.filter(g => g.archived).map(g => g.id));
+	for (const id of archivedGoalIds) expandedGoals.delete(id);
+	saveExpandedGoals();
+
+	// Remove archived session IDs from expandedDelegateParents
+	const archivedSessionIds = new Set(state.archivedSessions.map(s => s.id));
+	for (const id of archivedSessionIds) expandedDelegateParents.delete(id);
+	localStorage.setItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
+
+	// Reset archived team lead sessions from collapsedTeamLeadSessions
+	// (archived team leads that were explicitly collapsed — remove them so they return to default)
+	for (const id of archivedSessionIds) collapsedTeamLeadSessions.delete(id);
+	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
 }
 
 // ============================================================================

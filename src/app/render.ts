@@ -14,6 +14,7 @@ import {
 	ungroupedExpanded,
 	setUngroupedExpanded,
 	type GoalState,
+	resetArchivedExpandState,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions } from "./api.js";
 import { clearSessionModel } from "./routing.js";
@@ -218,6 +219,8 @@ function renderMobileLanding() {
 					localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 					if (state.showArchived) {
 						import("./api.js").then(m => m.fetchArchivedSessions());
+					} else {
+						resetArchivedExpandState();
 					}
 					renderApp();
 				}}
