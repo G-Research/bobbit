@@ -318,7 +318,7 @@ function goalPreviewPanel() {
 		}
 		await refreshSessions();
 		if (goal) {
-			setHashRoute("goal-dashboard", goal.id);
+			setHashRoute("goal-dashboard", goal.id, true);
 		} else {
 			setHashRoute("landing");
 		}
@@ -1359,7 +1359,7 @@ function goalProposalPanel() {
 			state.activeGoalProposal = null;
 			_proposalInitializedFrom = null;
 			if (goal) {
-				setHashRoute("goal-dashboard", goal.id);
+				setHashRoute("goal-dashboard", goal.id, true);
 			}
 		} finally {
 			_proposalSaving = false;

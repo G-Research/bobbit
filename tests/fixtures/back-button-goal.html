@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Back Button After Goal Creation Test</title>
+</head>
+<body>
+  <div id="result"></div>
+  <script>
+    // Reproduce setHashRoute from src/app/routing.ts
+    function setHashRoute(view, id, replace) {
+      let newHash;
+      if (view === "session" && id) {
+        newHash = "#/session/" + id;
+      } else if (view === "goal-dashboard" && id) {
+        newHash = "#/goal/" + id;
+      } else {
+        newHash = "#/";
+      }
+      if (window.location.hash !== newHash) {
+        if (replace) {
+          history.replaceState({}, "", newHash);
+          window.dispatchEvent(new HashChangeEvent("hashchange"));
+        } else {
+          window.location.hash = newHash;
+        }
+      }
+    }
+
+    // Simulate the bug: sessions list → assistant session → goal dashboard (push, not replace)
+    async function simulateBuggyNavigation() {
+      // Step 1: Start at sessions list
+      window.location.hash = "#/";
+      await new Promise(r => setTimeout(r, 50));
+
+      // Step 2: Navigate to goal assistant session
+      setHashRoute("session", "assistant-123");
+      await new Promise(r => setTimeout(r, 50));
+
+      // Step 3: Goal is created — navigate to goal dashboard WITH replace (the fix)
+      setHashRoute("goal-dashboard", "goal-456", true);
+      await new Promise(r => setTimeout(r, 50));
+
+      // Step 4: Press back
+      return new Promise(resolve => {
+        window.addEventListener("hashchange", function onBack() {
+          window.removeEventListener("hashchange", onBack);
+          resolve(window.location.hash);
+        });
+        history.back();
+      });
+    }
+
+    window.__runTest = simulateBuggyNavigation;
+  </script>
+</body>
+</html>
