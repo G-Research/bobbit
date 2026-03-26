@@ -190,7 +190,7 @@ function renderShortcutRow(entry: ShortcutEntry, index = 0) {
 		!entry.currentBindings.every((cb, i) => bindingsEqual(cb, entry.defaultBindings[i]));
 
 	return html`
-		<div class="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/30 transition-colors group ${index % 2 === 0 ? "bg-secondary/10" : ""}">
+		<div class="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/30 transition-colors group ${index % 2 === 0 ? "bg-secondary/50" : ""}">
 			<span class="flex-1 text-sm text-foreground">${entry.label}</span>
 			<div class="flex items-center gap-1.5">
 				${entry.currentBindings.map((binding, idx) => {
