@@ -528,13 +528,22 @@ export class SessionManager {
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		if (assistantDef) {
-			// Assistant sessions get their specialized prompt
+			// Combine assistant role's shared prompt with per-type specialized prompt
+			const assistantRole = this.roleManager?.getRole("assistant");
+			let assistantGoalSpec = "";
+			if (assistantRole?.promptTemplate) {
+				assistantGoalSpec = assistantRole.promptTemplate;
+				assistantGoalSpec += "\n\n---\n\n";
+			}
+			assistantGoalSpec += assistantDef.prompt;
+
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: undefined,
 				cwd: ps.cwd,
-				goalSpec: assistantDef.prompt,
+				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
+				allowedTools: restoredAllowedTools,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
@@ -683,15 +692,28 @@ export class SessionManager {
 
 		const assistantDef = assistantType ? getAssistantDef(assistantType) : undefined;
 		if (assistantDef) {
-			// Assistant sessions get their specialized prompt
+			// Combine assistant role's shared prompt with per-type specialized prompt
+			const assistantRole = this.roleManager?.getRole("assistant");
+			let assistantGoalSpec = "";
+			if (assistantRole?.promptTemplate) {
+				assistantGoalSpec = assistantRole.promptTemplate;
+				assistantGoalSpec += "\n\n---\n\n";
+			}
+			assistantGoalSpec += assistantDef.prompt;
+
 			const promptPath = this.assemblePrompt(id, {
 				baseSystemPromptPath: undefined,
 				cwd,
-				goalSpec: assistantDef.prompt,
+				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+
+			// Use assistant role's tool restrictions
+			if (assistantRole && assistantRole.allowedTools.length > 0) {
+				effectiveAllowedTools = assistantRole.allowedTools;
+			}
 		} else {
 			// Normal sessions: global base + AGENTS.md from cwd + goal spec
 			const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
