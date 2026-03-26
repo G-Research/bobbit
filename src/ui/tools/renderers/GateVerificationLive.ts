@@ -104,6 +104,8 @@ export class GateVerificationLive extends LitElement {
 
 		switch (detail.type) {
 			case "gate_verification_started": {
+				this._stepOutputs = new Map();
+				this.modalStep = null;
 				const stepDefs: Array<{ name: string; type: string }> = detail.steps || [];
 				const now = detail.startedAt || Date.now();
 				this.steps = stepDefs.map(s => ({
