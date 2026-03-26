@@ -305,6 +305,12 @@ export function createGateway(config: GatewayConfig) {
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
 
+			// Restore persisted defaultCwd preference
+			const savedCwd = preferencesStore.get("defaultCwd");
+			if (savedCwd && typeof savedCwd === "string") {
+				config.defaultCwd = savedCwd;
+			}
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 			sessionManager.startPurgeSchedule();
@@ -766,6 +772,27 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// ── Config: default cwd ──
+
+	// GET /api/config/cwd
+	if (url.pathname === "/api/config/cwd" && req.method === "GET") {
+		json({ cwd: config.defaultCwd });
+		return;
+	}
+
+	// PUT /api/config/cwd
+	if (url.pathname === "/api/config/cwd" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body?.cwd || typeof body.cwd !== "string") {
+			json({ error: "Missing or invalid cwd" }, 400);
+			return;
+		}
+		config.defaultCwd = body.cwd;
+		preferencesStore.set("defaultCwd", body.cwd);
+		json({ cwd: config.defaultCwd });
+		return;
 	}
 
 	// ── Preferences ──

@@ -217,6 +217,9 @@ export const state = {
 	staffPreviewCwdEdited: false,
 	staffPreviewPromptEditMode: false,
 
+	/** Server's default working directory */
+	defaultCwd: "",
+
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,
 	/** Whether the new-session role picker dropdown is open */

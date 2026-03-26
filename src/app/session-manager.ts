@@ -234,6 +234,16 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	}
 	renderApp();
 	await refreshSessions();
+	// Fetch default cwd from server
+	try {
+		const cwdRes = await fetch(`${url}/api/config/cwd`, {
+			headers: { Authorization: `Bearer ${token}` },
+		});
+		if (cwdRes.ok) {
+			const cwdData = await cwdRes.json();
+			if (cwdData.cwd) (state as any).defaultCwd = cwdData.cwd;
+		}
+	} catch { /* ignore — server may not support this endpoint yet */ }
 	startSessionPolling();
 	startTimeRefresh();
 }
@@ -844,7 +854,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 // CREATE & CONNECT
 // ============================================================================
 
-export async function createAndConnectSession(goalId?: string, roleId?: string, personalities?: string[]): Promise<void> {
+export async function createAndConnectSession(goalId?: string, roleId?: string, personalities?: string[], cwd?: string): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = goalId || null;
@@ -854,6 +864,7 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		if (goalId) body.goalId = goalId;
 		if (roleId) body.roleId = roleId;
 		if (personalities && personalities.length > 0) body.personalities = personalities;
+		if (cwd) body.cwd = cwd;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(body),

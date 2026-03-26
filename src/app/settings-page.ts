@@ -17,13 +17,13 @@ import {
 	type KeyBinding,
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
-import { renderApp } from "./state.js";
+import { renderApp, state } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
-type SettingsTab = "shortcuts" | "palette" | "models";
-let activeTab: SettingsTab = "shortcuts";
+type SettingsTab = "general" | "shortcuts" | "palette" | "models";
+let activeTab: SettingsTab = "general";
 
 // Rebind state (same as shortcuts-dialog)
 let rebindingId: string | null = null;
@@ -255,6 +255,82 @@ function renderShortcutRow(entry: ShortcutEntry) {
 					</div>
 				`
 			: ""}
+	`;
+}
+
+// ── General tab ──
+
+let settingsCwd = "";
+let settingsCwdLoaded = false;
+let settingsCwdSaved = false;
+let settingsCwdSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadGeneralSettings(): void {
+	if (settingsCwdLoaded) return;
+	settingsCwd = state.defaultCwd;
+	settingsCwdLoaded = true;
+}
+
+/** Reset general tab state when navigating away, so it reloads fresh next time. */
+export function resetGeneralTabState(): void {
+	settingsCwdLoaded = false;
+	settingsCwd = "";
+	settingsCwdSaved = false;
+	if (settingsCwdSaveTimer) {
+		clearTimeout(settingsCwdSaveTimer);
+		settingsCwdSaveTimer = null;
+	}
+}
+
+async function saveDefaultCwd(): Promise<void> {
+	try {
+		const res = await gatewayFetch("/api/config/cwd", {
+			method: "PUT",
+			body: JSON.stringify({ cwd: settingsCwd }),
+		});
+		if (res.ok) {
+			const data = await res.json();
+			state.defaultCwd = data.cwd;
+			settingsCwdSaved = true;
+			if (settingsCwdSaveTimer) clearTimeout(settingsCwdSaveTimer);
+			settingsCwdSaveTimer = setTimeout(() => {
+				settingsCwdSaved = false;
+				settingsCwdSaveTimer = null;
+				renderApp();
+			}, 2000);
+		}
+	} catch { /* ignore */ }
+	renderApp();
+}
+
+function renderGeneralTab() {
+	loadGeneralSettings();
+	return html`
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-1.5">
+				<label class="text-sm font-medium text-foreground">Default Working Directory</label>
+				<p class="text-xs text-muted-foreground">
+					The default directory used when creating new sessions and goals without an explicit path.
+				</p>
+				<div class="flex gap-2">
+					<input
+						type="text"
+						class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+							focus:outline-none focus:ring-2 focus:ring-ring"
+						.value=${settingsCwd}
+						placeholder="e.g. /home/user/projects"
+						@input=${(e: Event) => { settingsCwd = (e.target as HTMLInputElement).value; settingsCwdSaved = false; }}
+					/>
+					<button
+						class="px-4 py-2 text-sm rounded-md transition-colors
+							${settingsCwdSaved
+								? "bg-green-600 text-white"
+								: "bg-primary text-primary-foreground hover:bg-primary/90"}"
+						@click=${saveDefaultCwd}
+					>${settingsCwdSaved ? "Saved" : "Save"}</button>
+				</div>
+			</div>
+		</div>
 	`;
 }
 
@@ -772,6 +848,7 @@ export function renderSettingsPage() {
 	updateKeydownListener();
 
 	const tabs: { id: SettingsTab; label: string }[] = [
+		{ id: "general", label: "General" },
 		{ id: "shortcuts", label: "Shortcuts" },
 		{ id: "models", label: "Models" },
 		{ id: "palette", label: "Color Palette" },
@@ -804,6 +881,7 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto p-4">
 				<div class="${activeTab === "palette" ? "max-w-2xl" : "max-w-xl"}">
+					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}
