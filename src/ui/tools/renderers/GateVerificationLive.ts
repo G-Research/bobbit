@@ -67,9 +67,9 @@ export class GateVerificationLive extends LitElement {
 	@state() private modalStep: { index: number; name: string; output: string } | null = null;
 	/** Accumulated streamed output per step index */
 	private _stepOutputs = new Map<number, string>();
-	private _reconcileTimer?: ReturnType<typeof setTimeout>;
 
 	private _boundOnEvent = this._onEvent.bind(this);
+	private _reconcileTimer?: ReturnType<typeof setTimeout>;
 
 	override createRenderRoot() { return this; }
 
@@ -108,8 +108,11 @@ export class GateVerificationLive extends LitElement {
 	private async _fetchAndReconcile(): Promise<void> {
 		if (!this.goalId || !this.gateId || !this.signalId) return;
 
+		const token = localStorage.getItem("gateway.token") || "";
+		const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+
 		try {
-			const res = await fetch(`/api/goals/${this.goalId}/gates/${this.gateId}`);
+			const res = await fetch(`/api/goals/${this.goalId}/gates/${this.gateId}`, { headers });
 			if (!res.ok) return;
 			const gate = await res.json();
 
@@ -136,7 +139,7 @@ export class GateVerificationLive extends LitElement {
 
 			// Still running — try active verifications for real-time step state
 			if (vStatus === "running") {
-				const activeRes = await fetch(`/api/goals/${this.goalId}/verifications/active`);
+				const activeRes = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
 				if (!activeRes.ok) return;
 				const activeData = await activeRes.json();
 				const active = activeData.verifications?.find(
@@ -156,7 +159,7 @@ export class GateVerificationLive extends LitElement {
 				}
 			}
 		} catch {
-			// Silently ignore fetch errors — best-effort reconciliation
+			// Silently ignore fetch errors — this is a best-effort reconciliation
 		}
 	}
 
