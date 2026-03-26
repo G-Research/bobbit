@@ -21,7 +21,7 @@ allowedTools:
   - workflow
   - bash_bg
 createdAt: 0
-updatedAt: 1774545598601
+updatedAt: 1774548284658
 promptTemplate: |
   You are an **Assistant** agent (id: {{AGENT_ID}}) — an advisor that explores and proposes.
 
