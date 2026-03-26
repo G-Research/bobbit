@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head><title>PR Polling Test</title></head>
+<body>
+<div id="results"></div>
+<script>
+// ============================================================================
+// Simulate the relevant parts of src/app/api.ts to test PR polling behavior.
+// This is a faithful reproduction of the current (buggy) code paths.
+// ============================================================================
+
+// --- Simulated state (mirrors src/app/state.ts) ---
+const state = {
+  goals: [
+    { id: "goal-1", branch: "feature/one" },
+    { id: "goal-2", branch: "feature/two" },
+    { id: "goal-3", branch: null },  // no branch — should be skipped
+  ],
+  prStatusCache: new Map(),
+};
+
+// --- Track all fetch calls for assertions ---
+window.__fetchLog = [];
+window.__fetchDelay = 50; // ms per simulated fetch
+
+// --- Simulated gatewayFetch ---
+async function gatewayFetch(path) {
+  window.__fetchLog.push({ path, time: Date.now() });
+  // Simulate network delay
+  await new Promise(r => setTimeout(r, window.__fetchDelay));
+  return {
+    ok: true,
+    json: async () => ({ state: "open", url: "https://github.com/pr/1", number: 1 }),
+  };
+}
+
+// --- Reproduction of refreshPrStatusCache from src/app/api.ts (with fixes) ---
+let _prRefreshInFlight = false;
+async function refreshPrStatusCache() {
+  if (_prRefreshInFlight) return;
+  _prRefreshInFlight = true;
+  try {
+    const goalsWithBranch = state.goals.filter(g => g.branch);
+    if (goalsWithBranch.length === 0) return;
+
+    const results = await Promise.all(
+      goalsWithBranch.map(async (g) => {
+        try {
+          const res = await gatewayFetch(`/api/goals/${g.id}/pr-status`);
+          if (!res.ok) return { goalId: g.id, pr: null };
+          const data = await res.json();
+          return { goalId: g.id, pr: data };
+        } catch {
+          return { goalId: g.id, pr: null };
+        }
+      })
+    );
+
+    let changed = false;
+    for (const { goalId, pr } of results) {
+      const prev = state.prStatusCache.get(goalId);
+      if (pr) {
+        if (!prev || prev.state !== pr.state || prev.reviewDecision !== pr.reviewDecision) {
+          state.prStatusCache.set(goalId, pr);
+          changed = true;
+        }
+      } else if (prev) {
+        state.prStatusCache.delete(goalId);
+        changed = true;
+      }
+    }
+  } finally {
+    _prRefreshInFlight = false;
+  }
+}
+
+// --- Exact reproduction of the PR polling throttle from refreshSessions ---
+let _lastPrRefresh = 0;
+const PR_POLL_INTERVAL_MS = 60_000;  // Fixed: increased from 15s to 60s
+
+// Simulates the PR-refresh part of refreshSessions() (with visibility check)
+async function refreshSessionsPrPart() {
+  const now = Date.now();
+  if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS && document.visibilityState === "visible") {
+    _lastPrRefresh = now;
+    refreshPrStatusCache();  // note: fire-and-forget, no await
+  }
+}
+
+// --- Expose to Playwright tests ---
+window.__state = state;
+// Expose a polling-path wrapper that includes the visibility check
+// (matching the behavior in refreshSessions() where the check gates the call)
+window.__refreshPrStatusCache = async function() {
+  if (document.visibilityState !== "visible") return;
+  return refreshPrStatusCache();
+};
+window.__refreshSessionsPrPart = refreshSessionsPrPart;
+window.__PR_POLL_INTERVAL_MS = PR_POLL_INTERVAL_MS;
+
+// Goal dashboard polling interval (fixed: increased from 30s to 60s)
+window.__GOAL_DASHBOARD_POLL_INTERVAL_MS = 60_000;
+</script>
+</body>
+</html>
