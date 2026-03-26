@@ -617,10 +617,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onSetupProposal = (proposal) => {
+			// Track all setup actions in preview state
+			state.setupPreviewAction = proposal.action;
+			state.setupPreviewContent = proposal.content || "";
+			state.setupPreviewSteps.push({ action: proposal.action, content: proposal.content || "" });
+			state.assistantHasProposal = true;
+
 			if (proposal.action === "complete") {
 				state.setupComplete = true;
-				renderApp();
 			}
+			renderApp();
 		};
 
 		remote.onStaffProposal = (proposal) => {
@@ -673,6 +679,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			: null);
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
+		state.setupPreviewSteps = [];
+		state.setupPreviewContent = "";
+		state.setupPreviewAction = "";
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelHtml = ""; // Clear stale preview from previous session
 		if (state.isPreviewSession) startPreviewPolling();

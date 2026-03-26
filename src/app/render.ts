@@ -1208,6 +1208,81 @@ function personalityPreviewPanel() {
 	`;
 }
 
+// ============================================================================
+// SETUP PREVIEW PANEL (setup wizard split-screen)
+// ============================================================================
+
+function setupPreviewPanel() {
+	const handleDone = () => {
+		backToSessions();
+	};
+
+	const actionLabels: Record<string, string> = {
+		"system-prompt": "System Prompt",
+		"preferences": "Preferences",
+		"project-config": "Project Config",
+		"complete": "Setup Complete",
+	};
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+				<!-- Header -->
+				<div>
+					<div class="text-lg font-semibold flex items-center gap-2">
+						${icon(WandSparkles, "sm")}
+						Setup Progress
+					</div>
+					${state.setupComplete ? html`
+						<div class="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-500/15 text-green-700 dark:text-green-400">
+							<span class="text-green-500">&#10003;</span> Setup Complete
+						</div>
+					` : ""}
+				</div>
+
+				<!-- Completed steps -->
+				${state.setupPreviewSteps.length > 0 ? html`
+					<div>
+						<div class="text-xs text-muted-foreground mb-2 font-medium">Completed Steps</div>
+						<div class="flex flex-col gap-2">
+							${state.setupPreviewSteps.map((step, i) => html`
+								<div class="flex items-start gap-2.5 p-2.5 rounded-md border border-border ${step.action === "complete" ? "bg-green-500/5" : ""}">
+									<div class="mt-0.5 text-sm">
+										<span class="text-green-500">&#10003;</span>
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="text-sm font-medium">${actionLabels[step.action] || step.action}</div>
+										${step.content ? html`<div class="text-xs text-muted-foreground mt-0.5 line-clamp-2">${step.content.slice(0, 200)}</div>` : ""}
+									</div>
+								</div>
+							`)}
+						</div>
+					</div>
+				` : html`
+					<div class="text-xs text-muted-foreground italic p-3 border border-dashed border-border rounded-md">
+						The setup wizard will configure your project. Steps will appear here as they complete.
+					</div>
+				`}
+
+				<!-- Current content preview -->
+				${state.setupPreviewContent ? html`
+					<div>
+						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Latest Update</div>
+						<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[300px]">
+							<markdown-block .content=${state.setupPreviewContent}></markdown-block>
+						</div>
+					</div>
+				` : ""}
+			</div>
+
+			<!-- Footer -->
+			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
+			</div>
+		</div>
+	`;
+}
+
 function getAssistantPreviewPanel(type: string) {
 	switch (type) {
 		case "goal": return goalPreviewPanel();
@@ -1215,6 +1290,7 @@ function getAssistantPreviewPanel(type: string) {
 		case "tool": return toolPreviewPanel();
 		case "personality": return personalityPreviewPanel();
 		case "staff": return staffPreviewPanel();
+		case "setup": return setupPreviewPanel();
 		default: return "";
 	}
 }

@@ -88,6 +88,30 @@ Project-specific instructions and guidelines:
 - No external dependencies without discussion
 \`\`\`
 
+### Project config (\`.bobbit/config/project.yaml\`)
+
+Write a YAML file with the detected build/test/typecheck commands. This file is used by workflow verification gates to run the correct commands for this project.
+
+Example:
+\`\`\`yaml
+build_command: npm run build
+test_command: npm test
+typecheck_command: npm run check
+test_unit_command: npm run test:unit
+test_e2e_command: npm run test:e2e
+\`\`\`
+
+Adjust the commands based on what you detected in the exploration phase. For example, a Python project might use:
+\`\`\`yaml
+build_command: python -m build
+test_command: pytest
+typecheck_command: mypy src/
+test_unit_command: pytest tests/unit
+test_e2e_command: pytest tests/e2e
+\`\`\`
+
+If a command doesn't apply (e.g. no type-checker), use a no-op like \`echo "no typecheck configured"\`.
+
 After writing the system prompt, emit a progress block:
 
 <setup_proposal>

@@ -46,17 +46,17 @@ gates:
     verify:
       - name: "Type check"
         type: command
-        run: "npm run check"
+        run: "{{typecheck_command}}"
       - name: "Repro test passes (bug fixed)"
         type: command
         run: "{{reproducing-test.test_command}}"
         expect: success
       - name: "Unit tests"
         type: command
-        run: "npm run test:unit"
+        run: "{{test_unit_command}}"
       - name: "E2E tests"
         type: command
-        run: "npm run test:e2e"
+        run: "{{test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
         prompt: |

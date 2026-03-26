@@ -10,6 +10,7 @@ import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import type { SessionManager } from "./session-manager.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import type { WorkflowGate, Workflow } from "./workflow-store.js";
+import type { ProjectConfigStore } from "./project-config-store.js";
 
 /** Resolve Git Bash path on Windows for commands needing Unix tools. */
 function findGitBash(): string | null {
@@ -74,6 +75,7 @@ export class VerificationHarness {
 		private preferencesStore?: PreferencesStore,
 		private sessionManager?: import("./session-manager.js").SessionManager,
 		private teamManager?: import("./team-manager.js").TeamManager,
+		private projectConfigStore?: ProjectConfigStore,
 	) {}
 
 	/** Register a callback to notify the team lead agent when verification completes. */
@@ -151,6 +153,14 @@ export class VerificationHarness {
 				cwd,
 				goal_spec: goalSpec || "",
 			};
+
+			// Load project config into builtinVars so {{typecheck_command}} etc. resolve
+			if (this.projectConfigStore) {
+				const projectConfig = this.projectConfigStore.getWithDefaults();
+				for (const [k, v] of Object.entries(projectConfig)) {
+					builtinVars[k] = v;
+				}
+			}
 
 			// Also include the current signal's metadata as bare variables
 			if (signal.metadata) {
