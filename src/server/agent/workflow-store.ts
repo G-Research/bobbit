@@ -144,7 +144,7 @@ export class WorkflowStore {
 					};
 					if (g.content) out.content = true;
 					if (g.injectDownstream) out.inject_downstream = true;
-					if (g.dependsOn.length > 0) out.depends_on = g.dependsOn;
+					if (g.dependsOn && g.dependsOn.length > 0) out.depends_on = g.dependsOn;
 					if (g.metadata) out.metadata = g.metadata;
 					if (g.verify && g.verify.length > 0) {
 						out.verify = g.verify.map(v => {

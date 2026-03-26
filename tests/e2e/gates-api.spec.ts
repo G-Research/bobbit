@@ -152,17 +152,17 @@ test.describe("Gates API", () => {
 			});
 			await waitForGateStatus(goalId, "issue-analysis", "passed");
 
-			// Signal reproducing-test with a command that fails (exit 1)
-			// Because the gate has expect: failure, a non-zero exit = pass
+			// Signal reproducing-test with a command that fails (exit 1) and matching error_pattern
+			// Because the gate has expect: failure + non-zero exit + matching pattern = pass
 			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
 				method: "POST",
 				body: JSON.stringify({
-					metadata: { test_command: "exit 1" },
+					metadata: { test_command: "echo Expected addition to equal 5 1>&2 & exit 1", error_pattern: "Expected addition to equal 5" },
 				}),
 			});
 			expect(signalResp.status).toBe(201);
 
-			// Gate should pass because expect:failure + non-zero exit = pass
+			// Gate should pass because expect:failure + non-zero exit + matching error_pattern = pass
 			await waitForGateStatus(goalId, "reproducing-test", "passed");
 		} finally {
 			await deleteGoal(goalId);
@@ -186,7 +186,7 @@ test.describe("Gates API", () => {
 			await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
 				method: "POST",
 				body: JSON.stringify({
-					metadata: { test_command: "exit 0" },
+					metadata: { test_command: "exit 0", error_pattern: "some error" },
 				}),
 			});
 
@@ -297,7 +297,7 @@ test.describe("Gates API", () => {
 			await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
 				method: "POST",
 				body: JSON.stringify({
-					metadata: { test_command: "echo metadata-works" },
+					metadata: { test_command: "echo metadata-works", error_pattern: "some error" },
 				}),
 			});
 			// This gate has expect:failure but "echo metadata-works" exits 0, so it fails

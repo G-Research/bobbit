@@ -242,12 +242,28 @@ export class VerificationHarness {
 						});
 						const cmd = this.substituteVars(step.run || "", builtinVars, allGateStates);
 						const expectFailure = step.expect === "failure";
+
+						// Look up error_pattern for expect: failure steps
+						let errorPattern: string | undefined;
+						if (expectFailure) {
+							errorPattern = builtinVars["error_pattern"];
+							if (!errorPattern && allGateStates) {
+								// Check upstream gates for error_pattern in metadata
+								for (const [, gs] of allGateStates) {
+									if (gs.metadata?.["error_pattern"]) {
+										errorPattern = gs.metadata["error_pattern"];
+										break;
+									}
+								}
+							}
+						}
+
 						result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure, {
 							goalId: signal.goalId,
 							gateId: signal.gateId,
 							signalId: signal.id,
 							stepIndex: index,
-						});
+						}, errorPattern);
 					} else {
 						// llm-review — spawn a one-shot reviewer sub-agent
 						if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -798,6 +814,7 @@ export class VerificationHarness {
 		timeoutSec: number,
 		expectFailure: boolean,
 		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
+		errorPattern?: string,
 	): Promise<{ passed: boolean; output: string }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
@@ -882,13 +899,37 @@ export class VerificationHarness {
 				const output = (stdout + "\n" + stderr).trim().slice(-5000);
 				const exitedNonZero = code !== 0;
 				if (expectFailure) {
-					resolve({ passed: exitedNonZero, output: output || `exit code ${code}` });
-				} else {
-					resolve({ passed: !exitedNonZero, output: output || `exit code ${code}` });
+					if (!exitedNonZero) {
+						resolve({ passed: false, output: `Command succeeded (exit code 0) but was expected to fail.\n\n${output}` });
+					} else if (!errorPattern) {
+						resolve({ passed: false, output: `Command failed as expected (exit code ${code}), but no error_pattern metadata was provided. Gates with expect: failure verification require error_pattern metadata containing a regex that matches the expected error output.\n\nActual output (first 500 chars):\n${(output || '').slice(0, 500)}` });
+					} else {
+						try {
+							const regex = new RegExp(errorPattern, 'i');
+							if (regex.test(output)) {
+								resolve({ passed: true, output: output || `exit code ${code}` });
+							} else {
+								resolve({ passed: false, output: `Command failed (exit code ${code}) but output did not match expected error pattern.\n\nExpected pattern: /${errorPattern}/i\n\nActual output (first 500 chars):\n${(output || '').slice(0, 500)}` });
+							}
+						} catch (regexErr: any) {
+							resolve({ passed: false, output: `Invalid error_pattern regex: ${regexErr.message}\n\nPattern was: ${errorPattern}` });
+						}
+					}
+					return;
 				}
+				resolve({ passed: !exitedNonZero, output: output || `exit code ${code}` });
 			});
 			child.on("error", (err) => {
-				resolve({ passed: expectFailure, output: err.message });
+				if (expectFailure && errorPattern) {
+					try {
+						const regex = new RegExp(errorPattern, 'i');
+						resolve({ passed: regex.test(err.message), output: err.message });
+					} catch {
+						resolve({ passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` });
+					}
+				} else {
+					resolve({ passed: expectFailure, output: err.message });
+				}
 			});
 		});
 	}

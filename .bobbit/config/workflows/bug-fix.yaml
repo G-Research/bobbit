@@ -34,6 +34,7 @@ gates:
     depends_on: [issue-analysis]
     metadata:
       test_command: string
+      error_pattern: string
     verify:
       - name: "Test fails (bug exists)"
         type: command
