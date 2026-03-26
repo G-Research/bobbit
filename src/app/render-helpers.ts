@@ -517,6 +517,14 @@ export function renderGoalGroup(goal: Goal) {
 			title="Goal dashboard">${icon(LayoutDashboard, "xs")}</button>
 	`;
 
+	const pr = state.prStatusCache.get(goal.id);
+	const canArchive = pr?.state === "MERGED" && !hasActiveTeam;
+	const archiveBtn = canArchive ? html`
+		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
+			@click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}
+			title="Archive goal">${icon(Trash2, "xs")}</button>
+	` : nothing;
+
 	const emptyState = html`
 		<div class="pl-2 py-1 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground">
 			${isTeamGoal
@@ -566,9 +574,9 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
 				${renderGoalBadge(goal.id)}
 				${mobile
-					? dashboardBtn
+					? html`${archiveBtn}${dashboardBtn}`
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-						${dashboardBtn}
+						${archiveBtn}${dashboardBtn}
 					</div>`}
 			</div>
 			${isExpanded ? html`
