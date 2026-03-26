@@ -49,16 +49,38 @@ npm run build     # compile server + bundle UI
 npm start         # start gateway on :3001
 ```
 
-### Run from checkout
+### Quick start (from source)
 
-Have a Bobbit source checkout? Use the `run` script to launch it against any project directory — no global install needed. On first run it auto-installs dependencies and builds.
+If you have a Bobbit source checkout, use the `run` script to launch it against any project directory — no global install needed.
 
 ```bash
+git clone <repo> bobbit
+
+# From your project directory:
 /path/to/bobbit/run                    # Linux/macOS
 C:\path\to\bobbit\run.cmd              # Windows
 ```
 
-See **[Run from Checkout](docs/run-from-checkout.md)** for setup, PATH integration, and troubleshooting.
+On first run, the script auto-installs dependencies and builds (`npm install && npm run build`). Subsequent launches start immediately.
+
+Each project gets its own `.bobbit/` state directory, and ports auto-increment (3001–3010) so you can run multiple instances side by side. All CLI flags are forwarded:
+
+```bash
+/path/to/bobbit/run --host 0.0.0.0 --port 3005 --no-tls
+```
+
+Add it to your PATH for convenience:
+
+```bash
+# Linux/macOS
+ln -s /path/to/bobbit/run /usr/local/bin/bobbit
+
+# Then from any project:
+cd ~/my-project
+bobbit
+```
+
+See **[Run from Checkout](docs/run-from-checkout.md)** for full details, Windows PATH setup, and troubleshooting.
 
 ## Why Bobbit?
 
