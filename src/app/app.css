@@ -495,7 +495,7 @@ theme-toggle button {
 	to   { background-position: 200% 0; }
 }
 .title-wave {
-	--tw-lo: color-mix(in srgb, var(--color-foreground, currentColor) 72%, transparent);
+	--tw-lo: color-mix(in srgb, var(--color-foreground, currentColor) 50%, transparent);
 	--tw-hi: var(--color-foreground, currentColor);
 	background:
 		repeating-linear-gradient(
@@ -509,6 +509,6 @@ theme-toggle button {
 	-webkit-background-clip: text;
 	background-clip: text;
 	-webkit-text-fill-color: var(--tw-lo);
-	animation: title-wave 5s linear infinite;
+	animation: title-wave 4s linear infinite;
 	will-change: background-position;
 }

@@ -540,8 +540,8 @@ export function renderGoalGroup(goal: Goal) {
 	const emptyState = html`
 		<div class="pl-2 py-1 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground">
 			${isTeamGoal
-				? html`No agents — <button class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start team" @click=${handleStartTeam}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>${isLoading ? "starting\u2026" : "start team"}</button>`
-				: html`No sessions — <button class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start a session" @click=${() => createAndConnectSession(goal.id)}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>start one</button>`}
+				? html`No agents — <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start team" @click=${handleStartTeam}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>${isLoading ? "Starting\u2026" : "Start Team"}</button>`
+				: html`No sessions — <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start a session" @click=${() => createAndConnectSession(goal.id)}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>start one</button>`}
 		</div>
 	`;
 
