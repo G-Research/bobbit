@@ -49,13 +49,13 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.appView = "authenticated";
 			await refreshSessions();
 			await loadDashboardData(route.goalId);
 		} else if (route.view === "session" && route.sessionId) {
 			clearDashboardState();
-			if (state.remoteAgent?.gatewaySessionId === route.sessionId
-				|| state.selectedSessionId === route.sessionId) {
+			if (state.remoteAgent?.gatewaySessionId === route.sessionId) {
 				return;
 			}
 			if (state.remoteAgent) {
@@ -79,6 +79,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = route.goalId;
 			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
@@ -91,6 +92,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadRolePageData } = await import("./role-manager-page.js");
@@ -104,6 +106,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadRolePageData, navigateToRoleEdit } = await import("./role-manager-page.js");
@@ -117,6 +120,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadToolPageData } = await import("./tool-manager-page.js");
@@ -130,6 +134,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadToolPageData, navigateToToolEdit } = await import("./tool-manager-page.js");
@@ -143,6 +148,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadWorkflowPageData } = await import("./workflow-page.js");
@@ -156,6 +162,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadWorkflowPageData, navigateToWorkflowEdit } = await import("./workflow-page.js");
@@ -169,6 +176,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadSkillsPageData } = await import("./skills-page.js");
@@ -182,6 +190,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadStaffPageData } = await import("./staff-page.js");
@@ -195,6 +204,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadStaffPageData, navigateToStaffEdit } = await import("./staff-page.js");
@@ -208,6 +218,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadPersonalityPageData } = await import("./personality-manager-page.js");
@@ -221,6 +232,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			const { loadPersonalityPageData, navigateToPersonalityEdit } = await import("./personality-manager-page.js");
@@ -234,6 +246,7 @@ async function handleHashChange(): Promise<void> {
 				state.remoteAgent = null;
 				state.connectionStatus = "disconnected";
 			}
+			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
 			renderApp();
