@@ -36,8 +36,8 @@
       setHashRoute("session", "assistant-123");
       await new Promise(r => setTimeout(r, 50));
 
-      // Step 3: Goal is created — navigate to goal dashboard WITHOUT replace (the bug)
-      setHashRoute("goal-dashboard", "goal-456");
+      // Step 3: Goal is created — navigate to goal dashboard WITH replace (the fix)
+      setHashRoute("goal-dashboard", "goal-456", true);
       await new Promise(r => setTimeout(r, 50));
 
       // Step 4: Press back
