@@ -57,7 +57,7 @@ function renderMobileLanding() {
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto">
-			<div class="w-full max-w-xl mx-auto px-2 py-4 flex flex-col gap-1">
+			<div class="w-full max-w-xl mx-auto px-2 py-4 pb-16 flex flex-col gap-1">
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					<div class="flex items-center gap-1">
 						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
@@ -172,6 +172,27 @@ function renderMobileLanding() {
 
 							`}
 			</div>
+		</div>
+		<div class="fixed bottom-0 left-0 right-0 flex items-center justify-between px-4 py-2 border-t border-border bg-background z-10">
+			<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs text-muted-foreground active:bg-secondary/50 rounded transition-colors"
+				@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
+				title="Settings">
+				${icon(Settings, "sm")}
+				<span>Settings</span>
+			</button>
+			<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs ${state.showArchived ? "text-primary" : "text-muted-foreground"} active:bg-secondary/50 rounded transition-colors"
+				@click=${() => {
+					state.showArchived = !state.showArchived;
+					localStorage.setItem("bobbit-show-archived", String(state.showArchived));
+					if (state.showArchived) {
+						import("./api.js").then(m => m.fetchArchivedSessions());
+					}
+					renderApp();
+				}}
+				title="${state.showArchived ? "Hide archived sessions" : "Show archived sessions"}">
+				${icon(Archive, "sm")}
+				<span>See Archived</span>
+			</button>
 		</div>
 	`;
 }
