@@ -14,14 +14,29 @@ npx bobbit
 
 That's it. Bobbit scaffolds a `.bobbit/` config directory, starts a gateway on `http://localhost:3001`, and opens your browser. Send your first prompt and watch it work.
 
-**Global install** (if you prefer):
+For a detailed walkthrough of your first session, see the **[Getting Started guide](docs/getting-started.md)**.
+
+## Quick start (from source)
+
+If you have a Bobbit source checkout, use the `run` script to launch it against any project directory — no global install needed.
 
 ```bash
-npm install -g bobbit
-bobbit
+git clone <repo> bobbit
+
+# From your project directory:
+/path/to/bobbit/run                    # Linux/macOS
+C:\path\to\bobbit\run.cmd              # Windows
 ```
 
-For a detailed walkthrough of your first session, see the **[Getting Started guide](docs/getting-started.md)**.
+On first run, the script auto-installs dependencies and builds (`npm install && npm run build`). Subsequent launches start immediately.
+
+Each project gets its own `.bobbit/` state directory, and ports auto-increment so you can run multiple instances side by side. All CLI flags are forwarded:
+
+```bash
+/path/to/bobbit/run --host 0.0.0.0 --port 3005 --no-tls
+```
+
+See **[Run from Checkout](docs/run-from-checkout.md)** for full details, PATH integration, and troubleshooting.
 
 ### CLI flags
 
@@ -49,38 +64,12 @@ npm run build     # compile server + bundle UI
 npm start         # start gateway on :3001
 ```
 
-### Quick start (from source)
-
-If you have a Bobbit source checkout, use the `run` script to launch it against any project directory — no global install needed.
+### From global install
 
 ```bash
-git clone <repo> bobbit
-
-# From your project directory:
-/path/to/bobbit/run                    # Linux/macOS
-C:\path\to\bobbit\run.cmd              # Windows
-```
-
-On first run, the script auto-installs dependencies and builds (`npm install && npm run build`). Subsequent launches start immediately.
-
-Each project gets its own `.bobbit/` state directory, and ports auto-increment (3001–3010) so you can run multiple instances side by side. All CLI flags are forwarded:
-
-```bash
-/path/to/bobbit/run --host 0.0.0.0 --port 3005 --no-tls
-```
-
-Add it to your PATH for convenience:
-
-```bash
-# Linux/macOS
-ln -s /path/to/bobbit/run /usr/local/bin/bobbit
-
-# Then from any project:
-cd ~/my-project
+npm install -g bobbit
 bobbit
 ```
-
-See **[Run from Checkout](docs/run-from-checkout.md)** for full details, Windows PATH setup, and troubleshooting.
 
 ## Why Bobbit?
 

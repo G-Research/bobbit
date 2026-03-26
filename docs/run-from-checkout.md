@@ -60,7 +60,7 @@ This is a one-time cost (typically 30–60 seconds). Subsequent runs skip the bo
 Each project directory gets its own isolated Bobbit instance:
 
 - **State** is stored in `<project-dir>/.bobbit/` — sessions, goals, tasks, auth tokens, and TLS certificates are all per-project.
-- **Ports** auto-increment from 3001 to 3010, so you can run multiple instances simultaneously for different projects.
+- **Ports** auto-increment (up to 9 above the base port) so you can run multiple instances simultaneously for different projects.
 - **Working directory** defaults to where you invoke the script. The agent operates on your project files, not the Bobbit checkout.
 
 ```
@@ -148,7 +148,7 @@ If `npm install` or `npm run build` fails on first run:
 
 ### Port conflicts
 
-If Bobbit can't bind to a port (all 3001–3010 taken), either:
+If Bobbit can't bind to a port (all ports in the auto-increment range are taken), either:
 
 - Stop an existing instance
 - Specify a port explicitly: `./run --port 3020`
