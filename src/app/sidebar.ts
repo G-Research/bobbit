@@ -124,8 +124,14 @@ export function renderRolePickerDropdown() {
 	return html`
 		<div class="fixed z-50 rounded-md shadow-lg py-1"
 			style="background: var(--popover); border: 1px solid var(--border); width: ${popoverWidth}px; ${topStyle}; right: ${right}px; ${maxHStyle}; display: flex; flex-direction: column;"
-			@click=${(e: Event) => e.stopPropagation()}>
-			<div class="px-3 pt-2 pb-1.5 text-xs font-semibold text-foreground shrink-0">Create New Session</div>
+			@click=${(e: Event) => e.stopPropagation()}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Escape") { state.rolePickerOpen = false; renderApp(); } }}>
+			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
+				<span class="flex-1 text-xs font-semibold text-foreground">Create New Session</span>
+				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+				</button>
+			</div>
 			<div class="overflow-y-auto flex-1" style="min-height: 0;">
 			<!-- Personalities -->
 			${_cachedPersonalities.length > 0 ? html`
