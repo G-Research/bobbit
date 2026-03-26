@@ -9,7 +9,7 @@ import {
 	GW_TOKEN_KEY,
 	activeSessionId,
 } from "./state.js";
-import { gatewayFetch, refreshSessions } from "./api.js";
+import { gatewayFetch, refreshSessions, fetchSetupStatus } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
@@ -292,6 +292,13 @@ async function initApp() {
 					import("./aigw-config.js").then(({ applyAigwConfig }) => applyAigwConfig(prefs));
 				}
 			} catch {}
+
+			// Load setup wizard status
+			try {
+				state.setupComplete = await fetchSetupStatus();
+			} catch {
+				state.setupComplete = true; // safe default
+			}
 
 			const route = getRouteFromHash();
 			if (route.view === "goal" && route.goalId) {
