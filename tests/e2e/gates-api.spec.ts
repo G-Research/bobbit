@@ -157,7 +157,7 @@ test.describe("Gates API", () => {
 			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
 				method: "POST",
 				body: JSON.stringify({
-					metadata: { test_command: "node -e \"console.error('Expected addition to equal 5'); process.exit(1)\"", error_pattern: "Expected addition to equal 5" },
+					metadata: { test_command: "echo Expected addition to equal 5 1>&2 & exit 1", error_pattern: "Expected addition to equal 5" },
 				}),
 			});
 			expect(signalResp.status).toBe(201);

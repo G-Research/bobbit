@@ -212,7 +212,7 @@ test.describe("Verification output streaming and timestamps", () => {
 			await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
 				method: "POST",
 				body: JSON.stringify({
-					metadata: { test_command: "echo error-text 1>&2 && exit 1" },
+					metadata: { test_command: "echo error-text 1>&2 & exit 1", error_pattern: "error-text" },
 				}),
 			});
 

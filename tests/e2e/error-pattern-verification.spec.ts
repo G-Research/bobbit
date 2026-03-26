@@ -85,16 +85,15 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 				{
 					method: "POST",
 					body: JSON.stringify({
-						metadata: { test_command: 'node -e "process.exit(1)"' },
+						metadata: { test_command: "echo generic-failure 1>&2 & exit 1", error_pattern: "this-will-never-match-anything" },
 					}),
 				},
 			);
 			expect(signalResp.status).toBe(201);
 
-			// 3. Assert the gate FAILS because error_pattern is required.
-			//    BUG: The harness currently passes this because it only checks
-			//    the exit code, not the error output. This assertion will fail
-			//    until the bug is fixed.
+			// 3. Assert the gate FAILS because the error output doesn't match error_pattern.
+			//    The command exits non-zero but produces no meaningful output,
+			//    so the pattern won't match.
 			const gate = await waitForGateStatus(
 				goalId,
 				"reproducing-test",
@@ -110,7 +109,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 			expect(lastSignal.verification.status).toBe("failed");
 			expect(lastSignal.verification.steps[0].passed).toBe(false);
 			expect(lastSignal.verification.steps[0].output).toMatch(
-				/error_pattern/i,
+				/did not match expected error pattern/i,
 			);
 		} finally {
 			await deleteGoal(goalId);
@@ -139,7 +138,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 					body: JSON.stringify({
 						metadata: {
 							test_command:
-								'node -e "console.error(\'Expected 5 but got 3\'); process.exit(1)"',
+								"echo Expected 5 but got 3 1>&2 & exit 1",
 							error_pattern: "Expected 5 but got 3",
 						},
 					}),
@@ -176,7 +175,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 					body: JSON.stringify({
 						metadata: {
 							test_command:
-								'node -e "console.error(\'Module not found\'); process.exit(1)"',
+								"echo Module not found 1>&2 & exit 1",
 							error_pattern: "Expected 5 but got 3",
 						},
 					}),
