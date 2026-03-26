@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, List, MessagesSquare, Network, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Wrench, X, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -154,7 +154,7 @@ export function renderRolePickerDropdown() {
 			<div class="overflow-y-auto flex-1" style="min-height: 0;">
 			<!-- Personalities -->
 			${_cachedPersonalities.length > 0 ? html`
-				<div class="px-3 pt-1 pb-1.5 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Personalities</div>
+				<div class="px-3 pt-1 pb-1.5 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Personalities</div>
 				<div class="px-3 pb-2 flex flex-wrap gap-1">
 					${_cachedPersonalities.map(personality => {
 						const selected = _pickerPersonalities.has(personality.name);
@@ -171,7 +171,7 @@ export function renderRolePickerDropdown() {
 			` : ""}
 			<!-- Roles (2-column grid) -->
 			<div class="${_cachedPersonalities.length > 0 ? "border-t border-border/50 mt-1 pt-1" : ""}">
-				<div class="px-3 pt-1 pb-1.5 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Role</div>
+				<div class="px-3 pt-1 pb-1.5 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Role</div>
 				${allRoles.length === 0
 					? html`<div class="px-3 py-1 text-xs text-muted-foreground">No roles defined</div>`
 					: html`<div class="px-2 pb-1 grid gap-0.5" style="grid-template-columns: 1fr 1fr;">
@@ -190,7 +190,7 @@ export function renderRolePickerDropdown() {
 			</div>
 			<!-- Working Directory (pinned at bottom) -->
 			<div class="border-t border-border/50 px-3 py-2 shrink-0" style="overflow: visible;">
-				<div class="text-[10px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
+				<div class="text-[9px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
 				${cwdCombobox({
 					value: _pickerCwd,
 					onInput: (v: string) => { _pickerCwd = v; renderApp(); },
@@ -492,7 +492,7 @@ export function renderStaffSidebarSection() {
 				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); renderApp(); }}>
 				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-sm"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}">${staffSectionExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
-				<span class="flex-1 ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
+				<span class="flex-1 ${mobile ? "text-sm" : "text-[9px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
 					<button
 						class="${mobile ? "p-2 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
@@ -550,7 +550,7 @@ export function renderStaffSidebarSection() {
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
 								const unseen = hasUnseenActivity(session);
-								return html`<span class="shrink-0 flex items-center gap-0.5 text-[10px] tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
+								return html`<span class="shrink-0 flex items-center gap-0.5 text-[9px] tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
 							})() : ""}</span>
 							<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 								${editBtn}
@@ -628,7 +628,7 @@ export function renderSidebar() {
 						@click=${() => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); import("./routing.js").then((m) => m.setHashRoute("roles")); }}
 						title="Manage roles"
 					>
-						${icon(Users, "xs")}
+						${icon(Users, "xs", "!w-3.5 !h-3.5")}
 						<span>Roles</span>
 					</button>
 					<button
@@ -636,7 +636,7 @@ export function renderSidebar() {
 						@click=${() => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); import("./routing.js").then((m) => m.setHashRoute("personalities")); }}
 						title="Manage personalities"
 					>
-						${icon(Drama, "xs")}
+						${icon(Drama, "xs", "!w-3.5 !h-3.5")}
 						<span>Personalities</span>
 					</button>
 					<button
@@ -644,33 +644,33 @@ export function renderSidebar() {
 						@click=${() => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); import("./routing.js").then((m) => m.setHashRoute("tools")); }}
 						title="Manage tools"
 					>
-						${icon(Wrench, "xs")}
+						${icon(Wrench, "xs", "!w-3.5 !h-3.5")}
 						<span>Tools</span>
 					</button>
 				</div>
 				<div class="flex items-center">
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
 						@click=${() => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); import("./routing.js").then((m) => m.setHashRoute("workflows")); }}
 						title="Manage workflows"
 					>
-						${icon(Network, "xs")}
+						${icon(Workflow, "xs", "!w-3.5 !h-3.5")}
 						<span>Workflows</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
 						@click=${() => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); }}
 						title="View skills"
 					>
-						${icon(Zap, "xs")}
+						${icon(Zap, "xs", "!w-3.5 !h-3.5")}
 						<span>Skills</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
 						@click=${() => showGoalDialog()}
 						title="New goal (Alt+G)"
 					>
-						${icon(GoalIcon, "xs")}
+						${icon(GoalIcon, "xs", "!w-3.5 !h-3.5")}
 						<span>New Goal</span>
 					</button>
 				</div>
@@ -697,7 +697,7 @@ export function renderSidebar() {
 										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
 										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
 										<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
-										<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
+										<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 										<div class="flex items-center relative">
 											<button
 												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
@@ -722,7 +722,7 @@ export function renderSidebar() {
 							` : html`
 								<div class="flex flex-col gap-0.5">
 									<div class="flex items-center gap-1 pl-0 pr-1 py-0.5">
-										<span class="flex-1 flex items-center gap-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium" style="padding-left:${HEADER_CHEVRON_W}px;"><span class="shrink-0" style="margin-right:-3px;">${icon(MessagesSquare, "xs")}</span> Sessions</span>
+										<span class="flex-1 flex items-center gap-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="padding-left:${HEADER_CHEVRON_W}px;"><span class="shrink-0" style="margin-right:-3px;">${icon(MessagesSquare, "xs")}</span> Sessions</span>
 										<div class="flex items-center relative">
 											<button
 												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
@@ -778,7 +778,7 @@ export function renderSidebar() {
 										>
 											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.showArchived ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
-											<span class="flex-1 text-[10px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
+											<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
 										${state.showArchived ? html`
 											${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
@@ -908,7 +908,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 							@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 						>
 							<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
-							<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
+							<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
 						</button>
 						${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
 					`;
@@ -921,7 +921,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 						@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}
 					>
 						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
-						<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
+						<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
 					</button>
 					${ungroupedExpanded ? ungrouped.map(renderCollapsedSession) : ""}
 				` : ungrouped.map(renderCollapsedSession)}
@@ -957,7 +957,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewayS
 									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 								>
 									<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
-									<span class="text-[10px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
+									<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
 								</button>
 								${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
 							</div>
