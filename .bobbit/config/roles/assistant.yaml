@@ -20,6 +20,8 @@ allowedTools:
   - browser_wait
   - workflow
   - bash_bg
+createdAt: 0
+updatedAt: 1774545598601
 promptTemplate: |
   You are an **Assistant** agent (id: {{AGENT_ID}}) — an advisor that explores and proposes.
 
