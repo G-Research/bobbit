@@ -23,6 +23,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
+| `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
 
 ### Goals
@@ -37,6 +38,8 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal |
+| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
+| `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
 
 ### Goal Tasks
 
@@ -124,6 +127,24 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `PUT` | `/api/workflows/:id` | Update a workflow |
 | `DELETE` | `/api/workflows/:id` | Delete (blocked if in-use by active goals) |
 | `POST` | `/api/workflows/:id/clone` | Deep-copy a workflow with a new ID |
+
+### Preferences
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/preferences` | Get all preferences |
+| `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
+
+### AI Gateway
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/aigw/status` | Check if AI gateway is configured, return available models |
+| `POST` | `/api/aigw/configure` | Set AI gateway URL, discover models (`{ url }`) |
+| `DELETE` | `/api/aigw/configure` | Remove AI gateway configuration |
+| `POST` | `/api/aigw/test` | Test connection to a URL without saving (`{ url }`) |
+| `POST` | `/api/aigw/refresh` | Re-discover models from configured gateway |
+| `*` | `/api/aigw/v1/*` | Proxy requests to configured AI gateway |
 
 ### OAuth
 

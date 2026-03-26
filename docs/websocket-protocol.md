@@ -48,3 +48,9 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
+| `preferences_changed` | `preferences` | Server preferences were updated |
+| `gate_verification_started` | `goalId`, `gateId`, `signalId` | Gate verification began |
+| `gate_verification_step_started` | `goalId`, `gateId`, `stepIndex`, `stepName` | A verification step began |
+| `gate_verification_step_output` | `goalId`, `gateId`, `stepIndex`, `stream`, `text` | Live output from a verification step |
+| `gate_verification_step_complete` | `goalId`, `gateId`, `stepIndex`, `status` | A verification step finished (passed/failed) |
+| `gate_verification_complete` | `goalId`, `gateId`, `signalId`, `status` | All verification steps finished |
