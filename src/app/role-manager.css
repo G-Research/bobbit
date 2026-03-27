@@ -601,6 +601,10 @@
 		width: 28px;
 		height: 28px;
 	}
+	.bobbit-blob--inline {
+		left: 16px;
+		bottom: 3px;
+	}
 	.roles-edit-container {
 		flex-direction: column;
 	}
@@ -616,3 +620,77 @@
 	}
 }
 
+/* ============================================================================
+ * Inline blob — resets chat-specific blob layout for use in rows/grids.
+ *
+ * The normal .bobbit-blob has:
+ *   - margin-bottom: -24px (pulls up in chat)
+ *   - overflow: visible (accessories extend beyond)
+ *   - sprite margin: 8px 18px 28px 18px (spacing for bounce animations)
+ *
+ * .bobbit-blob--inline cancels all of that and renders the sprite centered
+ * within a fixed-size box at a smaller scale.
+ * ============================================================================ */
+/* The blob container renders at natural size (3.5x sprite = ~37×37px margin-box)
+ * inside an overflow:hidden viewport, then the outer div scales it down. */
+.bobbit-blob--inline {
+	margin-bottom: 0 !important;
+	overflow: visible;
+	position: absolute;
+	left: 24px;
+	bottom: 2px;
+}
+
+/* Keep the original 3.5x scale and sprite margins — the blob layout is
+ * tightly coupled (accessories are position:absolute relative to the sprite's
+ * margin box). Instead, scale the entire blob container down to fit.
+ *
+ * Sprite natural box: 1px + margins 8/18/28/18 = 37×37px.
+ * With accessories the visual area is ~55×45px (overflow:visible extends it).
+ * We scale the whole thing with the outer container's transform. */
+.bobbit-blob--inline .bobbit-blob__sprite {
+	/* Offset eye animation phase so multiple inline blobs don't blink in sync */
+	animation-delay: var(--bobbit-eye-delay, 0s) !important;
+}
+
+/* Shadow not needed inline */
+.bobbit-blob--inline .bobbit-blob__shadow {
+	display: none !important;
+}
+
+/* Block document-level accessory classes from affecting inline blobs.
+ * Inline blobs manage accessories via a class on the blob div itself. */
+.bobbit-blob--inline .bobbit-blob__crown,
+.bobbit-blob--inline .bobbit-blob__bandana,
+.bobbit-blob--inline .bobbit-blob__magnifier,
+.bobbit-blob--inline .bobbit-blob__palette,
+.bobbit-blob--inline .bobbit-blob__pencil,
+.bobbit-blob--inline .bobbit-blob__shield,
+.bobbit-blob--inline .bobbit-blob__set-square,
+.bobbit-blob--inline .bobbit-blob__flask,
+.bobbit-blob--inline .bobbit-blob__wand,
+.bobbit-blob--inline .bobbit-blob__wizard-hat {
+	display: none !important;
+}
+/* Show the accessory when the class is on the blob div itself */
+.bobbit-blob--inline.bobbit-crowned .bobbit-blob__crown { display: block !important; }
+.bobbit-blob--inline.bobbit-bandana .bobbit-blob__bandana { display: block !important; }
+.bobbit-blob--inline.bobbit-magnifier .bobbit-blob__magnifier { display: block !important; }
+.bobbit-blob--inline.bobbit-palette .bobbit-blob__palette { display: block !important; }
+.bobbit-blob--inline.bobbit-pencil .bobbit-blob__pencil { display: block !important; }
+.bobbit-blob--inline.bobbit-shield .bobbit-blob__shield { display: block !important; }
+.bobbit-blob--inline.bobbit-set-square .bobbit-blob__set-square { display: block !important; }
+.bobbit-blob--inline.bobbit-flask .bobbit-blob__flask { display: block !important; }
+.bobbit-blob--inline.bobbit-wand .bobbit-blob__wand { display: block !important; }
+.bobbit-blob--inline.bobbit-wizard-hat .bobbit-blob__wizard-hat { display: block !important; }
+
+/* Sync accessory idle animations with the eye-delay stagger */
+.bobbit-blob--inline.bobbit-bandana .bobbit-blob__bandana,
+.bobbit-blob--inline.bobbit-magnifier .bobbit-blob__magnifier,
+.bobbit-blob--inline.bobbit-palette .bobbit-blob__palette,
+.bobbit-blob--inline.bobbit-pencil .bobbit-blob__pencil,
+.bobbit-blob--inline.bobbit-shield .bobbit-blob__shield,
+.bobbit-blob--inline.bobbit-set-square .bobbit-blob__set-square,
+.bobbit-blob--inline.bobbit-flask .bobbit-blob__flask {
+    animation-delay: var(--bobbit-eye-delay, 0s) !important;
+}

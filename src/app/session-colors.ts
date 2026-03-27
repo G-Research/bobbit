@@ -1,7 +1,6 @@
 import { html } from "lit";
 import { patchSession } from "./api.js";
 import { activeSessionId, renderApp } from "./state.js";
-import { renderBobbitCanvas, parseShadowToPixels, computeBounds } from "./bobbit-canvas.js";
 
 // ============================================================================
 // ACCESSORY REGISTRY
@@ -281,35 +280,27 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 
 	const isBusy = status === "streaming" || isCompacting;
 
-	// ---- Canvas rendering (replaces box-shadow spans) ----
 	const eyeColor = isSelected ? p.main : p.eye;
-	const accPixels = hasAccessory ? parseShadowToPixels(acc.shadow) : undefined;
-	const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
-	const effectiveHue = (hueRotate && status !== "starting" && status !== "terminated") ? hueRotate : 0;
+	const shadow = `
+		3px 0px 0 #000,4px 0px 0 #000,5px 0px 0 #000,6px 0px 0 #000,7px 0px 0 #000,
+		2px 1px 0 #000,3px 1px 0 ${p.main},4px 1px 0 ${p.main},5px 1px 0 ${p.main},6px 1px 0 ${p.light},7px 1px 0 ${p.light},8px 1px 0 #000,
+		1px 2px 0 #000,2px 2px 0 ${p.main},3px 2px 0 ${p.main},4px 2px 0 ${p.main},5px 2px 0 ${p.main},6px 2px 0 ${p.main},7px 2px 0 ${p.light},8px 2px 0 ${p.main},9px 2px 0 #000,
+		0px 3px 0 #000,1px 3px 0 ${p.main},2px 3px 0 ${p.main},3px 3px 0 ${p.main},4px 3px 0 ${p.main},5px 3px 0 ${p.main},6px 3px 0 ${p.main},7px 3px 0 ${p.main},8px 3px 0 ${p.main},9px 3px 0 #000,
+		0px 4px 0 #000,1px 4px 0 ${p.main},2px 4px 0 ${p.main},3px 4px 0 ${eyeColor},4px 4px 0 ${p.main},5px 4px 0 ${p.main},6px 4px 0 ${eyeColor},7px 4px 0 ${p.main},8px 4px 0 ${p.main},9px 4px 0 #000,
+		0px 5px 0 #000,1px 5px 0 ${p.main},2px 5px 0 ${p.main},3px 5px 0 ${eyeColor},4px 5px 0 ${p.main},5px 5px 0 ${p.main},6px 5px 0 ${eyeColor},7px 5px 0 ${p.main},8px 5px 0 ${p.main},9px 5px 0 #000,
+		0px 6px 0 #000,1px 6px 0 ${p.dark},2px 6px 0 ${p.main},3px 6px 0 ${p.main},4px 6px 0 ${p.main},5px 6px 0 ${p.main},6px 6px 0 ${p.main},7px 6px 0 ${p.main},8px 6px 0 ${p.main},9px 6px 0 #000,
+		1px 7px 0 #000,2px 7px 0 ${p.dark},3px 7px 0 ${p.main},4px 7px 0 ${p.main},5px 7px 0 ${p.main},6px 7px 0 ${p.main},7px 7px 0 ${p.main},8px 7px 0 #000,
+		2px 8px 0 #000,3px 8px 0 #000,4px 8px 0 #000,5px 8px 0 #000,6px 8px 0 #000,7px 8px 0 #000
+	`;
 
-	const canvas = renderBobbitCanvas({
-		scale: 1,
-		palette: p,
-		eyeColor,
-		accessoryPixels: accPixels,
-		bodyYOffset,
-		hueRotate: effectiveHue,
-		accessoryHueRotate: acc.id === "flask",
-	});
+	const eyeShadow = `3px 4px 0 ${p.eye},6px 4px 0 ${p.eye},3px 5px 0 ${p.eye},6px 5px 0 ${p.eye}`;
 
-	// Compute grid metrics for transform-origin / translateY adjustments
-	const accMinY = accPixels?.length ? Math.min(...accPixels.map((px) => px.y)) : 0;
-	const gridShiftY = Math.max(0, -accMinY);
-	const bodyFeetCanvasY = 8 + bodyYOffset + gridShiftY;
-	const squishOriginY = bodyFeetCanvasY + 1;
-
-	// ---- Animations & styles (logic unchanged from box-shadow version) ----
 	const shimmerDelay = -(Date.now() % 8000);
 	const shimmer = isBusy && !isCompacting ? `animation:blob-shimmer 8s ease-in-out infinite;animation-delay:${shimmerDelay}ms;` : "";
 	const isIdle = status === "idle" && !isCompacting && !isSelected && !noDesaturate;
 	const isCancelling = isAborting && (status === "streaming" || isBusy);
 	const filters: string[] = [];
-	if (effectiveHue) filters.push(`hue-rotate(${effectiveHue}deg)`);
+	if (hueRotate && status !== "starting" && status !== "terminated") filters.push(`hue-rotate(${hueRotate}deg)`);
 	if (isCancelling) filters.push("saturate(0.3)");
 	else if (isIdle) filters.push("saturate(0.4)");
 	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
@@ -317,22 +308,48 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	const bobAnim = isBusy && !isCancelling && !isCompacting ? "animation:bobbit-bob 1.8s cubic-bezier(0.34,1.2,0.64,1) infinite;" : "";
 	const cancelAnim = isCancelling ? "animation:bobbit-cancel-fade 1.2s ease-in-out infinite;" : "";
 	const compactSquish = isCompacting && !isCancelling;
-
-	// Canvas transform — same scale(1.6) as the old body span so that
-	// bobbit-squish keyframes (which include scale(1.6)) still work.
-	const compressT = ((13.4 - bodyFeetCanvasY) / 1.2).toFixed(1);
-	const canvasTransform = isCompacting
+	const baseTransform = isCompacting
 		? (compactSquish
-			? `transform-origin:0 ${squishOriginY}px;animation:bobbit-squish 3s ease-in-out infinite;`
-			: `transform:scale(1.6) scaleY(0.75) translateY(${compressT}px);transform-origin:0 ${squishOriginY}px;`)
+			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
+			: "transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(4.5px);transform-origin:0 9px;")
 		: "transform:scale(1.6);transform-origin:0 0;";
+	const eyeAnim = isSelected
+		? (compactSquish
+			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
+			: `animation:${isCompacting ? "bobbit-eyes-squash" : "bobbit-eyes"} 6s step-end infinite;transform-origin:0 ${isCompacting ? "9px" : "0"};`)
+		: baseTransform;
 
 	const compactTopOffset = compactSquish ? 5.4 : 0;
+	const eyeTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
+	const eyeLeft = "0";
+	const eyeLayer = isSelected
+		? html`<span style="position:absolute;left:${eyeLeft};top:${eyeTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;box-shadow:${eyeShadow};${eyeAnim}"></span>`
+		: "";
+
+	// Accessory overlay layer — counter-hue-rotated to keep fixed colours
+	// Flask intentionally rotates with the bobbit for contrast
+	const accFilter = hueRotate && status !== "starting" && status !== "terminated" && acc.id !== "flask"
+		? `filter:hue-rotate(${-hueRotate}deg);`
+		: "";
+	// Bandana needs a slight translateY adjustment; crown uses yOffset for top positioning
+	const isBandanaStyle = acc.id === "bandana";
+	const isCrown = acc.id === "crown";
+	const accTransform = isCompacting
+		? (compactSquish
+			? `transform-origin:0 9px;animation:${isCrown ? "bobbit-squish-crown" : "bobbit-squish"} 3s ease-in-out infinite;`
+			: `transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(${isBandanaStyle ? "4px" : "4.5px"})${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 9px;`)
+		: `transform:scale(1.6)${isBandanaStyle ? " translateY(-0.5px)" : ""}${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 0;`;
+	const accTop = addsHeight ? `${acc.yOffset + compactTopOffset}px` : `${compactTopOffset}px`;
+	const accessoryLayer = hasAccessory
+		? html`<span style="position:absolute;left:0;top:${accTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;box-shadow:${acc.shadow};${accTransform}${accFilter}"></span>`
+		: "";
+
+	// Shift inner content down when accessory adds height so tips aren't clipped
+	const innerTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
 	const containerHeight = addsHeight ? "19px" : "15px";
+
 	const containerWidth = "20px";
 
-	// Append positioning / transform styles to the canvas (preserves width/height/imageRendering set by renderBobbitCanvas)
-	canvas.style.cssText += `;position:absolute;left:0;top:${compactTopOffset}px;display:block;will-change:transform;backface-visibility:hidden;${canvasTransform}${shimmer}`;
-
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${canvas}</span>`;
+	const innerLeft = "0";
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><span style="position:absolute;left:${innerLeft};top:${innerTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;${baseTransform}box-shadow:${shadow};${shimmer}"></span>${eyeLayer}${accessoryLayer}</span>`;
 }
