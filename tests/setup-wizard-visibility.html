@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Setup Wizard Visibility Test</title>
+</head>
+<body>
+
+<div id="setup-banner"></div>
+<div id="mobile-empty-state"></div>
+<div id="desktop-empty-state"></div>
+
+<script>
+/**
+ * Simulates the app state used by the setup wizard visibility checks.
+ * Mirrors src/app/state.ts relevant fields.
+ */
+const state = {
+  setupComplete: true,
+  gatewaySessions: [],
+};
+
+/**
+ * Helper: checks if a setup wizard session is already active.
+ * Mirrors the isSetupWizardActive() helper in src/app/sidebar.ts.
+ */
+function isSetupWizardActive() {
+  return state.gatewaySessions.some(s => s.assistantType === "setup");
+}
+
+/**
+ * Fixed implementation of renderSetupBanner — from src/app/sidebar.ts.
+ * Checks both state.setupComplete and active setup sessions.
+ */
+function renderSetupBanner() {
+  if (state.setupComplete || isSetupWizardActive()) return "";
+  return '<div class="setup-banner">Setup Wizard</div>';
+}
+
+/**
+ * Fixed implementation of shouldShowMobileEmptySetup — from src/app/render.ts ~line 140.
+ * Checks both !state.setupComplete and no active setup session.
+ */
+function shouldShowMobileEmptySetup() {
+  return !state.setupComplete && !isSetupWizardActive();
+}
+
+/**
+ * Fixed implementation of shouldShowDesktopEmptySetup — from src/app/render.ts ~line 2124.
+ * Checks both !state.setupComplete and no active setup session.
+ */
+function shouldShowDesktopEmptySetup() {
+  return !state.setupComplete && !isSetupWizardActive();
+}
+
+/**
+ * Render all three locations into the DOM based on current state.
+ */
+function renderAll() {
+  document.getElementById("setup-banner").innerHTML = renderSetupBanner();
+  document.getElementById("mobile-empty-state").innerHTML = shouldShowMobileEmptySetup()
+    ? '<div class="start-setup-mobile">Start Setup</div>'
+    : '<div class="no-setup-mobile">No goals or sessions yet</div>';
+  document.getElementById("desktop-empty-state").innerHTML = shouldShowDesktopEmptySetup()
+    ? '<div class="start-setup-desktop">Start Setup</div>'
+    : '<div class="select-session-desktop">Select a session</div>';
+}
+
+// Expose for tests
+window.__state = state;
+window.__renderAll = renderAll;
+
+// Initial render
+renderAll();
+</script>
+</body>
+</html>

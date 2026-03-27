@@ -617,7 +617,7 @@ export class TeamManager {
 				undefined,
 				goalId,
 				undefined,
-				{ rolePrompt, allowedTools, personalities: resolvedPersonalities, personalityNames, workflowContext },
+				{ rolePrompt, roleName: role, allowedTools, personalities: resolvedPersonalities, personalityNames, workflowContext },
 			);
 
 			// Assign a unique color and title

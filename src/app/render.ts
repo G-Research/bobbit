@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { Archive, ArrowLeft, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, FileText, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -20,7 +20,7 @@ import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup } f
 import { clearSessionModel } from "./routing.js";
 import { backToSessions, createAndConnectSession, connectToSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive } from "./sidebar.js";
 
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, INDENT } from "./render-helpers.js";
 
@@ -129,7 +129,7 @@ function renderMobileLanding() {
 								<button class="text-xs text-muted-foreground underline" title="Retry" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
-							? !state.setupComplete
+							? (!state.setupComplete && !isSetupWizardActive())
 								? html`<div class="text-center py-12">
 										<div class="text-muted-foreground mb-3 empty-state-icon">${icon(WandSparkles, "lg")}</div>
 										<p class="text-lg font-medium text-foreground mb-1">Welcome to Bobbit</p>
@@ -1780,6 +1780,16 @@ export function doRenderApp(): void {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
+					import("../ui/dialogs/SystemPromptDialog.js").then(m => m.SystemPromptDialog.show(activeSid!));
+				},
+				children: html`<span class="inline-flex items-center gap-1">${icon(FileText, "xs")}<span class="text-xs hidden sm:inline">Prompt</span></span>`,
+				className: "h-7 px-2 text-muted-foreground",
+				title: "View System Prompt",
+			})}
+			${Button({
+				variant: "ghost",
+				size: "sm",
+				onClick: () => {
 					if (activeStaffAgent) {
 						window.location.hash = `#/staff/${activeStaffAgent.id}`;
 					} else {
@@ -2119,7 +2129,7 @@ export function doRenderApp(): void {
 		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
 
 		if (desktop) {
-			if (!state.setupComplete) {
+			if (!state.setupComplete && !isSetupWizardActive()) {
 				return html`
 					<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
 						<div class="text-muted-foreground empty-state-icon">${icon(WandSparkles, "lg")}</div>
