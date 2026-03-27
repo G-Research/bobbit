@@ -65,4 +65,5 @@ export type ServerMessage =
 	| { type: "goal_setup_error"; goalId: string; error: string }
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
-	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string };
+	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
+	| { type: "pr_status_changed"; goalId: string };

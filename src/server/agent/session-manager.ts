@@ -128,6 +128,11 @@ export class SessionManager {
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
+	private _onPrCreationDetected?: (session: SessionInfo) => void;
+
+	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
+		this._onPrCreationDetected = cb;
+	}
 
 	constructor(options?: SessionManagerOptions) {
 		this.agentCliPath = options?.agentCliPath;
@@ -328,6 +333,39 @@ export class SessionManager {
 		if (event.type === "message_end" && event.message?.role === "user") {
 			if (session.promptQueue.removeDispatched()) {
 				this.broadcastQueue(session);
+			}
+		}
+
+		// Detect PR creation in tool results
+		if (event.type === "message_end" && event.message) {
+			const content = event.message.content;
+			if (Array.isArray(content)) {
+				let detected = false;
+				for (const block of content) {
+					// Check bash tool_use input for gh pr create/ready
+					if (block.type === "tool_use" && /^[Bb]ash$/.test(block.name) && block.input?.command) {
+						if (/gh\s+pr\s+(create|ready)/.test(block.input.command)) {
+							detected = true;
+							break;
+						}
+					}
+					// Check text/tool_result content for GitHub PR URLs
+					if (typeof block === "string" && /github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(block)) {
+						detected = true;
+						break;
+					}
+					if (block.type === "tool_result" && typeof block.content === "string" && /github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(block.content)) {
+						detected = true;
+						break;
+					}
+					if (block.type === "text" && typeof block.text === "string" && /github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(block.text)) {
+						detected = true;
+						break;
+					}
+				}
+				if (detected && this._onPrCreationDetected) {
+					this._onPrCreationDetected(session);
+				}
 			}
 		}
 
