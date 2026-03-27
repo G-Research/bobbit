@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar Archive CTA — empty state logic</title>
+</head>
+<body>
+<script>
+/**
+ * Replicates the CURRENT (buggy) emptyState priority chain from
+ * src/app/render-helpers.ts renderGoalGroup() (~line 502).
+ *
+ * Current priority chain (missing canArchive branch):
+ *   1. archived   → 'archived'
+ *   2. isTeamGoal → 'start-team'
+ *   3. else       → 'start-session'
+ *
+ * BUG: When canArchive is true (PR merged, no active team, not archived),
+ * the code falls through to isTeamGoal and shows "Start Team" instead of
+ * an "Archive Goal" CTA.
+ */
+function getEmptyState(archived, canArchive, isTeamGoal) {
+  if (archived) return 'archived';
+  if (canArchive) return 'archive-goal';
+  if (isTeamGoal) return 'start-team';
+  return 'start-session';
+}
+
+// Expose for Playwright
+window.getEmptyState = getEmptyState;
+</script>
+</body>
+</html>
