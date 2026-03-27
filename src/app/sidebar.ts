@@ -583,8 +583,12 @@ export async function launchSetupWizard(): Promise<void> {
 	}
 }
 
+export function isSetupWizardActive(): boolean {
+	return state.gatewaySessions.some(s => s.assistantType === "setup");
+}
+
 export function renderSetupBanner(mobile = false) {
-	if (state.setupComplete) return "";
+	if (state.setupComplete || isSetupWizardActive()) return "";
 	return html`
 		<div class="flex items-center gap-1 ${mobile ? "px-2 py-1.5 mx-1 mb-1" : "px-1.5 py-1 mx-0.5 mb-0.5"} rounded-md border border-primary/20 bg-primary/5">
 			<button
