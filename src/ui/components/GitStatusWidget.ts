@@ -1,4 +1,4 @@
-import { html, LitElement, nothing } from 'lit';
+import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 @customElement('git-status-widget')
@@ -34,8 +34,11 @@ export class GitStatusWidget extends LitElement {
     @state() private pulling = false;
     @state() private pullError = '';
 
+    private _dropdownEl: HTMLElement | null = null;
+
     private _onDocumentClick = (e: MouseEvent) => {
-        if (this.expanded && !this.contains(e.target as Node)) {
+        const target = e.target as Node;
+        if (this.expanded && !this.contains(target) && !this._dropdownEl?.contains(target)) {
             this.expanded = false;
         }
     };
@@ -52,6 +55,14 @@ export class GitStatusWidget extends LitElement {
     disconnectedCallback() {
         super.disconnectedCallback();
         document.removeEventListener('click', this._onDocumentClick, true);
+        this._removeDropdown();
+    }
+
+    private _removeDropdown() {
+        if (this._dropdownEl) {
+            this._dropdownEl.remove();
+            this._dropdownEl = null;
+        }
     }
 
     private _toggle(e: MouseEvent) {
@@ -314,6 +325,57 @@ export class GitStatusWidget extends LitElement {
         }));
     }
 
+    /** Render the dropdown content into the portaled element */
+    private _renderDropdownContent() {
+        return html`
+            <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
+                <span>⎇</span>
+                <span class="break-all">${this.branch}</span>
+                ${!this.isOnPrimary
+                    ? html`<span class="text-[10px] text-muted-foreground font-normal">(feature)</span>`
+                    : nothing}
+            </div>
+
+            <div class="flex flex-col gap-1 mb-2">
+                <div class="text-muted-foreground">
+                    Remote: ${this._renderRemoteStatus()}
+                </div>
+                ${this._renderPrimaryStatus()}
+            </div>
+
+            ${this._renderPrSection()}
+
+            ${this.statusFiles.length > 0
+                ? html`
+                      <div class="border-t border-border pt-2 mt-2">
+                          <div class="text-muted-foreground mb-1 font-medium">Changes</div>
+                          <div class="flex flex-col gap-0.5 max-h-[200px] overflow-y-auto">
+                              ${this.statusFiles.map(
+                                  (f) => html`
+                                      <div class="flex items-center gap-2 py-0.5 min-w-0">
+                                          <span
+                                              class="${this._statusColor(f.status)} font-mono w-[70px] shrink-0 text-right"
+                                              title=${this._statusLabel(f.status)}
+                                          >
+                                              ${this._statusLabel(f.status)}
+                                          </span>
+                                          <span class="text-foreground truncate" title=${f.file}>
+                                              ${f.file}
+                                          </span>
+                                      </div>
+                                  `
+                              )}
+                          </div>
+                      </div>
+                  `
+                : html`
+                      <div class="text-green-600 dark:text-green-400 border-t border-border pt-2 mt-2">
+                          Working tree clean
+                      </div>
+                  `}
+        `;
+    }
+
     render() {
         if (!this.branch && !this.loading) return nothing;
 
@@ -335,82 +397,54 @@ export class GitStatusWidget extends LitElement {
                 ${this._pillIndicator()}
                 ${this._prPillIcon()}
             </button>
-
-            ${this.expanded
-                ? html`
-                      <div
-                          class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-3 text-xs"
-                          style="max-width:min(420px, calc(100vw - 1rem))"
-                          id="git-status-dropdown"
-                      >
-                          <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
-                              <span>⎇</span>
-                              <span class="break-all">${this.branch}</span>
-                              ${!this.isOnPrimary
-                                  ? html`<span class="text-[10px] text-muted-foreground font-normal">(feature)</span>`
-                                  : nothing}
-                          </div>
-
-                          <div class="flex flex-col gap-1 mb-2">
-                              <div class="text-muted-foreground">
-                                  Remote: ${this._renderRemoteStatus()}
-                              </div>
-                              ${this._renderPrimaryStatus()}
-                          </div>
-
-                          ${this._renderPrSection()}
-
-                          ${this.statusFiles.length > 0
-                              ? html`
-                                    <div class="border-t border-border pt-2 mt-2">
-                                        <div class="text-muted-foreground mb-1 font-medium">Changes</div>
-                                        <div class="flex flex-col gap-0.5 max-h-[200px] overflow-y-auto">
-                                            ${this.statusFiles.map(
-                                                (f) => html`
-                                                    <div class="flex items-center gap-2 py-0.5 min-w-0">
-                                                        <span
-                                                            class="${this._statusColor(f.status)} font-mono w-[70px] shrink-0 text-right"
-                                                            title=${this._statusLabel(f.status)}
-                                                        >
-                                                            ${this._statusLabel(f.status)}
-                                                        </span>
-                                                        <span class="text-foreground truncate" title=${f.file}>
-                                                            ${f.file}
-                                                        </span>
-                                                    </div>
-                                                `
-                                            )}
-                                        </div>
-                                    </div>
-                                `
-                              : html`
-                                    <div class="text-green-600 dark:text-green-400 border-t border-border pt-2 mt-2">
-                                        Working tree clean
-                                    </div>
-                                `}
-                      </div>
-                  `
-                : nothing}
         `;
     }
 
     override updated(changed: Map<string, unknown>) {
         super.updated(changed);
-        if (changed.has('expanded') && this.expanded) {
-            this._positionDropdown();
+        if (changed.has('expanded')) {
+            if (this.expanded) {
+                // Create portal dropdown on body
+                this._dropdownEl = document.createElement('div');
+                this._dropdownEl.id = 'git-status-dropdown';
+                this._dropdownEl.className = 'fixed z-[9999] bg-card border border-border rounded-lg shadow-lg p-3 text-xs';
+                this._dropdownEl.style.maxWidth = 'min(420px, calc(100vw - 1rem))';
+                document.body.appendChild(this._dropdownEl);
+                render(this._renderDropdownContent(), this._dropdownEl);
+                this._positionDropdown();
+            } else {
+                this._removeDropdown();
+            }
+        } else if (this.expanded && this._dropdownEl) {
+            // Re-render dropdown content when other reactive properties change
+            render(this._renderDropdownContent(), this._dropdownEl);
         }
     }
 
     private _positionDropdown() {
         const btn = this.querySelector('button');
-        const dropdown = this.querySelector('#git-status-dropdown') as HTMLElement;
+        const dropdown = this._dropdownEl;
         if (!btn || !dropdown) return;
         const rect = btn.getBoundingClientRect();
         const spaceBelow = window.innerHeight - rect.bottom;
         const spaceAbove = rect.top;
+        const vw = window.innerWidth;
+        const pad = 8; // min distance from viewport edge
 
         // Anchor right edge to button's right edge
-        dropdown.style.right = `${window.innerWidth - rect.right}px`;
+        let rightVal = vw - rect.right;
+
+        // Clamp: ensure dropdown doesn't overflow left edge of viewport
+        const dropdownWidth = dropdown.offsetWidth || 0;
+        if (dropdownWidth > 0) {
+            const leftEdge = vw - rightVal - dropdownWidth;
+            if (leftEdge < pad) {
+                rightVal = Math.max(pad, vw - dropdownWidth - pad);
+            }
+        }
+
+        dropdown.style.right = `${rightVal}px`;
+        dropdown.style.left = '';
 
         if (spaceAbove > spaceBelow) {
             // Open upward (default for chat input area)

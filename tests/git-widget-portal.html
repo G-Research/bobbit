@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git Widget Portal — Dropdown in Transformed Ancestor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; width: 100%; }
+
+  :root {
+    --card: #fff;
+    --border: #e5e7eb;
+    --foreground: #111;
+    --muted-foreground: #6b7280;
+  }
+
+  /* Tailwind-like utilities the widget uses */
+  .fixed { position: fixed; }
+  .z-50 { z-index: 50; }
+  .bg-card { background: var(--card); }
+  .border { border-width: 1px; border-style: solid; }
+  .border-border { border-color: var(--border); }
+  .rounded-lg { border-radius: 0.5rem; }
+  .shadow-lg { box-shadow: 0 10px 15px -3px rgba(0,0,0,.1); }
+  .p-3 { padding: 0.75rem; }
+  .text-xs { font-size: 0.75rem; }
+  .text-sm { font-size: 0.875rem; }
+  .text-foreground { color: var(--foreground); }
+  .text-muted-foreground { color: var(--muted-foreground); }
+  .font-medium { font-weight: 500; }
+  .inline-flex { display: inline-flex; }
+  .flex { display: flex; }
+  .items-center { align-items: center; }
+  .gap-1 { gap: 0.25rem; }
+  .gap-1\.5 { gap: 0.375rem; }
+  .px-1\.5 { padding-left: 0.375rem; padding-right: 0.375rem; }
+  .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+  .rounded-full { border-radius: 9999px; }
+  .cursor-pointer { cursor: pointer; }
+  .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .shrink-0 { flex-shrink: 0; }
+  .mb-2 { margin-bottom: 0.5rem; }
+  .flex-col { flex-direction: column; }
+  .leading-tight { line-height: 1.25; }
+  .text-\[11px\] { font-size: 11px; }
+  .transition-colors { transition: color 0.15s; }
+  .hover\:text-foreground:hover { color: var(--foreground); }
+  .text-green-600 { color: #16a34a; }
+  .text-amber-600 { color: #d97706; }
+  .border-t { border-top-width: 1px; border-top-style: solid; }
+  .pt-2 { padding-top: 0.5rem; }
+  .mt-2 { margin-top: 0.5rem; }
+
+  /*
+   * Simulate the mobile preview slider layout from src/app/render.ts.
+   *
+   * .preview-slider has overflow:hidden + position:relative (line ~2122)
+   * .preview-slider__track has transform + will-change:transform (line ~2123)
+   *
+   * Per CSS spec, transform on any ancestor changes the containing block
+   * for position:fixed descendants — they become relative to the transformed
+   * ancestor, not the viewport. Combined with overflow:hidden, the dropdown
+   * is clipped invisible.
+   */
+  .preview-slider {
+    overflow: hidden;
+    position: relative;
+    height: 100%;
+    width: 100%;
+  }
+  .preview-slider__track {
+    display: flex;
+    width: 200%;
+    height: 100%;
+    transform: translateX(0%);
+    will-change: transform;
+  }
+  .chat-pane {
+    width: 50%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .widget-area {
+    margin-top: auto;
+    padding: 12px;
+    border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<!--
+  This layout mirrors the mobile preview mode from render.ts.
+  The git-status-widget sits inside the chat pane, which is inside
+  a transformed slider track with an overflow:hidden parent.
+-->
+<div class="preview-slider" id="slider">
+  <div class="preview-slider__track" id="track">
+    <div class="chat-pane">
+      <div style="flex:1;padding:12px;">Chat content area</div>
+      <div class="widget-area" id="widget-area">
+        <!-- Inline reproduction of the widget's trigger + dropdown pattern -->
+        <div id="git-widget" style="display:inline-block;position:relative;">
+          <button
+            id="git-pill"
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight"
+          >
+            <span class="shrink-0">⎇</span>
+            <span class="truncate">test-branch</span>
+            <span class="text-amber-600 font-medium shrink-0">+2 -1</span>
+          </button>
+          <!-- Dropdown is portaled to document.body (fix for transform ancestor clipping) -->
+        </div>
+      </div>
+    </div>
+    <div class="chat-pane" style="background:#f0f0f0;">
+      <div style="padding:12px;">Preview pane (HTML preview content)</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Reproduce the fixed toggle + positioning logic from GitStatusWidget.ts
+  // Key fix: dropdown is portaled to document.body instead of being inline
+  // inside the transformed ancestor. This avoids CSS transform breaking
+  // position:fixed positioning.
+
+  const pill = document.getElementById('git-pill');
+  const widget = document.getElementById('git-widget');
+  let dropdown = null;
+  let expanded = false;
+
+  const dropdownHTML = `
+    <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
+      <span>⎇</span>
+      <span>test-branch</span>
+      <span class="text-muted-foreground" style="font-size:10px">(feature)</span>
+    </div>
+    <div class="flex flex-col gap-1 mb-2">
+      <div class="text-muted-foreground">
+        Remote: <span class="text-amber-600">2 unpushed commits</span>
+      </div>
+    </div>
+    <div class="border-t border-border pt-2 mt-2">
+      <div class="text-muted-foreground mb-1 font-medium">Changes</div>
+      <div>
+        <div style="display:flex;gap:8px;padding:2px 0">
+          <span class="text-amber-600" style="font-family:monospace;width:70px;text-align:right">modified</span>
+          <span class="text-foreground">src/ui/components/GitStatusWidget.ts</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  function createDropdown() {
+    dropdown = document.createElement('div');
+    dropdown.id = 'git-status-dropdown';
+    dropdown.className = 'fixed z-50 bg-card border border-border rounded-lg shadow-lg p-3 text-xs';
+    dropdown.style.maxWidth = 'min(420px, calc(100vw - 1rem))';
+    dropdown.innerHTML = dropdownHTML;
+    document.body.appendChild(dropdown);
+  }
+
+  function removeDropdown() {
+    if (dropdown) {
+      dropdown.remove();
+      dropdown = null;
+    }
+  }
+
+  // _onDocumentClick equivalent — close when clicking outside
+  document.addEventListener('click', (e) => {
+    if (expanded && !widget.contains(e.target) && (!dropdown || !dropdown.contains(e.target))) {
+      expanded = false;
+      removeDropdown();
+    }
+  }, true);
+
+  // _toggle equivalent
+  pill.addEventListener('click', (e) => {
+    e.stopPropagation();
+    expanded = !expanded;
+    if (expanded) {
+      createDropdown();
+      positionDropdown();
+    } else {
+      removeDropdown();
+    }
+  });
+
+  // _positionDropdown equivalent — matches GitStatusWidget.ts portal approach
+  function positionDropdown() {
+    const btn = pill;
+    if (!btn || !dropdown) return;
+    const rect = btn.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const vw = window.innerWidth;
+    const pad = 8;
+
+    // Anchor right edge to button's right edge
+    let rightVal = vw - rect.right;
+
+    // Clamp: ensure dropdown doesn't overflow left edge of viewport
+    const dropdownWidth = dropdown.offsetWidth || 0;
+    if (dropdownWidth > 0) {
+      const leftEdge = vw - rightVal - dropdownWidth;
+      if (leftEdge < pad) {
+        rightVal = Math.max(pad, vw - dropdownWidth - pad);
+      }
+    }
+
+    dropdown.style.right = rightVal + 'px';
+    dropdown.style.left = '';
+
+    if (spaceAbove > spaceBelow) {
+      // Open upward (default for chat input area at bottom)
+      dropdown.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+      dropdown.style.top = '';
+    } else {
+      // Open downward
+      dropdown.style.top = (rect.bottom + 4) + 'px';
+      dropdown.style.bottom = '';
+    }
+  }
+
+  // Expose state for test inspection
+  window.__isExpanded = () => expanded;
+  window.__getDropdownRect = () => dropdown ? dropdown.getBoundingClientRect() : null;
+  window.__getSliderRect = () => document.getElementById('slider').getBoundingClientRect();
+</script>
+</body>
+</html>
