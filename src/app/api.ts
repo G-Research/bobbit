@@ -351,6 +351,7 @@ export async function deleteGoal(id: string): Promise<void> {
 
 	try {
 		await gatewayFetch(`/api/goals/${id}`, { method: "DELETE" });
+		setHashRoute("landing");
 		await refreshSessions();
 	} catch (err) {
 		showConnectionError("Failed to archive goal", err instanceof Error ? err.message : String(err));

@@ -843,6 +843,7 @@ const svgCommit = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="non
 const svgGate = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22V2"/><path d="M5 12H2"/><path d="M22 12h-3"/><circle cx="12" cy="12" r="4"/><path d="m15 9 2-2"/><path d="m7 15 2-2"/></svg>`;
 const svgClock = html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>`;
 const svgPhaseArrow = html`<svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M0 6h16M13 2l4 4-4 4"/></svg>`;
+const svgArchive = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>`;
 const svgDoc = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>`;
 
 // ============================================================================
@@ -900,7 +901,9 @@ function renderNavBar(goal: Goal): TemplateResult {
 			<div class="nav-right">
 				${goal.archived ? nothing : html`
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
-					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}<span>Archive</span></button>
+					${prStatus?.state === "MERGED" && !teamActive
+						? nothing
+						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}<span>Archive</span></button>`}
 				`}
 				${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
 			</div>
@@ -924,6 +927,17 @@ function renderTeamButton(goal: Goal): TemplateResult {
 			<div class="btn-split">
 				<button class="btn-split-main" ?disabled=${true} style="opacity:0.5;cursor:default">
 					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg><span>Archived</span>
+				</button>
+			</div>
+		`;
+	}
+	// When PR is merged, show Archive as the primary action
+	if (prStatus?.state === "MERGED") {
+		return html`
+			<div class="btn-split">
+				<button class="btn-split-main" title="Archive goal" @click=${() => deleteGoal(goal.id)}>
+					${svgArchive}
+					<span>Archive</span>
 				</button>
 			</div>
 		`;
