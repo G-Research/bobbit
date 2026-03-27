@@ -55,6 +55,8 @@ export interface BobbitCanvasOptions {
 	hueRotate?: number;
 	/** If true, accessory also gets hue-rotate (flask). Default false. */
 	accessoryHueRotate?: boolean;
+	/** Horizontal pixel shift for eye positions (e.g. 1 = look right). */
+	eyeXShift?: number;
 }
 
 // ============================================================================
@@ -149,9 +151,16 @@ export function parseShadowToPixels(shadow: string): Pixel[] {
 // Internal helpers
 // ============================================================================
 
-function resolveBody(palette: BobbitPalette, eyeColor?: string): Pixel[] {
+function resolveBody(palette: BobbitPalette, eyeColor?: string, eyeXShift = 0): Pixel[] {
 	const eye = eyeColor ?? palette.eye;
 	const map: Record<Token, string> = { O: "#000000", M: palette.main, L: palette.light, D: palette.dark, E: eye };
+	if (eyeXShift) {
+		// Shift eye pixels horizontally; fill vacated positions with main colour
+		return BODY.map((p) => {
+			if (p.t === "E") return { x: p.x + eyeXShift, y: p.y, color: map.E };
+			return { x: p.x, y: p.y, color: map[p.t] };
+		});
+	}
 	return BODY.map((p) => ({ x: p.x, y: p.y, color: map[p.t] }));
 }
 
@@ -265,6 +274,7 @@ function drawToCanvas(canvas: HTMLCanvasElement, options: BobbitCanvasOptions): 
 		bodyYOffset = 0,
 		hueRotate,
 		accessoryHueRotate,
+		eyeXShift = 0,
 	} = options;
 
 	// renderScale controls buffer density; scale controls CSS layout size.
@@ -272,7 +282,7 @@ function drawToCanvas(canvas: HTMLCanvasElement, options: BobbitCanvasOptions): 
 	// transform: scale(renderScale/scale) maps 1:1 to the buffer pixels.
 	const rs = renderScaleOpt ?? scale;
 
-	const bodyPixels = resolveBody(palette, eyeColor);
+	const bodyPixels = resolveBody(palette, eyeColor, eyeXShift);
 	const bounds = computeBounds(bodyYOffset, accessoryPixels);
 	const { minX, minY, gridW, gridH } = bounds;
 

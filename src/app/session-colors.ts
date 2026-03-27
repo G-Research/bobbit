@@ -282,7 +282,16 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	const isBusy = status === "streaming" || isCompacting;
 
 	// ---- Canvas rendering (replaces box-shadow spans) ----
-	const eyeColor = p.eye;
+	// Selected bobbit blinks and looks right on a 6-second cycle
+	// (matching the old bobbit-eyes CSS keyframes).
+	let eyeColor = p.eye;
+	let eyeXShift = 0;
+	if (isSelected && !isCompacting) {
+		const pct = (Date.now() % 6000) / 6000 * 100;
+		if (pct >= 56 && pct < 59) { eyeColor = p.main; }        // blink
+		else if (pct >= 74 && pct < 87) { eyeXShift = 1; }       // look right
+		else if (pct >= 87 && pct < 90) { eyeColor = p.main; }   // blink
+	}
 	const accPixels = hasAccessory ? parseShadowToPixels(acc.shadow) : undefined;
 	const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
 	const effectiveHue = (hueRotate && status !== "starting" && status !== "terminated") ? hueRotate : 0;
@@ -292,6 +301,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		renderScale: 1.6,
 		palette: p,
 		eyeColor,
+		eyeXShift,
 		accessoryPixels: accPixels,
 		bodyYOffset,
 		hueRotate: effectiveHue,
@@ -336,5 +346,22 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	// Append positioning / transform styles to the canvas (preserves width/height/imageRendering set by renderBobbitCanvas)
 	canvas.style.cssText += `;position:absolute;left:0;top:${compactTopOffset}px;display:block;${canvasTransform}${shimmer}`;
 
+	// Start a lightweight blink timer when a selected bobbit is rendered.
+	// Triggers renderApp() at ~200ms to animate the 6-second eye cycle.
+	if (isSelected && !isCompacting) startBlinkTimer();
+
 	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${canvas}</span>`;
+}
+
+let _blinkTimer: ReturnType<typeof setInterval> | null = null;
+function startBlinkTimer() {
+	if (_blinkTimer) return;
+	_blinkTimer = setInterval(() => {
+		if (!activeSessionId()) {
+			clearInterval(_blinkTimer!);
+			_blinkTimer = null;
+			return;
+		}
+		renderApp();
+	}, 200);
 }
