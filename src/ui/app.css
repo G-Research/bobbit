@@ -1848,6 +1848,7 @@ html {
 /* Idle state — sitting still, offset left, eyes looking around */
 .bobbit-blob--idle .bobbit-blob__sprite {
 	animation: none !important;
+	transform: scale(4) translateX(-7px);
 }
 
 /* Slow sine-wave light ripple across the sprite surface */
