@@ -23,6 +23,7 @@ import { ToolManager } from "./agent/tool-manager.js";
 import { PersonalityStore } from "./agent/personality-store.js";
 import { PersonalityManager } from "./agent/personality-manager.js";
 
+import { getPromptSections } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { GateStore } from "./agent/gate-store.js";
@@ -2581,6 +2582,24 @@ async function handleApiRoute(
 		const ok = sessionManager.setDraft(id, body.type, body.data);
 		if (!ok) { json({ error: "Session not found" }, 404); return; }
 		json({ ok: true });
+		return;
+	}
+
+	// GET /api/sessions/:id/prompt-sections — return system prompt broken into labeled sections
+	const promptSectionsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-sections$/);
+	if (promptSectionsMatch && req.method === "GET") {
+		const id = promptSectionsMatch[1];
+		const parts = sessionManager.getPromptParts(id);
+		if (!parts) { json({ error: "Session not found or no prompt data" }, 404); return; }
+
+		// Ensure tool docs are populated (they may have been injected at assemblePrompt time,
+		// but re-inject if missing to handle edge cases)
+		if (!parts.toolDocs && toolManager) {
+			parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools);
+		}
+
+		const sections = getPromptSections(parts);
+		json({ sections });
 		return;
 	}
 
