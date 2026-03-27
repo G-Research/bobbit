@@ -5,6 +5,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, BOBBIT_HUE_ROTATIONS, getAccessory } from "./session-colors.js";
+import { renderBobbitCanvas, CANONICAL_PALETTE, parseShadowToPixels } from "./bobbit-canvas.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
@@ -20,35 +21,42 @@ import { setHashRoute } from "./routing.js";
  *  properties, added via role-manager.css.
  */
 function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): TemplateResult {
-	const accClass = accId && accId !== "none"
-		? `bobbit-${accId === "crown" ? "crowned" : accId}`
-		: "";
-	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
-	// The sprite margin-box is ~40×36px at 4× scale but accessories overflow it.
-	// Use a larger viewport to capture everything, then scale down.
-	const naturalSize = 76;
-	const s = size / naturalSize;
+	const acc = getAccessory(accId);
+	const hasAcc = acc.id !== "none" && acc.shadow !== "";
+	const accPixels = hasAcc ? parseShadowToPixels(acc.shadow) : undefined;
+	const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
+
+	const canvas = renderBobbitCanvas({
+		scale: 1,
+		palette: CANONICAL_PALETTE,
+		accessoryPixels: accPixels,
+		bodyYOffset,
+	});
+
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
-	// Offset animations so multiple blobs don't blink/shimmer in sync
-	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
+	const filterStyle = hue ? `filter: hue-rotate(${hue}deg);` : "";
+
+	// Apply shimmer animation with staggered delay
 	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
+	canvas.style.animation = `blob-shimmer 8s ease-in-out infinite`;
+	canvas.style.animationDelay = `${shimmerDelay}s`;
+
+	// Scale to fit target size
+	// canvas CSS dimensions are set by renderBobbitCanvas (gridW × gridH at scale=1)
+	const cw = parseFloat(canvas.style.width);
+	const ch = parseFloat(canvas.style.height);
+	// Use scale(4) first (matching blob context), then scale down to target size
+	const displayW = cw * 4;
+	const displayH = ch * 4;
+	const s = Math.min(size / displayW, size / displayH);
+	const finalScale = 4 * s;
+
+	canvas.style.transformOrigin = "top left";
+	canvas.style.transform = `scale(${finalScale.toFixed(3)})`;
+
 	return html`
-		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
-			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
-				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
-					<div class="bobbit-blob__sprite"></div>
-					<div class="bobbit-blob__crown"></div>
-					<div class="bobbit-blob__bandana"></div>
-					<div class="bobbit-blob__magnifier"></div>
-					<div class="bobbit-blob__palette"></div>
-					<div class="bobbit-blob__pencil"></div>
-					<div class="bobbit-blob__shield"></div>
-					<div class="bobbit-blob__set-square"></div>
-					<div class="bobbit-blob__flask"></div>
-					<div class="bobbit-blob__wand"></div>
-					<div class="bobbit-blob__wizard-hat"></div>
-				</div>
-			</div>
+		<div style="width:${size}px;height:${size}px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+			<div style="${filterStyle}">${canvas}</div>
 		</div>
 	`;
 }
