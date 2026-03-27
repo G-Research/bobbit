@@ -43,7 +43,7 @@ const execAsync = promisify(exec);
 
 // ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
-const PR_NULL_CACHE_TTL_MS = 300_000; // 5 minutes for null (no-PR) results
+const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
 
 // Cache viewer permission per repo (rarely changes, long TTL)
@@ -279,6 +279,15 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 	teamManager.setBroadcastToGoal(broadcastToGoal);
+	sessionManager.setOnPrCreationDetected((session) => {
+		const goalId = session.goalId || session.teamGoalId;
+		if (!goalId) return;
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) return;
+		_prCache.delete(goal.cwd);
+		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
+		broadcastToAll({ type: "pr_status_changed", goalId });
+	});
 	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -1658,6 +1667,20 @@ async function handleApiRoute(
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const pr = await getCachedPrStatus(cwd, goal.branch);
 		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else { json({ error: "No PR found" }, 404); }
+		return;
+	}
+
+	// POST /api/goals/:id/pr-cache-bust — invalidate PR cache for a goal
+	const goalPrCacheBustMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-cache-bust$/);
+	if (req.method === 'POST' && goalPrCacheBustMatch) {
+		const goalId = goalPrCacheBustMatch[1];
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const cwd = goal.cwd;
+		_prCache.delete(cwd);
+		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+		broadcastToAll({ type: "pr_status_changed", goalId });
+		json({ ok: true });
 		return;
 	}
 
