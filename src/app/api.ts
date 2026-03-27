@@ -172,14 +172,29 @@ export async function refreshSessions(): Promise<void> {
 			.catch(() => {});
 	}
 
-	// Always fetch archived sessions so staff/goal filtering works correctly.
-	// When the toggle is off, we still need the data to hide goal-affiliated
-	// staff agents from the Staff section (they belong under their goal).
-	fetchArchivedSessions();
+	// Lazy-load archived sessions on initial load only if user had "Show archived" persisted
+	if (isInitial && state.showArchived && !_archivedSessionsLoaded) {
+		fetchArchivedSessions();
+	}
+}
+
+/** Whether archived sessions have been fetched at least once. */
+let _archivedSessionsLoaded = false;
+
+/** Check whether archived sessions have been loaded. */
+export function archivedSessionsLoaded(): boolean {
+	return _archivedSessionsLoaded;
+}
+
+/** Reset the archived sessions state (flag + data). Called on toggle-off. */
+export function clearArchivedSessionsState(): void {
+	_archivedSessionsLoaded = false;
+	state.archivedSessions = [];
 }
 
 /** Fetch archived sessions from the API. */
 export async function fetchArchivedSessions(): Promise<void> {
+	_archivedSessionsLoaded = true;
 	try {
 		const res = await gatewayFetch("/api/sessions?include=archived");
 		if (!res.ok) return;
