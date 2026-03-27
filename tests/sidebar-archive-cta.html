@@ -21,7 +21,7 @@
  */
 function getEmptyState(archived, canArchive, isTeamGoal) {
   if (archived) return 'archived';
-  // BUG: no canArchive check here — should return 'archive-goal'
+  if (canArchive) return 'archive-goal';
   if (isTeamGoal) return 'start-team';
   return 'start-session';
 }
