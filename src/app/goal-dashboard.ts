@@ -897,8 +897,8 @@ function renderNavBar(goal: Goal): TemplateResult {
 				${goal.archived ? nothing : html`
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
 					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}<span>Archive</span></button>
-					${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
 				`}
+				${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
 			</div>
 		</div>
 	`;
@@ -911,6 +911,15 @@ function renderTeamButton(goal: Goal): TemplateResult {
 				<button class="btn-split-main danger" title="Stop the goal team" @click=${() => handleEndTeam(goal.id)} ?disabled=${teamStopping}>
 					${svgStop}
 					<span>${teamStopping ? "Stopping\u2026" : "Stop Team"}</span>
+				</button>
+			</div>
+		`;
+	}
+	if (goal.archived) {
+		return html`
+			<div class="btn-split">
+				<button class="btn-split-main" ?disabled=${true} style="opacity:0.5;cursor:default">
+					${svgCrown}<span>Archived</span>
 				</button>
 			</div>
 		`;
@@ -928,6 +937,15 @@ function renderTeamButton(goal: Goal): TemplateResult {
 }
 
 function renderSessionButton(goal: Goal): TemplateResult {
+	if (goal.archived) {
+		return html`
+			<div class="btn-split">
+				<button class="btn-split-main" ?disabled=${true} style="opacity:0.5;cursor:default">
+					<span>Archived</span>
+				</button>
+			</div>
+		`;
+	}
 	return html`
 		<div class="btn-split">
 			<button class="btn-split-main" title="New session for this goal" @click=${() => createAndConnectSession(goal.id)} ?disabled=${goal.setupStatus !== undefined && goal.setupStatus !== "ready"}>
