@@ -69,6 +69,26 @@ function getBusyEyeState(pct: number): EyeState {
 }
 
 /**
+ * Determine the eye state for the idle blob animation.
+ * 10-second cycle matching the old blob-idle-eyes CSS keyframes:
+ * center → look left → blink-left → up-right → center →
+ * look right → blink-right → up-right → center → blink-center
+ */
+function getIdleEyeState(pct: number): EyeState {
+	if (pct < 10) return 'center';
+	if (pct < 22) return 'left';
+	if (pct < 25) return 'blink-left';
+	if (pct < 45) return 'up';
+	if (pct < 55) return 'center';
+	if (pct < 67) return 'right';
+	if (pct < 70) return 'blink-right';
+	if (pct < 85) return 'up';
+	if (pct < 93) return 'center';
+	if (pct < 96) return 'blink-center';
+	return 'center';
+}
+
+/**
  * Should the bandana tail be visible at this point in the 10s cycle?
  */
 function isBandanaTailVisible(pct: number): boolean {
@@ -197,9 +217,9 @@ export class StreamingMessageContainer extends LitElement {
 				this._drawCanvas();
 				this._canvasDrawn = true;
 			}
-			if (this._blobState === 'active' && !this._rafId) {
+			if ((this._blobState === 'active' || this._blobState === 'idle') && !this._rafId) {
 				this._startAnimation();
-			} else if (this._blobState !== 'active' && this._rafId) {
+			} else if (this._blobState !== 'active' && this._blobState !== 'idle' && this._rafId) {
 				this._cancelAnimation();
 				// Redraw with center eyes for non-active states
 				this._drawCanvas();
@@ -301,7 +321,7 @@ export class StreamingMessageContainer extends LitElement {
 		this._canvas.style.transformOrigin = `${5 + offX}px ${8 + bodyYOffset + offY}px`;
 	}
 
-	/** Start the RAF animation loop for eye blinks during active state */
+	/** Start the RAF animation loop for eye animation (active + idle states) */
 	private _startAnimation() {
 		this._animStartTime = performance.now();
 		this._lastEyeState = 'center';
@@ -309,7 +329,7 @@ export class StreamingMessageContainer extends LitElement {
 		this._drawCanvas('center', true);
 
 		const tick = () => {
-			if (this._blobState !== 'active') {
+			if (this._blobState !== 'active' && this._blobState !== 'idle') {
 				this._rafId = null;
 				return;
 			}
@@ -318,7 +338,7 @@ export class StreamingMessageContainer extends LitElement {
 			const cycleDuration = 10000; // 10 seconds
 			const pct = (elapsed % cycleDuration) / cycleDuration * 100;
 
-			const eyeState = getBusyEyeState(pct);
+			const eyeState = this._blobState === 'idle' ? getIdleEyeState(pct) : getBusyEyeState(pct);
 			const accId = detectAccessory();
 			const tailVisible = accId === 'bandana' ? isBandanaTailVisible(pct) : true;
 
