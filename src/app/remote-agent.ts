@@ -116,6 +116,7 @@ export class RemoteAgent {
 			isStreaming: false,
 			isCompacting: false,
 			isArchived: false,
+			isPreparing: false,
 			archivedAt: null as number | null,
 			streamMessage: null as any,
 			pendingToolCalls: new Set<string>(),
@@ -622,11 +623,18 @@ export class RemoteAgent {
 				if (msg.status === "archived") {
 					this._state.isStreaming = false;
 					this._state.isArchived = true;
+					this._state.isPreparing = false;
 					if (msg.archivedAt) this._state.archivedAt = msg.archivedAt;
+					this._state.turnStartTime = null;
+				} else if (msg.status === "preparing") {
+					this._state.isPreparing = true;
+					this._state.isStreaming = false;
+					this._state.isArchived = false;
 					this._state.turnStartTime = null;
 				} else {
 					this._state.isStreaming = msg.status === "streaming";
 					this._state.isArchived = false;
+					this._state.isPreparing = false;
 					if (msg.status === "streaming") {
 						this._state.turnStartTime = msg.streamingStartedAt ?? this._state.turnStartTime ?? Date.now();
 					} else {
