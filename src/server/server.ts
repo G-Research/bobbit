@@ -64,9 +64,11 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
-async function _fetchPrStatus(cwd: string): Promise<any | null> {
+async function _fetchPrStatus(cwd: string, branch?: string): Promise<any | null> {
+	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	try {
-		const { stdout } = await execAsync("gh pr view --json state,url,number,title,mergeable,headRefName,reviewDecision", {
+		const branchArg = branch ? ` ${branch}` : "";
+		const { stdout } = await execAsync(`gh pr view${branchArg} --json state,url,number,title,mergeable,headRefName,reviewDecision`, {
 			cwd,
 			encoding: "utf-8",
 			timeout: 10000,
@@ -75,24 +77,25 @@ async function _fetchPrStatus(cwd: string): Promise<any | null> {
 		const viewerIsAdmin = await getViewerIsAdmin(cwd);
 		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
 		const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
-		_prCache.set(cwd, { data, ts: Date.now(), ttl });
+		_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
 		return data;
 	} catch {
-		_prCache.set(cwd, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
+		_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
 		return null;
 	}
 }
 
-async function getCachedPrStatus(cwd: string): Promise<any | null> {
-	const cached = _prCache.get(cwd);
+async function getCachedPrStatus(cwd: string, branch?: string): Promise<any | null> {
+	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
+	const cached = _prCache.get(cacheKey);
 	if (cached && Date.now() - cached.ts < cached.ttl) return cached.data;
 
-	const existing = _prInFlight.get(cwd);
+	const existing = _prInFlight.get(cacheKey);
 	if (existing) return existing;
 
-	const p = _fetchPrStatus(cwd);
-	_prInFlight.set(cwd, p);
-	try { return await p; } finally { _prInFlight.delete(cwd); }
+	const p = _fetchPrStatus(cwd, branch);
+	_prInFlight.set(cacheKey, p);
+	try { return await p; } finally { _prInFlight.delete(cacheKey); }
 }
 
 // ── Async git helpers (avoid blocking event loop) ──
@@ -1638,7 +1641,7 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		const pr = await getCachedPrStatus(cwd);
+		const pr = await getCachedPrStatus(cwd, goal.branch);
 		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else { json({ error: "No PR found" }, 404); }
 		return;
 	}
@@ -1661,6 +1664,7 @@ async function handleApiRoute(
 		try {
 			await execAsync(`gh pr merge --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
+			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -2284,7 +2288,9 @@ async function handleApiRoute(
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		const pr = await getCachedPrStatus(cwd);
+		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged
+		const goalBranch = session.goalId ? sessionManager.goalManager.getGoal(session.goalId)?.branch : undefined;
+		const pr = await getCachedPrStatus(cwd, goalBranch);
 		if (pr) {
 			const goalId = session.goalId;
 			if (goalId) prStatusStore.set(goalId, pr);
@@ -2324,9 +2330,11 @@ async function handleApiRoute(
 			return;
 		}
 		const sessAdminFlag = body?.admin ? " --admin" : "";
+		const sessMergeBranch = session.goalId ? sessionManager.goalManager.getGoal(session.goalId)?.branch : undefined;
 		try {
 			await execAsync(`gh pr merge --${method}${sessAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
+			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);

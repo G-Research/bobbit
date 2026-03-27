@@ -1147,6 +1147,11 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
 			ai.reviewDecision = data.reviewDecision ?? undefined;
 		}
+		// Update goal grouping cache so sidebar reflects the new PR state immediately
+		if (goalId && data.state) {
+			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null });
+			renderApp();
+		}
 	} catch {
 		if (activeSessionId() === sessionId) {
 			ai.prState = undefined;

@@ -800,7 +800,11 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>
 			gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null),
 		]);
 		if (gitRes && gitRes.ok) gitStatus = await gitRes.json();
-		if (prRes && prRes.ok) prStatus = await prRes.json();
+		if (prRes && prRes.ok) {
+			prStatus = await prRes.json();
+			// Immediately update the goal grouping cache so it reflects the merge
+			if (prStatus) state.prStatusCache.set(goalId, prStatus);
+		}
 		else prStatus = null;
 	} catch { /* ignore */ }
 	refreshPrStatusCache();
