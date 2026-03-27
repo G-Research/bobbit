@@ -227,83 +227,6 @@
 .meta-tag.merge-merged { background: oklch(0.65 0.15 145 / 0.12); color: oklch(0.72 0.15 145); }
 .meta-tag.cost-tag { background: oklch(0.65 0.12 145 / 0.12); color: oklch(0.75 0.12 145); }
 
-/* ── COMPACT SUMMARY ROW ── */
-.summary-row {
-	display: flex;
-	align-items: center;
-	padding: 8px 20px;
-	gap: 0;
-	border-bottom: 1px solid var(--border);
-	background: var(--background);
-	flex-shrink: 0;
-}
-.summary-ring {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding-right: 16px;
-	border-right: 1px solid var(--border);
-}
-.ring-container { position: relative; width: 36px; height: 36px; flex-shrink: 0; }
-.ring-bg, .ring-fg {
-	position: absolute;
-	top: 0;
-	left: 0;
-	width: 36px;
-	height: 36px;
-	fill: none;
-	stroke-width: 3.5;
-	stroke-linecap: round;
-}
-.ring-bg { stroke: var(--border); }
-.ring-fg {
-	stroke: var(--primary);
-	transform: rotate(-90deg);
-	transform-origin: center;
-}
-.ring-label {
-	position: absolute;
-	top: 50%;
-	left: 50%;
-	transform: translate(-50%,-50%);
-	font-size: 10px;
-	font-weight: 700;
-}
-.ring-text { font-size: 12px; font-weight: 600; white-space: nowrap; }
-.ring-sub { font-size: 10px; color: var(--text-tertiary); }
-.summary-stats { display: flex; gap: 0; }
-.mini-stat {
-	display: flex;
-	align-items: center;
-	gap: 5px;
-	padding: 6px 14px;
-	border-right: 1px solid var(--border-subtle);
-	white-space: nowrap;
-}
-.mini-stat:last-child { border-right: none; }
-.mini-stat-value { font-size: 15px; font-weight: 700; line-height: 1; }
-.mini-stat-label {
-	font-size: 10px;
-	color: var(--text-tertiary);
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-}
-.summary-agents {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	margin-left: auto;
-	padding-left: 16px;
-	border-left: 1px solid var(--border);
-}
-.bobbit-row { display: flex; gap: 4px; align-items: center; }
-.bobbit-mini-label {
-	font-size: 10px;
-	color: var(--text-tertiary);
-	margin-left: 4px;
-	white-space: nowrap;
-}
-
 /* ── PHASE PIPELINE ── */
 .phase-pipeline {
 	display: flex;
@@ -873,8 +796,6 @@
 
 /* ── RESPONSIVE ── */
 @media (max-width: 900px) {
-	.summary-row { flex-wrap: wrap; gap: 8px; }
-	.summary-agents { margin-left: 0; border-left: none; padding-left: 0; }
 	.phase-pipeline { flex-wrap: wrap; gap: 4px; justify-content: flex-start; }
 	.agent-grid { grid-template-columns: 1fr; }
 }

@@ -1044,74 +1044,6 @@ function renderMetaRows(goal: Goal): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: SUMMARY ROW
-// ============================================================================
-
-function renderSummaryRow(taskList: Task[], agentList: TeamAgent[]): TemplateResult {
-	const total = taskList.length;
-	const done = taskList.filter((t) => t.state === "complete").length;
-	const inProgress = taskList.filter((t) => t.state === "in-progress").length;
-	const failed = taskList.filter((t) => t.state === "skipped").length;
-	const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-	const circumference = 2 * Math.PI * 14; // radius 14
-	const offset = circumference - (pct / 100) * circumference;
-
-	const workingAgents = agentList.filter(a => a.status === "streaming").length;
-	const idleAgents = agentList.length - workingAgents;
-
-	return html`
-		<div class="summary-row">
-			<div class="summary-ring">
-				<div class="ring-container">
-					<svg class="ring-bg" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14"/></svg>
-					<svg class="ring-fg" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"/></svg>
-					<div class="ring-label">${pct}%</div>
-				</div>
-				<div>
-					<div class="ring-text">${done}/${total} tasks</div>
-					<div class="ring-sub">complete</div>
-				</div>
-			</div>
-			<div class="summary-stats">
-				<div class="mini-stat">
-					<span class="mini-stat-value" style="color:oklch(0.72 0.15 250)">${inProgress}</span>
-					<span class="mini-stat-label">Active</span>
-				</div>
-				<div class="mini-stat">
-					<span class="mini-stat-value" style="color:var(--destructive)">${failed}</span>
-					<span class="mini-stat-label">Failed</span>
-				</div>
-				<div class="mini-stat">
-					<span class="mini-stat-value" style="color:oklch(0.72 0.15 145)">${agentList.length}</span>
-					<span class="mini-stat-label">Agents</span>
-				</div>
-			</div>
-			${agentList.length > 0 ? html`
-				<div class="summary-agents">
-					<div class="bobbit-row">
-						${agentList.map(agent => {
-							const session = state.gatewaySessions.find(s => s.id === agent.sessionId)
-								|| state.archivedSessions.find(s => s.id === agent.sessionId);
-							return statusBobbit(
-								session?.status ?? agent.status,
-								session?.isCompacting ?? false,
-								agent.sessionId,
-								false,
-								session?.isAborting ?? false,
-								agent.role === "team-lead",
-								agent.role === "coder",
-								session?.accessory,
-							);
-						})}
-					</div>
-					<span class="bobbit-mini-label">${workingAgents} working, ${idleAgents} idle</span>
-				</div>
-			` : nothing}
-		</div>
-	`;
-}
-
-// ============================================================================
 // RENDER: GATE PIPELINE (horizontal visualization)
 // ============================================================================
 
@@ -1817,7 +1749,6 @@ export function renderGoalDashboard(): TemplateResult {
 			` : nothing}
 			${renderSetupBanner(currentGoal)}
 			${renderMetaRows(currentGoal)}
-			${renderSummaryRow(tasks, agents)}
 			${renderGatePipeline()}
 			${renderTabBar()}
 			<div class="tab-content">
