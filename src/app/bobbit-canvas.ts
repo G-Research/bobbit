@@ -155,6 +155,55 @@ function resolveBody(palette: BobbitPalette, eyeColor?: string): Pixel[] {
 	return BODY.map((p) => ({ x: p.x, y: p.y, color: map[p.t] }));
 }
 
+// ============================================================================
+// JavaScript hue rotation (replaces unreliable ctx.filter)
+// ============================================================================
+
+function parseHex(hex: string): [number, number, number] {
+	const h = hex.replace("#", "");
+	return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function toHex(r: number, g: number, b: number): string {
+	return "#" + ((1 << 24) | (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b)).toString(16).slice(1);
+}
+
+/**
+ * Rotate the hue of a hex colour by `deg` degrees.
+ * Uses the same matrix as CSS hue-rotate().
+ */
+export function rotateHue(hex: string, deg: number): string {
+	if (!deg) return hex;
+	const [r, g, b] = parseHex(hex);
+	const rad = (deg * Math.PI) / 180;
+	const cos = Math.cos(rad);
+	const sin = Math.sin(rad);
+	// CSS hue-rotate matrix (from the Filter Effects spec)
+	const m00 = 0.213 + 0.787 * cos - 0.213 * sin;
+	const m01 = 0.715 - 0.715 * cos - 0.715 * sin;
+	const m02 = 0.072 - 0.072 * cos + 0.928 * sin;
+	const m10 = 0.213 - 0.213 * cos + 0.143 * sin;
+	const m11 = 0.715 + 0.285 * cos + 0.140 * sin;
+	const m12 = 0.072 - 0.072 * cos - 0.283 * sin;
+	const m20 = 0.213 - 0.213 * cos - 0.787 * sin;
+	const m21 = 0.715 - 0.715 * cos + 0.715 * sin;
+	const m22 = 0.072 + 0.928 * cos + 0.072 * sin;
+	const nr = Math.min(255, Math.max(0, m00 * r + m01 * g + m02 * b));
+	const ng = Math.min(255, Math.max(0, m10 * r + m11 * g + m12 * b));
+	const nb = Math.min(255, Math.max(0, m20 * r + m21 * g + m22 * b));
+	return toHex(nr, ng, nb);
+}
+
+/** Rotate an entire palette's hue. */
+function rotatePalette(palette: BobbitPalette, deg: number): BobbitPalette {
+	return {
+		main: rotateHue(palette.main, deg),
+		light: rotateHue(palette.light, deg),
+		dark: rotateHue(palette.dark, deg),
+		eye: rotateHue(palette.eye, deg),
+	};
+}
+
 /** Compute the unified bounding box for body (shifted) + optional accessory pixels. */
 export function computeBounds(
 	bodyYOffset: number,
@@ -253,30 +302,25 @@ function drawToCanvas(canvas: HTMLCanvasElement, options: BobbitCanvasOptions): 
 	ctx.imageSmoothingEnabled = false;
 
 	// ---- Draw body pixels ----
+	// Hue rotation is applied to body colours in JS (not CSS filter) so that
+	// accessories can be drawn in their original colours on the same canvas.
 	// CSS box-shadow z-order: first-listed = on top.  We draw in reverse
 	// so the first-listed pixel is painted last (on top) on the canvas.
-	const needCounter = !!(hueRotate && hueRotate !== 0);
 
 	for (let i = bodyPixels.length - 1; i >= 0; i--) {
 		const p = bodyPixels[i];
-		ctx.fillStyle = p.color;
+		ctx.fillStyle = hueRotate ? rotateHue(p.color, hueRotate) : p.color;
 		ctx.fillRect(p.x + offX, p.y + bodyYOffset + offY, 1, 1);
 	}
 
 	// ---- Draw accessory pixels (on top of body) ----
+	// Accessories keep their original colours unless accessoryHueRotate is set
+	// (e.g. flask rotates with the body).
 	if (accessoryPixels && accessoryPixels.length > 0) {
-		if (needCounter && !accessoryHueRotate) {
-			ctx.filter = `hue-rotate(${-hueRotate!}deg)`;
-		}
-
 		for (let i = accessoryPixels.length - 1; i >= 0; i--) {
 			const p = accessoryPixels[i];
-			ctx.fillStyle = p.color;
+			ctx.fillStyle = (hueRotate && accessoryHueRotate) ? rotateHue(p.color, hueRotate) : p.color;
 			ctx.fillRect(p.x + offX, p.y + offY, 1, 1);
-		}
-
-		if (needCounter && !accessoryHueRotate) {
-			ctx.filter = "none";
 		}
 	}
 

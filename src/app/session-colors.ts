@@ -309,8 +309,9 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	const shimmer = isBusy && !isCompacting ? `animation:blob-shimmer 8s ease-in-out infinite;animation-delay:${shimmerDelay}ms;` : "";
 	const isIdle = status === "idle" && !isCompacting && !isSelected && !noDesaturate;
 	const isCancelling = isAborting && (status === "streaming" || isBusy);
+	// Hue rotation is baked into the canvas pixel colours (not CSS filter)
+	// so accessories keep their original colours. Only saturate is CSS.
 	const filters: string[] = [];
-	if (effectiveHue) filters.push(`hue-rotate(${effectiveHue}deg)`);
 	if (isCancelling) filters.push("saturate(0.3)");
 	else if (isIdle) filters.push("saturate(0.4)");
 	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
