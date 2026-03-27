@@ -184,10 +184,23 @@ export function handleWebSocketConnection(
 			return;
 		}
 
-		// Block commands while session is still preparing (worktree being created)
-		if (session.status === "preparing" && msg.type !== "ping" && msg.type !== "get_state" && msg.type !== "get_messages") {
-			send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
-			return;
+		// Block commands while session is still preparing (worktree being created).
+		// Return safe responses for read-only commands; reject everything else.
+		if (session.status === "preparing") {
+			switch (msg.type) {
+				case "ping":
+					send(ws, { type: "pong" });
+					return;
+				case "get_state":
+					send(ws, { type: "state", data: { preparing: true } });
+					return;
+				case "get_messages":
+					send(ws, { type: "messages", data: [] });
+					return;
+				default:
+					send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
+					return;
+			}
 		}
 
 		try {
