@@ -901,7 +901,9 @@ function renderNavBar(goal: Goal): TemplateResult {
 			<div class="nav-right">
 				${goal.archived ? nothing : html`
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
-					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>
+					${prStatus?.state === "MERGED" && !teamActive
+						? html`<button class="btn-icon primary" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgArchive}<span>Archive</span></button>`
+						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>`}
 				`}
 				${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
 			</div>
@@ -929,18 +931,12 @@ function renderTeamButton(goal: Goal): TemplateResult {
 			</div>
 		`;
 	}
-	// When PR is merged, promote Archive to primary and demote Start Team to secondary
+	// When PR is merged, demote Start Team to secondary (Archive is in the nav bar)
 	if (prStatus?.state === "MERGED") {
 		return html`
 			<button class="btn-icon" title="Start the goal team" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
 				${svgCrown}<span>${teamStarting ? "Starting\u2026" : "Start Team"}</span>
 			</button>
-			<div class="btn-split">
-				<button class="btn-split-main" title="Archive goal" @click=${() => deleteGoal(goal.id)}>
-					${svgArchive}
-					<span>Archive</span>
-				</button>
-			</div>
 		`;
 	}
 	return html`

@@ -161,6 +161,8 @@
 }
 .btn-icon:disabled { opacity: 0.35; cursor: not-allowed; }
 .btn-icon:hover { background: var(--accent); color: var(--foreground); }
+.btn-icon.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+.btn-icon.primary:hover { opacity: 0.9; background: var(--primary); color: var(--primary-foreground); }
 .btn-icon.danger:hover {
 	color: var(--destructive);
 	border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
