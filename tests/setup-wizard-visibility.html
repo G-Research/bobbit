@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Setup Wizard Visibility Test</title>
+</head>
+<body>
+
+<div id="setup-banner"></div>
+<div id="mobile-empty-state"></div>
+<div id="desktop-empty-state"></div>
+
+<script>
+/**
+ * Simulates the app state used by the setup wizard visibility checks.
+ * Mirrors src/app/state.ts relevant fields.
+ */
+const state = {
+  setupComplete: true,
+  gatewaySessions: [],
+};
+
+/**
+ * Current (buggy) implementation of renderSetupBanner — from src/app/sidebar.ts ~line 587.
+ * Only checks state.setupComplete, does NOT check for active setup sessions.
+ */
+function renderSetupBanner() {
+  if (state.setupComplete) return "";
+  // Bug: should also check if a setup wizard session is already active
+  return '<div class="setup-banner">Setup Wizard</div>';
+}
+
+/**
+ * Current (buggy) implementation of shouldShowMobileEmptySetup — from src/app/render.ts ~line 140.
+ * Only checks !state.setupComplete.
+ */
+function shouldShowMobileEmptySetup() {
+  // Bug: should also check if a setup wizard session is already active
+  return !state.setupComplete;
+}
+
+/**
+ * Current (buggy) implementation of shouldShowDesktopEmptySetup — from src/app/render.ts ~line 2124.
+ * Only checks !state.setupComplete.
+ */
+function shouldShowDesktopEmptySetup() {
+  // Bug: should also check if a setup wizard session is already active
+  return !state.setupComplete;
+}
+
+/**
+ * Render all three locations into the DOM based on current state.
+ */
+function renderAll() {
+  document.getElementById("setup-banner").innerHTML = renderSetupBanner();
+  document.getElementById("mobile-empty-state").innerHTML = shouldShowMobileEmptySetup()
+    ? '<div class="start-setup-mobile">Start Setup</div>'
+    : '<div class="no-setup-mobile">No goals or sessions yet</div>';
+  document.getElementById("desktop-empty-state").innerHTML = shouldShowDesktopEmptySetup()
+    ? '<div class="start-setup-desktop">Start Setup</div>'
+    : '<div class="select-session-desktop">Select a session</div>';
+}
+
+// Expose for tests
+window.__state = state;
+window.__renderAll = renderAll;
+
+// Initial render
+renderAll();
+</script>
+</body>
+</html>
