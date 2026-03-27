@@ -901,7 +901,7 @@ function renderNavBar(goal: Goal): TemplateResult {
 			<div class="nav-right">
 				${goal.archived ? nothing : html`
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
-					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}<span>Archive</span></button>
+					<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>
 				`}
 				${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
 			</div>

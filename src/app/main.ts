@@ -307,13 +307,17 @@ async function initApp() {
 		try {
 			await authenticateGateway(savedUrl, savedToken);
 
-			// Load saved preferences (palette + AI gateway)
+			// Load saved preferences (palette, timestamps, AI gateway)
 			try {
 				const prefRes = await gatewayFetch("/api/preferences");
 				if (prefRes.ok) {
 					const prefs = await prefRes.json();
 					if (prefs.palette && prefs.palette !== "forest") {
 						document.documentElement.dataset.palette = prefs.palette;
+					}
+					// Apply showTimestamps
+					if (prefs.showTimestamps) {
+						document.documentElement.dataset.showTimestamps = "true";
 					}
 					// Load AI Gateway config into ModelSelector
 					import("./aigw-config.js").then(({ applyAigwConfig }) => applyAigwConfig(prefs));
@@ -551,6 +555,8 @@ async function initApp() {
 			} else {
 				document.documentElement.dataset.palette = palette;
 			}
+			// Apply showTimestamps
+			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
 			// Reload shortcuts if changed
 			if (prefs.shortcuts) {
 				await loadSavedBindings();
