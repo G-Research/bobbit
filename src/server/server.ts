@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir } from "./bobbit-dir.js";
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
+import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
@@ -125,6 +126,7 @@ export interface GatewayConfig {
 
 export function createGateway(config: GatewayConfig) {
 	const colorStore = new ColorStore();
+	const prStatusStore = new PrStatusStore();
 	const preferencesStore = new PreferencesStore();
 	const projectConfigStore = new ProjectConfigStore();
 	const savedCwd = preferencesStore.get("defaultCwd");
@@ -214,7 +216,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, broadcastToGoal, broadcastToAll);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, broadcastToGoal, broadcastToAll);
 
 			return;
 		}
@@ -399,6 +401,7 @@ async function handleApiRoute(
 	sessionManager: SessionManager,
 	config: GatewayConfig,
 	colorStore: ColorStore,
+	prStatusStore: PrStatusStore,
 	teamManager: TeamManager,
 	roleManager: RoleManager,
 	toolManager: ToolManager,
@@ -790,6 +793,7 @@ async function handleApiRoute(
 			}
 			// Archive instead of hard-delete — tasks, gates, team state remain intact
 			await sessionManager.goalManager.archiveGoal(id);
+			prStatusStore.remove(id);
 			json({ ok: true });
 			return;
 		}
@@ -1620,6 +1624,12 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/pr-status-cache — bulk PR status from disk cache (startup hydration)
+	if (req.method === "GET" && url.pathname === "/api/pr-status-cache") {
+		json(prStatusStore.getAll());
+		return;
+	}
+
 	// GET /api/goals/:id/pr-status — PR status for goal branch (async + cached)
 	const goalPrStatusMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-status$/);
 	if (goalPrStatusMatch && req.method === "GET") {
@@ -1629,7 +1639,7 @@ async function handleApiRoute(
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const pr = await getCachedPrStatus(cwd);
-		if (pr) { json(pr); } else { json({ error: "No PR found" }, 404); }
+		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else { json({ error: "No PR found" }, 404); }
 		return;
 	}
 
@@ -2275,7 +2285,11 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const pr = await getCachedPrStatus(cwd);
-		if (pr) { json(pr); } else { json({ error: "No PR found" }, 404); }
+		if (pr) {
+			const goalId = session.goalId;
+			if (goalId) prStatusStore.set(goalId, pr);
+			json(pr);
+		} else { json({ error: "No PR found" }, 404); }
 		return;
 	}
 
