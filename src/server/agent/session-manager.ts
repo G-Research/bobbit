@@ -130,7 +130,6 @@ export class SessionManager {
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
-	private _onPrCreationDetected?: (session: SessionInfo) => void;
 
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
 		this._onPrCreationDetected = cb;
@@ -399,32 +398,6 @@ export class SessionManager {
 		if (event.type === "message_end" && event.message?.role === "user") {
 			if (session.promptQueue.removeDispatched()) {
 				this.broadcastQueue(session);
-			}
-		}
-
-		// Detect PR creation in bash tool results
-		if (event.type === "message_end" && event.message && this._onPrCreationDetected) {
-			const content = event.message.content;
-			if (Array.isArray(content)) {
-				let prDetected = false;
-				const PR_CMD_RE = /gh\s+pr\s+(create|ready)/;
-				const PR_URL_RE = /github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
-				for (const block of content) {
-					if (block.type === "tool_use" && /^[Bb]ash$/.test(block.name) && block.input?.command) {
-						if (PR_CMD_RE.test(block.input.command)) { prDetected = true; break; }
-					}
-					if (block.type === "tool_result") {
-						const text = typeof block.content === "string" ? block.content
-							: Array.isArray(block.content) ? block.content.map((c: any) => typeof c === "string" ? c : c.text || "").join("") : "";
-						if (PR_URL_RE.test(text)) { prDetected = true; break; }
-					}
-					if (block.type === "text" && typeof block.text === "string" && PR_URL_RE.test(block.text)) {
-						prDetected = true; break;
-					}
-				}
-				if (prDetected) {
-					this._onPrCreationDetected(session);
-				}
 			}
 		}
 
@@ -1447,10 +1420,6 @@ export class SessionManager {
 			if (ps.goalId === goalId) ids.add(ps.id);
 		}
 		return [...ids];
-	}
-
-	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
-		this._onPrCreationDetected = cb;
 	}
 
 	setTitle(id: string, title: string): boolean {
