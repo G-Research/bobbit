@@ -279,7 +279,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 	teamManager.setBroadcastToGoal(broadcastToGoal);
-	sessionManager.setOnPrCreationDetected((session: any) => {
+	sessionManager.setOnPrCreationDetected((session) => {
 		const goalId = session.goalId || session.teamGoalId;
 		if (!goalId) return;
 		const goal = sessionManager.goalManager.getGoal(goalId);
@@ -1670,17 +1670,18 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/pr-cache-bust — invalidate PR cache for goal
+	// POST /api/goals/:id/pr-cache-bust — invalidate PR cache for a goal
 	const goalPrCacheBustMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-cache-bust$/);
 	if (req.method === 'POST' && goalPrCacheBustMatch) {
 		const goalId = goalPrCacheBustMatch[1];
 		const goal = sessionManager.goalManager.getGoal(goalId);
-		if (!goal) return json({ error: "Goal not found" }, 404);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		_prCache.delete(cwd);
 		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
-		return json({ ok: true });
+		json({ ok: true });
+		return;
 	}
 
 	// POST /api/goals/:id/pr-merge — merge PR for goal branch
