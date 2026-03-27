@@ -861,7 +861,7 @@ export class SessionManager {
 			this.store.update(id, { repoPath, branch, worktreePath });
 
 			// Fire-and-forget async setup with one retry
-			this._setupSessionWorktree(session, repoPath, branch, worktreePath).catch(() => {
+			this._setupSessionWorktree(session, repoPath, branch).catch(() => {
 				// Errors already logged inside _setupSessionWorktree
 			});
 		}
@@ -873,7 +873,7 @@ export class SessionManager {
 	 * Async worktree setup for a session. Retries once on failure.
 	 * On success: updates session cwd. On double failure: clears worktree metadata.
 	 */
-	private async _setupSessionWorktree(session: SessionInfo, repoPath: string, branch: string, worktreePath: string): Promise<void> {
+	private async _setupSessionWorktree(session: SessionInfo, repoPath: string, branch: string): Promise<void> {
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				const result = await createWorktree(repoPath, branch);
