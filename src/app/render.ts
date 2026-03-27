@@ -1772,6 +1772,8 @@ export function doRenderApp(): void {
 	const activeSid = activeSessionId();
 	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
 	const editLabel = activeStaffAgent ? "Edit" : "Modify";
+	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
+	const isTeamLead = activeSession?.role === "team-lead";
 	const editDeleteBtns = (connected && state.remoteAgent && activeSid) ? html`
 		<div class="flex items-center gap-1 shrink-0">
 			${Button({
@@ -1792,9 +1794,9 @@ export function doRenderApp(): void {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => terminateSession(activeSid),
-				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs hidden sm:inline">Terminate</span></span>`,
+				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs hidden sm:inline">${isTeamLead ? "End Team" : "Terminate"}</span></span>`,
 				className: "h-7 px-2 text-muted-foreground hover:text-destructive",
-				title: "Terminate session (Ctrl+Shift+D)",
+				title: isTeamLead ? "End team (Ctrl+Shift+D)" : "Terminate session (Ctrl+Shift+D)",
 			})}
 		</div>
 	` : "";
