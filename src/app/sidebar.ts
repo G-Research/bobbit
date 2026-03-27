@@ -808,6 +808,7 @@ export function renderSidebar() {
 													import("./api.js").then(m => m.fetchArchivedSessions());
 												} else {
 													resetArchivedExpandState();
+													import("./api.js").then(m => m.clearArchivedSessionsState());
 												}
 												renderApp();
 											}}
@@ -855,6 +856,7 @@ export function renderSidebar() {
 						} else {
 							state.showArchived = false;
 							resetArchivedExpandState();
+							import("./api.js").then(m => m.clearArchivedSessionsState());
 						}
 						renderApp();
 					}}

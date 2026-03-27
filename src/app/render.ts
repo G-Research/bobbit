@@ -256,6 +256,7 @@ function renderMobileLanding() {
 						import("./api.js").then(m => m.fetchArchivedSessions());
 					} else {
 						resetArchivedExpandState();
+						import("./api.js").then(m => m.clearArchivedSessionsState());
 					}
 					renderApp();
 				}}
