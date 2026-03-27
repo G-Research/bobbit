@@ -111,32 +111,7 @@
             <span class="truncate">test-branch</span>
             <span class="text-amber-600 font-medium shrink-0">+2 -1</span>
           </button>
-          <!-- Dropdown: hidden until toggled. Uses position:fixed just like GitStatusWidget.ts -->
-          <div
-            id="git-status-dropdown"
-            class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-3 text-xs"
-            style="display:none; max-width:min(420px, calc(100vw - 1rem));"
-          >
-            <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
-              <span>⎇</span>
-              <span>test-branch</span>
-              <span class="text-muted-foreground" style="font-size:10px">(feature)</span>
-            </div>
-            <div class="flex flex-col gap-1 mb-2">
-              <div class="text-muted-foreground">
-                Remote: <span class="text-amber-600">2 unpushed commits</span>
-              </div>
-            </div>
-            <div class="border-t border-border pt-2 mt-2">
-              <div class="text-muted-foreground mb-1 font-medium">Changes</div>
-              <div>
-                <div style="display:flex;gap:8px;padding:2px 0">
-                  <span class="text-amber-600" style="font-family:monospace;width:70px;text-align:right">modified</span>
-                  <span class="text-foreground">src/ui/components/GitStatusWidget.ts</span>
-                </div>
-              </div>
-            </div>
-          </div>
+          <!-- Dropdown is portaled to document.body (fix for transform ancestor clipping) -->
         </div>
       </div>
     </div>
@@ -147,18 +122,59 @@
 </div>
 
 <script>
-  // Reproduce the exact toggle + positioning logic from GitStatusWidget.ts
+  // Reproduce the fixed toggle + positioning logic from GitStatusWidget.ts
+  // Key fix: dropdown is portaled to document.body instead of being inline
+  // inside the transformed ancestor. This avoids CSS transform breaking
+  // position:fixed positioning.
 
   const pill = document.getElementById('git-pill');
-  const dropdown = document.getElementById('git-status-dropdown');
   const widget = document.getElementById('git-widget');
+  let dropdown = null;
   let expanded = false;
+
+  const dropdownHTML = `
+    <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
+      <span>⎇</span>
+      <span>test-branch</span>
+      <span class="text-muted-foreground" style="font-size:10px">(feature)</span>
+    </div>
+    <div class="flex flex-col gap-1 mb-2">
+      <div class="text-muted-foreground">
+        Remote: <span class="text-amber-600">2 unpushed commits</span>
+      </div>
+    </div>
+    <div class="border-t border-border pt-2 mt-2">
+      <div class="text-muted-foreground mb-1 font-medium">Changes</div>
+      <div>
+        <div style="display:flex;gap:8px;padding:2px 0">
+          <span class="text-amber-600" style="font-family:monospace;width:70px;text-align:right">modified</span>
+          <span class="text-foreground">src/ui/components/GitStatusWidget.ts</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  function createDropdown() {
+    dropdown = document.createElement('div');
+    dropdown.id = 'git-status-dropdown';
+    dropdown.className = 'fixed z-50 bg-card border border-border rounded-lg shadow-lg p-3 text-xs';
+    dropdown.style.maxWidth = 'min(420px, calc(100vw - 1rem))';
+    dropdown.innerHTML = dropdownHTML;
+    document.body.appendChild(dropdown);
+  }
+
+  function removeDropdown() {
+    if (dropdown) {
+      dropdown.remove();
+      dropdown = null;
+    }
+  }
 
   // _onDocumentClick equivalent — close when clicking outside
   document.addEventListener('click', (e) => {
-    if (expanded && !widget.contains(e.target)) {
+    if (expanded && !widget.contains(e.target) && (!dropdown || !dropdown.contains(e.target))) {
       expanded = false;
-      dropdown.style.display = 'none';
+      removeDropdown();
     }
   }, true);
 
@@ -167,23 +183,37 @@
     e.stopPropagation();
     expanded = !expanded;
     if (expanded) {
-      dropdown.style.display = '';
+      createDropdown();
       positionDropdown();
     } else {
-      dropdown.style.display = 'none';
+      removeDropdown();
     }
   });
 
-  // _positionDropdown equivalent — verbatim from GitStatusWidget.ts
+  // _positionDropdown equivalent — matches GitStatusWidget.ts portal approach
   function positionDropdown() {
     const btn = pill;
     if (!btn || !dropdown) return;
     const rect = btn.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
     const spaceAbove = rect.top;
+    const vw = window.innerWidth;
+    const pad = 8;
 
     // Anchor right edge to button's right edge
-    dropdown.style.right = (window.innerWidth - rect.right) + 'px';
+    let rightVal = vw - rect.right;
+
+    // Clamp: ensure dropdown doesn't overflow left edge of viewport
+    const dropdownWidth = dropdown.offsetWidth || 0;
+    if (dropdownWidth > 0) {
+      const leftEdge = vw - rightVal - dropdownWidth;
+      if (leftEdge < pad) {
+        rightVal = Math.max(pad, vw - dropdownWidth - pad);
+      }
+    }
+
+    dropdown.style.right = rightVal + 'px';
+    dropdown.style.left = '';
 
     if (spaceAbove > spaceBelow) {
       // Open upward (default for chat input area at bottom)
@@ -198,7 +228,7 @@
 
   // Expose state for test inspection
   window.__isExpanded = () => expanded;
-  window.__getDropdownRect = () => dropdown.getBoundingClientRect();
+  window.__getDropdownRect = () => dropdown ? dropdown.getBoundingClientRect() : null;
   window.__getSliderRect = () => document.getElementById('slider').getBoundingClientRect();
 </script>
 </body>
