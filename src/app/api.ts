@@ -153,6 +153,25 @@ export async function refreshSessions(): Promise<void> {
 		refreshPrStatusCache();
 	}
 
+	// One-time hydration of PR status from disk cache (instant badge rendering)
+	if (isInitial) {
+		gatewayFetch("/api/pr-status-cache")
+			.then(r => r.ok ? r.json() : null)
+			.then(data => {
+				if (data && typeof data === "object") {
+					let changed = false;
+					for (const [goalId, entry] of Object.entries(data)) {
+						if (!state.prStatusCache.has(goalId)) {
+							state.prStatusCache.set(goalId, entry as any);
+							changed = true;
+						}
+					}
+					if (changed) renderApp();
+				}
+			})
+			.catch(() => {});
+	}
+
 	// Always fetch archived sessions so staff/goal filtering works correctly.
 	// When the toggle is off, we still need the data to hide goal-affiliated
 	// staff agents from the Staff section (they belong under their goal).
@@ -208,7 +227,7 @@ export async function refreshPrStatusCache() {
 	try {
 	// Only poll active goals — completed/archived goals keep their cached PR status
 	// Only poll active goals — completed/archived goals keep their cached PR status
-	const goalsWithBranch = state.goals.filter(g => g.branch && g.state !== 'complete' && !g.archived);
+	const goalsWithBranch = state.goals.filter(g => g.branch && g.state !== 'complete' && !g.archived && state.prStatusCache.get(g.id)?.state !== 'MERGED');
 	if (goalsWithBranch.length === 0) return;
 
 	const results = await Promise.all(
