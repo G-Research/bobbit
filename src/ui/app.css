@@ -912,7 +912,8 @@ html {
 	padding: 0;
 	margin-bottom: -28px;
 	overflow: visible;
-	filter: hue-rotate(var(--bobbit-hue-rotate, 0deg));
+	/* Hue rotation is baked into canvas pixel colours in JS — no CSS filter
+	   needed (CSS filter was rotating accessories along with the body). */
 }
 /* When chat shares space with a side panel, nudge bobbit right to avoid clipping */
 .goal-chat-panel .bobbit-blob {

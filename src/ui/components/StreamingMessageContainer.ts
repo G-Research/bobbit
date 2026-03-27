@@ -251,15 +251,23 @@ export class StreamingMessageContainer extends LitElement {
 
 		const palette = CANONICAL_PALETTE;
 
+		// Read session hue rotation from CSS variable (set on documentElement)
+		const hueStr = getComputedStyle(document.documentElement).getPropertyValue("--bobbit-hue-rotate").trim();
+		const hueRotate = hueStr ? parseFloat(hueStr) || 0 : 0;
+
 		// First render with default center eyes
 		// renderScale=4 oversamples the buffer to match the CSS scale(4) transform,
 		// so the GPU compositor maps 1:1 to buffer pixels — no bilinear blur.
+		// hueRotate bakes the session colour into body pixels in JS so the CSS
+		// filter on .bobbit-blob can be removed (it was rotating accessories too).
 		renderBobbitToCanvas(this._canvas, {
 			scale: 1,
 			renderScale: 4,
 			palette,
 			accessoryPixels: finalAccPixels,
 			bodyYOffset,
+			hueRotate,
+			accessoryHueRotate: acc.id === "flask",
 		});
 
 		// If eye state is not center, overdraw eyes
