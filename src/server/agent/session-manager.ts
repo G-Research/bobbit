@@ -10,7 +10,7 @@ import { PromptQueue } from "./prompt-queue.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
-import { assembleSystemPrompt, cleanupSessionPrompt } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, type PromptParts } from "./system-prompt.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
@@ -82,6 +82,8 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
+	/** Cached PromptParts for serving prompt-sections API */
+	promptParts?: PromptParts;
 }
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
@@ -144,11 +146,19 @@ export class SessionManager {
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
-	private assemblePrompt(sessionId: string, parts: Parameters<typeof assembleSystemPrompt>[1]): string | undefined {
+	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
 		if (this.toolManager && !parts.toolDocs) {
 			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools);
 		}
+		// Cache parts for prompt-sections API
+		const session = this.sessions.get(sessionId);
+		if (session) session.promptParts = parts;
 		return assembleSystemPrompt(sessionId, parts);
+	}
+
+	/** Get cached PromptParts for serving prompt-sections API. */
+	getPromptParts(sessionId: string): PromptParts | undefined {
+		return this.sessions.get(sessionId)?.promptParts;
 	}
 
 	// ── Prompt queue helpers ──────────────────────────────────────────
@@ -554,14 +564,21 @@ export class SessionManager {
 				: undefined;
 
 			// Re-attach role prompt for team agents (lost on restart since rolePrompt isn't persisted)
-			let goalSpec = goal?.spec;
+			const goalSpec = goal?.spec;
+			let rolePrompt: string | undefined;
+			let roleName: string | undefined;
+			let toolRestrictionsText: string | undefined;
 			if (ps.role && this.roleManager) {
 				const role = this.roleManager.getRole(ps.role);
 				if (role?.promptTemplate) {
-					let rolePrompt = role.promptTemplate;
+					rolePrompt = role.promptTemplate;
 					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
 					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
-					goalSpec = (goalSpec ? goalSpec + "\n\n---\n\n" : "") + rolePrompt;
+					roleName = ps.role;
+				}
+				if (role && role.allowedTools.length > 0) {
+					const toolList = role.allowedTools.join(", ");
+					toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
 				}
 			}
 
@@ -571,6 +588,9 @@ export class SessionManager {
 				goalTitle: goal?.title,
 				goalState: goal?.state,
 				goalSpec,
+				rolePrompt,
+				roleName,
+				toolRestrictions: toolRestrictionsText,
 				personalities: resolvedPersonalities,
 				allowedTools: restoredAllowedTools,
 			});
@@ -656,7 +676,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string }): Promise<SessionInfo> {
 		const id = randomUUID();
 
 		const bridgeOptions: RpcBridgeOptions = {
@@ -718,16 +738,13 @@ export class SessionManager {
 		} else {
 			// Normal sessions: global base + AGENTS.md from cwd + goal spec
 			const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
-			let goalSpec = goal?.spec;
-			// Append role prompt for team agents (role instructions after goal spec)
-			if (opts?.rolePrompt) {
-				goalSpec = (goalSpec ? goalSpec + "\n\n---\n\n" : "") + opts.rolePrompt;
-			}
+			const goalSpec = goal?.spec;
 
-			// Append tool restrictions if allowedTools is specified and non-empty
+			// Build tool restrictions text if allowedTools is specified and non-empty
+			let toolRestrictionsText: string | undefined;
 			if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
 				const toolList = effectiveAllowedTools.join(", ");
-				goalSpec = (goalSpec || "") + `\n\n---\n\n## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+				toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
 			}
 
 			// Build task context if taskId is provided
@@ -756,6 +773,9 @@ export class SessionManager {
 				goalTitle: goal?.title,
 				goalState: goal?.state,
 				goalSpec,
+				rolePrompt: opts?.rolePrompt,
+				roleName: opts?.roleName,
+				toolRestrictions: toolRestrictionsText,
 				taskTitle,
 				taskType,
 				taskSpec,
@@ -1355,13 +1375,13 @@ export class SessionManager {
 		session.unsubscribe();
 		await session.rpcClient.stop();
 
-		// Reassemble system prompt with role instructions appended
+		// Reassemble system prompt with role instructions as separate fields
 		const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
-		let goalSpec = goal?.spec;
-		goalSpec = (goalSpec ? goalSpec + "\n\n---\n\n" : "") + role.promptTemplate;
+		const goalSpec = goal?.spec;
+		let toolRestrictionsText: string | undefined;
 		if (role.allowedTools.length > 0) {
 			const toolList = role.allowedTools.join(", ");
-			goalSpec += `\n\n---\n\n## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+			toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
 		}
 
 		// Resolve personalities for system prompt
@@ -1376,7 +1396,11 @@ export class SessionManager {
 			goalTitle: goal?.title,
 			goalState: goal?.state,
 			goalSpec,
+			rolePrompt: role.promptTemplate,
+			roleName: role.name,
+			toolRestrictions: toolRestrictionsText,
 			personalities: resolvedPersonalities,
+			allowedTools: role.allowedTools.length > 0 ? role.allowedTools : undefined,
 		});
 
 		// Respawn with new system prompt
@@ -1474,16 +1498,22 @@ export class SessionManager {
 
 		// Reassemble system prompt with new personalities (preserving role prompt if assigned)
 		const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
-		let goalSpec = goal?.spec;
+		const goalSpec = goal?.spec;
 
-		// If the session has a role, include its prompt template (same pattern as assignRole)
+		// If the session has a role, include its prompt template as separate fields
+		let rolePrompt: string | undefined;
+		let roleName: string | undefined;
+		let toolRestrictionsText: string | undefined;
+		let roleAllowedTools: string[] | undefined;
 		if (session.role && this.roleManager) {
 			const role = this.roleManager.getRole(session.role);
 			if (role) {
-				goalSpec = (goalSpec ? goalSpec + "\n\n---\n\n" : "") + role.promptTemplate;
+				rolePrompt = role.promptTemplate;
+				roleName = role.name;
 				if (role.allowedTools.length > 0) {
+					roleAllowedTools = role.allowedTools;
 					const toolList = role.allowedTools.join(", ");
-					goalSpec += `\n\n---\n\n## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+					toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
 				}
 			}
 		}
@@ -1498,7 +1528,11 @@ export class SessionManager {
 			goalTitle: goal?.title,
 			goalState: goal?.state,
 			goalSpec,
+			rolePrompt,
+			roleName,
+			toolRestrictions: toolRestrictionsText,
 			personalities: resolvedPersonalities,
+			allowedTools: roleAllowedTools,
 		});
 
 		// Respawn with new system prompt
