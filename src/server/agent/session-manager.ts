@@ -401,34 +401,27 @@ export class SessionManager {
 			}
 		}
 
-		// Detect PR creation in tool results
-		if (event.type === "message_end" && event.message) {
+		// Detect PR creation in bash tool results
+		if (event.type === "message_end" && event.message && this._onPrCreationDetected) {
 			const content = event.message.content;
 			if (Array.isArray(content)) {
-				let detected = false;
+				let prDetected = false;
+				const PR_CMD_RE = /gh\s+pr\s+(create|ready)/;
+				const PR_URL_RE = /github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 				for (const block of content) {
-					// Check bash tool_use input for gh pr create/ready
 					if (block.type === "tool_use" && /^[Bb]ash$/.test(block.name) && block.input?.command) {
-						if (/gh\s+pr\s+(create|ready)/.test(block.input.command)) {
-							detected = true;
-							break;
-						}
+						if (PR_CMD_RE.test(block.input.command)) { prDetected = true; break; }
 					}
-					// Check text/tool_result content for GitHub PR URLs
-					if (typeof block === "string" && /github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(block)) {
-						detected = true;
-						break;
+					if (block.type === "tool_result") {
+						const text = typeof block.content === "string" ? block.content
+							: Array.isArray(block.content) ? block.content.map((c: any) => typeof c === "string" ? c : c.text || "").join("") : "";
+						if (PR_URL_RE.test(text)) { prDetected = true; break; }
 					}
-					if (block.type === "tool_result" && typeof block.content === "string" && /github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(block.content)) {
-						detected = true;
-						break;
-					}
-					if (block.type === "text" && typeof block.text === "string" && /github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(block.text)) {
-						detected = true;
-						break;
+					if (block.type === "text" && typeof block.text === "string" && PR_URL_RE.test(block.text)) {
+						prDetected = true; break;
 					}
 				}
-				if (detected && this._onPrCreationDetected) {
+				if (prDetected) {
 					this._onPrCreationDetected(session);
 				}
 			}
