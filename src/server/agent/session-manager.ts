@@ -156,9 +156,73 @@ export class SessionManager {
 		return assembleSystemPrompt(sessionId, parts);
 	}
 
-	/** Get cached PromptParts for serving prompt-sections API. */
+	/** Get cached PromptParts for serving prompt-sections API.
+	 *  If not cached (e.g. dormant session), rebuild from session metadata. */
 	getPromptParts(sessionId: string): PromptParts | undefined {
-		return this.sessions.get(sessionId)?.promptParts;
+		const session = this.sessions.get(sessionId);
+		if (!session) return undefined;
+		if (session.promptParts) return session.promptParts;
+
+		// Rebuild on demand for dormant / restored sessions missing cached parts
+		const assistantDef = session.assistantType ? getAssistantDef(session.assistantType) : undefined;
+		let parts: PromptParts;
+
+		if (assistantDef) {
+			const assistantRole = this.roleManager?.getRole("assistant");
+			let assistantGoalSpec = "";
+			if (assistantRole?.promptTemplate) {
+				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`);
+				assistantGoalSpec += "\n\n---\n\n";
+			}
+			assistantGoalSpec += assistantDef.prompt;
+			parts = {
+				baseSystemPromptPath: undefined,
+				cwd: session.cwd,
+				goalSpec: assistantGoalSpec,
+				goalTitle: assistantDef.promptTitle,
+				goalState: "active",
+				allowedTools: session.allowedTools,
+			};
+		} else {
+			const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
+			const resolvedPersonalities = (session.personalities && session.personalities.length > 0 && this.personalityManager)
+				? this.personalityManager.resolvePersonalities(session.personalities)
+				: undefined;
+
+			let rolePrompt: string | undefined;
+			let roleName: string | undefined;
+			let toolRestrictionsText: string | undefined;
+			if (session.role && this.roleManager) {
+				const role = this.roleManager.getRole(session.role);
+				if (role?.promptTemplate) {
+					rolePrompt = role.promptTemplate;
+					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
+					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.id).slice(0, 8)}`);
+					roleName = session.role;
+				}
+				if (role && role.allowedTools.length > 0) {
+					const toolList = role.allowedTools.join(", ");
+					toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+				}
+			}
+
+			parts = {
+				baseSystemPromptPath: this.systemPromptPath,
+				cwd: session.cwd,
+				goalTitle: goal?.title,
+				goalState: goal?.state,
+				goalSpec: goal?.spec,
+				rolePrompt,
+				roleName,
+				toolRestrictions: toolRestrictionsText,
+				personalities: resolvedPersonalities,
+				allowedTools: session.allowedTools,
+			};
+		}
+
+		// Cache for future calls
+		session.promptParts = parts;
+		return parts;
 	}
 
 	// ── Prompt queue helpers ──────────────────────────────────────────
