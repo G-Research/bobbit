@@ -196,6 +196,8 @@ export function renderSessionRow(session: GatewaySession) {
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
 
+	const isTeamLead = session.role === "team-lead";
+
 	// Desktop: hover-revealed gradient overlay. Mobile: always-visible inline buttons.
 	const buttons = html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
@@ -203,7 +205,7 @@ export function renderSessionRow(session: GatewaySession) {
 			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
-			title="Terminate (Ctrl+Shift+D)">${icon(Trash2, "xs")}</button>
+			title="${isTeamLead ? "End team (Ctrl+Shift+D)" : "Terminate (Ctrl+Shift+D)"}">${icon(Trash2, "xs")}</button>
 	`;
 
 	return html`

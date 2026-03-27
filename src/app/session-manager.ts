@@ -11,7 +11,7 @@ import {
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel } from "./routing.js";
 import { sessionHueRotation } from "./session-colors.js";
@@ -976,10 +976,14 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 export async function terminateSession(sessionId: string): Promise<void> {
 	const session = state.gatewaySessions.find((s) => s.id === sessionId);
 	const sessionTitle = session?.title || "this session";
+	const isTeamLead = session?.role === "team-lead";
+	const goalId = session?.goalId || session?.teamGoalId;
 	const confirmed = await confirmAction(
-		"Terminate Session",
-		`Are you sure you want to terminate "${sessionTitle}"? This will end the agent process and cannot be undone.`,
-		"Terminate",
+		isTeamLead && goalId ? "End Team" : "Terminate Session",
+		isTeamLead && goalId
+			? `Are you sure you want to end the team for "${sessionTitle}"? This will dismiss all agents and terminate the team lead.`
+			: `Are you sure you want to terminate "${sessionTitle}"? This will end the agent process and cannot be undone.`,
+		isTeamLead && goalId ? "End Team" : "Terminate",
 		true,
 	);
 	if (!confirmed) return;
@@ -993,9 +997,13 @@ export async function terminateSession(sessionId: string): Promise<void> {
 		renderApp();
 	}
 
-	const res = await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-	if (!res.ok && res.status !== 404) {
-		throw new Error(`Failed to terminate session: ${res.status}`);
+	if (isTeamLead && goalId) {
+		await teardownTeam(goalId);
+	} else {
+		const res = await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+		if (!res.ok && res.status !== 404) {
+			throw new Error(`Failed to terminate session: ${res.status}`);
+		}
 	}
 	clearSessionModel(sessionId);
 	deleteGoalDraft(sessionId);
