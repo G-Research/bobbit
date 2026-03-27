@@ -912,8 +912,9 @@ html {
 	padding: 0;
 	margin-bottom: -28px;
 	overflow: visible;
-	/* Hue rotation is baked into canvas pixel colours in JS — no CSS filter
-	   needed (CSS filter was rotating accessories along with the body). */
+	/* Creates a stacking context so z-index:-1 shadow stays visible.
+	   (Previously the CSS hue-rotate filter did this implicitly.) */
+	isolation: isolate;
 }
 /* When chat shares space with a side panel, nudge bobbit right to avoid clipping */
 .goal-chat-panel .bobbit-blob {
