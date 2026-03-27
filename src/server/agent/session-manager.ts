@@ -29,7 +29,7 @@ const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
 /** Team lead extension — team management tools. */
 const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
 
-export type SessionStatus = "starting" | "idle" | "streaming" | "terminated";
+export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "terminated";
 
 export interface SessionInfo {
 	id: string;
@@ -751,41 +751,51 @@ export class SessionManager {
 	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } }): Promise<SessionInfo> {
 		const id = randomUUID();
 
-		// ── Worktree setup (must happen before agent launch so cwd is correct) ──
-		let worktreePath: string | undefined;
-		let worktreeBranch: string | undefined;
-		let worktreeRepoPath: string | undefined;
+		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
-			worktreeRepoPath = opts.worktreeOpts.repoPath;
-			const slug = "new-session"; // Title not known yet; will be renamed later
+			const repoPath = opts.worktreeOpts.repoPath;
+			const slug = "new-session";
 			const uuid8 = id.slice(0, 8);
-			worktreeBranch = `session/${slug}-${uuid8}`;
-			const wtRoot = path.resolve(worktreeRepoPath, "..", `${path.basename(worktreeRepoPath)}-wt`);
-			const safeName = worktreeBranch.replace(/\//g, "-");
-			worktreePath = path.join(wtRoot, safeName);
+			const branch = `session/${slug}-${uuid8}`;
+			const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
+			const safeName = branch.replace(/\//g, "-");
+			const worktreePath = path.join(wtRoot, safeName);
 
-			// Create worktree synchronously — agent needs the correct cwd at launch
-			try {
-				const result = await createWorktree(worktreeRepoPath, worktreeBranch);
-				worktreePath = result.worktreePath;
-				cwd = result.worktreePath;
-				console.log(`[session-manager] Worktree ready for session ${id}: ${result.worktreePath} (branch: ${worktreeBranch})`);
-			} catch (err) {
-				// Retry once after 1s
-				await new Promise(resolve => setTimeout(resolve, 1000));
-				try {
-					const result = await createWorktree(worktreeRepoPath, worktreeBranch);
-					worktreePath = result.worktreePath;
-					cwd = result.worktreePath;
-					console.log(`[session-manager] Worktree ready (retry) for session ${id}: ${result.worktreePath}`);
-				} catch (err2) {
-					console.error(`[session-manager] Worktree setup failed for session ${id}:`, err2);
-					// Fall through — session will use original cwd
-					worktreePath = undefined;
-					worktreeBranch = undefined;
-					worktreeRepoPath = undefined;
-				}
-			}
+			const now = Date.now();
+			const session: SessionInfo = {
+				id,
+				title: "New session",
+				cwd, // temporary — will be updated when worktree is ready
+				status: "preparing",
+				createdAt: now,
+				lastActivity: now,
+				clients: new Set(),
+				rpcClient: new RpcBridge({ cwd }), // placeholder, not started
+				eventBuffer: new EventBuffer(),
+				unsubscribe: () => {},
+				isCompacting: false,
+				titleGenerated: false,
+				goalId,
+				assistantType: undefined,
+				taskId: opts?.taskId,
+				personalities: opts?.personalityNames,
+				allowedTools: opts?.allowedTools,
+				worktreePath,
+				promptQueue: new PromptQueue(),
+			};
+
+			this.sessions.set(id, session);
+			this.store.update(id, { repoPath, branch, worktreePath });
+			this.persistSessionMetadata(session).catch(() => {});
+
+			// Fire-and-forget: create worktree then launch agent
+			this._setupWorktreeAndLaunchAgent(session, repoPath, branch, cwd, agentArgs, goalId, opts).catch((err) => {
+				console.error(`[session-manager] Worktree session setup failed for ${id}:`, err);
+				session.status = "terminated";
+				broadcast(session.clients, { type: "session_status", status: "terminated" });
+			});
+
+			return session;
 		}
 
 		const bridgeOptions: RpcBridgeOptions = {
@@ -963,16 +973,154 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to persist session ${id}:`, err);
 		});
 
-		// ── Persist worktree metadata (worktree already created above) ──
-		if (worktreePath && worktreeRepoPath && worktreeBranch) {
-			session.worktreePath = worktreePath;
-			this.store.update(id, { repoPath: worktreeRepoPath, branch: worktreeBranch, worktreePath, cwd: worktreePath });
-		}
-
 		return session;
 	}
 
+	/**
+	 * Async worktree setup + agent launch for sessions created with worktreeOpts.
+	 * Creates the worktree, then launches the agent in it.
+	 */
+	private async _setupWorktreeAndLaunchAgent(
+		session: SessionInfo,
+		repoPath: string,
+		branch: string,
+		originalCwd: string,
+		agentArgs?: string[],
+		goalId?: string,
+		opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } },
+	): Promise<void> {
+		// Create worktree with one retry
+		let worktreeCwd: string;
+		try {
+			const result = await createWorktree(repoPath, branch);
+			worktreeCwd = result.worktreePath;
+		} catch (err) {
+			await new Promise(resolve => setTimeout(resolve, 1000));
+			const result = await createWorktree(repoPath, branch);
+			worktreeCwd = result.worktreePath;
+		}
 
+		// Update session metadata
+		session.cwd = worktreeCwd;
+		session.worktreePath = worktreeCwd;
+		this.store.update(session.id, { cwd: worktreeCwd, worktreePath: worktreeCwd });
+		console.log(`[session-manager] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${branch})`);
+
+		// Now launch the agent (mirrors the non-worktree path in createSession)
+		const cwd = worktreeCwd;
+		const id = session.id;
+
+		const bridgeOptions: RpcBridgeOptions = {
+			cwd,
+			args: agentArgs ? [...agentArgs] : [],
+			env: { BOBBIT_SESSION_ID: id, ...opts?.env },
+		};
+		if (this.agentCliPath) {
+			bridgeOptions.cliPath = this.agentCliPath;
+		}
+
+		if (goalId) {
+			const alreadyHasExtension = bridgeOptions.args?.includes("--extension");
+			if (!alreadyHasExtension) {
+				bridgeOptions.args = bridgeOptions.args || [];
+				bridgeOptions.args.push("--extension", GOAL_TOOLS_EXTENSION_PATH);
+			}
+			bridgeOptions.env = { ...bridgeOptions.env, BOBBIT_GOAL_ID: goalId };
+		}
+
+		let effectiveAllowedTools = opts?.allowedTools;
+		if (!effectiveAllowedTools && this.roleManager) {
+			const generalRole = this.roleManager.getRole("general");
+			if (generalRole && generalRole.allowedTools.length > 0) {
+				effectiveAllowedTools = generalRole.allowedTools;
+			}
+		}
+
+		// Build system prompt
+		const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
+		let toolRestrictionsText: string | undefined;
+		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
+			const toolList = effectiveAllowedTools.join(", ");
+			toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+		}
+
+		let taskTitle: string | undefined;
+		let taskType: string | undefined;
+		let taskSpec: string | undefined;
+		let taskDependsOn: string[] | undefined;
+		if (opts?.taskId) {
+			const task = this.taskManager.getTask(opts.taskId);
+			if (task) {
+				taskTitle = task.title;
+				taskType = task.type;
+				taskSpec = task.spec;
+				if (task.dependsOn && task.dependsOn.length > 0) {
+					taskDependsOn = task.dependsOn.map(depId => {
+						const dep = this.taskManager.getTask(depId);
+						return dep?.title || depId;
+					});
+				}
+			}
+		}
+
+		const promptPath = this.assemblePrompt(id, {
+			baseSystemPromptPath: this.systemPromptPath,
+			cwd,
+			goalTitle: goal?.title,
+			goalState: goal?.state,
+			goalSpec: goal?.spec,
+			rolePrompt: opts?.rolePrompt,
+			roleName: opts?.roleName,
+			toolRestrictions: toolRestrictionsText,
+			taskTitle,
+			taskType,
+			taskSpec,
+			taskDependsOn,
+			personalities: opts?.personalities,
+			allowedTools: effectiveAllowedTools,
+			workflowContext: opts?.workflowContext,
+		});
+		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+
+		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
+			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd);
+			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+		}
+
+		// Replace the placeholder rpcClient with a real one
+		const rpcClient = new RpcBridge(bridgeOptions);
+		session.rpcClient = rpcClient;
+		session.allowedTools = effectiveAllowedTools ?? opts?.allowedTools;
+
+		if (opts?.taskId) {
+			try {
+				this.taskManager.assignTask(opts.taskId, id);
+			} catch (err) {
+				console.error(`[session-manager] Failed to assign task ${opts.taskId} to session ${id}:`, err);
+			}
+		}
+
+		const unsub = rpcClient.onEvent((event: any) => {
+			session.lastActivity = Date.now();
+			this.store.update(id, { lastActivity: session.lastActivity });
+			this.handleAgentLifecycle(session, event);
+			eventBuffer.push(event);
+			broadcast(session.clients, { type: "event", data: event });
+			this.trackCostFromEvent(session, event);
+		});
+		session.unsubscribe = unsub;
+
+		const eventBuffer = session.eventBuffer;
+
+		await rpcClient.start();
+		session.status = "idle";
+
+		await this.tryAutoSelectModel(session);
+		this.persistSessionMetadata(session).catch(() => {});
+
+		// Notify connected clients that the session is ready
+		broadcast(session.clients, { type: "session_status", status: "idle" });
+	}
 
 	/**
 	 * Create a delegate session — a real session that runs a task on behalf of a parent session.

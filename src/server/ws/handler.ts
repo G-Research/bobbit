@@ -126,14 +126,17 @@ export function handleWebSocketConnection(
 
 			// Send current agent state (don't block auth on this — fire async
 			// so the client gets auth_ok immediately and can start rendering).
-			session.rpcClient.getState().then((stateResponse) => {
-				if (stateResponse.success) {
-					patchModelContextWindow(stateResponse.data);
-					send(ws, { type: "state", data: stateResponse.data });
-				}
-			}).catch(() => {
-				// State not available yet — client will get events as they come
-			});
+			// Skip for "preparing" sessions — agent isn't launched yet.
+			if (session.status !== "preparing") {
+				session.rpcClient.getState().then((stateResponse) => {
+					if (stateResponse.success) {
+						patchModelContextWindow(stateResponse.data);
+						send(ws, { type: "state", data: stateResponse.data });
+					}
+				}).catch(() => {
+					// State not available yet — client will get events as they come
+				});
+			}
 
 			// Notify other clients that a new device connected
 			const joinMsg: ServerMessage = { type: "client_joined", clientId };
@@ -178,6 +181,12 @@ export function handleWebSocketConnection(
 		const session = sessionManager.getSession(sessionId);
 		if (!session) {
 			send(ws, { type: "error", message: "Session not found", code: "SESSION_NOT_FOUND" });
+			return;
+		}
+
+		// Block commands while session is still preparing (worktree being created)
+		if (session.status === "preparing" && msg.type !== "ping" && msg.type !== "get_state" && msg.type !== "get_messages") {
+			send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
 			return;
 		}
 

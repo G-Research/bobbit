@@ -271,7 +271,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 
 	const canonical = { main: "#8ec63f", light: "#b5d98a", dark: "#6b9930", eye: "#1a3010" };
 	let p: typeof canonical;
-	if (status === "starting") {
+	if (status === "starting" || status === "preparing") {
 		p = { main: "#eab308", light: "#fde047", dark: "#ca8a04", eye: "#2d2006" };
 	} else if (status === "terminated") {
 		p = { main: "#ef4444", light: "#fca5a5", dark: "#dc2626", eye: "#2c0b0e" };

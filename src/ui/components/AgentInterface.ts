@@ -496,6 +496,17 @@ export class AgentInterface extends LitElement {
 		if (!this.session)
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
 		const state = this.session.state;
+
+		if ((state as any).isPreparing) {
+			return html`
+				<div class="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+					<svg class="animate-spin" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+					</svg>
+					<span class="text-sm">Creating worktree…</span>
+				</div>
+			`;
+		}
 		// Build a map of tool results to allow inline rendering in assistant messages
 		const toolResultsById = new Map<string, ToolResultMessage<any>>();
 		for (const message of state.messages) {
@@ -739,7 +750,7 @@ export class AgentInterface extends LitElement {
 							></git-status-widget>` : nothing}
 						</div>
 						` : ''}
-						${this.readOnly ? nothing : html`<message-editor
+						${this.readOnly || (state as any).isPreparing ? nothing : html`<message-editor
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
 							.isStreaming=${state.isStreaming}
