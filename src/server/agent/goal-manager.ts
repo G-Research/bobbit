@@ -1,12 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 import fs from "node:fs";
-
-const execFile = promisify(execFileCb);
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
 import type { WorkflowStore } from "./workflow-store.js";
 
 /**
@@ -21,21 +17,6 @@ function toBranchName(title: string): string {
 		.slice(0, 10) || "goal";
 }
 
-/** Check if a directory is inside a git repository. */
-async function isGitRepo(cwd: string): Promise<boolean> {
-	try {
-		await execFile("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/** Get the git repo root for a directory. */
-async function getRepoRoot(cwd: string): Promise<string> {
-	const { stdout } = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd });
-	return stdout.toString().trim();
-}
 
 export class GoalManager {
 	private store = new GoalStore();
