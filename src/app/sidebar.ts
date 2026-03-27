@@ -41,6 +41,7 @@ let _pickerPersonalities = new Set<string>();
 let _pickerCwd = "";
 let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
+let _pickerWorktree = false;
 /** Goal ID context for the picker (if launched from a goal). */
 let _pickerGoalId: string | undefined;
 /** Anchor rect for positioning the popover near the button. */
@@ -49,7 +50,7 @@ let _pickerAnchorRect: { top: number; right: number; bottom: number } | null = n
 let _pickerFocusIndex = -1;
 
 /** Item types in the flat focus list. */
-type PickerItemType = "personality" | "role" | "cwd" | "create";
+type PickerItemType = "personality" | "role" | "cwd" | "worktree" | "create";
 interface PickerItem { type: PickerItemType; id: string; }
 
 /** Build the flat ordered list of focusable items. */
@@ -58,6 +59,7 @@ function _buildPickerItems(): PickerItem[] {
 	for (const p of _cachedPersonalities) items.push({ type: "personality", id: p.name });
 	for (const r of state.roles) items.push({ type: "role", id: r.name });
 	items.push({ type: "cwd", id: "cwd" });
+	items.push({ type: "worktree", id: "worktree" });
 	items.push({ type: "create", id: "create" });
 	return items;
 }
@@ -80,6 +82,7 @@ export async function toggleRolePicker(e: Event, goalId?: string): Promise<void>
 	_pickerCwd = "";
 	_pickerCwdDropdownOpen = false;
 	_pickerCwdHighlightIndex = -1;
+	_pickerWorktree = false;
 	_pickerGoalId = goalId;
 	// Capture the button position for anchoring the popover
 	const btn = e.currentTarget as HTMLElement;
@@ -116,9 +119,10 @@ export function renderRolePickerDropdown() {
 		state.rolePickerOpen = false;
 		const personalities = [..._pickerPersonalities];
 		const cwd = _pickerCwd || undefined;
+		const worktree = _pickerWorktree || undefined;
 		_pickerCwd = "";
 		_pickerCwdDropdownOpen = false;
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
+		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
 	};
 
 	// All roles including general (the server default)
@@ -201,6 +205,16 @@ export function renderRolePickerDropdown() {
 					highlightedIndex: _pickerCwdHighlightIndex,
 					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; renderApp(); },
 				})}
+			</div>
+			<!-- Worktree checkbox -->
+			<div class="border-t border-border/50 px-3 py-1.5 shrink-0">
+				<label class="flex items-center gap-2 cursor-pointer ${isFocused("worktree", "worktree") ? "ring-2 ring-ring rounded" : ""}">
+					<input type="checkbox" .checked=${_pickerWorktree}
+						@change=${(e: Event) => { _pickerWorktree = (e.target as HTMLInputElement).checked; renderApp(); }} />
+					<span class="text-[11px] text-foreground/70">Create worktree</span>
+					<span title="Creates an isolated git branch and worktree for this session"
+						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+				</label>
 			</div>
 			<!-- Create button (pinned at bottom) -->
 			<div class="border-t border-border/50 px-3 py-2 shrink-0">
@@ -294,14 +308,18 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		} else if (focusedItem?.type === "role") {
 			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
 			renderApp();
+		} else if (focusedItem?.type === "worktree") {
+			_pickerWorktree = !_pickerWorktree;
+			renderApp();
 		} else {
 			// create button or no focus — create session
 			state.rolePickerOpen = false;
 			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
+			const worktree = _pickerWorktree || undefined;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
-			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
+			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
 		}
 		return;
 	}
@@ -316,13 +334,17 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		} else if (focusedItem.type === "role") {
 			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
 			renderApp();
+		} else if (focusedItem.type === "worktree") {
+			_pickerWorktree = !_pickerWorktree;
+			renderApp();
 		} else if (focusedItem.type === "create") {
 			state.rolePickerOpen = false;
 			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
+			const worktree = _pickerWorktree || undefined;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
-			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd);
+			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
 		}
 		return;
 	}

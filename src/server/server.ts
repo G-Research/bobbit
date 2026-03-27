@@ -29,6 +29,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { GateStore } from "./agent/gate-store.js";
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
+import { isGitRepo, getRepoRoot } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -653,8 +654,21 @@ async function handleApiRoute(
 			createOpts = { ...createOpts, personalities: resolved, personalityNames };
 		}
 
+		// ── Worktree support ──
+		let worktreeOpts: { repoPath: string } | undefined;
+		if (body?.worktree && !assistantType) {
+			try {
+				if (await isGitRepo(cwd)) {
+					const repoPath = await getRepoRoot(cwd);
+					worktreeOpts = { repoPath };
+				}
+			} catch {
+				// Not a git repo or git not available — silently ignore
+			}
+		}
+
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, createOpts);
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts });
 
 			// Set role metadata if a role was specified
 			if (roleForMeta) {
