@@ -520,6 +520,22 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		};
 
+		remote.onPrStatusChanged = (goalId) => {
+			// Targeted PR status refresh — bypasses the 60s poll throttle
+			(async () => {
+				try {
+					const res = await gatewayFetch(`/api/goals/${goalId}/pr-status`);
+					if (res.ok) {
+						const data = await res.json();
+						state.prStatusCache.set(goalId, data);
+					} else if (res.status === 404) {
+						state.prStatusCache.delete(goalId);
+					}
+					renderApp();
+				} catch { /* silently ignore network errors */ }
+			})();
+		};
+
 		remote.onGoalProposal = (proposal) => {
 			state.activeGoalProposal = proposal;
 			if (state.assistantType === "goal") {

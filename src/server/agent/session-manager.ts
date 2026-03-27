@@ -126,9 +126,14 @@ export class SessionManager {
 	private roleManager?: RoleManager;
 	private toolManager?: ToolManager;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
+	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
+
+	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
+		this._onPrCreationDetected = cb;
+	}
 
 	constructor(options?: SessionManagerOptions) {
 		this.agentCliPath = options?.agentCliPath;
@@ -418,6 +423,32 @@ export class SessionManager {
 		} else if (event.type === "auto_compaction_end") {
 			session.isCompacting = false;
 			if (!event.aborted) this.refreshAfterCompaction(session);
+		}
+
+		// Detect PR creation in bash tool results
+		if (event.type === "message_end" && event.message && this._onPrCreationDetected) {
+			const content = event.message.content;
+			if (Array.isArray(content)) {
+				let prDetected = false;
+				const PR_CMD_RE = /gh\s+pr\s+(create|ready)/;
+				const PR_URL_RE = /github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
+				for (const block of content) {
+					if (block.type === "tool_use" && /^[Bb]ash$/.test(block.name) && block.input?.command) {
+						if (PR_CMD_RE.test(block.input.command)) { prDetected = true; break; }
+					}
+					if (block.type === "tool_result") {
+						const text = typeof block.content === "string" ? block.content
+							: Array.isArray(block.content) ? block.content.map((c: any) => typeof c === "string" ? c : c.text || "").join("") : "";
+						if (PR_URL_RE.test(text)) { prDetected = true; break; }
+					}
+					if (block.type === "text" && typeof block.text === "string" && PR_URL_RE.test(block.text)) {
+						prDetected = true; break;
+					}
+				}
+				if (prDetected) {
+					this._onPrCreationDetected(session);
+				}
+			}
 		}
 	}
 

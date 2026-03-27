@@ -104,6 +104,8 @@ export class RemoteAgent {
 	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; process?: any }) => void;
 	/** Callback fired when preview panel flag changes for a session. */
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
+	/** Callback fired when server detects PR creation and busts the cache. */
+	onPrStatusChanged?: (goalId: string) => void;
 	private _title = "New session";
 
 	constructor() {
@@ -718,6 +720,10 @@ export class RemoteAgent {
 			case "bg_process_output":
 			case "bg_process_exited":
 				this.onBgProcessEvent?.(msg as any);
+				break;
+
+			case "pr_status_changed":
+				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
 
 			case "error":
