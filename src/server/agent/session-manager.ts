@@ -20,6 +20,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import { getAigwUrl, getAigwModels, modelRecencyRank } from "./aigw-manager.js";
+import { createWorktree } from "../skills/git.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -522,6 +523,13 @@ export class SessionManager {
 			}
 			this.addDormantSession(ps);
 		}
+
+		// Stuck worktree recovery: warn about sessions with worktreePath set but directory missing
+		for (const ps of persisted) {
+			if (ps.worktreePath && !fs.existsSync(ps.worktreePath)) {
+				console.warn(`[session-manager] Session "${ps.title}" (${ps.id}) has worktreePath "${ps.worktreePath}" but directory does not exist`);
+			}
+		}
 	}
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
@@ -740,7 +748,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } }): Promise<SessionInfo> {
 		const id = randomUUID();
 
 		const bridgeOptions: RpcBridgeOptions = {
@@ -918,7 +926,58 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to persist session ${id}:`, err);
 		});
 
+		// ── Async worktree setup (fire-and-forget) ──
+		if (opts?.worktreeOpts) {
+			const { repoPath } = opts.worktreeOpts;
+			const slug = session.title
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "-")
+				.replace(/^-|-$/g, "")
+				.slice(0, 20) || "session";
+			const uuid8 = id.slice(0, 8);
+			const branch = `session/${slug}-${uuid8}`;
+			const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
+			const safeName = branch.replace(/\//g, "-");
+			const worktreePath = path.join(wtRoot, safeName);
+
+			// Persist worktree metadata immediately
+			session.worktreePath = worktreePath;
+			this.store.update(id, { repoPath, branch, worktreePath });
+
+			// Fire-and-forget async setup with one retry
+			this._setupSessionWorktree(session, repoPath, branch).catch(() => {
+				// Errors already logged inside _setupSessionWorktree
+			});
+		}
+
 		return session;
+	}
+
+	/**
+	 * Async worktree setup for a session. Retries once on failure.
+	 * On success: updates session cwd. On double failure: clears worktree metadata.
+	 */
+	private async _setupSessionWorktree(session: SessionInfo, repoPath: string, branch: string): Promise<void> {
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				const result = await createWorktree(repoPath, branch);
+				// Update in-memory and persist
+				session.cwd = result.worktreePath;
+				session.worktreePath = result.worktreePath;
+				this.store.update(session.id, { cwd: result.worktreePath, worktreePath: result.worktreePath });
+				console.log(`[session-manager] Worktree ready for session "${session.title}" (${session.id}): ${result.worktreePath}`);
+				return;
+			} catch (err) {
+				console.error(`[session-manager] Worktree setup attempt ${attempt + 1} failed for session "${session.title}" (${session.id}):`, err);
+				if (attempt === 0) {
+					await new Promise(resolve => setTimeout(resolve, 1000));
+				}
+			}
+		}
+		// Both attempts failed — clear worktree metadata so stuck recovery doesn't perpetually warn
+		console.error(`[session-manager] Worktree setup failed for session "${session.title}" (${session.id}) — clearing worktree metadata`);
+		session.worktreePath = undefined;
+		this.store.update(session.id, { worktreePath: undefined, repoPath: undefined, branch: undefined });
 	}
 
 	/**
@@ -1166,6 +1225,9 @@ export class SessionManager {
 			return;
 		}
 
+		// Preserve fields that may have been set via store.update() before this async call
+		const existing = this.store.get(session.id);
+
 		this.store.put({
 			id: session.id,
 			title: session.title,
@@ -1178,6 +1240,8 @@ export class SessionManager {
 			role: session.role,
 			teamGoalId: session.teamGoalId,
 			worktreePath: session.worktreePath,
+			repoPath: existing?.repoPath,
+			branch: existing?.branch,
 			taskId: session.taskId,
 			staffId: session.staffId,
 			accessory: session.accessory,

@@ -5,6 +5,22 @@ import path from "node:path";
 
 const execFile = promisify(execFileCb);
 
+/** Check if a directory is inside a git repository. */
+export async function isGitRepo(cwd: string): Promise<boolean> {
+	try {
+		await execFile("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Get the git repo root for a directory. */
+export async function getRepoRoot(cwd: string): Promise<string> {
+	const { stdout } = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd });
+	return stdout.toString().trim();
+}
+
 export interface WorktreeResult {
 	worktreePath: string;
 	branchName: string;
