@@ -159,6 +159,7 @@
 	font-size: 12px;
 	white-space: nowrap;
 }
+.btn-icon:disabled { opacity: 0.35; cursor: not-allowed; }
 .btn-icon:hover { background: var(--accent); color: var(--foreground); }
 .btn-icon.danger:hover {
 	color: var(--destructive);
