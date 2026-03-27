@@ -751,6 +751,43 @@ export class SessionManager {
 	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } }): Promise<SessionInfo> {
 		const id = randomUUID();
 
+		// ── Worktree setup (must happen before agent launch so cwd is correct) ──
+		let worktreePath: string | undefined;
+		let worktreeBranch: string | undefined;
+		let worktreeRepoPath: string | undefined;
+		if (opts?.worktreeOpts) {
+			worktreeRepoPath = opts.worktreeOpts.repoPath;
+			const slug = "new-session"; // Title not known yet; will be renamed later
+			const uuid8 = id.slice(0, 8);
+			worktreeBranch = `session/${slug}-${uuid8}`;
+			const wtRoot = path.resolve(worktreeRepoPath, "..", `${path.basename(worktreeRepoPath)}-wt`);
+			const safeName = worktreeBranch.replace(/\//g, "-");
+			worktreePath = path.join(wtRoot, safeName);
+
+			// Create worktree synchronously — agent needs the correct cwd at launch
+			try {
+				const result = await createWorktree(worktreeRepoPath, worktreeBranch);
+				worktreePath = result.worktreePath;
+				cwd = result.worktreePath;
+				console.log(`[session-manager] Worktree ready for session ${id}: ${result.worktreePath} (branch: ${worktreeBranch})`);
+			} catch (err) {
+				// Retry once after 1s
+				await new Promise(resolve => setTimeout(resolve, 1000));
+				try {
+					const result = await createWorktree(worktreeRepoPath, worktreeBranch);
+					worktreePath = result.worktreePath;
+					cwd = result.worktreePath;
+					console.log(`[session-manager] Worktree ready (retry) for session ${id}: ${result.worktreePath}`);
+				} catch (err2) {
+					console.error(`[session-manager] Worktree setup failed for session ${id}:`, err2);
+					// Fall through — session will use original cwd
+					worktreePath = undefined;
+					worktreeBranch = undefined;
+					worktreeRepoPath = undefined;
+				}
+			}
+		}
+
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
 			args: agentArgs ? [...agentArgs] : [],
@@ -926,59 +963,16 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to persist session ${id}:`, err);
 		});
 
-		// ── Async worktree setup (fire-and-forget) ──
-		if (opts?.worktreeOpts) {
-			const { repoPath } = opts.worktreeOpts;
-			const slug = session.title
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, "-")
-				.replace(/^-|-$/g, "")
-				.slice(0, 20) || "session";
-			const uuid8 = id.slice(0, 8);
-			const branch = `session/${slug}-${uuid8}`;
-			const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
-			const safeName = branch.replace(/\//g, "-");
-			const worktreePath = path.join(wtRoot, safeName);
-
-			// Persist worktree metadata immediately
+		// ── Persist worktree metadata (worktree already created above) ──
+		if (worktreePath && worktreeRepoPath && worktreeBranch) {
 			session.worktreePath = worktreePath;
-			this.store.update(id, { repoPath, branch, worktreePath });
-
-			// Fire-and-forget async setup with one retry
-			this._setupSessionWorktree(session, repoPath, branch).catch(() => {
-				// Errors already logged inside _setupSessionWorktree
-			});
+			this.store.update(id, { repoPath: worktreeRepoPath, branch: worktreeBranch, worktreePath, cwd: worktreePath });
 		}
 
 		return session;
 	}
 
-	/**
-	 * Async worktree setup for a session. Retries once on failure.
-	 * On success: updates session cwd. On double failure: clears worktree metadata.
-	 */
-	private async _setupSessionWorktree(session: SessionInfo, repoPath: string, branch: string): Promise<void> {
-		for (let attempt = 0; attempt < 2; attempt++) {
-			try {
-				const result = await createWorktree(repoPath, branch);
-				// Update in-memory and persist
-				session.cwd = result.worktreePath;
-				session.worktreePath = result.worktreePath;
-				this.store.update(session.id, { cwd: result.worktreePath, worktreePath: result.worktreePath });
-				console.log(`[session-manager] Worktree ready for session "${session.title}" (${session.id}): ${result.worktreePath}`);
-				return;
-			} catch (err) {
-				console.error(`[session-manager] Worktree setup attempt ${attempt + 1} failed for session "${session.title}" (${session.id}):`, err);
-				if (attempt === 0) {
-					await new Promise(resolve => setTimeout(resolve, 1000));
-				}
-			}
-		}
-		// Both attempts failed — clear worktree metadata so stuck recovery doesn't perpetually warn
-		console.error(`[session-manager] Worktree setup failed for session "${session.title}" (${session.id}) — clearing worktree metadata`);
-		session.worktreePath = undefined;
-		this.store.update(session.id, { worktreePath: undefined, repoPath: undefined, branch: undefined });
-	}
+
 
 	/**
 	 * Create a delegate session — a real session that runs a task on behalf of a parent session.
