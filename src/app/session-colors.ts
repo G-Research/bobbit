@@ -282,7 +282,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	const isBusy = status === "streaming" || isCompacting;
 
 	// ---- Canvas rendering (replaces box-shadow spans) ----
-	const eyeColor = isSelected ? p.main : p.eye;
+	const eyeColor = p.eye;
 	const accPixels = hasAccessory ? parseShadowToPixels(acc.shadow) : undefined;
 	const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
 	const effectiveHue = (hueRotate && status !== "starting" && status !== "terminated") ? hueRotate : 0;
