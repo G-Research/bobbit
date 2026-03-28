@@ -321,6 +321,9 @@ function buildEyeFrameCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<s
 }
 
 /** Start a JS eye animation loop on a canvas sprite <img> element.
+ *  Syncs to the CSS animation timeline on the same element (blob-busy-eyes
+ *  or blob-idle-eyes) via the Web Animations API, so eyes and accessory
+ *  hide/show keyframes stay perfectly in phase.
  *  Returns a cleanup function to stop the loop. */
 export function startCanvasEyeAnimation(
 	img: HTMLImageElement,
@@ -331,13 +334,47 @@ export function startCanvasEyeAnimation(
 	const cache = buildEyeFrameCache(palette, sequence);
 	let rafId = 0;
 	let lastKey = "";
-	// Use time origin 0 so the JS cycle aligns with CSS animation timelines
-	// (CSS animations also count from page load / performance time origin).
-	const startTime = 0;
+	let cssAnim: Animation | null = null;
+
+	function findCssAnimation(): Animation | null {
+		// The CSS blob-busy-eyes / blob-idle-eyes animation runs on this same
+		// img element (box-shadow changes are invisible due to our override).
+		// Find it so we can read its currentTime for perfect sync.
+		try {
+			const anims = img.getAnimations();
+			// Look for the eye animation — it's the one using steps(1) timing
+			for (const a of anims) {
+				const effect = a.effect as KeyframeEffect;
+				if (effect?.getTiming?.()?.easing === "step-end"
+					|| (effect?.getKeyframes?.()?.some(k => "boxShadow" in k))) {
+					return a;
+				}
+			}
+			// Fallback: use the first animation with matching duration
+			for (const a of anims) {
+				const dur = (a.effect as KeyframeEffect)?.getTiming?.()?.duration;
+				if (dur === cycleDurationMs) return a;
+			}
+		} catch { /* getAnimations not supported */ }
+		return null;
+	}
 
 	function tick() {
-		const elapsed = performance.now() - startTime;
-		const pct = (elapsed % cycleDurationMs) / cycleDurationMs * 100;
+		// Try to sync to CSS animation; cache the reference
+		if (!cssAnim) cssAnim = findCssAnimation();
+
+		let pct: number;
+		if (cssAnim && cssAnim.currentTime != null) {
+			// CSS animation currentTime is in ms, may exceed duration (loops)
+			const ct = typeof cssAnim.currentTime === "number"
+				? cssAnim.currentTime
+				: (cssAnim.currentTime as CSSNumericValue).to("ms").value;
+			pct = (ct % cycleDurationMs) / cycleDurationMs * 100;
+		} else {
+			// Fallback: use performance.now() from page origin
+			pct = (performance.now() % cycleDurationMs) / cycleDurationMs * 100;
+		}
+
 		// Find current frame — last frame whose pct <= current pct
 		let frame = sequence[0];
 		for (let i = sequence.length - 1; i >= 0; i--) {
@@ -387,8 +424,11 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	// CSS applies identically. Override width (CSS sets 1px for box-shadow technique)
 	// to actual pixel dimensions, and compensate margins to keep the same layout box.
 	// CSS has: width:1px; margin:8px 18px 28px 18px; → total 37×37
-	// Canvas:  width:10px; margin:8px 9px 20px 18px; → total 37×37 (same)
-	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:8px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
+	// Keep margin-bottom at 28px (same as div) because .bobbit-blob uses
+	// display:flex; align-items:end which aligns from the bottom margin edge.
+	// Shrink margin-top instead to compensate for the larger element height.
+	// Canvas:  width:10px; margin:0px 9px 28px 18px; → total 37×37 (same)
+	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:${8 - (BODY_HEIGHT - 1)}px ${18 - (BODY_WIDTH - 1)}px 28px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
 	// Shadow CSS: width:1px; same principle
 	const shadowStyle = `width:11px !important;height:10px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
@@ -440,7 +480,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
 
 	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
-	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:8px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
+	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:${8 - (BODY_HEIGHT - 1)}px ${18 - (BODY_WIDTH - 1)}px 28px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
 	// Eye animation for idle blob
 	let cleanup: (() => void) | null = null;
