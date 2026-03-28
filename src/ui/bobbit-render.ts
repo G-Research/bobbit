@@ -388,7 +388,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	// to actual pixel dimensions, and compensate margins to keep the same layout box.
 	// CSS has: width:1px; margin:8px 18px 28px 18px; → total 37×37
 	// Canvas:  width:10px; margin:8px 9px 20px 18px; → total 37×37 (same)
-	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:8px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
+	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
 	// Shadow CSS: width:1px; same principle
 	const shadowStyle = `width:11px !important;height:10px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
@@ -440,7 +440,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
 
 	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
-	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:8px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
+	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
 	// Eye animation for idle blob
 	let cleanup: (() => void) | null = null;
