@@ -204,6 +204,29 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/oauth/start` | Begin an OAuth flow, returns auth URL |
 | `POST` | `/api/oauth/complete` | Exchange code for tokens (`{ flowId, code }`) |
 
+### MCP Servers
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/mcp-servers` | List all discovered MCP servers with status, tool count, and tool names |
+| `POST` | `/api/mcp-servers/:name/restart` | Disconnect and reconnect an MCP server (also re-discovers from config files) |
+| `POST` | `/api/internal/mcp-call` | Proxy a tool call to an MCP server (`{ tool: "mcp__server__name", args: {...} }`) |
+
+**`GET /api/mcp-servers`** returns an array of server objects:
+```json
+[{
+  "name": "playwright",
+  "status": "connected",
+  "toolCount": 12,
+  "config": { "command": "npx", "args": ["@playwright/mcp@latest"] },
+  "tools": [{ "name": "mcp__playwright__browser_navigate", "description": "Navigate to URL" }]
+}]
+```
+
+**`POST /api/mcp-servers/:name/restart`** re-discovers servers from config files before connecting, so newly added servers can be started without a gateway restart.
+
+**`POST /api/internal/mcp-call`** is the internal proxy endpoint used by generated agent extensions. Returns the raw MCP `{ content, isError }` response.
+
 ### Preview
 
 | Method | Path | Description |
