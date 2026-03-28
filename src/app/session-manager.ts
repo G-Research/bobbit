@@ -437,8 +437,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			staff: "Start the staff agent creation session.",
 			setup: "Start the project setup session.",
 		};
-		if (state.assistantType && !isExisting) {
-			const autoPrompt = AUTO_PROMPTS[state.assistantType];
+		if (options?.assistantType && !isExisting) {
+			const autoPrompt = AUTO_PROMPTS[options.assistantType];
 			if (autoPrompt) remote.prompt(autoPrompt);
 		}
 
