@@ -7,6 +7,8 @@ provider:
 group: Web
 renderer: src/ui/tools/renderers/WebFetchRenderer.ts
 docs: |-
+  No JS execution — use browser tools for SPAs. Default 20K char limit; increase `maxLength` for long docs. Much faster than browser tools. Follows redirects. Extracts readable text, stripping navigation/ads.
+detail_docs: |-
   ## Purpose
 
   Fetch a web page by URL and extract readable text content. Uses curl internally for speed, then strips HTML boilerplate (navigation, ads, scripts) to return clean, readable text.

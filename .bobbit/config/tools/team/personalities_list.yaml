@@ -7,7 +7,9 @@ provider:
   extension: extension.ts
 group: Team
 renderer: src/ui/tools/renderers/PersonalityToolRenderers.ts
-docs: |
+docs: |-
+  No parameters. Returns all available personality definitions.
+detail_docs: |
   List all available personalities that can be applied to spawned agents.
   Each personality modifies the agent's behavior via system prompt additions.
 

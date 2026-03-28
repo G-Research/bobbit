@@ -6,7 +6,9 @@ provider:
   extension: extension.ts
 group: Team
 renderer: src/ui/tools/renderers/PersonalityToolRenderers.ts
-docs: |
+docs: |-
+  Create a named personality with a prompt fragment. The fragment is appended to the agent's system prompt to modify behavior/style.
+detail_docs: |
   Define a new personality that can be applied to agents via `team_spawn`.
   Personalities modify how agents approach their work (communication style,
   thoroughness, risk tolerance, etc.).

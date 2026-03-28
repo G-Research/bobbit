@@ -6,26 +6,47 @@ provider:
   tool: find
 group: File System
 renderer: src/ui/tools/renderers/FindRenderer.ts
-docs: |
+docs: |-
+  All paths must use forward slashes, even on Windows. Respects .gitignore. Returns paths relative to search directory.
+detail_docs: >
   Search for files matching a glob pattern. Returns matching file paths relative
+
   to the search directory. Respects `.gitignore`.
 
-  **All paths must use forward slashes (`/`), even on Windows.** Never use backslashes.
+
+  **All paths must use forward slashes (`/`), even on Windows.** Never use
+  backslashes.
+
 
   Parameters:
+
   - `pattern` (required): Glob pattern to match (e.g. `*.ts`, `**/*.spec.ts`).
-  - `path` (optional): Directory to search in (default: working directory). Forward slashes only.
+
+  - `path` (optional): Directory to search in (default: working directory).
+  Forward slashes only.
+
   - `limit` (optional): Maximum number of results to return.
 
+
   Examples — correct:
-  ```
-  find("*.yaml", "tools")
-  find("**/*.spec.ts", "src/server")
-  find("*.md")  # search working directory
-  find("**/*.test.ts", "C:/Users/you/project/tests")
+
   ```
 
-  Examples — WRONG (backslashes):
+  find("*.yaml", "tools")
+
+  find("**/*.spec.ts", "src/server")
+
+  find("*.md")  # search working directory
+
+  find("**/*.test.ts", "C:/Users/you/project/tests")
+
   ```
+
+
+  Examples — WRONG (backslashes):
+
+  ```
+
   find("**/*.spec.ts", "src\\server")                    # WRONG
+
   ```

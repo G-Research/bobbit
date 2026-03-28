@@ -7,71 +7,132 @@ provider:
 group: File System
 renderer: src/ui/tools/renderers/EditRenderer.ts
 docs: |-
+  `oldText` must match **exactly** — whitespace, indentation, newlines. Always `read` first to get exact text. First occurrence only; include surrounding context to disambiguate. Empty `newText` deletes the matched text.
+detail_docs: >-
   ## Purpose
 
-  Perform a precise, surgical text replacement in a file. Finds the exact `oldText` string in the file and replaces it with `newText`. The match must be character-perfect — including whitespace, indentation, and newlines.
 
-  This is the safest way to modify existing files because it only changes the targeted text while preserving everything else. Unlike `write`, which replaces the entire file, `edit` touches only what you specify.
+  Perform a precise, surgical text replacement in a file. Finds the exact
+  `oldText` string in the file and replaces it with `newText`. The match must be
+  character-perfect — including whitespace, indentation, and newlines.
 
-  Only the **first occurrence** of `oldText` is replaced. If the text appears multiple times, include enough surrounding context to make your match unique.
+
+  This is the safest way to modify existing files because it only changes the
+  targeted text while preserving everything else. Unlike `write`, which replaces
+  the entire file, `edit` touches only what you specify.
+
+
+  Only the **first occurrence** of `oldText` is replaced. If the text appears
+  multiple times, include enough surrounding context to make your match unique.
+
 
   ## Parameters
 
+
   | Name | Type | Required | Description |
+
   |------|------|----------|-------------|
-  | `path` | string | **Yes** | Path to the file to edit. Must be an existing file. |
-  | `oldText` | string | **Yes** | Exact text to find in the file. Must match character-for-character including all whitespace, indentation, and newlines. |
-  | `newText` | string | **Yes** | Replacement text. Can be empty string to delete the matched text. |
+
+  | `path` | string | **Yes** | Path to the file to edit. Must be an existing
+  file. |
+
+  | `oldText` | string | **Yes** | Exact text to find in the file. Must match
+  character-for-character including all whitespace, indentation, and newlines. |
+
+  | `newText` | string | **Yes** | Replacement text. Can be empty string to
+  delete the matched text. |
+
 
   ## When to Use
 
-  - **Fixing bugs** — change a specific line or expression without touching the rest of the file.
+
+  - **Fixing bugs** — change a specific line or expression without touching the
+  rest of the file.
+
   - **Adding imports** — insert a new import line next to existing imports.
-  - **Modifying function signatures** — change parameters, return types, or function names.
-  - **Updating configuration values** — change a specific setting in a config file.
-  - **Any targeted change** — when you know exactly what text to find and what to replace it with.
+
+  - **Modifying function signatures** — change parameters, return types, or
+  function names.
+
+  - **Updating configuration values** — change a specific setting in a config
+  file.
+
+  - **Any targeted change** — when you know exactly what text to find and what
+  to replace it with.
+
 
   ## When NOT to Use
 
-  - **Creating new files** — use `write` instead; `edit` requires the file to already exist.
-  - **Rewriting most of a file** — if you're changing more than ~50% of the content, `write` is cleaner and less error-prone.
-  - **When you don't know the exact current text** — always `read` the file first to get the precise text. Guessing the indentation or exact formatting will cause the match to fail.
-  - **Multi-occurrence replacements** — `edit` only replaces the first match. For global find-and-replace across a file, use `bash` with `sed` or a script.
+
+  - **Creating new files** — use `write` instead; `edit` requires the file to
+  already exist.
+
+  - **Rewriting most of a file** — if you're changing more than ~50% of the
+  content, `write` is cleaner and less error-prone.
+
+  - **When you don't know the exact current text** — always `read` the file
+  first to get the precise text. Guessing the indentation or exact formatting
+  will cause the match to fail.
+
+  - **Multi-occurrence replacements** — `edit` only replaces the first match.
+  For global find-and-replace across a file, use `bash` with `sed` or a script.
+
 
   ## Examples
 
+
   ```
+
   # Add an import to an existing import block
+
   edit(path="src/server/server.ts",
     oldText="import { Router } from 'express';",
     newText="import { Router } from 'express';\nimport { ToolStore } from './agent/tool-store.js';")
 
   # Fix a bug — wrong comparison operator
+
   edit(path="src/utils/validator.ts",
     oldText="if (count = 0) {",
     newText="if (count === 0) {")
 
   # Change a function's return type
+
   edit(path="src/api/handler.ts",
     oldText="function getUser(id: string): User {",
     newText="function getUser(id: string): User | null {")
 
   # Update a config value
+
   edit(path="package.json",
     oldText='"version": "1.2.3"',
     newText='"version": "1.3.0"')
 
   # Delete a block of code (replace with empty)
+
   edit(path="src/app.ts",
     oldText="// DEPRECATED: remove after v2\nfunction oldHelper() {\n  return null;\n}\n",
     newText="")
   ```
 
+
   ## Notes / Gotchas
 
-  - **Exact match is non-negotiable** — the `oldText` must match the file content byte-for-byte. Even one space difference causes failure. Always `read` the file first.
-  - **First occurrence only** — if the same text appears multiple times, only the first is replaced. Include more surrounding context to disambiguate.
-  - **Whitespace matters** — tabs vs spaces, trailing whitespace, and exact indentation all matter. Copy the text exactly from `read` output.
-  - **Newlines in parameters** — use `\n` to represent newlines in the oldText and newText strings.
-  - **Empty newText deletes** — setting `newText` to an empty string effectively deletes the matched text.
-  - **Verify after editing** — for critical changes, `read` the file afterward to confirm the edit applied correctly.
+
+  - **Exact match is non-negotiable** — the `oldText` must match the file
+  content byte-for-byte. Even one space difference causes failure. Always `read`
+  the file first.
+
+  - **First occurrence only** — if the same text appears multiple times, only
+  the first is replaced. Include more surrounding context to disambiguate.
+
+  - **Whitespace matters** — tabs vs spaces, trailing whitespace, and exact
+  indentation all matter. Copy the text exactly from `read` output.
+
+  - **Newlines in parameters** — use `\n` to represent newlines in the oldText
+  and newText strings.
+
+  - **Empty newText deletes** — setting `newText` to an empty string effectively
+  deletes the matched text.
+
+  - **Verify after editing** — for critical changes, `read` the file afterward
+  to confirm the edit applied correctly.
