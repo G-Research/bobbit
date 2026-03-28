@@ -1062,7 +1062,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.prUrl=${prStatus?.url}
 						.prNumber=${prStatus?.number}
 						.prTitle=${prStatus?.title}
-						.prMergeable=${prStatus?.mergeable ?? false}
+						.prMergeable=${prStatus?.mergeable}
 						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
 						.reviewDecision=${prStatus?.reviewDecision}
 						@pr-merge=${handlePrMerge}
