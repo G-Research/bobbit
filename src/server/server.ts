@@ -2967,15 +2967,36 @@ async function handleApiRoute(
 			return;
 		}
 		const serverName = decodeURIComponent(mcpRestartMatch[1]);
-		const statuses = mcpManager.getServerStatuses();
-		const existing = statuses.find(s => s.name === serverName);
+		let statuses = mcpManager.getServerStatuses();
+		let existing = statuses.find(s => s.name === serverName);
 		if (!existing || !existing.config) {
-			json({ error: `MCP server "${serverName}" not found` }, 404);
-			return;
+			// Re-discover servers in case config was added after startup
+			const discovered = mcpManager.discoverServers();
+			if (!discovered[serverName]) {
+				json({ error: `MCP server "${serverName}" not found` }, 404);
+				return;
+			}
+			// Connect the newly discovered server
+			await mcpManager.connectServer(serverName, discovered[serverName]);
+		} else {
+			await mcpManager.disconnectServer(serverName);
+			await mcpManager.connectServer(serverName, existing.config);
 		}
-		await mcpManager.disconnectServer(serverName);
-		await mcpManager.connectServer(serverName, existing.config);
-		json({ ok: true, status: mcpManager.getServerStatuses().find(s => s.name === serverName) });
+		// Re-register MCP tools with ToolManager
+		if (toolManager) {
+			toolManager.removeExternalTools("mcp__");
+			const infos = mcpManager.getToolInfos();
+			toolManager.registerExternalTools(infos.map(info => ({
+				name: info.name,
+				description: info.description,
+				summary: info.description,
+				group: info.group,
+				docs: info.docs,
+				provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
+			})));
+		}
+		const updated = mcpManager.getServerStatuses().find(s => s.name === serverName);
+		json({ ok: true, ...updated });
 		return;
 	}
 

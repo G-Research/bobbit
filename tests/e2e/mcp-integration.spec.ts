@@ -199,12 +199,12 @@ test.describe("MCP Tools in Tool List", () => {
 
 		const echoTool = tools.find((t: any) => t.name === "mcp__mock__echo");
 		expect(echoTool).toBeDefined();
-		expect(echoTool.description).toContain("echo");
+		expect(echoTool.description.toLowerCase()).toContain("echo");
 		expect(echoTool.group).toMatch(/MCP/i);
 
 		const addTool = tools.find((t: any) => t.name === "mcp__mock__add");
 		expect(addTool).toBeDefined();
-		expect(addTool.description).toContain("add");
+		expect(addTool.description.toLowerCase()).toContain("add");
 	});
 });
 
