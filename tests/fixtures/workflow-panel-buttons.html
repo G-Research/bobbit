@@ -67,17 +67,55 @@
     }
 
     // -------------------------------------------------------
-    // CURRENT (BUGGY) HANDLERS — exact reproduction from render.ts
+    // NEW (FIXED) HANDLERS — matching the updated render.ts
     // -------------------------------------------------------
 
-    // Current "Done" handler — just calls backToSessions()
-    function currentHandleDone() {
-      backToSessions();
+    function renderApp() { /* no-op mock */ }
+
+    // New "Cancel" handler
+    async function handleCancel() {
+      if (state.assistantType === "workflow") {
+        const sessionId = activeSessionId();
+        if (state.remoteAgent) {
+          state.remoteAgent.disconnect();
+          state.remoteAgent = null;
+          state.connectionStatus = "disconnected";
+        }
+        state.assistantType = null;
+        // localStorage.removeItem("gateway.sessionId"); — skip in test
+        state.appView = "authenticated";
+        if (sessionId) {
+          await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+          clearSessionModel(sessionId);
+        }
+        await refreshSessions();
+        setHashRoute("landing");
+        renderApp();
+      } else {
+        backToSessions();
+      }
     }
 
-    // Current "Save" handler — just calls saveWorkflowFromPanel()
-    async function currentHandleSave() {
-      await saveWorkflowFromPanel();
+    // New "Create Workflow" handler
+    async function handleCreateWorkflow() {
+      const ok = await saveWorkflowFromPanel();
+      if (!ok) return;
+      const sessionId = activeSessionId();
+      if (state.remoteAgent) {
+        state.remoteAgent.disconnect();
+        state.remoteAgent = null;
+        state.connectionStatus = "disconnected";
+      }
+      state.assistantType = null;
+      // localStorage.removeItem("gateway.sessionId"); — skip in test
+      state.appView = "authenticated";
+      if (sessionId) {
+        await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+        clearSessionModel(sessionId);
+      }
+      await refreshSessions();
+      setHashRoute("workflows");
+      renderApp();
     }
 
     // -------------------------------------------------------
@@ -97,8 +135,8 @@
       resetTracking();
       state.assistantType = "workflow";
 
-      // Execute current buggy handler
-      currentHandleDone();
+      // Execute the fixed handler
+      await handleCancel();
 
       // Check if session was deleted via API
       const deleteCall = apiCalls.find(
@@ -118,8 +156,8 @@
       resetTracking();
       state.assistantType = "workflow";
 
-      // Execute current buggy handler
-      await currentHandleSave();
+      // Execute the fixed handler
+      await handleCreateWorkflow();
 
       // Check if session was deleted via API
       const deleteCall = apiCalls.find(
