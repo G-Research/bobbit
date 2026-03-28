@@ -46,6 +46,90 @@ export const TERMINATED_PALETTE: BobbitPalette = { main: "#ef4444", light: "#fca
 
 export const NO_ACCESSORY: AccessoryDef = { id: "none", label: "None", shadow: "", yOffset: 0, addsHeight: false };
 
+/** Aurora borealis palette — 14 curated hue-rotate offsets from canonical green. */
+export const BOBBIT_HUE_ROTATIONS = [-110, -85, -60, -35, -10, 0, 15, 25, 40, 50, 65, 75, 100, 125];
+
+// ============================================================================
+// IDLE BLOB (role manager / large display context)
+// ============================================================================
+
+export interface IdleBlobOptions {
+	accId: string;
+	accClass: string;
+	size?: number;
+	hueIndex?: number;
+	phaseIndex?: number;
+}
+
+/**
+ * Render an idle chat blob with accessory, sized to fit a container.
+ * Uses the exact same DOM as StreamingMessageContainer.
+ * Extracted from role-manager-page.ts idleBlob().
+ */
+export function renderIdleBlob(opts: IdleBlobOptions): TemplateResult {
+	const { accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
+	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
+	const naturalSize = 76;
+	const s = size / naturalSize;
+	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
+	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
+	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
+	return html`
+		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
+			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
+				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
+					<div class="bobbit-blob__sprite"></div>
+					<div class="bobbit-blob__crown"></div>
+					<div class="bobbit-blob__bandana"></div>
+					<div class="bobbit-blob__magnifier"></div>
+					<div class="bobbit-blob__palette"></div>
+					<div class="bobbit-blob__pencil"></div>
+					<div class="bobbit-blob__shield"></div>
+					<div class="bobbit-blob__set-square"></div>
+					<div class="bobbit-blob__flask"></div>
+					<div class="bobbit-blob__wand"></div>
+					<div class="bobbit-blob__wizard-hat"></div>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
+// ============================================================================
+// SIDEBAR BOBBIT RENDERER
+// ============================================================================
+
+// ============================================================================
+// CHAT BLOB RENDERER
+// ============================================================================
+
+export interface ChatBlobOptions {
+	blobClass: string;
+	accClass?: string;
+	hueRotate?: number;
+}
+
+/** Render a chat blob with the exact DOM structure from StreamingMessageContainer. */
+export function renderChatBlob(opts: ChatBlobOptions): TemplateResult {
+	const { blobClass, accClass = "", hueRotate = 0 } = opts;
+	return html`<div class="${accClass}" style="--bobbit-hue-rotate:${hueRotate}deg;display:inline-block;padding:8px 20px 40px 20px;">
+		<div class="${blobClass}">
+			<div class="bobbit-blob__sprite"></div>
+			<div class="bobbit-blob__crown"></div>
+			<div class="bobbit-blob__bandana"></div>
+			<div class="bobbit-blob__magnifier"></div>
+			<div class="bobbit-blob__palette"></div>
+			<div class="bobbit-blob__pencil"></div>
+			<div class="bobbit-blob__shield"></div>
+			<div class="bobbit-blob__set-square"></div>
+			<div class="bobbit-blob__flask"></div>
+			<div class="bobbit-blob__wand"></div>
+			<div class="bobbit-blob__wizard-hat"></div>
+			<div class="bobbit-blob__shadow"></div>
+		</div>
+	</div>`;
+}
+
 // ============================================================================
 // SIDEBAR BOBBIT RENDERER
 // ============================================================================

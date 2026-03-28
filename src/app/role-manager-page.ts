@@ -4,7 +4,8 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
-import { ACCESSORY_IDS, BOBBIT_HUE_ROTATIONS, getAccessory } from "./session-colors.js";
+import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
+import { renderIdleBlob, BOBBIT_HUE_ROTATIONS } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
@@ -23,34 +24,7 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 	const accClass = accId && accId !== "none"
 		? `bobbit-${accId === "crown" ? "crowned" : accId}`
 		: "";
-	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
-	// The sprite margin-box is ~40×36px at 4× scale but accessories overflow it.
-	// Use a larger viewport to capture everything, then scale down.
-	const naturalSize = 76;
-	const s = size / naturalSize;
-	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
-	// Offset animations so multiple blobs don't blink/shimmer in sync
-	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
-	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
-	return html`
-		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
-			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
-				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
-					<div class="bobbit-blob__sprite"></div>
-					<div class="bobbit-blob__crown"></div>
-					<div class="bobbit-blob__bandana"></div>
-					<div class="bobbit-blob__magnifier"></div>
-					<div class="bobbit-blob__palette"></div>
-					<div class="bobbit-blob__pencil"></div>
-					<div class="bobbit-blob__shield"></div>
-					<div class="bobbit-blob__set-square"></div>
-					<div class="bobbit-blob__flask"></div>
-					<div class="bobbit-blob__wand"></div>
-					<div class="bobbit-blob__wizard-hat"></div>
-				</div>
-			</div>
-		</div>
-	`;
+	return renderIdleBlob({ accId, accClass, size, hueIndex, phaseIndex });
 }
 
 // ============================================================================
