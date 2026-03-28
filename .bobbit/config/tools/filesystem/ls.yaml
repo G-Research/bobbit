@@ -7,7 +7,7 @@ provider:
 group: File System
 renderer: src/ui/tools/renderers/LsRenderer.ts
 docs: |-
-  All paths must use forward slashes. Directories suffixed with `/`. Includes dotfiles. Truncated to 500 entries.
+  Directories suffixed with `/`. Includes dotfiles. Truncated to 500 entries.
 detail_docs: >
   List the contents of a directory. Returns entries sorted alphabetically, with
 

@@ -7,7 +7,7 @@ provider:
 group: File System
 renderer: src/ui/tools/renderers/WriteRenderer.ts
 docs: |-
-  **Overwrites entirely** — use `edit` for surgical changes to existing files. Creates parent directories automatically. `.html`/`.svg` files render inline in chat. No append mode — read first, then write combined content.
+  **Overwrites entirely** — use `edit` for surgical changes. Relative paths resolve from session working directory. Creates parent directories automatically. `.html`/`.svg` files render inline in chat.
 detail_docs: |-
   ## Purpose
 

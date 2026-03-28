@@ -7,7 +7,7 @@ provider:
 group: File System
 renderer: src/ui/tools/renderers/FindRenderer.ts
 docs: |-
-  All paths must use forward slashes, even on Windows. Respects .gitignore. Returns paths relative to search directory.
+  Respects .gitignore. Returns paths relative to search directory. Use forward slashes in glob patterns on all platforms.
 detail_docs: >
   Search for files matching a glob pattern. Returns matching file paths relative
 

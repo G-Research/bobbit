@@ -8,7 +8,7 @@ provider:
 group: Team
 renderer: src/ui/tools/renderers/PersonalityToolRenderers.ts
 docs: |-
-  No parameters. Returns all available personality definitions.
+  No parameters. Use before `team_spawn` to see available personality options.
 detail_docs: |
   List all available personalities that can be applied to spawned agents.
   Each personality modifies the agent's behavior via system prompt additions.

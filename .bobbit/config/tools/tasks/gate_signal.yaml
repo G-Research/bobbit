@@ -7,9 +7,9 @@ provider:
   extension: extension.ts
 group: Gates
 docs: >-
-  Triggers async verification after signaling. Server enforces dependency
-  ordering — upstream gates must pass first (409 if not). Include `content`
-  (markdown) for content gates like design docs.
+  Required: `gate_id`. Optional: `content` (markdown), `metadata` (key-value
+  pairs). Triggers async verification after signaling. Server enforces
+  dependency ordering — upstream gates must pass first (409 if not).
 detail_docs: >-
   ## Purpose
 

@@ -8,7 +8,7 @@ provider:
 group: File System
 renderer: src/ui/tools/renderers/ReadRenderer.ts
 docs: |-
-  Truncated to 2000 lines / 50KB — use `offset`/`limit` for large files. Offset is 1-indexed. Supports images (jpg, png, gif, webp) as visual attachments. Launch parallel `read` calls for multiple files.
+  Offset is 1-indexed. Supports images (jpg, png, gif, webp) as visual attachments. Launch parallel `read` calls for multiple files — much faster than sequential.
 detail_docs: >-
   ## Purpose
 

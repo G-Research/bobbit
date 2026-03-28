@@ -7,7 +7,7 @@ provider:
 group: Browser
 renderer: src/ui/tools/renderers/ScreenshotRenderer.ts
 docs: |-
-  Viewport only by default; use `fullPage: true` for full scrollable page. Use `selector` to capture a specific element. Returns image inline in chat.
+  Viewport only by default; use `fullPage: true` for full scrollable page. Use `selector` to capture a specific element. Use `savePath` to save to a .png file on disk. Returns image inline in chat.
 detail_docs: >-
   ## Purpose
 

@@ -7,7 +7,7 @@ provider:
 group: Browser
 renderer: src/ui/tools/renderers/BrowserTypeRenderer.ts
 docs: |-
-  Clears field before typing by default. Set `clear: false` to append (types char-by-char via pressSequentially). Fires input/change/key events. Target must be input, textarea, or contenteditable.
+  Set `clear: false` to append instead of replacing (types char-by-char via pressSequentially). Fires input/change/key events. Target must be input, textarea, or contenteditable.
 detail_docs: >-
   ## Purpose
 

@@ -7,7 +7,7 @@ provider:
 group: Team
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Each agent gets an isolated git worktree branched from the goal branch. Gate enforcement applies — server may reject with 409 if upstream gates haven't passed. Task prompt should be self-contained with all context the agent needs. Returns session ID and worktree path.
+  Required: `role`, `task`. Optional: `personality`, `taskId`, `workflowGateId`, `inputGateIds`. Each agent gets an isolated git worktree branched from the goal branch. Gate enforcement applies — server may reject with 409. Task prompt should be self-contained with all context the agent needs.
 detail_docs: >-
   ## Purpose
 

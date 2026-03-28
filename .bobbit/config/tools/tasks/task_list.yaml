@@ -7,7 +7,7 @@ provider:
 group: Tasks
 renderer: src/ui/tools/renderers/TaskToolRenderers.ts
 docs: |-
-  No parameters. Returns all tasks for the current goal with state, assignments, and dependencies.
+  No parameters. Call frequently to track progress across the team.
 detail_docs: >-
   ## Purpose
 

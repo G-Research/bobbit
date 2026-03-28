@@ -7,9 +7,9 @@ provider:
   extension: extension.ts
 group: Gates
 docs: >-
-  Returns single gate's full detail including content body, signal history, and
-  verification results. Use for reading upstream gate content (e.g. design
-  docs).
+  Use to read upstream gate content (e.g. design docs) before starting
+  downstream work. Returns content body, signal history, and verification
+  results.
 detail_docs: >-
   ## Purpose
 

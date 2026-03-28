@@ -7,7 +7,7 @@ provider:
 group: File System
 renderer: src/ui/tools/renderers/GrepRenderer.ts
 docs: |-
-  All paths must use forward slashes. Respects .gitignore. Output truncated to 100 matches / 50KB. **Cannot search patterns starting with `--`** — use `bash` with `rg -- 'pattern'` instead.
+  Respects .gitignore. Output truncated to 100 matches / 50KB. **Cannot search patterns starting with `--`** — use `bash` with `rg -- 'pattern'` instead.
 detail_docs: >
   Search file contents for a regex or literal pattern. Returns matching lines
 

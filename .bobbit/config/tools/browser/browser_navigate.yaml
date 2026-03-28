@@ -7,7 +7,7 @@ provider:
 group: Browser
 renderer: src/ui/tools/renderers/BrowserNavigateRenderer.ts
 docs: |-
-  Launches browser if needed. Session persists (cookies, localStorage). Prefer `web_fetch` for static pages (10x faster). Waits for DOMContentLoaded only — use `browser_wait` for async content.
+  Session persists across navigations (cookies, localStorage). Prefer `web_fetch` for static pages (10x faster). Waits for DOMContentLoaded only — use `browser_wait` for async content.
 detail_docs: >-
   ## Purpose
 

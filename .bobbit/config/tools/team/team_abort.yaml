@@ -1,13 +1,13 @@
 name: team_abort
 description: "Force-abort a stuck agent that won't respond to steering"
-summary: "Force-abort a stuck agent that won't respond to steering."
+summary: "Terminate the entire goal — kills all agents and cleans up worktrees."
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Team
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Terminates the goal immediately. All agent sessions are terminated and worktrees cleaned up. Use only as a last resort.
+  Kills ALL agents on the goal and tears down all worktrees. This is a goal-level abort, not a single-agent operation. Use `team_dismiss` to remove one agent. Last resort only.
 detail_docs: >-
   # team_abort
 

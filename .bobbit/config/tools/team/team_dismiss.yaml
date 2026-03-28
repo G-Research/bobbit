@@ -7,7 +7,7 @@ provider:
 group: Team
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Terminates a specific agent session and cleans up its worktree. Use after the agent's work is merged back to the goal branch.
+  Use after the agent's work is merged back to the goal branch. Cleans up the agent's git worktree. To kill all agents at once, use `team_complete` or `team_abort`.
 detail_docs: >-
   ## Purpose
 
