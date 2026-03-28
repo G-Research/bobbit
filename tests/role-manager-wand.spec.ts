@@ -2,37 +2,26 @@ import { test, expect } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 
-test.describe("role-manager-page idleBlob canvas accessory rendering", () => {
-	test("idleBlob uses canvas rendering from bobbit-canvas", () => {
+test.describe("role-manager-page idleBlob accessory divs", () => {
+	test("idleBlob template contains bobbit-blob__wand div", () => {
 		const source = fs.readFileSync(
 			path.resolve("src/app/role-manager-page.ts"),
 			"utf-8"
 		);
 		expect(
-			source.includes("bobbit-canvas") || source.includes("renderBobbitCanvas"),
-			"Expected role-manager-page.ts to import from bobbit-canvas for canvas-based accessory rendering"
+			source.includes("bobbit-blob__wand"),
+			"Expected role-manager-page.ts idleBlob template to contain bobbit-blob__wand div for wand accessory rendering"
 		).toBe(true);
 	});
 
-	test("ACCESSORIES registry contains wand entry", () => {
+	test("idleBlob template contains bobbit-blob__wizard-hat div", () => {
 		const source = fs.readFileSync(
-			path.resolve("src/app/session-colors.ts"),
+			path.resolve("src/app/role-manager-page.ts"),
 			"utf-8"
 		);
 		expect(
-			source.includes('"wand"') || source.includes("'wand'"),
-			"Expected session-colors.ts ACCESSORIES registry to contain wand entry"
-		).toBe(true);
-	});
-
-	test("ACCESSORIES registry contains wizard-hat entry", () => {
-		const source = fs.readFileSync(
-			path.resolve("src/app/session-colors.ts"),
-			"utf-8"
-		);
-		expect(
-			source.includes('"wizard-hat"') || source.includes("'wizard-hat'"),
-			"Expected session-colors.ts ACCESSORIES registry to contain wizard-hat entry"
+			source.includes("bobbit-blob__wizard-hat"),
+			"Expected role-manager-page.ts idleBlob template to contain bobbit-blob__wizard-hat div for wizard-hat accessory rendering"
 		).toBe(true);
 	});
 });

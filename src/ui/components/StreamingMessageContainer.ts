@@ -3,138 +3,6 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
 import "./LiveTimer.js";
-import {
-	renderBobbitToCanvas,
-	CANONICAL_PALETTE,
-	computeBounds,
-	parseShadowToPixels,
-	rotateHue,
-	type Pixel,
-	type BobbitPalette,
-} from "../../app/bobbit-canvas.js";
-import { ACCESSORIES, getAccessory } from "../../app/session-colors.js";
-
-// ============================================================================
-// Eye position data
-// ============================================================================
-
-/** Default (center) eye positions: top row + bottom row */
-const EYES_CENTER_TOP: [number, number][] = [[3, 4], [6, 4]];
-const EYES_CENTER_BOT: [number, number][] = [[3, 5], [6, 5]];
-
-const EYES_RIGHT_TOP: [number, number][] = [[4, 4], [7, 4]];
-const EYES_RIGHT_BOT: [number, number][] = [[4, 5], [7, 5]];
-
-const EYES_LEFT_TOP: [number, number][] = [[2, 4], [5, 4]];
-const EYES_LEFT_BOT: [number, number][] = [[2, 5], [5, 5]];
-
-const EYES_UP_TOP: [number, number][] = [[4, 3], [7, 3]];
-const EYES_UP_BOT: [number, number][] = [[4, 4], [7, 4]];
-
-type EyeState = 'center' | 'blink-center' | 'right' | 'blink-right' | 'left' | 'blink-left' | 'up' | 'blink-up';
-
-/** CSS class → accessory ID mapping */
-const CLASS_TO_ACCESSORY: Record<string, string> = {
-	"bobbit-crowned": "crown",
-	"bobbit-bandana": "bandana",
-	"bobbit-magnifier": "magnifier",
-	"bobbit-palette": "palette",
-	"bobbit-pencil": "pencil",
-	"bobbit-shield": "shield",
-	"bobbit-set-square": "set-square",
-	"bobbit-flask": "flask",
-	"bobbit-wizard-hat": "wizard-hat",
-	"bobbit-wand": "wand",
-};
-
-/**
- * Determine the eye state for the busy blob animation.
- * 10-second cycle matching the old blob-busy-eyes CSS keyframes.
- */
-function getBusyEyeState(pct: number): EyeState {
-	if (pct < 16) return 'center';
-	if (pct < 18) return 'blink-center';
-	if (pct < 34) return 'center';
-	if (pct < 36) return 'right';
-	if (pct < 37) return 'blink-right';
-	if (pct < 54) return 'right';
-	if (pct < 60) return 'center';
-	if (pct < 64) return 'up';
-	if (pct < 65) return 'blink-up';
-	if (pct < 68) return 'left';
-	if (pct < 92) return 'center';
-	if (pct < 94) return 'blink-center';
-	if (pct < 96) return 'center';
-	if (pct < 98) return 'right';
-	return 'center';
-}
-
-/**
- * Determine the eye state for the idle blob animation.
- * 10-second cycle matching the old blob-idle-eyes CSS keyframes:
- * center → look left → blink-left → up-right → center →
- * look right → blink-right → up-right → center → blink-center
- */
-function getIdleEyeState(pct: number): EyeState {
-	if (pct < 10) return 'center';
-	if (pct < 22) return 'left';
-	if (pct < 25) return 'blink-left';
-	if (pct < 45) return 'up';
-	if (pct < 55) return 'center';
-	if (pct < 67) return 'right';
-	if (pct < 70) return 'blink-right';
-	if (pct < 85) return 'up';
-	if (pct < 93) return 'center';
-	if (pct < 96) return 'blink-center';
-	return 'center';
-}
-
-/**
- * Should the bandana tail be visible at this point in the 10s cycle?
- */
-function isBandanaTailVisible(pct: number): boolean {
-	if (pct < 34) return true;
-	if (pct < 57) return false;
-	if (pct < 60) return true;
-	if (pct < 65) return false;
-	if (pct < 96) return true;
-	if (pct < 98) return false;
-	return true;
-}
-
-/**
- * Get the eye pixel positions (top + bottom rows) for a given eye state.
- * For blink variants, only the bottom row is returned.
- */
-function getEyePixels(eyeState: EyeState): { top: [number, number][]; bot: [number, number][] } {
-	switch (eyeState) {
-		case 'center':
-			return { top: EYES_CENTER_TOP, bot: EYES_CENTER_BOT };
-		case 'blink-center':
-			return { top: [], bot: EYES_CENTER_BOT };
-		case 'right':
-			return { top: EYES_RIGHT_TOP, bot: EYES_RIGHT_BOT };
-		case 'blink-right':
-			return { top: [], bot: EYES_RIGHT_BOT };
-		case 'left':
-			return { top: EYES_LEFT_TOP, bot: EYES_LEFT_BOT };
-		case 'blink-left':
-			return { top: [], bot: EYES_LEFT_BOT };
-		case 'up':
-			return { top: EYES_UP_TOP, bot: EYES_UP_BOT };
-		case 'blink-up':
-			return { top: [], bot: EYES_UP_BOT };
-	}
-}
-
-/** Detect the active accessory from document.documentElement.classList */
-function detectAccessory(): string {
-	const cl = document.documentElement.classList;
-	for (const [cls, id] of Object.entries(CLASS_TO_ACCESSORY)) {
-		if (cl.contains(cls)) return id;
-	}
-	return "none";
-}
 
 export class StreamingMessageContainer extends LitElement {
 	@property({ type: Array }) tools: AgentTool[] = [];
@@ -158,14 +26,6 @@ export class StreamingMessageContainer extends LitElement {
 	private _updateScheduled = false;
 	private _immediateUpdate = false;
 
-	// Canvas animation state
-	private _canvas: HTMLCanvasElement = document.createElement("canvas");
-	private _rafId: number | null = null;
-	private _animStartTime: number = 0;
-	private _lastEyeState: EyeState = 'center';
-	private _lastTailVisible: boolean = true;
-	private _canvasDrawn = false;
-
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
@@ -173,12 +33,6 @@ export class StreamingMessageContainer extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
-		this._canvas.className = "bobbit-blob__sprite";
-	}
-
-	override disconnectedCallback(): void {
-		super.disconnectedCallback();
-		this._cancelAnimation();
 	}
 
 	override updated(changed: Map<string, unknown>) {
@@ -202,7 +56,6 @@ export class StreamingMessageContainer extends LitElement {
 					clearTimeout(this._entryTimer);
 					this._entryTimer = null;
 				}
-				this._cancelAnimation();
 				this._exitVariant = Math.random() < 0.5 ? 'exit' : 'exit-roll';
 				this._blobState = 'exiting';
 				setTimeout(() => {
@@ -211,24 +64,6 @@ export class StreamingMessageContainer extends LitElement {
 			}
 		}
 
-		// Draw or start animation when the canvas first appears in the DOM
-		if (this._blobVisible) {
-			const canvasInDom = this.querySelector('.bobbit-blob__sprite') === this._canvas;
-			if (canvasInDom && !this._canvasDrawn) {
-				this._drawCanvas();
-				this._canvasDrawn = true;
-			}
-			if ((this._blobState === 'active' || this._blobState === 'idle') && !this._rafId) {
-				this._startAnimation();
-			} else if (this._blobState !== 'active' && this._blobState !== 'idle' && this._rafId) {
-				this._cancelAnimation();
-				// Redraw with center eyes for non-active states
-				this._drawCanvas();
-			}
-		} else {
-			this._canvasDrawn = false;
-			this._cancelAnimation();
-		}
 	}
 
 	private get _blobVisible() {
@@ -244,128 +79,6 @@ export class StreamingMessageContainer extends LitElement {
 		if (this._blobState === 'compact-pop') return 'bobbit-blob bobbit-blob--compact-pop';
 		return 'bobbit-blob';
 	}
-
-	// ---- Canvas rendering ----
-
-	/** Detect accessory and compute canvas options */
-	private _getCanvasConfig() {
-		const accId = detectAccessory();
-		const acc = getAccessory(accId);
-		const hasAccessory = acc.id !== "none" && acc.shadow !== "";
-		const accPixels = hasAccessory ? parseShadowToPixels(acc.shadow) : undefined;
-		// bodyYOffset=0: accessories share the body coordinate space.
-		// Crown/wizard-hat extend above (y<0) and overlap the body naturally.
-		const bounds = computeBounds(0, accPixels);
-		const offX = -bounds.minX;
-		const offY = -bounds.minY;
-		return { acc, accPixels, bounds, offX, offY };
-	}
-
-	/** Draw the canvas with center eyes (static render) */
-	private _drawCanvas(eyeState: EyeState = 'center', tailVisible = true) {
-		const { acc, accPixels, offX, offY } = this._getCanvasConfig();
-
-		// For bandana tail animation: filter out tail pixels when not visible
-		let finalAccPixels = accPixels;
-		if (acc.id === 'bandana' && accPixels && !tailVisible) {
-			finalAccPixels = accPixels.filter(p => p.x < 10);
-		}
-
-		const palette = CANONICAL_PALETTE;
-
-		// Read session hue rotation from CSS variable (set on documentElement)
-		const hueStr = getComputedStyle(document.documentElement).getPropertyValue("--bobbit-hue-rotate").trim();
-		const hueRotate = hueStr ? parseFloat(hueStr) || 0 : 0;
-
-		// First render with default center eyes
-		// renderScale=4 oversamples the buffer to match the CSS scale(4) transform,
-		// so the GPU compositor maps 1:1 to buffer pixels — no bilinear blur.
-		// hueRotate bakes the session colour into body pixels in JS so the CSS
-		// filter on .bobbit-blob can be removed (it was rotating accessories too).
-		renderBobbitToCanvas(this._canvas, {
-			scale: 1,
-			renderScale: 4,
-			palette,
-			accessoryPixels: finalAccPixels,
-			
-			hueRotate,
-			accessoryHueRotate: acc.id === "flask",
-		});
-
-		// If eye state is not center, overdraw eyes
-		if (eyeState !== 'center') {
-			const dpr = window.devicePixelRatio || 1;
-			const ctx = this._canvas.getContext("2d")!;
-			ctx.save();
-			// Must match renderScale (4) so eye overdraw aligns with the buffer
-			ctx.scale(dpr * 4, dpr * 4);
-			ctx.imageSmoothingEnabled = false;
-
-			// Clear default eye positions by painting hue-rotated body main color
-			const mainColor = hueRotate ? rotateHue(palette.main, hueRotate) : palette.main;
-			for (const [ex, ey] of [...EYES_CENTER_TOP, ...EYES_CENTER_BOT]) {
-				ctx.fillStyle = mainColor;
-				ctx.fillRect(ex + offX, ey + offY, 1, 1);
-			}
-
-			// Paint new eye positions with hue-rotated eye color
-			const eyeColor = hueRotate ? rotateHue(palette.eye, hueRotate) : palette.eye;
-			const { top, bot } = getEyePixels(eyeState);
-			for (const [ex, ey] of [...top, ...bot]) {
-				ctx.fillStyle = eyeColor;
-				ctx.fillRect(ex + offX, ey + offY, 1, 1);
-			}
-
-			ctx.restore();
-		}
-
-		// Set transform-origin dynamically based on accessory bounds
-		this._canvas.style.transformOrigin = `${5 + offX}px ${8 + offY}px`;
-	}
-
-	/** Start the RAF animation loop for eye animation (active + idle states) */
-	private _startAnimation() {
-		this._animStartTime = performance.now();
-		this._lastEyeState = 'center';
-		this._lastTailVisible = true;
-		this._drawCanvas('center', true);
-
-		const tick = () => {
-			if (this._blobState !== 'active' && this._blobState !== 'idle') {
-				this._rafId = null;
-				return;
-			}
-
-			const elapsed = performance.now() - this._animStartTime;
-			const cycleDuration = 10000; // 10 seconds
-			const pct = (elapsed % cycleDuration) / cycleDuration * 100;
-
-			const eyeState = this._blobState === 'idle' ? getIdleEyeState(pct) : getBusyEyeState(pct);
-			const accId = detectAccessory();
-			const tailVisible = accId === 'bandana' ? isBandanaTailVisible(pct) : true;
-
-			// Only redraw if state changed
-			if (eyeState !== this._lastEyeState || tailVisible !== this._lastTailVisible) {
-				this._lastEyeState = eyeState;
-				this._lastTailVisible = tailVisible;
-				this._drawCanvas(eyeState, tailVisible);
-			}
-
-			this._rafId = requestAnimationFrame(tick);
-		};
-
-		this._rafId = requestAnimationFrame(tick);
-	}
-
-	/** Cancel the RAF animation loop */
-	private _cancelAnimation() {
-		if (this._rafId !== null) {
-			cancelAnimationFrame(this._rafId);
-			this._rafId = null;
-		}
-	}
-
-	// ---- Compaction animation ----
 
 	private _compactShakeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -477,26 +190,25 @@ export class StreamingMessageContainer extends LitElement {
 		}
 	}
 
-	private _renderBlob() {
-		const accId = detectAccessory();
-		const sparkles = accId === 'wand'
-			? html`<span class="bobbit-blob__sparkle bobbit-blob__sparkle--a"></span><span class="bobbit-blob__sparkle bobbit-blob__sparkle--b"></span>`
-			: accId === 'flask'
-			? html`<span class="bobbit-blob__bubble bobbit-blob__bubble--a"></span><span class="bobbit-blob__bubble bobbit-blob__bubble--b"></span>`
-			: nothing;
-		return html`<div class="${this._blobClass}">
-			${this._canvas}
-			${sparkles}
-			<div class="bobbit-blob__shadow"></div>
-		</div>`;
-	}
-
 	override render() {
 		// Show loading indicator if loading but no message yet
 		if (!this._message) {
 			if (this._blobVisible)
 				return html`<div class="flex flex-col gap-3 mb-3">
-					${this._renderBlob()}
+					<div class="${this._blobClass}">
+						<div class="bobbit-blob__sprite"></div>
+						<div class="bobbit-blob__crown"></div>
+						<div class="bobbit-blob__bandana"></div>
+						<div class="bobbit-blob__magnifier"></div>
+						<div class="bobbit-blob__palette"></div>
+						<div class="bobbit-blob__pencil"></div>
+						<div class="bobbit-blob__shield"></div>
+						<div class="bobbit-blob__set-square"></div>
+						<div class="bobbit-blob__flask"></div>
+						<div class="bobbit-blob__wand"></div>
+						<div class="bobbit-blob__wizard-hat"></div>
+						<div class="bobbit-blob__shadow"></div>
+					</div>
 					${this.isStreaming && this.turnStartTime
 						? html`<div class="px-2 sm:px-4 text-xs text-muted-foreground text-right tabular-nums" style="margin-top:-32px;">
 							<live-timer .startTime=${this.turnStartTime} .running=${true}></live-timer>
@@ -528,7 +240,20 @@ export class StreamingMessageContainer extends LitElement {
 						.onCostClick=${this.onCostClick}
 						.turnStartTime=${this.turnStartTime}
 					></assistant-message>
-					${this._blobVisible ? this._renderBlob() : ""}
+					${this._blobVisible ? html`<div class="${this._blobClass}">
+						<div class="bobbit-blob__sprite"></div>
+						<div class="bobbit-blob__crown"></div>
+						<div class="bobbit-blob__bandana"></div>
+						<div class="bobbit-blob__magnifier"></div>
+						<div class="bobbit-blob__palette"></div>
+						<div class="bobbit-blob__pencil"></div>
+						<div class="bobbit-blob__shield"></div>
+						<div class="bobbit-blob__set-square"></div>
+						<div class="bobbit-blob__flask"></div>
+						<div class="bobbit-blob__wand"></div>
+						<div class="bobbit-blob__wizard-hat"></div>
+						<div class="bobbit-blob__shadow"></div>
+					</div>` : ""}
 				</div>
 			`;
 		}
