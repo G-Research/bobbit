@@ -2646,6 +2646,42 @@ async function handleApiRoute(
 
 	// ── Cost endpoints ─────────────────────────────────────────────
 
+	// GET /api/sessions/:id/cost/breakdown — cost breakdown including delegates
+	const sessionCostBreakdownMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost\/breakdown$/);
+	if (sessionCostBreakdownMatch && req.method === "GET") {
+		const sessionId = sessionCostBreakdownMatch[1];
+		const costTracker = sessionManager.getCostTracker();
+		const allCosts = costTracker.getAllCosts();
+		const sessionCost = allCosts.get(sessionId);
+		if (!sessionCost) {
+			json({ error: "No cost data" }, 404);
+			return;
+		}
+
+		// Find delegate sessions
+		const delegates: any[] = [];
+		const allSessions = [...sessionManager.listSessions(), ...sessionManager.listArchivedSessions()];
+		for (const s of allSessions) {
+			if ((s as any).delegateOf === sessionId) {
+				const dCost = allCosts.get(s.id);
+				if (dCost && dCost.totalCost > 0) {
+					delegates.push({
+						sessionId: s.id,
+						title: (s as any).title || s.id.slice(0, 8),
+						...dCost,
+					});
+				}
+			}
+		}
+		delegates.sort((a, b) => b.totalCost - a.totalCost);
+
+		json({
+			session: { sessionId, ...sessionCost },
+			delegates,
+		});
+		return;
+	}
+
 	// GET /api/sessions/:id/cost — cost for a single session
 	const sessionCostMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost$/);
 	if (sessionCostMatch && req.method === "GET") {
@@ -2656,6 +2692,51 @@ async function handleApiRoute(
 			return;
 		}
 		json(cost);
+		return;
+	}
+
+	// GET /api/goals/:goalId/cost/breakdown — per-session cost breakdown for a goal
+	const goalCostBreakdownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/cost\/breakdown$/);
+	if (goalCostBreakdownMatch && req.method === "GET") {
+		const goalId = goalCostBreakdownMatch[1];
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) {
+			json({ error: "Goal not found" }, 404);
+			return;
+		}
+		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
+		const costTracker = sessionManager.getCostTracker();
+		const allCosts = costTracker.getAllCosts();
+
+		// Build per-session breakdown with metadata
+		const sessions: any[] = [];
+		for (const sid of sessionIds) {
+			const cost = allCosts.get(sid);
+			if (!cost || cost.totalCost === 0) continue;
+
+			// Get session metadata from live sessions or store
+			const live = sessionManager.listSessions().find(s => s.id === sid);
+			const archived = !live ? sessionManager.listArchivedSessions().find(s => s.id === sid) : null;
+			const meta = live || archived;
+
+			sessions.push({
+				sessionId: sid,
+				title: (meta as any)?.title || sid.slice(0, 8),
+				role: (meta as any)?.role || null,
+				delegateOf: (meta as any)?.delegateOf || null,
+				assistantType: (meta as any)?.assistantType || null,
+				taskId: (meta as any)?.taskId || null,
+				...cost,
+			});
+		}
+
+		// Sort by cost descending
+		sessions.sort((a, b) => b.totalCost - a.totalCost);
+
+		// Compute aggregate
+		const aggregate = costTracker.getGoalCost(goalId, sessionIds);
+
+		json({ aggregate, sessions });
 		return;
 	}
 

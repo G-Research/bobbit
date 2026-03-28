@@ -1,6 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import "../ui/components/VerificationOutputModal.js";
+import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
@@ -93,6 +94,7 @@ interface GoalCost {
 }
 let goalCost: GoalCost | null = null;
 let costPollTimer: ReturnType<typeof setInterval> | null = null;
+let costPopoverOpen = false;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
 let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -259,6 +261,7 @@ export function clearDashboardState(): void {
 	gitStatus = null;
 	prStatus = null;
 	goalCost = null;
+	costPopoverOpen = false;
 	stopAgentPolling();
 	stopTaskPolling();
 	stopGatePolling();
@@ -1033,10 +1036,17 @@ function renderMetaRows(goal: Goal): TemplateResult {
 		<div class="meta-rows">
 			${goalCost && goalCost.totalCost > 0 ? html`
 			<div class="meta-row">
-				<div class="meta-item" title="Input: ${formatTokens(goalCost.inputTokens)} | Output: ${formatTokens(goalCost.outputTokens)} | Cache read: ${formatTokens(goalCost.cacheReadTokens)} | Cache write: ${formatTokens(goalCost.cacheWriteTokens)}">
+				<div class="meta-item" style="position:relative;cursor:pointer;" @click=${(e: Event) => { e.stopPropagation(); costPopoverOpen = !costPopoverOpen; renderApp(); }}
+					title="Click for cost breakdown">
 					${svgDollar}
 					<span class="meta-tag cost-tag">${formatCost(goalCost.totalCost)}</span>
 					<span class="meta-label">${formatTokens(goalCost.inputTokens + goalCost.outputTokens)} tokens</span>
+					<cost-popover
+						.open=${costPopoverOpen}
+						.goalId=${currentGoal?.id || ""}
+						anchor="left"
+						@close=${() => { costPopoverOpen = false; renderApp(); }}
+					></cost-popover>
 				</div>
 			</div>
 			` : nothing}
