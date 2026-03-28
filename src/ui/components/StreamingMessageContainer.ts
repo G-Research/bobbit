@@ -8,6 +8,7 @@ import {
 	CANONICAL_PALETTE,
 	computeBounds,
 	parseShadowToPixels,
+	rotateHue,
 	type Pixel,
 	type BobbitPalette,
 } from "../../app/bobbit-canvas.js";
@@ -299,15 +300,15 @@ export class StreamingMessageContainer extends LitElement {
 			ctx.scale(dpr * 4, dpr * 4);
 			ctx.imageSmoothingEnabled = false;
 
-			// Clear default eye positions by painting body main color
-			const mainColor = palette.main;
+			// Clear default eye positions by painting hue-rotated body main color
+			const mainColor = hueRotate ? rotateHue(palette.main, hueRotate) : palette.main;
 			for (const [ex, ey] of [...EYES_CENTER_TOP, ...EYES_CENTER_BOT]) {
 				ctx.fillStyle = mainColor;
 				ctx.fillRect(ex + offX, ey + bodyYOffset + offY, 1, 1);
 			}
 
-			// Paint new eye positions
-			const eyeColor = palette.eye;
+			// Paint new eye positions with hue-rotated eye color
+			const eyeColor = hueRotate ? rotateHue(palette.eye, hueRotate) : palette.eye;
 			const { top, bot } = getEyePixels(eyeState);
 			for (const [ex, ey] of [...top, ...bot]) {
 				ctx.fillStyle = eyeColor;
