@@ -17,6 +17,7 @@ import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -225,6 +226,90 @@ function writeModelsJson(data: Record<string, any>): void {
 		console.log(`[aigw-manager] Wrote models.json to ${p}`);
 	} catch (err) {
 		console.error("[aigw-manager] Failed to write models.json:", err);
+	}
+}
+
+/**
+ * Parse model IDs from pi-ai's models.generated.js, grouped by provider.
+ * Reads the file as text and extracts id+provider pairs via regex.
+ */
+function parseModelsGenerated(): Map<string, string[]> {
+	const providerModels = new Map<string, string[]>();
+	try {
+		const pkgUrl = import.meta.resolve("@mariozechner/pi-ai");
+		const pkgDir = path.dirname(fileURLToPath(pkgUrl));
+		const modelsPath = path.join(pkgDir, "models.generated.js");
+		const text = fs.readFileSync(modelsPath, "utf-8");
+
+		// The file has entries like:
+		//   "some-model-id": {
+		//       id: "some-model-id",
+		//       ...
+		//       provider: "amazon-bedrock",
+		// We extract (id, provider) pairs.
+		const entryRegex = /"([^"]+)":\s*\{[^}]*?provider:\s*"([^"]+)"/g;
+		let match: RegExpExecArray | null;
+		while ((match = entryRegex.exec(text)) !== null) {
+			const modelId = match[1];
+			const provider = match[2];
+			if (!providerModels.has(provider)) providerModels.set(provider, []);
+			providerModels.get(provider)!.push(modelId);
+		}
+	} catch (err) {
+		console.error("[aigw-manager] Failed to parse models.generated.js:", err);
+	}
+	return providerModels;
+}
+
+/**
+ * Write contextWindow overrides to models.json for all Claude models where
+ * inferMeta() returns a larger context window than the built-in 200k.
+ *
+ * This fixes the 200k compaction bug: pi-ai hardcodes contextWindow: 200000
+ * for all Claude models, but Sonnet/Opus actually support 1M tokens.
+ * The modelOverrides in models.json tell pi-coding-agent to use the correct value.
+ *
+ * Preserves existing user modelOverrides — only sets contextWindow if the user
+ * hasn't already overridden it for that model.
+ */
+export function writeContextWindowOverrides(): void {
+	const providerModels = parseModelsGenerated();
+	const targetProviders = ["amazon-bedrock", "anthropic"];
+
+	const data = readModelsJson();
+	if (!data.providers) data.providers = {};
+
+	let overridesWritten = 0;
+
+	for (const provider of targetProviders) {
+		const modelIds = providerModels.get(provider) || [];
+		const claudeIds = modelIds.filter(id => id.toLowerCase().includes("claude"));
+
+		if (claudeIds.length === 0) continue;
+
+		if (!data.providers[provider]) data.providers[provider] = {};
+		if (!data.providers[provider].modelOverrides) data.providers[provider].modelOverrides = {};
+
+		const overrides = data.providers[provider].modelOverrides;
+
+		for (const modelId of claudeIds) {
+			const meta = inferMeta(modelId);
+			if (meta.contextWindow > 200_000) {
+				// Don't clobber existing user contextWindow override
+				if (overrides[modelId]?.contextWindow !== undefined) continue;
+
+				if (!overrides[modelId]) overrides[modelId] = {};
+				overrides[modelId].contextWindow = meta.contextWindow;
+				overridesWritten++;
+			}
+		}
+	}
+
+	if (overridesWritten > 0) {
+		writeModelsJson(data);
+		console.log(`[aigw-manager] Wrote ${overridesWritten} contextWindow overrides to models.json`);
+	} else {
+		console.log("[aigw-manager] No contextWindow overrides needed");
 	}
 }
 
@@ -529,8 +614,8 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
 			api: "openai-completions",
 			reasoning: meta.reasoning,
 			input: meta.input,
-			contextWindow: ctxFromGw || meta.contextWindow,
-			maxTokens: maxTokFromGw || meta.maxTokens,
+			contextWindow: Math.max(ctxFromGw || 0, meta.contextWindow),
+			maxTokens: Math.max(maxTokFromGw || 0, meta.maxTokens),
 			...(meta.compat ? { compat: meta.compat } : {}),
 		};
 	});

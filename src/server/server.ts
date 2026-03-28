@@ -35,7 +35,7 @@ import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
-import { configureAigw, removeAigw, getAigwUrl, getAigwModels, discoverAigwModels, proxyRequest, startupAigwCheck } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, getAigwModels, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -336,6 +336,7 @@ export function createGateway(config: GatewayConfig) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
+			writeContextWindowOverrides();
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
