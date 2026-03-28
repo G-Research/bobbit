@@ -17,8 +17,9 @@ import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
+import { McpManager } from "../mcp/mcp-manager.js";
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { createWorktree } from "../skills/git.js";
@@ -128,6 +129,7 @@ export class SessionManager {
 	private roleManager?: RoleManager;
 	private toolManager?: ToolManager;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
+	private mcpManager: McpManager | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
@@ -151,6 +153,34 @@ export class SessionManager {
 
 	getCostTracker(): CostTracker {
 		return this.costTracker;
+	}
+
+	getMcpManager(): McpManager | null {
+		return this.mcpManager;
+	}
+
+	async initMcp(cwd: string): Promise<void> {
+		try {
+			const mgr = new McpManager(cwd);
+			await mgr.connectAll();
+			this.mcpManager = mgr;
+
+			// Register MCP tools with ToolManager
+			if (this.toolManager) {
+				const infos = mgr.getToolInfos();
+				this.toolManager.registerExternalTools(infos.map(info => ({
+					name: info.name,
+					description: info.description,
+					summary: info.description,
+					group: info.group,
+					docs: info.docs,
+					provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
+				})));
+			}
+			console.log(`[mcp] MCP initialization complete`);
+		} catch (err) {
+			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
+		}
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
@@ -626,7 +656,8 @@ export class SessionManager {
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
 			if (role && role.allowedTools.length > 0) {
-				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, ps.cwd);
+				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, ps.cwd, mcpExtPaths);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 			}
 		}
@@ -941,7 +972,8 @@ export class SessionManager {
 
 		// Apply tool activation args based on allowedTools (controls --tools and --extension flags)
 		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd);
+			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		}
 
@@ -1116,7 +1148,8 @@ export class SessionManager {
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 
 		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd);
+			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		}
 
@@ -1731,7 +1764,8 @@ export class SessionManager {
 
 		// Apply tool activation args based on role's allowedTools
 		if (role.allowedTools.length > 0) {
-			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd);
+			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		}
 
@@ -1864,7 +1898,8 @@ export class SessionManager {
 		if (session.role && this.roleManager) {
 			const role = this.roleManager.getRole(session.role);
 			if (role && role.allowedTools.length > 0) {
-				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd);
+				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 			}
 		}
@@ -2342,7 +2377,8 @@ export class SessionManager {
 			if (session.role && this.roleManager) {
 				const role = this.roleManager.getRole(session.role);
 				if (role && role.allowedTools.length > 0) {
-					const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd);
+					const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+					const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 					bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 				}
 			}
