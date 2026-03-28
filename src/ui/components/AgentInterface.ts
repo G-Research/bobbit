@@ -17,7 +17,7 @@ import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import type { Agent, AgentEvent } from "@mariozechner/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
-import { formatCost, formatTokenCount } from "../utils/format.js";
+import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
 import { createStreamFn } from "../utils/proxy-utils.js";
 import type { UserMessageWithAttachments } from "./Messages.js";
@@ -83,6 +83,7 @@ export class AgentInterface extends LitElement {
 	@query("message-editor") private _messageEditor!: MessageEditor;
 	@query("streaming-message-container") private _streamingContainer!: StreamingMessageContainer;
 
+	private _contextPopoverOpen = false;
 	private _stickToBottom = true;
 	private _isAutoScrolling = false;
 	private _autoScrollTimer?: ReturnType<typeof setTimeout>;
@@ -652,6 +653,101 @@ export class AgentInterface extends LitElement {
 			return html`<span class="font-mono opacity-60 flex items-center gap-1 truncate" style="max-width:280px;" title="${this.cwd}">${short}</span>`;
 		})() : "";
 
+		// Build context popover content
+		const popoverContent = this._contextPopoverOpen ? (() => {
+			const m = model as any;
+			// Find last assistant usage (same logic as above)
+			let lastUsage: Usage | undefined;
+			if (!usageStale) {
+				for (let i = state.messages.length - 1; i >= 0; i--) {
+					const msg = state.messages[i] as any;
+					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
+						lastUsage = msg.usage;
+						break;
+					}
+				}
+			}
+			const contextTokens = lastUsage ? (lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite)) : 0;
+			const contextWindow = m?.contextWindow || 0;
+			const pct = contextWindow ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
+			const msgCount = state.messages.length;
+			const turnCount = state.messages.filter((msg: any) => msg.role === "assistant").length;
+
+			const row = (label: string, value: any) => html`
+				<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;">
+					<span style="color:var(--muted-foreground)">${label}</span>
+					<span style="font-weight:500;font-variant-numeric:tabular-nums">${value}</span>
+				</div>`;
+
+			return html`
+				<div class="context-popover" style="
+					position:absolute;bottom:100%;right:0;margin-bottom:6px;z-index:50;
+					background:var(--popover);color:var(--popover-foreground);
+					border:1px solid var(--border);border-radius:8px;
+					padding:12px 14px;min-width:260px;max-width:320px;
+					box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:12px;
+				">
+					${m ? html`
+						<div style="font-weight:600;font-size:13px;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+							${icon(Sparkles, "sm")} ${m.id}
+						</div>
+						<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
+							${row("Provider", m.provider)}
+							${row("Context window", contextWindow ? formatTokenCount(contextWindow) + " tokens" : "—")}
+							${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
+							${row("Cost", m.cost ? formatModelCost(m.cost) + "/M tokens" : "—")}
+						</div>
+					` : nothing}
+
+					<div style="font-weight:600;margin-bottom:6px;">Context Usage</div>
+					<div style="margin-bottom:8px;">
+						<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+							<span style="flex:1;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden;">
+								<span style="display:block;width:${usageStale ? 0 : pct}%;height:100%;background:${pct >= 90 ? "var(--destructive, #ef4444)" : pct >= 75 ? "var(--warning, #f59e0b)" : "var(--primary, #3b82f6)"};border-radius:3px;transition:width 0.3s"></span>
+							</span>
+							<span style="font-weight:500;min-width:36px;text-align:right">${usageStale ? "—" : pct + "%"}</span>
+						</div>
+						${!usageStale && lastUsage ? html`
+							<div style="color:var(--muted-foreground)">${formatTokenCount(contextTokens)} / ${formatTokenCount(contextWindow)} tokens</div>
+						` : usageStale ? html`<div style="color:var(--muted-foreground)">Updating after compaction…</div>` : nothing}
+					</div>
+
+					${lastUsage ? html`
+						<div style="border-top:1px solid var(--border);padding-top:8px;">
+							<div style="font-weight:600;margin-bottom:6px;">Last Turn</div>
+							${row("Input tokens", formatTokenCount(lastUsage.input))}
+							${row("Output tokens", formatTokenCount(lastUsage.output))}
+							${lastUsage.cacheRead ? row("Cache read", formatTokenCount(lastUsage.cacheRead)) : nothing}
+							${lastUsage.cacheWrite ? row("Cache write", formatTokenCount(lastUsage.cacheWrite)) : nothing}
+						</div>
+					` : nothing}
+
+					<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px;">
+						<div style="font-weight:600;margin-bottom:6px;">Session</div>
+						${row("Messages", msgCount)}
+						${row("Turns", turnCount)}
+						${row("Total cost", totals.cost?.total ? formatCost(totals.cost.total) : "—")}
+						${row("Total input", formatTokenCount(totals.input))}
+						${row("Total output", formatTokenCount(totals.output))}
+						${totals.cacheRead ? row("Total cache read", formatTokenCount(totals.cacheRead)) : nothing}
+					</div>
+				</div>
+			`;
+		})() : nothing;
+
+		const togglePopover = () => {
+			this._contextPopoverOpen = !this._contextPopoverOpen;
+			this.requestUpdate();
+		};
+
+		// Close popover when clicking outside
+		const closePopover = () => {
+			if (this._contextPopoverOpen) {
+				this._contextPopoverOpen = false;
+				this.requestUpdate();
+			}
+		};
+
 		return html`
 			<div class="text-xs text-muted-foreground flex justify-between items-center mt-0.5">
 				<div class="flex items-center">
@@ -660,17 +756,16 @@ export class AgentInterface extends LitElement {
 					${modelButton}
 				</div>
 				${cwdHtml ? html`<div class="hidden sm:flex items-center pl-4">${cwdHtml}</div>` : ""}
-				<div class="flex ml-auto items-center gap-3">
-					${contextHtml}
-					${
-						costText
-							? this.onCostClick
-								? html`<span class="cursor-pointer hover:text-foreground transition-colors" @click=${this.onCostClick}>${costText}</span>`
-								: html`<span>${costText}</span>`
-							: ""
-					}
+				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">
+					${popoverContent}
+					<span class="cursor-pointer hover:text-foreground transition-colors flex items-center gap-3"
+						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>
+						${contextHtml}
+						${costText ? html`<span>${costText}</span>` : ""}
+					</span>
 				</div>
 			</div>
+			${this._contextPopoverOpen ? html`<div style="position:fixed;inset:0;z-index:40;" @click=${closePopover}></div>` : nothing}
 		`;
 	}
 
