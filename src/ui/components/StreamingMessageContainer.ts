@@ -74,6 +74,12 @@ function drawAccessoryCanvas(
 		}
 	}
 
+	// Position the canvas at the correct pre-transform coordinate within
+	// the 1×1px wrapper so that after scale(4) it aligns with the body sprite.
+	canvas.style.position = 'absolute';
+	canvas.style.left = `${minX}px`;
+	canvas.style.top = `${minY}px`;
+
 	const ctx = canvas.getContext('2d')!;
 	ctx.imageSmoothingEnabled = false;
 	ctx.clearRect(0, 0, width, height);
@@ -124,7 +130,7 @@ export class StreamingMessageContainer extends LitElement {
 	/** DPR change unsubscribe */
 	private _unsubDpr: (() => void) | null = null;
 	/** Previous blob state — used to avoid redundant repaints in updated() */
-	private _prevBlobState: string = 'idle';
+	private _prevBlobState: string = '';
 
 	constructor() {
 		super();
