@@ -111,11 +111,61 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `PUT` | `/api/personalities/:name` | Update a personality |
 | `DELETE` | `/api/personalities/:name` | Delete a personality |
 
-### Skills
+### Slash Skills
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/skills` | List available skill definitions (id, name, description) |
+| `GET` | `/api/slash-skills` | Discover slash skills for autocomplete (name, description, argument hint) |
+| `GET` | `/api/slash-skills/details` | Full slash skill details including content and file paths |
+
+### Assistant Prompts
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/roles/assistant/prompts` | List all assistant prompt definitions |
+| `PUT` | `/api/roles/assistant/prompts/:type` | Update an assistant prompt (goal, role, tool, personality, staff, setup) |
+
+### Staff Agents
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/staff` | List all staff agent definitions |
+| `POST` | `/api/staff` | Create a staff agent (`{ name, description, triggers, skillId?, prompt? }`) |
+| `POST` | `/api/staff/:id/wake` | Manually trigger a staff agent's wake cycle |
+
+### Project Config
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/project-config` | Get project settings (build/test/typecheck commands, custom config) |
+| `GET` | `/api/project-config/defaults` | Get default project config values |
+| `PUT` | `/api/project-config` | Update project config fields |
+
+### Setup
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/setup-status` | Check if project setup wizard has been completed |
+| `POST` | `/api/setup-status/dismiss` | Mark setup wizard as dismissed |
+
+### Config
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/config/cwd` | Get the server's working directory |
+| `PUT` | `/api/config/cwd` | Update the server's working directory |
+
+### PR Status
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/pr-status-cache` | Bulk PR status from disk cache (startup hydration) |
+
+### System
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/shutdown` | Graceful server shutdown (used by coverage teardown) |
 
 ### Workflows
 
