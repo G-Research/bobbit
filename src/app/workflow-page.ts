@@ -522,6 +522,28 @@ export async function createWorkflowAssistantSession(): Promise<void> {
 	}
 }
 
+export async function editWorkflowWithAssistant(wf: Workflow): Promise<void> {
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	renderApp();
+	try {
+		populateAssistantEditState(wf);
+		const res = await gatewayFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ assistantType: "workflow" }),
+		});
+		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		const { id } = await res.json();
+		const { connectToSession } = await import("./session-manager.js");
+		await connectToSession(id, false, { assistantType: "workflow", workflowEditContext: { id: wf.id, name: wf.name } });
+	} catch (err) {
+		console.error("Failed to create workflow assistant session:", err);
+	} finally {
+		state.creatingSession = false;
+		renderApp();
+	}
+}
+
 // ============================================================================
 // ASSISTANT PANEL EDIT FORM (exported for use in render.ts)
 // ============================================================================
@@ -561,8 +583,14 @@ export function populateAssistantEditState(wf: Workflow): void {
 
 /** Populate edit state directly from a proposal (no API fetch — workflow doesn't exist yet). */
 export function populateFromProposal(data: { id: string; name: string; description: string; gates: WorkflowGate[] }): void {
-	selectedWorkflow = null;
-	isNew = true;
+	// If editing an existing workflow and proposal ID matches, keep update mode
+	if (selectedWorkflow && data.id === selectedWorkflow.id) {
+		isNew = false;
+		// selectedWorkflow stays set — save will use updateWorkflow()
+	} else {
+		selectedWorkflow = null;
+		isNew = true;
+	}
 	editId = data.id;
 	editName = data.name;
 	editDescription = data.description;
@@ -712,6 +740,9 @@ function renderWorkflowRow(wf: Workflow): TemplateResult {
 				<span class="wf-badge">${wf.gates.length} gate${wf.gates.length !== 1 ? "s" : ""}</span>
 			</div>
 			<div class="wf-row-actions">
+				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); editWorkflowWithAssistant(wf); }} title="Edit with Assistant">
+					${icon(MessageSquare, "sm")}
+				</button>
 				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); handleClone(wf); }} title="Clone">
 					${icon(Copy, "sm")}
 				</button>
