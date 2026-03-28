@@ -228,6 +228,12 @@ export const state = {
 	/** Whether the setup wizard has been completed (safe default: true — don't show banner until we know) */
 	setupComplete: true,
 
+	// Workflow assistant preview state
+	workflowPreviewId: "",
+	workflowPreviewName: "",
+	workflowPreviewDescription: "",
+	workflowPreviewGates: "",
+
 	// Setup assistant preview state
 	setupPreviewContent: "",
 	setupPreviewAction: "",  // last action: "system-prompt", "preferences", "complete"

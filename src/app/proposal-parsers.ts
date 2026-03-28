@@ -42,4 +42,10 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 		requiredFields: ["action", "content"],
 		callbackName: "onSetupProposal",
 	},
+	{
+		tag: "workflow_proposal",
+		fields: ["id", "name", "description", "gates"],
+		requiredFields: ["id", "name"],
+		callbackName: "onWorkflowProposal",
+	},
 ];

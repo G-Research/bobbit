@@ -8,11 +8,12 @@ import {
 	updateWorkflow,
 	deleteWorkflow,
 	cloneWorkflow,
+	gatewayFetch,
 	type Workflow,
 	type WorkflowGate,
 	type VerifyStep,
 } from "./api.js";
-import { renderApp } from "./state.js";
+import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
 // ============================================================================
@@ -459,6 +460,31 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 }
 
 // ============================================================================
+// WORKFLOW ASSISTANT SESSION
+// ============================================================================
+
+async function createWorkflowAssistantSession(): Promise<void> {
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ assistantType: "workflow" }),
+		});
+		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		const { id } = await res.json();
+		const { connectToSession } = await import("./session-manager.js");
+		await connectToSession(id, false, { assistantType: "workflow" });
+	} catch (err) {
+		console.error("Failed to create workflow assistant session:", err);
+	} finally {
+		state.creatingSession = false;
+		renderApp();
+	}
+}
+
+// ============================================================================
 // RENDER: NAV BAR
 // ============================================================================
 
@@ -478,6 +504,12 @@ function renderNavBar(): TemplateResult {
 					</div>
 				</div>
 				<div class="wf-nav-right">
+					${Button({
+						variant: "ghost" as any,
+						size: "sm",
+						onClick: createWorkflowAssistantSession,
+						children: html`<span class="inline-flex items-center gap-1.5">${icon(MessageSquare, "sm")} Assistant</span>`,
+					})}
 					${!isNew && selectedWorkflow ? html`
 						${Button({
 							variant: "ghost" as any,
@@ -508,6 +540,12 @@ function renderNavBar(): TemplateResult {
 				<h1 class="wf-title">Workflows</h1>
 			</div>
 			<div class="wf-nav-right">
+				${Button({
+					variant: "ghost",
+					size: "sm",
+					onClick: createWorkflowAssistantSession,
+					children: html`<span class="inline-flex items-center gap-1.5">${icon(MessageSquare, "sm")} Workflow Assistant</span>`,
+				})}
 				${Button({
 					variant: "default",
 					size: "sm",

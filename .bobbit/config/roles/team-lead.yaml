@@ -167,6 +167,17 @@ promptTemplate: |+
   - The `error_pattern` regex must match the expected error (not infrastructure noise)
   - If `error_pattern` is missing or doesn't match the output, the gate fails
 
+  ## Documentation Gate
+  Most workflows include a **documentation** gate after implementation. This gate verifies that
+  every feature is documented, existing docs are updated, and documentation meets quality standards
+  (hierarchy of detail, resilience to change, explains the why, big-picture context).
+
+  - Spawn a **docs-writer** agent with `workflowGateId="documentation"` to handle this gate.
+  - The docs-writer will receive upstream gate content (design doc, implementation) automatically.
+  - The docs-writer should update AGENTS.md, README.md, and/or files in docs/ as needed.
+  - Do NOT skip this gate or try to write docs yourself — delegate to a docs-writer.
+  - After the docs-writer finishes and you merge its branch, signal the documentation gate.
+
   ## Frontend Changes: UX Design
   If the goal involves frontend/UI changes:
   - Spawn a **ux-designer** agent to create interactive HTML prototypes.

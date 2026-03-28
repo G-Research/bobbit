@@ -3,7 +3,7 @@ import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { html, render } from "lit";
+import { html, nothing, render } from "lit";
 import { Archive, ArrowLeft, FileText, MessagesSquare, ChevronDown, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
@@ -1298,6 +1298,63 @@ function setupPreviewPanel() {
 	`;
 }
 
+function workflowPreviewPanel() {
+	const handleDone = () => {
+		backToSessions();
+	};
+
+	const handleViewWorkflow = async () => {
+		const workflowId = state.workflowPreviewId.trim();
+		if (!workflowId) return;
+		const { loadWorkflowPageData } = await import("./workflow-page.js");
+		await loadWorkflowPageData();
+		setHashRoute("workflow-edit", workflowId);
+		renderApp();
+	};
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+				<!-- Workflow ID header -->
+				<div>
+					<div class="text-xs text-muted-foreground mb-1">Workflow ID</div>
+					<div class="text-lg font-semibold">${state.workflowPreviewId || html`<span class="text-muted-foreground italic">Waiting for assistant...</span>`}</div>
+				</div>
+
+				<!-- Workflow name -->
+				${state.workflowPreviewName ? html`
+				<div>
+					<div class="text-xs text-muted-foreground mb-1">Name</div>
+					<div class="text-sm">${state.workflowPreviewName}</div>
+				</div>
+				` : nothing}
+
+				<!-- Description -->
+				${state.workflowPreviewDescription ? html`
+				<div>
+					<div class="text-xs text-muted-foreground mb-1">Description</div>
+					<div class="text-sm text-muted-foreground">${state.workflowPreviewDescription}</div>
+				</div>
+				` : nothing}
+
+				<!-- Gates summary -->
+				${state.workflowPreviewGates ? html`
+				<div>
+					<div class="text-xs text-muted-foreground mb-1">Gates</div>
+					<div class="text-sm whitespace-pre-wrap font-mono text-xs bg-secondary/50 rounded p-3">${state.workflowPreviewGates}</div>
+				</div>
+				` : nothing}
+			</div>
+			<div class="flex items-center justify-between p-3 border-t border-border">
+				${state.workflowPreviewId ? html`
+					${Button({ variant: "outline", size: "sm", onClick: handleViewWorkflow, children: "View Workflow" })}
+				` : html`<div></div>`}
+				${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
+			</div>
+		</div>
+	`;
+}
+
 function getAssistantPreviewPanel(type: string) {
 	switch (type) {
 		case "goal": return goalPreviewPanel();
@@ -1306,6 +1363,7 @@ function getAssistantPreviewPanel(type: string) {
 		case "personality": return personalityPreviewPanel();
 		case "staff": return staffPreviewPanel();
 		case "setup": return setupPreviewPanel();
+		case "workflow": return workflowPreviewPanel();
 		default: return "";
 	}
 }

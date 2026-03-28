@@ -10,6 +10,7 @@ import { TOOL_ASSISTANT_PROMPT } from "./tool-assistant.js";
 import { PERSONALITY_ASSISTANT_PROMPT } from "./personality-assistant.js";
 import { STAFF_ASSISTANT_PROMPT } from "./staff-assistant.js";
 import { SETUP_ASSISTANT_PROMPT } from "./setup-assistant.js";
+import { WORKFLOW_ASSISTANT_PROMPT } from "./workflow-assistant.js";
 
 export interface AssistantDef {
 	type: string;
@@ -55,6 +56,12 @@ const FALLBACK_DEFAULTS: Record<string, AssistantDef> = {
 		title: "Setup Wizard",
 		promptTitle: "Project Setup Assistant",
 		prompt: SETUP_ASSISTANT_PROMPT,
+	},
+	workflow: {
+		type: "workflow",
+		title: "Workflow Assistant",
+		promptTitle: "Workflow Creation Assistant",
+		prompt: WORKFLOW_ASSISTANT_PROMPT,
 	},
 };
 
