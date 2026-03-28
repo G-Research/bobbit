@@ -5,7 +5,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, BOBBIT_HUE_ROTATIONS, getAccessory } from "./session-colors.js";
-import { renderBobbitCanvas, CANONICAL_PALETTE, parseShadowToPixels } from "./bobbit-canvas.js";
+import { renderBobbitCanvas, CANONICAL_PALETTE, parseShadowToPixels, computeBounds } from "./bobbit-canvas.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
@@ -26,9 +26,16 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 	const accPixels = hasAcc ? parseShadowToPixels(acc.shadow) : undefined;
 	const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
 
+	// Compute final display scale and bake it into the canvas buffer directly
+	// so no CSS transform is needed (avoids clipping/offset issues).
+	const bounds = computeBounds(bodyYOffset, accPixels);
+	const displayW = bounds.gridW * 4;
+	const displayH = bounds.gridH * 4;
+	const s = Math.min(size / displayW, size / displayH);
+	const finalScale = 4 * s;
+
 	const canvas = renderBobbitCanvas({
-		scale: 1,
-		renderScale: 4,
+		scale: finalScale,
 		palette: CANONICAL_PALETTE,
 		accessoryPixels: accPixels,
 		bodyYOffset,
@@ -41,19 +48,6 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
 	canvas.style.animation = `blob-shimmer 8s ease-in-out infinite`;
 	canvas.style.animationDelay = `${shimmerDelay}s`;
-
-	// Scale to fit target size
-	// canvas CSS dimensions are set by renderBobbitCanvas (gridW × gridH at scale=1)
-	const cw = parseFloat(canvas.style.width);
-	const ch = parseFloat(canvas.style.height);
-	// Use scale(4) first (matching blob context), then scale down to target size
-	const displayW = cw * 4;
-	const displayH = ch * 4;
-	const s = Math.min(size / displayW, size / displayH);
-	const finalScale = 4 * s;
-
-	canvas.style.transformOrigin = "top left";
-	canvas.style.transform = `scale(${finalScale.toFixed(3)})`;
 
 	return html`
 		<div style="width:${size}px;height:${size}px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden;">
