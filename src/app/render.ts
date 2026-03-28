@@ -1316,15 +1316,6 @@ function workflowPreviewPanel() {
 		if (_workflowPageModule) await _workflowPageModule.saveWorkflowFromPanel();
 	};
 
-	const handleViewFullEditor = async () => {
-		const workflowId = state.workflowPreviewId.trim();
-		if (!workflowId) return;
-		const { loadWorkflowPageData } = await import("./workflow-page.js");
-		await loadWorkflowPageData();
-		setHashRoute("workflow-edit", workflowId);
-		renderApp();
-	};
-
 	if (!_workflowPageModule) {
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -1341,11 +1332,7 @@ function workflowPreviewPanel() {
 				${renderWorkflowEditPanel()}
 			</div>
 			<div class="flex items-center justify-between p-3 border-t border-border">
-				<div class="flex items-center gap-2">
-					${state.workflowPreviewId ? html`
-						${Button({ variant: "outline", size: "sm", onClick: handleViewFullEditor, children: "Open Full Editor" })}
-					` : html`<div></div>`}
-				</div>
+				<div></div>
 				<div class="flex items-center gap-2">
 					${Button({ variant: "ghost", size: "sm", onClick: handleDone, children: "Done" })}
 					${Button({
