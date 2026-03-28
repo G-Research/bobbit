@@ -427,12 +427,34 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		eyeUrl = canvas.toDataURL();
 	}
 
-	// Accessory data URL
-	let accResult: { url: string; minX: number; minY: number; w: number; h: number } | null = null;
+	// Accessory data URL — render at same coordinate origin as box-shadow (0,0)
+	// so CSS transforms (translateX, scale, transform-origin) behave identically
+	let accUrl = "";
+	let accCanvasW = 0;
+	let accCanvasH = 0;
 	if (hasAccessory) {
 		const spriteData = SPRITE_ACCESSORIES[acc.id];
-		if (spriteData) {
-			accResult = renderAccessoryToDataURL(spriteData.pixels);
+		if (spriteData && spriteData.pixels.length > 0) {
+			// Find bounds to size the canvas, but keep pixel coordinates absolute
+			let minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+			for (const [x, y] of spriteData.pixels) {
+				if (y < minY) minY = y;
+				if (x > maxX) maxX = x;
+				if (y > maxY) maxY = y;
+			}
+			// Canvas origin at (0, minY) — shift negative y values to canvas y=0
+			const yShift = Math.min(0, minY);
+			accCanvasW = maxX + 1;
+			accCanvasH = maxY - yShift + 1;
+			const canvas = document.createElement("canvas");
+			canvas.width = accCanvasW;
+			canvas.height = accCanvasH;
+			const ctx = canvas.getContext("2d")!;
+			for (const [x, y, color] of spriteData.pixels) {
+				ctx.fillStyle = color;
+				ctx.fillRect(x, y - yShift, 1, 1);
+			}
+			accUrl = canvas.toDataURL();
 		}
 	}
 
@@ -493,9 +515,9 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		? html`<img src="${eyeUrl}" width="${BODY_WIDTH}" height="${BODY_HEIGHT}" style="position:absolute;left:0;top:${eyeTop};image-rendering:pixelated;will-change:transform;${eyeAnim}">`
 		: "";
 
-	// Accessory layer
-	const accessoryLayer = accResult && accResult.url
-		? html`<img src="${accResult.url}" width="${accResult.w}" height="${accResult.h}" style="position:absolute;left:${accResult.minX}px;top:${(addsHeight ? acc.yOffset : 0) + compactTopOffset + accResult.minY}px;image-rendering:pixelated;will-change:transform;${accTransform}${accFilter}">`
+	// Accessory layer — positioned at left:0;top:accTop just like the box-shadow span
+	const accessoryLayer = accUrl
+		? html`<img src="${accUrl}" width="${accCanvasW}" height="${accCanvasH}" style="position:absolute;left:0;top:${accTop};image-rendering:pixelated;will-change:transform;${accTransform}${accFilter}">`
 		: "";
 
 	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${eyeLayer}${accessoryLayer}</span>`;
