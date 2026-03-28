@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { Archive, ArrowLeft, FileText, MessagesSquare, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, FileText, MessagesSquare, ChevronDown, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -18,7 +18,7 @@ import {
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup } from "./api.js";
 import { clearSessionModel } from "./routing.js";
-import { backToSessions, createAndConnectSession, connectToSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
+import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive } from "./sidebar.js";
 
@@ -46,7 +46,7 @@ import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobi
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
 import { renderGoalDashboard } from "./goal-dashboard.js";
 import "./goal-dashboard.css";
-import { renderRoleManagerPage, loadRolePageData } from "./role-manager-page.js";
+import { renderRoleManagerPage } from "./role-manager-page.js";
 import "./role-manager.css";
 import { renderToolManagerPage } from "./tool-manager-page.js";
 import "./tool-manager.css";
@@ -898,7 +898,6 @@ function describeCron(cron: string): string {
 	const [min, hour, dom, mon, dow] = parts;
 
 	const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-	const monNames = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 	let timeStr = "";
 	if (min !== "*" && hour !== "*") {
@@ -1261,7 +1260,7 @@ function setupPreviewPanel() {
 					<div>
 						<div class="text-xs text-muted-foreground mb-2 font-medium">Completed Steps</div>
 						<div class="flex flex-col gap-2">
-							${state.setupPreviewSteps.map((step, i) => html`
+							${state.setupPreviewSteps.map((step, _i) => html`
 								<div class="flex items-start gap-2.5 p-2.5 rounded-md border border-border ${step.action === "complete" ? "bg-green-500/5" : ""}">
 									<div class="mt-0.5 text-sm">
 										<span class="text-green-500">&#10003;</span>
@@ -1814,8 +1813,6 @@ export function doRenderApp(): void {
 
 	const headerLeft = () => {
 		if (connected && state.remoteAgent) {
-			const model = state.remoteAgent.state.model;
-
 			const backBtn = !desktop ? Button({
 				variant: "ghost",
 				size: "sm",

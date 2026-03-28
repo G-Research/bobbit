@@ -15,7 +15,6 @@ import {
 	type DelegateCardEntry,
 	statusColor,
 	statusIcon,
-	formatDuration,
 	renderDuration,
 	renderSessionLink,
 } from "./delegate-cards.js";

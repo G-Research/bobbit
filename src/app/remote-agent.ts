@@ -50,12 +50,6 @@ export class RemoteAgent {
 	private _isCompacting = false;
 	private _isAborting = false;
 
-	// After compaction, usage from the last assistant message is stale (reflects
-	// pre-compaction context size).  Set to true on compaction_end, cleared when
-	// a new assistant message with usage arrives.  The UI checks this to avoid
-	// showing a misleading context percentage.
-	private _usageStaleAfterCompaction = false;
-
 	// Synthetic messages added around compaction (/compact user msg + result).
 	// Kept separately so they survive the server's post-compaction messages refresh.
 	private _compactionSyntheticMessages: any[] = [];
@@ -63,7 +57,6 @@ export class RemoteAgent {
 	// Task timing — track when the agent started working so we can
 	// notify the user if a long task finishes while the tab is hidden.
 	private _taskStartTime: number | null = null;
-	private static readonly LONG_TASK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 
 	// Auto-reconnect state
 	private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -347,7 +340,7 @@ export class RemoteAgent {
 
 	// ── Agent commands (proxied to gateway) ──────────────────────────
 
-	async prompt(input: string | any | any[], images?: any[]): Promise<void> {
+	async prompt(input: string | any | any[], _images?: any[]): Promise<void> {
 		let text: string;
 		let attachments: any[] | undefined;
 		let imageData: any[] | undefined;
@@ -374,7 +367,6 @@ export class RemoteAgent {
 		// Clear compaction synthetic messages — they were only needed to survive
 		// the post-compaction refresh; a new prompt starts a fresh turn.
 		this._compactionSyntheticMessages = [];
-		this._usageStaleAfterCompaction = false;
 
 		// Add the user message optimistically so it renders immediately —
 		// but only when the agent is idle. If streaming, the prompt is queued
@@ -1025,7 +1017,6 @@ export class RemoteAgent {
 			case "compaction_end":
 			case "auto_compaction_end": {
 				this._isCompacting = false;
-				this._usageStaleAfterCompaction = true;
 				// Replace the placeholder with the final result message
 				const filtered = this._state.messages.filter((m: any) => m.id !== "compacting_placeholder");
 				const success = event.type === "compaction_end" ? event.success : !event.aborted;

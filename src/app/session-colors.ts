@@ -1,4 +1,3 @@
-import { html } from "lit";
 import { patchSession } from "./api.js";
 import { activeSessionId, renderApp } from "./state.js";
 import { renderSidebarBobbitCanvas, ACCESSORY_DEFS, NO_ACCESSORY, type AccessoryDef } from "../ui/bobbit-render.js";

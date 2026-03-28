@@ -156,8 +156,6 @@ export function createGateway(config: GatewayConfig) {
 		workflowStore,
 		preferencesStore,
 	});
-	const protocol = config.tls ? "https" : "http";
-	let gatewayUrl = `${protocol}://${config.host}:${config.port}`;
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
@@ -357,9 +355,7 @@ export function createGateway(config: GatewayConfig) {
 							resolve();
 						});
 					});
-					// Update the closure gatewayUrl with the actual bound port
 					if (port !== config.port) {
-						gatewayUrl = `${protocol}://${config.host}:${port}`;
 						console.log(`Port ${config.port} in use, using port ${port}`);
 					}
 					return port;
@@ -725,8 +721,6 @@ async function handleApiRoute(
 		const title = body?.title;
 		const cwd = body?.cwd || config.defaultCwd;
 		const spec = body?.spec || "";
-		const team = true; // Always-on team mode
-		const worktree = true; // Always create worktree
 		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
 		if (!title || typeof title !== "string") {
 			json({ error: "Missing title" }, 400);

@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, ChevronDown, Pencil, Plus, Wrench } from "lucide";
+import { ArrowLeft, Pencil, Plus, Wrench } from "lucide";
 import { fetchTools, fetchToolDetail, updateTool, fetchRoles, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";

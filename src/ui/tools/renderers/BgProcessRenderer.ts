@@ -26,7 +26,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 	render(
 		params: BgParams | undefined,
 		result: ToolResultMessage | undefined,
-		isStreaming?: boolean,
+		_isStreaming?: boolean,
 	): ToolRenderResult {
 		const summary = params ? summarize(params) : "background process";
 		const state = getToolState(result, !result);

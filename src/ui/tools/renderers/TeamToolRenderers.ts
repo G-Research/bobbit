@@ -83,7 +83,7 @@ export class TeamSpawnRenderer implements ToolRenderer {
 // ── team_list ────────────────────────────────────────────────────────
 
 export class TeamListRenderer implements ToolRenderer {
-	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
+	render(_params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
 		const state = getToolState(result, isStreaming);
 
 		if (!result) {

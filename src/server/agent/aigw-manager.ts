@@ -341,7 +341,6 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 	// Code) for full feature parity — native tool use, images, streaming.
 	// Non-Claude models use OpenAI completions with conservative compat.
 	const normalizedUrl = aigwUrl.replace(/\/+$/, "");
-	const bedrockBaseUrl = normalizedUrl.replace(/\/v1$/, "") + "/aws";
 
 	const openaiCompat: Record<string, unknown> = {
 		supportsDeveloperRole: false,

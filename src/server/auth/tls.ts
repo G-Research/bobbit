@@ -81,7 +81,7 @@ export async function ensureTlsCert(host: string, extraDomains?: string[]): Prom
  * Generate a CA + cert using the mkcert npm package.
  * The CA cert can be installed on devices to trust all Bobbit certs.
  */
-async function generateMkcertCert(host: string, allDomains: string[]): Promise<TlsFiles> {
+async function generateMkcertCert(_host: string, allDomains: string[]): Promise<TlsFiles> {
 	// Dynamic import — fails fast if mkcert isn't installed
 	const { createCA, createCert } = await import("mkcert");
 
@@ -134,7 +134,7 @@ async function generateMkcertCert(host: string, allDomains: string[]): Promise<T
 	return { cert: CERT_PATH, key: KEY_PATH, caCert: CA_CERT_PATH };
 }
 
-function generateSelfSignedCert(host: string, allDomains: string[]): TlsFiles {
+function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
 	console.log(`  Generating self-signed TLS certificate for: ${allDomains.join(", ")}`);
 
 	const openssl = resolveOpenssl();
@@ -243,53 +243,3 @@ function certCoversAllDomains(certPath: string, domains: string[]): boolean {
 	}
 }
 
-/** @deprecated Use certCoversAllDomains instead. Kept for backward compat. */
-function certCoversHost(certPath: string, host: string): boolean {
-	try {
-		const openssl = resolveOpenssl();
-
-		// Check if cert is still valid (not expired)
-		try {
-			execSync(
-				`${openssl} x509 -in "${certPath}" -noout -checkend 86400`,
-				{ stdio: ["pipe", "pipe", "pipe"], shell: true as unknown as string },
-			);
-		} catch {
-			// Cert expires within 24 hours or is already expired
-			return false;
-		}
-
-		const out = execSync(
-			`${openssl} x509 -in "${certPath}" -noout -ext subjectAltName`,
-			{ encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], shell: true as unknown as string },
-		);
-		// Check for IP match (self-signed/mkcert certs)
-		if (out.includes(`IP Address:${host}`)) return true;
-
-		// Check for DNS name match (Let's Encrypt certs accessed via hostname)
-		// A valid LE cert for any DNS name is usable — don't regenerate it
-		if (out.includes("DNS:") && !isSelfSigned(certPath, openssl)) return true;
-
-		return false;
-	} catch {
-		return false;
-	}
-}
-
-/** Check if a certificate is self-signed (issuer == subject). */
-function isSelfSigned(certPath: string, openssl: string): boolean {
-	try {
-		const subject = execSync(
-			`${openssl} x509 -in "${certPath}" -noout -subject`,
-			{ encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], shell: true as unknown as string },
-		).trim();
-		const issuer = execSync(
-			`${openssl} x509 -in "${certPath}" -noout -issuer`,
-			{ encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], shell: true as unknown as string },
-		).trim();
-		// Self-signed: subject and issuer have the same CN
-		return subject.replace("subject=", "") === issuer.replace("issuer=", "");
-	} catch {
-		return true; // assume self-signed on error
-	}
-}

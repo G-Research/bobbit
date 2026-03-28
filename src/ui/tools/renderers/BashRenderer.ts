@@ -31,9 +31,6 @@ function summarizeCommand(command: string): string {
 	rest = rest.replace(/^(sudo|nohup|time|nice|env|command)\s+/g, "");
 
 	// Get the base command (first token), strip path
-	const baseCmd = rest.split(/\s/)[0];
-	const cmdName = baseCmd.split("/").pop() || baseCmd;
-
 	// Build a short summary: command name + a few key args
 	const maxLen = 80;
 	if (firstLine.length <= maxLen) return firstLine;

@@ -6,7 +6,7 @@
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { globalAuthPath } from "../bobbit-dir.js";
 
 // Anthropic OAuth constants (same as in @mariozechner/pi-ai)

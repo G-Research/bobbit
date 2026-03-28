@@ -11,7 +11,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, refreshSessions } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, selectSession } from "./session-manager.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";

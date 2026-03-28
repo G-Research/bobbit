@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
-import type { ServerMessage, QueuedMessage } from "../ws/protocol.js";
+import type { ServerMessage } from "../ws/protocol.js";
 import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
@@ -1015,7 +1015,7 @@ export class SessionManager {
 		session: SessionInfo,
 		repoPath: string,
 		branch: string,
-		originalCwd: string,
+		_originalCwd: string,
 		agentArgs?: string[],
 		goalId?: string,
 		opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } },

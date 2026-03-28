@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { parse, parseDocument, stringify } from "yaml";
+import { parse, parseDocument } from "yaml";
 
 export interface ToolProvider {
 	type: 'builtin' | 'bobbit-extension';

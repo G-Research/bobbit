@@ -471,16 +471,6 @@ export function renderGoalGroup(goal: Goal) {
 		if (sid) connectToSession(sid, false); else renderApp();
 	};
 
-	const handleEndTeam = async (e?: Event) => {
-		e?.stopPropagation();
-		teamLoading.add(goal.id);
-		renderApp();
-		await teardownTeam(goal.id);
-		teamLoading.delete(goal.id);
-		await refreshSessions();
-		renderApp();
-	};
-
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
 
 	const dashboardBtn = html`

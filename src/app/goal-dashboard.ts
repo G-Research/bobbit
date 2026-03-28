@@ -835,7 +835,6 @@ async function handleGitFetch(): Promise<void> {
 const svgArrowLeft = html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>`;
 const svgPencil = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>`;
 const svgTrash = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>`;
-const svgPlay = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
 const svgCrown = html`<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M2 12h12v1.5H2V12zm0-1L1 4l4 3 3-5 3 5 4-3-1 7H2z"/></svg>`;
 const svgStop = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>`;
 const svgPlus = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>`;
@@ -1027,7 +1026,6 @@ function formatTokens(n: number): string {
 }
 
 function renderMetaRows(goal: Goal): TemplateResult {
-	const isTeamGoal = !!goal.team;
 	const branch = goal.branch || "";
 	const gs = gitStatus;
 
@@ -1114,7 +1112,6 @@ function renderGatePipeline(): TemplateResult {
 
 function renderGateNode(node: GatePipelineNode): TemplateResult {
 	const statusClass = gateNodeStatusClass(node.status);
-	const isExpanded = expandedGateIds.has(node.id);
 	return html`
 		<div class="phase-node ${statusClass}" @click=${() => toggleGateExpand(node.id)} title="${node.name} (${node.status})${node.signalCount > 0 ? ` \u2014 ${node.signalCount} signal${node.signalCount !== 1 ? "s" : ""}` : ""}">
 			${node.status === "passed" ? html`<span class="phase-check">\u2713</span>` : nothing}
@@ -1515,7 +1512,7 @@ function renderGateChecklist(): TemplateResult {
 }
 
 function renderGateDetail(
-	wfGate: NonNullable<Goal["workflow"]>["gates"][number],
+	_wfGate: NonNullable<Goal["workflow"]>["gates"][number],
 	gs: GateState | undefined,
 ): TemplateResult {
 	const signals = gs?.signals ?? [];
@@ -1694,7 +1691,6 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 				const stepKey = `${entry.gateId}:${entry.signalId}:${i}`;
 				const isRunning = step.status === "running";
 				const isPassed = step.status === "passed";
-				const isFailed = step.status === "failed";
 				const hasOutput = !!step.output;
 				const isExpanded = expandedLiveStepKeys.has(stepKey);
 				const isLlm = step.type === "llm-review";
@@ -1816,6 +1812,6 @@ export function renderGoalDashboard(): TemplateResult {
 // BACKWARD COMPAT: renderAgentPanel (exported but only used internally before)
 // ============================================================================
 
-export function renderAgentPanel(agentList: TeamAgent[]): TemplateResult {
+export function renderAgentPanel(_agentList: TeamAgent[]): TemplateResult {
 	return renderAgentsTab();
 }

@@ -1,9 +1,9 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Clock, Eye, Pencil, Play, Pause, Plus, Trash2, UserCheck, Zap } from "lucide";
-import { fetchStaff, fetchStaffAgent, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, fetchPersonalities, gatewayFetch, refreshSessions, type StaffAgent, type PersonalityData } from "./api.js";
+import { html, type TemplateResult } from "lit";
+import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
+import { fetchStaff, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, fetchPersonalities, gatewayFetch, refreshSessions, type StaffAgent, type PersonalityData } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";

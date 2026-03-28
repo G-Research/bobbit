@@ -9,7 +9,6 @@ import {
 	formatDuration,
 	statusColor,
 	summarizeInstructions,
-	renderDelegateCard,
 	renderRunningCard,
 
 	renderDelegateCardList,
@@ -38,11 +37,6 @@ interface DelegateDetails {
 function getTextOutput(result: ToolResultMessage<any> | undefined): string {
 	if (!result) return "";
 	return result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
-}
-
-/** Convert DelegateDetailsEntry to shared DelegateCardEntry */
-function toCardEntry(d: DelegateDetailsEntry): DelegateCardEntry {
-	return { id: d.id, sessionId: d.sessionId, name: summarizeInstructions(d.instructions), status: d.status, durationMs: d.durationMs };
 }
 
 export class DelegateRenderer implements ToolRenderer<DelegateParams, DelegateDetails> {
@@ -85,7 +79,6 @@ export class DelegateRenderer implements ToolRenderer<DelegateParams, DelegateDe
 		// ── Completed with details ──
 		if (details?.delegates && details.delegates.length > 0) {
 			const delegates = details.delegates;
-			const cards = delegates.map(toCardEntry);
 			const allOk = delegates.every((d) => d.status === "completed");
 
 			if (delegates.length === 1) {

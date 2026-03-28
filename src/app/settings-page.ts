@@ -18,7 +18,7 @@ import {
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
 import { renderApp, state } from "./state.js";
-import { getRouteFromHash, setHashRoute, toggleConfigPage } from "./routing.js";
+import { setHashRoute, toggleConfigPage } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 

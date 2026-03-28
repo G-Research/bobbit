@@ -20,7 +20,6 @@ import { gatewayFetch, updateGoal } from "./api.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
-import { setHashRoute } from "./routing.js";
 import { fetchPersonalities, type PersonalityData } from "./api.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 

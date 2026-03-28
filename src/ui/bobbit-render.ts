@@ -8,7 +8,7 @@
  * All pixel data comes from bobbit-sprite-data.ts — the single source of truth.
  */
 import { html, type TemplateResult } from "lit";
-import { ref, createRef } from "lit/directives/ref.js";
+import { ref } from "lit/directives/ref.js";
 import {
 	BODY_GRID, BODY_WIDTH, BODY_HEIGHT,
 	EYE_POSITIONS,
@@ -244,7 +244,7 @@ export interface IdleBlobOptions {
  * Extracted from role-manager-page.ts idleBlob().
  */
 export function renderIdleBlob(opts: IdleBlobOptions): TemplateResult {
-	const { accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
+	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
 	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
 	const naturalSize = 76;
 	const s = size / naturalSize;
@@ -428,7 +428,6 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	// Start eye animation when the img mounts
 	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
 	const cycleDuration = 10000; // both busy and idle use 10s cycles
-	const spriteRef = createRef<HTMLImageElement>();
 	let cleanup: (() => void) | null = null;
 	const onRef = (el: Element | undefined) => {
 		if (el && el instanceof HTMLImageElement) {
@@ -464,7 +463,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
  * Only the sprite body is canvas-rendered; accessories use CSS box-shadow.
  */
 export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
-	const { accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
+	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
 	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
 	const naturalSize = 76;
 	const s = size / naturalSize;

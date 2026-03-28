@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, cleanupWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { createWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
 import type { WorkflowStore } from "./workflow-store.js";
 
 /**

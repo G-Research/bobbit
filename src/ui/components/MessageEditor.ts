@@ -1,12 +1,11 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import type { Model } from "@mariozechner/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { live } from "lit/directives/live.js";
-import { Brain, Loader2, Mic, MicOff, Paperclip, Send, Sparkles, Square, Zap, X } from "lucide";
+import { Loader2, Mic, MicOff, Paperclip, Send, Square, Zap, X } from "lucide";
 import { type Attachment, loadAttachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
@@ -82,7 +81,6 @@ export class MessageEditor extends LitElement {
 	private _history: string[] = [];
 	private _historyIndex = -1; // -1 = not browsing history
 	private _savedDraft = ""; // draft saved when entering history mode
-	private _historyLoaded = false;
 
 	// Slash skill autocomplete state
 	@state() private _slashSkills: SlashSkillInfo[] = [];
@@ -112,11 +110,9 @@ export class MessageEditor extends LitElement {
 			const store = getAppStorage().commandHistory;
 			this._history = await store.getHistory(this.sessionId);
 			this._historyIndex = -1;
-			this._historyLoaded = true;
 		} catch {
 			// Storage not available — history won't work but that's fine
 			this._history = [];
-			this._historyLoaded = true;
 		}
 	}
 
@@ -590,10 +586,6 @@ export class MessageEditor extends LitElement {
 	}
 
 	override render() {
-		// Check if current model supports thinking/reasoning
-		const model = this.currentModel;
-		const supportsThinking = model?.reasoning === true; // Models with reasoning:true support thinking
-
 		const attachButton = this.showAttachmentButton
 			? this.processingFiles
 				? html`<div class="h-8 w-8 flex items-center justify-center shrink-0">${icon(Loader2, "sm", "animate-spin text-muted-foreground")}</div>`

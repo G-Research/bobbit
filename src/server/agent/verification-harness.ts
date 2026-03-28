@@ -7,9 +7,8 @@ import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
-import type { SessionManager } from "./session-manager.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
-import type { WorkflowGate, Workflow } from "./workflow-store.js";
+import type { WorkflowGate } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
 
 /** Resolve Git Bash path on Windows for commands needing Unix tools. */
@@ -395,8 +394,6 @@ export class VerificationHarness {
 		if (!role) {
 			return { passed: false, output: "LLM review failed: 'reviewer' role not found in role store.", sessionId };
 		}
-
-		const subSessionId = sessionId || `llm-review-${randomUUID().slice(0, 12)}`;
 
 		const timeoutMs = (step.timeout || 600) * 1000;
 

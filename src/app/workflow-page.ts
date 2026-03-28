@@ -1,11 +1,9 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Copy, GripVertical, MessageSquare, Pencil, Plus, Terminal, Trash2 } from "lucide";
 import {
 	fetchWorkflows,
-	fetchWorkflow,
 	createWorkflow,
 	updateWorkflow,
 	deleteWorkflow,
@@ -14,18 +12,12 @@ import {
 	type WorkflowGate,
 	type VerifyStep,
 } from "./api.js";
-import { state, renderApp } from "./state.js";
+import { renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
 // ============================================================================
 // CONSTANTS
 // ============================================================================
-
-const GATE_STATUS_COLORS: Record<string, string> = {
-	pending: "#888",
-	passed: "#34d399",
-	failed: "#f87171",
-};
 
 // ============================================================================
 // STATE

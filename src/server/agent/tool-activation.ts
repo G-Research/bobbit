@@ -36,7 +36,7 @@ function resolveExtensionPath(provider: ToolProvider & { groupDir: string }): st
  * If allowedTools is empty or undefined, all tools are enabled (all builtins + all bobbit extensions).
  * Always adds `--no-extensions` so Bobbit has complete control over extension loading.
  */
-export function computeToolActivationArgs(allowedTools?: string[], toolManager?: ToolManager, cwd?: string): ToolActivationResult {
+export function computeToolActivationArgs(allowedTools?: string[], toolManager?: ToolManager, _cwd?: string): ToolActivationResult {
 	const args: string[] = [];
 
 	if (!toolManager) {

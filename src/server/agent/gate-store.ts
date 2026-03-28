@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
-import type { Workflow, WorkflowGate } from "./workflow-store.js";
+import type { Workflow } from "./workflow-store.js";
 
 export type GateStatus = "pending" | "passed" | "failed";
 

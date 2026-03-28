@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, ChevronRight, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -459,15 +459,6 @@ export function reloadStaffList(): Promise<void> {
 	});
 }
 
-function relativeTime(ts?: number): string {
-	if (!ts) return "";
-	const diff = Date.now() - ts;
-	if (diff < 60_000) return "now";
-	if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
-	if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`;
-	return `${Math.floor(diff / 86_400_000)}d`;
-}
-
 async function createStaffAssistantSession(e: Event): Promise<void> {
 	e.stopPropagation();
 	const { gatewayFetch } = await import("./api.js");
@@ -882,7 +873,7 @@ export function renderSidebar() {
 // COLLAPSED SIDEBAR
 // ============================================================================
 
-function renderCollapsedSidebar(sortedGoals: Goal[], ungroupedSessions: GatewaySession[], archivedGoals: Goal[] = []) {
+function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: GatewaySession[], archivedGoals: Goal[] = []) {
 	const allSessions = state.gatewaySessions;
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
 	const ungrouped = allSessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);

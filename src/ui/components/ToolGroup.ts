@@ -1,7 +1,7 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ToolCall, ToolResultMessage } from "@mariozechner/pi-ai";
 import { icon } from "@mariozechner/mini-lit";
-import { html, LitElement, type TemplateResult } from "lit";
+import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import {
 	Bot,
@@ -12,7 +12,6 @@ import {
 	ChevronsUpDown,
 	ChevronUp,
 } from "lucide";
-import { i18n } from "../utils/i18n.js";
 import { renderTool } from "../tools/index.js";
 import { isSkippedToolResult } from "../tools/renderer-registry.js";
 
@@ -146,7 +145,6 @@ export class ToolGroup extends LitElement {
 					? html`
 						<div class="mt-3 flex flex-col gap-3">
 							${this.toolCalls.map((tc) => {
-								const tool = this.tools?.find((t) => t.name === tc.name);
 								const result = this.toolResultsById?.get(tc.id);
 								const renderResult = renderTool(tc.name, tc.arguments, result, false);
 								if (renderResult.isCustom) {
