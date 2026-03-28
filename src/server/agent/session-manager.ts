@@ -128,6 +128,7 @@ export class SessionManager {
 	private roleManager?: RoleManager;
 	private toolManager?: ToolManager;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
+	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
@@ -145,12 +146,25 @@ export class SessionManager {
 		this.roleManager = options?.roleManager;
 		this.toolManager = options?.toolManager;
 		this.preferencesStore = options?.preferencesStore;
+		this.workflowStore = options?.workflowStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
 	}
 
 	getCostTracker(): CostTracker {
 		return this.costTracker;
+	}
+
+	/** Build a markdown list of available workflows for the goal assistant prompt. */
+	private _buildWorkflowList(): string {
+		const workflows = this.workflowStore?.getAll();
+		if (!workflows || workflows.length === 0) {
+			return 'Use **general** as a safe default.';
+		}
+		return workflows.map(w => {
+			const gateNames = w.gates.map(g => g.name).join(', ');
+			return `- **${w.id}** (${w.name}) — ${w.description}. Gates: ${gateNames}.`;
+		}).join('\n');
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
@@ -183,6 +197,9 @@ export class SessionManager {
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
+			if (session.assistantType === "goal") {
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+			}
 			parts = {
 				baseSystemPromptPath: undefined,
 				cwd: session.cwd,
@@ -651,6 +668,9 @@ export class SessionManager {
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
+			if (ps.assistantType === "goal") {
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+			}
 
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: undefined,
@@ -872,6 +892,9 @@ export class SessionManager {
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
+			if (assistantType === "goal") {
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+			}
 
 			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
 			if (assistantRole && assistantRole.allowedTools.length > 0) {
