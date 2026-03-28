@@ -22,6 +22,12 @@ gates:
     name: Ready to Merge
     depends_on: [implementation]
     verify:
-      - name: "All gates passed"
+      - name: "Branch pushed"
+        type: command
+        run: "echo ok"
+      - name: "Master merged"
+        type: command
+        run: "echo ok"
+      - name: "PR raised"
         type: command
         run: "echo ok"

@@ -90,7 +90,7 @@ skill_directories: '[{"path":"~/my-team-skills"},{"path":"/shared/skills"}]'
 
 The value is a JSON-encoded array of `{"path": "..."}` objects. Paths support `~` expansion. Custom directories are additive — the default directories (`.claude/skills/`, `.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `.claude/commands/`) are always scanned. Skills from custom directories get source label `"custom"` and have lower priority than built-in directories (built-in skills with the same name win).
 
-**Add a goal-related feature**: Goal CRUD is in `goal-manager.ts`/`goal-store.ts`. REST endpoints in `server.ts`. Goal assistant prompt in `goal-assistant.ts`. Client-side proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`.
+**Add a goal-related feature**: Goal CRUD is in `goal-manager.ts`/`goal-store.ts`. REST endpoints in `server.ts`. Goal assistant prompt in `goal-assistant.ts`. Client-side proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`. Re-attempt flow: `buildReattemptContext()` in `goal-assistant.ts`, `startReattempt()` in `session-manager.ts` (client), re-attempt buttons in `goal-dashboard.ts` and `render-helpers.ts`.
 
 **Add/edit tool documentation**: Navigate to `#/tools`, click a tool, edit the Description/Group/Docs fields, and Save. Or launch a Tool Assistant session for AI-guided documentation. Server-side: tool metadata lives in `.bobbit/config/tools/<group>/*.yaml` files, managed by `tool-manager.ts`, API routes in `server.ts`.
 
@@ -177,8 +177,8 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | File / Directory | Owner | Purpose |
 |---|---|---|
 | `token` | `token.ts` | Auth token (mode 0600) |
-| `sessions.json` | `SessionStore` | Session metadata (id, title, cwd, agentSessionFile, wasStreaming) |
-| `goals.json` | `GoalStore` | Goal definitions (title, spec, cwd, state) |
+| `sessions.json` | `SessionStore` | Session metadata (id, title, cwd, agentSessionFile, wasStreaming, reattemptGoalId) |
+| `goals.json` | `GoalStore` | Goal definitions (title, spec, cwd, state, reattemptOf) |
 | `tasks.json` | `TaskStore` | Task definitions, state, assignments |
 | `gates.json` | `GateStore` | Gate state and signal history |
 | `team-state.json` | `TeamStore` | Team state (agents, roles, goal associations) |
@@ -210,3 +210,18 @@ Goals can optionally have a **workflow** — a DAG of gates with dependency orde
 **Tasks** link to workflow gates via `workflowGateId` (output) and `inputGateIds` (context inputs). **Context injection** feeds passed upstream gate content into agent prompts automatically — at spawn time (`team_spawn`) or prompt time (`team_prompt`).
 
 For the full architecture — data models, context injection mechanics, verification lifecycle, REST API, and worked examples — see [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+
+### Goal re-attempt flow
+
+When a goal's PR has been merged or the goal is archived, users can **re-attempt** it — opening a goal assistant session pre-loaded with context from the original goal to define a new, informed attempt.
+
+**How it works:**
+1. User clicks "Re-attempt" (RotateCcw icon) in the goal dashboard nav bar or sidebar pill button
+2. A goal assistant session is created with `reattemptGoalId` set to the original goal's ID
+3. The assistant receives the original goal's title, spec, branch, and PR URL via `buildReattemptContext()` in `goal-assistant.ts`
+4. The assistant guides the user through: what went wrong, preferred approach (revert & start fresh / fix up / revert & fix up), and composes a new goal spec
+5. On proposal acceptance, the old goal is archived and the new goal gets `reattemptOf` linking back to it
+
+**Data model:** `PersistedGoal.reattemptOf` (optional string, original goal ID). `PersistedSession.reattemptGoalId` (optional string, for goal assistant sessions). The dashboard shows a "Re-attempt of: [title]" badge when `reattemptOf` is set.
+
+**API:** `POST /api/sessions` accepts `reattemptGoalId` in the body. `POST /api/goals` and `PUT /api/goals/:id` accept `reattemptOf`.

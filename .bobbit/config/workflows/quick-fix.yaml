@@ -48,11 +48,36 @@ gates:
     depends_on:
       - implementation
     verify:
-      - name: PR raised
+      - name: "Branch pushed to remote"
+        type: command
+        run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ."
+      - name: "Master merged into branch"
         type: llm-review
-        prompt: |-
-          Verify a pull request has been created for branch {{branch}}.
-          Run `git log {{master}}...{{branch}} --oneline` to confirm there are commits.
-          Check that the branch has been pushed and is ready for merge.
+        prompt: |
+          Merge {{master}} into the goal branch {{branch}} so the PR is up-to-date and conflict-free.
+
+          1. Run `git fetch origin {{master}}` to get latest master.
+          2. Run `git merge origin/{{master}}` to merge master into the current branch.
+          3. If there are conflicts, resolve them intelligently:
+             - Read both sides of each conflict to understand intent.
+             - Keep the goal branch's new functionality while incorporating master's updates.
+             - After resolving, run `{{project.typecheck_command}}` and `{{project.test_unit_command}}` to verify the merge is clean.
+             - Commit the merge.
+          4. If the merge was clean (no conflicts), no further action needed.
+          5. Push the updated branch: `git push origin {{branch}}`
+
+          Report whether the merge was clean or required conflict resolution, and confirm all resolved.
+      - name: "PR raised"
+        type: llm-review
+        prompt: |
+          Ensure a pull request exists for branch {{branch}} targeting {{master}}.
+
+          1. Check if a PR already exists: `git ls-remote --refs origin refs/pull/*/head` or use `gh pr list --head {{branch}}` if gh CLI is available.
+          2. If no PR exists, create one using `gh pr create --base {{master}} --head {{branch}} --title "<goal title>" --body "<summary of changes>"`.
+             - The title should be concise and descriptive.
+             - The body should summarize what changed and why, referencing the goal spec.
+          3. If a PR already exists, confirm it is open and targeting {{master}}.
+
+          Report the PR URL or number.
 createdAt: 1774734770196
 updatedAt: 1774734770196

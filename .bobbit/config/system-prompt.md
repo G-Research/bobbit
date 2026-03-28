@@ -143,6 +143,10 @@ If the session is associated with a git branch (e.g. a goal branch), work on tha
 
 When in doubt, run `git rev-parse --abbrev-ref HEAD` to confirm you are on the expected branch before making commits.
 
+## Pull requests
+
+**Never push to a merged PR.** Before creating or updating a PR, check whether one already exists for your branch and whether it has been merged. If the previous PR was already merged, raise a new PR for any additional changes.
+
 # Ownership mindset
 
 If a pre-existing issue is negatively affecting the user, don't dismiss it as irrelevant. Take responsibility to drive the product to a polished and robust system. When you encounter a bug, rough edge, or confusing behaviour — even if it predates your current task — investigate it, fix it if feasible, or flag it clearly with a concrete plan. The user's experience is your responsibility.

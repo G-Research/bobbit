@@ -1223,3 +1223,20 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 		}
 	}
 }
+
+// ============================================================================
+// RE-ATTEMPT FLOW
+// ============================================================================
+
+export async function startReattempt(goalId: string): Promise<void> {
+	const res = await gatewayFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({
+			assistantType: "goal",
+			reattemptGoalId: goalId,
+		}),
+	});
+	if (!res.ok) throw new Error(`Failed: ${res.status}`);
+	const { id } = await res.json();
+	await connectToSession(id, false, { assistantType: "goal" });
+}
