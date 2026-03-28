@@ -312,7 +312,25 @@ function goalPreviewPanel() {
 		localStorage.removeItem("gateway.sessionId");
 		state.appView = "authenticated";
 
-		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), { spec: state.previewSpec, workflowId });
+		// Detect re-attempt context from the current session
+		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
+		const reattemptGoalId = currentSession?.reattemptGoalId;
+
+		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
+			spec: state.previewSpec,
+			workflowId,
+			reattemptOf: reattemptGoalId || undefined,
+		});
+
+		// If this is a re-attempt, archive the old goal and link the new one
+		if (reattemptGoalId && goal) {
+			await gatewayFetch(`/api/goals/${reattemptGoalId}`, { method: "DELETE" });
+			await gatewayFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ reattemptOf: reattemptGoalId }),
+			});
+		}
+
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);

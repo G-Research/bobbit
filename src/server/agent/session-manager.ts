@@ -10,6 +10,7 @@ import { PromptQueue } from "./prompt-queue.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
+import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, type PromptParts } from "./system-prompt.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
@@ -155,6 +156,10 @@ export class SessionManager {
 		return this.costTracker;
 	}
 
+	getSessionStore(): SessionStore {
+		return this.store;
+	}
+
 	/** Build a markdown list of available workflows for the goal assistant prompt. */
 	private _buildWorkflowList(): string {
 		const workflows = this.workflowStore?.getAll();
@@ -225,6 +230,14 @@ export class SessionManager {
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
 				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
+				// Inject re-attempt context if this is a re-attempt session
+				const reattemptId = (this.store.get(session.id) as any)?.reattemptGoalId;
+				if (reattemptId) {
+					const origGoal = this.goalManager.getGoal(reattemptId);
+					if (origGoal) {
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+					}
+				}
 			}
 			parts = {
 				baseSystemPromptPath: undefined,
@@ -696,6 +709,13 @@ export class SessionManager {
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
 				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
+				// Inject re-attempt context if this is a re-attempt session
+				if (ps.reattemptGoalId) {
+					const origGoal = this.goalManager.getGoal(ps.reattemptGoalId);
+					if (origGoal) {
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+					}
+				}
 			}
 
 			const promptPath = this.assemblePrompt(ps.id, {
@@ -827,7 +847,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string }): Promise<SessionInfo> {
 		const id = randomUUID();
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
@@ -920,6 +940,13 @@ export class SessionManager {
 			assistantGoalSpec += assistantDef.prompt;
 			if (assistantType === "goal") {
 				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
+				// Inject re-attempt context if this is a re-attempt session
+				if (opts?.reattemptGoalId) {
+					const origGoal = this.goalManager.getGoal(opts.reattemptGoalId);
+					if (origGoal) {
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+					}
+				}
 			}
 
 			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
@@ -1579,6 +1606,7 @@ export class SessionManager {
 		nonInteractive?: boolean;
 		preview?: boolean;
 		personalities?: string[];
+		reattemptGoalId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => ({
 			id: s.id,
@@ -1606,6 +1634,7 @@ export class SessionManager {
 			nonInteractive: s.nonInteractive,
 			preview: s.preview,
 			personalities: s.personalities,
+			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
 		}));
 	}
 
@@ -2158,6 +2187,7 @@ export class SessionManager {
 		accessory?: string;
 		preview?: boolean;
 		personalities?: string[];
+		reattemptGoalId?: string;
 		archived: boolean;
 		archivedAt?: number;
 	}> {
@@ -2182,6 +2212,7 @@ export class SessionManager {
 			accessory: ps.accessory,
 			preview: ps.preview,
 			personalities: ps.personalities,
+			reattemptGoalId: ps.reattemptGoalId,
 			archived: true,
 			archivedAt: ps.archivedAt,
 		}));

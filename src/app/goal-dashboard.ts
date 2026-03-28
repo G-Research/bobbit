@@ -7,7 +7,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, type GateState, type GateSignal } from "./api.js";
 import { setHashRoute } from "./routing.js";
-import { createAndConnectSession, connectToSession } from "./session-manager.js";
+import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 
@@ -904,6 +904,10 @@ function renderNavBar(goal: Goal): TemplateResult {
 				</button>
 				<span class="nav-title">${goal.title}</span>
 				${goal.workflow ? html`<span class="nav-workflow-badge" title="Uses workflow: ${goal.workflow.name}">${goal.workflow.name}</span>` : nothing}
+				${goal.reattemptOf ? (() => {
+					const orig = state.goals.find(g => g.id === goal.reattemptOf);
+					return html`<span class="text-xs text-muted-foreground" style="margin-left:8px;">Re-attempt of: <a href="#/goal-dashboard/${goal.reattemptOf}" class="underline">${orig?.title ?? goal.reattemptOf.slice(0, 8)}</a></span>`;
+				})() : nothing}
 			</div>
 			<div class="nav-right">
 				${goal.archived ? nothing : html`
@@ -912,6 +916,14 @@ function renderNavBar(goal: Goal): TemplateResult {
 						? html`<button class="btn-icon primary" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgArchive}<span>Archive</span></button>`
 						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>`}
 				`}
+				${(prStatus?.state === "MERGED" || goal.archived) && !teamActive ? html`
+					<button class="btn-icon" @click=${() => startReattempt(goal.id)} title="Re-attempt this goal">
+						<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+						</svg>
+						<span>Re-attempt</span>
+					</button>
+				` : nothing}
 				${isTeamGoal ? renderTeamButton(goal) : renderSessionButton(goal)}
 			</div>
 		</div>
