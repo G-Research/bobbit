@@ -321,6 +321,9 @@ export function resetArchivedExpandState(): void {
 	// (archived team leads that were explicitly collapsed — remove them so they return to default)
 	for (const id of archivedSessionIds) collapsedTeamLeadSessions.delete(id);
 	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
+
+	// Free memory — archived sessions will be re-fetched on next toggle-on
+	state.archivedSessions = [];
 }
 
 // ============================================================================

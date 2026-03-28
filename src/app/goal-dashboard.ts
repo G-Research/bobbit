@@ -4,7 +4,7 @@ import "../ui/components/VerificationOutputModal.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, type GateState, type GateSignal } from "./api.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -189,6 +189,11 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		fetchActiveVerifications(goalId);
 
 		loading = false;
+
+		// Lazy-load archived sessions for assignee lookups (fire-and-forget)
+		if (!archivedSessionsLoaded()) {
+			fetchArchivedSessions();
+		}
 	} catch (err) {
 		error = err instanceof Error ? err.message : String(err);
 		loading = false;

@@ -20,7 +20,7 @@ import {
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog } from "./dialogs.js";
-import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, dismissSetup, gatewayFetch, type PersonalityData } from "./api.js";
+import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -436,6 +436,9 @@ let _staffLoaded = false;
 function ensureStaffLoaded(): void {
 	if (_staffLoaded) return;
 	_staffLoaded = true;
+	if (!archivedSessionsLoaded()) {
+		fetchArchivedSessions();
+	}
 	fetchStaff().then((list) => {
 		state.staffList = list.map((s) => ({
 			id: s.id, name: s.name, description: s.description, state: s.state,
@@ -805,6 +808,7 @@ export function renderSidebar() {
 													import("./api.js").then(m => m.fetchArchivedSessions());
 												} else {
 													resetArchivedExpandState();
+													import("./api.js").then(m => m.clearArchivedSessionsState());
 												}
 												renderApp();
 											}}
@@ -852,6 +856,7 @@ export function renderSidebar() {
 						} else {
 							state.showArchived = false;
 							resetArchivedExpandState();
+							import("./api.js").then(m => m.clearArchivedSessionsState());
 						}
 						renderApp();
 					}}
