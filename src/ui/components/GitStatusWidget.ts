@@ -23,7 +23,7 @@ export class GitStatusWidget extends LitElement {
     @property() prUrl?: string;
     @property({ type: Number }) prNumber?: number;
     @property() prTitle?: string;
-    @property({ type: Boolean }) prMergeable?: boolean;
+    @property() prMergeable?: string;
     @property({ type: Boolean }) viewerIsAdmin = false;
     @property() reviewDecision?: string; // "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null
 
@@ -193,7 +193,10 @@ export class GitStatusWidget extends LitElement {
             colorClass = 'text-green-600/70 dark:text-green-400/70';
             title = `PR #${this.prNumber} open`;
         }
-        return html`<span class="${colorClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title=${title}><span style="font-size:10px">⦿</span>${this.prNumber != null ? html`<span style="font-size:10px">#${this.prNumber}</span>` : nothing}</span>`;
+        const hasConflicts = this.prState === 'OPEN' && this.prMergeable === 'CONFLICTING';
+        if (hasConflicts) title += ' — has conflicts';
+        const pulseClass = hasConflicts ? ' pr-conflict-pulse' : '';
+        return html`<span class="${colorClass}${pulseClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title=${title}><span style="font-size:10px">⦿</span>${this.prNumber != null ? html`<span style="font-size:10px">#${this.prNumber}</span>` : nothing}</span>`;
     }
 
     /** Review decision badge for inside the PR section */
@@ -234,6 +237,7 @@ export class GitStatusWidget extends LitElement {
                         ${this.prState}
                     </span>
                     ${this._renderReviewBadge()}
+                    ${this.prState === 'OPEN' && this.prMergeable === 'CONFLICTING' ? html`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:oklch(0.62 0.14 25);background:oklch(0.62 0.14 25 / 0.12)">Has conflicts</span>` : nothing}
                 </div>
                 ${this.prState === 'OPEN' ? html`
                     <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
@@ -250,7 +254,7 @@ export class GitStatusWidget extends LitElement {
                         ${this.merging ? html`<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted-foreground)"><span style="display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>Merging\u2026</span>` : html`
                         <button
                             style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
-                            ?disabled=${!this.prMergeable}
+                            ?disabled=${this.prMergeable !== "MERGEABLE"}
                             @click=${this._handleMerge}
                         >
                             Merge PR
@@ -262,7 +266,7 @@ export class GitStatusWidget extends LitElement {
                         >
                             Force Merge
                         </button>` : nothing}
-                        ${!this.prMergeable && !this.viewerIsAdmin ? html`<span style="font-size:10px;color:var(--destructive)">Not mergeable</span>` : nothing}
+                        ${this.prMergeable !== "MERGEABLE" && !this.viewerIsAdmin ? html`<span style="font-size:10px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : nothing}
                         `}
                     </div>
                     ${this.mergeError ? html`<div style="font-size:11px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : nothing}

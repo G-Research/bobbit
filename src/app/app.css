@@ -491,3 +491,11 @@ theme-toggle button {
 	animation: title-wave 4s linear infinite;
 	will-change: background-position;
 }
+
+@keyframes pr-conflict-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.3; }
+}
+.pr-conflict-pulse {
+	animation: pr-conflict-pulse 1.5s ease-in-out infinite;
+}

@@ -110,7 +110,7 @@ export const state = {
 	/** Gate status cache: goalId → { passed, total, verifying } */
 	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean }>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */
-	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null }>(),
+	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string }>(),
 	sessionsLoading: false,
 	sessionsError: "",
 	creatingSession: false,

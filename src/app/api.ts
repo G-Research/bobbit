@@ -252,7 +252,7 @@ export async function refreshPrStatusCache() {
 				if (res.status === 404) return { goalId: g.id, pr: null, noPr: true };
 				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
 				const data = await res.json();
-				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string }, noPr: false };
+				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string; mergeable?: string }, noPr: false };
 			} catch {
 				return { goalId: g.id, pr: null, noPr: false };
 			}
@@ -263,7 +263,7 @@ export async function refreshPrStatusCache() {
 	for (const { goalId, pr, noPr } of results) {
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
-			if (!prev || prev.state !== pr.state || prev.reviewDecision !== pr.reviewDecision) {
+			if (!prev || prev.state !== pr.state || prev.reviewDecision !== pr.reviewDecision || prev.mergeable !== pr.mergeable) {
 				state.prStatusCache.set(goalId, pr);
 				changed = true;
 			}
