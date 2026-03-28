@@ -19,13 +19,25 @@ const execAsync = promisify(exec);
 const USER_AGENT =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/** Run curl and return stdout. Throws on non-zero exit or timeout. */
+/** Run curl GET and return stdout. Throws on non-zero exit or timeout. */
 async function curlGet(url: string, signal?: AbortSignal, timeoutSecs = 15): Promise<string> {
 	const ac = new AbortController();
 	if (signal) signal.addEventListener("abort", () => ac.abort());
 
 	const { stdout } = await execAsync(
 		`curl -sL --max-time ${timeoutSecs} -H "User-Agent: ${USER_AGENT}" ${JSON.stringify(url)}`,
+		{ maxBuffer: 2 * 1024 * 1024, signal: ac.signal },
+	);
+	return stdout;
+}
+
+/** Run curl POST and return stdout. Throws on non-zero exit or timeout. */
+async function curlPost(url: string, body: string, signal?: AbortSignal, timeoutSecs = 15): Promise<string> {
+	const ac = new AbortController();
+	if (signal) signal.addEventListener("abort", () => ac.abort());
+
+	const { stdout } = await execAsync(
+		`curl -sL --max-time ${timeoutSecs} -H "User-Agent: ${USER_AGENT}" -X POST -d ${JSON.stringify(body)} ${JSON.stringify(url)}`,
 		{ maxBuffer: 2 * 1024 * 1024, signal: ac.signal },
 	);
 	return stdout;
@@ -125,14 +137,29 @@ const extension: ExtensionFactory = (pi) => {
 		async execute(_toolCallId, params, signal) {
 			const max = params.maxResults ?? 10;
 
-			const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(params.query)}`;
+			const url = "https://html.duckduckgo.com/html/";
+			const body = `q=${encodeURIComponent(params.query)}`;
 
 			let html: string;
 			try {
-				html = await curlGet(url, signal);
+				html = await curlPost(url, body, signal);
 			} catch (e: any) {
 				return {
 					content: [{ type: "text" as const, text: `Search failed: ${e.message}` }],
+					details: { query: params.query, resultCount: 0 },
+					isError: true,
+				} as any;
+			}
+
+			// Detect DuckDuckGo rate-limiting / blocking (403 returned as HTML body)
+			if (html.includes("If this persists, please") && !html.includes('class="result')) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: "Search blocked: DuckDuckGo is rate-limiting requests from this IP. Try again in a few minutes, or use web_fetch with a known URL instead.",
+						},
+					],
 					details: { query: params.query, resultCount: 0 },
 					isError: true,
 				} as any;
