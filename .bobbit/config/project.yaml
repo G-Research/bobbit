@@ -3,4 +3,4 @@ build_command: npm run build
 typecheck_command: npm run check
 test_unit_command: npx playwright test --config tests/playwright.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
 test_e2e_command: npm run build:server && npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
-worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
+worktree_setup_command: robocopy "%SOURCE_REPO%\node_modules" node_modules /E /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP & if %ERRORLEVEL% LSS 8 exit /b 0
