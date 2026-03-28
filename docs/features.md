@@ -54,12 +54,12 @@ Personality definitions that modify agent behaviour via prompt fragments.
 
 ## Skills
 
-Skills are reusable templates for spawning isolated sub-agents that produce structured outputs.
+Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 
-- **Isolation**: Sub-agents receive only skill instructions + explicit context + `AGENTS.md` — never the parent conversation.
-- **Built-in skills**: `correctness-review`, `security-review`, `design-review` (three code review perspectives), and `test-suite-report` (runs tests and produces a structured report).
-- **Invocation**: Via `invoke_skill` WebSocket command. Server broadcasts `skill_started`, then `skill_completed` or `skill_failed`.
-- **Definition sync**: Registered skills are exported to `.bobbit/state/skill-definitions.json` for agent-side tool extensions to discover.
+- **Discovery**: Skills are found in `.claude/skills/<name>/SKILL.md` (project), `~/.claude/skills/<name>/SKILL.md` (personal), and `.claude/commands/<name>.md` (legacy).
+- **Invocation**: Via `/skill-name` slash commands in the chat input. Skill instructions are injected into the agent's prompt.
+- **Frontmatter**: YAML frontmatter supports `description`, `argument_hint`, `allowed_tools`, `context` (e.g. `fork`), `agent`, `disable_model_invocation`, and `user_invocable`.
+- **API**: `GET /api/slash-skills` for autocomplete data, `GET /api/slash-skills/details` for full content and file paths.
 
 ## Cost Tracking
 
@@ -86,13 +86,16 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 
 ## Assistant Registry
 
-A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles:
+A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles. Definitions load from YAML files in `.bobbit/config/roles/assistant/`, falling back to hardcoded defaults:
 
 - `goal` — Goal creation assistant
 - `role` — Role creation assistant
 - `tool` — Tool management assistant
+- `personality` — Personality creation assistant
+- `staff` — Staff agent creation assistant
+- `setup` — Project setup wizard
 
-Sessions created with an `assistantType` get the corresponding system prompt automatically.
+Sessions created with an `assistantType` get the corresponding system prompt automatically. Assistant prompts can be edited via their YAML files and are reloaded on change.
 
 ## Compaction
 

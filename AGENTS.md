@@ -82,7 +82,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add a new tool renderer**: Create in `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`.
 
-**Add a new skill definition**: Create in `src/server/skills/definitions/`, import and register in `src/server/skills/index.ts`. Define a `Skill` object with id, instructions, isolation level, and expected output. Run `exportDefinitions()` to sync to disk.
+**Add a slash skill**: Create a `SKILL.md` file in `.claude/skills/<name>/` (project-level) or `~/.claude/skills/<name>/` (personal). The file should have YAML frontmatter with `description` and optional `argument_hint`, `allowed_tools`, `context`, `agent` fields. Skills are discovered automatically via `discoverSlashSkills()` in `src/server/skills/slash-skills.ts` and served at `GET /api/slash-skills`.
 
 **Add a goal-related feature**: Goal CRUD is in `goal-manager.ts`/`goal-store.ts`. REST endpoints in `server.ts`. Goal assistant prompt in `goal-assistant.ts`. Client-side proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`.
 
@@ -133,6 +133,8 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `workflows/*.yaml` | `WorkflowStore` | Workflow templates (gate DAGs, verification configs) |
 | `personalities/*.yaml` | `PersonalityStore` | Personality definitions |
 | `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
+| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, custom config) |
+| `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompt definitions (goal, role, tool, personality, staff, setup) |
 
 
 ### `.bobbit/state/` — runtime state (gitignored)
@@ -149,7 +151,6 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `session-costs.json` | `CostTracker` | Per-session token and cost data |
 | `session-colors.json` | `ColorStore` | Session → color index (0-13) mapping |
 | `preferences.json` | `PreferencesStore` | Key-value preferences (AI gateway config, etc.) |
-| `skill-definitions.json` | `definitions-sync.ts` | Exported skill definitions for agent discovery |
 | `session-prompts/` | `system-prompt.ts` | Assembled per-session prompt files (cleaned up on terminate) |
 | `tls/` | `tls.ts` | TLS certificates and keys |
 | `gateway-url` | `cli.ts` | Last-started gateway base URL (e.g. `https://100.x.x.x:3001`) |
