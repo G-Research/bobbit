@@ -286,7 +286,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	// (matching the old bobbit-eyes CSS keyframes).
 	let eyeColor = p.eye;
 	let eyeXShift = 0;
-	if (isSelected && !isCompacting) {
+	if (isSelected) {
 		const pct = (Date.now() % 6000) / 6000 * 100;
 		if (pct >= 56 && pct < 59) { eyeColor = p.main; }        // blink
 		else if (pct >= 74 && pct < 87) { eyeXShift = 1; }       // look right
@@ -348,7 +348,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 
 	// Start a lightweight blink timer when a selected bobbit is rendered.
 	// Triggers renderApp() at ~200ms to animate the 6-second eye cycle.
-	if (isSelected && !isCompacting) startBlinkTimer();
+	if (isSelected) startBlinkTimer();
 
 	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${canvas}</span>`;
 }
