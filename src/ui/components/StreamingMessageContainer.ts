@@ -3,6 +3,103 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
 import "./LiveTimer.js";
+import {
+	type EyeState,
+	BobbitEyeTimer,
+	BUSY_EYE_SCHEDULE,
+	IDLE_EYE_SCHEDULE,
+	drawBobbitSprite,
+	onDprChange,
+	ACCESSORY_PIXELS,
+	counterHueRotate,
+} from "../bobbit-sprite.js";
+import { getAccessory } from "../../app/session-colors.js";
+
+/**
+ * Paint only the accessory pixels onto a canvas.
+ * For the chat blob, accessories are separate elements with their own CSS animations.
+ */
+function drawAccessoryCanvas(
+	canvas: HTMLCanvasElement,
+	accessoryId: string,
+	opts: { scale?: number; dpr?: number; hueRotate?: number; excludeTail?: boolean; cssScale?: number; },
+): void {
+	const pixels = ACCESSORY_PIXELS[accessoryId];
+	if (!pixels || pixels.length === 0) return;
+
+	const scale = opts.scale ?? 4;
+	const dpr = opts.dpr ?? window.devicePixelRatio;
+	const pxSize = Math.max(1, Math.round(scale * dpr));
+
+	// Filter tail pixels for bandana when facing right/up
+	let paintPixels = pixels;
+	if (opts.excludeTail && accessoryId === 'bandana') {
+		// Tail pixels are x >= 10 (the knot and tail extending right)
+		paintPixels = pixels.filter(p => p.x < 10);
+	}
+
+	// Compute bounding box
+	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+	for (const p of paintPixels) {
+		if (p.x < minX) minX = p.x;
+		if (p.y < minY) minY = p.y;
+		if (p.x > maxX) maxX = p.x;
+		if (p.y > maxY) maxY = p.y;
+	}
+	if (paintPixels.length === 0) {
+		// No pixels to paint — clear canvas
+		canvas.width = 1;
+		canvas.height = 1;
+		canvas.style.width = '0px';
+		canvas.style.height = '0px';
+		return;
+	}
+
+	const gridW = maxX - minX + 1;
+	const gridH = maxY - minY + 1;
+	const width = gridW * pxSize;
+	const height = gridH * pxSize;
+	const offsetX = -minX;
+	const offsetY = -minY;
+
+	if (canvas.width !== width || canvas.height !== height) {
+		canvas.width = width;
+		canvas.height = height;
+		if (opts.cssScale != null) {
+			canvas.style.width = `${gridW * opts.cssScale}px`;
+			canvas.style.height = `${gridH * opts.cssScale}px`;
+		} else {
+			canvas.style.width = `${width / dpr}px`;
+			canvas.style.height = `${height / dpr}px`;
+		}
+	}
+
+	// Position the canvas at the correct pre-transform coordinate within
+	// the 1×1px wrapper so that after scale(4) it aligns with the body sprite.
+	canvas.style.position = 'absolute';
+	canvas.style.left = `${minX}px`;
+	canvas.style.top = `${minY}px`;
+
+	const ctx = canvas.getContext('2d')!;
+	ctx.imageSmoothingEnabled = false;
+	ctx.clearRect(0, 0, width, height);
+
+	const hueRotate = opts.hueRotate ?? 0;
+	const accDef = getAccessory(accessoryId);
+
+	for (const pixel of paintPixels) {
+		const color = (hueRotate !== 0 && accDef?.id !== 'flask')
+			? counterHueRotate(pixel.color, hueRotate)
+			: pixel.color;
+		ctx.fillStyle = color;
+		ctx.fillRect(
+			(pixel.x + offsetX) * pxSize,
+			(pixel.y + offsetY) * pxSize,
+			pxSize,
+			pxSize,
+		);
+	}
+}
 
 export class StreamingMessageContainer extends LitElement {
 	@property({ type: Array }) tools: AgentTool[] = [];
@@ -26,6 +123,24 @@ export class StreamingMessageContainer extends LitElement {
 	private _updateScheduled = false;
 	private _immediateUpdate = false;
 
+	/** Eye animation timer — drives canvas repaints */
+	private _eyeTimer: BobbitEyeTimer;
+	/** Current eye state for repainting */
+	private _eyeState: EyeState = 'center';
+	/** DPR change unsubscribe */
+	private _unsubDpr: (() => void) | null = null;
+	/** Previous blob state — used to avoid redundant repaints in updated() */
+	private _prevBlobState: string = '';
+
+	constructor() {
+		super();
+		this._eyeTimer = new BobbitEyeTimer((eyeState) => {
+			this._eyeState = eyeState;
+			this._repaintSprite();
+			this._repaintBandana();
+		});
+	}
+
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
@@ -33,6 +148,88 @@ export class StreamingMessageContainer extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
+		this._unsubDpr = onDprChange(() => {
+			this._repaintSprite();
+			this._repaintAllAccessories();
+		});
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback();
+		this._eyeTimer.stop();
+		this._unsubDpr?.();
+		this._unsubDpr = null;
+	}
+
+	/** Repaint the body+eyes sprite canvas */
+	private _repaintSprite(): void {
+		const canvas = this.querySelector<HTMLCanvasElement>('canvas.bobbit-blob__sprite');
+		if (!canvas) return;
+		drawBobbitSprite(canvas, {
+			eyeState: this._eyeState,
+			scale: 1,
+			cssScale: 1,
+		});
+	}
+
+	/** Repaint bandana canvas with tail state based on eye direction */
+	private _repaintBandana(): void {
+		const wrapper = this.querySelector<HTMLElement>('.bobbit-blob__bandana');
+		if (!wrapper || wrapper.style.display === 'none') return;
+		const canvas = wrapper.querySelector<HTMLCanvasElement>('canvas');
+		if (!canvas) return;
+
+		// Determine if tail should be hidden and translate shift
+		const eyeState = this._eyeState;
+		const facingRight = eyeState === 'right' || eyeState === 'blink-right';
+		const lookingUp = eyeState === 'up' || eyeState === 'blink-up';
+		const excludeTail = facingRight || lookingUp;
+
+		drawAccessoryCanvas(canvas, 'bandana', { scale: 1, excludeTail, cssScale: 1 });
+
+		// Translate shift for eyes-up state (per design doc)
+		if (lookingUp) {
+			wrapper.style.translate = '0 -3.5px';
+		} else {
+			wrapper.style.translate = '0 -2px';
+		}
+	}
+
+	/** Repaint all visible accessory canvases */
+	private _repaintAllAccessories(): void {
+		const accessories = [
+			'crown', 'bandana', 'magnifier', 'palette', 'pencil',
+			'shield', 'set-square', 'flask', 'wand', 'wizard-hat',
+		];
+		for (const accId of accessories) {
+			const wrapper = this.querySelector<HTMLElement>(`.bobbit-blob__${accId}`);
+			if (!wrapper) continue;
+			const canvas = wrapper.querySelector<HTMLCanvasElement>('canvas');
+			if (!canvas) continue;
+			if (accId === 'bandana') {
+				this._repaintBandana();
+			} else {
+				drawAccessoryCanvas(canvas, accId, { scale: 1, cssScale: 1 });
+			}
+		}
+	}
+
+	/** Start/restart/stop eye timer based on blob state */
+	private _updateEyeTimer(): void {
+		switch (this._blobState) {
+			case 'active':
+			case 'entering':
+				this._eyeTimer.start(BUSY_EYE_SCHEDULE, 10000);
+				break;
+			case 'idle':
+				this._eyeTimer.start(IDLE_EYE_SCHEDULE, 10000);
+				break;
+			case 'exiting':
+			case 'hidden':
+				this._eyeTimer.stop();
+				break;
+			// compact-shake, compacting, compact-pop: timer keeps running
+		}
 	}
 
 	override updated(changed: Map<string, unknown>) {
@@ -44,12 +241,15 @@ export class StreamingMessageContainer extends LitElement {
 				// Coming from idle — play entry animation
 				this._entryVariant = Math.random() < 0.5 ? 'enter' : 'enter-roll';
 				this._blobState = 'entering';
+				this._updateEyeTimer();
 				this._entryTimer = setTimeout(() => {
 					this._entryTimer = null;
 					this._blobState = 'active';
+					this._updateEyeTimer();
 				}, this._entryVariant === 'enter-roll' ? 900 : 700);
 			} else if (this.isStreaming) {
 				this._blobState = 'active';
+				this._updateEyeTimer();
 			} else if (this._blobState === 'active' || this._blobState === 'entering') {
 				// Streaming stopped — cancel any pending entry timer and play exit
 				if (this._entryTimer) {
@@ -58,12 +258,25 @@ export class StreamingMessageContainer extends LitElement {
 				}
 				this._exitVariant = Math.random() < 0.5 ? 'exit' : 'exit-roll';
 				this._blobState = 'exiting';
+				this._updateEyeTimer();
 				setTimeout(() => {
 					this._blobState = 'idle';
+					this._updateEyeTimer();
 				}, this._exitVariant === 'exit-roll' ? 900 : 700);
 			}
 		}
 
+		// Repaint canvases only when blob state actually changed (e.g. hidden→visible)
+		// The eye timer handles ongoing repaints during animation.
+		if (this._blobState !== this._prevBlobState) {
+			this._prevBlobState = this._blobState;
+			if (this._blobVisible) {
+				requestAnimationFrame(() => {
+					this._repaintSprite();
+					this._repaintAllAccessories();
+				});
+			}
+		}
 	}
 
 	private get _blobVisible() {
@@ -88,14 +301,17 @@ export class StreamingMessageContainer extends LitElement {
 		// If idle, enter first then shake then compact; if active, shake then compact
 		const startShake = () => {
 			this._blobState = 'compact-shake';
+			this._updateEyeTimer();
 			this._compactShakeTimer = setTimeout(() => {
 				this._compactShakeTimer = null;
 				this._blobState = 'compacting';
+				this._updateEyeTimer();
 			}, 800); // matches blob-compact-shake duration
 		};
 		if (this._blobState === 'idle') {
 			this._entryVariant = Math.random() < 0.5 ? 'enter' : 'enter-roll';
 			this._blobState = 'entering';
+			this._updateEyeTimer();
 			this._compactEntryTimer = setTimeout(() => {
 				this._compactEntryTimer = null;
 				startShake();
@@ -145,11 +361,14 @@ export class StreamingMessageContainer extends LitElement {
 			this._compactSafetyTimer = null;
 		}
 		this._blobState = 'compact-pop';
+		this._updateEyeTimer();
 		setTimeout(() => {
 			this._exitVariant = Math.random() < 0.5 ? 'exit' : 'exit-roll';
 			this._blobState = 'exiting';
+			this._updateEyeTimer();
 			setTimeout(() => {
 				this._blobState = 'idle';
+				this._updateEyeTimer();
 			}, this._exitVariant === 'exit-roll' ? 900 : 700);
 		}, 600); // pop duration
 	}
@@ -190,25 +409,30 @@ export class StreamingMessageContainer extends LitElement {
 		}
 	}
 
+	/** Render the blob section with canvas elements for sprite and accessories */
+	private _renderBlob() {
+		return html`<div class="${this._blobClass}">
+			<canvas class="bobbit-blob__sprite"></canvas>
+			<div class="bobbit-blob__crown"><canvas></canvas></div>
+			<div class="bobbit-blob__bandana"><canvas></canvas></div>
+			<div class="bobbit-blob__magnifier"><canvas></canvas></div>
+			<div class="bobbit-blob__palette"><canvas></canvas></div>
+			<div class="bobbit-blob__pencil"><canvas></canvas></div>
+			<div class="bobbit-blob__shield"><canvas></canvas></div>
+			<div class="bobbit-blob__set-square"><canvas></canvas></div>
+			<div class="bobbit-blob__flask"><canvas></canvas></div>
+			<div class="bobbit-blob__wand"><canvas></canvas></div>
+			<div class="bobbit-blob__wizard-hat"><canvas></canvas></div>
+			<div class="bobbit-blob__shadow"></div>
+		</div>`;
+	}
+
 	override render() {
 		// Show loading indicator if loading but no message yet
 		if (!this._message) {
 			if (this._blobVisible)
 				return html`<div class="flex flex-col gap-3 mb-3">
-					<div class="${this._blobClass}">
-						<div class="bobbit-blob__sprite"></div>
-						<div class="bobbit-blob__crown"></div>
-						<div class="bobbit-blob__bandana"></div>
-						<div class="bobbit-blob__magnifier"></div>
-						<div class="bobbit-blob__palette"></div>
-						<div class="bobbit-blob__pencil"></div>
-						<div class="bobbit-blob__shield"></div>
-						<div class="bobbit-blob__set-square"></div>
-						<div class="bobbit-blob__flask"></div>
-						<div class="bobbit-blob__wand"></div>
-						<div class="bobbit-blob__wizard-hat"></div>
-						<div class="bobbit-blob__shadow"></div>
-					</div>
+					${this._renderBlob()}
 					${this.isStreaming && this.turnStartTime
 						? html`<div class="px-2 sm:px-4 text-xs text-muted-foreground text-right tabular-nums" style="margin-top:-32px;">
 							<live-timer .startTime=${this.turnStartTime} .running=${true}></live-timer>
@@ -240,20 +464,7 @@ export class StreamingMessageContainer extends LitElement {
 						.onCostClick=${this.onCostClick}
 						.turnStartTime=${this.turnStartTime}
 					></assistant-message>
-					${this._blobVisible ? html`<div class="${this._blobClass}">
-						<div class="bobbit-blob__sprite"></div>
-						<div class="bobbit-blob__crown"></div>
-						<div class="bobbit-blob__bandana"></div>
-						<div class="bobbit-blob__magnifier"></div>
-						<div class="bobbit-blob__palette"></div>
-						<div class="bobbit-blob__pencil"></div>
-						<div class="bobbit-blob__shield"></div>
-						<div class="bobbit-blob__set-square"></div>
-						<div class="bobbit-blob__flask"></div>
-						<div class="bobbit-blob__wand"></div>
-						<div class="bobbit-blob__wizard-hat"></div>
-						<div class="bobbit-blob__shadow"></div>
-					</div>` : ""}
+					${this._blobVisible ? this._renderBlob() : ""}
 				</div>
 			`;
 		}

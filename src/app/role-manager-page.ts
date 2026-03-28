@@ -5,6 +5,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, BOBBIT_HUE_ROTATIONS, getAccessory } from "./session-colors.js";
+import { bobbitSprite, IDLE_EYE_SCHEDULE } from "../ui/bobbit-sprite.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
@@ -12,43 +13,37 @@ import { setHashRoute } from "./routing.js";
 // HELPERS
 // ============================================================================
 
-/** Render an idle in-chat blob with the given accessory in a self-contained box.
+/** Render an idle bobbit with the given accessory in a self-contained box.
  *
- *  The blob's CSS assumes chat context: the sprite has margin 8px 18px 28px 18px,
- *  the blob container has margin-bottom:-24px and overflow:visible. To render it
- *  outside chat we use a CSS class (.bobbit-blob--inline) that resets these
- *  properties, added via role-manager.css.
+ *  Uses a single <canvas> with the bobbitSprite directive that paints body,
+ *  eyes, and the active accessory. The directive handles DPR-aware sizing,
+ *  eye animation via BobbitEyeTimer, and DPR change repaints.
+ *
+ *  Replaces the old chat-blob-structure approach that used CSS box-shadow on
+ *  .bobbit-blob__sprite, .bobbit-blob__crown, .bobbit-blob__bandana,
+ *  .bobbit-blob__magnifier, .bobbit-blob__palette, .bobbit-blob__pencil,
+ *  .bobbit-blob__shield, .bobbit-blob__set-square, .bobbit-blob__flask,
+ *  .bobbit-blob__wand, .bobbit-blob__wizard-hat divs with .bobbit-blob--inline
+ *  CSS overrides.
  */
 function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): TemplateResult {
-	const accClass = accId && accId !== "none"
-		? `bobbit-${accId === "crown" ? "crowned" : accId}`
-		: "";
-	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
-	// The sprite margin-box is ~40×36px at 4× scale but accessories overflow it.
-	// Use a larger viewport to capture everything, then scale down.
-	const naturalSize = 76;
-	const s = size / naturalSize;
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
-	// Offset animations so multiple blobs don't blink/shimmer in sync
-	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
-	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
+	const acc = accId && accId !== "none" ? accId : undefined;
+	// Scale so the body (10px wide) fills ~77% of the container.
+	// drawBobbitSprite() sizes the canvas automatically, accounting for accessory overflow.
+	const scale = size / 13;
 	return html`
-		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
-			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
-				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
-					<div class="bobbit-blob__sprite"></div>
-					<div class="bobbit-blob__crown"></div>
-					<div class="bobbit-blob__bandana"></div>
-					<div class="bobbit-blob__magnifier"></div>
-					<div class="bobbit-blob__palette"></div>
-					<div class="bobbit-blob__pencil"></div>
-					<div class="bobbit-blob__shield"></div>
-					<div class="bobbit-blob__set-square"></div>
-					<div class="bobbit-blob__flask"></div>
-					<div class="bobbit-blob__wand"></div>
-					<div class="bobbit-blob__wizard-hat"></div>
-				</div>
-			</div>
+		<div class="bobbit-blob-canvas-inline" style="width:${size}px;height:${size}px;filter:hue-rotate(${hue}deg);">
+			<canvas ${bobbitSprite({
+				eyeState: 'center',
+				scale,
+				accessory: acc,
+				hueRotate: hue,
+				animated: true,
+				schedule: IDLE_EYE_SCHEDULE,
+				cycleDuration: 10000,
+				eyeDelay: phaseIndex * 800,
+			})}></canvas>
 		</div>
 	`;
 }
