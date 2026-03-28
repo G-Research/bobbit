@@ -7,52 +7,114 @@ provider:
 group: Team
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
+  Each agent gets an isolated git worktree branched from the goal branch. Gate enforcement applies — server may reject with 409 if upstream gates haven't passed. Task prompt should be self-contained with all context the agent needs. Returns session ID and worktree path.
+detail_docs: >-
   ## Purpose
 
-  Spawn a new agent with a specific role (coder, reviewer, tester, or custom) as part of a goal's team. The agent gets its own isolated **git worktree** branched from the goal branch, ensuring its file changes don't interfere with other agents until explicitly merged.
 
-  The spawned agent receives the role's system prompt (defining its capabilities and restrictions), the role's tool allowlist, and the provided task as its first user message. The agent then works independently on that task.
+  Spawn a new agent with a specific role (coder, reviewer, tester, or custom) as
+  part of a goal's team. The agent gets its own isolated **git worktree**
+  branched from the goal branch, ensuring its file changes don't interfere with
+  other agents until explicitly merged.
 
-  Returns the new agent's session ID and worktree path, which you use for subsequent `team_steer`, `team_prompt`, and `team_dismiss` calls.
+
+  The spawned agent receives the role's system prompt (defining its capabilities
+  and restrictions), the role's tool allowlist, and the provided task as its
+  first user message. The agent then works independently on that task.
+
+
+  Returns the new agent's session ID and worktree path, which you use for
+  subsequent `team_steer`, `team_prompt`, and `team_dismiss` calls.
+
 
   ## Parameters
 
+
   | Name | Type | Required | Description |
+
   |------|------|----------|-------------|
-  | `role` | string | **Yes** | The role to assign. Built-in roles: `coder`, `reviewer`, `tester`. Custom roles defined via the role management page also work. |
-  | `task` | string | **Yes** | Task description sent as the agent's first user prompt. Should be specific and self-contained — include references to upstream gates, file paths, and acceptance criteria. |
+
+  | `role` | string | **Yes** | The role to assign. Built-in roles: `coder`,
+  `reviewer`, `tester`. Custom roles defined via the role management page also
+  work. |
+
+  | `task` | string | **Yes** | Task description sent as the agent's first user
+  prompt. Should be specific and self-contained — include references to upstream
+  gates, file paths, and acceptance criteria. |
+
 
   ## When to Use
 
-  - **Implementing features** — spawn a `coder` with a clear task description referencing the design doc.
+
+  - **Implementing features** — spawn a `coder` with a clear task description
+  referencing the design doc.
+
   - **Code review** — spawn a `reviewer` to review changes on a specific branch.
-  - **Writing tests** — spawn a `tester` to create test suites for new functionality.
-  - **Parallel work** — spawn multiple agents with different roles to work concurrently on independent tasks.
+
+  - **Writing tests** — spawn a `tester` to create test suites for new
+  functionality.
+
+  - **Parallel work** — spawn multiple agents with different roles to work
+  concurrently on independent tasks.
+
 
   ## When NOT to Use
 
-  - **Simple one-off tasks** — if the task is small enough to do yourself, don't spawn an agent.
+
+  - **Simple one-off tasks** — if the task is small enough to do yourself, don't
+  spawn an agent.
+
   - **Without a goal** — team tools require an active goal context.
+
   - **Without required gates passed — the server enforces gate dependencies.
+
 
   ## Examples
 
+
   ```
+
   # Spawn a coder for a feature implementation
-  team_spawn(role="coder", task="Implement the tool metadata REST API endpoints (GET/PUT /api/tools/:name) as described in the design doc. Check gate_list and gate_status for the design document. Run npm run check before committing.")
+
+  team_spawn(role="coder", task="Implement the tool metadata REST API endpoints
+  (GET/PUT /api/tools/:name) as described in the design doc. Check gate_list and
+  gate_status for the design document. Run npm run check before committing.")
+
 
   # Spawn a reviewer to review changes
-  team_spawn(role="reviewer", task="Review the changes on the goal branch against master. Focus on correctness, error handling, and API contract consistency. Signal the code-review gate with your results.")
+
+  team_spawn(role="reviewer", task="Review the changes on the goal branch
+  against master. Focus on correctness, error handling, and API contract
+  consistency. Signal the code-review gate with your results.")
+
 
   # Spawn a tester for E2E test coverage
-  team_spawn(role="tester", task="Write E2E tests for the new /api/tools endpoints. Cover: GET list, GET single, PUT update, 404 for unknown tools. Follow patterns in tests/e2e/. Run tests and ensure they pass.")
+
+  team_spawn(role="tester", task="Write E2E tests for the new /api/tools
+  endpoints. Cover: GET list, GET single, PUT update, 404 for unknown tools.
+  Follow patterns in tests/e2e/. Run tests and ensure they pass.")
+
   ```
+
 
   ## Notes / Gotchas
 
+
   - **Team lead only** — only sessions with team lead status can spawn agents.
-  - **Isolated worktrees** — each agent works in a separate git worktree. Changes must be merged back to the goal branch (the agent's system prompt instructs them how).
-  - **Gate enforcement — spawning a coder may fail with 409 if required upstream gates haven't passed yet.
-  - **Agent independence** — spawned agents work autonomously. Use `team_list` to monitor progress, `team_steer` for mid-turn corrections, and `team_prompt` for follow-up tasks.
-  - **Resource usage** — each agent is a full agent process with its own context window. Spawn only as many as needed.
-  - **Worktree cleanup** — worktrees are cleaned up when the agent is dismissed via `team_dismiss` or `team_complete`.
+
+  - **Isolated worktrees** — each agent works in a separate git worktree.
+  Changes must be merged back to the goal branch (the agent's system prompt
+  instructs them how).
+
+  - **Gate enforcement — spawning a coder may fail with 409 if required upstream
+  gates haven't passed yet.
+
+  - **Agent independence** — spawned agents work autonomously. Use `team_list`
+  to monitor progress, `team_steer` for mid-turn corrections, and `team_prompt`
+  for follow-up tasks.
+
+  - **Resource usage** — each agent is a full agent process with its own context
+  window. Spawn only as many as needed.
+
+  - **Worktree cleanup** — worktrees are cleaned up when the agent is dismissed
+  via `team_dismiss` or `team_complete`.

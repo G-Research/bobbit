@@ -7,6 +7,8 @@ provider:
 group: File System
 renderer: src/ui/tools/renderers/WriteRenderer.ts
 docs: |-
+  **Overwrites entirely** — use `edit` for surgical changes to existing files. Creates parent directories automatically. `.html`/`.svg` files render inline in chat. No append mode — read first, then write combined content.
+detail_docs: |-
   ## Purpose
 
   Write content to a file on disk. If the file already exists, it is **completely overwritten**. If it doesn't exist, it is created along with any necessary parent directories.

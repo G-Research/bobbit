@@ -7,59 +7,119 @@ provider:
 group: Browser
 renderer: src/ui/tools/renderers/ScreenshotRenderer.ts
 docs: |-
+  Viewport only by default; use `fullPage: true` for full scrollable page. Use `selector` to capture a specific element. Returns image inline in chat.
+detail_docs: >-
   ## Purpose
 
-  Capture a visual screenshot of the current browser page or a specific element. The screenshot is returned as an image attachment that renders inline in the chat, allowing visual inspection of UI state, layout, and rendering.
+
+  Capture a visual screenshot of the current browser page or a specific element.
+  The screenshot is returned as an image attachment that renders inline in the
+  chat, allowing visual inspection of UI state, layout, and rendering.
+
 
   ## Parameters
 
+
   | Name | Type | Required | Description |
+
   |------|------|----------|-------------|
-  | `selector` | string | No | CSS selector to screenshot a specific element instead of the full page. If omitted, captures the entire visible viewport. |
-  | `savePath` | string | No | File path to save the screenshot as a PNG file on disk. If omitted, the screenshot is only returned as an inline attachment. |
-  | `fullPage` | boolean | No | When `true`, captures the full scrollable page, not just the visible viewport. Default: **false**. |
+
+  | `selector` | string | No | CSS selector to screenshot a specific element
+  instead of the full page. If omitted, captures the entire visible viewport. |
+
+  | `savePath` | string | No | File path to save the screenshot as a PNG file on
+  disk. If omitted, the screenshot is only returned as an inline attachment. |
+
+  | `fullPage` | boolean | No | When `true`, captures the full scrollable page,
+  not just the visible viewport. Default: **false**. |
+
 
   ## When to Use
 
-  - **Visual verification** — confirming UI changes look correct after modifications.
-  - **Debugging layout issues** — seeing exactly how elements are positioned and styled.
-  - **Capturing error states** — screenshotting error dialogs, broken layouts, or unexpected UI.
-  - **Documenting current state** — creating a visual record of how something looks before changing it.
+
+  - **Visual verification** — confirming UI changes look correct after
+  modifications.
+
+  - **Debugging layout issues** — seeing exactly how elements are positioned and
+  styled.
+
+  - **Capturing error states** — screenshotting error dialogs, broken layouts,
+  or unexpected UI.
+
+  - **Documenting current state** — creating a visual record of how something
+  looks before changing it.
+
   - **Comparing before/after** — taking screenshots before and after a change.
-  - **Saving screenshots to disk** — use `savePath` to persist screenshots for reports or later comparison.
+
+  - **Saving screenshots to disk** — use `savePath` to persist screenshots for
+  reports or later comparison.
+
 
   ## When NOT to Use
 
-  - **Extracting text content** — use `browser_eval` to get text via DOM queries. Screenshots can't be searched or copied.
+
+  - **Extracting text content** — use `browser_eval` to get text via DOM
+  queries. Screenshots can't be searched or copied.
+
   - **When no page is loaded** — call `browser_navigate` first.
-  - **For non-visual checks** — if you just need to verify a value exists, `browser_eval` is faster and more reliable.
+
+  - **For non-visual checks** — if you just need to verify a value exists,
+  `browser_eval` is faster and more reliable.
+
 
   ## Examples
 
+
   ```
+
   # Screenshot the full page
+
   browser_screenshot()
 
+
   # Screenshot a specific component
+
   browser_screenshot(selector=".sidebar-navigation")
 
+
   # Capture the full scrollable page (not just the viewport)
+
   browser_screenshot(fullPage=true)
 
+
   # Save a screenshot to disk
+
   browser_screenshot(savePath="screenshots/dashboard.png")
 
+
   # Screenshot a modal dialog
+
   browser_screenshot(selector="dialog[open]")
 
+
   # Capture full page and save to disk
+
   browser_screenshot(fullPage=true, savePath="screenshots/full-page.png")
+
   ```
+
 
   ## Notes / Gotchas
 
-  - **Must navigate first** — a page must be loaded via `browser_navigate` before taking screenshots.
-  - **Viewport vs full page** — by default, only the visible viewport is captured. Use `fullPage: true` to capture everything including content below the fold.
-  - **Element screenshots** — when using a `selector`, only that element's bounding box is captured. If the selector matches nothing, the tool will error.
-  - **Hidden elements** — elements with `display: none` or `visibility: hidden` won't appear in screenshots even if selected.
-  - **Rendered inline** — the screenshot image appears directly in the chat conversation as an attachment.
+
+  - **Must navigate first** — a page must be loaded via `browser_navigate`
+  before taking screenshots.
+
+  - **Viewport vs full page** — by default, only the visible viewport is
+  captured. Use `fullPage: true` to capture everything including content below
+  the fold.
+
+  - **Element screenshots** — when using a `selector`, only that element's
+  bounding box is captured. If the selector matches nothing, the tool will
+  error.
+
+  - **Hidden elements** — elements with `display: none` or `visibility: hidden`
+  won't appear in screenshots even if selected.
+
+  - **Rendered inline** — the screenshot image appears directly in the chat
+  conversation as an attachment.
