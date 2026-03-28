@@ -255,13 +255,13 @@ export class GitStatusWidget extends LitElement {
                         <button
                             style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
                             ?disabled=${this.prMergeable !== "MERGEABLE"}
-                            @click=${this._handleMerge}
+                            @click=${() => this._handleMerge()}
                         >
                             Merge PR
                         </button>
                         ${this.viewerIsAdmin ? html`<button
                             style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
-                            @click=${this._handleForceMerge}
+                            @click=${() => this._handleForceMerge()}
                             title="Merge with --admin to bypass branch protection rules"
                         >
                             Force Merge
@@ -279,7 +279,7 @@ export class GitStatusWidget extends LitElement {
         return html`<button
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.pulling}
-            @click=${this._handlePull}
+            @click=${() => this._handlePull()}
         >${this.pulling ? 'Pulling\u2026' : 'Pull'}</button>${this.pullError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.pullError}</span>` : nothing}`;
     }
 
