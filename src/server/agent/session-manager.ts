@@ -19,8 +19,9 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
-import { getAigwUrl, getAigwModels, modelRecencyRank } from "./aigw-manager.js";
+import { getAigwUrl, getAigwModels, modelRecencyRank, deriveName } from "./aigw-manager.js";
 import { createWorktree } from "../skills/git.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -1357,6 +1358,7 @@ export class SessionManager {
 				const modelId = sessionModelPref.slice(slash + 1);
 				try {
 					await session.rpcClient.setModel(provider, modelId);
+					this._writeModelNameFile(session.id, sessionModelPref);
 					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}`);
 					broadcast(session.clients, {
 						type: "state",
@@ -1380,6 +1382,7 @@ export class SessionManager {
 			const modelToUse = [...aigwModels].sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id))[0];
 
 			await session.rpcClient.setModel("aigw", modelToUse.id);
+			this._writeModelNameFile(session.id, modelToUse.id);
 			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
 
 			broadcast(session.clients, {
@@ -1971,6 +1974,21 @@ export class SessionManager {
 		console.log(`[session-manager] Restored session ${sessionId} via ensureSessionAlive`);
 	}
 
+	/** Write the human-readable model name to a file so shell extensions can read it at commit time. */
+	private _writeModelNameFile(sessionId: string, modelId: string): void {
+		try {
+			const filePath = path.join(bobbitStateDir(), "model-name-" + sessionId + ".txt");
+			fs.writeFileSync(filePath, deriveName(modelId), "utf-8");
+		} catch (err) {
+			console.warn(`[session-manager] Failed to write model name file for ${sessionId}:`, err);
+		}
+	}
+
+	/** Update the model name file for a session (called from WS handler on setModel). */
+	updateModelNameFile(sessionId: string, modelId: string): void {
+		this._writeModelNameFile(sessionId, modelId);
+	}
+
 	async terminateSession(id: string): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
@@ -1996,6 +2014,12 @@ export class SessionManager {
 		if ((this as any).bgProcessManager) {
 			(this as any).bgProcessManager.cleanup(id);
 		}
+
+		// Clean up model name file
+		try {
+			const modelNameFile = path.join(bobbitStateDir(), "model-name-" + id + ".txt");
+			if (fs.existsSync(modelNameFile)) fs.unlinkSync(modelNameFile);
+		} catch { /* ignore */ }
 
 		// Broadcast session_archived event before closing clients
 		const archivedAt = Date.now();

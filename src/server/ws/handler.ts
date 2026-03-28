@@ -258,6 +258,7 @@ export function handleWebSocketConnection(
 					break;
 				case "set_model":
 					await session.rpcClient.setModel(msg.provider, msg.modelId);
+					sessionManager.updateModelNameFile(session.id, msg.modelId);
 					break;
 				case "compact":
 					// Fire-and-forget: don't block the WS message loop.

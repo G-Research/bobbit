@@ -70,6 +70,43 @@ function killProcessTree(pid: number): void {
 	} catch { /* process may already be dead */ }
 }
 
+function getModelName(sessionId: string | undefined): string {
+	if (!sessionId) return '';
+	try {
+		const stateDir = process.env.BOBBIT_DIR
+			? path.join(process.env.BOBBIT_DIR, 'state')
+			: path.join(homedir(), '.pi');
+		return fs.readFileSync(path.join(stateDir, `model-name-${sessionId}.txt`), 'utf-8').trim();
+	} catch { return ''; }
+}
+
+function injectCoAuthorTrailer(command: string, sessionId: string | undefined): string {
+	// Only match actual git commit commands
+	const gitCommitPattern = /\bgit\s+commit\b/;
+	if (!gitCommitPattern.test(command)) return command;
+
+	// Don't add if already has Co-Authored-By trailer
+	if (/--trailer\s+["']?Co-Authored/i.test(command)) return command;
+
+	// Don't intercept merge commits, reverts, or cherry-picks (mechanical operations)
+	if (/\bgit\s+(merge|revert|cherry-pick)\b/.test(command)) return command;
+
+	// Build the trailer value
+	const modelName = getModelName(sessionId);
+	const author = modelName ? `Bobbit (${modelName})` : 'Bobbit';
+	const trailer = `--trailer "Co-Authored-By: ${author} <noreply@bobbit.dev>"`;
+
+	// For chained commands (&&, ;, ||), find and modify each git commit portion
+	return command.replace(
+		/(\bgit\s+commit\b[^&|;]*)/g,
+		(match) => {
+			// Don't double-add if individual match already has --trailer
+			if (match.includes('--trailer')) return match;
+			return `${match.trimEnd()} ${trailer}`;
+		}
+	);
+}
+
 export default function (pi: ExtensionAPI) {
 	// Self-signed TLS
 	process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -122,7 +159,9 @@ export default function (pi: ExtensionAPI) {
 				const timeoutSec = timeout ?? DEFAULT_TIMEOUT;
 				const { shell, args } = getShellConfig();
 
-				const child = spawn(shell, [...args, command], {
+				command = injectCoAuthorTrailer(command, sessionId);
+
+			const child = spawn(shell, [...args, command], {
 					detached: true,
 					env: getShellEnv(),
 					cwd: process.cwd(),

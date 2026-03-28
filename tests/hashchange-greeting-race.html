@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hashchange Greeting Race Condition</title>
+</head>
+<body>
+<div id="status">ready</div>
+<script>
+/**
+ * Simulates the race condition in src/app/main.ts where handleHashChange()
+ * fires during connectToSession's async connect phase, causing a duplicate
+ * connection that suppresses the assistant greeting auto-prompt.
+ *
+ * This reproduces the BUGGY behavior — the guard in handleHashChange only
+ * checks state.remoteAgent?.gatewaySessionId, which is null during connecting.
+ */
+
+// --- State (mirrors src/app/state.ts) ---
+const state = {
+	selectedSessionId: null,
+	connectingSessionId: null,
+	remoteAgent: null,        // { gatewaySessionId: string } when connected
+	switchGeneration: 0,
+	connectionStatus: "disconnected",
+	appView: "authenticated",
+};
+
+// --- Tracking ---
+window.__greetingSent = false;
+window.__greetingMessage = null;
+window.__connectCalls = [];  // log of connectToSession calls
+window.__handleHashChangeCalls = 0;
+
+// --- Route parsing (mirrors src/app/routing.ts) ---
+function getRouteFromHash() {
+	const hash = window.location.hash;
+	const match = hash.match(/^#\/session\/(.+)$/);
+	if (match) return { view: "session", sessionId: match[1] };
+	return { view: "landing" };
+}
+
+// --- selectSession (mirrors src/app/session-manager.ts:361) ---
+function selectSession(sessionId) {
+	state.switchGeneration++;
+	state.selectedSessionId = sessionId;
+	// In real code, this also disconnects previous remoteAgent, updates hash
+	window.location.hash = `#/session/${sessionId}`;
+}
+
+// --- handleHashChange — BUGGY version (mirrors src/app/main.ts:~45) ---
+// This is the current production code that LACKS the fix.
+// It only checks state.remoteAgent?.gatewaySessionId, missing the connecting case.
+let handlingHashChange = false;
+
+async function handleHashChange() {
+	if (handlingHashChange) return;
+	handlingHashChange = true;
+	try {
+		const route = getRouteFromHash();
+		if (route.view === "session" && route.sessionId) {
+			// FIX: Check if session is already selected or connecting
+			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId) {
+				return;
+			}
+			if (state.remoteAgent?.gatewaySessionId === route.sessionId) {
+				return;
+			}
+			// This is the duplicate call — isExisting=true, no assistantType
+			window.__handleHashChangeCalls++;
+			await connectToSession(route.sessionId, true);
+		}
+	} finally {
+		handlingHashChange = false;
+	}
+}
+
+// --- connectToSession (mirrors src/app/session-manager.ts:401) ---
+async function connectToSession(sessionId, isExisting, options) {
+	window.__connectCalls.push({
+		sessionId,
+		isExisting,
+		assistantType: options?.assistantType || null,
+		timestamp: performance.now(),
+	});
+
+	// Phase 1: synchronous select — ALWAYS called (mirrors real code)
+	selectSession(sessionId);
+
+	// Phase 2: async hydrate
+	const gen = state.switchGeneration;
+	const isStale = () => state.switchGeneration !== gen;
+
+	state.connectingSessionId = sessionId;
+
+	try {
+		// Simulate async remote.connect() — yields to the event loop
+		// This is where the hashchange event fires in the real bug
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		if (isStale()) {
+			// First call becomes stale because hashchange bumped switchGeneration
+			return;
+		}
+
+		// Simulate successful connection
+		state.remoteAgent = { gatewaySessionId: sessionId };
+		state.connectionStatus = "connected";
+
+		// Auto-prompt for new assistant sessions — this is the greeting
+		if (options?.assistantType && !isExisting) {
+			window.__greetingSent = true;
+			window.__greetingMessage = `Start the ${options.assistantType} creation session.`;
+		}
+	} finally {
+		if (state.connectingSessionId === sessionId) {
+			state.connectingSessionId = null;
+		}
+	}
+}
+
+// Listen for hashchange — the real app does this in initApp()
+window.addEventListener("hashchange", handleHashChange);
+
+// --- Test entry point ---
+// Called by the Playwright spec to simulate the race
+window.__simulateRace = async function(sessionId, assistantType) {
+	// Reset state
+	state.selectedSessionId = null;
+	state.connectingSessionId = null;
+	state.remoteAgent = null;
+	state.switchGeneration = 0;
+	state.connectionStatus = "disconnected";
+	window.__greetingSent = false;
+	window.__greetingMessage = null;
+	window.__connectCalls = [];
+	window.__handleHashChangeCalls = 0;
+	window.location.hash = "";
+
+	// Start connectToSession like a caller would (e.g. dialogs.ts "New Goal")
+	await connectToSession(sessionId, false, { assistantType });
+
+	// Wait for any pending hashchange handlers to complete
+	await new Promise(resolve => setTimeout(resolve, 50));
+
+	return {
+		greetingSent: window.__greetingSent,
+		greetingMessage: window.__greetingMessage,
+		connectCalls: window.__connectCalls.length,
+		handleHashChangeCalls: window.__handleHashChangeCalls,
+		finalSessionId: state.selectedSessionId,
+		remoteAgentSession: state.remoteAgent?.gatewaySessionId || null,
+	};
+};
+
+document.getElementById("status").textContent = "loaded";
+</script>
+</body>
+</html>
