@@ -87,33 +87,23 @@ export class CustomProviderDialog extends DialogBase {
 		this.discoveredModels = [];
 
 		try {
-			// Save provider first (server will discover models)
-			const provider = {
+			// Test connection without persisting the provider
+			const testConfig = {
 				id: this.provider?.id || crypto.randomUUID(),
 				name: this.name || this.type,
 				type: this.type,
 				baseUrl: this.baseUrl,
 				apiKey: this.apiKey || undefined,
 			};
-			const saveRes = await fetch("/api/custom-providers", {
+			const res = await fetch("/api/custom-providers/test", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify(provider),
+				body: JSON.stringify(testConfig),
 			});
-			if (!saveRes.ok) throw new Error("Failed to save provider for testing");
+			if (!res.ok) throw new Error("Failed to test connection");
 
-			// Store the ID for later save
-			if (!this.provider) {
-				this.provider = provider as any;
-			}
-
-			// Now fetch models to see what was discovered
-			const modelsRes = await fetch("/api/models");
-			if (modelsRes.ok) {
-				const allModels = await modelsRes.json();
-				const providerModels = allModels.filter((m: any) => m.provider === (this.name || this.type));
-				this.discoveredModels = providerModels;
-			}
+			const data = await res.json();
+			this.discoveredModels = data.models || [];
 
 			this.testError = "";
 		} catch (error) {

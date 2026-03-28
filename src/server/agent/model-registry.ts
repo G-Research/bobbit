@@ -229,48 +229,52 @@ function hasOAuthCredentials(provider?: string): boolean {
 
 // ── Custom Provider Discovery ──────────────────────────────────────
 
+/** Discover models from a single custom provider config (without persisting anything). */
+export async function discoverModelsForConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
+	return discoverFromSingleConfig(config);
+}
+
 async function discoverCustomProviderModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const configs = (prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 	const results: ApiModel[] = [];
 
 	for (const config of configs) {
 		try {
-			let models: ApiModel[];
-			switch (config.type) {
-				case "ollama":
-					models = await discoverOllamaModelsServer(config);
-					break;
-				case "lmstudio":
-					models = await discoverLMStudioModelsServer(config);
-					break;
-				case "llama.cpp":
-				case "vllm":
-					models = await discoverOpenAICompatModelsServer(config);
-					break;
-				case "manual":
-					models = (config.models || []).map(m => ({
-						id: m.id,
-						name: m.name || m.id,
-						provider: config.name || config.id,
-						api: "openai-completions",
-						baseUrl: `${config.baseUrl}/v1`,
-						contextWindow: 8192,
-						maxTokens: 4096,
-						reasoning: false,
-						input: ["text"] as ("text" | "image")[],
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						authenticated: true,
-					}));
-					break;
-				default:
-					models = [];
-			}
+			const models = await discoverFromSingleConfig(config);
 			results.push(...models);
 		} catch (err) {
 			console.error(`[model-registry] Failed to discover from ${config.name}:`, err);
 		}
 	}
 	return results;
+}
+
+async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
+	switch (config.type) {
+		case "ollama":
+			return discoverOllamaModelsServer(config);
+		case "lmstudio":
+			return discoverLMStudioModelsServer(config);
+		case "llama.cpp":
+		case "vllm":
+			return discoverOpenAICompatModelsServer(config);
+		case "manual":
+			return (config.models || []).map(m => ({
+				id: m.id,
+				name: m.name || m.id,
+				provider: config.name || config.id,
+				api: "openai-completions" as const,
+				baseUrl: `${config.baseUrl}/v1`,
+				contextWindow: 8192,
+				maxTokens: 4096,
+				reasoning: false,
+				input: ["text"] as ("text" | "image")[],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				authenticated: true,
+			}));
+		default:
+			return [];
+	}
 }
 
 async function discoverOllamaModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {

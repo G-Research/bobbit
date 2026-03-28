@@ -36,7 +36,7 @@ import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
-import { getAvailableModels } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
@@ -880,9 +880,16 @@ async function handleApiRoute(
 
 	// ── Preferences ──
 
-	// GET /api/preferences — return all preferences
+	// GET /api/preferences — return all preferences (filter sensitive keys)
 	if (url.pathname === "/api/preferences" && req.method === "GET") {
-		json(preferencesStore.getAll());
+		const all = preferencesStore.getAll();
+		const filtered: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(all)) {
+			if (!key.startsWith("providerKey.")) {
+				filtered[key] = value;
+			}
+		}
+		json(filtered);
 		return;
 	}
 
@@ -952,6 +959,29 @@ async function handleApiRoute(
 	if (url.pathname === "/api/custom-providers" && req.method === "GET") {
 		const configs = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 		json(configs);
+		return;
+	}
+
+	// POST /api/custom-providers/test — discover models without persisting
+	if (url.pathname === "/api/custom-providers/test" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || !body.type || !body.baseUrl) {
+			json({ error: "Missing required fields: type, baseUrl" }, 400);
+			return;
+		}
+		const config: CustomProviderConfig = {
+			id: body.id || "test-" + Date.now(),
+			name: body.name || body.type,
+			type: body.type,
+			baseUrl: body.baseUrl,
+			...(body.apiKey ? { apiKey: body.apiKey } : {}),
+		};
+		try {
+			const models = await discoverModelsForConfig(config);
+			json({ models });
+		} catch (err: any) {
+			json({ error: err?.message || "Discovery failed" }, 500);
+		}
 		return;
 	}
 
