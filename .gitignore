@@ -22,3 +22,5 @@ tests/code-review-results.json
 coverage/
 concept/
 ARCHIVE/
+prompt_tmp.json
+sessions_tmp.json

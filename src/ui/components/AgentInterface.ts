@@ -13,6 +13,7 @@ import "./GitStatusWidget.js";
 import "./BgProcessPill.js";
 import type { BgProcessInfo } from "./BgProcessPill.js";
 import "./Messages.js"; // Import for side effects to register the custom elements
+import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import type { Agent, AgentEvent } from "@mariozechner/pi-agent-core";
@@ -84,6 +85,7 @@ export class AgentInterface extends LitElement {
 	@query("streaming-message-container") private _streamingContainer!: StreamingMessageContainer;
 
 	private _contextPopoverOpen = false;
+	private _costPopoverOpen = false;
 	private _stickToBottom = true;
 	private _isAutoScrolling = false;
 	private _autoScrollTimer?: ReturnType<typeof setTimeout>;
@@ -737,13 +739,15 @@ export class AgentInterface extends LitElement {
 
 		const togglePopover = () => {
 			this._contextPopoverOpen = !this._contextPopoverOpen;
+			this._costPopoverOpen = false;
 			this.requestUpdate();
 		};
 
 		// Close popover when clicking outside
 		const closePopover = () => {
-			if (this._contextPopoverOpen) {
+			if (this._contextPopoverOpen || this._costPopoverOpen) {
 				this._contextPopoverOpen = false;
+				this._costPopoverOpen = false;
 				this.requestUpdate();
 			}
 		};
@@ -758,14 +762,29 @@ export class AgentInterface extends LitElement {
 				${cwdHtml ? html`<div class="hidden sm:flex items-center pl-4">${cwdHtml}</div>` : ""}
 				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">
 					${popoverContent}
-					<span class="cursor-pointer hover:text-foreground transition-colors flex items-center gap-3"
+					<span class="cursor-pointer hover:text-foreground transition-colors"
 						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>
 						${contextHtml}
-						${costText ? html`<span>${costText}</span>` : ""}
 					</span>
+					${costText ? html`
+						<span style="position:relative;">
+							<span class="cursor-pointer hover:text-foreground transition-colors"
+								@click=${(e: Event) => {
+									e.stopPropagation();
+									this._costPopoverOpen = !this._costPopoverOpen;
+									this._contextPopoverOpen = false;
+									this.requestUpdate();
+								}}>${costText}</span>
+							<cost-popover
+								.open=${this._costPopoverOpen}
+								.sessionId=${this.session?.sessionId || ""}
+								@close=${() => { this._costPopoverOpen = false; this.requestUpdate(); }}
+							></cost-popover>
+						</span>
+					` : ""}
 				</div>
 			</div>
-			${this._contextPopoverOpen ? html`<div style="position:fixed;inset:0;z-index:40;" @click=${closePopover}></div>` : nothing}
+			${this._contextPopoverOpen || this._costPopoverOpen ? html`<div style="position:fixed;inset:0;z-index:40;" @click=${closePopover}></div>` : nothing}
 		`;
 	}
 
