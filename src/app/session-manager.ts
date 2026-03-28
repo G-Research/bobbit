@@ -436,6 +436,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			personality: "Start the personality creation session.",
 			staff: "Start the staff agent creation session.",
 			setup: "Start the project setup session.",
+			workflow: "Start the workflow creation session. Help me design a new workflow with gates and verification.",
 		};
 		if (options?.assistantType && !isExisting) {
 			const autoPrompt = AUTO_PROMPTS[options.assistantType];
@@ -656,6 +657,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 			if (proposal.action === "complete") {
 				state.setupComplete = true;
+			}
+			renderApp();
+		};
+
+		remote.onWorkflowProposal = (proposal) => {
+			state.workflowPreviewId = proposal.id || "";
+			state.workflowPreviewName = proposal.name || "";
+			state.workflowPreviewDescription = proposal.description || "";
+			state.workflowPreviewGates = proposal.gates || "";
+			state.assistantHasProposal = true;
+			if (state.assistantTab === "chat" && !isDesktop()) {
+				state.assistantTab = "preview";
 			}
 			renderApp();
 		};
@@ -938,6 +951,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.staffPreviewTriggersEdited = false;
 			state.staffPreviewCwdEdited = false;
 			state.assistantHasProposal = false;
+		}
+
+		if (state.assistantType === "workflow") {
+			state.assistantTab = "chat";
+			state.workflowPreviewId = "";
+			state.workflowPreviewName = "";
+			state.workflowPreviewDescription = "";
+			state.workflowPreviewGates = "";
 		}
 
 		// Now that all draft restores have completed and default state is

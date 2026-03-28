@@ -87,6 +87,8 @@ export class RemoteAgent {
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }) => void;
 	/** Callback fired when a setup proposal is detected in an assistant message. */
 	onSetupProposal?: (proposal: { action: string; content: string }) => void;
+	/** Callback fired when a workflow proposal is detected in an assistant message. */
+	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }) => void;
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
 	/** Callback fired when the server-side prompt queue changes. */
