@@ -119,13 +119,19 @@ export class CostPopover extends LitElement {
 			? "right:0;"
 			: "left:0;";
 
+		// Use top positioning (below trigger) for goal dashboard, bottom (above) for session stats bar
+		const posStyle = this.goalId
+			? `top:100%;margin-top:6px;`
+			: `bottom:100%;margin-bottom:6px;`;
+
 		return html`
 			<div style="position:fixed;inset:0;z-index:40;" @click=${() => this.dispatchEvent(new Event("close"))}></div>
 			<div style="
-				position:absolute;bottom:100%;${anchorStyle}margin-bottom:6px;z-index:50;
+				position:absolute;${posStyle}${anchorStyle}z-index:50;
 				background:var(--popover);color:var(--popover-foreground);
 				border:1px solid var(--border);border-radius:8px;
 				padding:12px 14px;min-width:300px;max-width:400px;
+				max-height:70vh;overflow-y:auto;
 				box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:12px;
 			">
 				${this._loading ? html`<div style="text-align:center;padding:12px;color:var(--muted-foreground)">Loading…</div>` : nothing}
