@@ -48,10 +48,10 @@ export interface WorktreeResult {
  * Fully async — the `git worktree add`, dependency setup, and `git push`
  * are all awaited without blocking the Node.js event loop.
  *
- * @param setupCommand — custom worktree setup command from project config
- *   (`worktree_setup_command`). If provided, runs this instead of the default
- *   npm logic. If empty string, skips setup entirely. If undefined, uses the
- *   default: copy node_modules from the source repo, falling back to npm ci.
+ * @param setupCommand — worktree setup command from project config
+ *   (`worktree_setup_command`). If provided, runs this shell command in the
+ *   worktree directory. If empty string or undefined/not configured, skips
+ *   setup entirely — no implicit npm/pip/cargo assumptions.
  */
 export async function createWorktree(repoPath: string, branchName: string, setupCommand?: string): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
@@ -71,10 +71,10 @@ export async function createWorktree(repoPath: string, branchName: string, setup
 		cwd: repoPath,
 	});
 
-	// Set up dependencies in the new worktree.
-	// Read project config for custom setup command if none was explicitly provided.
+	// Set up dependencies in the new worktree (only if configured).
+	// Reads `worktree_setup_command` from project.yaml. If not set, does nothing.
 	if (!process.env.BOBBIT_SKIP_NPM_CI) {
-		const cmd = setupCommand !== undefined ? setupCommand : readWorktreeSetupCommand();
+		const cmd = setupCommand !== undefined ? setupCommand : (readWorktreeSetupCommand() ?? "");
 		await setupWorktreeDeps(repoPath, worktreePath, cmd);
 	}
 
@@ -93,78 +93,25 @@ export async function createWorktree(repoPath: string, branchName: string, setup
 }
 
 /**
- * Set up dependencies in a new worktree.
- *
- * If `setupCommand` is provided (from project config `worktree_setup_command`),
- * runs that shell command in the worktree directory.
- * If `setupCommand` is empty string, skips setup entirely.
- * If `setupCommand` is undefined, uses the default npm strategy:
- *   1. Copy node_modules from the source repo (fast — same branch, same deps)
- *   2. Run `npm ci` as a fallback if the copy fails or node_modules doesn't exist
+ * Run the worktree setup command (from project config `worktree_setup_command`).
+ * If the command is empty, does nothing. The command runs as a shell command
+ * in the worktree directory with SOURCE_REPO env var set to the original repo path.
  */
-async function setupWorktreeDeps(repoPath: string, worktreePath: string, setupCommand?: string): Promise<void> {
-	// Explicit custom command from project config
-	if (setupCommand !== undefined) {
-		if (setupCommand === "") return; // empty string = skip setup
-		try {
-			await execFile(process.platform === "win32" ? "cmd" : "sh",
-				process.platform === "win32" ? ["/c", setupCommand] : ["-c", setupCommand],
-				{
-					cwd: worktreePath,
-					timeout: 120_000,
-					env: { ...process.env, SOURCE_REPO: repoPath },
-				},
-			);
-		} catch (err) {
-			console.warn(`[git] Custom worktree setup command failed (non-fatal):`, err);
-		}
-		return;
-	}
-
-	// Default npm strategy: copy node_modules, fallback to npm ci
-	if (!fs.existsSync(path.join(worktreePath, "package-lock.json"))) return;
-
-	const srcNodeModules = path.join(repoPath, "node_modules");
-	const dstNodeModules = path.join(worktreePath, "node_modules");
-
-	// Try copying node_modules from source repo first — much faster than npm ci.
-	// Since the worktree starts at HEAD (same commit as source), dependencies match.
-	// NOTE: Never use symlinks/junctions — worktree cleanup can follow the link
-	// and destroy the source repo's node_modules.
-	if (fs.existsSync(srcNodeModules)) {
-		try {
-			if (process.platform === "win32") {
-				// robocopy is faster than fs.cp for large dirs; exit code 1 = files copied (success)
-				const { status } = await new Promise<{ status: number }>((resolve) => {
-					const proc = require("node:child_process").spawn(
-						"robocopy", [srcNodeModules, dstNodeModules, "/E", "/MT:8", "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS", "/NP"],
-						{ stdio: "ignore" },
-					);
-					proc.on("close", (code: number) => resolve({ status: code ?? 1 }));
-				});
-				// robocopy: 0 = nothing copied, 1 = files copied, >=8 = error
-				if (status >= 8) throw new Error(`robocopy failed with exit code ${status}`);
-			} else {
-				await fs.promises.cp(srcNodeModules, dstNodeModules, { recursive: true });
-			}
-			console.log(`[git] Copied node_modules to worktree (fast path)`);
-			return; // Success — skip npm ci
-		} catch (err) {
-			console.warn(`[git] Failed to copy node_modules, falling back to npm ci:`, err);
-			// Clean up partial copy before npm ci
-			try { await fs.promises.rm(dstNodeModules, { recursive: true, force: true }); } catch { /* ignore */ }
-		}
-	}
-
-	// Fallback: npm ci
+async function setupWorktreeDeps(repoPath: string, worktreePath: string, setupCommand: string): Promise<void> {
+	if (!setupCommand) return;
 	try {
-		await execFile("npm", ["ci", "--prefer-offline", "--no-audit", "--no-fund"], {
-			cwd: worktreePath,
-			timeout: 120_000,
-			...(process.platform === "win32" ? { shell: true } : {}),
-		});
-	} catch {
-		// Non-fatal — agent can npm install manually
+		console.log(`[git] Running worktree setup command: ${setupCommand}`);
+		await execFile(process.platform === "win32" ? "cmd" : "sh",
+			process.platform === "win32" ? ["/c", setupCommand] : ["-c", setupCommand],
+			{
+				cwd: worktreePath,
+				timeout: 120_000,
+				env: { ...process.env, SOURCE_REPO: repoPath },
+			},
+		);
+		console.log(`[git] Worktree setup command completed`);
+	} catch (err) {
+		console.warn(`[git] Worktree setup command failed (non-fatal):`, err);
 	}
 }
 

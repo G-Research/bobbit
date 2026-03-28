@@ -120,6 +120,33 @@ UI changes (`src/ui/`, `src/app/`) hot-reload via Vite after the pull. Server ch
 
 You cannot `git checkout master` from a goal worktree (it's already checked out in the primary worktree). Instead, push to remote and pull from the primary worktree as shown above.
 
+### Worktree setup command
+
+When a goal or team agent creates a new git worktree, Bobbit optionally runs a setup command to install dependencies. This is configured via `worktree_setup_command` in `.bobbit/config/project.yaml`.
+
+**If `worktree_setup_command` is not set, no setup runs.** This is intentional — Bobbit does not assume your project uses npm, pip, cargo, or any other package manager. You must explicitly configure it.
+
+The command runs as a shell command in the new worktree directory with the `SOURCE_REPO` environment variable set to the original repo path (useful for copying build artifacts or caches). It has a 2-minute timeout and failures are non-fatal.
+
+Examples:
+
+```yaml
+# Node.js project
+worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
+
+# Python project
+worktree_setup_command: python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# Rust project
+worktree_setup_command: cargo fetch
+
+# Copy node_modules from source repo (fastest for npm — avoids full reinstall)
+worktree_setup_command: robocopy "%SOURCE_REPO%\node_modules" node_modules /E /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP & if %ERRORLEVEL% LSS 8 exit /b 0
+
+# No dependencies to install
+worktree_setup_command: ""
+```
+
 ## Disk state summary
 
 All per-project state lives under `<project-root>/.bobbit/`:
@@ -133,7 +160,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `workflows/*.yaml` | `WorkflowStore` | Workflow templates (gate DAGs, verification configs) |
 | `personalities/*.yaml` | `PersonalityStore` | Personality definitions |
 | `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
-| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, custom config) |
+| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, custom config) |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompt definitions (goal, role, tool, personality, staff, setup) |
 
 
