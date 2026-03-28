@@ -99,51 +99,37 @@ let _stickToBottom = true;
 let _isAutoScrolling = false;
 let _autoScrollTimer;
 let _lastScrollHeight = scrollContainer.scrollHeight;
-let _collapseCompensation = 0;
-
 // The resize handler — same logic as the ResizeObserver callback in AgentInterface.ts.
 function handleResize() {
   if (!scrollContainer) return;
   const newScrollHeight = scrollContainer.scrollHeight;
   const delta = newScrollHeight - _lastScrollHeight;
-  _lastScrollHeight = newScrollHeight;
+
+  if (delta < 0) {
+    // Content shrunk (collapse) — apply post-collapse clamp.
+    // Let the browser naturally adjust scrollTop, then check:
+    // if bottom of content is above the viewport midpoint, scroll
+    // so latest message is at the bottom of the viewport.
+    _lastScrollHeight = newScrollHeight;
+    const { scrollTop, clientHeight } = scrollContainer;
+    const contentBottom = newScrollHeight - scrollTop;
+    if (contentBottom < clientHeight / 2) {
+      _isAutoScrolling = true;
+      scrollContainer.scrollTop = newScrollHeight - clientHeight;
+      clearTimeout(_autoScrollTimer);
+      _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
+    }
+    return;
+  }
 
   if (_stickToBottom) {
-    if (delta < 0) {
-      // Content shrunk (e.g. tool collapsed) while stuck to bottom.
-      // Add bottom padding to compensate so scrollHeight is maintained
-      // and the browser doesn't clamp scrollTop (which causes a jolt).
-      const wrapper = document.getElementById('content-wrapper');
-      if (wrapper) {
-        _collapseCompensation += Math.abs(delta);
-        wrapper.style.paddingBottom = _collapseCompensation + 'px';
-      }
-      _lastScrollHeight = scrollContainer.scrollHeight;
-      _isAutoScrolling = true;
-      scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    } else if (delta > 0 && _collapseCompensation > 0) {
-      // Content grew while we have compensation padding — absorb growth
-      const wrapper = document.getElementById('content-wrapper');
-      if (wrapper) {
-        const absorbed = Math.min(delta, _collapseCompensation);
-        _collapseCompensation -= absorbed;
-        wrapper.style.paddingBottom = _collapseCompensation + 'px';
-        _lastScrollHeight = scrollContainer.scrollHeight;
-      }
-      _isAutoScrolling = true;
-      scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    } else {
-      _isAutoScrolling = true;
-      scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    }
-    clearTimeout(_autoScrollTimer);
-    _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
-  } else if (delta < 0) {
-    // Content shrunk — adjust scroll to keep viewport stable
+    _lastScrollHeight = newScrollHeight;
     _isAutoScrolling = true;
-    scrollContainer.scrollTop += delta;
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
     clearTimeout(_autoScrollTimer);
     _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
+  } else {
+    _lastScrollHeight = newScrollHeight;
   }
 }
 
@@ -170,8 +156,7 @@ window.__getState = () => ({
   clientHeight: scrollContainer.clientHeight,
   stickToBottom: _stickToBottom,
   lastScrollHeight: _lastScrollHeight,
-  collapseCompensation: _collapseCompensation,
-  paddingBottom: document.getElementById('content-wrapper').style.paddingBottom,
+
 });
 
 window.__collapseElement = (id) => {
