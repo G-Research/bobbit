@@ -297,7 +297,7 @@ export class ToolManager {
 	}
 
 	/** Updates tool metadata (description, group, docs) by writing directly to the YAML file. */
-	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string }): boolean {
+	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string }): boolean {
 		const tools = loadToolDefinitions();
 		const base = tools.find((t) => t.name === name);
 		if (!base) return false;
@@ -309,6 +309,7 @@ export class ToolManager {
 			if (updates.description !== undefined) doc.set("description", updates.description);
 			if (updates.group !== undefined) doc.set("group", updates.group);
 			if (updates.docs !== undefined) doc.set("docs", updates.docs);
+			if (updates.detail_docs !== undefined) doc.set("detail_docs", updates.detail_docs);
 
 			fs.writeFileSync(base.filePath, doc.toString(), "utf-8");
 			return true;

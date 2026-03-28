@@ -875,6 +875,7 @@ async function handleApiRoute(
 				description: body.description,
 				group: body.group,
 				docs: body.docs,
+				detail_docs: body.detail_docs,
 			});
 			if (!ok) { json({ error: "Tool not found" }, 404); return; }
 			json({ ok: true });
