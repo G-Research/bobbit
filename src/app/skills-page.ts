@@ -282,7 +282,7 @@ export function renderSkillsPage(): TemplateResult {
 						<h2 class="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
 							${icon(BookOpen, "sm")}
 							Slash Skills
-							<span class="text-xs font-normal text-muted-foreground">(from .claude/skills/ and .bobbit/skills/)</span>
+							<span class="text-xs font-normal text-muted-foreground">(from .claude/skills/, .bobbit/skills/, and custom directories)</span>
 						</h2>
 						${userSkills.length > 0
 							? renderSkillList(userSkills)

@@ -308,8 +308,8 @@ export function discoverSlashSkills(
 }
 
 /** Look up a single slash skill by name. */
-export function getSlashSkill(cwd: string, name: string): SlashSkill | undefined {
-	return discoverSlashSkills(cwd).find((s) => s.name === name);
+export function getSlashSkill(cwd: string, name: string, projectConfigStore?: { get(key: string): string | undefined }): SlashSkill | undefined {
+	return discoverSlashSkills(cwd, projectConfigStore).find((s) => s.name === name);
 }
 
 /**
