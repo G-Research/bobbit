@@ -3,9 +3,11 @@ import path from "node:path";
 import { parse, parseDocument } from "yaml";
 
 export interface ToolProvider {
-	type: 'builtin' | 'bobbit-extension';
+	type: 'builtin' | 'bobbit-extension' | 'mcp';
 	tool?: string;       // for builtin
 	extension?: string;  // for bobbit-extension
+	server?: string;     // for mcp
+	mcpTool?: string;    // for mcp
 }
 
 /** Base tool definition loaded from YAML */
@@ -128,12 +130,28 @@ function loadToolDefinitions(): BaseToolInfo[] {
  * Metadata updates write directly to the YAML files.
  */
 export class ToolManager {
+	private externalTools = new Map<string, { name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>();
+
 	constructor() {}
+
+	/** Register tools from external sources (e.g. MCP servers). */
+	registerExternalTools(tools: Array<{ name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>): void {
+		for (const tool of tools) {
+			this.externalTools.set(tool.name, tool);
+		}
+	}
+
+	/** Remove all external tools whose name starts with the given prefix. */
+	removeExternalTools(prefix: string): void {
+		for (const key of this.externalTools.keys()) {
+			if (key.startsWith(prefix)) this.externalTools.delete(key);
+		}
+	}
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */
 	getAvailableTools(): ToolInfo[] {
 		const tools = loadToolDefinitions();
-		return tools.map((tool) => ({
+		const result = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
 			group: tool.group,
@@ -141,10 +159,25 @@ export class ToolManager {
 			hasRenderer: !!tool.renderer,
 			rendererFile: tool.renderer,
 		}));
+		for (const ext of this.externalTools.values()) {
+			result.push({
+				name: ext.name,
+				description: ext.description,
+				group: ext.group,
+				docs: ext.docs,
+				hasRenderer: false,
+				rendererFile: undefined,
+			});
+		}
+		return result;
 	}
 
 	/** Returns a single tool's full detail, or undefined if not found. */
 	getToolByName(name: string): ToolInfo | undefined {
+		const ext = this.externalTools.get(name);
+		if (ext) {
+			return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, hasRenderer: false, rendererFile: undefined };
+		}
 		const tools = loadToolDefinitions();
 		const base = tools.find((t) => t.name === name);
 		if (!base) return undefined;
@@ -187,6 +220,16 @@ export class ToolManager {
 			});
 		}
 
+		// Include external tools (e.g. MCP)
+		for (const ext of this.externalTools.values()) {
+			if (toolNames && !toolNames.includes(ext.name)) continue;
+			const group = ext.group;
+			const summary = ext.summary ?? ext.description;
+			const docs = ext.docs?.trim();
+			if (!grouped.has(group)) grouped.set(group, []);
+			grouped.get(group)!.push({ name: ext.name, summary, docs });
+		}
+
 		if (grouped.size === 0) return "";
 
 		// Part 1: Tool Overview
@@ -219,6 +262,8 @@ export class ToolManager {
 
 	/** Returns the provider info for a tool, or undefined if not found. */
 	getToolProvider(name: string): ToolProvider | undefined {
+		const ext = this.externalTools.get(name);
+		if (ext) return ext.provider;
 		const tools = loadToolDefinitions();
 		const base = tools.find((t) => t.name === name);
 		return base?.provider;
@@ -231,12 +276,16 @@ export class ToolManager {
 		for (const tool of tools) {
 			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir });
 		}
+		for (const [name, ext] of this.externalTools) {
+			map.set(name, { ...ext.provider, groupDir: '' });
+		}
 		return map;
 	}
 
 	/** Returns all tool names from YAML definitions. */
 	getAllToolNames(): string[] {
-		return loadToolDefinitions().map((t) => t.name);
+		const yamlNames = loadToolDefinitions().map((t) => t.name);
+		return [...yamlNames, ...this.externalTools.keys()];
 	}
 
 	/** Updates tool metadata (description, group, docs) by writing directly to the YAML file. */

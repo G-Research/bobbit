@@ -338,6 +338,13 @@ export function createGateway(config: GatewayConfig) {
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
 
+			// Initialize MCP servers
+			try {
+				await sessionManager.initMcp(process.cwd());
+			} catch (err) {
+				console.error('[mcp] MCP init failed:', (err as Error).message);
+			}
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 			sessionManager.startPurgeSchedule();
@@ -3030,6 +3037,91 @@ async function handleApiRoute(
 	const staffSessionsMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/sessions$/);
 	if (staffSessionsMatch && req.method === "GET") {
 		json({ error: "Deprecated. Staff agents have a single permanent session. Use GET /api/staff/:id." }, 410);
+		return;
+	}
+
+	// GET /api/mcp-servers
+	if (url.pathname === "/api/mcp-servers" && req.method === "GET") {
+		const mcpManager = sessionManager.getMcpManager();
+		if (!mcpManager) {
+			json([]);
+			return;
+		}
+		const statuses = mcpManager.getServerStatuses();
+		const toolInfos = mcpManager.getToolInfos();
+		const result = statuses.map(s => ({
+			...s,
+			tools: toolInfos.filter(t => t.serverName === s.name).map(t => ({ name: t.name, description: t.description })),
+		}));
+		json(result);
+		return;
+	}
+
+	// POST /api/mcp-servers/:name/restart
+	const mcpRestartMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/restart$/);
+	if (mcpRestartMatch && req.method === "POST") {
+		const mcpManager = sessionManager.getMcpManager();
+		if (!mcpManager) {
+			json({ error: "MCP not initialized" }, 500);
+			return;
+		}
+		const serverName = decodeURIComponent(mcpRestartMatch[1]);
+		let statuses = mcpManager.getServerStatuses();
+		let existing = statuses.find(s => s.name === serverName);
+		if (!existing || !existing.config) {
+			// Re-discover servers in case config was added after startup
+			const discovered = mcpManager.discoverServers();
+			if (!discovered[serverName]) {
+				json({ error: `MCP server "${serverName}" not found` }, 404);
+				return;
+			}
+			// Connect the newly discovered server
+			await mcpManager.connectServer(serverName, discovered[serverName]);
+		} else {
+			await mcpManager.disconnectServer(serverName);
+			await mcpManager.connectServer(serverName, existing.config);
+		}
+		// Re-register MCP tools with ToolManager
+		if (toolManager) {
+			toolManager.removeExternalTools("mcp__");
+			const infos = mcpManager.getToolInfos();
+			toolManager.registerExternalTools(infos.map(info => ({
+				name: info.name,
+				description: info.description,
+				summary: info.description,
+				group: info.group,
+				docs: info.docs,
+				provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
+			})));
+		}
+		const updated = mcpManager.getServerStatuses().find(s => s.name === serverName);
+		json({ ok: true, ...updated });
+		return;
+	}
+
+	// POST /api/internal/mcp-call
+	if (url.pathname === "/api/internal/mcp-call" && req.method === "POST") {
+		const mcpManager = sessionManager.getMcpManager();
+		if (!mcpManager) {
+			json({ error: "MCP not initialized" }, 500);
+			return;
+		}
+		try {
+			const body = await new Promise<string>((resolve) => {
+				let data = "";
+				req.on("data", (chunk: Buffer) => data += chunk.toString());
+				req.on("end", () => resolve(data));
+			});
+			const { tool, args } = JSON.parse(body);
+			if (!tool) {
+				json({ error: "Missing 'tool' field" }, 400);
+				return;
+			}
+			const result = await mcpManager.callTool(tool, args || {});
+			json(result);
+		} catch (err) {
+			json({ error: (err as Error).message }, 500);
+		}
 		return;
 	}
 

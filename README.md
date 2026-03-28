@@ -101,6 +101,9 @@ Control what agents can do (tool access, system prompts) and how they communicat
 ### Skills
 Reusable templates for isolated sub-agents: code review, security review, test reports. Invoke them from any session for structured, repeatable outputs.
 
+### MCP Server Integration
+Use any [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server with Bobbit. Drop a `.mcp.json` in your project root (same format as Claude Code) and Bobbit auto-discovers, connects, and exposes all MCP tools — appearing in the Tools UI, system prompts, and role-based access control.
+
 ### Cost Tracking
 Per-session token usage and cost, aggregated to goal and task level. Always know what you're spending.
 
