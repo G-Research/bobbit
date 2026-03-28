@@ -11,6 +11,7 @@ import { html, type TemplateResult } from "lit";
 import {
 	BODY_GRID, BODY_WIDTH, BODY_HEIGHT,
 	EYE_POSITIONS,
+	SHADOW_REST,
 	type PaletteKey, type SpritePixel, type EyeGaze, type ShadowPixel,
 	type AccessorySpriteData,
 	ACCESSORIES as SPRITE_ACCESSORIES,
@@ -299,6 +300,120 @@ export function renderChatBlob(opts: ChatBlobOptions): TemplateResult {
 			<div class="bobbit-blob__shadow"></div>
 		</div>
 	</div>`;
+}
+
+// ============================================================================
+// CANVAS CHAT BLOB RENDERER (for preview / comparison)
+// ============================================================================
+
+/**
+ * Render a chat blob using canvas <img> elements instead of CSS box-shadow.
+ * Uses the same container classes for filter/hue-rotate but replaces pixel
+ * rendering with canvas. Eye animations won't run (static center gaze).
+ */
+export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
+	const { blobClass, accClass = "", hueRotate = 0 } = opts;
+
+	// Body + eyes at center gaze
+	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
+
+	// Shadow
+	const shadowCanvas = document.createElement("canvas");
+	shadowCanvas.width = 11;
+	shadowCanvas.height = 11;
+	const sctx = shadowCanvas.getContext("2d")!;
+	for (const [x, y, a] of SHADOW_REST) {
+		sctx.fillStyle = `rgba(0,0,0,${a})`;
+		sctx.fillRect(x, y, 1, 1);
+	}
+	const shadowUrl = shadowCanvas.toDataURL();
+
+	// Accessory — parse accClass like "bobbit-crowned" → "crown"
+	let accImg: TemplateResult | string = "";
+	if (accClass) {
+		const accId = accClass.replace("bobbit-", "").replace("crowned", "crown");
+		const spriteData = SPRITE_ACCESSORIES[accId];
+		if (spriteData && spriteData.pixels.length > 0) {
+			const pixels = spriteData.pixels.map(([x, y, c]): SpritePixel =>
+				[x, y + spriteData.blobYAdjust, c]);
+			let minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+			for (const [x, y] of pixels) {
+				if (y < minY) minY = y;
+				if (x > maxX) maxX = x;
+				if (y > maxY) maxY = y;
+			}
+			const yShift = Math.min(0, minY);
+			const w = maxX + 1, h = maxY - yShift + 1;
+			const c = document.createElement("canvas");
+			c.width = w;
+			c.height = h;
+			const ctx = c.getContext("2d")!;
+			for (const [x, y, color] of pixels) {
+				ctx.fillStyle = color;
+				ctx.fillRect(x, y - yShift, 1, 1);
+			}
+			// Scale to 4× like the body
+			const accHueFilter = `filter:hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));`;
+			const noFilter = accId === "flask" ? "" : accHueFilter;
+			accImg = html`<img src="${c.toDataURL()}" width="${w}" height="${h}" style="width:${w * 4}px;height:${h * 4}px;position:absolute;left:${18}px;top:${8 + (-yShift * 4)}px;z-index:1;image-rendering:pixelated;${noFilter}">`;
+		}
+	}
+
+	// The box-shadow blob uses a 1px element with box-shadow extending outward, scaled 4×.
+	// For canvas, we render at native pixel size and use CSS to scale up.
+	// Body: 10×9 native → 40×36 CSS px at 4× scale
+	const bodyW = BODY_WIDTH * 4, bodyH = BODY_HEIGHT * 4;
+	const shadowW = 11 * 4, shadowH = 11 * 4;
+
+	return html`<div style="--bobbit-hue-rotate:${hueRotate}deg;display:inline-block;padding:8px 20px 40px 20px;">
+		<div class="${blobClass}">
+			<img src="${bodyUrl}" width="${BODY_WIDTH}" height="${BODY_HEIGHT}" style="width:${bodyW}px;height:${bodyH}px;position:relative;z-index:0;margin:8px 18px 28px 18px;image-rendering:pixelated;">
+			${accImg}
+			<img src="${shadowUrl}" width="11" height="11" style="width:${shadowW}px;height:${shadowH}px;position:absolute;bottom:0;left:18px;image-rendering:pixelated;">
+		</div>
+	</div>`;
+}
+
+// ============================================================================
+// CANVAS IDLE BLOB (role manager / comparison)
+// ============================================================================
+
+/**
+ * Render an idle blob using canvas instead of CSS box-shadow.
+ * Same layout as renderIdleBlob but with canvas pixel rendering.
+ */
+export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
+	const { accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
+	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
+	const naturalSize = 76;
+	const s = size / naturalSize;
+	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
+	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
+	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
+
+	// Body canvas — render at native pixel size, scale via CSS
+	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
+	const bodyW = BODY_WIDTH * 4, bodyH = BODY_HEIGHT * 4;
+
+	return html`
+		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
+			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
+				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
+					<img src="${bodyUrl}" width="${BODY_WIDTH}" height="${BODY_HEIGHT}" style="width:${bodyW}px;height:${bodyH}px;margin:8px 18px 28px 18px;image-rendering:pixelated;">
+					<div class="bobbit-blob__crown"></div>
+					<div class="bobbit-blob__bandana"></div>
+					<div class="bobbit-blob__magnifier"></div>
+					<div class="bobbit-blob__palette"></div>
+					<div class="bobbit-blob__pencil"></div>
+					<div class="bobbit-blob__shield"></div>
+					<div class="bobbit-blob__set-square"></div>
+					<div class="bobbit-blob__flask"></div>
+					<div class="bobbit-blob__wand"></div>
+					<div class="bobbit-blob__wizard-hat"></div>
+				</div>
+			</div>
+		</div>
+	`;
 }
 
 // ============================================================================

@@ -128,7 +128,9 @@
 <script type="module">
 import { render, html, nothing } from "/node_modules/lit/index.js";
 import {
-  renderSidebarBobbit, renderSidebarBobbitCanvas, renderChatBlob, renderIdleBlob,
+  renderSidebarBobbit, renderSidebarBobbitCanvas,
+  renderChatBlob, renderChatBlobCanvas,
+  renderIdleBlob, renderIdleBlobCanvas,
   NO_ACCESSORY, BOBBIT_HUE_ROTATIONS, ACCESSORY_DEFS
 } from "/src/ui/bobbit-render.ts";
 import { ACCESSORIES, ACCESSORY_IDS } from "/src/app/session-colors.ts";
@@ -314,6 +316,47 @@ function renderComparison(hue) {
     <div class="row">${HUES.map(h => pair(h+'°', { status: 'streaming', hueRotate: h }))}</div>
     <h3>14 hue colours with crown</h3>
     <div class="row">${HUES.map(h => pair(h+'°', { status: 'streaming', hueRotate: h, accessory: acc('crown') }))}</div>
+
+    <h3 style="margin-top:24px;border-top:2px solid var(--border);padding-top:12px;">Chat Blobs — box-shadow left, canvas right</h3>
+    <div class="row" style="gap:24px;">
+      ${[['active', 'bobbit-blob', ''], ['idle', 'bobbit-blob bobbit-blob--idle', ''],
+        ['crown', 'bobbit-blob', 'bobbit-crowned'], ['bandana', 'bobbit-blob', 'bobbit-bandana'],
+        ['wand', 'bobbit-blob', 'bobbit-wand'], ['flask', 'bobbit-blob', 'bobbit-flask'],
+        ['wizard-hat', 'bobbit-blob', 'bobbit-wizard-hat'],
+      ].map(([label, cls, ac]) => html`
+        <div class="cell">
+          <div style="display:flex;gap:4px;">
+            <div style="border:1px solid var(--border);border-radius:4px;">${renderChatBlob({ blobClass: cls, accClass: ac, hueRotate: hue })}</div>
+            <div style="border:1px solid var(--ring,#888);border-radius:4px;">${renderChatBlobCanvas({ blobClass: cls, accClass: ac, hueRotate: hue })}</div>
+          </div>
+          <span class="cell-label">${label}</span>
+        </div>
+      `)}
+    </div>
+
+    <h3>Chat Blobs — 14 hue colours</h3>
+    <div class="row" style="gap:8px;">${HUES.map(h => html`
+      <div class="cell">
+        <div style="display:flex;gap:2px;">
+          <div style="border:1px solid var(--border);border-radius:4px;">${renderChatBlob({ blobClass: 'bobbit-blob', hueRotate: h })}</div>
+          <div style="border:1px solid var(--ring,#888);border-radius:4px;">${renderChatBlobCanvas({ blobClass: 'bobbit-blob', hueRotate: h })}</div>
+        </div>
+        <span class="cell-label">${h}°</span>
+      </div>
+    `)}</div>
+
+    <h3 style="margin-top:24px;border-top:2px solid var(--border);padding-top:12px;">Role Manager — box-shadow left, canvas right</h3>
+    <div class="row" style="gap:16px;">
+      ${ACC_IDS.map((id, i) => html`
+        <div class="cell">
+          <div style="display:flex;gap:4px;align-items:center;">
+            <div style="border:1px solid var(--border);border-radius:4px;padding:4px;">${renderIdleBlob({ accId: id, accClass: accClass(id), size: 42, hueIndex: i, phaseIndex: i })}</div>
+            <div style="border:1px solid var(--ring,#888);border-radius:4px;padding:4px;">${renderIdleBlobCanvas({ accId: id, accClass: accClass(id), size: 42, hueIndex: i, phaseIndex: i })}</div>
+          </div>
+          <span class="cell-label">${id}</span>
+        </div>
+      `)}
+    </div>
   `;
   render(tpl, document.getElementById('comparison'));
 }
