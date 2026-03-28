@@ -19,7 +19,8 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
-import { getAigwUrl, getAigwModels, modelRecencyRank, deriveName } from "./aigw-manager.js";
+import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
+import { modelRecencyRank } from "./model-registry.js";
 import { createWorktree } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
@@ -1375,8 +1376,16 @@ export class SessionManager {
 
 		// Fall back to aigw best-ranked model when gateway is configured
 		const aigwUrl = getAigwUrl(this.preferencesStore);
-		const aigwModels = getAigwModels(this.preferencesStore);
-		if (!aigwUrl || !aigwModels || aigwModels.length === 0) return;
+		if (!aigwUrl) return;
+
+		let aigwModels;
+		try {
+			aigwModels = await discoverAigwModels(aigwUrl);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to discover aigw models for auto-selection:`, err);
+			return;
+		}
+		if (aigwModels.length === 0) return;
 
 		try {
 			const modelToUse = [...aigwModels].sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id))[0];

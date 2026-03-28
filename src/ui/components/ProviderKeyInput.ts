@@ -93,6 +93,12 @@ export class ProviderKeyInput extends LitElement {
 		if (success) {
 			try {
 				await getAppStorage().providerKeys.set(this.provider, this.keyInput);
+				// Also store server-side for unified model registry auth detection
+				fetch(`/api/provider-keys/${encodeURIComponent(this.provider)}`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ key: this.keyInput }),
+				}).catch(() => {});
 				this.hasKey = true;
 				this.inputChanged = false;
 				this.requestUpdate();

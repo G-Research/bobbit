@@ -7,9 +7,7 @@ import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import type { Model } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { state } from "lit/decorators.js";
-import { getAppStorage } from "../storage/app-storage.js";
 import type { CustomProvider, CustomProviderType } from "../storage/stores/custom-providers-store.js";
-import { discoverModels } from "../utils/model-discovery.js";
 
 export class CustomProviderDialog extends DialogBase {
 	private provider?: CustomProvider;
@@ -89,16 +87,23 @@ export class CustomProviderDialog extends DialogBase {
 		this.discoveredModels = [];
 
 		try {
-			const models = await discoverModels(
-				this.type as "ollama" | "llama.cpp" | "vllm" | "lmstudio",
-				this.baseUrl,
-				this.apiKey || undefined,
-			);
+			// Test connection without persisting the provider
+			const testConfig = {
+				id: this.provider?.id || crypto.randomUUID(),
+				name: this.name || this.type,
+				type: this.type,
+				baseUrl: this.baseUrl,
+				apiKey: this.apiKey || undefined,
+			};
+			const res = await fetch("/api/custom-providers/test", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(testConfig),
+			});
+			if (!res.ok) throw new Error("Failed to test connection");
 
-			this.discoveredModels = models.map((model) => ({
-				...model,
-				provider: this.name || this.type,
-			}));
+			const data = await res.json();
+			this.discoveredModels = data.models || [];
 
 			this.testError = "";
 		} catch (error) {
@@ -117,9 +122,7 @@ export class CustomProviderDialog extends DialogBase {
 		}
 
 		try {
-			const storage = getAppStorage();
-
-			const provider: CustomProvider = {
+			const provider = {
 				id: this.provider?.id || crypto.randomUUID(),
 				name: this.name,
 				type: this.type,
@@ -128,7 +131,12 @@ export class CustomProviderDialog extends DialogBase {
 				models: this.isAutoDiscoveryType() ? undefined : this.provider?.models || [],
 			};
 
-			await storage.customProviders.set(provider);
+			const res = await fetch("/api/custom-providers", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(provider),
+			});
+			if (!res.ok) throw new Error("Failed to save provider");
 
 			if (this.onSaveCallback) {
 				this.onSaveCallback();
