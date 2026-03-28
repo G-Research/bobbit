@@ -65,6 +65,29 @@ promptTemplate: |-
   - Use headings to create scannable structure.
   - Write for developers who are already familiar with the tech stack but new to this project.
 
+  ## Documentation quality standards
+
+  Your documentation will be verified against these standards. Follow them strictly:
+
+  1. **Hierarchy of detail** — Top-level files (AGENTS.md, README.md) should give concise summaries
+     and link to specific docs/*.md files for detail. Don't cram detailed explanations into AGENTS.md.
+     Add cross-references between related docs.
+
+  2. **Resilience to future changes** — Documentation must NOT be fragile. Never use:
+     - Hardcoded line numbers (e.g. "see line 42 of server.ts")
+     - Hardcoded counts that will drift (e.g. "the 15 tool groups")
+     - Exact file paths to files that are likely to move — prefer describing the module/concept
+       and its location pattern instead
+     - Version-specific claims without noting the version
+
+  3. **Explain the WHY, not just the what/how** — Every feature and design decision should explain
+     the reasoning behind it. "Sessions persist to disk" is what. "Sessions persist to disk so they
+     survive server restarts and the user doesn't lose context" is why. Always include motivation.
+
+  4. **Big-picture context** — Before diving into details, briefly explain where a feature fits in
+     the broader architecture, what problem it solves, and how it relates to adjacent features.
+     Orient the reader before getting into specifics.
+
   ## Process
 
   1. Read the relevant source code thoroughly before writing. Understand the actual behavior — don't guess.

@@ -91,9 +91,69 @@ gates:
           4. Secrets handling — no hardcoded secrets, tokens, or credentials
           5. Dependency risks — any new dependencies with known vulnerabilities?
 
+  - id: documentation
+    name: Documentation
+    depends_on: [implementation]
+    verify:
+      - name: "Documentation coverage"
+        type: llm-review
+        prompt: |
+          Review documentation for the changes on branch {{branch}} vs {{master}}.
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see all changes.
+          Read the key documentation files: AGENTS.md, README.md, and files in docs/.
+
+          The goal spec is:
+          {{goal_spec}}
+
+          **Check 1 — Every feature is documented:**
+          - Every new user-facing feature, API endpoint, config option, or behavioral change
+            introduced in this branch must be documented somewhere.
+          - If a feature is only described in code comments, that is NOT sufficient — it must
+            appear in a .md file (AGENTS.md, README.md, or a file in docs/).
+          - List any undocumented features.
+
+          **Check 2 — Existing documentation is updated:**
+          - If the changes modify behavior that is already documented, the documentation must
+            be updated to reflect the new behavior.
+          - Check for stale references: old API signatures, removed config options, renamed
+            files, changed defaults, altered workflows.
+          - List any stale documentation that was not updated.
+
+          **Check 3 — Documentation quality standards:**
+          Evaluate all new or modified documentation against these standards:
+
+          a) **Hierarchy of detail** — Top-level files (AGENTS.md, README.md) should give
+             concise summaries and link to specific docs/*.md files for detail. Detailed
+             explanations belong in docs/, not crammed into AGENTS.md. Check that new docs
+             follow this layered pattern and add cross-references where appropriate.
+
+          b) **Resilience to future changes** — Documentation must NOT be fragile. Flag:
+             - Hardcoded line numbers (e.g. "see line 42 of server.ts")
+             - Hardcoded counts that will drift (e.g. "the 15 tool groups")
+             - Exact file paths to files that are likely to move (prefer describing
+               the module/concept and its location pattern instead)
+             - Version-specific claims without noting the version
+
+          c) **Explains the WHY, not just the what/how** — Documentation should explain
+             the reasoning behind design decisions, not just describe the mechanics.
+             "Sessions persist to disk" is what. "Sessions persist to disk so they survive
+             server restarts and the user doesn't lose context" is why. Flag sections
+             that describe mechanics without motivation.
+
+          d) **Big-picture context** — New documentation should orient the reader by
+             connecting the feature to the broader system. Before diving into details,
+             briefly explain where this fits in the architecture, what problem it solves,
+             and how it relates to adjacent features. Flag documentation that jumps
+             straight into implementation details without context.
+
+          Summarize your findings with:
+          - PASS/FAIL for each of the 3 checks
+          - Specific items that need to be addressed (with file paths and descriptions)
+
   - id: ready-to-merge
     name: Ready to Merge
-    depends_on: [implementation]
+    depends_on: [documentation]
     verify:
       - name: "Branch pushed to remote"
         type: command
