@@ -2292,16 +2292,6 @@ html {
 	}
 }
 
-/* Entry + Exit + Idle states — no blink overlay */
-.bobbit-blob--enter .bobbit-blob__sprite::before,
-.bobbit-blob--enter-roll .bobbit-blob__sprite::before,
-.bobbit-blob--exit .bobbit-blob__sprite::before,
-.bobbit-blob--exit-roll .bobbit-blob__sprite::before,
-.bobbit-blob--idle .bobbit-blob__sprite::before {
-	animation: none !important;
-	opacity: 0 !important;
-}
-
 /* ===== Compaction animation — hydraulic press squash ===== */
 
 /* Build-up shake before compaction — vibrating anticipation */
@@ -2311,11 +2301,6 @@ html {
 }
 
 .bobbit-blob--compact-shake .bobbit-blob__shadow {
-	display: none !important;
-}
-
-/* No blink/overlays during shake */
-.bobbit-blob--compact-shake .bobbit-blob__sprite::before {
 	display: none !important;
 }
 
@@ -2351,11 +2336,6 @@ html {
    the shadow's right edge slide diagonally since it can't track the
    sprite's non-uniform transform. The squash reads fine without it. */
 .bobbit-blob--compacting .bobbit-blob__shadow {
-	display: none !important;
-}
-
-/* No overlays during compaction */
-.bobbit-blob--compacting .bobbit-blob__sprite::before {
 	display: none !important;
 }
 
@@ -2441,11 +2421,6 @@ html {
 	display: none !important;
 }
 
-.bobbit-blob--compact-pop .bobbit-blob__sprite::before {
-	animation: none !important;
-	opacity: 0 !important;
-}
-
 @keyframes blob-compact-pop {
 	/* Start from squashed */
 	0% {
@@ -2469,28 +2444,6 @@ html {
 	transform: scale(4) translateX(-7px);
 	animation: none !important;
 }
-
-/* Blink overlay — disabled; eyes now managed by canvas rendering */
-.bobbit-blob__sprite::before {
-	content: '';
-	position: absolute;
-	top: 4px;
-	left: 3px;
-	width: 4px;
-	height: 2px;
-	background: #8ec63f;
-	opacity: 0;
-	z-index: 1;
-	display: none;
-}
-
-@keyframes blob-blink-overlay {
-	0%, 92%, 96%, 100% { opacity: 0; }
-	93%, 95% { opacity: 1; }
-}
-
-/* Slow sine-wave light ripple across the sprite surface */
-/* Wave overlay removed — blue shimmer handled by blob-shimmer filter */
 
 /* Reptilian shimmer — subtle pearlescent skin shift */
 @keyframes blob-shimmer {

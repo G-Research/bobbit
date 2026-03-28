@@ -154,7 +154,7 @@ export class StreamingMessageContainer extends LitElement {
 		if (!canvas) return;
 		drawBobbitSprite(canvas, {
 			eyeState: this._eyeState,
-			scale: 4,
+			scale: 1,
 		});
 	}
 
@@ -171,7 +171,7 @@ export class StreamingMessageContainer extends LitElement {
 		const lookingUp = eyeState === 'up' || eyeState === 'blink-up';
 		const excludeTail = facingRight || lookingUp;
 
-		drawAccessoryCanvas(canvas, 'bandana', { scale: 4, excludeTail });
+		drawAccessoryCanvas(canvas, 'bandana', { scale: 1, excludeTail });
 
 		// Translate shift for eyes-up state (per design doc)
 		if (lookingUp) {
@@ -195,7 +195,7 @@ export class StreamingMessageContainer extends LitElement {
 			if (accId === 'bandana') {
 				this._repaintBandana();
 			} else {
-				drawAccessoryCanvas(canvas, accId, { scale: 4 });
+				drawAccessoryCanvas(canvas, accId, { scale: 1 });
 			}
 		}
 	}
