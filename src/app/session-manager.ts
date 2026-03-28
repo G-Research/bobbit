@@ -778,6 +778,21 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel.agentInterface.onGitFetch = () => {
 				refreshGitStatusForSession(sessionId, true);
 			};
+			state.chatPanel.agentInterface.onGitPush = async () => {
+				try {
+					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-push`, {
+						method: 'POST',
+					});
+					if (res.ok) {
+						refreshGitStatusForSession(sessionId);
+						return undefined;
+					}
+					const data = await res.json().catch(() => ({ error: 'Push failed' }));
+					return data.error || 'Push failed';
+				} catch (err) {
+					return err instanceof Error ? err.message : 'Network error';
+				}
+			};
 			state.chatPanel.agentInterface.onGitPull = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-pull`, {

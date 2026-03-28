@@ -33,6 +33,8 @@ export class GitStatusWidget extends LitElement {
     @state() private mergeMethod: 'merge' | 'squash' | 'rebase' = 'squash';
     @state() private pulling = false;
     @state() private pullError = '';
+    @state() private pushing = false;
+    @state() private pushError = '';
 
     private _dropdownEl: HTMLElement | null = null;
 
@@ -122,7 +124,7 @@ export class GitStatusWidget extends LitElement {
                 return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} ahead, ${this.behind} behind remote</span> ${this._renderPullButton()}`;
             }
             if (this.ahead > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span>`;
+                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
             }
             if (this.behind > 0) {
                 return html`<span class="text-amber-600 dark:text-amber-400">${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span> ${this._renderPullButton()}`;
@@ -138,7 +140,7 @@ export class GitStatusWidget extends LitElement {
             return html`<span class="text-amber-600 dark:text-amber-400">local only — not pushed</span>`;
         }
         if (this.ahead > 0) {
-            return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span>`;
+            return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
         }
         return html`<span class="text-green-600 dark:text-green-400">pushed to remote branch</span>`;
     }
@@ -296,6 +298,34 @@ export class GitStatusWidget extends LitElement {
     public setPullResult(error?: string) {
         this.pulling = false;
         this.pullError = error || '';
+    }
+
+    private _renderPushButton() {
+        return html`<button
+            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
+            ?disabled=${this.pushing}
+            @click=${() => this._handlePush()}
+        >${this.pushing ? 'Pushing\u2026' : 'Push'}</button>${this.pushError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.pushError}</span>` : nothing}`;
+    }
+
+    private _handlePush() {
+        this.pushing = true;
+        this.pushError = '';
+        this.dispatchEvent(new CustomEvent('git-push', {
+            bubbles: true,
+            composed: true,
+        }));
+    }
+
+    /** Called by the parent after push completes or fails */
+    public setPushResult(error?: string) {
+        this.pushing = false;
+        this.pushError = error || '';
+        // Refresh git status after push
+        this.dispatchEvent(new CustomEvent('git-fetch', {
+            bubbles: true,
+            composed: true,
+        }));
     }
 
     private _handleMerge() {

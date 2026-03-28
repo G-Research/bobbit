@@ -66,6 +66,7 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onBgProcessDismiss?: (id: string) => void;
 	@property({ attribute: false }) onPrMerge?: (method: string, admin?: boolean) => Promise<string | undefined>;
 	@property({ attribute: false }) onGitPull?: () => Promise<string | undefined>;
+	@property({ attribute: false }) onGitPush?: () => Promise<string | undefined>;
 	@property({ attribute: false }) onGitFetch?: () => void;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
 	@property({ attribute: false }) onApiKeyRequired?: (provider: string) => Promise<boolean>;
@@ -724,6 +725,7 @@ export class AgentInterface extends LitElement {
 								.reviewDecision=${this.reviewDecision}
 								@pr-merge=${this._handlePrMerge}
 								@git-pull=${this._handleGitPull}
+								@git-push=${this._handleGitPush}
 								@git-fetch=${this._handleGitFetch}
 							></git-status-widget>` : nothing}
 						</div>
@@ -783,6 +785,17 @@ export class AgentInterface extends LitElement {
 
 	private _handleGitFetch(): void {
 		this.onGitFetch?.();
+	}
+
+	private async _handleGitPush(e: Event): Promise<void> {
+		if (!this.onGitPush) return;
+		const widget = e.target as import('./GitStatusWidget.js').GitStatusWidget;
+		try {
+			const error = await this.onGitPush();
+			widget.setPushResult(error);
+		} catch (err) {
+			widget.setPushResult(err instanceof Error ? err.message : 'Network error');
+		}
 	}
 
 	private async _handleGitPull(e: Event): Promise<void> {

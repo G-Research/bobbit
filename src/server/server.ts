@@ -2349,6 +2349,23 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/git-push — push local commits to remote
+	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-push')) {
+		const id = url.pathname.split('/')[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const cwd = session.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		try {
+			const { stdout } = await execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 });
+			json({ ok: true, output: stdout.trim() });
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			json({ error: msg }, 500);
+		}
+		return;
+	}
+
 	// POST /api/sessions/:id/pr-merge — merge PR for session's branch
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/pr-merge')) {
 		const id = url.pathname.split('/')[3];
