@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html><body><script>
+function injectCoAuthorTrailer(command, modelName) {
+  // Match git commit commands
+  const gitCommitPattern = /\bgit\s+commit\b/;
+  if (!gitCommitPattern.test(command)) return command;
+
+  // Don't add if already has Co-Authored-By trailer
+  if (/--trailer\s+["']?Co-Authored/i.test(command)) return command;
+
+  // Don't intercept merge/revert/cherry-pick
+  if (/\bgit\s+(merge|revert|cherry-pick)\b/.test(command)) return command;
+
+  const author = modelName ? `Bobbit (${modelName})` : 'Bobbit';
+  const trailer = `--trailer "Co-Authored-By: ${author} <noreply@bobbit.dev>"`;
+
+  return command.replace(
+    /(\bgit\s+commit\b(?:\s+[^&|;]*)?)/g,
+    (match) => {
+      if (match.includes('--trailer')) return match;
+      return match.trimEnd() + ' ' + trailer;
+    }
+  );
+}
+window.injectCoAuthorTrailer = injectCoAuthorTrailer;
+</script></body></html>
