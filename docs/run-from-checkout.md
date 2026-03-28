@@ -55,6 +55,19 @@ npm run build
 
 This is a one-time cost (typically 30–60 seconds). Subsequent runs skip the bootstrap and start immediately.
 
+## Auto-rebuild on source changes
+
+After the initial bootstrap, the scripts detect when source files are newer than the build output and rebuild automatically before launching. This means `git pull` followed by `./run` just works — no manual rebuild needed.
+
+The staleness check compares file modification times:
+
+- **Server**: `src/server/`, `package.json`, `tsconfig.server.json` vs `dist/server/cli.js` — runs `npm run build:server` if stale.
+- **UI**: `src/ui/`, `src/app/` vs `dist/ui/index.html` — runs `npm run build:ui` if stale.
+
+When a rebuild is needed, the script prints a short message (e.g. `⚡ Server source changed — rebuilding...`) and rebuilds only the stale parts. When the build is fresh, there is no output and no delay. If a rebuild fails, the script exits with an error code rather than launching with stale code.
+
+On Linux/macOS, staleness detection uses `find -newer ... -print -quit` which exits at the first newer file found — effectively instant. On Windows, an inline PowerShell snippet compares timestamps via `Get-ChildItem -Recurse`.
+
 ## How isolation works
 
 Each project directory gets its own isolated Bobbit instance:
@@ -155,7 +168,9 @@ If Bobbit can't bind to a port (all ports in the auto-increment range are taken)
 
 ### Stale build
 
-If the Bobbit checkout is updated (e.g. `git pull`), the existing `dist/` may be outdated but the bootstrap check won't re-trigger (since `dist/server/cli.js` still exists). Rebuild manually:
+The run scripts automatically detect when source files are newer than the build output and rebuild before launching (see [Auto-rebuild on source changes](#auto-rebuild-on-source-changes)). In most cases, `git pull` followed by `./run` is sufficient.
+
+If auto-rebuild doesn't catch a change (e.g. a dependency update that doesn't touch source files), rebuild manually:
 
 ```bash
 cd /path/to/bobbit

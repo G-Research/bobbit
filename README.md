@@ -28,7 +28,7 @@ git clone <repo> bobbit
 C:\path\to\bobbit\run.cmd              # Windows
 ```
 
-On first run, the script auto-installs dependencies and builds (`npm install && npm run build`). Subsequent launches start immediately.
+On first run, the script auto-installs dependencies and builds (`npm install && npm run build`). On subsequent runs, it detects when source files have changed since the last build and rebuilds automatically — so `git pull && ./run` just works.
 
 Each project gets its own `.bobbit/` state directory, and ports auto-increment so you can run multiple instances side by side. All CLI flags are forwarded:
 
