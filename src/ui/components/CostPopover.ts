@@ -125,7 +125,7 @@ export class CostPopover extends LitElement {
 			: `bottom:100%;margin-bottom:6px;`;
 
 		return html`
-			<div style="position:fixed;inset:0;z-index:40;" @click=${() => this.dispatchEvent(new Event("close"))}></div>
+			<div style="position:fixed;inset:0;z-index:40;" @click=${(e: Event) => { e.stopPropagation(); this.dispatchEvent(new Event("close")); }}></div>
 			<div style="
 				position:absolute;${posStyle}${anchorStyle}z-index:50;
 				background:var(--popover);color:var(--popover-foreground);

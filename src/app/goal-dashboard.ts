@@ -1036,7 +1036,13 @@ function renderMetaRows(goal: Goal): TemplateResult {
 		<div class="meta-rows">
 			${goalCost && goalCost.totalCost > 0 ? html`
 			<div class="meta-row">
-				<div class="meta-item" style="position:relative;cursor:pointer;" @click=${(e: Event) => { e.stopPropagation(); costPopoverOpen = !costPopoverOpen; renderApp(); }}
+				<div class="meta-item" style="position:relative;cursor:pointer;" @click=${(e: Event) => {
+						e.stopPropagation();
+						if (!costPopoverOpen) {
+							costPopoverOpen = true;
+							renderApp();
+						}
+					}}
 					title="Click for cost breakdown">
 					${svgDollar}
 					<span class="meta-tag cost-tag">${formatCost(goalCost.totalCost)}</span>
@@ -1045,7 +1051,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.open=${costPopoverOpen}
 						.goalId=${currentGoal?.id || ""}
 						anchor="left"
-						@close=${() => { costPopoverOpen = false; renderApp(); }}
+						@close=${(e: Event) => { e.stopPropagation(); costPopoverOpen = false; renderApp(); }}
 					></cost-popover>
 				</div>
 			</div>
