@@ -530,6 +530,7 @@ async function handleApiRoute(
 					colorIndex: colorStore.get(archived.id),
 					preview: archived.preview,
 					personalities: archived.personalities,
+					reattemptGoalId: archived.reattemptGoalId,
 					archived: true,
 					archivedAt: archived.archivedAt,
 				});
@@ -539,6 +540,7 @@ async function handleApiRoute(
 			res.end(JSON.stringify({ error: "Session not found" }));
 			return;
 		}
+		const sessionPs = sessionManager.getSessionStore().get(session.id);
 		json({
 			id: session.id,
 			title: session.title,
@@ -564,6 +566,7 @@ async function handleApiRoute(
 			colorIndex: colorStore.get(session.id),
 			preview: session.preview,
 			personalities: session.personalities,
+			reattemptGoalId: sessionPs?.reattemptGoalId,
 		});
 		return;
 	}
@@ -675,8 +678,11 @@ async function handleApiRoute(
 			}
 		}
 
+		// ── Re-attempt support ──
+		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
+
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts });
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId });
 
 			// Set role metadata if a role was specified
 			if (roleForMeta) {
@@ -687,6 +693,11 @@ async function handleApiRoute(
 				sessionManager.updateSessionMeta(session.id, { role: "assistant", accessory: "wand" });
 				session.role = "assistant";
 				session.accessory = "wand";
+			}
+
+			// Store reattemptGoalId on the session if provided
+			if (reattemptGoalId) {
+				sessionManager.getSessionStore().update(session.id, { reattemptGoalId });
 			}
 
 			json({
@@ -702,6 +713,7 @@ async function handleApiRoute(
 				role: session.role,
 				accessory: session.accessory,
 				personalities: session.personalities,
+				reattemptGoalId,
 			}, 201);
 		} catch (err) {
 			json({ error: String(err) }, 500);
@@ -734,6 +746,11 @@ async function handleApiRoute(
 				workflowId,
 				workflowStore: workflowManager.store,
 			});
+			// Set reattemptOf if provided
+			if (body.reattemptOf && typeof body.reattemptOf === "string") {
+				sessionManager.goalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
+				goal.reattemptOf = body.reattemptOf;
+			}
 			// Initialize gate states for the workflow
 			if (goal.workflow) {
 				gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
@@ -799,6 +816,7 @@ async function handleApiRoute(
 				repoPath: body.repoPath,
 				branch: body.branch,
 				prUrl: body.prUrl,
+				reattemptOf: body.reattemptOf,
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
 			json({ ok: true });
