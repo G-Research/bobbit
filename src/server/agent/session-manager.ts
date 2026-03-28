@@ -167,6 +167,32 @@ export class SessionManager {
 		}).join('\n');
 	}
 
+	/**
+	 * Inject the dynamic workflow list into a goal assistant prompt.
+	 * Handles two cases:
+	 * 1. The prompt contains {{AVAILABLE_WORKFLOWS}} placeholder (new TS constant)
+	 * 2. The prompt contains the old hardcoded workflow list (legacy YAML on disk)
+	 */
+	private _injectWorkflowList(spec: string): string {
+		const dynamicList = this._buildWorkflowList();
+
+		// Case 1: New placeholder exists — simple replacement
+		if (spec.includes('{{AVAILABLE_WORKFLOWS}}')) {
+			return spec.replace('{{AVAILABLE_WORKFLOWS}}', dynamicList);
+		}
+
+		// Case 2: Old hardcoded list from legacy YAML — replace the section between
+		// "Available workflows:" and "Pick the workflow" with the dynamic list.
+		// The old pattern has bullet items starting with "- **" after "Available workflows:\n"
+		const oldListPattern = /(Available workflows:\s*\n)(?:\s*- \*\*.*\n?)+(\s*\n*(?:Pick the workflow))/s;
+		let result = spec.replace(oldListPattern, `$1${dynamicList}\n\n$2`);
+
+		// Also remove the "You can also check for additional workflows..." sentence
+		result = result.replace(/\s*You can also check for additional workflows[^\n]*(?:the three above cover most cases)?\.?\s*/g, ' ');
+
+		return result;
+	}
+
 	/** Generate tool docs and inject into prompt parts before assembly. */
 	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
 		if (this.toolManager && !parts.toolDocs) {
@@ -198,7 +224,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
 			}
 			parts = {
 				baseSystemPromptPath: undefined,
@@ -669,7 +695,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
 			}
 
 			const promptPath = this.assemblePrompt(ps.id, {
@@ -893,7 +919,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
 			}
 
 			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
