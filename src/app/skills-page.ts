@@ -27,10 +27,12 @@ export function clearSkillsPageState(): void {
 	directoriesExpanded = false;
 }
 
-export async function loadSkillsPageData(): Promise<void> {
-	loading = true;
-	error = "";
-	renderApp();
+export async function loadSkillsPageData(showLoading = true): Promise<void> {
+	if (showLoading) {
+		loading = true;
+		error = "";
+		renderApp();
+	}
 
 	try {
 		const slashRes = await gatewayFetch("/api/slash-skills/details");
@@ -135,13 +137,21 @@ function renderSkillCard(skill: typeof slashSkills[0]): TemplateResult {
 }
 
 async function saveCustomDirs(): Promise<void> {
+	renderApp();
 	try {
 		await gatewayFetch("/api/project-config", {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ skill_directories: JSON.stringify(customDirs) }),
 		});
-		await loadSkillsPageData();
+		// Background refresh to pick up any newly discovered skills
+		const slashRes = await gatewayFetch("/api/slash-skills/details");
+		if (slashRes.ok) {
+			const data = await slashRes.json();
+			slashSkills = data.skills || [];
+			directories = data.directories || [];
+			renderApp();
+		}
 	} catch {
 		// ignore save errors
 	}

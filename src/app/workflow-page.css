@@ -241,6 +241,14 @@
 .wf-action-btn:hover { background: var(--secondary); color: var(--foreground); }
 .wf-action-btn.delete:hover { color: var(--destructive); }
 
+.wf-nav-delete {
+	color: var(--muted-foreground);
+	transition: color 150ms;
+}
+.wf-nav-delete:hover {
+	color: var(--destructive);
+}
+
 /* ============================================================================
  * EDIT VIEW
  * ============================================================================ */
@@ -263,6 +271,13 @@
 .wf-field { display: flex; flex-direction: column; gap: 4px; }
 .wf-field-label { font-size: 12px; font-weight: 500; color: var(--muted-foreground); }
 .wf-field-readonly { font-size: 13px; color: var(--muted-foreground); padding: 6px 0; font-family: monospace; }
+
+.wf-identity-row {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: 8px;
+}
 
 .wf-input {
 	padding: 6px 8px;
@@ -298,6 +313,17 @@
 }
 .wf-textarea:focus { outline: none; border-color: var(--ring); }
 
+.wf-desc-auto {
+	min-height: 32px;
+	max-height: 200px;
+	resize: none;
+	overflow-y: auto;
+	flex: 1;
+	min-width: 0;
+	padding: 6px 8px;
+	line-height: 1.4;
+}
+
 .wf-artifacts-header {
 	display: flex;
 	align-items: center;
@@ -319,6 +345,11 @@
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
+}
+
+.wf-add-gate-btn {
+	align-self: center;
+	margin-top: 4px;
 }
 
 .wf-empty-artifacts {
@@ -407,7 +438,8 @@
 .wf-gate-name {
 	flex: 1;
 	font-size: 13px;
-	color: var(--muted-foreground);
+	font-weight: 600;
+	color: var(--foreground);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -462,12 +494,12 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 24px;
-	height: 24px;
+	width: 20px;
+	height: 20px;
 	border: none;
 	background: none;
 	color: var(--muted-foreground);
-	font-size: 12px;
+	font-size: 20px;
 	cursor: pointer;
 	flex-shrink: 0;
 	transition: transform 200ms ease;
@@ -492,6 +524,16 @@
 	transition: color 150ms;
 }
 .wf-gate-delete:hover { color: var(--destructive); }
+
+/* Gate header element ordering */
+.wf-gate-grip    { order: -2; }
+.wf-gate-idx     { order: -1; }
+.wf-gate-chevron { order: 0; }
+.wf-gate-name    { order: 1; }
+.wf-gate-deps-desktop,
+.wf-gate-deps-mobile,
+.wf-gate-pill    { order: 2; }
+.wf-gate-delete  { order: 3; }
 
 /* Gate body — collapsible with CSS transition */
 .wf-gate-body {
@@ -561,6 +603,42 @@
 .wf-dep-toggle-chip--active:hover {
 	background: color-mix(in oklch, var(--primary) 25%, transparent);
 	border-color: var(--primary);
+}
+
+/* Compact toggles row */
+.wf-toggles-row {
+	display: flex;
+	align-items: center;
+	gap: 20px;
+	flex-wrap: nowrap;
+}
+.wf-toggle-compact {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 13px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+.wf-info-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	border: 1px solid var(--border);
+	font-size: 10px;
+	font-style: italic;
+	font-family: Georgia, serif;
+	color: var(--muted-foreground);
+	cursor: help;
+	flex-shrink: 0;
+	transition: color 150ms, border-color 150ms;
+}
+.wf-info-icon:hover {
+	color: var(--foreground);
+	border-color: var(--foreground);
 }
 
 /* ============================================================================
@@ -642,6 +720,75 @@
 	white-space: nowrap;
 }
 .wf-criteria-add-btn:hover { background: var(--accent); }
+
+/* Collapsible verification step cards */
+.wf-vstep-card {
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	overflow: hidden;
+	cursor: pointer;
+}
+.wf-vstep-collapsed-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 8px;
+	background: var(--secondary);
+	transition: background 150ms;
+}
+.wf-vstep-card:hover .wf-vstep-collapsed-header {
+	background: var(--accent);
+}
+.wf-vstep-chevron {
+	font-size: 18px;
+	color: var(--muted-foreground);
+	transition: transform 200ms ease;
+	flex-shrink: 0;
+	width: 18px;
+	text-align: center;
+	line-height: 1;
+}
+.wf-vstep-card.vstep-expanded .wf-vstep-chevron {
+	transform: rotate(90deg);
+}
+.wf-vstep-name-label {
+	font-size: 13px;
+	color: var(--foreground);
+	font-weight: 500;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.wf-vstep-sep {
+	color: var(--muted-foreground);
+	font-size: 13px;
+	flex-shrink: 0;
+	line-height: 1;
+}
+.wf-vstep-type-label {
+	font-size: 11px;
+	font-family: var(--font-mono, monospace);
+	color: var(--muted-foreground);
+	flex-shrink: 0;
+}
+.wf-vstep-spacer {
+	flex: 1;
+}
+.wf-vstep-body {
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.3s ease;
+}
+.wf-vstep-card.vstep-expanded .wf-vstep-body {
+	max-height: 500px;
+}
+.wf-vstep-fields {
+	padding: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	border-top: 1px solid var(--border);
+}
 
 /* ============================================================================
  * RESPONSIVE

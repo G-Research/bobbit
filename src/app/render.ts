@@ -3,7 +3,7 @@ import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { html, nothing, render } from "lit";
+import { html, render } from "lit";
 import { Archive, ArrowLeft, FileText, MessagesSquare, ChevronDown, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
@@ -1298,12 +1298,25 @@ function setupPreviewPanel() {
 	`;
 }
 
+let _workflowPageModule: typeof import("./workflow-page.js") | null = null;
+function ensureWorkflowPageLoaded() {
+	if (!_workflowPageModule) {
+		import("./workflow-page.js").then(mod => { _workflowPageModule = mod; renderApp(); });
+	}
+}
+
 function workflowPreviewPanel() {
+	ensureWorkflowPageLoaded();
+
 	const handleDone = () => {
 		backToSessions();
 	};
 
-	const handleViewWorkflow = async () => {
+	const handleSave = async () => {
+		if (_workflowPageModule) await _workflowPageModule.saveWorkflowFromPanel();
+	};
+
+	const handleViewFullEditor = async () => {
 		const workflowId = state.workflowPreviewId.trim();
 		if (!workflowId) return;
 		const { loadWorkflowPageData } = await import("./workflow-page.js");
@@ -1312,44 +1325,37 @@ function workflowPreviewPanel() {
 		renderApp();
 	};
 
+	if (!_workflowPageModule) {
+		return html`
+			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading editor...</div>
+			</div>
+		`;
+	}
+
+	const { renderWorkflowEditPanel, isWorkflowSaving, canSaveWorkflow } = _workflowPageModule;
+
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				<!-- Workflow ID header -->
-				<div>
-					<div class="text-xs text-muted-foreground mb-1">Workflow ID</div>
-					<div class="text-lg font-semibold">${state.workflowPreviewId || html`<span class="text-muted-foreground italic">Waiting for assistant...</span>`}</div>
-				</div>
-
-				<!-- Workflow name -->
-				${state.workflowPreviewName ? html`
-				<div>
-					<div class="text-xs text-muted-foreground mb-1">Name</div>
-					<div class="text-sm">${state.workflowPreviewName}</div>
-				</div>
-				` : nothing}
-
-				<!-- Description -->
-				${state.workflowPreviewDescription ? html`
-				<div>
-					<div class="text-xs text-muted-foreground mb-1">Description</div>
-					<div class="text-sm text-muted-foreground">${state.workflowPreviewDescription}</div>
-				</div>
-				` : nothing}
-
-				<!-- Gates summary -->
-				${state.workflowPreviewGates ? html`
-				<div>
-					<div class="text-xs text-muted-foreground mb-1">Gates</div>
-					<div class="text-sm whitespace-pre-wrap font-mono text-xs bg-secondary/50 rounded p-3">${state.workflowPreviewGates}</div>
-				</div>
-				` : nothing}
+			<div class="flex-1 overflow-y-auto p-4">
+				${renderWorkflowEditPanel()}
 			</div>
 			<div class="flex items-center justify-between p-3 border-t border-border">
-				${state.workflowPreviewId ? html`
-					${Button({ variant: "outline", size: "sm", onClick: handleViewWorkflow, children: "View Workflow" })}
-				` : html`<div></div>`}
-				${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
+				<div class="flex items-center gap-2">
+					${state.workflowPreviewId ? html`
+						${Button({ variant: "outline", size: "sm", onClick: handleViewFullEditor, children: "Open Full Editor" })}
+					` : html`<div></div>`}
+				</div>
+				<div class="flex items-center gap-2">
+					${Button({ variant: "ghost", size: "sm", onClick: handleDone, children: "Done" })}
+					${Button({
+						variant: "default",
+						size: "sm",
+						onClick: handleSave,
+						disabled: !canSaveWorkflow(),
+						children: isWorkflowSaving() ? "Saving\u2026" : "Save",
+					})}
+				</div>
 			</div>
 		</div>
 	`;
@@ -1976,10 +1982,10 @@ export function doRenderApp(): void {
 				>Chat</button>
 				<button
 					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
-					title="Preview"
+					title="${state.assistantType === "workflow" ? "Editor" : "Preview"}"
 					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
 				>
-					Preview${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
+					${state.assistantType === "workflow" ? "Editor" : "Preview"}${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
 				</button>
 			</div>
 		`;

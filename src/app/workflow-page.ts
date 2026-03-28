@@ -42,6 +42,8 @@ let editGates: WorkflowGate[] = [];
 // Collapse/expand state — all gates start collapsed
 let expandedGateIndices: Set<number> = new Set();
 
+let expandedVStepKeys: Set<string> = new Set();
+
 // Drag-to-reorder state
 let dragIndex: number | null = null;
 let dropTargetIndex: number | null = null;
@@ -57,6 +59,7 @@ export async function loadWorkflowPageData(): Promise<void> {
 	saving = false;
 	isNew = false;
 	expandedGateIndices = new Set();
+	expandedVStepKeys = new Set();
 	dragIndex = null;
 	dropTargetIndex = null;
 	renderApp();
@@ -94,6 +97,7 @@ function showEdit(workflow: Workflow): void {
 	editGates = workflow.gates.map((g) => ({ ...g, dependsOn: [...g.dependsOn], verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined, metadata: g.metadata ? { ...g.metadata } : undefined }));
 	saving = false;
 	expandedGateIndices = new Set();
+	expandedVStepKeys = new Set();
 	setHashRoute("workflow-edit", workflow.id);
 }
 
@@ -107,6 +111,7 @@ function showNewEdit(): void {
 	editGates = [];
 	saving = false;
 	expandedGateIndices = new Set();
+	expandedVStepKeys = new Set();
 	renderApp();
 }
 
@@ -129,12 +134,18 @@ async function handleSave(): Promise<void> {
 	saving = true;
 	renderApp();
 
+	// Auto-compute dependsOn from gate order (each gate depends on the one above it)
+	const gatesWithDeps = editGates.map((g, i) => ({
+		...g,
+		dependsOn: i > 0 && editGates[i - 1].id ? [editGates[i - 1].id] : [],
+	}));
+
 	if (isNew) {
 		const result = await createWorkflow({
 			id: editId,
 			name: editName,
 			description: editDescription,
-			gates: editGates,
+			gates: gatesWithDeps,
 		});
 		if (result) {
 			workflows = await fetchWorkflows();
@@ -145,7 +156,7 @@ async function handleSave(): Promise<void> {
 		const ok = await updateWorkflow(selectedWorkflow.id, {
 			name: editName,
 			description: editDescription,
-			gates: editGates,
+			gates: gatesWithDeps,
 		});
 		if (ok) {
 			workflows = await fetchWorkflows();
@@ -220,6 +231,16 @@ function toggleGateExpand(index: number): void {
 		expandedGateIndices.delete(index);
 	} else {
 		expandedGateIndices.add(index);
+	}
+	renderApp();
+}
+
+function toggleVStepExpand(gateIdx: number, stepIdx: number): void {
+	const key = `${gateIdx}-${stepIdx}`;
+	if (expandedVStepKeys.has(key)) {
+		expandedVStepKeys.delete(key);
+	} else {
+		expandedVStepKeys.add(key);
 	}
 	renderApp();
 }
@@ -387,14 +408,9 @@ function handleTouchEnd(): void {
 // ============================================================================
 
 function getVerifySummary(gate: WorkflowGate): string {
-	const steps = gate.verify || [];
-	if (steps.length === 0) return "";
-	const cmdCount = steps.filter(s => s.type === "command").length;
-	const reviewCount = steps.filter(s => s.type === "llm-review").length;
-	const parts: string[] = [];
-	if (cmdCount > 0) parts.push(`${cmdCount} cmd`);
-	if (reviewCount > 0) parts.push(`${reviewCount} review`);
-	return parts.join(", ");
+	const count = (gate.verify || []).length;
+	if (count === 0) return "";
+	return `${count} verification${count !== 1 ? "s" : ""}`;
 }
 
 // ============================================================================
@@ -403,58 +419,78 @@ function getVerifySummary(gate: WorkflowGate): string {
 
 function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: VerifyStep, stepIdx: number): TemplateResult {
 	const typeIcon = step.type === "command" ? Terminal : MessageSquare;
+	const isVStepExpanded = expandedVStepKeys.has(`${gateIdx}-${stepIdx}`);
 	return html`
-		<div class="wf-verification-step">
-			<div class="wf-vstep-header">
+		<div class="wf-vstep-card ${isVStepExpanded ? "vstep-expanded" : ""}">
+			<div class="wf-vstep-collapsed-header" @click=${(e: Event) => { e.stopPropagation(); toggleVStepExpand(gateIdx, stepIdx); }}>
+				<span class="wf-vstep-chevron">\u25B8</span>
 				<span class="wf-verify-type-icon">${icon(typeIcon, "sm")}</span>
-				<input class="wf-input wf-vstep-name" .value=${step.name || ""} placeholder="Step name"
-					@input=${(e: Event) => {
-						const steps = [...(gate.verify || [])];
-						steps[stepIdx] = { ...steps[stepIdx], name: (e.target as HTMLInputElement).value };
-						updateGateField(gateIdx, "verify", steps);
-					}} />
-				<select class="wf-select wf-vstep-type" .value=${step.type || "command"}
-					@change=${(e: Event) => {
-						const steps = [...(gate.verify || [])];
-						steps[stepIdx] = { ...steps[stepIdx], type: (e.target as HTMLSelectElement).value as "command" | "llm-review" };
-						updateGateField(gateIdx, "verify", steps);
-					}}>
-					<option value="command" ?selected=${step.type === "command"}>command</option>
-					<option value="llm-review" ?selected=${step.type === "llm-review"}>llm-review</option>
-				</select>
-				${step.type === "command" ? html`
-					<select class="wf-select wf-vstep-expect" .value=${step.expect || "success"}
-						@change=${(e: Event) => {
-							const steps = [...(gate.verify || [])];
-							steps[stepIdx] = { ...steps[stepIdx], expect: (e.target as HTMLSelectElement).value as "success" | "failure" };
-							updateGateField(gateIdx, "verify", steps);
-						}}>
-						<option value="success" ?selected=${step.expect !== "failure"}>expect: success</option>
-						<option value="failure" ?selected=${step.expect === "failure"}>expect: failure</option>
-					</select>
-				` : nothing}
+				<span class="wf-vstep-name-label">${step.name || "(unnamed)"}</span>
+				<span class="wf-vstep-sep">\u00B7</span>
+				<span class="wf-vstep-type-label">${step.type || "command"}</span>
+				<span class="wf-vstep-spacer"></span>
 				<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
 					e.stopPropagation();
 					const steps = (gate.verify || []).filter((_: any, i: number) => i !== stepIdx);
 					updateGateField(gateIdx, "verify", steps);
 				}}>${icon(Trash2, "sm")}</button>
 			</div>
-			${step.type === "command" ? html`
-				<input class="wf-input" .value=${step.run || ""} placeholder="Command to run..."
-					@input=${(e: Event) => {
-						const steps = [...(gate.verify || [])];
-						steps[stepIdx] = { ...steps[stepIdx], run: (e.target as HTMLInputElement).value };
-						updateGateField(gateIdx, "verify", steps);
-					}} />
-				<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>
-			` : html`
-				<textarea class="wf-textarea" .value=${step.prompt || ""} placeholder="Review prompt..."
-					@input=${(e: Event) => {
-						const steps = [...(gate.verify || [])];
-						steps[stepIdx] = { ...steps[stepIdx], prompt: (e.target as HTMLTextAreaElement).value };
-						updateGateField(gateIdx, "verify", steps);
-					}}></textarea>
-			`}
+			<div class="wf-vstep-body">
+				<div class="wf-vstep-fields">
+					<div class="wf-identity-row">
+						<label class="wf-field-label">Name</label>
+						<input class="wf-input" style="flex:1;min-width:0;" .value=${step.name || ""} placeholder="Step name"
+							@click=${(e: Event) => e.stopPropagation()}
+							@input=${(e: Event) => {
+								const steps = [...(gate.verify || [])];
+								steps[stepIdx] = { ...steps[stepIdx], name: (e.target as HTMLInputElement).value };
+								updateGateField(gateIdx, "verify", steps);
+							}} />
+						<label class="wf-field-label" style="margin-left:8px;">Type</label>
+						<select class="wf-select" .value=${step.type || "command"}
+							@click=${(e: Event) => e.stopPropagation()}
+							@change=${(e: Event) => {
+								const steps = [...(gate.verify || [])];
+								steps[stepIdx] = { ...steps[stepIdx], type: (e.target as HTMLSelectElement).value as "command" | "llm-review" };
+								updateGateField(gateIdx, "verify", steps);
+							}}>
+							<option value="command" ?selected=${step.type === "command"}>command</option>
+							<option value="llm-review" ?selected=${step.type === "llm-review"}>llm-review</option>
+						</select>
+						${step.type === "command" ? html`
+							<label class="wf-field-label" style="margin-left:8px;">Expect</label>
+							<select class="wf-select" .value=${step.expect || "success"}
+								@click=${(e: Event) => e.stopPropagation()}
+								@change=${(e: Event) => {
+									const steps = [...(gate.verify || [])];
+									steps[stepIdx] = { ...steps[stepIdx], expect: (e.target as HTMLSelectElement).value as "success" | "failure" };
+									updateGateField(gateIdx, "verify", steps);
+								}}>
+								<option value="success" ?selected=${step.expect !== "failure"}>success</option>
+								<option value="failure" ?selected=${step.expect === "failure"}>failure</option>
+							</select>
+						` : nothing}
+					</div>
+					${step.type === "command" ? html`
+						<input class="wf-input" .value=${step.run || ""} placeholder="Command to run..."
+							@click=${(e: Event) => e.stopPropagation()}
+							@input=${(e: Event) => {
+								const steps = [...(gate.verify || [])];
+								steps[stepIdx] = { ...steps[stepIdx], run: (e.target as HTMLInputElement).value };
+								updateGateField(gateIdx, "verify", steps);
+							}} />
+						<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>
+					` : html`
+						<textarea class="wf-textarea" .value=${step.prompt || ""} placeholder="Review prompt..."
+							@click=${(e: Event) => e.stopPropagation()}
+							@input=${(e: Event) => {
+								const steps = [...(gate.verify || [])];
+								steps[stepIdx] = { ...steps[stepIdx], prompt: (e.target as HTMLTextAreaElement).value };
+								updateGateField(gateIdx, "verify", steps);
+							}}></textarea>
+					`}
+				</div>
+			</div>
 		</div>
 	`;
 }
@@ -463,11 +499,13 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 // WORKFLOW ASSISTANT SESSION
 // ============================================================================
 
-async function createWorkflowAssistantSession(): Promise<void> {
+export async function createWorkflowAssistantSession(): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
 	try {
+		// Initialize empty edit state for the panel
+		initAssistantEditState();
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ assistantType: "workflow" }),
@@ -482,6 +520,120 @@ async function createWorkflowAssistantSession(): Promise<void> {
 		state.creatingSession = false;
 		renderApp();
 	}
+}
+
+// ============================================================================
+// ASSISTANT PANEL EDIT FORM (exported for use in render.ts)
+// ============================================================================
+
+/** Initialize empty edit state for the assistant panel (new workflow). */
+export function initAssistantEditState(): void {
+	isNew = true;
+	selectedWorkflow = null;
+	editId = "";
+	editName = "";
+	editDescription = "";
+	editGates = [];
+	saving = false;
+	expandedGateIndices = new Set();
+	expandedVStepKeys = new Set();
+	dragIndex = null;
+	dropTargetIndex = null;
+}
+
+/** Populate edit state from a fetched workflow (after assistant creates/updates it). */
+export function populateAssistantEditState(wf: Workflow): void {
+	selectedWorkflow = wf;
+	isNew = false;
+	editId = wf.id;
+	editName = wf.name;
+	editDescription = wf.description;
+	editGates = wf.gates.map((g) => ({
+		...g,
+		dependsOn: [...g.dependsOn],
+		verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined,
+		metadata: g.metadata ? { ...g.metadata } : undefined,
+	}));
+	saving = false;
+	// Expand all gates so the user can see what was created
+	expandedGateIndices = new Set(wf.gates.map((_, i) => i));
+}
+
+/** Populate edit state directly from a proposal (no API fetch — workflow doesn't exist yet). */
+export function populateFromProposal(data: { id: string; name: string; description: string; gates: WorkflowGate[] }): void {
+	selectedWorkflow = null;
+	isNew = true;
+	editId = data.id;
+	editName = data.name;
+	editDescription = data.description;
+	editGates = data.gates.map((g) => ({
+		...g,
+		dependsOn: [...(g.dependsOn || [])],
+		verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined,
+		metadata: g.metadata ? { ...g.metadata } : undefined,
+	}));
+	saving = false;
+	expandedGateIndices = new Set(data.gates.map((_, i) => i));
+}
+
+/** Save workflow from the assistant panel (no navigation). */
+export async function saveWorkflowFromPanel(): Promise<boolean> {
+	saving = true;
+	renderApp();
+
+	try {
+		if (!selectedWorkflow) {
+			// Create new
+			const result = await createWorkflow({
+				id: editId,
+				name: editName,
+				description: editDescription,
+				gates: editGates,
+			});
+			if (result) {
+				selectedWorkflow = result;
+				isNew = false;
+				workflows = await fetchWorkflows();
+				renderApp();
+				return true;
+			}
+		} else {
+			// Update existing
+			const ok = await updateWorkflow(selectedWorkflow.id, {
+				name: editName,
+				description: editDescription,
+				gates: editGates,
+			});
+			if (ok) {
+				workflows = await fetchWorkflows();
+				const updated = workflows.find((w) => w.id === selectedWorkflow!.id);
+				if (updated) {
+					selectedWorkflow = updated;
+				}
+				renderApp();
+				return true;
+			}
+		}
+	} finally {
+		saving = false;
+		renderApp();
+	}
+	return false;
+}
+
+/** Get whether the form is currently saving. */
+export function isWorkflowSaving(): boolean {
+	return saving;
+}
+
+/** Get whether the form can be saved. */
+export function canSaveWorkflow(): boolean {
+	return !saving && (isNew ? !!editId.trim() && !!editName.trim() : !!editName.trim());
+}
+
+/** Render the workflow edit form for the assistant panel. */
+export function renderWorkflowEditPanel(): TemplateResult {
+	return renderEditView();
 }
 
 // ============================================================================
@@ -507,18 +659,10 @@ function renderNavBar(): TemplateResult {
 					${Button({
 						variant: "ghost" as any,
 						size: "sm",
-						onClick: createWorkflowAssistantSession,
-						children: html`<span class="inline-flex items-center gap-1.5">${icon(MessageSquare, "sm")} Assistant</span>`,
+						onClick: () => selectedWorkflow ? handleDelete(selectedWorkflow) : showList(),
+						className: "wf-nav-delete",
+						children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "sm")} Delete</span>`,
 					})}
-					${!isNew && selectedWorkflow ? html`
-						${Button({
-							variant: "ghost" as any,
-							size: "sm",
-							onClick: () => handleDelete(selectedWorkflow!),
-							className: "text-destructive hover:text-destructive hover:bg-destructive/10",
-							children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "sm")} Delete</span>`,
-						})}
-					` : nothing}
 					${Button({
 						variant: "default",
 						size: "sm",
@@ -541,15 +685,9 @@ function renderNavBar(): TemplateResult {
 			</div>
 			<div class="wf-nav-right">
 				${Button({
-					variant: "ghost",
-					size: "sm",
-					onClick: createWorkflowAssistantSession,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(MessageSquare, "sm")} Workflow Assistant</span>`,
-				})}
-				${Button({
 					variant: "default",
 					size: "sm",
-					onClick: showNewEdit,
+					onClick: createWorkflowAssistantSession,
 					children: html`<span class="inline-flex items-center gap-1.5 font-semibold">${icon(Plus, "sm")} New Workflow</span>`,
 				})}
 			</div>
@@ -627,7 +765,6 @@ function renderListView(): TemplateResult {
 // ============================================================================
 
 function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
-	const otherIds = editGates.filter((_, i) => i !== idx).map((g) => g.id).filter(Boolean);
 	const isExpanded = expandedGateIndices.has(idx);
 	const isDragging = dragIndex === idx;
 	const verifySummary = getVerifySummary(gate);
@@ -650,71 +787,36 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 				<span class="wf-gate-grip"
 					@touchstart=${(e: TouchEvent) => handleGripTouchStart(e, idx)}>${icon(GripVertical, "sm")}</span>
 				<span class="wf-gate-idx">${idx + 1}</span>
-				<code class="wf-gate-id">${gate.id || "(no id)"}</code>
-				<span class="wf-gate-name">${gate.name || ""}</span>
-				${gate.dependsOn.length > 0 ? html`
-					<span class="wf-gate-deps-desktop">
-						<span class="wf-gate-dep-arrow">\u2190</span>
-						${gate.dependsOn.map(d => html`<span class="wf-dep-chip">${d}</span>`)}
-					</span>
-					<span class="wf-gate-deps-mobile">
-						<span class="wf-gate-pill">${gate.dependsOn.length} dep${gate.dependsOn.length !== 1 ? "s" : ""}</span>
-					</span>
-				` : nothing}
-				${verifySummary ? html`<span class="wf-gate-pill">${verifySummary}</span>` : nothing}
 				<span class="wf-gate-chevron">\u25B8</span>
+				<span class="wf-gate-name">${gate.name || "(unnamed)"}</span>
+				${verifySummary ? html`<span class="wf-gate-pill">${verifySummary}</span>` : nothing}
 				<button class="wf-gate-delete" @click=${(e: Event) => { e.stopPropagation(); removeGate(idx); }} title="Remove gate">${icon(Trash2, "sm")}</button>
 			</div>
 
 			<div class="wf-gate-body">
 				<div class="wf-gate-body-inner">
-					<div class="wf-field-row">
-						<div class="wf-field" style="flex:0 0 160px;">
-							<label class="wf-field-label">ID</label>
-							<input class="wf-input" .value=${gate.id} placeholder="e.g. issue-analysis"
-								@input=${(e: Event) => updateGateField(idx, "id", (e.target as HTMLInputElement).value)} />
-						</div>
-						<div class="wf-field" style="flex:1;min-width:0;">
-							<label class="wf-field-label">Name</label>
-							<input class="wf-input" .value=${gate.name} placeholder="Display name"
-								@input=${(e: Event) => updateGateField(idx, "name", (e.target as HTMLInputElement).value)} />
-						</div>
+					<div class="wf-identity-row">
+						<label class="wf-field-label">ID</label>
+						<input class="wf-input" style="width:140px;" .value=${gate.id} placeholder="e.g. issue-analysis"
+							@input=${(e: Event) => updateGateField(idx, "id", (e.target as HTMLInputElement).value)} />
+						<label class="wf-field-label" style="margin-left:8px;">Name</label>
+						<input class="wf-input" style="flex:1;min-width:0;" .value=${gate.name} placeholder="Display name"
+							@input=${(e: Event) => updateGateField(idx, "name", (e.target as HTMLInputElement).value)} />
 					</div>
 
-					<div class="wf-field-row">
-						<div class="wf-field" style="flex:1;">
-							<label class="wf-toggle-row">
-								<input type="checkbox" class="toggle-switch" .checked=${gate.content === true}
-									@change=${(e: Event) => updateGateField(idx, "content", (e.target as HTMLInputElement).checked || undefined)} />
-								<span>Content gate (accepts markdown content)</span>
-							</label>
-						</div>
-						<div class="wf-field" style="flex:1;">
-							<label class="wf-toggle-row">
-								<input type="checkbox" class="toggle-switch" .checked=${gate.injectDownstream === true}
-									@change=${(e: Event) => updateGateField(idx, "injectDownstream", (e.target as HTMLInputElement).checked || undefined)} />
-								<span>Inject content downstream</span>
-							</label>
-						</div>
-					</div>
-
-					<div class="wf-field">
-						<label class="wf-section-title">Depends On</label>
-						<div class="wf-dep-list">
-							${otherIds.length > 0 ? otherIds.map((depId) => {
-								const checked = gate.dependsOn.includes(depId);
-								return html`
-									<button class="wf-dep-toggle-chip ${checked ? "wf-dep-toggle-chip--active" : ""}"
-										title="Toggle dependency on ${depId}"
-										@click=${() => {
-											const newDeps = checked ? gate.dependsOn.filter((d) => d !== depId) : [...gate.dependsOn, depId];
-											updateGateField(idx, "dependsOn", newDeps);
-										}}>
-										${depId}
-									</button>
-								`;
-							}) : html`<span class="wf-dep-none">No other gates to depend on</span>`}
-						</div>
+					<div class="wf-toggles-row">
+						<label class="wf-toggle-compact">
+							<input type="checkbox" class="toggle-switch" .checked=${gate.content === true}
+								@change=${(e: Event) => updateGateField(idx, "content", (e.target as HTMLInputElement).checked || undefined)} />
+							<span>Content</span>
+							<span class="wf-info-icon" title="Content gates store a markdown document">i</span>
+						</label>
+						<label class="wf-toggle-compact">
+							<input type="checkbox" class="toggle-switch" .checked=${gate.injectDownstream === true}
+								@change=${(e: Event) => updateGateField(idx, "injectDownstream", (e.target as HTMLInputElement).checked || undefined)} />
+							<span>Inject downstream</span>
+							<span class="wf-info-icon" title="Agents working towards subsequent gates have the content attached to this gate injected into their context">i</span>
+						</label>
 					</div>
 
 					<div class="wf-field">
@@ -739,59 +841,43 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 // RENDER: EDIT VIEW
 // ============================================================================
 
+function autoGrowTextarea(el: HTMLTextAreaElement): void {
+	el.style.height = '0';
+	el.style.height = Math.max(32, el.scrollHeight) + 'px';
+}
+
 function renderEditView(): TemplateResult {
 	return html`
 		<div class="wf-edit-container">
 			<div class="wf-edit-identity">
-				<div class="wf-field-row">
+				<div class="wf-identity-row">
+					<label class="wf-field-label">ID</label>
 					${isNew ? html`
-						<div class="wf-field" style="flex:0 0 200px;">
-							<label class="wf-field-label">ID</label>
-							<input class="wf-input" .value=${editId} placeholder="e.g. bug-fix"
-								@input=${(e: Event) => { editId = (e.target as HTMLInputElement).value; renderApp(); }} />
-						</div>
+						<input class="wf-input" style="width:140px;" .value=${editId} placeholder="e.g. bug-fix"
+							@input=${(e: Event) => { editId = (e.target as HTMLInputElement).value; renderApp(); }} />
 					` : html`
-						<div class="wf-field" style="flex:0 0 200px;">
-							<label class="wf-field-label">ID</label>
-							<div class="wf-field-readonly">${editId}</div>
-						</div>
+						<input class="wf-input" style="width:140px;opacity:0.6;cursor:not-allowed;" .value=${editId} disabled />
 					`}
-					<div class="wf-field" style="flex:1;min-width:0;">
-						<label class="wf-field-label">Name</label>
-						<input class="wf-input" .value=${editName} placeholder="Workflow name"
-							@input=${(e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); }} />
-					</div>
+					<label class="wf-field-label" style="margin-left:8px;">Name</label>
+					<input class="wf-input" style="flex:1;min-width:0;" .value=${editName} placeholder="Workflow name"
+						@input=${(e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); }} />
 				</div>
-				<div class="wf-field">
-					<label class="wf-field-label">Description</label>
-					<textarea class="wf-textarea" .value=${editDescription} placeholder="What this workflow does"
-						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; }}></textarea>
+				<div class="wf-identity-row">
+					<label class="wf-field-label" style="flex-shrink:0;">Description</label>
+					<textarea class="wf-textarea wf-desc-auto" rows="1" .value=${editDescription} placeholder="What this workflow does"
+						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; autoGrowTextarea(e.target as HTMLTextAreaElement); }}></textarea>
 				</div>
-			</div>
-
-			<div class="wf-artifacts-header">
-				<h2 class="wf-section-title">Gates (${editGates.length})</h2>
-				${Button({
-					variant: "ghost" as any,
-					size: "sm",
-					onClick: addGate,
-					children: html`<span class="inline-flex items-center gap-1">${icon(Plus, "sm")} Add Gate</span>`,
-				})}
 			</div>
 
 			<div class="wf-artifacts-list">
 				${editGates.map((gate, idx) => renderGateEditor(gate, idx))}
-				${editGates.length === 0 ? html`
-					<div class="wf-empty-artifacts">
-						<p>No gates defined yet.</p>
-						${Button({
-							variant: "default",
-							size: "sm",
-							onClick: addGate,
-							children: html`<span class="inline-flex items-center gap-1">${icon(Plus, "sm")} Add First Gate</span>`,
-						})}
-					</div>
-				` : nothing}
+				${Button({
+					variant: "secondary" as any,
+					size: "sm",
+					className: "wf-add-gate-btn",
+					onClick: addGate,
+					children: html`<span class="inline-flex items-center gap-1">${icon(Plus, "sm")} Add Gate</span>`,
+				})}
 			</div>
 		</div>
 	`;

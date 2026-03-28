@@ -13,7 +13,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
 import { startTimeRefresh } from "./render-helpers.js";
-import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel } from "./routing.js";
+import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation } from "./session-colors.js";
 import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
@@ -233,7 +233,7 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 
 	state.appView = "authenticated";
 	const route = getRouteFromHash();
-	if (route.view !== "session" && route.view !== "goal-dashboard" && route.view !== "roles" && route.view !== "role-edit" && route.view !== "staff" && route.view !== "staff-edit") {
+	if (route.view !== "session" && route.view !== "goal-dashboard" && !isConfigPageRoute()) {
 		setHashRoute("landing");
 	}
 	renderApp();
@@ -673,6 +673,21 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantTab === "chat" && !isDesktop()) {
 				state.assistantTab = "preview";
 			}
+			// Parse gates JSON from proposal and populate edit form directly
+			if (proposal.id) {
+				let gates: any[] = [];
+				try { gates = JSON.parse(proposal.gates || "[]"); } catch { /* ignore parse errors */ }
+				import("./workflow-page.js").then(({ populateFromProposal }) => {
+					if (isStale()) return;
+					populateFromProposal({
+						id: proposal.id,
+						name: proposal.name || "",
+						description: proposal.description || "",
+						gates,
+					});
+					renderApp();
+				});
+			}
 			renderApp();
 		};
 
@@ -922,6 +937,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.workflowPreviewName = "";
 				state.workflowPreviewDescription = "";
 				state.workflowPreviewGates = "";
+				// Initialize the edit form state for the panel
+				import("./workflow-page.js").then(({ initAssistantEditState }) => {
+					initAssistantEditState();
+				});
 			}
 		})();
 
