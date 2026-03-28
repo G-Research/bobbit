@@ -330,14 +330,40 @@ export function startCanvasEyeAnimation(
 	const cache = buildEyeFrameCache(palette, sequence);
 	let rafId = 0;
 	let lastKey = "";
-	// Use time origin 0 so the JS cycle aligns with CSS animation timelines
-	// (CSS animations also count from page load / performance time origin).
-	const startTime = 0;
+	let cssAnim: Animation | null = null;
+
+	function findCssAnimation(): Animation | null {
+		try {
+			const anims = img.getAnimations();
+			for (const a of anims) {
+				const kfs = (a.effect as KeyframeEffect)?.getKeyframes?.() ?? [];
+				if (kfs.some((k: Keyframe) => "boxShadow" in k)) return a;
+			}
+			for (const a of anims) {
+				const dur = (a.effect as KeyframeEffect)?.getTiming?.()?.duration;
+				if (dur === cycleDurationMs) return a;
+			}
+		} catch { /* getAnimations not supported */ }
+		return null;
+	}
 
 	function tick() {
-		const elapsed = performance.now() - startTime;
-		const pct = (elapsed % cycleDurationMs) / cycleDurationMs * 100;
-		// Find current frame — last frame whose pct <= current pct
+		if (!cssAnim) cssAnim = findCssAnimation();
+
+		let pct: number;
+		if (cssAnim && cssAnim.currentTime != null) {
+			const ct = typeof cssAnim.currentTime === "number"
+				? cssAnim.currentTime
+				: (cssAnim.currentTime as CSSNumericValue).to("ms").value;
+			const delay = Number((cssAnim.effect as KeyframeEffect)?.getTiming?.()?.delay ?? 0);
+			const active = ct - delay;
+			pct = active >= 0
+				? ((active % cycleDurationMs) / cycleDurationMs * 100)
+				: 0;
+		} else {
+			pct = (performance.now() % cycleDurationMs) / cycleDurationMs * 100;
+		}
+
 		let frame = sequence[0];
 		for (let i = sequence.length - 1; i >= 0; i--) {
 			if (pct >= sequence[i].pct) { frame = sequence[i]; break; }
