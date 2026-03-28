@@ -26,13 +26,9 @@ Keep it to 1-2 sentences. Don't explain the full process — just ask what they 
 Every goal runs with a workflow that defines the gates to pass, their dependency order, quality criteria, and verification. You should recommend the most appropriate workflow based on the goal.
 
 Available workflows:
-- **general** — Default for most goals. Design doc → implementation → test results → code review → summary report.
-- **feature** — For new features. Like general but adds a PR gate and a full feature report. Use when the goal is clearly a new feature that needs a PR.
-- **bug-fix** — For bug fixes. Issue analysis → reproducing test → implementation → code review → test results → bug fix report. Use when the goal is clearly about fixing a specific bug.
+{{AVAILABLE_WORKFLOWS}}
 
 Pick the workflow that best fits. When in doubt, use **general**.
-
-You can also check for additional workflows by reading the \`workflows/\` directory, but the three above cover most cases.
 
 ## Proposing a goal
 
