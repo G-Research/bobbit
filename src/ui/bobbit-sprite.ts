@@ -213,6 +213,14 @@ export interface SpriteOptions {
   cycleDuration?: number;
   /** Eye animation offset in ms — staggers multiple blobs so they don't blink in sync */
   eyeDelay?: number;
+  /**
+   * When set, use this value (instead of DPR-derived size) for the canvas CSS
+   * display dimensions. Each sprite pixel maps to `cssScale` CSS pixels.
+   * Use cssScale=1 for chat blobs where CSS `transform: scale(4)` handles
+   * the visual scaling — the canvas must be exactly gridW×gridH CSS pixels
+   * regardless of DPR, so the CSS transform produces deterministic results.
+   */
+  cssScale?: number;
 }
 
 /**
@@ -251,8 +259,16 @@ export function drawBobbitSprite(canvas: HTMLCanvasElement, opts: SpriteOptions)
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
-    canvas.style.width = `${width / dpr}px`;
-    canvas.style.height = `${height / dpr}px`;
+    // When cssScale is provided (e.g. chat blob with CSS transform: scale(4)),
+    // use deterministic CSS sizing independent of DPR. Otherwise use DPR-derived sizing.
+    const cssScale = opts.cssScale;
+    if (cssScale != null) {
+      canvas.style.width = `${gridW * cssScale}px`;
+      canvas.style.height = `${gridH * cssScale}px`;
+    } else {
+      canvas.style.width = `${width / dpr}px`;
+      canvas.style.height = `${height / dpr}px`;
+    }
   }
 
   const ctx = canvas.getContext('2d')!;

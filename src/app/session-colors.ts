@@ -303,10 +303,13 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	// Compute hue-rotate value to pass to the directive for counter-rotating accessories
 	const accessoryHueRotate = (hueRotate && status !== "starting" && status !== "terminated") ? hueRotate : 0;
 
-	// Squish animation for compaction state
+	// Squish animation for compaction state — applied to outer span (not canvas)
+	// because bobbit-squish keyframes include scale(1.6) designed for a 1×1px element.
+	// The canvas is already sized at scale=1.6, so applying squish to the outer span
+	// scales the whole container as a unit.
 	const squishStyle = compactSquish ? "animation:bobbit-squish 3s ease-in-out infinite;transform-origin:0 9px;" : "";
 
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><canvas ${bobbitSprite({
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}${squishStyle}"><canvas ${bobbitSprite({
 		eyeState: "center",
 		scale: 1.6,
 		colors: palette,
@@ -314,5 +317,5 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		hueRotate: accessoryHueRotate,
 		selected: isSelected,
 		animated: isSelected,
-	})} style="position:absolute;left:0;top:${canvasTop};image-rendering:pixelated;${shimmer}${squishStyle}"></canvas></span>`;
+	})} style="position:absolute;left:0;top:${canvasTop};image-rendering:pixelated;${shimmer}"></canvas></span>`;
 }

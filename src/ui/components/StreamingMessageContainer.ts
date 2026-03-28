@@ -22,7 +22,7 @@ import { getAccessory } from "../../app/session-colors.js";
 function drawAccessoryCanvas(
 	canvas: HTMLCanvasElement,
 	accessoryId: string,
-	opts: { scale?: number; dpr?: number; hueRotate?: number; excludeTail?: boolean; },
+	opts: { scale?: number; dpr?: number; hueRotate?: number; excludeTail?: boolean; cssScale?: number; },
 ): void {
 	const pixels = ACCESSORY_PIXELS[accessoryId];
 	if (!pixels || pixels.length === 0) return;
@@ -65,8 +65,13 @@ function drawAccessoryCanvas(
 	if (canvas.width !== width || canvas.height !== height) {
 		canvas.width = width;
 		canvas.height = height;
-		canvas.style.width = `${width / dpr}px`;
-		canvas.style.height = `${height / dpr}px`;
+		if (opts.cssScale != null) {
+			canvas.style.width = `${gridW * opts.cssScale}px`;
+			canvas.style.height = `${gridH * opts.cssScale}px`;
+		} else {
+			canvas.style.width = `${width / dpr}px`;
+			canvas.style.height = `${height / dpr}px`;
+		}
 	}
 
 	const ctx = canvas.getContext('2d')!;
@@ -118,6 +123,8 @@ export class StreamingMessageContainer extends LitElement {
 	private _eyeState: EyeState = 'center';
 	/** DPR change unsubscribe */
 	private _unsubDpr: (() => void) | null = null;
+	/** Previous blob state — used to avoid redundant repaints in updated() */
+	private _prevBlobState: string = 'idle';
 
 	constructor() {
 		super();
@@ -155,6 +162,7 @@ export class StreamingMessageContainer extends LitElement {
 		drawBobbitSprite(canvas, {
 			eyeState: this._eyeState,
 			scale: 1,
+			cssScale: 1,
 		});
 	}
 
@@ -171,7 +179,7 @@ export class StreamingMessageContainer extends LitElement {
 		const lookingUp = eyeState === 'up' || eyeState === 'blink-up';
 		const excludeTail = facingRight || lookingUp;
 
-		drawAccessoryCanvas(canvas, 'bandana', { scale: 1, excludeTail });
+		drawAccessoryCanvas(canvas, 'bandana', { scale: 1, excludeTail, cssScale: 1 });
 
 		// Translate shift for eyes-up state (per design doc)
 		if (lookingUp) {
@@ -195,7 +203,7 @@ export class StreamingMessageContainer extends LitElement {
 			if (accId === 'bandana') {
 				this._repaintBandana();
 			} else {
-				drawAccessoryCanvas(canvas, accId, { scale: 1 });
+				drawAccessoryCanvas(canvas, accId, { scale: 1, cssScale: 1 });
 			}
 		}
 	}
@@ -252,13 +260,16 @@ export class StreamingMessageContainer extends LitElement {
 			}
 		}
 
-		// After render, do initial canvas paint if blob is visible
-		if (this._blobVisible) {
-			// Use requestAnimationFrame to ensure DOM is rendered
-			requestAnimationFrame(() => {
-				this._repaintSprite();
-				this._repaintAllAccessories();
-			});
+		// Repaint canvases only when blob state actually changed (e.g. hidden→visible)
+		// The eye timer handles ongoing repaints during animation.
+		if (this._blobState !== this._prevBlobState) {
+			this._prevBlobState = this._blobState;
+			if (this._blobVisible) {
+				requestAnimationFrame(() => {
+					this._repaintSprite();
+					this._repaintAllAccessories();
+				});
+			}
 		}
 	}
 
