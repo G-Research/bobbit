@@ -1,11 +1,5 @@
 # Bobbit — Agent Guide
 
-## What is this?
-
-A remote gateway for AI coding agents. Wraps pi-coding-agent in a WebSocket server with a browser-based chat UI. The user runs `bobbit` on a dev machine and interacts with the agent from any browser.
-
-For architecture details and features, see [README.md](README.md). For the REST API reference, see [docs/rest-api.md](docs/rest-api.md). For the WebSocket protocol, see [docs/websocket-protocol.md](docs/websocket-protocol.md).
-
 ## Commands
 
 ```bash
@@ -41,7 +35,7 @@ See [docs/dev-workflow.md](docs/dev-workflow.md) for the full guide on running m
 
 ## Testing
 
-**Run tests before committing.** After any code change, run type-check and relevant tests. Pipe Playwright output through the test filter to keep context lean — it outputs just pass/fail counts and failure details:
+Pipe Playwright output through the test filter to keep context lean — it outputs just pass/fail counts and failure details:
 
 ```bash
 # Type check first
@@ -233,10 +227,6 @@ Tool YAML definitions and extension code, organized by group (agent, browser, fi
 | `~/.pi/agent/auth.json` | `oauth.ts` | API auth credentials — global, not per-project |
 
 ## Goals, workflows, tasks & gates
-
-Goals can optionally have a **workflow** — a DAG of gates with dependency ordering, quality criteria, and automated verification. Workflows are YAML templates snapshotted into the goal at creation.
-
-**Tasks** link to workflow gates via `workflowGateId` (output) and `inputGateIds` (context inputs). **Context injection** feeds passed upstream gate content into agent prompts automatically — at spawn time (`team_spawn`) or prompt time (`team_prompt`).
 
 For the full architecture — data models, context injection mechanics, verification lifecycle, REST API, and worked examples — see [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 
