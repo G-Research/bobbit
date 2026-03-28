@@ -1,7 +1,7 @@
 import { html } from "lit";
 import { patchSession } from "./api.js";
 import { activeSessionId, renderApp } from "./state.js";
-import { renderSidebarBobbit, ACCESSORY_DEFS, NO_ACCESSORY, type AccessoryDef } from "../ui/bobbit-render.js";
+import { renderSidebarBobbitCanvas, ACCESSORY_DEFS, NO_ACCESSORY, type AccessoryDef } from "../ui/bobbit-render.js";
 
 // ============================================================================
 // ACCESSORY REGISTRY (derived from canonical sprite data)
@@ -106,7 +106,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		?? (isTeamLead ? "crown" : isCoder ? "bandana" : "none");
 	const acc = getAccessory(resolvedAccessoryId);
 
-	return renderSidebarBobbit({
+	return renderSidebarBobbitCanvas({
 		status,
 		isCompacting,
 		hueRotate,

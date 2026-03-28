@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
+import { renderBlobSpriteImg } from "../bobbit-render.js";
 import "./LiveTimer.js";
 
 export class StreamingMessageContainer extends LitElement {
@@ -196,7 +197,7 @@ export class StreamingMessageContainer extends LitElement {
 			if (this._blobVisible)
 				return html`<div class="flex flex-col gap-3 mb-3">
 					<div class="${this._blobClass}">
-						<div class="bobbit-blob__sprite"></div>
+						${renderBlobSpriteImg(this._blobClass.includes("idle"))}
 						<div class="bobbit-blob__crown"></div>
 						<div class="bobbit-blob__bandana"></div>
 						<div class="bobbit-blob__magnifier"></div>
@@ -241,7 +242,7 @@ export class StreamingMessageContainer extends LitElement {
 						.turnStartTime=${this.turnStartTime}
 					></assistant-message>
 					${this._blobVisible ? html`<div class="${this._blobClass}">
-						<div class="bobbit-blob__sprite"></div>
+						${renderBlobSpriteImg(this._blobClass.includes("idle"))}
 						<div class="bobbit-blob__crown"></div>
 						<div class="bobbit-blob__bandana"></div>
 						<div class="bobbit-blob__magnifier"></div>

@@ -381,6 +381,29 @@ export function startCanvasEyeAnimation(
 }
 
 // ============================================================================
+// CANVAS BLOB SPRITE — standalone <img> for use inside existing blob templates
+// ============================================================================
+
+/**
+ * Render just the canvas sprite <img> element with eye animation.
+ * Drop-in replacement for `<div class="bobbit-blob__sprite"></div>`.
+ * Inherits all CSS animations from the class; eyes driven by JS.
+ */
+export function renderBlobSpriteImg(isIdle: boolean): TemplateResult {
+	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
+	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
+	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
+	let cleanup: (() => void) | null = null;
+	const onRef = (el: Element | undefined) => {
+		if (el && el instanceof HTMLImageElement) {
+			cleanup?.();
+			cleanup = startCanvasEyeAnimation(el, sequence, 10000);
+		}
+	};
+	return html`<img ${ref(onRef)} class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">`;
+}
+
+// ============================================================================
 // CANVAS CHAT BLOB RENDERER (for preview / comparison)
 // ============================================================================
 

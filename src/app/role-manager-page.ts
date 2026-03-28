@@ -5,7 +5,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchRoles, fetchTools, createRole, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
-import { renderIdleBlob, BOBBIT_HUE_ROTATIONS } from "../ui/bobbit-render.js";
+import { renderIdleBlobCanvas, BOBBIT_HUE_ROTATIONS } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
@@ -24,7 +24,7 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 	const accClass = accId && accId !== "none"
 		? `bobbit-${accId === "crown" ? "crowned" : accId}`
 		: "";
-	return renderIdleBlob({ accId, accClass, size, hueIndex, phaseIndex });
+	return renderIdleBlobCanvas({ accId, accClass, size, hueIndex, phaseIndex });
 }
 
 // ============================================================================
