@@ -1039,6 +1039,96 @@ html {
 	animation: blob-shadow-enter-roll 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
 }
 
+/* ---- Wand sparkle overlays (two staggered layers) ---- */
+.bobbit-blob__sparkle {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 1px;
+	height: 1px;
+	image-rendering: pixelated;
+	pointer-events: none;
+	transform: scale(4);
+	transform-origin: top left;
+}
+.bobbit-blob__sparkle--a {
+	box-shadow:
+		8px 2px 0 #fff,
+		14px 6px 0 #fef9c4;
+	animation: wand-sparkle-a 1.6s ease-in-out infinite;
+}
+.bobbit-blob__sparkle--b {
+	box-shadow:
+		14px 2px 0 #fef08a,
+		8px 6px 0 #fff;
+	animation: wand-sparkle-b 1.9s ease-in-out 0.5s infinite;
+}
+@keyframes wand-sparkle-a {
+	0%   { opacity: 0.6; transform: scale(4) translate(0, 0); }
+	15%  { opacity: 1;   transform: scale(4) translate(-0.3px, -0.4px); }
+	40%  { opacity: 0.7; transform: scale(4) translate(-0.7px, -0.9px); }
+	60%  { opacity: 0.2; transform: scale(4) translate(-1px, -1.2px); }
+	65%  { opacity: 0.3; transform: scale(4) translate(0.1px, 0.1px); }
+	80%  { opacity: 1;   transform: scale(4) translate(0.4px, -0.3px); }
+	95%  { opacity: 0.5; transform: scale(4) translate(0.7px, -0.7px); }
+	100% { opacity: 0.6; transform: scale(4) translate(0, 0); }
+}
+@keyframes wand-sparkle-b {
+	0%   { opacity: 0.5; transform: scale(4) translate(0, 0); }
+	12%  { opacity: 1;   transform: scale(4) translate(0.3px, 0.2px); }
+	35%  { opacity: 0.6; transform: scale(4) translate(0.6px, -0.4px); }
+	55%  { opacity: 0.15;transform: scale(4) translate(0.9px, -0.8px); }
+	60%  { opacity: 0.4; transform: scale(4) translate(-0.1px, 0.15px); }
+	75%  { opacity: 0.95;transform: scale(4) translate(-0.4px, -0.2px); }
+	90%  { opacity: 0.5; transform: scale(4) translate(-0.7px, -0.5px); }
+	100% { opacity: 0.5; transform: scale(4) translate(0, 0); }
+}
+/* Hide sparkles during idle/compaction/transitions */
+.bobbit-blob--idle .bobbit-blob__sparkle,
+.bobbit-blob--compact-shake .bobbit-blob__sparkle,
+.bobbit-blob--compacting .bobbit-blob__sparkle,
+.bobbit-blob--compact-pop .bobbit-blob__sparkle,
+.bobbit-blob--exit .bobbit-blob__sparkle,
+.bobbit-blob--exit-roll .bobbit-blob__sparkle { display: none; }
+
+/* ---- Flask bubble overlays (two staggered layers) ---- */
+.bobbit-blob__bubble {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 1px;
+	height: 1px;
+	image-rendering: pixelated;
+	pointer-events: none;
+	transform: scale(4);
+	transform-origin: top left;
+}
+.bobbit-blob__bubble--a {
+	box-shadow: 9px 3px 0 rgba(125, 211, 252, 0.9);
+	animation: flask-bubbles-a 2.5s ease-in-out infinite;
+}
+.bobbit-blob__bubble--b {
+	box-shadow: 10px 3px 0 rgba(56, 189, 248, 0.8);
+	animation: flask-bubbles-b 2.5s ease-in-out 1s infinite;
+}
+@keyframes flask-bubbles-a {
+	0%, 100% { opacity: 0; transform: scale(4) translateY(0); }
+	20% { opacity: 1; transform: scale(4) translateY(-0.5px); }
+	80% { opacity: 0.5; transform: scale(4) translateY(-2px); }
+}
+@keyframes flask-bubbles-b {
+	0%, 100% { opacity: 0; transform: scale(4) translateY(0); }
+	20% { opacity: 1; transform: scale(4) translateY(-0.5px); }
+	80% { opacity: 0.5; transform: scale(4) translateY(-2px); }
+}
+/* Hide bubbles during idle/compaction/transitions */
+.bobbit-blob--idle .bobbit-blob__bubble,
+.bobbit-blob--compact-shake .bobbit-blob__bubble,
+.bobbit-blob--compacting .bobbit-blob__bubble,
+.bobbit-blob--compact-pop .bobbit-blob__bubble,
+.bobbit-blob--exit .bobbit-blob__bubble,
+.bobbit-blob--exit-roll .bobbit-blob__bubble { display: none; }
+
 @keyframes blob-shadow-exit {
 	0%   { transform: scale(4) translateX(0); }
 	35%  { transform: scale(4) translateX(-2px); }

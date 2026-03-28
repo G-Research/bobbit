@@ -478,8 +478,15 @@ export class StreamingMessageContainer extends LitElement {
 	}
 
 	private _renderBlob() {
+		const accId = detectAccessory();
+		const sparkles = accId === 'wand'
+			? html`<span class="bobbit-blob__sparkle bobbit-blob__sparkle--a"></span><span class="bobbit-blob__sparkle bobbit-blob__sparkle--b"></span>`
+			: accId === 'flask'
+			? html`<span class="bobbit-blob__bubble bobbit-blob__bubble--a"></span><span class="bobbit-blob__bubble bobbit-blob__bubble--b"></span>`
+			: nothing;
 		return html`<div class="${this._blobClass}">
 			${this._canvas}
+			${sparkles}
 			<div class="bobbit-blob__shadow"></div>
 		</div>`;
 	}
