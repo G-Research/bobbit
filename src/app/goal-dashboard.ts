@@ -77,7 +77,7 @@ interface PrStatus {
 	url: string;
 	title: string;
 	state: "OPEN" | "MERGED" | "CLOSED";
-	mergeable: boolean;
+	mergeable?: string;
 	viewerIsAdmin?: boolean;
 	reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
 }
