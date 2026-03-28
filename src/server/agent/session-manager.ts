@@ -233,10 +233,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
-<<<<<<< HEAD
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
-=======
-				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
 				// Inject re-attempt context if this is a re-attempt session
 				const reattemptId = (this.store.get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
@@ -245,7 +242,6 @@ export class SessionManager {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
 				}
->>>>>>> 9469e59ac29b379976e65edc201a69fbf4fe5030
 			}
 			parts = {
 				baseSystemPromptPath: undefined,
@@ -722,10 +718,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
-<<<<<<< HEAD
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
-=======
-				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
 					const origGoal = this.goalManager.getGoal(ps.reattemptGoalId);
@@ -733,7 +726,6 @@ export class SessionManager {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
 				}
->>>>>>> 9469e59ac29b379976e65edc201a69fbf4fe5030
 			}
 
 			const promptPath = this.assemblePrompt(ps.id, {
@@ -957,10 +949,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (assistantType === "goal") {
-<<<<<<< HEAD
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
-=======
-				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
 				// Inject re-attempt context if this is a re-attempt session
 				if (opts?.reattemptGoalId) {
 					const origGoal = this.goalManager.getGoal(opts.reattemptGoalId);
@@ -968,7 +957,6 @@ export class SessionManager {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
 				}
->>>>>>> 9469e59ac29b379976e65edc201a69fbf4fe5030
 			}
 
 			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
