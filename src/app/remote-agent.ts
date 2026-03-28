@@ -538,6 +538,8 @@ export class RemoteAgent {
 	private send(msg: any): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
+		} else {
+			console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
 		}
 	}
 
