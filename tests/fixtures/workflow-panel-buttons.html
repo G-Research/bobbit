@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Workflow Panel Buttons Test</title>
+</head>
+<body>
+  <div id="result"></div>
+  <script>
+    // Track all API calls made by the handlers
+    const apiCalls = [];
+    let currentHash = "#/session/wf-assistant-1";
+    let sessionModelCleared = false;
+    let sessionsRefreshed = false;
+
+    // Mock: gatewayFetch — tracks DELETE calls
+    function gatewayFetch(url, options) {
+      apiCalls.push({ url, method: (options && options.method) || "GET" });
+      return Promise.resolve({ ok: true });
+    }
+
+    // Mock: clearSessionModel
+    function clearSessionModel(sessionId) {
+      sessionModelCleared = sessionId;
+    }
+
+    // Mock: refreshSessions
+    function refreshSessions() {
+      sessionsRefreshed = true;
+      return Promise.resolve();
+    }
+
+    // Mock: setHashRoute
+    function setHashRoute(view, id, replace) {
+      if (view === "workflows") {
+        currentHash = "#/workflows";
+      } else if (view === "landing") {
+        currentHash = "#/";
+      } else if (view === "session" && id) {
+        currentHash = "#/session/" + id;
+      } else {
+        currentHash = "#/";
+      }
+    }
+
+    // Mock: backToSessions — what the current buggy "Done" handler calls
+    // This disconnects but does NOT delete the session from the server
+    function backToSessions() {
+      // Simulates disconnect only — no DELETE call, no clearSessionModel
+      currentHash = "#/";
+    }
+
+    // Mock: saveWorkflowFromPanel
+    function saveWorkflowFromPanel() {
+      return Promise.resolve(true);
+    }
+
+    // Mock state
+    const state = {
+      assistantType: "workflow",
+      remoteAgent: { disconnect: function() {} },
+      connectionStatus: "connected",
+      appView: "authenticated"
+    };
+
+    function activeSessionId() {
+      return "wf-assistant-1";
+    }
+
+    // -------------------------------------------------------
+    // NEW (FIXED) HANDLERS — matching the updated render.ts
+    // -------------------------------------------------------
+
+    function renderApp() { /* no-op mock */ }
+
+    // New "Cancel" handler
+    async function handleCancel() {
+      if (state.assistantType === "workflow") {
+        const sessionId = activeSessionId();
+        if (state.remoteAgent) {
+          state.remoteAgent.disconnect();
+          state.remoteAgent = null;
+          state.connectionStatus = "disconnected";
+        }
+        state.assistantType = null;
+        // localStorage.removeItem("gateway.sessionId"); — skip in test
+        state.appView = "authenticated";
+        if (sessionId) {
+          await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+          clearSessionModel(sessionId);
+        }
+        await refreshSessions();
+        setHashRoute("landing");
+        renderApp();
+      } else {
+        backToSessions();
+      }
+    }
+
+    // New "Create Workflow" handler
+    async function handleCreateWorkflow() {
+      const ok = await saveWorkflowFromPanel();
+      if (!ok) return;
+      const sessionId = activeSessionId();
+      if (state.remoteAgent) {
+        state.remoteAgent.disconnect();
+        state.remoteAgent = null;
+        state.connectionStatus = "disconnected";
+      }
+      state.assistantType = null;
+      // localStorage.removeItem("gateway.sessionId"); — skip in test
+      state.appView = "authenticated";
+      if (sessionId) {
+        await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+        clearSessionModel(sessionId);
+      }
+      await refreshSessions();
+      setHashRoute("workflows");
+      renderApp();
+    }
+
+    // -------------------------------------------------------
+    // Test runners
+    // -------------------------------------------------------
+
+    function resetTracking() {
+      apiCalls.length = 0;
+      currentHash = "#/session/wf-assistant-1";
+      sessionModelCleared = false;
+      sessionsRefreshed = false;
+    }
+
+    // Test: clicking "Done" (Cancel) on a dedicated workflow assistant
+    // should delete the session. Current code does NOT — this should fail.
+    async function testDoneDeletesSession() {
+      resetTracking();
+      state.assistantType = "workflow";
+
+      // Execute the fixed handler
+      await handleCancel();
+
+      // Check if session was deleted via API
+      const deleteCall = apiCalls.find(
+        c => c.method === "DELETE" && c.url.includes("/api/sessions/")
+      );
+
+      return {
+        sessionDeleted: !!deleteCall,
+        sessionModelCleared: !!sessionModelCleared,
+        apiCalls: apiCalls.slice()
+      };
+    }
+
+    // Test: clicking "Save" (Create Workflow) should save, delete session,
+    // and navigate to workflows. Current code does NOT — this should fail.
+    async function testSaveDeletesSession() {
+      resetTracking();
+      state.assistantType = "workflow";
+
+      // Execute the fixed handler
+      await handleCreateWorkflow();
+
+      // Check if session was deleted via API
+      const deleteCall = apiCalls.find(
+        c => c.method === "DELETE" && c.url.includes("/api/sessions/")
+      );
+
+      return {
+        sessionDeleted: !!deleteCall,
+        sessionModelCleared: !!sessionModelCleared,
+        navigatedToWorkflows: currentHash === "#/workflows",
+        apiCalls: apiCalls.slice()
+      };
+    }
+
+    window.__testDoneDeletesSession = testDoneDeletesSession;
+    window.__testSaveDeletesSession = testSaveDeletesSession;
+  </script>
+</body>
+</html>

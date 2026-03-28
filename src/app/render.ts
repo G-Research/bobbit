@@ -1308,12 +1308,50 @@ function ensureWorkflowPageLoaded() {
 function workflowPreviewPanel() {
 	ensureWorkflowPageLoaded();
 
-	const handleDone = () => {
-		backToSessions();
+	const handleCancel = async () => {
+		if (state.assistantType === "workflow") {
+			const sessionId = activeSessionId();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.assistantType = null;
+			localStorage.removeItem("gateway.sessionId");
+			state.appView = "authenticated";
+			if (sessionId) {
+				await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+				clearSessionModel(sessionId);
+			}
+			await refreshSessions();
+			setHashRoute("landing");
+			renderApp();
+		} else {
+			backToSessions();
+		}
 	};
 
-	const handleSave = async () => {
-		if (_workflowPageModule) await _workflowPageModule.saveWorkflowFromPanel();
+	const handleCreateWorkflow = async () => {
+		if (_workflowPageModule) {
+			const ok = await _workflowPageModule.saveWorkflowFromPanel();
+			if (!ok) return;
+		}
+		const sessionId = activeSessionId();
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
+		state.assistantType = null;
+		localStorage.removeItem("gateway.sessionId");
+		state.appView = "authenticated";
+		if (sessionId) {
+			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+			clearSessionModel(sessionId);
+		}
+		await refreshSessions();
+		setHashRoute("workflows");
+		renderApp();
 	};
 
 	if (!_workflowPageModule) {
@@ -1334,13 +1372,13 @@ function workflowPreviewPanel() {
 			<div class="flex items-center justify-between p-3 border-t border-border">
 				<div></div>
 				<div class="flex items-center gap-2">
-					${Button({ variant: "ghost", size: "sm", onClick: handleDone, children: "Done" })}
+					${Button({ variant: "ghost", size: "sm", onClick: handleCancel, children: "Cancel" })}
 					${Button({
 						variant: "default",
 						size: "sm",
-						onClick: handleSave,
+						onClick: handleCreateWorkflow,
 						disabled: !canSaveWorkflow(),
-						children: isWorkflowSaving() ? "Saving\u2026" : "Save",
+						children: isWorkflowSaving() ? "Creating\u2026" : "Create Workflow",
 					})}
 				</div>
 			</div>
