@@ -44,6 +44,8 @@ export interface GatewaySession {
 	staffAssistant?: boolean;
 	/** Whether this session has a live HTML preview panel */
 	preview?: boolean;
+	/** Goal ID this session is re-attempting (for goal assistant sessions) */
+	reattemptGoalId?: string;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
 	/** Personality names assigned to this session */
@@ -70,6 +72,8 @@ export interface Goal {
 	setupError?: string;
 	archived?: boolean;
 	archivedAt?: number;
+	/** If this goal is a re-attempt of another goal, the original goal's ID */
+	reattemptOf?: string;
 	workflow?: {
 		id: string;
 		name: string;

@@ -1,0 +1,58 @@
+id: quick-fix
+name: Quick Fix
+description: Fast workflow for small changes — skip design, go straight to implementation and merge
+gates:
+  - id: implementation
+    name: Implementation
+    verify:
+      - name: Type check passes
+        type: command
+        run: "{{project.typecheck_command}}"
+      - name: Unit tests
+        type: command
+        run: "{{project.test_unit_command}}"
+      - name: E2E tests
+        type: command
+        run: "{{project.test_e2e_command}}"
+      - name: Gap analysis
+        type: llm-review
+        prompt: |-
+          Compare the goal specification to the actual implementation on this branch.
+
+          The goal spec is:
+          {{goal_spec}}
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see the implementation diff.
+
+          Identify:
+          1. Requirements in the goal spec not addressed by the changes
+          2. Acceptance criteria not met by the code
+          3. Implemented behavior that contradicts the specification
+          4. Any unrelated or unnecessary changes
+      - name: Code quality review
+        type: llm-review
+        prompt: |-
+          Review the code changes on branch {{branch}} vs {{master}} for quality.
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see changes.
+          Read modified files for full context.
+
+          Check:
+          1. Correctness — logic errors, off-by-one, race conditions
+          2. Error handling — missing try/catch, unhandled promise rejections
+          3. Edge cases — null/undefined, empty arrays, boundary values
+          4. Minimality — no unrelated changes, no dead code
+          5. Test coverage — are new behaviors tested?
+  - id: ready-to-merge
+    name: Ready to Merge
+    depends_on:
+      - implementation
+    verify:
+      - name: PR raised
+        type: llm-review
+        prompt: |-
+          Verify a pull request has been created for branch {{branch}}.
+          Run `git log {{master}}...{{branch}} --oneline` to confirm there are commits.
+          Check that the branch has been pushed and is ready for merge.
+createdAt: 1774734770196
+updatedAt: 1774734770196

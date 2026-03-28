@@ -395,8 +395,7 @@ async function initApp() {
 		const nonDelegate = allSessions.filter((s) => !s.delegateOf);
 		const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
 		const byAge = (a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt;
-		const stateOrder: Record<string, number> = { "in-progress": 0, "todo": 1, "complete": 2, "shelved": 3 };
-		const sortedGoals = [...state.goals].sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9));
+		const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
 
 		const ordered: string[] = [];
 		for (const goal of sortedGoals) {

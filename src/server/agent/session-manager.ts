@@ -10,6 +10,7 @@ import { PromptQueue } from "./prompt-queue.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
+import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, type PromptParts } from "./system-prompt.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
@@ -129,6 +130,7 @@ export class SessionManager {
 	private roleManager?: RoleManager;
 	private toolManager?: ToolManager;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
+	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private mcpManager: McpManager | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	goalManager: GoalManager;
@@ -147,12 +149,17 @@ export class SessionManager {
 		this.roleManager = options?.roleManager;
 		this.toolManager = options?.toolManager;
 		this.preferencesStore = options?.preferencesStore;
+		this.workflowStore = options?.workflowStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
 	}
 
 	getCostTracker(): CostTracker {
 		return this.costTracker;
+	}
+
+	getSessionStore(): SessionStore {
+		return this.store;
 	}
 
 	getMcpManager(): McpManager | null {
@@ -181,6 +188,44 @@ export class SessionManager {
 		} catch (err) {
 			console.error('[mcp] Failed to initialize MCP:', (err as Error).message);
 		}
+	}
+
+	/** Build a markdown list of available workflows for the goal assistant prompt. */
+	private _buildWorkflowList(): string {
+		const workflows = this.workflowStore?.getAll();
+		if (!workflows || workflows.length === 0) {
+			return 'Use **general** as a safe default.';
+		}
+		return workflows.map(w => {
+			const gateNames = w.gates.map(g => g.name).join(', ');
+			return `- **${w.id}** (${w.name}) — ${w.description}. Gates: ${gateNames}.`;
+		}).join('\n');
+	}
+
+	/**
+	 * Inject the dynamic workflow list into a goal assistant prompt.
+	 * Handles two cases:
+	 * 1. The prompt contains {{AVAILABLE_WORKFLOWS}} placeholder (new TS constant)
+	 * 2. The prompt contains the old hardcoded workflow list (legacy YAML on disk)
+	 */
+	private _injectWorkflowList(spec: string): string {
+		const dynamicList = this._buildWorkflowList();
+
+		// Case 1: New placeholder exists — simple replacement
+		if (spec.includes('{{AVAILABLE_WORKFLOWS}}')) {
+			return spec.replace('{{AVAILABLE_WORKFLOWS}}', dynamicList);
+		}
+
+		// Case 2: Old hardcoded list from legacy YAML — replace the section between
+		// "Available workflows:" and "Pick the workflow" with the dynamic list.
+		// The old pattern has bullet items starting with "- **" after "Available workflows:\n"
+		const oldListPattern = /(Available workflows:\s*\n)(?:\s*- \*\*.*\n?)+(\s*\n*(?:Pick the workflow))/s;
+		let result = spec.replace(oldListPattern, `$1${dynamicList}\n\n$2`);
+
+		// Also remove the "You can also check for additional workflows..." sentence
+		result = result.replace(/\s*You can also check for additional workflows[^\n]*(?:the three above cover most cases)?\.?\s*/g, ' ');
+
+		return result;
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
@@ -213,6 +258,17 @@ export class SessionManager {
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
+			if (session.assistantType === "goal") {
+				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
+				// Inject re-attempt context if this is a re-attempt session
+				const reattemptId = (this.store.get(session.id) as any)?.reattemptGoalId;
+				if (reattemptId) {
+					const origGoal = this.goalManager.getGoal(reattemptId);
+					if (origGoal) {
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+					}
+				}
+			}
 			parts = {
 				baseSystemPromptPath: undefined,
 				cwd: session.cwd,
@@ -687,6 +743,16 @@ export class SessionManager {
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
+			if (ps.assistantType === "goal") {
+				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
+				// Inject re-attempt context if this is a re-attempt session
+				if (ps.reattemptGoalId) {
+					const origGoal = this.goalManager.getGoal(ps.reattemptGoalId);
+					if (origGoal) {
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+					}
+				}
+			}
 
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: undefined,
@@ -817,7 +883,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string }): Promise<SessionInfo> {
 		const id = randomUUID();
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
@@ -908,6 +974,16 @@ export class SessionManager {
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
+			if (assistantType === "goal") {
+				assistantGoalSpec = this._injectWorkflowList(assistantGoalSpec);
+				// Inject re-attempt context if this is a re-attempt session
+				if (opts?.reattemptGoalId) {
+					const origGoal = this.goalManager.getGoal(opts.reattemptGoalId);
+					if (origGoal) {
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+					}
+				}
+			}
 
 			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
 			if (assistantRole && assistantRole.allowedTools.length > 0) {
@@ -1578,6 +1654,7 @@ export class SessionManager {
 		nonInteractive?: boolean;
 		preview?: boolean;
 		personalities?: string[];
+		reattemptGoalId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => ({
 			id: s.id,
@@ -1605,6 +1682,7 @@ export class SessionManager {
 			nonInteractive: s.nonInteractive,
 			preview: s.preview,
 			personalities: s.personalities,
+			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
 		}));
 	}
 
@@ -2169,6 +2247,7 @@ export class SessionManager {
 		accessory?: string;
 		preview?: boolean;
 		personalities?: string[];
+		reattemptGoalId?: string;
 		archived: boolean;
 		archivedAt?: number;
 	}> {
@@ -2193,6 +2272,7 @@ export class SessionManager {
 			accessory: ps.accessory,
 			preview: ps.preview,
 			personalities: ps.personalities,
+			reattemptGoalId: ps.reattemptGoalId,
 			archived: true,
 			archivedAt: ps.archivedAt,
 		}));

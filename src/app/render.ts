@@ -312,7 +312,25 @@ function goalPreviewPanel() {
 		localStorage.removeItem("gateway.sessionId");
 		state.appView = "authenticated";
 
-		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), { spec: state.previewSpec, workflowId });
+		// Detect re-attempt context from the current session
+		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
+		const reattemptGoalId = currentSession?.reattemptGoalId;
+
+		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
+			spec: state.previewSpec,
+			workflowId,
+			reattemptOf: reattemptGoalId || undefined,
+		});
+
+		// If this is a re-attempt, archive the old goal and link the new one
+		if (reattemptGoalId && goal) {
+			await gatewayFetch(`/api/goals/${reattemptGoalId}`, { method: "DELETE" });
+			await gatewayFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ reattemptOf: reattemptGoalId }),
+			});
+		}
+
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
@@ -1308,12 +1326,50 @@ function ensureWorkflowPageLoaded() {
 function workflowPreviewPanel() {
 	ensureWorkflowPageLoaded();
 
-	const handleDone = () => {
-		backToSessions();
+	const handleCancel = async () => {
+		if (state.assistantType === "workflow") {
+			const sessionId = activeSessionId();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.assistantType = null;
+			localStorage.removeItem("gateway.sessionId");
+			state.appView = "authenticated";
+			if (sessionId) {
+				await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+				clearSessionModel(sessionId);
+			}
+			await refreshSessions();
+			setHashRoute("landing");
+			renderApp();
+		} else {
+			backToSessions();
+		}
 	};
 
-	const handleSave = async () => {
-		if (_workflowPageModule) await _workflowPageModule.saveWorkflowFromPanel();
+	const handleCreateWorkflow = async () => {
+		if (_workflowPageModule) {
+			const ok = await _workflowPageModule.saveWorkflowFromPanel();
+			if (!ok) return;
+		}
+		const sessionId = activeSessionId();
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
+		state.assistantType = null;
+		localStorage.removeItem("gateway.sessionId");
+		state.appView = "authenticated";
+		if (sessionId) {
+			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+			clearSessionModel(sessionId);
+		}
+		await refreshSessions();
+		setHashRoute("workflows");
+		renderApp();
 	};
 
 	if (!_workflowPageModule) {
@@ -1334,13 +1390,13 @@ function workflowPreviewPanel() {
 			<div class="flex items-center justify-between p-3 border-t border-border">
 				<div></div>
 				<div class="flex items-center gap-2">
-					${Button({ variant: "ghost", size: "sm", onClick: handleDone, children: "Done" })}
+					${Button({ variant: "ghost", size: "sm", onClick: handleCancel, children: "Cancel" })}
 					${Button({
 						variant: "default",
 						size: "sm",
-						onClick: handleSave,
+						onClick: handleCreateWorkflow,
 						disabled: !canSaveWorkflow(),
-						children: isWorkflowSaving() ? "Saving\u2026" : "Save",
+						children: isWorkflowSaving() ? "Creating\u2026" : "Create Workflow",
 					})}
 				</div>
 			</div>

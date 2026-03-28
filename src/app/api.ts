@@ -314,11 +314,12 @@ export async function fetchGitStatus(sessionId: string, opts?: { fetch?: boolean
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string }): Promise<Goal | null> {
-	const { spec = "", workflowId } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
+		if (reattemptOf) body.reattemptOf = reattemptOf;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),

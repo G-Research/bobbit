@@ -36,6 +36,8 @@ export interface PersistedGoal {
 	setupError?: string;
 	/** GitHub PR URL (set by team lead after creating PR) */
 	prUrl?: string;
+	/** If this goal is a re-attempt of another goal, the original goal's ID */
+	reattemptOf?: string;
 	/** Whether this goal has been archived (soft-deleted) */
 	archived?: boolean;
 	/** Epoch ms when the goal was archived */
