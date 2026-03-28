@@ -15,6 +15,8 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "rootDir": "src/server",
     "outDir": "dist/server"
   },
