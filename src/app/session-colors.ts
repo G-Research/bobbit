@@ -298,10 +298,13 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 
 	// Canvas positioning — offset for accessories that add height
 	const compactTopOffset = compactSquish ? 5.4 : 0;
-	const canvasTop = addsHeight ? `${compactTopOffset}px` : `${compactTopOffset}px`;
+	const canvasTop = `${compactTopOffset}px`;
 
 	// Compute hue-rotate value to pass to the directive for counter-rotating accessories
 	const accessoryHueRotate = (hueRotate && status !== "starting" && status !== "terminated") ? hueRotate : 0;
+
+	// Squish animation for compaction state
+	const squishStyle = compactSquish ? "animation:bobbit-squish 3s ease-in-out infinite;transform-origin:0 9px;" : "";
 
 	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><canvas ${bobbitSprite({
 		eyeState: "center",
@@ -311,5 +314,5 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		hueRotate: accessoryHueRotate,
 		selected: isSelected,
 		animated: isSelected,
-	})} style="position:absolute;left:0;top:${canvasTop};image-rendering:pixelated;${shimmer}"></canvas></span>`;
+	})} style="position:absolute;left:0;top:${canvasTop};image-rendering:pixelated;${shimmer}${squishStyle}"></canvas></span>`;
 }

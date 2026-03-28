@@ -26,7 +26,7 @@ import { setHashRoute } from "./routing.js";
  *  .bobbit-blob__wand, .bobbit-blob__wizard-hat divs with .bobbit-blob--inline
  *  CSS overrides.
  */
-function idleBlob(accId: string, size = 40, hueIndex = 0, _phaseIndex = 0): TemplateResult {
+function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): TemplateResult {
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
 	const acc = accId && accId !== "none" ? accId : undefined;
 	// Scale so the body (10px wide) fills ~77% of the container.
@@ -42,6 +42,7 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, _phaseIndex = 0): Temp
 				animated: true,
 				schedule: IDLE_EYE_SCHEDULE,
 				cycleDuration: 10000,
+				eyeDelay: phaseIndex * 800,
 			})}></canvas>
 		</div>
 	`;

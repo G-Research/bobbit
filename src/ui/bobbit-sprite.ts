@@ -211,6 +211,8 @@ export interface SpriteOptions {
   schedule?: EyeScheduleEntry[];
   /** Cycle duration in ms for animated sprites */
   cycleDuration?: number;
+  /** Eye animation offset in ms — staggers multiple blobs so they don't blink in sync */
+  eyeDelay?: number;
 }
 
 /**
@@ -320,7 +322,6 @@ export class BobbitEyeTimer {
   private _currentState: EyeState = 'center';
   private _onStateChange: (state: EyeState) => void;
   private _offset = 0;
-  private _unsubDpr: (() => void) | null = null;
 
   constructor(onStateChange: (state: EyeState) => void) {
     this._onStateChange = onStateChange;
@@ -372,16 +373,6 @@ export class BobbitEyeTimer {
     return this._currentState;
   }
 
-  /** Subscribe to DPR changes. Call cleanup() to unsubscribe. */
-  subscribeDpr(repaint: () => void): void {
-    this._unsubDpr = onDprChange(repaint);
-  }
-
-  /** Unsubscribe from DPR changes */
-  unsubscribeDpr(): void {
-    this._unsubDpr?.();
-    this._unsubDpr = null;
-  }
 }
 
 // ============================================================================
@@ -417,8 +408,10 @@ class BobbitSpriteDirective extends AsyncDirective {
       this._timer.start(
         opts.schedule ?? SIDEBAR_EYE_SCHEDULE,
         opts.cycleDuration ?? 6000,
+        opts.eyeDelay ?? 0,
       );
-      // Subscribe to DPR changes
+      // Subscribe to DPR changes (unsubscribe previous first to avoid leak)
+      this._unsubDpr?.();
       this._unsubDpr = onDprChange(() => this._draw());
     } else if (!opts.animated && this._timer) {
       this._timer.stop();
@@ -431,8 +424,10 @@ class BobbitSpriteDirective extends AsyncDirective {
     }
 
     // If not animated, still handle DPR changes
-    if (!opts.animated && !this._unsubDpr) {
-      this._unsubDpr = onDprChange(() => this._draw());
+    if (!opts.animated) {
+      if (!this._unsubDpr) {
+        this._unsubDpr = onDprChange(() => this._draw());
+      }
     }
 
     return noChange;
@@ -464,6 +459,7 @@ class BobbitSpriteDirective extends AsyncDirective {
       this._timer.start(
         this._opts.schedule ?? SIDEBAR_EYE_SCHEDULE,
         this._opts.cycleDuration ?? 6000,
+        this._opts.eyeDelay ?? 0,
       );
     }
     this._unsubDpr = onDprChange(() => this._draw());
