@@ -344,10 +344,6 @@ function goalPreviewPanel() {
 		renderApp();
 	};
 
-	const handleCancel = () => {
-		backToSessions();
-	};
-
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
@@ -445,7 +441,6 @@ function goalPreviewPanel() {
 			</div>
 			<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 				<div class="flex items-center justify-end gap-2">
-					${Button({ variant: "ghost", onClick: handleCancel, children: "Cancel" })}
 					${Button({
 						variant: "default",
 						onClick: handleCreateGoal,
@@ -520,10 +515,6 @@ function rolePreviewPanel() {
 		await loadRolePageData();
 		setHashRoute("roles");
 		renderApp();
-	};
-
-	const handleCancel = () => {
-		backToSessions();
 	};
 
 	// Parse current tools string into array for display
@@ -654,7 +645,6 @@ function rolePreviewPanel() {
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({ variant: "ghost", onClick: handleCancel, children: "Cancel" })}
 				${Button({
 					variant: "default",
 					onClick: handleCreateRole,
@@ -1008,10 +998,6 @@ function staffPreviewPanel() {
 		renderApp();
 	};
 
-	const handleCancel = () => {
-		backToSessions();
-	};
-
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
@@ -1097,7 +1083,6 @@ function staffPreviewPanel() {
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({ variant: "ghost", onClick: handleCancel, children: "Cancel" })}
 				${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
@@ -1149,10 +1134,6 @@ function personalityPreviewPanel() {
 		await loadPersonalityPageData();
 		setHashRoute("personalities");
 		renderApp();
-	};
-
-	const handleCancel = () => {
-		backToSessions();
 	};
 
 	return html`
@@ -1229,7 +1210,6 @@ function personalityPreviewPanel() {
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({ variant: "ghost", onClick: handleCancel, children: "Cancel" })}
 				${Button({
 					variant: "default",
 					onClick: handleCreatePersonality,
@@ -1326,29 +1306,6 @@ function ensureWorkflowPageLoaded() {
 function workflowPreviewPanel() {
 	ensureWorkflowPageLoaded();
 
-	const handleCancel = async () => {
-		if (state.assistantType === "workflow") {
-			const sessionId = activeSessionId();
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
-			state.assistantType = null;
-			localStorage.removeItem("gateway.sessionId");
-			state.appView = "authenticated";
-			if (sessionId) {
-				await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-				clearSessionModel(sessionId);
-			}
-			await refreshSessions();
-			setHashRoute("landing");
-			renderApp();
-		} else {
-			backToSessions();
-		}
-	};
-
 	const handleCreateWorkflow = async () => {
 		if (_workflowPageModule) {
 			const ok = await _workflowPageModule.saveWorkflowFromPanel();
@@ -1390,7 +1347,6 @@ function workflowPreviewPanel() {
 			<div class="flex items-center justify-between p-3 border-t border-border">
 				<div></div>
 				<div class="flex items-center gap-2">
-					${Button({ variant: "ghost", size: "sm", onClick: handleCancel, children: "Cancel" })}
 					${Button({
 						variant: "default",
 						size: "sm",
