@@ -29,5 +29,17 @@ if [ ! -f "$BOBBIT_HOME/dist/ui/index.html" ]; then
   (cd "$BOBBIT_HOME" && npm run build:ui)
 fi
 
+# 3b. Rebuild if source is newer than build output
+if [ -f "$BOBBIT_HOME/dist/server/cli.js" ] && \
+   [ -n "$(find "$BOBBIT_HOME/src/server" "$BOBBIT_HOME/package.json" "$BOBBIT_HOME/tsconfig.server.json" -type f -newer "$BOBBIT_HOME/dist/server/cli.js" -print -quit 2>/dev/null)" ]; then
+  echo "⚡ Server source changed — rebuilding..."
+  (cd "$BOBBIT_HOME" && npm run build:server)
+fi
+if [ -f "$BOBBIT_HOME/dist/ui/index.html" ] && \
+   [ -n "$(find "$BOBBIT_HOME/src/ui" "$BOBBIT_HOME/src/app" -type f -newer "$BOBBIT_HOME/dist/ui/index.html" -print -quit 2>/dev/null)" ]; then
+  echo "⚡ UI source changed — rebuilding..."
+  (cd "$BOBBIT_HOME" && npm run build:ui)
+fi
+
 # 4. Launch, forwarding all args after implicit --cwd
 exec node "$BOBBIT_HOME/dist/server/cli.js" --cwd "$(pwd)" "$@"
