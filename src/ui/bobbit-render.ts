@@ -8,11 +8,13 @@
  * All pixel data comes from bobbit-sprite-data.ts — the single source of truth.
  */
 import { html, type TemplateResult } from "lit";
+import { ref, createRef } from "lit/directives/ref.js";
 import {
 	BODY_GRID, BODY_WIDTH, BODY_HEIGHT,
 	EYE_POSITIONS,
 	SHADOW_REST,
-	type PaletteKey, type SpritePixel, type EyeGaze, type ShadowPixel,
+	BUSY_EYE_SEQUENCE, IDLE_EYE_SEQUENCE,
+	type PaletteKey, type SpritePixel, type EyeGaze, type EyeFrame, type ShadowPixel,
 	type AccessorySpriteData,
 	ACCESSORIES as SPRITE_ACCESSORIES,
 	ACCESSORY_IDS as SPRITE_ACCESSORY_IDS,
@@ -303,24 +305,71 @@ export function renderChatBlob(opts: ChatBlobOptions): TemplateResult {
 }
 
 // ============================================================================
+// CANVAS EYE ANIMATION
+// ============================================================================
+
+/** Pre-render all unique eye frames for an eye sequence, return map of frameKey → dataURL */
+function buildEyeFrameCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<string, string> {
+	const cache = new Map<string, string>();
+	for (const frame of sequence) {
+		const key = `${frame.gaze}-${frame.blink}`;
+		if (!cache.has(key)) {
+			cache.set(key, renderBodyToDataURL(palette, frame.gaze, frame.blink));
+		}
+	}
+	return cache;
+}
+
+/** Start a JS eye animation loop on a canvas sprite <img> element.
+ *  Returns a cleanup function to stop the loop. */
+export function startCanvasEyeAnimation(
+	img: HTMLImageElement,
+	sequence: EyeFrame[],
+	cycleDurationMs: number,
+	palette: BobbitPalette = CANONICAL_PALETTE,
+): () => void {
+	const cache = buildEyeFrameCache(palette, sequence);
+	let rafId = 0;
+	let lastKey = "";
+	// Use time origin 0 so the JS cycle aligns with CSS animation timelines
+	// (CSS animations also count from page load / performance time origin).
+	const startTime = 0;
+
+	function tick() {
+		const elapsed = performance.now() - startTime;
+		const pct = (elapsed % cycleDurationMs) / cycleDurationMs * 100;
+		// Find current frame — last frame whose pct <= current pct
+		let frame = sequence[0];
+		for (let i = sequence.length - 1; i >= 0; i--) {
+			if (pct >= sequence[i].pct) { frame = sequence[i]; break; }
+		}
+		const key = `${frame.gaze}-${frame.blink}`;
+		if (key !== lastKey) {
+			const url = cache.get(key);
+			if (url) img.src = url;
+			lastKey = key;
+		}
+		rafId = requestAnimationFrame(tick);
+	}
+	rafId = requestAnimationFrame(tick);
+	return () => cancelAnimationFrame(rafId);
+}
+
+// ============================================================================
 // CANVAS CHAT BLOB RENDERER (for preview / comparison)
 // ============================================================================
 
 /**
- * Render a chat blob using canvas <img> inside the EXACT same DOM structure
- * as renderChatBlob. CSS classes provide all layout, positioning, transforms
- * and animations. We only replace the box-shadow pixel art with a canvas img
- * inside .bobbit-blob__sprite and .bobbit-blob__shadow.
- *
- * Eye-swap animations (box-shadow keyframes) won't render — the body shows
- * static center gaze. All other animations (bob, shimmer, enter/exit, squish,
- * idle translate, blink overlay) work because they target transform/filter.
+ * Render a chat blob using canvas <img> with the same CSS classes as the
+ * box-shadow version. Eye animation runs via JS (startCanvasEyeAnimation)
+ * instead of CSS box-shadow keyframes. All other animations (bob, shimmer,
+ * enter/exit, squish, idle translate) work via CSS.
  */
 export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	const { blobClass, accClass = "", hueRotate = 0 } = opts;
+	const isIdle = blobClass.includes("idle");
 
-	// Body at center gaze — rendered to a 10×9 canvas, placed inside the
-	// 1px sprite div so CSS scale(4) magnifies it identically to box-shadow.
+	// Body — start with center gaze, JS animation will swap frames
 	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
 
 	// Shadow at rest position
@@ -343,9 +392,21 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	// Shadow CSS: width:1px; same principle
 	const shadowStyle = `width:11px !important;height:10px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
+	// Start eye animation when the img mounts
+	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
+	const cycleDuration = 10000; // both busy and idle use 10s cycles
+	const spriteRef = createRef<HTMLImageElement>();
+	let cleanup: (() => void) | null = null;
+	const onRef = (el: Element | undefined) => {
+		if (el && el instanceof HTMLImageElement) {
+			cleanup?.();
+			cleanup = startCanvasEyeAnimation(el, sequence, cycleDuration);
+		}
+	};
+
 	return html`<div class="${accClass}" style="--bobbit-hue-rotate:${hueRotate}deg;display:inline-block;padding:8px 20px 40px 20px;">
 		<div class="${blobClass}">
-			<img class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">
+			<img ${ref(onRef)} class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">
 			<div class="bobbit-blob__crown"></div>
 			<div class="bobbit-blob__bandana"></div>
 			<div class="bobbit-blob__magnifier"></div>
@@ -381,11 +442,20 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
 	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:8px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
+	// Eye animation for idle blob
+	let cleanup: (() => void) | null = null;
+	const onRef = (el: Element | undefined) => {
+		if (el && el instanceof HTMLImageElement) {
+			cleanup?.();
+			cleanup = startCanvasEyeAnimation(el, IDLE_EYE_SEQUENCE, 10000);
+		}
+	};
+
 	return html`
 		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
 			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
 				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
-					<img class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">
+					<img ${ref(onRef)} class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">
 					<div class="bobbit-blob__crown"></div>
 					<div class="bobbit-blob__bandana"></div>
 					<div class="bobbit-blob__magnifier"></div>
