@@ -8,6 +8,7 @@ import { html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Brain, Image as ImageIcon, KeyRound } from "lucide";
+import { gatewayFetch } from "../../app/api.js";
 import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
@@ -130,7 +131,7 @@ export class ModelSelector extends DialogBase {
 	private async loadModels() {
 		this.loading = true;
 		try {
-			const res = await fetch("/api/models");
+			const res = await gatewayFetch("/api/models");
 			if (res.ok) {
 				this.serverModels = await res.json();
 			}

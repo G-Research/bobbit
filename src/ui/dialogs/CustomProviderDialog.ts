@@ -7,6 +7,7 @@ import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import type { Model } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { state } from "lit/decorators.js";
+import { gatewayFetch } from "../../app/api.js";
 import type { CustomProvider, CustomProviderType } from "../storage/stores/custom-providers-store.js";
 
 export class CustomProviderDialog extends DialogBase {
@@ -95,7 +96,7 @@ export class CustomProviderDialog extends DialogBase {
 				baseUrl: this.baseUrl,
 				apiKey: this.apiKey || undefined,
 			};
-			const res = await fetch("/api/custom-providers/test", {
+			const res = await gatewayFetch("/api/custom-providers/test", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(testConfig),
@@ -131,7 +132,7 @@ export class CustomProviderDialog extends DialogBase {
 				models: this.isAutoDiscoveryType() ? undefined : this.provider?.models || [],
 			};
 
-			const res = await fetch("/api/custom-providers", {
+			const res = await gatewayFetch("/api/custom-providers", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(provider),

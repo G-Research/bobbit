@@ -3,6 +3,7 @@ import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import { getProviders } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { gatewayFetch } from "../../app/api.js";
 import "../components/CustomProviderCard.js";
 import "../components/ProviderKeyInput.js";
 import type {
@@ -27,7 +28,7 @@ export class ProvidersModelsTab extends SettingsTab {
 
 	private async loadCustomProviders() {
 		try {
-			const res = await fetch("/api/custom-providers");
+			const res = await gatewayFetch("/api/custom-providers");
 			if (res.ok) {
 				this.customProviders = await res.json();
 			}
@@ -57,7 +58,7 @@ export class ProvidersModelsTab extends SettingsTab {
 		this.requestUpdate();
 
 		try {
-			const res = await fetch("/api/models");
+			const res = await gatewayFetch("/api/models");
 			if (res.ok) {
 				const models = await res.json();
 				const providerModels = models.filter((m: any) => m.provider === provider.name);
@@ -166,7 +167,7 @@ export class ProvidersModelsTab extends SettingsTab {
 		this.requestUpdate();
 
 		try {
-			const res = await fetch("/api/models");
+			const res = await gatewayFetch("/api/models");
 			if (res.ok) {
 				const models = await res.json();
 				const providerModels = models.filter((m: any) => m.provider === provider.name);
@@ -190,7 +191,7 @@ export class ProvidersModelsTab extends SettingsTab {
 		}
 
 		try {
-			const res = await fetch(`/api/custom-providers/${provider.id}`, { method: "DELETE" });
+			const res = await gatewayFetch(`/api/custom-providers/${provider.id}`, { method: "DELETE" });
 			if (!res.ok) throw new Error("Failed to delete provider");
 			await this.loadCustomProviders();
 			this.requestUpdate();

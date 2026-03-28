@@ -4,6 +4,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { type Context, complete, getModel } from "@mariozechner/pi-ai";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { gatewayFetch } from "../../app/api.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { applyProxyIfNeeded } from "../utils/proxy-utils.js";
 import { Input } from "./Input.js";
@@ -94,7 +95,7 @@ export class ProviderKeyInput extends LitElement {
 			try {
 				await getAppStorage().providerKeys.set(this.provider, this.keyInput);
 				// Also store server-side for unified model registry auth detection
-				fetch(`/api/provider-keys/${encodeURIComponent(this.provider)}`, {
+				gatewayFetch(`/api/provider-keys/${encodeURIComponent(this.provider)}`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ key: this.keyInput }),
