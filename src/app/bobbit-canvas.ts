@@ -155,11 +155,18 @@ function resolveBody(palette: BobbitPalette, eyeColor?: string, eyeXShift = 0): 
 	const eye = eyeColor ?? palette.eye;
 	const map: Record<Token, string> = { O: "#000000", M: palette.main, L: palette.light, D: palette.dark, E: eye };
 	if (eyeXShift) {
-		// Shift eye pixels horizontally; fill vacated positions with main colour
-		return BODY.map((p) => {
-			if (p.t === "E") return { x: p.x + eyeXShift, y: p.y, color: map.E };
-			return { x: p.x, y: p.y, color: map[p.t] };
-		});
+		// Shift eye pixels horizontally; fill vacated positions with main colour.
+		// We emit two pixels per eye: main at original pos + eye at shifted pos.
+		const pixels: Pixel[] = [];
+		for (const p of BODY) {
+			if (p.t === "E") {
+				pixels.push({ x: p.x, y: p.y, color: map.M });             // fill old pos
+				pixels.push({ x: p.x + eyeXShift, y: p.y, color: map.E }); // eye at new pos
+			} else {
+				pixels.push({ x: p.x, y: p.y, color: map[p.t] });
+			}
+		}
+		return pixels;
 	}
 	return BODY.map((p) => ({ x: p.x, y: p.y, color: map[p.t] }));
 }
