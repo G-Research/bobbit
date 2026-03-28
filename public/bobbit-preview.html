@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Bobbit Sprite Preview</title>
+<link rel="stylesheet" href="/src/ui/app.css">
+<link rel="stylesheet" href="/src/app/app.css">
+<style>
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    padding: 24px;
+    background: var(--background, #fff);
+    color: var(--foreground, #222);
+  }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+  h2 { font-size: 16px; font-weight: 600; margin: 24px 0 8px; border-bottom: 1px solid var(--border, #ddd); padding-bottom: 4px; }
+  h3 { font-size: 13px; font-weight: 600; margin: 16px 0 4px; color: var(--muted-foreground, #666); }
+  .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
+  .cell { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .cell-label { font-size: 10px; color: var(--muted-foreground, #888); text-align: center; max-width: 80px; word-break: break-all; }
+  .sidebar-bg { background: var(--sidebar, #f0f0f0); padding: 8px 12px; border-radius: 6px; }
+  .blob-cell { display: inline-block; padding: 8px 20px 40px 20px; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .controls label { font-size: 12px; }
+  .controls select, .controls input { font-size: 12px; padding: 2px 6px; }
+</style>
+</head>
+<body>
+
+<h1>Bobbit Sprite Reference Sheet</h1>
+<div class="controls">
+  <label>Hue: <input type="range" id="hueSlider" min="-180" max="180" value="0" style="width:140px"> <span id="hueVal">0°</span></label>
+  <label>Theme: <select id="themeToggle"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+</div>
+
+<h2>Sidebar Bobbits (1.6× scale) — uses renderSidebarBobbit() from real app</h2>
+<div id="sidebar-grid"></div>
+
+<h2>Chat Blobs (4× scale) — exact DOM from StreamingMessageContainer</h2>
+<div id="blob-grid"></div>
+
+<script type="module">
+import { render, html } from "/node_modules/lit/index.js";
+import { renderSidebarBobbit, NO_ACCESSORY } from "/src/ui/bobbit-render.ts";
+import { ACCESSORIES, ACCESSORY_IDS } from "/src/app/session-colors.ts";
+
+const HUES = [-110, -85, -60, -35, -10, 0, 15, 25, 40, 50, 65, 75, 100, 125];
+const ACC_IDS = ACCESSORY_IDS.filter(id => id !== 'none');
+
+const hueSlider = document.getElementById('hueSlider');
+const hueVal = document.getElementById('hueVal');
+const themeToggle = document.getElementById('themeToggle');
+hueSlider.addEventListener('input', () => { hueVal.textContent = hueSlider.value + '°'; renderAll(); });
+themeToggle.addEventListener('change', () => {
+  document.documentElement.classList.toggle('dark', themeToggle.value === 'dark');
+  renderAll();
+});
+
+function sb(opts) {
+  return renderSidebarBobbit(opts);
+}
+function acc(id) {
+  return ACCESSORIES[id] || NO_ACCESSORY;
+}
+
+function renderAll() {
+  const hue = parseInt(hueSlider.value);
+  renderSidebar(hue);
+  renderBlobs(hue);
+}
+
+function renderSidebar(hue) {
+  const tpl = html`
+    <h3>Status variants (canonical green, no hue)</h3>
+    <div class="row sidebar-bg">
+      <div class="cell">${sb({ status: 'streaming' })}<span class="cell-label">streaming</span></div>
+      <div class="cell">${sb({ status: 'idle' })}<span class="cell-label">idle</span></div>
+      <div class="cell">${sb({ status: 'idle', isSelected: true })}<span class="cell-label">selected</span></div>
+      <div class="cell">${sb({ status: 'streaming', isCompacting: true })}<span class="cell-label">compacting</span></div>
+      <div class="cell">${sb({ status: 'streaming', isAborting: true })}<span class="cell-label">aborting</span></div>
+    </div>
+
+    <h3>Special palettes</h3>
+    <div class="row sidebar-bg">
+      <div class="cell">${sb({ status: 'starting' })}<span class="cell-label">starting</span></div>
+      <div class="cell">${sb({ status: 'terminated' })}<span class="cell-label">terminated</span></div>
+    </div>
+
+    <h3>All 14 session colours (streaming)</h3>
+    <div class="row sidebar-bg">
+      ${HUES.map(h => html`<div class="cell">${sb({ status: 'streaming', hueRotate: h })}<span class="cell-label">${h}°</span></div>`)}
+    </div>
+
+    <h3>All accessories (streaming, hue=${hue}°)</h3>
+    <div class="row sidebar-bg">
+      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'streaming', hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+    </div>
+
+    <h3>Selected with accessories (eye blink)</h3>
+    <div class="row sidebar-bg">
+      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'streaming', hueRotate: hue, isSelected: true, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+    </div>
+
+    <h3>Compacting with accessories</h3>
+    <div class="row sidebar-bg">
+      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'streaming', isCompacting: true, hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+    </div>
+
+    <h3>Idle with accessories (desaturated)</h3>
+    <div class="row sidebar-bg">
+      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'idle', hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+    </div>
+
+    <h3>All 14 colours × crown</h3>
+    <div class="row sidebar-bg">
+      ${HUES.map(h => html`<div class="cell">${sb({ status: 'streaming', hueRotate: h, accessory: acc('crown') })}<span class="cell-label">${h}°</span></div>`)}
+    </div>
+
+    <h3>All 14 colours × bandana</h3>
+    <div class="row sidebar-bg">
+      ${HUES.map(h => html`<div class="cell">${sb({ status: 'streaming', hueRotate: h, accessory: acc('bandana') })}<span class="cell-label">${h}°</span></div>`)}
+    </div>
+  `;
+  render(tpl, document.getElementById('sidebar-grid'));
+}
+
+function blobHTML(blobClass, accClass) {
+  return html`<div class="${accClass}">
+    <div class="blob-cell">
+      <div class="${blobClass}">
+        <div class="bobbit-blob__sprite"></div>
+        <div class="bobbit-blob__crown"></div>
+        <div class="bobbit-blob__bandana"></div>
+        <div class="bobbit-blob__magnifier"></div>
+        <div class="bobbit-blob__palette"></div>
+        <div class="bobbit-blob__pencil"></div>
+        <div class="bobbit-blob__shield"></div>
+        <div class="bobbit-blob__set-square"></div>
+        <div class="bobbit-blob__flask"></div>
+        <div class="bobbit-blob__wand"></div>
+        <div class="bobbit-blob__wizard-hat"></div>
+        <div class="bobbit-blob__shadow"></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderBlobs(hue) {
+  const tpl = html`
+    <h3>Active blob — bounce, shimmer, eyes, shadow</h3>
+    <div class="row" style="--bobbit-hue-rotate:${hue}deg">
+      ${blobHTML('bobbit-blob', '')}
+    </div>
+
+    <h3>Idle blob — desaturated, offset left, idle eye cycle</h3>
+    <div class="row" style="--bobbit-hue-rotate:${hue}deg">
+      ${blobHTML('bobbit-blob bobbit-blob--idle', '')}
+    </div>
+
+    <h3>Active blob with accessories</h3>
+    <div class="row" style="--bobbit-hue-rotate:${hue}deg;gap:12px;">
+      ${ACC_IDS.map(id => html`<div class="cell">${blobHTML('bobbit-blob', `bobbit-${id}`)}<span class="cell-label">${id}</span></div>`)}
+    </div>
+
+    <h3>Idle blob with accessories</h3>
+    <div class="row" style="--bobbit-hue-rotate:${hue}deg;gap:12px;">
+      ${ACC_IDS.map(id => html`<div class="cell">${blobHTML('bobbit-blob bobbit-blob--idle', `bobbit-${id}`)}<span class="cell-label">${id}</span></div>`)}
+    </div>
+
+    <h3>All 14 session colours (active)</h3>
+    <div class="row" style="gap:8px;">
+      ${HUES.map(h => html`<div class="cell" style="--bobbit-hue-rotate:${h}deg">${blobHTML('bobbit-blob', '')}<span class="cell-label">${h}°</span></div>`)}
+    </div>
+
+    <h3>All 14 colours × crown</h3>
+    <div class="row" style="gap:8px;">
+      ${HUES.map(h => html`<div class="cell" style="--bobbit-hue-rotate:${h}deg">${blobHTML('bobbit-blob', 'bobbit-crowned')}<span class="cell-label">${h}°</span></div>`)}
+    </div>
+
+    <h3>All 14 colours × wand (with sparkles)</h3>
+    <div class="row" style="gap:8px;">
+      ${HUES.map(h => html`<div class="cell" style="--bobbit-hue-rotate:${h}deg">${blobHTML('bobbit-blob', 'bobbit-wand')}<span class="cell-label">${h}°</span></div>`)}
+    </div>
+  `;
+  render(tpl, document.getElementById('blob-grid'));
+}
+
+renderAll();
+</script>
+
+</body>
+</html>
