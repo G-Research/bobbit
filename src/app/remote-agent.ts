@@ -54,6 +54,13 @@ export class RemoteAgent {
 	// Kept separately so they survive the server's post-compaction messages refresh.
 	private _compactionSyntheticMessages: any[] = [];
 
+	// Proposal deferral — when set, incoming messages are stored but
+	// _checkProposals is skipped until runDeferredProposalCheck() is called.
+	// This lets us fire requestMessages() early for fast loading while
+	// draft restores finish without being overwritten by proposal detection.
+	private _deferProposalCheck = false;
+	private _hasDeferredProposals = false;
+
 	// Task timing — track when the agent started working so we can
 	// notify the user if a long task finishes while the tab is hidden.
 	private _taskStartTime: number | null = null;
@@ -437,6 +444,25 @@ export class RemoteAgent {
 		this.send({ type: "get_messages" });
 	}
 
+	/** Defer proposal checking on incoming messages until unlocked. */
+	deferProposalCheck(): void {
+		this._deferProposalCheck = true;
+		this._hasDeferredProposals = false;
+	}
+
+	/** Run deferred proposal checks now (after draft restores are complete). */
+	runDeferredProposalCheck(): void {
+		this._deferProposalCheck = false;
+		if (this._hasDeferredProposals) {
+			this._hasDeferredProposals = false;
+			for (const m of this._state.messages) {
+				if (m.role === "assistant") {
+					this._checkProposals(m);
+				}
+			}
+		}
+	}
+
 	async continue(): Promise<void> {}
 
 	async waitForIdle(): Promise<void> {
@@ -586,10 +612,16 @@ export class RemoteAgent {
 					for (const m of this._state.messages) {
 						this.emit({ type: "message_end", message: m });
 					}
-					// Scan loaded messages for goal proposals (e.g. reconnecting to an existing session)
-					for (const m of this._state.messages) {
-						if (m.role === "assistant") {
-							this._checkProposals(m);
+					// Scan loaded messages for goal proposals (e.g. reconnecting to an existing session).
+					// If proposal checking is deferred (draft restores in progress),
+					// just flag that we have proposals to check later.
+					if (this._deferProposalCheck) {
+						this._hasDeferredProposals = true;
+					} else {
+						for (const m of this._state.messages) {
+							if (m.role === "assistant") {
+								this._checkProposals(m);
+							}
 						}
 					}
 					// Re-add compacting placeholder if compaction is still in progress

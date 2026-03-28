@@ -368,6 +368,9 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 		state.remoteAgent = null;
 		state.connectionStatus = "disconnected";
 	}
+	// Clear the old chat panel so the render never shows stale messages
+	// from the previous session while connecting to the new one.
+	state.chatPanel = null;
 	state.cwdDropdownOpen = false;
 
 	// Update hash route synchronously
@@ -694,26 +697,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.appView = "authenticated";
 		markSessionVisited(sessionId);
 
-		// Refresh sessions so newly created sessions have role/accessory data
-		await refreshSessions();
-		if (isStale()) { cleanupRemote(remote); return; }
-
-		// Re-apply accessory class after refreshSessions (may have new data)
-		const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
-		const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat", "bobbit-wand"];
-		accClasses.forEach((c) => document.documentElement.classList.remove(c));
-		const accId = sessionForRole?.accessory
-			?? (sessionForRole?.role === "team-lead" ? "crown" : sessionForRole?.role === "coder" ? "bandana" : undefined);
-		if (accId && accId !== "none") {
-			const cls = accId === "crown" ? "bobbit-crowned" : `bobbit-${accId}`;
-			document.documentElement.classList.add(cls);
-		}
-
-		// Detect goal assistant state early — before async work and before
-		// the first renderApp() — so the mobile header (which depends on
-		// isGoalAssistantSession) renders correctly on the first pass.
+		// Detect assistant type from cached session data (no network needed).
 		const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
-		// Unified assistant type detection — prefer assistantType from server, fall back to legacy booleans
 		state.assistantType = options?.assistantType
 			|| sessionData?.assistantType
 			|| (options?.isGoalAssistant || sessionData?.goalAssistant ? "goal"
@@ -731,20 +716,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
 
-		// Render immediately so the mobile header appears without waiting
-		// for ChatPanel setup or other async work below.
-		renderApp();
-
-		// Replace history if the hash changed to a goal-dashboard during the async gap
-		const currentRoute = getRouteFromHash();
-		if (currentRoute.view === "goal-dashboard") {
-			setHashRoute("session", sessionId, true);
-		}
-
-		const modelProvider = remote.state.model?.provider || "anthropic";
-		await storage.providerKeys.set(modelProvider, "gateway-managed");
-		if (isStale()) { cleanupRemote(remote); return; }
-
+		// ── Create ChatPanel immediately so the first render shows the new
+		// (empty) panel instead of a stale one or a blank gap.
 		state.chatPanel = new ChatPanel();
 		await state.chatPanel.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
@@ -761,7 +734,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Set cwd and branch on the AgentInterface stats bar
 		if (state.chatPanel.agentInterface && sessionData?.cwd) {
 			state.chatPanel.agentInterface.cwd = sessionData.cwd;
-			// Look up branch from the goal if this session belongs to one
 			if (sessionData.goalId) {
 				const goal = state.goals.find((g) => g.id === sessionData.goalId);
 				if (goal?.branch) {
@@ -845,131 +817,145 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			};
 		}
 
-		// Initial git status and bg process fetch
+		// ── First render: connected state with new (empty) ChatPanel.
+		// The mobile header and session chrome appear immediately.
+		renderApp();
+
+		// Replace history if the hash changed to a goal-dashboard during the async gap
+		const currentRoute = getRouteFromHash();
+		if (currentRoute.view === "goal-dashboard") {
+			setHashRoute("session", sessionId, true);
+		}
+
+		// ── Fire requestMessages() early so the network roundtrip overlaps
+		// with draft restores and refreshSessions below. Proposal checking
+		// is deferred so incoming messages won't fill form state before
+		// draft restores have a chance to run.
+		if (isExisting) {
+			remote.deferProposalCheck();
+			remote.requestMessages();
+		}
+
+		// Initial git status and bg process fetch (fire-and-forget)
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
 
-		// NOTE: requestMessages() is deferred until after all draft restores
-		// complete (see below). Calling it here would race: the WS response
-		// can arrive while draft restores are awaiting, detect a proposal via
-		// _checkProposals, fill the form — then the restore completes with
-		// "no draft" and wipes the form to empty.
+		// ── Run draft restores, refreshSessions, and storage.providerKeys
+		// in parallel. Draft restores must complete before we unlock proposal
+		// checking, but they don't depend on refreshSessions.
+		const draftRestorePromise = (async () => {
+			// Clear stale proposals for non-matching assistant types
+			if (state.assistantType !== "goal") state.activeGoalProposal = null;
+			if (state.assistantType !== "role") state.activeRoleProposal = null;
+			if (state.assistantType !== "personality") state.activePersonalityProposal = null;
+			if (state.assistantType !== "staff") state.activeStaffProposal = null;
 
-		// Clear goal proposal when connecting to a non-goal-assistant session
-		// to prevent stale proposals from showing in unrelated sessions
-		if (state.assistantType !== "goal") {
-			state.activeGoalProposal = null;
-		}
-
-		if (state.assistantType === "goal") {
-			// Try to restore persisted draft state; fall back to fresh defaults
-			const restored = await restoreGoalDraft(sessionId);
-			if (isStale()) { cleanupRemote(remote); return; }
-			if (!restored) {
+			if (state.assistantType === "goal") {
+				const restored = await restoreGoalDraft(sessionId);
+				if (isStale()) return;
+				if (!restored) {
+					state.assistantTab = "chat";
+					state.previewTitle = "";
+					state.previewCwd = "";
+					state.previewSpec = "";
+					state.previewTitleEdited = false;
+					state.previewCwdEdited = false;
+					state.previewSpecEdited = false;
+					state.assistantHasProposal = false;
+				}
+				state.previewSpecEditMode = false;
+			} else if (state.assistantType === "role") {
+				const restored = await restoreRoleDraft(sessionId);
+				if (isStale()) return;
+				if (!restored) {
+					state.assistantTab = "chat";
+					state.rolePreviewName = "";
+					state.rolePreviewLabel = "";
+					state.rolePreviewPrompt = "";
+					state.rolePreviewTools = "";
+					state.rolePreviewAccessory = "none";
+					state.rolePreviewNameEdited = false;
+					state.rolePreviewLabelEdited = false;
+					state.rolePreviewPromptEdited = false;
+					state.rolePreviewToolsEdited = false;
+					state.rolePreviewAccessoryEdited = false;
+					state.assistantHasProposal = false;
+				}
+				state.rolePreviewPromptEditMode = false;
+			} else if (state.assistantType === "tool") {
 				state.assistantTab = "chat";
-				state.previewTitle = "";
-				state.previewCwd = "";
-				state.previewSpec = "";
-				state.previewTitleEdited = false;
-				state.previewCwdEdited = false;
-				state.previewSpecEdited = false;
-				state.assistantHasProposal = false;
-			}
-			state.previewSpecEditMode = false;
-		}
-
-		// Clear role proposal when connecting to a non-role-assistant session
-		if (state.assistantType !== "role") {
-			state.activeRoleProposal = null;
-		}
-
-		if (state.assistantType === "role") {
-			const restored = await restoreRoleDraft(sessionId);
-			if (isStale()) { cleanupRemote(remote); return; }
-			if (!restored) {
+				state.toolPreviewName = "";
+				state.toolPreviewChecklist = { docs: "pending", renderer: "pending", tests: "pending", config: "pending" };
+				state.toolPreviewDocs = "";
+				state.toolPreviewRendererHtml = "";
+			} else if (state.assistantType === "personality") {
+				const restored = await restorePersonalityDraft(sessionId);
+				if (isStale()) return;
+				if (!restored) {
+					state.assistantTab = "chat";
+					state.personalityPreviewName = "";
+					state.personalityPreviewLabel = "";
+					state.personalityPreviewDescription = "";
+					state.personalityPreviewPromptFragment = "";
+					state.personalityPreviewNameEdited = false;
+					state.personalityPreviewLabelEdited = false;
+					state.personalityPreviewDescriptionEdited = false;
+					state.personalityPreviewPromptFragmentEdited = false;
+					state.assistantHasProposal = false;
+				}
+			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
-				state.rolePreviewName = "";
-				state.rolePreviewLabel = "";
-				state.rolePreviewPrompt = "";
-				state.rolePreviewTools = "";
-				state.rolePreviewAccessory = "none";
-				state.rolePreviewNameEdited = false;
-				state.rolePreviewLabelEdited = false;
-				state.rolePreviewPromptEdited = false;
-				state.rolePreviewToolsEdited = false;
-				state.rolePreviewAccessoryEdited = false;
+				state.staffPreviewName = "";
+				state.staffPreviewDescription = "";
+				state.staffPreviewPrompt = "";
+				state.staffPreviewTriggers = "[]";
+				state.staffPreviewCwd = "";
+				state.staffPreviewNameEdited = false;
+				state.staffPreviewDescriptionEdited = false;
+				state.staffPreviewPromptEdited = false;
+				state.staffPreviewTriggersEdited = false;
+				state.staffPreviewCwdEdited = false;
 				state.assistantHasProposal = false;
-			}
-			state.rolePreviewPromptEditMode = false;
-		}
-
-		if (state.assistantType === "tool") {
-			state.assistantTab = "chat";
-			state.toolPreviewName = "";
-			state.toolPreviewChecklist = { docs: "pending", renderer: "pending", tests: "pending", config: "pending" };
-			state.toolPreviewDocs = "";
-			state.toolPreviewRendererHtml = "";
-		}
-
-		// Clear personality proposal when connecting to a non-personality-assistant session
-		if (state.assistantType !== "personality") {
-			state.activePersonalityProposal = null;
-		}
-
-		if (state.assistantType === "personality") {
-			const restored = await restorePersonalityDraft(sessionId);
-			if (isStale()) { cleanupRemote(remote); return; }
-			if (!restored) {
+			} else if (state.assistantType === "workflow") {
 				state.assistantTab = "chat";
-				state.personalityPreviewName = "";
-				state.personalityPreviewLabel = "";
-				state.personalityPreviewDescription = "";
-				state.personalityPreviewPromptFragment = "";
-				state.personalityPreviewNameEdited = false;
-				state.personalityPreviewLabelEdited = false;
-				state.personalityPreviewDescriptionEdited = false;
-				state.personalityPreviewPromptFragmentEdited = false;
-				state.assistantHasProposal = false;
+				state.workflowPreviewId = "";
+				state.workflowPreviewName = "";
+				state.workflowPreviewDescription = "";
+				state.workflowPreviewGates = "";
 			}
-		}
+		})();
 
-		// Clear staff proposal when connecting to a non-staff-assistant session
-		if (state.assistantType !== "staff") {
-			state.activeStaffProposal = null;
-		}
+		const backgroundWork = Promise.all([
+			refreshSessions().then(() => {
+				if (isStale()) return;
+				// Re-apply accessory class after refreshSessions (may have new data)
+				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
+				const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat", "bobbit-wand"];
+				accClasses.forEach((c) => document.documentElement.classList.remove(c));
+				const accId = sessionForRole?.accessory
+					?? (sessionForRole?.role === "team-lead" ? "crown" : sessionForRole?.role === "coder" ? "bandana" : undefined);
+				if (accId && accId !== "none") {
+					const cls = accId === "crown" ? "bobbit-crowned" : `bobbit-${accId}`;
+					document.documentElement.classList.add(cls);
+				}
+			}),
+			storage.providerKeys.set(remote.state.model?.provider || "anthropic", "gateway-managed"),
+		]);
 
-		if (state.assistantType === "staff") {
-			state.assistantTab = "chat";
-			state.staffPreviewName = "";
-			state.staffPreviewDescription = "";
-			state.staffPreviewPrompt = "";
-			state.staffPreviewTriggers = "[]";
-			state.staffPreviewCwd = "";
-			state.staffPreviewNameEdited = false;
-			state.staffPreviewDescriptionEdited = false;
-			state.staffPreviewPromptEdited = false;
-			state.staffPreviewTriggersEdited = false;
-			state.staffPreviewCwdEdited = false;
-			state.assistantHasProposal = false;
-		}
-
-		if (state.assistantType === "workflow") {
-			state.assistantTab = "chat";
-			state.workflowPreviewId = "";
-			state.workflowPreviewName = "";
-			state.workflowPreviewDescription = "";
-			state.workflowPreviewGates = "";
-		}
-
-		// Now that all draft restores have completed and default state is
-		// established, request messages. Any proposals found during the message
-		// scan will correctly fill the form without being overwritten.
+		// Wait for draft restores to finish, then unlock proposal checking
+		// so any buffered messages can now safely run _checkProposals.
+		await draftRestorePromise;
+		if (isStale()) { cleanupRemote(remote); return; }
 		if (isExisting) {
-			remote.requestMessages();
+			remote.runDeferredProposalCheck();
 		}
 
 		// Restore prompt draft from server and set up auto-save
 		_setupPromptDraftHandlers(sessionId);
+
+		// Wait for background work (refreshSessions + storage) to settle
+		await backgroundWork;
+		if (isStale()) { cleanupRemote(remote); return; }
 
 		refreshSessions();
 	} catch (err) {
