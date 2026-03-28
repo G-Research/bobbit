@@ -1,184 +1,24 @@
 import { html } from "lit";
 import { patchSession } from "./api.js";
 import { activeSessionId, renderApp } from "./state.js";
-import { renderSidebarBobbit } from "../ui/bobbit-render.js";
+import { renderSidebarBobbit, ACCESSORY_DEFS, NO_ACCESSORY, type AccessoryDef } from "../ui/bobbit-render.js";
 
 // ============================================================================
-// ACCESSORY REGISTRY
+// ACCESSORY REGISTRY (derived from canonical sprite data)
 // ============================================================================
 
 /** Definition for a pixel-art accessory overlay rendered on the Bobbit sprite. */
-export interface AccessoryDefinition {
-	/** Unique identifier (e.g. "crown", "bandana") */
-	id: string;
-	/** Human-readable label */
-	label: string;
-	/** CSS box-shadow pixel string (at 1px scale, rendered at 1.6× via transform) */
-	shadow: string;
-	/** Vertical offset in px for positioning on the Bobbit head */
-	yOffset: number;
-	/** Whether this accessory adds height above the sprite (like crown) */
-	addsHeight: boolean;
-}
+export type AccessoryDefinition = AccessoryDef;
 
 /**
  * All available pixel-art accessories for Bobbit sprites.
- * Each is a CSS box-shadow grid counter-hue-rotated to keep fixed colours
+ * Derived from canonical pixel data in bobbit-sprite-data.ts via pixelsToBoxShadow().
+ * Each shadow string is counter-hue-rotated at render time to keep fixed colours
  * across session identity hues.
  */
 export const ACCESSORIES: Record<string, AccessoryDefinition> = {
-	none: {
-		id: "none",
-		label: "None",
-		shadow: "",
-		yOffset: 0,
-		addsHeight: false,
-	},
-	crown: {
-		id: "crown",
-		label: "Crown",
-		shadow: `
-			3px -1px 0 #000,5px -1px 0 #000,7px -1px 0 #000,
-			2px 0 0 #000,3px 0 0 #fef08a,4px 0 0 #000,5px 0 0 #fef08a,6px 0 0 #000,7px 0 0 #fef08a,8px 0 0 #000,
-			1px 1px 0 #000,2px 1px 0 #fde047,3px 1px 0 #fef08a,4px 1px 0 #fde047,5px 1px 0 #ef4444,6px 1px 0 #fde047,7px 1px 0 #fef08a,8px 1px 0 #fde047,9px 1px 0 #000,
-			1px 2px 0 #000,2px 2px 0 #ca8a04,3px 2px 0 #eab308,4px 2px 0 #eab308,5px 2px 0 #eab308,6px 2px 0 #eab308,7px 2px 0 #eab308,8px 2px 0 #ca8a04,9px 2px 0 #000,
-			1px 3px 0 #000,2px 3px 0 #000,3px 3px 0 #000,4px 3px 0 #000,5px 3px 0 #000,6px 3px 0 #000,7px 3px 0 #000,8px 3px 0 #000,9px 3px 0 #000
-		`,
-		yOffset: 2,
-		addsHeight: true,
-	},
-	bandana: {
-		id: "bandana",
-		label: "Bandana",
-		shadow: `
-			1px 2px 0 #000,2px 2px 0 #000,3px 2px 0 #000,4px 2px 0 #000,5px 2px 0 #000,6px 2px 0 #000,7px 2px 0 #000,8px 2px 0 #000,9px 2px 0 #000,
-			0 3px 0 #000,1px 3px 0 #b91c1c,2px 3px 0 #dc2626,3px 3px 0 #ef4444,4px 3px 0 #ef4444,5px 3px 0 #ef4444,6px 3px 0 #ef4444,7px 3px 0 #ef4444,8px 3px 0 #f87171,9px 3px 0 #000,
-			0 4px 0 #000,1px 4px 0 #000,2px 4px 0 #000,3px 4px 0 #000,4px 4px 0 #000,5px 4px 0 #000,6px 4px 0 #000,7px 4px 0 #000,8px 4px 0 #000,9px 4px 0 #000,
-			10px 3px 0 #000,10px 4px 0 #b91c1c,11px 4px 0 #000,
-			10px 5px 0 #991b1b,11px 5px 0 #000,10px 6px 0 #000
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
-	magnifier: {
-		id: "magnifier",
-		label: "Magnifying Glass",
-		shadow: `
-			8px 2px 0 #000,9px 2px 0 #000,10px 2px 0 #000,
-			7px 3px 0 #000,8px 3px 0 #87ceeb,9px 3px 0 #b0e0f0,10px 3px 0 #87ceeb,11px 3px 0 #000,
-			7px 4px 0 #000,8px 4px 0 #b0e0f0,9px 4px 0 #e0f4ff,10px 4px 0 #87ceeb,11px 4px 0 #000,
-			7px 5px 0 #000,8px 5px 0 #87ceeb,9px 5px 0 #b0e0f0,10px 5px 0 #87ceeb,11px 5px 0 #000,
-			7px 6px 0 #000,8px 6px 0 #000,9px 6px 0 #000,10px 6px 0 #000,
-			6px 7px 0 #000,7px 7px 0 #8b4513,
-			5px 8px 0 #000,6px 8px 0 #8b4513
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
-	palette: {
-		id: "palette",
-		label: "Paint Palette",
-		shadow: `
-			9px 5px 0 #000,10px 5px 0 #000,
-			8px 6px 0 #000,9px 6px 0 #a16207,10px 6px 0 #ef4444,11px 6px 0 #000,
-			7px 7px 0 #000,8px 7px 0 #4ade80,9px 7px 0 #a16207,10px 7px 0 #a16207,11px 7px 0 #000,
-			7px 8px 0 #000,8px 8px 0 #a16207,9px 8px 0 #a16207,10px 8px 0 #60a5fa,11px 8px 0 #000,
-			8px 9px 0 #000,9px 9px 0 #000,10px 9px 0 #000
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
-	pencil: {
-		id: "pencil",
-		label: "Pencil",
-		shadow: `
-			10px 3px 0 #000,11px 3px 0 #000,
-			9px 4px 0 #000,10px 4px 0 #f9a8d4,11px 4px 0 #ec4899,12px 4px 0 #000,
-			8px 5px 0 #000,9px 5px 0 #9ca3af,10px 5px 0 #d1d5db,11px 5px 0 #000,
-			7px 6px 0 #000,8px 6px 0 #fde047,9px 6px 0 #fbbf24,10px 6px 0 #000,
-			6px 7px 0 #000,7px 7px 0 #fde047,8px 7px 0 #fbbf24,9px 7px 0 #000,
-			5px 8px 0 #000,6px 8px 0 #f4a460,7px 8px 0 #cd853f,8px 8px 0 #000,
-			4px 9px 0 #000,5px 9px 0 #4b5563,6px 9px 0 #000
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
-	shield: {
-		id: "shield",
-		label: "Shield",
-		shadow: `
-			8px 3px 0 #000,9px 3px 0 #000,10px 3px 0 #000,11px 3px 0 #000,12px 3px 0 #000,
-			7px 4px 0 #000,8px 4px 0 #9ca3af,9px 4px 0 #d1d5db,10px 4px 0 #d1d5db,11px 4px 0 #9ca3af,12px 4px 0 #000,
-			7px 5px 0 #000,8px 5px 0 #d1d5db,9px 5px 0 #f3f4f6,10px 5px 0 #ef4444,11px 5px 0 #d1d5db,12px 5px 0 #000,
-			7px 6px 0 #000,8px 6px 0 #9ca3af,9px 6px 0 #d1d5db,10px 6px 0 #d1d5db,11px 6px 0 #9ca3af,12px 6px 0 #000,
-			8px 7px 0 #000,9px 7px 0 #9ca3af,10px 7px 0 #9ca3af,11px 7px 0 #000,
-			9px 8px 0 #000,10px 8px 0 #000
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
-	"set-square": {
-		id: "set-square",
-		label: "Set Square",
-		shadow: `
-			10px 4px 0 #000,
-			9px 5px 0 #000,10px 5px 0 #93c5fd,11px 5px 0 #000,
-			8px 6px 0 #000,9px 6px 0 #bfdbfe,10px 6px 0 #93c5fd,11px 6px 0 #000,
-			7px 7px 0 #000,8px 7px 0 #bfdbfe,9px 7px 0 #000,10px 7px 0 #bfdbfe,11px 7px 0 #000,
-			6px 8px 0 #000,7px 8px 0 #bfdbfe,8px 8px 0 #bfdbfe,9px 8px 0 #bfdbfe,10px 8px 0 #93c5fd,11px 8px 0 #000,
-			5px 9px 0 #000,6px 9px 0 #000,7px 9px 0 #000,8px 9px 0 #000,9px 9px 0 #000,10px 9px 0 #000,11px 9px 0 #000
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
-	flask: {
-		id: "flask",
-		label: "Flask",
-		shadow: `
-			8px 4px 0 #000,9px 4px 0 #fff,10px 4px 0 #000,
-			8px 5px 0 #000,9px 5px 0 #7dd3fc,10px 5px 0 #000,
-			7px 6px 0 #000,8px 6px 0 #0369a1,9px 6px 0 #38bdf8,10px 6px 0 #0ea5e9,11px 6px 0 #000,
-			6px 7px 0 #000,7px 7px 0 #1e3a5f,8px 7px 0 #0ea5e9,9px 7px 0 #0284c7,10px 7px 0 #0369a1,11px 7px 0 #1e3a5f,12px 7px 0 #000,
-			6px 8px 0 #000,7px 8px 0 #1e3a5f,8px 8px 0 #0284c7,9px 8px 0 #0c4a6e,10px 8px 0 #082f49,11px 8px 0 #1e3a5f,12px 8px 0 #000,
-			6px 9px 0 #000,7px 9px 0 #000,8px 9px 0 #000,9px 9px 0 #000,10px 9px 0 #000,11px 9px 0 #000,12px 9px 0 #000
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
-	"wizard-hat": {
-		id: "wizard-hat",
-		label: "Wizard Hat",
-		shadow: `
-			7px -2px 0 #2dd4bf,8px -2px 0 #fde047,
-			5px -1px 0 #000,6px -1px 0 #6366f1,7px -1px 0 #818cf8,8px -1px 0 #000,
-			2px 0px 0 #000,3px 0px 0 #6d28d9,4px 0px 0 #7c3aed,5px 0px 0 #8b5cf6,6px 0px 0 #6366f1,7px 0px 0 #a78bfa,8px 0px 0 #000,
-			1px 1px 0 #000,2px 1px 0 #6d28d9,3px 1px 0 #7c3aed,4px 1px 0 #fbbf24,5px 1px 0 #fde047,6px 1px 0 #14b8a6,7px 1px 0 #a78bfa,8px 1px 0 #6d28d9,9px 1px 0 #000,
-			0px 2px 0 #000,1px 2px 0 #000,2px 2px 0 #000,3px 2px 0 #000,4px 2px 0 #000,5px 2px 0 #000,6px 2px 0 #000,7px 2px 0 #000,8px 2px 0 #000,9px 2px 0 #000,10px 2px 0 #000
-		`,
-		yOffset: 2,
-		addsHeight: true,
-	},
-	wand: {
-		id: "wand",
-		label: "Wand",
-		shadow: `
-			11px 2px 0 #000,
-			10px 3px 0 #000,12px 3px 0 #000,
-			9px 4px 0 #000,13px 4px 0 #000,
-			10px 5px 0 #000,12px 5px 0 #000,
-			11px 6px 0 #000,
-			11px 3px 0 #fef9c4,
-			10px 4px 0 #fde047,11px 4px 0 #fff,12px 4px 0 #fde047,
-			11px 5px 0 #fef9c4,
-			9px 5px 0 #000,10px 5px 0 #cd853f,11px 5px 0 #000,
-			8px 6px 0 #000,9px 6px 0 #cd853f,10px 6px 0 #000,
-			7px 7px 0 #000,8px 7px 0 #8b4513,9px 7px 0 #000,
-			6px 8px 0 #000,7px 8px 0 #8b4513,8px 8px 0 #000,
-			5px 9px 0 #000,6px 9px 0 #000
-		`,
-		yOffset: 0,
-		addsHeight: false,
-	},
+	none: NO_ACCESSORY,
+	...ACCESSORY_DEFS,
 };
 
 /** List of all accessory IDs (for iteration/UI selectors) */

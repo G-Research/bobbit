@@ -4,8 +4,23 @@
  *
  * These functions take all inputs explicitly and return Lit TemplateResults.
  * No imports from state.ts, api.ts, or any other app module.
+ *
+ * All pixel data comes from bobbit-sprite-data.ts — the single source of truth.
  */
 import { html, type TemplateResult } from "lit";
+import {
+	BODY_GRID, BODY_WIDTH, BODY_HEIGHT,
+	EYE_POSITIONS,
+	type PaletteKey, type SpritePixel, type EyeGaze, type ShadowPixel,
+	type AccessorySpriteData,
+	ACCESSORIES as SPRITE_ACCESSORIES,
+	ACCESSORY_IDS as SPRITE_ACCESSORY_IDS,
+} from "./bobbit-sprite-data.js";
+
+// Re-export sprite data types and constants for convenience
+export type { SpritePixel, EyeGaze, ShadowPixel, AccessorySpriteData };
+export { BODY_GRID, BODY_WIDTH, BODY_HEIGHT, EYE_POSITIONS };
+export { SPRITE_ACCESSORIES, SPRITE_ACCESSORY_IDS };
 
 // ============================================================================
 // TYPES
@@ -18,6 +33,7 @@ export interface BobbitPalette {
 	eye: string;
 }
 
+/** Legacy accessory definition with pre-computed box-shadow string. */
 export interface AccessoryDef {
 	id: string;
 	label: string;
@@ -48,6 +64,161 @@ export const NO_ACCESSORY: AccessoryDef = { id: "none", label: "None", shadow: "
 
 /** Aurora borealis palette — 14 curated hue-rotate offsets from canonical green. */
 export const BOBBIT_HUE_ROTATIONS = [-110, -85, -60, -35, -10, 0, 15, 25, 40, 50, 65, 75, 100, 125];
+
+// ============================================================================
+// PIXEL → BOX-SHADOW CONVERSION
+// ============================================================================
+
+/** Convert sprite pixels to a CSS box-shadow string. */
+export function pixelsToBoxShadow(pixels: SpritePixel[]): string {
+	return pixels.map(([x, y, c]) => `${x}px ${y}px 0 ${c}`).join(",");
+}
+
+/** Convert shadow pixels (with alpha) to a CSS box-shadow string. */
+export function shadowPixelsToBoxShadow(pixels: ShadowPixel[]): string {
+	return pixels.map(([x, y, a]) => `${x}px ${y}px 0 rgba(0,0,0,${a})`).join(",");
+}
+
+// ============================================================================
+// BODY PIXEL RESOLUTION
+// ============================================================================
+
+const PALETTE_KEY_MAP: Record<PaletteKey, keyof BobbitPalette | null> = {
+	'_': null,
+	'K': null, // black — handled specially
+	'M': 'main',
+	'L': 'light',
+	'D': 'dark',
+};
+
+/**
+ * Resolve the body grid + eyes into concrete pixel colors for a given palette.
+ * Returns an array of [x, y, hexColor] ready for box-shadow or canvas rendering.
+ */
+export function resolveBodyPixels(
+	palette: BobbitPalette,
+	gaze: EyeGaze = "center",
+	blink = false,
+	eyeColor?: string,
+): SpritePixel[] {
+	const pixels: SpritePixel[] = [];
+
+	// Resolve body grid (without eyes — eye rows are solid M)
+	for (let y = 0; y < BODY_HEIGHT; y++) {
+		const row = BODY_GRID[y];
+		for (let x = 0; x < BODY_WIDTH; x++) {
+			const key = row[x];
+			if (key === '_') continue;
+			const color = key === 'K' ? '#000' : palette[PALETTE_KEY_MAP[key]!];
+			pixels.push([x, y, color]);
+		}
+	}
+
+	// Overlay eyes
+	const ec = eyeColor ?? palette.eye;
+	const pos = EYE_POSITIONS[gaze];
+	if (blink) {
+		// Blink: only bottom pixel of each eye
+		pixels.push([pos.lx, pos.ly + 1, ec]);
+		pixels.push([pos.rx, pos.ry + 1, ec]);
+	} else {
+		pixels.push([pos.lx, pos.ly, ec]);
+		pixels.push([pos.lx, pos.ly + 1, ec]);
+		pixels.push([pos.rx, pos.ry, ec]);
+		pixels.push([pos.rx, pos.ry + 1, ec]);
+	}
+
+	return pixels;
+}
+
+// ============================================================================
+// CANVAS RENDERING
+// ============================================================================
+
+/**
+ * Draw sprite pixels to a canvas context at 1:1 scale (1 sprite pixel = 1 canvas pixel).
+ * The canvas should be pre-sized. Call with appropriate transforms for scaling.
+ */
+export function drawPixels(ctx: CanvasRenderingContext2D, pixels: SpritePixel[]): void {
+	for (const [x, y, color] of pixels) {
+		ctx.fillStyle = color;
+		ctx.fillRect(x, y, 1, 1);
+	}
+}
+
+/**
+ * Draw shadow pixels (with alpha) to a canvas context at 1:1 scale.
+ */
+export function drawShadowPixels(ctx: CanvasRenderingContext2D, pixels: ShadowPixel[]): void {
+	for (const [x, y, alpha] of pixels) {
+		ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+		ctx.fillRect(x, y, 1, 1);
+	}
+}
+
+/**
+ * Render a bobbit body to a data URL image at 1:1 pixel scale.
+ * Use CSS image-rendering:pixelated and transform:scale() to display at desired size.
+ */
+export function renderBodyToDataURL(
+	palette: BobbitPalette,
+	gaze: EyeGaze = "center",
+	blink = false,
+	eyeColor?: string,
+): string {
+	const canvas = document.createElement("canvas");
+	canvas.width = BODY_WIDTH;
+	canvas.height = BODY_HEIGHT;
+	const ctx = canvas.getContext("2d")!;
+	drawPixels(ctx, resolveBodyPixels(palette, gaze, blink, eyeColor));
+	return canvas.toDataURL();
+}
+
+/**
+ * Render accessory pixels to a data URL image.
+ * Returns the data URL and the bounding box of the accessory.
+ */
+export function renderAccessoryToDataURL(pixels: SpritePixel[]): { url: string; minX: number; minY: number; w: number; h: number } {
+	if (pixels.length === 0) return { url: "", minX: 0, minY: 0, w: 0, h: 0 };
+	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+	for (const [x, y] of pixels) {
+		if (x < minX) minX = x;
+		if (y < minY) minY = y;
+		if (x > maxX) maxX = x;
+		if (y > maxY) maxY = y;
+	}
+	const w = maxX - minX + 1;
+	const h = maxY - minY + 1;
+	const canvas = document.createElement("canvas");
+	canvas.width = w;
+	canvas.height = h;
+	const ctx = canvas.getContext("2d")!;
+	for (const [x, y, color] of pixels) {
+		ctx.fillStyle = color;
+		ctx.fillRect(x - minX, y - minY, 1, 1);
+	}
+	return { url: canvas.toDataURL(), minX, minY, w, h };
+}
+
+// ============================================================================
+// SPRITE DATA → LEGACY ACCESSORY DEF BRIDGE
+// ============================================================================
+
+/** Convert AccessorySpriteData → AccessoryDef (with pre-computed box-shadow string). */
+export function spriteToAccessoryDef(data: AccessorySpriteData): AccessoryDef {
+	return {
+		id: data.id,
+		label: data.label,
+		shadow: pixelsToBoxShadow(data.pixels),
+		yOffset: data.yOffset,
+		addsHeight: data.addsHeight,
+	};
+}
+
+/** Pre-computed AccessoryDef map from sprite data. */
+export const ACCESSORY_DEFS: Record<string, AccessoryDef> = Object.fromEntries(
+	Object.entries(SPRITE_ACCESSORIES).map(([k, v]) => [k, spriteToAccessoryDef(v)])
+);
 
 // ============================================================================
 // IDLE BLOB (role manager / large display context)
@@ -94,10 +265,6 @@ export function renderIdleBlob(opts: IdleBlobOptions): TemplateResult {
 		</div>
 	`;
 }
-
-// ============================================================================
-// SIDEBAR BOBBIT RENDERER
-// ============================================================================
 
 // ============================================================================
 // CHAT BLOB RENDERER
@@ -148,20 +315,17 @@ export function renderSidebarBobbit(opts: SidebarBobbitOptions): TemplateResult 
 
 	const isBusy = status === "streaming" || isCompacting;
 
+	// Resolve body pixels from sprite data
 	const eyeColor = isSelected ? p.main : p.eye;
-	const shadow = `
-		3px 0px 0 #000,4px 0px 0 #000,5px 0px 0 #000,6px 0px 0 #000,7px 0px 0 #000,
-		2px 1px 0 #000,3px 1px 0 ${p.main},4px 1px 0 ${p.main},5px 1px 0 ${p.main},6px 1px 0 ${p.light},7px 1px 0 ${p.light},8px 1px 0 #000,
-		1px 2px 0 #000,2px 2px 0 ${p.main},3px 2px 0 ${p.main},4px 2px 0 ${p.main},5px 2px 0 ${p.main},6px 2px 0 ${p.main},7px 2px 0 ${p.light},8px 2px 0 ${p.main},9px 2px 0 #000,
-		0px 3px 0 #000,1px 3px 0 ${p.main},2px 3px 0 ${p.main},3px 3px 0 ${p.main},4px 3px 0 ${p.main},5px 3px 0 ${p.main},6px 3px 0 ${p.main},7px 3px 0 ${p.main},8px 3px 0 ${p.main},9px 3px 0 #000,
-		0px 4px 0 #000,1px 4px 0 ${p.main},2px 4px 0 ${p.main},3px 4px 0 ${eyeColor},4px 4px 0 ${p.main},5px 4px 0 ${p.main},6px 4px 0 ${eyeColor},7px 4px 0 ${p.main},8px 4px 0 ${p.main},9px 4px 0 #000,
-		0px 5px 0 #000,1px 5px 0 ${p.main},2px 5px 0 ${p.main},3px 5px 0 ${eyeColor},4px 5px 0 ${p.main},5px 5px 0 ${p.main},6px 5px 0 ${eyeColor},7px 5px 0 ${p.main},8px 5px 0 ${p.main},9px 5px 0 #000,
-		0px 6px 0 #000,1px 6px 0 ${p.dark},2px 6px 0 ${p.main},3px 6px 0 ${p.main},4px 6px 0 ${p.main},5px 6px 0 ${p.main},6px 6px 0 ${p.main},7px 6px 0 ${p.main},8px 6px 0 ${p.main},9px 6px 0 #000,
-		1px 7px 0 #000,2px 7px 0 ${p.dark},3px 7px 0 ${p.main},4px 7px 0 ${p.main},5px 7px 0 ${p.main},6px 7px 0 ${p.main},7px 7px 0 ${p.main},8px 7px 0 #000,
-		2px 8px 0 #000,3px 8px 0 #000,4px 8px 0 #000,5px 8px 0 #000,6px 8px 0 #000,7px 8px 0 #000
-	`;
+	const bodyPixels = resolveBodyPixels(p, "center", false, eyeColor);
+	const shadow = pixelsToBoxShadow(bodyPixels);
 
-	const eyeShadow = `3px 4px 0 ${p.eye},6px 4px 0 ${p.eye},3px 5px 0 ${p.eye},6px 5px 0 ${p.eye}`;
+	// Eye overlay (separate span, only when selected for independent animation)
+	const eyePos = EYE_POSITIONS["center"];
+	const eyeShadow = pixelsToBoxShadow([
+		[eyePos.lx, eyePos.ly, p.eye], [eyePos.rx, eyePos.ry, p.eye],
+		[eyePos.lx, eyePos.ly + 1, p.eye], [eyePos.rx, eyePos.ry + 1, p.eye],
+	]);
 
 	const shimmerDelay = -(Date.now() % 8000);
 	const shimmer = isBusy && !isCompacting ? `animation:blob-shimmer 8s ease-in-out infinite;animation-delay:${shimmerDelay}ms;` : "";
@@ -213,4 +377,122 @@ export function renderSidebarBobbit(opts: SidebarBobbitOptions): TemplateResult 
 	const containerWidth = "20px";
 
 	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><span style="position:absolute;left:0;top:${innerTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;${baseTransform}box-shadow:${shadow};${shimmer}"></span>${eyeLayer}${accessoryLayer}</span>`;
+}
+
+// ============================================================================
+// CANVAS SIDEBAR RENDERER (for preview / comparison)
+// ============================================================================
+
+/**
+ * Render a sidebar bobbit to a canvas-based <img> element.
+ * Uses the same data as renderSidebarBobbit but draws to canvas
+ * instead of box-shadow. For side-by-side comparison in the preview page.
+ *
+ * Note: animations (bob, shimmer, eye blink) still use CSS on the container.
+ * Only the pixel rendering technique differs (canvas vs box-shadow).
+ */
+export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateResult {
+	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false } = opts;
+	const acc = opts.accessory ?? NO_ACCESSORY;
+	const hasAccessory = acc.id !== "none";
+	const addsHeight = acc.addsHeight;
+
+	let p: BobbitPalette;
+	if (status === "starting") p = STARTING_PALETTE;
+	else if (status === "terminated") p = TERMINATED_PALETTE;
+	else p = CANONICAL_PALETTE;
+
+	const isBusy = status === "streaming" || isCompacting;
+
+	// Draw body to canvas data URL
+	const eyeColor = isSelected ? p.main : p.eye;
+	const bodyUrl = renderBodyToDataURL(p, "center", false, eyeColor);
+
+	// Eye overlay data URL (only when selected)
+	let eyeUrl = "";
+	if (isSelected) {
+		const eyePos = EYE_POSITIONS["center"];
+		const eyePixels: SpritePixel[] = [
+			[eyePos.lx, eyePos.ly, p.eye], [eyePos.rx, eyePos.ry, p.eye],
+			[eyePos.lx, eyePos.ly + 1, p.eye], [eyePos.rx, eyePos.ry + 1, p.eye],
+		];
+		const canvas = document.createElement("canvas");
+		canvas.width = BODY_WIDTH;
+		canvas.height = BODY_HEIGHT;
+		drawPixels(canvas.getContext("2d")!, eyePixels);
+		eyeUrl = canvas.toDataURL();
+	}
+
+	// Accessory data URL
+	let accResult: { url: string; minX: number; minY: number; w: number; h: number } | null = null;
+	if (hasAccessory) {
+		const spriteData = SPRITE_ACCESSORIES[acc.id];
+		if (spriteData) {
+			accResult = renderAccessoryToDataURL(spriteData.pixels);
+		}
+	}
+
+	// Reuse all the CSS animation logic from box-shadow version
+	const shimmerDelay = -(Date.now() % 8000);
+	const shimmer = isBusy && !isCompacting ? `animation:blob-shimmer 8s ease-in-out infinite;animation-delay:${shimmerDelay}ms;` : "";
+	const isIdle = status === "idle" && !isCompacting && !isSelected && !noDesaturate;
+	const isCancelling = isAborting && (status === "streaming" || isBusy);
+	const filters: string[] = [];
+	if (hueRotate && status !== "starting" && status !== "terminated") filters.push(`hue-rotate(${hueRotate}deg)`);
+	if (isCancelling) filters.push("saturate(0.3)");
+	else if (isIdle) filters.push("saturate(0.4)");
+	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
+	const idleAnim = isIdle ? "animation:bobbit-breathe 4s ease-in-out infinite;" : "";
+	const bobAnim = isBusy && !isCancelling && !isCompacting ? "animation:bobbit-bob 1.8s cubic-bezier(0.34,1.2,0.64,1) infinite;" : "";
+	const cancelAnim = isCancelling ? "animation:bobbit-cancel-fade 1.2s ease-in-out infinite;" : "";
+	const compactSquish = isCompacting && !isCancelling;
+
+	const compactTopOffset = compactSquish ? 5.4 : 0;
+
+	// Body transform: scale(1.6) via CSS on the img
+	const bodyTransform = isCompacting
+		? (compactSquish
+			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
+			: "transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(4.5px);transform-origin:0 9px;")
+		: "transform:scale(1.6);transform-origin:0 0;";
+
+	// Eye animation
+	const eyeAnim = isSelected
+		? (compactSquish
+			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
+			: `animation:${isCompacting ? "bobbit-eyes-squash" : "bobbit-eyes"} 6s step-end infinite;transform-origin:0 ${isCompacting ? "9px" : "0"};`)
+		: bodyTransform;
+
+	// Accessory transform
+	const isBandanaStyle = acc.id === "bandana";
+	const isCrown = acc.id === "crown";
+	const accFilter = hueRotate && status !== "starting" && status !== "terminated" && acc.id !== "flask"
+		? `filter:hue-rotate(${-hueRotate}deg);`
+		: "";
+	const accTransform = isCompacting
+		? (compactSquish
+			? `transform-origin:0 9px;animation:${isCrown ? "bobbit-squish-crown" : "bobbit-squish"} 3s ease-in-out infinite;`
+			: `transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(${isBandanaStyle ? "4px" : "4.5px"})${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 9px;`)
+		: `transform:scale(1.6)${isBandanaStyle ? " translateY(-0.5px)" : ""}${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 0;`;
+
+	const innerTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
+	const eyeTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
+	const accTop = addsHeight ? `${acc.yOffset + compactTopOffset}px` : `${compactTopOffset}px`;
+	const containerHeight = addsHeight ? "19px" : "15px";
+	const containerWidth = "20px";
+
+	// Body layer: canvas-rendered img with pixelated scaling
+	const bodyLayer = html`<img src="${bodyUrl}" width="${BODY_WIDTH}" height="${BODY_HEIGHT}" style="position:absolute;left:0;top:${innerTop};image-rendering:pixelated;will-change:transform;${bodyTransform}${shimmer}">`;
+
+	// Eye layer (only when selected)
+	const eyeLayer = isSelected && eyeUrl
+		? html`<img src="${eyeUrl}" width="${BODY_WIDTH}" height="${BODY_HEIGHT}" style="position:absolute;left:0;top:${eyeTop};image-rendering:pixelated;will-change:transform;${eyeAnim}">`
+		: "";
+
+	// Accessory layer
+	const accessoryLayer = accResult && accResult.url
+		? html`<img src="${accResult.url}" width="${accResult.w}" height="${accResult.h}" style="position:absolute;left:${accResult.minX}px;top:${(addsHeight ? acc.yOffset : 0) + compactTopOffset + accResult.minY}px;image-rendering:pixelated;will-change:transform;${accTransform}${accFilter}">`
+		: "";
+
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${eyeLayer}${accessoryLayer}</span>`;
 }

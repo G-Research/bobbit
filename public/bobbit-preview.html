@@ -116,17 +116,21 @@
 <div id="ctx-chat"></div>
 
 <!-- ============================================================ -->
-<h2>4. Sidebar — All Variants</h2>
+<h2>4. Side-by-Side: Box-Shadow vs Canvas</h2>
+<p style="font-size:12px;color:var(--muted-foreground);">Left = box-shadow (current production), Right = canvas (proposed). Should be pixel-identical.</p>
+<div id="comparison"></div>
+
+<h2>5. Sidebar — All Variants</h2>
 <div id="sidebar-grid"></div>
 
-<h2>5. Chat Blobs — All Variants</h2>
+<h2>6. Chat Blobs — All Variants</h2>
 <div id="blob-grid"></div>
 
 <script type="module">
 import { render, html, nothing } from "/node_modules/lit/index.js";
 import {
-  renderSidebarBobbit, renderChatBlob, renderIdleBlob,
-  NO_ACCESSORY, BOBBIT_HUE_ROTATIONS
+  renderSidebarBobbit, renderSidebarBobbitCanvas, renderChatBlob, renderIdleBlob,
+  NO_ACCESSORY, BOBBIT_HUE_ROTATIONS, ACCESSORY_DEFS
 } from "/src/ui/bobbit-render.ts";
 import { ACCESSORIES, ACCESSORY_IDS } from "/src/app/session-colors.ts";
 
@@ -278,7 +282,45 @@ function renderChatContext(hue) {
 }
 
 // ============================================================================
-// 4. SIDEBAR ALL VARIANTS
+// 4. SIDE-BY-SIDE COMPARISON: Box-Shadow vs Canvas
+// ============================================================================
+function renderComparison(hue) {
+  const sbC = (opts) => renderSidebarBobbitCanvas(opts);
+  const statuses = ['streaming', 'idle', 'starting', 'terminated'];
+  const accIds = Object.keys(ACCESSORY_DEFS);
+
+  const pair = (label, opts) => html`
+    <div class="cell">
+      <div style="display:flex;gap:2px;align-items:center;">
+        <div style="background:var(--sidebar);padding:4px;border-radius:4px;border:1px solid var(--border);">${sb(opts)}</div>
+        <div style="background:var(--sidebar);padding:4px;border-radius:4px;border:1px solid var(--ring,#888);">${sbC(opts)}</div>
+      </div>
+      <span class="cell-label">${label}</span>
+    </div>
+  `;
+
+  const tpl = html`
+    <h3>Status variants (box-shadow left, canvas right)</h3>
+    <div class="row">${statuses.map(s => pair(s, { status: s, hueRotate: hue }))}</div>
+    <h3>Selected</h3>
+    <div class="row">${statuses.filter(s=>s!=='starting'&&s!=='terminated').map(s => pair(s+' sel', { status: s, hueRotate: hue, isSelected: true }))}</div>
+    <h3>Compacting / Aborting</h3>
+    <div class="row">
+      ${pair('compacting', { status: 'streaming', isCompacting: true, hueRotate: hue })}
+      ${pair('aborting', { status: 'streaming', isAborting: true, hueRotate: hue })}
+    </div>
+    <h3>All accessories (hue=${hue}°)</h3>
+    <div class="row">${accIds.map(id => pair(id, { status: 'streaming', hueRotate: hue, accessory: acc(id) }))}</div>
+    <h3>14 hue colours</h3>
+    <div class="row">${HUES.map(h => pair(h+'°', { status: 'streaming', hueRotate: h }))}</div>
+    <h3>14 hue colours with crown</h3>
+    <div class="row">${HUES.map(h => pair(h+'°', { status: 'streaming', hueRotate: h, accessory: acc('crown') }))}</div>
+  `;
+  render(tpl, document.getElementById('comparison'));
+}
+
+// ============================================================================
+// 5. SIDEBAR ALL VARIANTS
 // ============================================================================
 function renderSidebarAll(hue) {
   const tpl = html`
@@ -340,6 +382,7 @@ function renderAll() {
   renderSidebarContext(hue);
   renderRoleContext(hue);
   renderChatContext(hue);
+  renderComparison(hue);
   renderSidebarAll(hue);
   renderBlobAll(hue);
 }
