@@ -880,8 +880,8 @@ async function handleApiRoute(
 
 	// ── Preferences ──
 
-	// GET /api/preferences — return all preferences (filter sensitive keys)
-	if (url.pathname === "/api/preferences" && req.method === "GET") {
+	/** Return preferences with sensitive keys (providerKey.*) filtered out. */
+	function getSafePreferences(): Record<string, unknown> {
 		const all = preferencesStore.getAll();
 		const filtered: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(all)) {
@@ -889,7 +889,17 @@ async function handleApiRoute(
 				filtered[key] = value;
 			}
 		}
-		json(filtered);
+		return filtered;
+	}
+
+	/** Broadcast preferences_changed with sensitive keys filtered out. */
+	function broadcastPreferencesChanged(): void {
+		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
+	}
+
+	// GET /api/preferences — return all preferences (filter sensitive keys)
+	if (url.pathname === "/api/preferences" && req.method === "GET") {
+		json(getSafePreferences());
 		return;
 	}
 
@@ -905,7 +915,7 @@ async function handleApiRoute(
 			}
 		}
 		json({ ok: true });
-		broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+		broadcastPreferencesChanged();
 		return;
 	}
 
@@ -1095,7 +1105,7 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(body.url, preferencesStore);
-			broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+			broadcastPreferencesChanged();
 			json({ ok: true, models });
 		} catch (err: any) {
 			json({ error: `Failed to configure AI Gateway: ${err.message}` }, 502);
@@ -1106,7 +1116,7 @@ async function handleApiRoute(
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
 		removeAigw(preferencesStore);
-		broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+		broadcastPreferencesChanged();
 		json({ ok: true });
 		return;
 	}
@@ -1136,7 +1146,7 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(aigwUrl, preferencesStore);
-			broadcastToAll({ type: "preferences_changed", preferences: preferencesStore.getAll() });
+			broadcastPreferencesChanged();
 			json({ models });
 		} catch (err: any) {
 			json({ error: err.message || "Refresh failed" }, 502);
