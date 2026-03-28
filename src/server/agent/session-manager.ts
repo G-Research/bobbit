@@ -659,6 +659,11 @@ export class SessionManager {
 				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
 				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, ps.cwd, mcpExtPaths);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+			} else if (this.mcpManager) {
+				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+				for (const extPath of mcpExtPaths) {
+					bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+				}
 			}
 		}
 
@@ -975,6 +980,11 @@ export class SessionManager {
 			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
 			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+		} else if (this.mcpManager) {
+			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			for (const extPath of mcpExtPaths) {
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+			}
 		}
 
 		const rpcClient = new RpcBridge(bridgeOptions);
@@ -1151,6 +1161,11 @@ export class SessionManager {
 			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
 			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+		} else if (this.mcpManager) {
+			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			for (const extPath of mcpExtPaths) {
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+			}
 		}
 
 		// Replace the placeholder rpcClient with a real one
@@ -1767,6 +1782,11 @@ export class SessionManager {
 			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
 			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+		} else if (this.mcpManager) {
+			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			for (const extPath of mcpExtPaths) {
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+			}
 		}
 
 		const rpcClient = new RpcBridge(bridgeOptions);
@@ -1901,6 +1921,11 @@ export class SessionManager {
 				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
 				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+			} else if (this.mcpManager) {
+				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+				for (const extPath of mcpExtPaths) {
+					bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+				}
 			}
 		}
 
@@ -2380,6 +2405,11 @@ export class SessionManager {
 					const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
 					const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 					bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+				} else if (this.mcpManager) {
+					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+					for (const extPath of mcpExtPaths) {
+						bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+					}
 				}
 			}
 
