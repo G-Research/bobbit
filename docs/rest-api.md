@@ -116,7 +116,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/slash-skills` | Discover slash skills for autocomplete (name, description, argument hint) |
-| `GET` | `/api/slash-skills/details` | Full slash skill details including content and file paths |
+| `GET` | `/api/slash-skills/details` | Full slash skill details including content, file paths, and `directories` array listing all scanned directories (default + custom) |
 
 ### Assistant Prompts
 
