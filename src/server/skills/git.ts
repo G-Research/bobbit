@@ -94,15 +94,16 @@ export async function createWorktree(repoPath: string, branchName: string, setup
 
 /**
  * Run the worktree setup command (from project config `worktree_setup_command`).
- * If the command is empty, does nothing. The command runs as a shell command
- * in the worktree directory with SOURCE_REPO env var set to the original repo path.
+ * If the command is empty, does nothing. The command always runs via `sh -c`
+ * (Git Bash on Windows) for cross-platform consistency — since git is a hard
+ * prerequisite for Bobbit, Git Bash is always available.
+ * The SOURCE_REPO env var is set to the original repo path.
  */
 async function setupWorktreeDeps(repoPath: string, worktreePath: string, setupCommand: string): Promise<void> {
 	if (!setupCommand) return;
 	try {
 		console.log(`[git] Running worktree setup command: ${setupCommand}`);
-		await execFile(process.platform === "win32" ? "cmd" : "sh",
-			process.platform === "win32" ? ["/c", setupCommand] : ["-c", setupCommand],
+		await execFile("sh", ["-c", setupCommand],
 			{
 				cwd: worktreePath,
 				timeout: 120_000,
