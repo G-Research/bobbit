@@ -15,7 +15,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions` | List all sessions (includes title, status, color, goal) |
-| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type) |
+| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
@@ -31,9 +31,9 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List all goals |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree? }`) |
+| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
 | `GET` | `/api/goals/:id` | Get a goal |
-| `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch) |
+| `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
