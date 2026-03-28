@@ -128,6 +128,8 @@ When a goal or team agent creates a new git worktree, Bobbit optionally runs a s
 
 The command runs as a shell command in the new worktree directory with the `SOURCE_REPO` environment variable set to the original repo path (useful for copying build artifacts or caches). It has a 2-minute timeout and failures are non-fatal.
 
+The command always runs via `sh -c` (Git Bash on Windows) for cross-platform consistency — since git is a hard prerequisite for Bobbit, Git Bash is always available. Write commands using Unix shell syntax.
+
 Examples:
 
 ```yaml
@@ -141,7 +143,7 @@ worktree_setup_command: python -m venv .venv && .venv/bin/pip install -r require
 worktree_setup_command: cargo fetch
 
 # Copy node_modules from source repo (fastest for npm — avoids full reinstall)
-worktree_setup_command: robocopy "%SOURCE_REPO%\node_modules" node_modules /E /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP & if %ERRORLEVEL% LSS 8 exit /b 0
+worktree_setup_command: cp -r "$SOURCE_REPO/node_modules" node_modules
 
 # No dependencies to install
 worktree_setup_command: ""
