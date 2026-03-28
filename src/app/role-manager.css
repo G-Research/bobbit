@@ -621,31 +621,18 @@
 }
 
 /* ============================================================================
- * Canvas-based inline blob — renders the bobbit sprite on a single <canvas>
- * using the bobbitSprite directive. Body, eyes, and accessories are all
- * painted via drawBobbitSprite() with DPR-aware integer pixel sizing.
+ * Inline blob — resets chat-specific blob layout for use in rows/grids.
  *
- * Replaces the old .bobbit-blob--inline approach that reused the chat blob
- * structure (box-shadow + CSS overrides). The canvas approach gives crisp
- * rendering at any DPR without the scaling artifacts of transform + box-shadow.
+ * The normal .bobbit-blob has:
+ *   - margin-bottom: -24px (pulls up in chat)
+ *   - overflow: visible (accessories extend beyond)
+ *   - sprite margin: 8px 18px 28px 18px (spacing for bounce animations)
+ *
+ * .bobbit-blob--inline cancels all of that and renders the sprite centered
+ * within a fixed-size box at a smaller scale.
  * ============================================================================ */
-.bobbit-blob-canvas-inline {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	overflow: hidden;
-	flex-shrink: 0;
-}
-
-.bobbit-blob-canvas-inline canvas {
-	image-rendering: pixelated;
-	display: block;
-}
-
-/* ============================================================================
- * Legacy inline blob rules — kept for backward compatibility with tests and
- * any external code that may reference .bobbit-blob--inline.
- * ============================================================================ */
+/* The blob container renders at natural size (3.5x sprite = ~37×37px margin-box)
+ * inside an overflow:hidden viewport, then the outer div scales it down. */
 .bobbit-blob--inline {
 	margin-bottom: 0 !important;
 	overflow: visible;
