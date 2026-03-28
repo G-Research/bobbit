@@ -15,7 +15,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
-import { discoverSlashSkills } from "./skills/slash-skills.js";
+import { discoverSlashSkills, getSkillDirectories } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
@@ -324,7 +324,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, isLocalhostServer);
+			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer);
 		});
 	});
 
@@ -2548,7 +2548,7 @@ async function handleApiRoute(
 	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
 	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
 		const cwd = url.searchParams.get("cwd") || process.cwd();
-		const skills = discoverSlashSkills(cwd);
+		const skills = discoverSlashSkills(cwd, projectConfigStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
 		return;
 	}
@@ -2556,8 +2556,9 @@ async function handleApiRoute(
 	// GET /api/slash-skills/details — full slash skill details including content and file paths
 	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
 		const cwd = url.searchParams.get("cwd") || process.cwd();
-		const skills = discoverSlashSkills(cwd);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })) });
+		const skills = discoverSlashSkills(cwd, projectConfigStore);
+		const directories = getSkillDirectories(cwd, projectConfigStore);
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })), directories });
 		return;
 	}
 

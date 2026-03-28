@@ -27,8 +27,8 @@ export interface SlashSkill {
 	userInvocable?: boolean;
 	/** Raw markdown content (instructions) */
 	content: string;
-	/** Source: "project", "personal", "legacy", or "built-in" */
-	source: "project" | "personal" | "legacy" | "built-in";
+	/** Source: "project", "personal", "legacy", "built-in", or "custom" */
+	source: "project" | "personal" | "legacy" | "built-in" | "custom";
 	/** Absolute path to the SKILL.md or command .md file */
 	filePath: string;
 	/** Optional allowed tools list */
@@ -198,17 +198,71 @@ const BUILTIN_SKILLS: SlashSkill[] = [
 	},
 ];
 
+/** Parse custom skill directories from project config store. */
+function parseCustomDirectories(projectConfigStore?: { get(key: string): string | undefined }): { path: string }[] {
+	if (!projectConfigStore) return [];
+	const raw = projectConfigStore.get("skill_directories");
+	if (!raw) return [];
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (err) {
+		console.warn(`[slash-skills] Invalid skill_directories JSON, ignoring:`, err);
+		return [];
+	}
+
+	if (!Array.isArray(parsed)) return [];
+
+	return parsed.filter(
+		(entry): entry is { path: string } =>
+			typeof entry === "object" && entry !== null &&
+			typeof (entry as any).path === "string" && (entry as any).path.trim().length > 0
+	).map((entry) => ({
+		path: entry.path.startsWith("~")
+			? path.join(os.homedir(), entry.path.slice(1))
+			: entry.path,
+	}));
+}
+
+/**
+ * Get the complete list of directories scanned for slash skills.
+ * Returns both default (built-in) and custom directories.
+ */
+export function getSkillDirectories(
+	cwd: string,
+	projectConfigStore?: { get(key: string): string | undefined },
+): { path: string; source: string; isCustom: boolean }[] {
+	const dirs: { path: string; source: string; isCustom: boolean }[] = [
+		{ path: path.join(cwd, ".claude", "skills"), source: "project", isCustom: false },
+		{ path: path.join(cwd, ".bobbit", "skills"), source: "project", isCustom: false },
+		{ path: path.join(os.homedir(), ".claude", "skills"), source: "personal", isCustom: false },
+		{ path: path.join(os.homedir(), ".bobbit", "skills"), source: "personal", isCustom: false },
+		{ path: path.join(cwd, ".claude", "commands"), source: "legacy", isCustom: false },
+	];
+
+	for (const entry of parseCustomDirectories(projectConfigStore)) {
+		dirs.push({ path: entry.path, source: "custom", isCustom: true });
+	}
+
+	return dirs;
+}
+
 // Simple TTL cache
-let _cache: { skills: SlashSkill[]; cwd: string; ts: number } | null = null;
+let _cache: { skills: SlashSkill[]; cwd: string; configVal: string; ts: number } | null = null;
 const CACHE_TTL_MS = 5_000;
 
 /**
  * Discover all slash skills for a given working directory.
- * Merges project, personal, and legacy sources. Project skills take priority
- * over personal skills with the same name. Legacy commands have lowest priority.
+ * Merges project, personal, legacy, custom, and built-in sources.
+ * Priority (highest wins): project > bobbit project > personal > bobbit personal > legacy > custom > built-in.
  */
-export function discoverSlashSkills(cwd: string): SlashSkill[] {
-	if (_cache && _cache.cwd === cwd && Date.now() - _cache.ts < CACHE_TTL_MS) {
+export function discoverSlashSkills(
+	cwd: string,
+	projectConfigStore?: { get(key: string): string | undefined },
+): SlashSkill[] {
+	const configVal = projectConfigStore?.get("skill_directories") ?? "";
+	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
 		return _cache.skills;
 	}
 
@@ -224,10 +278,17 @@ export function discoverSlashSkills(cwd: string): SlashSkill[] {
 	const bobbitPersonalSkills = scanSkillDir(bobbitPersonalSkillsDir, "personal");
 	const legacyCommands = scanCommandsDir(legacyCommandsDir);
 
-	// Merge with priority: project > personal > legacy > built-in
-	// .claude takes precedence over .bobbit at the same level
+	// Scan custom directories
+	const customSkills: SlashSkill[] = [];
+	for (const entry of parseCustomDirectories(projectConfigStore)) {
+		customSkills.push(...scanSkillDir(entry.path, "custom"));
+	}
+
+	// Merge with priority (lowest to highest — later insertions overwrite):
+	// built-in → custom → legacy → bobbit personal → claude personal → bobbit project → claude project
 	const byName = new Map<string, SlashSkill>();
 	for (const skill of BUILTIN_SKILLS) byName.set(skill.name, skill);
+	for (const skill of customSkills) byName.set(skill.name, skill);
 	for (const skill of legacyCommands) byName.set(skill.name, skill);
 	for (const skill of bobbitPersonalSkills) byName.set(skill.name, skill);
 	for (const skill of personalSkills) byName.set(skill.name, skill);
@@ -242,13 +303,13 @@ export function discoverSlashSkills(cwd: string): SlashSkill[] {
 	// Sort alphabetically
 	skills.sort((a, b) => a.name.localeCompare(b.name));
 
-	_cache = { skills, cwd, ts: Date.now() };
+	_cache = { skills, cwd, configVal, ts: Date.now() };
 	return skills;
 }
 
 /** Look up a single slash skill by name. */
-export function getSlashSkill(cwd: string, name: string): SlashSkill | undefined {
-	return discoverSlashSkills(cwd).find((s) => s.name === name);
+export function getSlashSkill(cwd: string, name: string, projectConfigStore?: { get(key: string): string | undefined }): SlashSkill | undefined {
+	return discoverSlashSkills(cwd, projectConfigStore).find((s) => s.name === name);
 }
 
 /**

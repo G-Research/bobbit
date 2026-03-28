@@ -35,6 +35,7 @@ export function handleWebSocketConnection(
 	sessionManager: SessionManager,
 	authToken: string,
 	rateLimiter: RateLimiter,
+	projectConfigStore?: { get(key: string): string | undefined },
 	skipAuth = false,
 ): void {
 	const ip = getClientIp(req);
@@ -200,7 +201,7 @@ export function handleWebSocketConnection(
 					if (slashMatch) {
 						const skillName = slashMatch[1];
 						const skillArgs = slashMatch[2] || "";
-						const skill = getSlashSkill(session.cwd, skillName);
+						const skill = getSlashSkill(session.cwd, skillName, projectConfigStore);
 						if (skill) {
 							promptText = buildSlashSkillPrompt(skill, skillArgs);
 							console.log(`[ws-handler] Slash skill "${skillName}" invoked for session ${sessionId}`);
