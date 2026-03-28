@@ -390,7 +390,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	// Canvas:  width:10px; margin:8px 9px 20px 18px; → total 37×37 (same)
 	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
 	// Shadow CSS: width:1px; same principle
-	const shadowStyle = `width:11px !important;height:10px !important;box-shadow:none !important;image-rendering:pixelated;`;
+	const shadowStyle = `width:11px !important;height:10px !important;margin-bottom:-9px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
 	// Start eye animation when the img mounts
 	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
