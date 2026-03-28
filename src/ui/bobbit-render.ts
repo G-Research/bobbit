@@ -102,30 +102,34 @@ export function resolveBodyPixels(
 	eyeColor?: string,
 ): SpritePixel[] {
 	const pixels: SpritePixel[] = [];
+	const ec = eyeColor ?? palette.eye;
+	const pos = EYE_POSITIONS[gaze];
 
-	// Resolve body grid (without eyes — eye rows are solid M)
+	// Build set of eye pixel positions to skip in body grid
+	const eyeSet = new Set<string>();
+	if (blink) {
+		eyeSet.add(`${pos.lx},${pos.ly + 1}`);
+		eyeSet.add(`${pos.rx},${pos.ry + 1}`);
+	} else {
+		eyeSet.add(`${pos.lx},${pos.ly}`);
+		eyeSet.add(`${pos.lx},${pos.ly + 1}`);
+		eyeSet.add(`${pos.rx},${pos.ry}`);
+		eyeSet.add(`${pos.rx},${pos.ry + 1}`);
+	}
+
+	// Resolve body grid, replacing eye positions with eye color
 	for (let y = 0; y < BODY_HEIGHT; y++) {
 		const row = BODY_GRID[y];
 		for (let x = 0; x < BODY_WIDTH; x++) {
 			const key = row[x];
 			if (key === '_') continue;
-			const color = key === 'K' ? '#000' : palette[PALETTE_KEY_MAP[key]!];
-			pixels.push([x, y, color]);
+			if (eyeSet.has(`${x},${y}`)) {
+				pixels.push([x, y, ec]);
+			} else {
+				const color = key === 'K' ? '#000' : palette[PALETTE_KEY_MAP[key]!];
+				pixels.push([x, y, color]);
+			}
 		}
-	}
-
-	// Overlay eyes
-	const ec = eyeColor ?? palette.eye;
-	const pos = EYE_POSITIONS[gaze];
-	if (blink) {
-		// Blink: only bottom pixel of each eye
-		pixels.push([pos.lx, pos.ly + 1, ec]);
-		pixels.push([pos.rx, pos.ry + 1, ec]);
-	} else {
-		pixels.push([pos.lx, pos.ly, ec]);
-		pixels.push([pos.lx, pos.ly + 1, ec]);
-		pixels.push([pos.rx, pos.ry, ec]);
-		pixels.push([pos.rx, pos.ry + 1, ec]);
 	}
 
 	return pixels;
