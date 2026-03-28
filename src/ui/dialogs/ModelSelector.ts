@@ -3,17 +3,14 @@ import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.js";
 import { DialogBase } from "@mariozechner/mini-lit/dist/DialogBase.js";
-import { getModels, getProviders, type Model, modelsAreEqual } from "@mariozechner/pi-ai";
+import { type Model, modelsAreEqual } from "@mariozechner/pi-ai";
 import { html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Brain, Image as ImageIcon, KeyRound } from "lucide";
 import { Input } from "../components/Input.js";
-import { getAppStorage } from "../storage/app-storage.js";
-import type { AutoDiscoveryProviderType } from "../storage/stores/custom-providers-store.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
-import { discoverModels } from "../utils/model-discovery.js";
 
 /**
  * Assign a recency/tier rank to a model ID so newer flagship models sort first.
@@ -104,32 +101,16 @@ function modelRecencyRank(id: string): number {
 	return 0;
 }
 
-/** AI Gateway model configuration — set from app layer */
-export interface AigwModelConfig {
-	/** When true, only gateway models are shown (built-in providers hidden) */
-	active: boolean;
-	/** Gateway models to display */
-	models: Model<any>[];
-}
-
 @customElement("agent-model-selector")
 export class ModelSelector extends DialogBase {
-	/**
-	 * Static aigw configuration. Set from the app layer before opening
-	 * the selector. When active, built-in and custom providers are hidden
-	 * and only gateway models are shown.
-	 */
-	static aigwConfig: AigwModelConfig = { active: false, models: [] };
-
 	@state() currentModel: Model<any> | null = null;
 	@state() searchQuery = "";
 	@state() filterThinking = false;
 	@state() filterVision = false;
-	@state() customProvidersLoading = false;
 	@state() selectedIndex = 0;
 	@state() private navigationMode: "mouse" | "keyboard" = "mouse";
-	@state() private customProviderModels: Model<any>[] = [];
-	@state() private authenticatedProviders: Set<string> = new Set();
+	@state() private serverModels: any[] = [];
+	@state() private loading = false;
 
 	private onSelectCallback?: (model: Model<any>) => void;
 	private scrollContainerRef = createRef<HTMLDivElement>();
@@ -143,17 +124,20 @@ export class ModelSelector extends DialogBase {
 		selector.currentModel = currentModel;
 		selector.onSelectCallback = onSelect;
 		selector.open();
-		selector.loadCustomProviders();
-		selector.loadAuthenticatedProviders();
+		selector.loadModels();
 	}
 
-	private async loadAuthenticatedProviders() {
+	private async loadModels() {
+		this.loading = true;
 		try {
-			const storage = getAppStorage();
-			const providers = await storage.providerKeys.list();
-			this.authenticatedProviders = new Set(providers);
-		} catch (error) {
-			console.debug("Failed to load provider keys:", error);
+			const res = await fetch("/api/models");
+			if (res.ok) {
+				this.serverModels = await res.json();
+			}
+		} catch (err) {
+			console.error("Failed to load models:", err);
+		} finally {
+			this.loading = false;
 		}
 	}
 
@@ -212,53 +196,6 @@ export class ModelSelector extends DialogBase {
 		});
 	}
 
-	private async loadCustomProviders() {
-		this.customProvidersLoading = true;
-		const allCustomModels: Model<any>[] = [];
-
-		try {
-			const storage = getAppStorage();
-			const customProviders = await storage.customProviders.getAll();
-
-			// Load models from custom providers
-			for (const provider of customProviders) {
-				const isAutoDiscovery: boolean =
-					provider.type === "ollama" ||
-					provider.type === "llama.cpp" ||
-					provider.type === "vllm" ||
-					provider.type === "lmstudio";
-
-				if (isAutoDiscovery) {
-					try {
-						const models = await discoverModels(
-							provider.type as AutoDiscoveryProviderType,
-							provider.baseUrl,
-							provider.apiKey,
-						);
-
-						const modelsWithProvider = models.map((model) => ({
-							...model,
-							provider: provider.name,
-						}));
-
-						allCustomModels.push(...modelsWithProvider);
-					} catch (error) {
-						console.debug(`Failed to load models from ${provider.name}:`, error);
-					}
-				} else if (provider.models) {
-					// Manual provider - models already defined
-					allCustomModels.push(...provider.models);
-				}
-			}
-		} catch (error) {
-			console.error("Failed to load custom providers:", error);
-		} finally {
-			this.customProviderModels = allCustomModels;
-			this.customProvidersLoading = false;
-			this.requestUpdate();
-		}
-	}
-
 	private formatTokens(tokens: number): string {
 		if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(0)}M`;
 		if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}`;
@@ -275,26 +212,8 @@ export class ModelSelector extends DialogBase {
 	private getFilteredModels(): Array<{ provider: string; id: string; model: any }> {
 		const allModels: Array<{ provider: string; id: string; model: any }> = [];
 
-		// When AI Gateway is active, show ONLY gateway models
-		if (ModelSelector.aigwConfig.active && ModelSelector.aigwConfig.models.length > 0) {
-			for (const model of ModelSelector.aigwConfig.models) {
-				allModels.push({ provider: model.provider, id: model.id, model });
-			}
-		} else {
-			// Collect all models from known providers
-			const knownProviders = getProviders();
-
-			for (const provider of knownProviders) {
-				const models = getModels(provider as any);
-				for (const model of models) {
-					allModels.push({ provider, id: model.id, model });
-				}
-			}
-
-			// Add custom provider models
-			for (const model of this.customProviderModels) {
-				allModels.push({ provider: model.provider, id: model.id, model });
-			}
+		for (const model of this.serverModels) {
+			allModels.push({ provider: model.provider, id: model.id, model });
 		}
 
 		// Filter models based on search and capability filters
@@ -303,10 +222,7 @@ export class ModelSelector extends DialogBase {
 		// Apply search filter
 		if (this.searchQuery) {
 			filteredModels = filteredModels.filter(({ provider, id, model }) => {
-				const searchTokens = this.searchQuery
-					.toLowerCase()
-					.split(/\s+/)
-					.filter((t) => t);
+				const searchTokens = this.searchQuery.toLowerCase().split(/\s+/).filter((t) => t);
 				const searchText = `${provider} ${id} ${model.name}`.toLowerCase();
 				return searchTokens.every((token) => searchText.includes(token));
 			});
@@ -320,22 +236,18 @@ export class ModelSelector extends DialogBase {
 			filteredModels = filteredModels.filter(({ model }) => model.input.includes("image"));
 		}
 
-		// Sort: current model first, then authenticated providers, then by provider name
-		const authed = this.authenticatedProviders;
-		const aigwActive = ModelSelector.aigwConfig.active;
+		// Sort: current model first, then authenticated, then by recency rank
 		filteredModels.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
 
-			// When aigw is active all models are "authenticated"
-			if (!aigwActive) {
-				const aHasKey = authed.has(a.provider);
-				const bHasKey = authed.has(b.provider);
-				if (aHasKey && !bHasKey) return -1;
-				if (!aHasKey && bHasKey) return 1;
-			}
+			// Use authenticated field from server response
+			const aHasKey = a.model.authenticated ?? false;
+			const bHasKey = b.model.authenticated ?? false;
+			if (aHasKey && !bHasKey) return -1;
+			if (!aHasKey && bHasKey) return 1;
 
 			// Sort by model recency/tier (higher = newer/better)
 			const aRank = modelRecencyRank(a.id);
@@ -362,7 +274,6 @@ export class ModelSelector extends DialogBase {
 
 	protected override renderContent(): TemplateResult {
 		const filteredModels = this.getFilteredModels();
-		const aigwActive = ModelSelector.aigwConfig.active;
 
 		return html`
 			<!-- Header and Search -->
@@ -413,46 +324,48 @@ export class ModelSelector extends DialogBase {
 
 			<!-- Scrollable model list -->
 			<div class="flex-1 overflow-y-auto" ${ref(this.scrollContainerRef)}>
-				${filteredModels.map(({ provider, id, model }, index) => {
-					const isCurrent = modelsAreEqual(this.currentModel, model);
-					const isSelected = index === this.selectedIndex;
-					const hasKey = aigwActive || this.authenticatedProviders.has(provider);
-					return html`
-						<div
-							data-model-item
-							class="px-4 py-3 ${
-								this.navigationMode === "mouse" ? "hover:bg-muted" : ""
-							} cursor-pointer border-b border-border ${isSelected ? "bg-accent" : ""} ${hasKey ? "" : "opacity-45"}"
-							@click=${() => this.handleSelect(model)}
-							@mouseenter=${() => {
-								// Only update selection in mouse mode
-								if (this.navigationMode === "mouse") {
-									this.selectedIndex = index;
-								}
-							}}
-							title=${hasKey ? "" : i18n("API key required — set up in Settings > Providers")}
-						>
-							<div class="flex items-center justify-between gap-2 mb-1">
-								<div class="flex items-center gap-2 flex-1 min-w-0">
-									<span class="text-sm font-medium text-foreground truncate">${id}</span>
-									${isCurrent ? html`<span class="text-green-500">✓</span>` : ""}
+				${this.loading && this.serverModels.length === 0
+					? html`<div class="flex items-center justify-center py-8 text-muted-foreground text-sm">Loading models...</div>`
+					: filteredModels.map(({ provider, id, model }, index) => {
+						const isCurrent = modelsAreEqual(this.currentModel, model);
+						const isSelected = index === this.selectedIndex;
+						const hasKey = model.authenticated ?? false;
+						return html`
+							<div
+								data-model-item
+								class="px-4 py-3 ${
+									this.navigationMode === "mouse" ? "hover:bg-muted" : ""
+								} cursor-pointer border-b border-border ${isSelected ? "bg-accent" : ""} ${hasKey ? "" : "opacity-45"}"
+								@click=${() => this.handleSelect(model)}
+								@mouseenter=${() => {
+									// Only update selection in mouse mode
+									if (this.navigationMode === "mouse") {
+										this.selectedIndex = index;
+									}
+								}}
+								title=${hasKey ? "" : i18n("API key required — set up in Settings > Providers")}
+							>
+								<div class="flex items-center justify-between gap-2 mb-1">
+									<div class="flex items-center gap-2 flex-1 min-w-0">
+										<span class="text-sm font-medium text-foreground truncate">${id}</span>
+										${isCurrent ? html`<span class="text-green-500">✓</span>` : ""}
+									</div>
+									<div class="flex items-center gap-1.5">
+										${!hasKey ? html`<span class="text-muted-foreground" title=${i18n("API key required")}>${icon(KeyRound, "sm")}</span>` : ""}
+										${Badge(provider, "outline")}
+									</div>
 								</div>
-								<div class="flex items-center gap-1.5">
-									${!hasKey ? html`<span class="text-muted-foreground" title=${i18n("API key required")}>${icon(KeyRound, "sm")}</span>` : ""}
-									${Badge(provider, "outline")}
+								<div class="flex items-center justify-between text-xs text-muted-foreground">
+									<div class="flex items-center gap-2">
+										<span class="${model.reasoning ? "" : "opacity-30"}">${icon(Brain, "sm")}</span>
+										<span class="${model.input.includes("image") ? "" : "opacity-30"}">${icon(ImageIcon, "sm")}</span>
+										<span>${this.formatTokens(model.contextWindow)}K/${this.formatTokens(model.maxTokens)}K</span>
+									</div>
+									<span>${formatModelCost(model.cost)}</span>
 								</div>
 							</div>
-							<div class="flex items-center justify-between text-xs text-muted-foreground">
-								<div class="flex items-center gap-2">
-									<span class="${model.reasoning ? "" : "opacity-30"}">${icon(Brain, "sm")}</span>
-									<span class="${model.input.includes("image") ? "" : "opacity-30"}">${icon(ImageIcon, "sm")}</span>
-									<span>${this.formatTokens(model.contextWindow)}K/${this.formatTokens(model.maxTokens)}K</span>
-								</div>
-								<span>${formatModelCost(model.cost)}</span>
-							</div>
-						</div>
-					`;
-				})}
+						`;
+					})}
 			</div>
 		`;
 	}

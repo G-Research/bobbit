@@ -5,13 +5,10 @@ import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "../components/CustomProviderCard.js";
 import "../components/ProviderKeyInput.js";
-import { getAppStorage } from "../storage/app-storage.js";
 import type {
-	AutoDiscoveryProviderType,
 	CustomProvider,
 	CustomProviderType,
 } from "../storage/stores/custom-providers-store.js";
-import { discoverModels } from "../utils/model-discovery.js";
 import { CustomProviderDialog } from "./CustomProviderDialog.js";
 import { SettingsTab } from "./SettingsDialog.js";
 
@@ -30,8 +27,10 @@ export class ProvidersModelsTab extends SettingsTab {
 
 	private async loadCustomProviders() {
 		try {
-			const storage = getAppStorage();
-			this.customProviders = await storage.customProviders.getAll();
+			const res = await fetch("/api/custom-providers");
+			if (res.ok) {
+				this.customProviders = await res.json();
+			}
 
 			// Check status for auto-discovery providers
 			for (const provider of this.customProviders) {
@@ -58,13 +57,14 @@ export class ProvidersModelsTab extends SettingsTab {
 		this.requestUpdate();
 
 		try {
-			const models = await discoverModels(
-				provider.type as AutoDiscoveryProviderType,
-				provider.baseUrl,
-				provider.apiKey,
-			);
-
-			this.providerStatus.set(provider.id, { modelCount: models.length, status: "connected" });
+			const res = await fetch("/api/models");
+			if (res.ok) {
+				const models = await res.json();
+				const providerModels = models.filter((m: any) => m.provider === provider.name);
+				this.providerStatus.set(provider.id, { modelCount: providerModels.length, status: "connected" });
+			} else {
+				this.providerStatus.set(provider.id, { modelCount: 0, status: "disconnected" });
+			}
 		} catch (_error) {
 			this.providerStatus.set(provider.id, { modelCount: 0, status: "disconnected" });
 		}
@@ -166,20 +166,19 @@ export class ProvidersModelsTab extends SettingsTab {
 		this.requestUpdate();
 
 		try {
-			const models = await discoverModels(
-				provider.type as AutoDiscoveryProviderType,
-				provider.baseUrl,
-				provider.apiKey,
-			);
-
-			this.providerStatus.set(provider.id, { modelCount: models.length, status: "connected" });
-			this.requestUpdate();
-
-			console.log(`Refreshed ${models.length} models from ${provider.name}`);
+			const res = await fetch("/api/models");
+			if (res.ok) {
+				const models = await res.json();
+				const providerModels = models.filter((m: any) => m.provider === provider.name);
+				this.providerStatus.set(provider.id, { modelCount: providerModels.length, status: "connected" });
+				this.requestUpdate();
+				console.log(`Refreshed ${providerModels.length} models from ${provider.name}`);
+			} else {
+				throw new Error("Failed to fetch models");
+			}
 		} catch (error) {
 			this.providerStatus.set(provider.id, { modelCount: 0, status: "disconnected" });
 			this.requestUpdate();
-
 			console.error(`Failed to refresh provider ${provider.name}:`, error);
 			alert(`Failed to refresh provider: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -191,8 +190,8 @@ export class ProvidersModelsTab extends SettingsTab {
 		}
 
 		try {
-			const storage = getAppStorage();
-			await storage.customProviders.delete(provider.id);
+			const res = await fetch(`/api/custom-providers/${provider.id}`, { method: "DELETE" });
+			if (!res.ok) throw new Error("Failed to delete provider");
 			await this.loadCustomProviders();
 			this.requestUpdate();
 		} catch (error) {

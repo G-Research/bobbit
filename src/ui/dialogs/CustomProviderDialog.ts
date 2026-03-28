@@ -7,9 +7,7 @@ import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import type { Model } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { state } from "lit/decorators.js";
-import { getAppStorage } from "../storage/app-storage.js";
 import type { CustomProvider, CustomProviderType } from "../storage/stores/custom-providers-store.js";
-import { discoverModels } from "../utils/model-discovery.js";
 
 export class CustomProviderDialog extends DialogBase {
 	private provider?: CustomProvider;
@@ -89,16 +87,33 @@ export class CustomProviderDialog extends DialogBase {
 		this.discoveredModels = [];
 
 		try {
-			const models = await discoverModels(
-				this.type as "ollama" | "llama.cpp" | "vllm" | "lmstudio",
-				this.baseUrl,
-				this.apiKey || undefined,
-			);
+			// Save provider first (server will discover models)
+			const provider = {
+				id: this.provider?.id || crypto.randomUUID(),
+				name: this.name || this.type,
+				type: this.type,
+				baseUrl: this.baseUrl,
+				apiKey: this.apiKey || undefined,
+			};
+			const saveRes = await fetch("/api/custom-providers", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(provider),
+			});
+			if (!saveRes.ok) throw new Error("Failed to save provider for testing");
 
-			this.discoveredModels = models.map((model) => ({
-				...model,
-				provider: this.name || this.type,
-			}));
+			// Store the ID for later save
+			if (!this.provider) {
+				this.provider = provider as any;
+			}
+
+			// Now fetch models to see what was discovered
+			const modelsRes = await fetch("/api/models");
+			if (modelsRes.ok) {
+				const allModels = await modelsRes.json();
+				const providerModels = allModels.filter((m: any) => m.provider === (this.name || this.type));
+				this.discoveredModels = providerModels;
+			}
 
 			this.testError = "";
 		} catch (error) {
@@ -117,9 +132,7 @@ export class CustomProviderDialog extends DialogBase {
 		}
 
 		try {
-			const storage = getAppStorage();
-
-			const provider: CustomProvider = {
+			const provider = {
 				id: this.provider?.id || crypto.randomUUID(),
 				name: this.name,
 				type: this.type,
@@ -128,7 +141,12 @@ export class CustomProviderDialog extends DialogBase {
 				models: this.isAutoDiscoveryType() ? undefined : this.provider?.models || [],
 			};
 
-			await storage.customProviders.set(provider);
+			const res = await fetch("/api/custom-providers", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(provider),
+			});
+			if (!res.ok) throw new Error("Failed to save provider");
 
 			if (this.onSaveCallback) {
 				this.onSaveCallback();

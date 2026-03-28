@@ -152,7 +152,7 @@ test.describe("AI Gateway Configure Flow", () => {
 		const res = await apiFetch("/api/preferences");
 		const prefs = await res.json();
 		expect(prefs["aigw.url"]).toBe(`http://127.0.0.1:${mockPort}`);
-		expect(prefs["aigw.models"]).toHaveLength(3);
+		// aigw.models is no longer cached in preferences — models are discovered fresh via GET /api/models
 	});
 
 	test("preferences cleaned after delete", async () => {
@@ -165,6 +165,6 @@ test.describe("AI Gateway Configure Flow", () => {
 		const res = await apiFetch("/api/preferences");
 		const prefs = await res.json();
 		expect(prefs["aigw.url"]).toBeUndefined();
-		expect(prefs["aigw.models"]).toBeUndefined();
+		// aigw.models is no longer stored in preferences
 	});
 });
