@@ -255,6 +255,7 @@ export class ToolManager {
 		if (docSections.length > 0) {
 			sections.push("\n# Tool Documentation");
 			sections.push(...docSections);
+			sections.push("\n_For detailed tool documentation (examples, edge cases, full parameter descriptions), read the tool's YAML file in `.bobbit/config/tools/<group>/<tool>.yaml` — see the `detail_docs` field._");
 		}
 
 		return sections.join("\n");

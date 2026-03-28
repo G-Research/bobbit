@@ -6,61 +6,121 @@ provider:
   tool: grep
 group: File System
 renderer: src/ui/tools/renderers/GrepRenderer.ts
-docs: |
+docs: |-
+  All paths must use forward slashes. Respects .gitignore. Output truncated to 100 matches / 50KB. **Cannot search patterns starting with `--`** — use `bash` with `rg -- 'pattern'` instead.
+detail_docs: >
   Search file contents for a regex or literal pattern. Returns matching lines
-  with file paths and line numbers. Respects `.gitignore`. Uses ripgrep internally.
 
-  **All paths must use forward slashes (`/`), even on Windows.** Never use backslashes.
+  with file paths and line numbers. Respects `.gitignore`. Uses ripgrep
+  internally.
+
+
+  **All paths must use forward slashes (`/`), even on Windows.** Never use
+  backslashes.
+
 
   Parameters:
-  - `pattern` (required): Regex pattern to search for (or literal string if `literal` is true).
-  - `path` (optional): File or directory to search in (default: working directory). Forward slashes only.
-  - `glob` (optional): File glob filter (e.g. `*.ts` to only search TypeScript files).
+
+  - `pattern` (required): Regex pattern to search for (or literal string if
+  `literal` is true).
+
+  - `path` (optional): File or directory to search in (default: working
+  directory). Forward slashes only.
+
+  - `glob` (optional): File glob filter (e.g. `*.ts` to only search TypeScript
+  files).
+
   - `ignoreCase` (optional): Case-insensitive search. Default: false.
-  - `literal` (optional): Treat pattern as a literal string, not regex. Default: false.
+
+  - `literal` (optional): Treat pattern as a literal string, not regex. Default:
+  false.
+
   - `context` (optional): Number of context lines to show around each match.
+
   - `limit` (optional): Maximum number of matches to return.
 
+
   Examples — correct:
-  ```
-  grep("TODO", "src/server")
-  grep("assembleSystemPrompt", "src/server/agent")
-  grep("import.*ToolManager", path="src/server", glob="*.ts")
-  grep("password", ignoreCase=true)
-  grep("exact match here", literal=true, path="src/app/main.ts")
+
   ```
 
+  grep("TODO", "src/server")
+
+  grep("assembleSystemPrompt", "src/server/agent")
+
+  grep("import.*ToolManager", path="src/server", glob="*.ts")
+
+  grep("password", ignoreCase=true)
+
+  grep("exact match here", literal=true, path="src/app/main.ts")
+
+  ```
+
+
   Examples — WRONG (backslashes):
+
   ```
+
   grep("TODO", "src\\server")                            # WRONG
+
   grep("import", "src\\server\\agent")                   # WRONG
+
   ```
+
 
   ## Known Issue: Patterns Starting with `--`
 
-  **The grep tool cannot search for patterns that start with `--`** (e.g. `--extension`, `--verbose`). Ripgrep interprets these as command-line flags, producing errors like:
+
+  **The grep tool cannot search for patterns that start with `--`** (e.g.
+  `--extension`, `--verbose`). Ripgrep interprets these as command-line flags,
+  producing errors like:
+
 
   ```
+
   rg: unrecognized flag --extension
+
   ```
 
-  This is a bug in how the grep tool passes patterns to ripgrep — it does not insert a `--` end-of-options separator before the pattern argument. The `literal: true` parameter does NOT fix this, because CLI argument parsing happens before pattern interpretation.
+
+  This is a bug in how the grep tool passes patterns to ripgrep — it does not
+  insert a `--` end-of-options separator before the pattern argument. The
+  `literal: true` parameter does NOT fix this, because CLI argument parsing
+  happens before pattern interpretation.
+
 
   ### Workaround
 
-  When you need to search for a pattern starting with `--`, use the `bash` tool with ripgrep directly, adding the `--` separator:
+
+  When you need to search for a pattern starting with `--`, use the `bash` tool
+  with ripgrep directly, adding the `--` separator:
+
 
   ```
+
   bash(command="rg -- '--extension' src/server")
+
   bash(command="rg -n -- '--verbose' src/")
+
   ```
 
-  The `--` tells ripgrep that everything after it is a positional argument (the pattern), not a flag.
+
+  The `--` tells ripgrep that everything after it is a positional argument (the
+  pattern), not a flag.
+
 
   ### Quick Reference
 
+
   | Scenario | What to use |
+
   |----------|-------------|
-  | Normal pattern (no leading dashes) | `grep(pattern="myFunction")` — works fine |
-  | Pattern starts with `--` | `bash(command="rg -- '--extension' src/")` — must use bash workaround |
-  | Pattern starts with single `-` | `bash(command="rg -- '-v' src/")` — use bash workaround to be safe |
+
+  | Normal pattern (no leading dashes) | `grep(pattern="myFunction")` — works
+  fine |
+
+  | Pattern starts with `--` | `bash(command="rg -- '--extension' src/")` — must
+  use bash workaround |
+
+  | Pattern starts with single `-` | `bash(command="rg -- '-v' src/")` — use
+  bash workaround to be safe |

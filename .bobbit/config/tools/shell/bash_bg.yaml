@@ -6,7 +6,9 @@ provider:
   extension: extension.ts
 group: Shell
 renderer: src/ui/tools/renderers/BgProcessRenderer.ts
-docs: |
+docs: |-
+  Actions: create (start a process), logs (view output), kill (terminate), list (show all). Use for dev servers, file watchers, long-running builds. Parameters: `command` (for create), `id` (for logs/kill), `tail` (log lines, default 200).
+detail_docs: |
   Manage background shell processes that don't block the agent.
 
   Actions:

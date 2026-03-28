@@ -6,6 +6,10 @@ provider:
   extension: extension.ts
 group: Gates
 docs: >-
+  No parameters. Returns all workflow gates with status
+  (`pending`/`passed`/`failed`), dependencies, and content flags. Call at start
+  of work to understand workflow state.
+detail_docs: >-
   ## Purpose
 
 

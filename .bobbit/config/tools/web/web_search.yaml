@@ -7,66 +7,141 @@ provider:
 group: Web
 renderer: src/ui/tools/renderers/WebSearchRenderer.ts
 docs: |-
+  DuckDuckGo HTML scraping (no API key). Max 20 results (default 10). Launch parallel searches with different phrasings for better coverage. Follow up with `web_fetch` for full page content.
+detail_docs: >-
   ## Purpose
 
-  Search the web using DuckDuckGo and return a list of results with titles, URLs, and text snippets. This is a fast, zero-configuration web search — no API key needed.
 
-  Use this as the starting point for any web research. It returns enough information in the snippets to often answer questions directly, and provides URLs for deeper reading via `web_fetch`.
+  Search the web using DuckDuckGo and return a list of results with titles,
+  URLs, and text snippets. This is a fast, zero-configuration web search — no
+  API key needed.
+
+
+  Use this as the starting point for any web research. It returns enough
+  information in the snippets to often answer questions directly, and provides
+  URLs for deeper reading via `web_fetch`.
+
 
   ## How It Works
 
-  This tool works by scraping DuckDuckGo's HTML search results page via curl — it does not use an official search API. Results (titles, URLs, snippets) are extracted from the HTML response. This means:
+
+  This tool works by scraping DuckDuckGo's HTML search results page via curl —
+  it does not use an official search API. Results (titles, URLs, snippets) are
+  extracted from the HTML response. This means:
+
 
   - **No API key needed** — searches are anonymous, no configuration required.
-  - **Rate limiting** — DuckDuckGo may occasionally rate-limit requests if many searches are made in quick succession. If results come back empty, wait a moment and retry.
-  - **Formatting inconsistencies** — since results are parsed from HTML, occasional formatting artifacts (extra whitespace, truncated snippets) may appear.
+
+  - **Rate limiting** — DuckDuckGo may occasionally rate-limit requests if many
+  searches are made in quick succession. If results come back empty, wait a
+  moment and retry.
+
+  - **Formatting inconsistencies** — since results are parsed from HTML,
+  occasional formatting artifacts (extra whitespace, truncated snippets) may
+  appear.
+
 
   ## Parameters
 
+
   | Name | Type | Required | Description |
+
   |------|------|----------|-------------|
-  | `query` | string | **Yes** | The search query. Use natural language or keyword-style queries. More specific queries yield better results. |
-  | `maxResults` | number | No | Maximum number of results to return. Range: 1-20. Default: 10. |
+
+  | `query` | string | **Yes** | The search query. Use natural language or
+  keyword-style queries. More specific queries yield better results. |
+
+  | `maxResults` | number | No | Maximum number of results to return. Range:
+  1-20. Default: 10. |
+
 
   ## When to Use
 
-  - **Looking up documentation** — API references, library docs, language features.
+
+  - **Looking up documentation** — API references, library docs, language
+  features.
+
   - **Debugging errors** — paste error messages or codes to find solutions.
-  - **Checking current information** — version numbers, release dates, deprecation notices.
-  - **Finding best practices** — design patterns, architecture guidance, security recommendations.
-  - **Researching before implementing** — understanding how others have solved similar problems.
+
+  - **Checking current information** — version numbers, release dates,
+  deprecation notices.
+
+  - **Finding best practices** — design patterns, architecture guidance,
+  security recommendations.
+
+  - **Researching before implementing** — understanding how others have solved
+  similar problems.
+
 
   ## When NOT to Use
 
-  - **When you already know the URL** — use `web_fetch` directly to read a known page.
-  - **For internal/local information** — use `read` or `bash` to examine local files and project state.
-  - **For real-time data** — search results may be cached/delayed. DuckDuckGo doesn't guarantee real-time freshness.
+
+  - **When you already know the URL** — use `web_fetch` directly to read a known
+  page.
+
+  - **For internal/local information** — use `read` or `bash` to examine local
+  files and project state.
+
+  - **For real-time data** — search results may be cached/delayed. DuckDuckGo
+  doesn't guarantee real-time freshness.
+
 
   ## Examples
 
+
   ```
+
   # Look up API documentation
+
   web_search(query="Node.js crypto createHash API reference")
 
+
   # Debug an error message
-  web_search(query="TypeScript error TS2345 argument of type string not assignable")
+
+  web_search(query="TypeScript error TS2345 argument of type string not
+  assignable")
+
 
   # Research a design pattern
-  web_search(query="WebSocket reconnection with exponential backoff best practices")
+
+  web_search(query="WebSocket reconnection with exponential backoff best
+  practices")
+
 
   # Find library-specific guidance
+
   web_search(query="Lit web components reactive controller lifecycle")
 
+
   # Check compatibility
+
   web_search(query="CSS container queries browser support 2024")
+
   ```
+
 
   ## Notes / Gotchas
 
-  - **HTML scraping, not an API** — results are extracted from DuckDuckGo's HTML page via curl. There is no official API involved, so results may occasionally have formatting inconsistencies or be rate-limited.
-  - **Search from multiple angles** — launch 3-5 parallel searches with different phrasings in a single message for better coverage. This is much faster than sequential searches.
-  - **Follow up with `web_fetch`** — snippets are brief. Fetch the full page for detailed information.
-  - **Cross-reference claims** — verify important facts appear in at least two independent sources.
-  - **No authentication** — searches are anonymous via DuckDuckGo. No API key configuration needed.
-  - **Result quality** — DuckDuckGo results may differ from Google. If results are sparse, try rephrasing the query.
-  - **Max 20 results** — even with `maxResults=20`, DuckDuckGo may return fewer if there aren't enough relevant results.
+
+  - **HTML scraping, not an API** — results are extracted from DuckDuckGo's HTML
+  page via curl. There is no official API involved, so results may occasionally
+  have formatting inconsistencies or be rate-limited.
+
+  - **Search from multiple angles** — launch 3-5 parallel searches with
+  different phrasings in a single message for better coverage. This is much
+  faster than sequential searches.
+
+  - **Follow up with `web_fetch`** — snippets are brief. Fetch the full page for
+  detailed information.
+
+  - **Cross-reference claims** — verify important facts appear in at least two
+  independent sources.
+
+  - **No authentication** — searches are anonymous via DuckDuckGo. No API key
+  configuration needed.
+
+  - **Result quality** — DuckDuckGo results may differ from Google. If results
+  are sparse, try rephrasing the query.
+
+  - **Max 20 results** — even with `maxResults=20`, DuckDuckGo may return fewer
+  if there aren't enough relevant results.

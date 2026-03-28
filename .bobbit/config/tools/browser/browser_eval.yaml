@@ -8,6 +8,8 @@ provider:
 group: Browser
 renderer: src/ui/tools/renderers/BrowserEvalRenderer.ts
 docs: |-
+  Return objects via `JSON.stringify()`. Supports `await`. Runs in page context (browser APIs, not Node.js). Side effects persist until next navigation.
+detail_docs: |-
   ## Purpose
 
   Execute arbitrary JavaScript in the context of the currently loaded browser page. The expression runs with full access to the page's DOM, window object, and any loaded scripts/frameworks. The return value is serialized and returned as a string.

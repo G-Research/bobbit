@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, svg, type TemplateResult } from "lit";
-import { Goal as GoalIcon, LayoutDashboard, Pencil, Trash2 } from "lucide";
+import { Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -481,6 +481,12 @@ export function renderGoalGroup(goal: Goal) {
 
 	const pr = state.prStatusCache.get(goal.id);
 	const canArchive = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
+	const reattemptBtn = goal.archived ? html`
+		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-foreground"}"
+			@click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}
+			title="Re-attempt goal">${icon(RotateCcw, "xs")}</button>
+	` : nothing;
+
 	const archiveBtn = canArchive ? html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-secondary-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}
@@ -540,9 +546,9 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
 				${renderGoalBadge(goal.id)}
 				${mobile
-					? html`${archiveBtn}${dashboardBtn}`
+					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-						${archiveBtn}${dashboardBtn}
+						${reattemptBtn}${archiveBtn}${dashboardBtn}
 					</div>`}
 			</div>
 			${isExpanded ? html`
