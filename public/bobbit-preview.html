@@ -334,6 +334,24 @@ function renderComparison(hue) {
       `)}
     </div>
 
+    <h3>Idle with accessories</h3>
+    <div class="row" style="gap:24px;">
+      ${[['crown', 'bobbit-crowned'], ['bandana', 'bobbit-bandana'],
+        ['wand', 'bobbit-wand'], ['flask', 'bobbit-flask'],
+        ['wizard-hat', 'bobbit-wizard-hat'], ['magnifier', 'bobbit-magnifier'],
+        ['palette', 'bobbit-palette'], ['pencil', 'bobbit-pencil'],
+        ['shield', 'bobbit-shield'], ['set-square', 'bobbit-set-square'],
+      ].map(([label, ac]) => html`
+        <div class="cell">
+          <div style="display:flex;gap:4px;">
+            <div style="border:1px solid var(--border);border-radius:4px;">${renderChatBlob({ blobClass: 'bobbit-blob bobbit-blob--idle', accClass: ac, hueRotate: hue })}</div>
+            <div style="border:1px solid var(--ring,#888);border-radius:4px;">${renderChatBlobCanvas({ blobClass: 'bobbit-blob bobbit-blob--idle', accClass: ac, hueRotate: hue })}</div>
+          </div>
+          <span class="cell-label">${label}</span>
+        </div>
+      `)}
+    </div>
+
     <h3>Chat Blobs — 14 hue colours</h3>
     <div class="row" style="gap:8px;">${HUES.map(h => html`
       <div class="cell">

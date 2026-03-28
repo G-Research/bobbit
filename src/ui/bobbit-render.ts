@@ -12,7 +12,6 @@ import { ref, createRef } from "lit/directives/ref.js";
 import {
 	BODY_GRID, BODY_WIDTH, BODY_HEIGHT,
 	EYE_POSITIONS,
-	SHADOW_REST,
 	BUSY_EYE_SEQUENCE, IDLE_EYE_SEQUENCE,
 	type PaletteKey, type SpritePixel, type EyeGaze, type EyeFrame, type ShadowPixel,
 	type AccessorySpriteData,
@@ -372,25 +371,10 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	// Body — start with center gaze, JS animation will swap frames
 	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
 
-	// Shadow at rest position
-	const shadowCanvas = document.createElement("canvas");
-	shadowCanvas.width = 11;
-	shadowCanvas.height = 10;
-	const sctx = shadowCanvas.getContext("2d")!;
-	for (const [x, y, a] of SHADOW_REST) {
-		sctx.fillStyle = `rgba(0,0,0,${a})`;
-		sctx.fillRect(x, y, 1, 1);
-	}
-	const shadowUrl = shadowCanvas.toDataURL();
-
 	// Use img elements WITH the CSS class names so all layout/transform/animation
 	// CSS applies identically. Override width (CSS sets 1px for box-shadow technique)
 	// to actual pixel dimensions, and compensate margins to keep the same layout box.
-	// CSS has: width:1px; margin:8px 18px 28px 18px; → total 37×37
-	// Canvas:  width:10px; margin:8px 9px 20px 18px; → total 37×37 (same)
 	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
-	// Shadow CSS: width:1px; same principle
-	const shadowStyle = `width:11px !important;height:10px !important;margin-bottom:-9px !important;box-shadow:none !important;image-rendering:pixelated;`;
 
 	// Start eye animation when the img mounts
 	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
@@ -417,7 +401,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 			<div class="bobbit-blob__flask"></div>
 			<div class="bobbit-blob__wand"></div>
 			<div class="bobbit-blob__wizard-hat"></div>
-			<img class="bobbit-blob__shadow" src="${shadowUrl}" style="${shadowStyle}">
+			<div class="bobbit-blob__shadow"></div>
 		</div>
 	</div>`;
 }
