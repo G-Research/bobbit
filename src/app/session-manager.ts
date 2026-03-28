@@ -427,6 +427,21 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
 
+		// Auto-prompt for new assistant sessions — fire IMMEDIATELY after connect
+		// before any draft-restore awaits that could yield and race
+		const AUTO_PROMPTS: Record<string, string> = {
+			goal: "Start the goal creation session.",
+			role: "Start the role creation session.",
+			tool: "Start the tool assistant session. Help me document, improve, or create tools.",
+			personality: "Start the personality creation session.",
+			staff: "Start the staff agent creation session.",
+			setup: "Start the project setup session.",
+		};
+		if (options?.assistantType && !isExisting) {
+			const autoPrompt = AUTO_PROMPTS[options.assistantType];
+			if (autoPrompt) remote.prompt(autoPrompt);
+		}
+
 		// Restore saved model
 		const savedModel = loadSessionModel(sessionId);
 		if (savedModel) {
@@ -915,20 +930,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// scan will correctly fill the form without being overwritten.
 		if (isExisting) {
 			remote.requestMessages();
-		}
-
-		// Auto-prompt for new assistant sessions
-		const AUTO_PROMPTS: Record<string, string> = {
-			goal: "Start the goal creation session.",
-			role: "Start the role creation session.",
-			tool: "Start the tool assistant session. Help me document, improve, or create tools.",
-			personality: "Start the personality creation session.",
-			staff: "Start the staff agent creation session.",
-			setup: "Start the project setup session.",
-		};
-		if (state.assistantType && !isExisting) {
-			const autoPrompt = AUTO_PROMPTS[state.assistantType];
-			if (autoPrompt) remote.prompt(autoPrompt);
 		}
 
 		// Restore prompt draft from server and set up auto-save
