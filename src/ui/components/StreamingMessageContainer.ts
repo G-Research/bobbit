@@ -253,16 +253,17 @@ export class StreamingMessageContainer extends LitElement {
 		const acc = getAccessory(accId);
 		const hasAccessory = acc.id !== "none" && acc.shadow !== "";
 		const accPixels = hasAccessory ? parseShadowToPixels(acc.shadow) : undefined;
-		const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
-		const bounds = computeBounds(bodyYOffset, accPixels);
+		// bodyYOffset=0: accessories share the body coordinate space.
+		// Crown/wizard-hat extend above (y<0) and overlap the body naturally.
+		const bounds = computeBounds(0, accPixels);
 		const offX = -bounds.minX;
 		const offY = -bounds.minY;
-		return { acc, accPixels, bodyYOffset, bounds, offX, offY };
+		return { acc, accPixels, bounds, offX, offY };
 	}
 
 	/** Draw the canvas with center eyes (static render) */
 	private _drawCanvas(eyeState: EyeState = 'center', tailVisible = true) {
-		const { acc, accPixels, bodyYOffset, offX, offY } = this._getCanvasConfig();
+		const { acc, accPixels, offX, offY } = this._getCanvasConfig();
 
 		// For bandana tail animation: filter out tail pixels when not visible
 		let finalAccPixels = accPixels;
@@ -286,7 +287,7 @@ export class StreamingMessageContainer extends LitElement {
 			renderScale: 4,
 			palette,
 			accessoryPixels: finalAccPixels,
-			bodyYOffset,
+			
 			hueRotate,
 			accessoryHueRotate: acc.id === "flask",
 		});
@@ -304,7 +305,7 @@ export class StreamingMessageContainer extends LitElement {
 			const mainColor = hueRotate ? rotateHue(palette.main, hueRotate) : palette.main;
 			for (const [ex, ey] of [...EYES_CENTER_TOP, ...EYES_CENTER_BOT]) {
 				ctx.fillStyle = mainColor;
-				ctx.fillRect(ex + offX, ey + bodyYOffset + offY, 1, 1);
+				ctx.fillRect(ex + offX, ey + offY, 1, 1);
 			}
 
 			// Paint new eye positions with hue-rotated eye color
@@ -312,14 +313,14 @@ export class StreamingMessageContainer extends LitElement {
 			const { top, bot } = getEyePixels(eyeState);
 			for (const [ex, ey] of [...top, ...bot]) {
 				ctx.fillStyle = eyeColor;
-				ctx.fillRect(ex + offX, ey + bodyYOffset + offY, 1, 1);
+				ctx.fillRect(ex + offX, ey + offY, 1, 1);
 			}
 
 			ctx.restore();
 		}
 
 		// Set transform-origin dynamically based on accessory bounds
-		this._canvas.style.transformOrigin = `${5 + offX}px ${8 + bodyYOffset + offY}px`;
+		this._canvas.style.transformOrigin = `${5 + offX}px ${8 + offY}px`;
 	}
 
 	/** Start the RAF animation loop for eye animation (active + idle states) */

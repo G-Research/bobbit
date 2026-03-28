@@ -665,7 +665,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 														scale: 2,
 														palette: CANONICAL_PALETTE,
 														accessoryPixels: accPixels,
-														bodyYOffset: acc.addsHeight ? acc.yOffset : 0,
+														
 														hueRotate: rot,
 														accessoryHueRotate: acc.id === "flask",
 													});

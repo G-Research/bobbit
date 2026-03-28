@@ -24,11 +24,9 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 	const acc = getAccessory(accId);
 	const hasAcc = acc.id !== "none" && acc.shadow !== "";
 	const accPixels = hasAcc ? parseShadowToPixels(acc.shadow) : undefined;
-	const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
-
 	// Compute final display scale and bake it into the canvas buffer directly
 	// so no CSS transform is needed (avoids clipping/offset issues).
-	const bounds = computeBounds(bodyYOffset, accPixels);
+	const bounds = computeBounds(0, accPixels);
 	const displayW = bounds.gridW * 4;
 	const displayH = bounds.gridH * 4;
 	const s = Math.min(size / displayW, size / displayH);
@@ -38,7 +36,6 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 		scale: finalScale,
 		palette: CANONICAL_PALETTE,
 		accessoryPixels: accPixels,
-		bodyYOffset,
 	});
 
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];

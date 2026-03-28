@@ -293,9 +293,11 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		else if (pct >= 87 && pct < 90) { eyeColor = p.main; }   // blink
 	}
 	const accPixels = hasAccessory ? parseShadowToPixels(acc.shadow) : undefined;
-	const bodyYOffset = acc.addsHeight ? acc.yOffset : 0;
 	const effectiveHue = (hueRotate && status !== "starting" && status !== "terminated") ? hueRotate : 0;
 
+	// bodyYOffset=0: accessories share the body coordinate space (y=0..8).
+	// Crown/wizard-hat pixels extend above (y<0) and overlap the body naturally.
+	// computeBounds extends the canvas to accommodate negative-y pixels.
 	const canvas = renderBobbitCanvas({
 		scale: 1,
 		renderScale: 1.6,
@@ -303,7 +305,6 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		eyeColor,
 		eyeXShift,
 		accessoryPixels: accPixels,
-		bodyYOffset,
 		hueRotate: effectiveHue,
 		accessoryHueRotate: acc.id === "flask",
 	});
@@ -311,7 +312,7 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 	// Compute grid metrics for transform-origin / translateY adjustments
 	const accMinY = accPixels?.length ? Math.min(...accPixels.map((px) => px.y)) : 0;
 	const gridShiftY = Math.max(0, -accMinY);
-	const bodyFeetCanvasY = 8 + bodyYOffset + gridShiftY;
+	const bodyFeetCanvasY = 8 + gridShiftY;
 	const squishOriginY = bodyFeetCanvasY + 1;
 
 	// ---- Animations & styles (logic unchanged from box-shadow version) ----

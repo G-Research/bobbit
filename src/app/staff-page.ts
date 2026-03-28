@@ -556,7 +556,7 @@ function renderEditView(): TemplateResult {
 										scale: 2,
 										palette: CANONICAL_PALETTE,
 										accessoryPixels: accPixels,
-										bodyYOffset: acc.addsHeight ? acc.yOffset : 0,
+										
 										hueRotate: rot,
 										accessoryHueRotate: acc.id === "flask",
 									});
