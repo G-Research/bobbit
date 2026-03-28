@@ -94,7 +94,34 @@ The value is a JSON-encoded array of `{"path": "..."}` objects. Paths support `~
 
 **Add/edit tool documentation**: Navigate to `#/tools`, click a tool, edit the Description/Group/Docs fields, and Save. Or launch a Tool Assistant session for AI-guided documentation. Server-side: tool metadata lives in `.bobbit/config/tools/<group>/*.yaml` files, managed by `tool-manager.ts`, API routes in `server.ts`.
 
-**Add a new tool**: Create a YAML file in the appropriate `.bobbit/config/tools/<group>/` directory (e.g. `.bobbit/config/tools/filesystem/my_tool.yaml`). Define `name`, `description`, `summary`, `group`, `provider`, and optionally `renderer` and `docs`. If the tool needs a custom extension, add code to the group's `extension.ts` in `.bobbit/config/tools/<group>/`. Register a renderer in `src/ui/tools/renderers/` if needed.
+**Add a new tool**: Create a YAML file in the appropriate `.bobbit/config/tools/<group>/` directory (e.g. `.bobbit/config/tools/filesystem/my_tool.yaml`). Define `name`, `description`, `summary`, `group`, `provider`, and optionally `renderer` and `docs`. If the tool needs a custom extension, add code to the group's `extension.ts` in `.bobbit/config/tools/<group>/`. Register a renderer in `src/ui/tools/renderers/` if needed. MCP tools are auto-discovered from `.mcp.json` config files and don't require manual YAML definitions. See "Add/use MCP servers" below.
+
+**Add/use MCP servers**: Bobbit auto-discovers MCP (Model Context Protocol) server configurations from Claude Code-compatible locations and exposes their tools as first-class Bobbit tools. Discovery sources (later overrides earlier):
+
+1. `~/.claude.json` → `mcpServers` field (user scope)
+2. `.mcp.json` in project root (project scope — shared via version control)
+3. `.bobbit/config/mcp.json` → `mcpServers` field (Bobbit-specific overrides)
+
+Configuration format matches Claude Code's `.mcp.json`:
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    },
+    "remote-server": {
+      "url": "https://mcp.example.com/api"
+    }
+  }
+}
+```
+
+MCP tools are exposed with `mcp__<server>__<tool>` naming (double underscore separator). They appear in the Tools UI (`#/tools`), system prompts, and respect role-based access control via `allowedTools`. Environment variables in config `env` values (`${VAR}`) are expanded from `process.env`, matching Claude Code behavior.
+
+Supported transports: **stdio** (spawn child process, most common) and **HTTP** (POST JSON-RPC to URL). The gateway connects to MCP servers at startup and routes tool calls via generated proxy extensions.
+
+REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-servers/:name/restart` (reconnect a server, also triggers re-discovery), `POST /api/internal/mcp-call` (internal proxy for tool execution).
 
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
 
@@ -170,6 +197,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
 | `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, custom config) |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompt definitions (goal, role, tool, personality, staff, setup) |
+| `mcp.json` | `McpManager` | MCP server overrides (Bobbit-specific additions to `.mcp.json`) |
 
 
 ### `.bobbit/state/` — runtime state (gitignored)
@@ -192,6 +220,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `gateway-restart` | `harness.ts` | Sentinel file for dev server restart |
 | `desec.json` | `desec.ts` | deSEC dynDNS config (domain + API token) |
 | `rpc-debug.log` | `rpc-bridge.ts` | Debug log of all RPC events |
+| `mcp-extensions/` | `tool-activation.ts` | Generated proxy extension files for MCP tool calls |
 
 ### `.bobbit/config/tools/<group>/` — tool definitions and extensions
 
