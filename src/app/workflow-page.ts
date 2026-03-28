@@ -753,7 +753,7 @@ function renderListView(): TemplateResult {
 	}
 
 	return html`
-		<p class="text-sm text-muted-foreground mb-3">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
+		<p class="text-sm text-muted-foreground mb-3" style="max-width: 600px; margin: 0 auto;">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
 		<div class="wf-list">
 			${workflows.map((wf) => renderWorkflowRow(wf))}
 		</div>
