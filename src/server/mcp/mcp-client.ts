@@ -147,7 +147,15 @@ export class McpClient {
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error(`[mcp:${this.serverName}] Connection timeout (${CONNECTION_TIMEOUT_MS}ms)`));
-        this.disconnect();
+        // Kill process directly — this.disconnect() guards on this._connected which is still false
+        if (this._process) {
+          this._process.kill('SIGTERM');
+          this._process = null;
+        }
+        if (this._readline) {
+          this._readline.close();
+          this._readline = null;
+        }
       }, CONNECTION_TIMEOUT_MS);
 
       try {

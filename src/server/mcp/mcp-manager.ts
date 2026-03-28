@@ -26,6 +26,7 @@ export interface McpToolInfo {
   docs?: string;
   serverName: string;
   mcpToolName: string;
+  inputSchema: Record<string, unknown>;
 }
 
 /**
@@ -201,6 +202,7 @@ export class McpManager {
           docs: this._generateToolDocs(tool),
           serverName,
           mcpToolName: tool.name,
+          inputSchema: tool.inputSchema as Record<string, unknown>,
         });
       }
     }

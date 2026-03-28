@@ -93,7 +93,6 @@ export function generateMcpProxyExtension(
         const req = mod.request(url, {
           method: "POST",
           headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-          rejectAuthorized: false,
           ...(url.protocol === "https:" ? { rejectUnauthorized: false } : {}),
         }, (res) => {
           let data = "";
@@ -149,11 +148,10 @@ export function writeMcpProxyExtensions(mcpManager: McpManager): string[] {
 	}
 
 	for (const [serverName, tools] of byServer) {
-		// Build minimal tool defs from info (inputSchema will be empty — tools still register)
 		const toolDefs = tools.map(t => ({
 			name: t.mcpToolName,
 			description: t.description,
-			inputSchema: { type: "object" as const, properties: {} } as Record<string, unknown>,
+			inputSchema: t.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
 		}));
 		const code = generateMcpProxyExtension(serverName, toolDefs);
 		const filePath = path.join(extDir, `${serverName}.ts`);
