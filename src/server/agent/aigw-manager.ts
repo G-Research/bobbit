@@ -48,55 +48,7 @@ interface ModelMeta {
 	compat?: Record<string, unknown>;
 }
 
-/**
- * Rank a model ID by recency/quality tier. Higher = newer/better.
- * Used to auto-select the best aigw model when no preference is set.
- * Keep in sync with modelRecencyRank() in ModelSelector.ts.
- */
-export function modelRecencyRank(id: string): number {
-	const s = id.toLowerCase();
-	// Anthropic Claude
-	if (s.includes("claude-opus-4-6") || s.includes("claude-opus-4.6")) return 100;
-	if (s.includes("claude-sonnet-4-6") || s.includes("claude-sonnet-4.6")) return 99;
-	if (s.includes("claude-opus-4-5") || s.includes("claude-opus-4.5")) return 98;
-	if (s.includes("claude-sonnet-4-5") || s.includes("claude-sonnet-4.5")) return 97;
-	if (s.includes("claude-sonnet-4") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 94;
-	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
-	if (s.includes("claude")) return 50;
-	// OpenAI
-	if (s.includes("gpt-5.4")) return 100;
-	if (s.includes("gpt-5.3")) return 98;
-	if (s.includes("gpt-5.2")) return 96;
-	if (s.includes("gpt-5") && !s.includes("5.")) return 92;
-	if (s.includes("o4-mini")) return 91;
-	if (s.includes("o3") && !s.includes("o3-mini")) return 88;
-	if (s.includes("gpt-4o") && !s.includes("mini")) return 70;
-	if (s.includes("gpt-4")) return 50;
-	// Gemini
-	if (s.includes("gemini-3.1-pro") || s.includes("gemini-3-pro")) return 98;
-	if (s.includes("gemini-2.5-pro")) return 90;
-	if (s.includes("gemini")) return 30;
-	// Grok
-	if (s.includes("grok-4")) return 100;
-	if (s.includes("grok-3") && !s.includes("mini")) return 90;
-	if (s.includes("grok")) return 50;
-	// DeepSeek
-	if (s.includes("deepseek-r1")) return 88;
-	if (s.includes("deepseek-v3")) return 85;
-	if (s.includes("deepseek")) return 50;
-	// Qwen
-	if (s.includes("qwen3-coder") || s.includes("qwen-3-coder")) return 90;
-	if (s.includes("qwen3") || s.includes("qwen-3")) return 85;
-	if (s.includes("qwen")) return 50;
-	// Mistral
-	if (s.includes("devstral")) return 85;
-	if (s.includes("codestral")) return 80;
-	if (s.includes("mistral")) return 50;
-	// Llama
-	if (s.includes("llama-4") || s.includes("llama4")) return 90;
-	if (s.includes("llama")) return 50;
-	return 0;
-}
+// modelRecencyRank() has moved to model-registry.ts
 
 const DEFAULT_META: ModelMeta = {
 	contextWindow: 128_000,
@@ -639,7 +591,7 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
 	);
 
 	prefs.set("aigw.url", normalizedUrl);
-	prefs.set("aigw.models", models);
+	// Note: aigw.models no longer cached in preferences — model-registry discovers fresh each time
 
 	writeAigwModelsJson(normalizedUrl, models);
 	return models;
@@ -661,9 +613,4 @@ export function getAigwUrl(prefs: PreferencesStore): string | undefined {
 	return prefs.get("aigw.url") as string | undefined;
 }
 
-/**
- * Get the cached aigw models (if any).
- */
-export function getAigwModels(prefs: PreferencesStore): AigwModel[] | undefined {
-	return prefs.get("aigw.models") as AigwModel[] | undefined;
-}
+// getAigwModels() has been removed — model-registry discovers fresh each time

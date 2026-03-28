@@ -319,8 +319,6 @@ async function initApp() {
 					if (prefs.showTimestamps) {
 						document.documentElement.dataset.showTimestamps = "true";
 					}
-					// Load AI Gateway config into ModelSelector
-					import("./aigw-config.js").then(({ applyAigwConfig }) => applyAigwConfig(prefs));
 				}
 			} catch {}
 
@@ -561,8 +559,6 @@ async function initApp() {
 			if (prefs.shortcuts) {
 				await loadSavedBindings();
 			}
-			// Sync AI Gateway config
-			import("./aigw-config.js").then(({ applyAigwConfig }) => applyAigwConfig(prefs));
 		} catch {}
 	});
 }
