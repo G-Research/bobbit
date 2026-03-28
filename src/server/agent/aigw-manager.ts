@@ -167,7 +167,7 @@ export function inferMeta(modelId: string): ModelMeta {
  * Derive a short display name from a full gateway model ID.
  * e.g. "aws/us.anthropic.claude-sonnet-4-6" → "Claude Sonnet 4.6 (aws)"
  */
-function deriveName(modelId: string): string {
+export function deriveName(modelId: string): string {
 	const parts = modelId.split("/");
 	const prefix = parts.length > 1 ? parts[0] : undefined;
 	const raw = parts[parts.length - 1];
