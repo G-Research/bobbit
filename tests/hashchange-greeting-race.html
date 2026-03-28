@@ -59,9 +59,10 @@ async function handleHashChange() {
 	try {
 		const route = getRouteFromHash();
 		if (route.view === "session" && route.sessionId) {
-			// BUG: Only checks fully-connected sessions, not connecting ones.
-			// state.remoteAgent is null during the async connect phase,
-			// so this guard fails to catch the in-flight connection.
+			// FIX: Check if session is already selected or connecting
+			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId) {
+				return;
+			}
 			if (state.remoteAgent?.gatewaySessionId === route.sessionId) {
 				return;
 			}
