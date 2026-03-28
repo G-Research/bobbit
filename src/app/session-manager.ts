@@ -401,7 +401,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // CONNECT TO SESSION (select + hydrate)
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; workflowEditContext?: { id: string; name: string } }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
 	const replaceHistory = startingRoute.view === "goal-dashboard";
@@ -442,7 +442,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			workflow: "Start the workflow creation session. Help me design a new workflow with gates and verification.",
 		};
 		if (options?.assistantType && !isExisting) {
-			const autoPrompt = AUTO_PROMPTS[options.assistantType];
+			let autoPrompt: string | undefined;
+			if (options.assistantType === "workflow" && options.workflowEditContext) {
+				const wfCtx = options.workflowEditContext;
+				autoPrompt = `I want to edit the existing workflow '${wfCtx.name}' (id: ${wfCtx.id}). Read it from .bobbit/config/workflows/${wfCtx.id}.yaml and help me improve it.`;
+			} else {
+				autoPrompt = AUTO_PROMPTS[options.assistantType];
+			}
 			if (autoPrompt) remote.prompt(autoPrompt);
 		}
 
