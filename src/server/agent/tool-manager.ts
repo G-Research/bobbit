@@ -18,6 +18,7 @@ interface BaseToolInfo {
 	group: string;
 	renderer?: string;
 	docs?: string;
+	detail_docs?: string;
 	provider?: ToolProvider;
 	/** Subdirectory name within tools/ (e.g. "shell", "filesystem"). Empty string for flat files. */
 	groupDir: string;
@@ -30,6 +31,7 @@ export interface ToolInfo {
 	description: string;
 	group: string;
 	docs?: string;
+	detail_docs?: string;
 	hasRenderer: boolean;
 	rendererFile?: string;
 }
@@ -78,6 +80,7 @@ function loadToolDefinitions(): BaseToolInfo[] {
 								group: data.group || groupDir,
 								renderer: data.renderer,
 								docs: data.docs,
+								detail_docs: data.detail_docs,
 								provider: data.provider,
 								groupDir,
 								filePath,
@@ -109,6 +112,7 @@ function loadToolDefinitions(): BaseToolInfo[] {
 						group: data.group || "Other",
 						renderer: data.renderer,
 						docs: data.docs,
+						detail_docs: data.detail_docs,
 						provider: data.provider,
 						groupDir: "",
 						filePath,
@@ -156,6 +160,7 @@ export class ToolManager {
 			description: tool.description,
 			group: tool.group,
 			docs: tool.docs,
+			detail_docs: tool.detail_docs,
 			hasRenderer: !!tool.renderer,
 			rendererFile: tool.renderer,
 		}));
@@ -165,6 +170,7 @@ export class ToolManager {
 				description: ext.description,
 				group: ext.group,
 				docs: ext.docs,
+				detail_docs: undefined,
 				hasRenderer: false,
 				rendererFile: undefined,
 			});
@@ -176,7 +182,7 @@ export class ToolManager {
 	getToolByName(name: string): ToolInfo | undefined {
 		const ext = this.externalTools.get(name);
 		if (ext) {
-			return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, hasRenderer: false, rendererFile: undefined };
+			return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined };
 		}
 		const tools = loadToolDefinitions();
 		const base = tools.find((t) => t.name === name);
@@ -186,6 +192,7 @@ export class ToolManager {
 			description: base.description,
 			group: base.group,
 			docs: base.docs,
+			detail_docs: base.detail_docs,
 			hasRenderer: !!base.renderer,
 			rendererFile: base.renderer,
 		};

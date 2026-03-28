@@ -892,6 +892,7 @@ export interface ToolInfo {
 	description: string;
 	group: string;
 	docs?: string;
+	detail_docs?: string;
 	hasRenderer?: boolean;
 	rendererFile?: string;
 }
@@ -923,7 +924,7 @@ export async function fetchToolDetail(name: string): Promise<ToolInfo | null> {
 	}
 }
 
-export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string }): Promise<boolean> {
+export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string }): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`, {
 			method: "PUT",

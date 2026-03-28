@@ -186,6 +186,7 @@ let loading = true;
 let editDescription = "";
 let editGroup = "";
 let editDocs = "";
+let editDetailDocs = "";
 let saving = false;
 let collapsedGroups = new Set<string>();
 
@@ -229,6 +230,7 @@ function showEdit(tool: ToolInfo): void {
 	editDescription = tool.description;
 	editGroup = tool.group;
 	editDocs = tool.docs || "";
+	editDetailDocs = tool.detail_docs || "";
 	saving = false;
 	setHashRoute("tool-edit", tool.name);
 }
@@ -243,6 +245,7 @@ export function navigateToToolEdit(toolName: string): void {
 		editDescription = tool.description;
 		editGroup = tool.group;
 		editDocs = tool.docs || "";
+		editDetailDocs = tool.detail_docs || "";
 		saving = false;
 		renderApp();
 		// Also fetch full detail (may have docs)
@@ -252,6 +255,9 @@ export function navigateToToolEdit(toolName: string): void {
 				// Only update docs from detail if user hasn't changed it
 				if (editDocs === (tool.docs || "")) {
 					editDocs = detail.docs || "";
+				}
+				if (editDetailDocs === (tool.detail_docs || "")) {
+					editDetailDocs = detail.detail_docs || "";
 				}
 				renderApp();
 			}
@@ -265,6 +271,7 @@ export function navigateToToolEdit(toolName: string): void {
 				editDescription = detail.description;
 				editGroup = detail.group;
 				editDocs = detail.docs || "";
+				editDetailDocs = detail.detail_docs || "";
 				saving = false;
 			} else {
 				currentView = "list";
@@ -311,6 +318,7 @@ async function handleSave(): Promise<void> {
 		description: editDescription,
 		group: editGroup,
 		docs: editDocs,
+		detail_docs: editDetailDocs,
 	});
 
 	if (ok) {
@@ -353,7 +361,8 @@ function renderNavBar(): TemplateResult {
 		const hasChanges = selectedTool && (
 			editDescription !== selectedTool.description ||
 			editGroup !== selectedTool.group ||
-			editDocs !== (selectedTool.docs || "")
+			editDocs !== (selectedTool.docs || "") ||
+			editDetailDocs !== (selectedTool.detail_docs || "")
 		);
 		return html`
 			<div class="tools-nav">
@@ -525,13 +534,24 @@ function renderEditView(): TemplateResult {
 					</div>
 				</div>
 				<div class="tools-section">
-					<h2 class="tools-section-title">Documentation</h2>
-					<p class="tools-note">Markdown documentation — usage examples, parameter descriptions, expected output.</p>
+					<h2 class="tools-section-title">Prompt Documentation</h2>
+					<p class="tools-note">Injected into every agent's system prompt. Keep this brief — critical notes and gotchas only. The model already knows tool names, descriptions, and parameter schemas.</p>
 					<textarea
 						class="tools-docs-editor"
+						style="min-height:120px"
 						.value=${editDocs}
-						placeholder="Write documentation for this tool..."
+						placeholder="Brief notes for the system prompt..."
 						@input=${(e: Event) => { editDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
+					></textarea>
+				</div>
+				<div class="tools-section">
+					<h2 class="tools-section-title">Detailed Documentation</h2>
+					<p class="tools-note">Full reference — examples, edge cases, parameter descriptions. Agents can read this on demand from the YAML file; it is NOT injected into prompts.</p>
+					<textarea
+						class="tools-docs-editor"
+						.value=${editDetailDocs}
+						placeholder="Full documentation with examples, edge cases..."
+						@input=${(e: Event) => { editDetailDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
 					></textarea>
 				</div>
 			</div>

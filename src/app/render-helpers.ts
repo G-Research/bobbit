@@ -481,7 +481,7 @@ export function renderGoalGroup(goal: Goal) {
 
 	const pr = state.prStatusCache.get(goal.id);
 	const canArchive = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
-	const reattemptBtn = goal.archived ? html`
+	const reattemptBtn = (goal.archived || canArchive) ? html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}
 			title="Re-attempt goal">${icon(RotateCcw, "xs")}</button>
@@ -496,9 +496,9 @@ export function renderGoalGroup(goal: Goal) {
 	const emptyState = html`
 		<div class="pl-2 py-1 ${mobile ? "text-xs" : "text-[11px]"} text-muted-foreground">
 			${goal.archived
-				? html`<span style="color:var(--text-tertiary)">Archived</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary text-[10px] font-semibold hover:bg-primary/20 transition-colors align-middle" title="Re-attempt goal" @click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Re-attempt</button>`
+				? html`<span style="color:var(--text-tertiary)">Archived</span>`
 				: canArchive
-				? html`<span style="vertical-align:middle">Work merged —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-secondary text-secondary-foreground text-[10px] font-semibold hover:bg-secondary/80 transition-colors align-middle" title="Archive goal" @click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}>${icon(Trash2, "xs")}Archive Goal</button> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary text-[10px] font-semibold hover:bg-primary/20 transition-colors align-middle" title="Re-attempt goal" @click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Re-attempt</button>`
+				? html`<span style="vertical-align:middle">Work merged</span>`
 				: isTeamGoal
 				? html`<span style="vertical-align:middle">No agents —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary text-[10px] font-semibold hover:bg-primary/20 transition-colors align-middle ${isPreparing ? "opacity-60 pointer-events-none" : ""}" title="${isPreparing ? "Setting up worktree\u2026" : "Start team"}" @click=${handleStartTeam} ?disabled=${isLoading || isPreparing}>${isPreparing ? html`<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : html`<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 12h12v1.5H2V12zm0-1L1 4l4 3 3-5 3 5 4-3-1 7H2z"/></svg>`}${isLoading ? "Starting\u2026" : isPreparing ? "Setting up\u2026" : "Start Team"}</button>`
 				: html`No sessions — <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start a session" @click=${() => createAndConnectSession(goal.id)}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>start one</button>`}
