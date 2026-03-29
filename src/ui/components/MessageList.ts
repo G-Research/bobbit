@@ -10,6 +10,7 @@ import { repeat } from "lit/directives/repeat.js";
 import { renderMessage } from "./message-renderer-registry.js";
 import "./ErrorMessage.js";
 import "./ToolGroup.js";
+import "./ToolPermissionCard.js";
 
 /** Tool names eligible for cross-message grouping */
 const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "delegate"]);
@@ -87,6 +88,23 @@ export class MessageList extends LitElement {
 						.message=${errMsg}
 						.onDismiss=${this.onDismissError}
 					></error-message>`,
+				});
+				i++;
+				continue;
+			}
+
+			// Render tool permission request cards
+			if ((msg as any).role === "tool_permission_needed") {
+				const perm = msg as any;
+				items.push({
+					key: `perm:${perm.id}`,
+					template: html`<tool-permission-card
+						.toolName=${perm.toolName}
+						.group=${perm.group}
+						.roleName=${perm.roleName}
+						.roleLabel=${perm.roleLabel}
+						.onGrant=${(scope: "tool" | "group") => this.dispatchEvent(new CustomEvent("grant-tool-permission", { detail: { toolName: perm.toolName, scope, group: perm.group }, bubbles: true, composed: true }))}
+					></tool-permission-card>`,
 				});
 				i++;
 				continue;

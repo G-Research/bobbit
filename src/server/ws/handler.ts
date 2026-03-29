@@ -343,6 +343,12 @@ export function handleWebSocketConnection(
 					}
 					break;
 				}
+				case "grant_tool_permission": {
+					sessionManager.grantToolPermission(sessionId, msg.toolName, msg.scope, msg.group).catch((err) => {
+						send(ws, { type: "error", message: `Grant failed: ${err}`, code: "GRANT_ERROR" });
+					});
+					break;
+				}
 				case "ping":
 					send(ws, { type: "pong" });
 					break;

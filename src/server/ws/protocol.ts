@@ -32,7 +32,8 @@ export type ClientMessage =
 	| { type: "task_create"; goalId: string; title: string; taskType: string; parentTaskId?: string; spec?: string; dependsOn?: string[] }
 	| { type: "task_update"; taskId: string; updates: { title?: string; spec?: string; state?: string; assignedSessionId?: string; dependsOn?: string[] } }
 	| { type: "task_delete"; taskId: string }
-	| { type: "summarize_goal_title"; goalTitle: string };
+	| { type: "summarize_goal_title"; goalTitle: string }
+	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
@@ -67,4 +68,5 @@ export type ServerMessage =
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
-	| { type: "pr_status_changed"; goalId: string };
+	| { type: "pr_status_changed"; goalId: string }
+	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string };

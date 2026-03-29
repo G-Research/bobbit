@@ -508,6 +508,10 @@ export class RemoteAgent {
 		// no-op: tools are server-side for the coding agent
 	}
 
+	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string): void {
+		this.send({ type: "grant_tool_permission", toolName, scope, group });
+	}
+
 	setSystemPrompt(prompt: string): void {
 		this._state.systemPrompt = prompt;
 	}
@@ -761,6 +765,22 @@ export class RemoteAgent {
 			case "pr_status_changed":
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
+
+			case "tool_permission_needed": {
+				const perm = msg as any;
+				// Inject a permission-request message into the chat
+				this._state.messages = [...this._state.messages, {
+					role: "tool_permission_needed" as any,
+					toolName: perm.toolName,
+					group: perm.group,
+					roleName: perm.roleName,
+					roleLabel: perm.roleLabel,
+					timestamp: Date.now(),
+					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+				} as any];
+				this.emit({ type: "render" });
+				break;
+			}
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);

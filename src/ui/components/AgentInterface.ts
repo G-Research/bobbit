@@ -517,6 +517,11 @@ export class AgentInterface extends LitElement {
 					.onRetry=${!state.isStreaming && typeof (this.session as any)?.retry === 'function'
 						? () => (this.session as any).retry()
 						: undefined}
+					@grant-tool-permission=${(e: CustomEvent) => {
+						if (!this.session) return;
+						const { toolName, scope, group } = e.detail;
+						(this.session as any).grantToolPermission?.(toolName, scope, group);
+					}}
 				></message-list>
 
 				<!-- Streaming message container - manages its own updates -->

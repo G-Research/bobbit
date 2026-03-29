@@ -462,6 +462,32 @@ export class SessionManager {
 			session.lastTurnErrored = event.message.stopReason === "error";
 		}
 
+		// Detect "Tool X not found" errors for MCP tools that exist but aren't
+		// in the session's role allowedTools — prompt the user to grant permission.
+		if (event.type === "message_end" && event.message?.role === "toolResult" && event.message.isError) {
+			const text = Array.isArray(event.message.content)
+				? event.message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")
+				: "";
+			const notFoundMatch = text.match(/^Tool (\S+) not found$/);
+			if (notFoundMatch && session.role && this.mcpManager) {
+				const toolName = notFoundMatch[1];
+				const mcpInfos = this.mcpManager.getToolInfos();
+				const mcpTool = mcpInfos.find(t => t.name === toolName);
+				if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === toolName.toLowerCase())) {
+					const role = this.roleManager?.getRole(session.role);
+					if (role) {
+						broadcast(session.clients, {
+							type: "tool_permission_needed",
+							toolName: mcpTool.name,
+							group: mcpTool.group,
+							roleName: role.name,
+							roleLabel: role.label,
+						});
+					}
+				}
+			}
+		}
+
 		// When a steered user message appears in chat, remove the dispatched pill
 		if (event.type === "message_end" && event.message?.role === "user") {
 			if (session.promptQueue.removeDispatched()) {
@@ -550,6 +576,83 @@ export class SessionManager {
 				"[SYSTEM: The model API returned an error on your last response. " +
 				"Please review your conversation history and retry what you were doing.]"
 			);
+		}
+	}
+
+	/**
+	 * Grant a tool or tool group to a session's role and restart the session
+	 * so it picks up the new tools. Returns the updated list of allowed tools.
+	 */
+	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string): Promise<string[]> {
+		const session = this.sessions.get(sessionId);
+		if (!session) throw new Error("Session not found");
+		if (!session.role || !this.roleManager) throw new Error("Session has no role");
+
+		const role = this.roleManager.getRole(session.role);
+		if (!role) throw new Error(`Role "${session.role}" not found`);
+
+		const newTools: string[] = [];
+		if (scope === "group" && group && this.mcpManager) {
+			// Add all tools from the MCP group
+			const infos = this.mcpManager.getToolInfos();
+			for (const info of infos) {
+				if (info.group === group && !role.allowedTools.includes(info.name)) {
+					newTools.push(info.name);
+				}
+			}
+		} else {
+			// Add just the single tool
+			if (!role.allowedTools.includes(toolName)) {
+				newTools.push(toolName);
+			}
+		}
+
+		if (newTools.length > 0) {
+			const updatedTools = [...role.allowedTools, ...newTools];
+			this.roleManager.updateRole(role.name, { allowedTools: updatedTools });
+
+			// Update the session's allowedTools in memory
+			session.allowedTools = updatedTools;
+
+			// Retry so the agent continues with the tool now available
+			// The session needs a full restart to reload extensions with the new tool
+			await this._restartSessionWithUpdatedRole(session);
+		}
+
+		return role.allowedTools;
+	}
+
+	/**
+	 * Restart a session's agent process so it picks up updated role/tools.
+	 * Stops the current agent, then restores from the persisted session file
+	 * which re-applies tool activation with the updated role.
+	 */
+	private async _restartSessionWithUpdatedRole(session: SessionInfo): Promise<void> {
+		const ps = this.store.get(session.id);
+		if (!ps) return;
+
+		// Save connected clients before teardown
+		const clients = new Set(session.clients);
+
+		// Stop the current agent process
+		session.unsubscribe();
+		await session.rpcClient.stop();
+
+		// Remove from sessions map — restoreSession will re-add it
+		this.sessions.delete(session.id);
+
+		// Restore the session (re-launches with correct tool activation)
+		await this.restoreSession(ps);
+
+		// Re-attach the saved clients to the restored session
+		const restored = this.sessions.get(session.id);
+		if (restored) {
+			for (const ws of clients) {
+				if ((ws as any).readyState === 1) {
+					restored.clients.add(ws);
+				}
+			}
+			broadcast(restored.clients, { type: "session_status", status: "idle" });
 		}
 	}
 
