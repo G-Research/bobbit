@@ -516,8 +516,9 @@ export function renderGoalGroup(goal: Goal) {
 		if (!teamLead) return goalSessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
 		// Archived members belonging to the live lead
+		const archivedLeadIds = new Set(state.archivedSessions.filter(s => s.teamGoalId === goal.id && s.role === "team-lead").map(s => s.id));
 		const archivedForLiveLead = state.showArchived
-			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
+			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && (s.teamLeadSessionId === teamLead.id || !s.teamLeadSessionId || !archivedLeadIds.has(s.teamLeadSessionId)))
 			: [];
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
@@ -591,6 +592,10 @@ export function renderGoalGroup(goal: Goal) {
 
 						return html`
 							${archivedLeads.map((s, i) => renderLeadWithMembers(s, i === archivedLeads.length - 1 && !teamLead))}
+							${teamLead && unmapped.length > 0 ? unmapped.map(m => html`
+								${renderArchivedSessionRow(m)}
+								${renderArchivedDelegates(m.id)}
+							`) : ""}
 						`;
 					})() : ""}
 				</div>
