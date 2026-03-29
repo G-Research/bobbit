@@ -106,31 +106,27 @@
 </div>
 
 <!-- ============================================================ -->
-<h2>1. Side-by-Side: Box-Shadow vs Canvas</h2>
-<p style="font-size:12px;color:var(--muted-foreground);">Left = box-shadow (current production), Right = canvas (proposed). Should be pixel-identical.</p>
-<div id="comparison"></div>
-
-<h2>2. Sidebar Context</h2>
+<h2>1. Sidebar Context</h2>
 <div id="ctx-sidebar"></div>
 
-<h2>3. Role Manager Context</h2>
+<h2>2. Role Manager Context</h2>
 <div id="ctx-roles"></div>
 
-<h2>4. Chat Context</h2>
+<h2>3. Chat Context</h2>
 <div id="ctx-chat"></div>
 
-<h2>5. Sidebar — All Variants</h2>
+<h2>4. Sidebar — All Variants</h2>
 <div id="sidebar-grid"></div>
 
-<h2>6. Chat Blobs — All Variants</h2>
+<h2>5. Chat Blobs — All Variants</h2>
 <div id="blob-grid"></div>
 
 <script type="module">
 import { render, html, nothing } from "/node_modules/lit/index.js";
 import {
-  renderSidebarBobbit, renderSidebarBobbitCanvas,
-  renderChatBlob, renderChatBlobCanvas,
-  renderIdleBlob, renderIdleBlobCanvas,
+  renderSidebarBobbitCanvas,
+  renderChatBlobCanvas,
+  renderIdleBlobCanvas,
   NO_ACCESSORY, BOBBIT_HUE_ROTATIONS, ACCESSORY_DEFS
 } from "/src/ui/bobbit-render.ts";
 import { ACCESSORIES, ACCESSORY_IDS } from "/src/app/session-colors.ts";
@@ -138,7 +134,6 @@ import { ACCESSORIES, ACCESSORY_IDS } from "/src/app/session-colors.ts";
 const HUES = BOBBIT_HUE_ROTATIONS;
 const ACC_IDS = ACCESSORY_IDS.filter(id => id !== 'none');
 function acc(id) { return ACCESSORIES[id] || NO_ACCESSORY; }
-function sb(opts) { return renderSidebarBobbit(opts); }
 function accClass(id) { return id && id !== 'none' ? `bobbit-${id === 'crown' ? 'crowned' : id}` : ''; }
 
 const hueSlider = document.getElementById('hueSlider');
@@ -173,7 +168,7 @@ function renderSidebarContext(hue) {
           <div class="mock-sidebar-section">Sessions</div>
           ${sessions.map(s => html`
             <div class="mock-sidebar-row ${s.active ? 'active' : ''}">
-              ${sb({ status: s.status, hueRotate: s.hue, isSelected: s.active, accessory: acc(s.acc) })}
+              ${renderSidebarBobbitCanvas({ status: s.status, hueRotate: s.hue, isSelected: s.active, accessory: acc(s.acc) })}
               <span class="mock-sidebar-title">${s.title}</span>
               <span class="mock-sidebar-time">${s.time}</span>
             </div>
@@ -190,7 +185,7 @@ function renderSidebarContext(hue) {
             { title: 'Reviewer', status: 'idle', hue: HUES[3], acc: 'magnifier', compact: false },
           ].map(s => html`
             <div class="mock-sidebar-row">
-              ${sb({ status: s.status, hueRotate: s.hue, isCompacting: s.compact, accessory: acc(s.acc) })}
+              ${renderSidebarBobbitCanvas({ status: s.status, hueRotate: s.hue, isCompacting: s.compact, accessory: acc(s.acc) })}
               <span class="mock-sidebar-title">${s.title}</span>
             </div>
           `)}
@@ -201,7 +196,7 @@ function renderSidebarContext(hue) {
         <div class="mock-sidebar">
           ${ACC_IDS.map((id, i) => html`
             <div class="mock-sidebar-row ${i === 0 ? 'active' : ''}">
-              ${sb({ status: i === 0 ? 'streaming' : 'idle', hueRotate: hue, isSelected: i === 0, accessory: acc(id) })}
+              ${renderSidebarBobbitCanvas({ status: i === 0 ? 'streaming' : 'idle', hueRotate: hue, isSelected: i === 0, accessory: acc(id) })}
               <span class="mock-sidebar-title">${acc(id).label}</span>
             </div>
           `)}
@@ -233,7 +228,7 @@ function renderRoleContext(hue) {
     <div class="mock-role-grid">
       ${roles.map((r, i) => html`
         <div class="mock-role-card">
-          ${renderIdleBlob({ accId: r.acc, accClass: accClass(r.acc), size: 42, hueIndex: r.hue, phaseIndex: i })}
+          ${renderIdleBlobCanvas({ accId: r.acc, accClass: accClass(r.acc), size: 42, hueIndex: r.hue, phaseIndex: i })}
           <div class="mock-role-name">${r.name}</div>
           <div class="mock-role-desc">${r.desc}</div>
         </div>
@@ -253,28 +248,28 @@ function renderChatContext(hue) {
         <h3>Active (streaming)</h3>
         <div class="mock-chat">
           <div class="mock-msg mock-msg-user">How do I fix the canvas rendering?</div>
-          ${renderChatBlob({ blobClass: 'bobbit-blob', accClass: 'bobbit-crowned', hueRotate: hue })}
+          ${renderChatBlobCanvas({ blobClass: 'bobbit-blob', accClass: 'bobbit-crowned', hueRotate: hue })}
         </div>
       </div>
       <div>
         <h3>Idle (waiting)</h3>
         <div class="mock-chat">
           <div class="mock-msg">Here's the implementation. Let me know if you need changes.</div>
-          ${renderChatBlob({ blobClass: 'bobbit-blob bobbit-blob--idle', accClass: 'bobbit-crowned', hueRotate: hue })}
+          ${renderChatBlobCanvas({ blobClass: 'bobbit-blob bobbit-blob--idle', accClass: 'bobbit-crowned', hueRotate: hue })}
         </div>
       </div>
       <div>
         <h3>With wand (sparkles)</h3>
         <div class="mock-chat">
           <div class="mock-msg mock-msg-user">Cast a spell on this code</div>
-          ${renderChatBlob({ blobClass: 'bobbit-blob', accClass: 'bobbit-wand', hueRotate: hue })}
+          ${renderChatBlobCanvas({ blobClass: 'bobbit-blob', accClass: 'bobbit-wand', hueRotate: hue })}
         </div>
       </div>
       <div>
         <h3>With flask (bubbles)</h3>
         <div class="mock-chat">
           <div class="mock-msg mock-msg-user">Mix up something good</div>
-          ${renderChatBlob({ blobClass: 'bobbit-blob', accClass: 'bobbit-flask', hueRotate: hue })}
+          ${renderChatBlobCanvas({ blobClass: 'bobbit-blob', accClass: 'bobbit-flask', hueRotate: hue })}
         </div>
       </div>
     </div>
@@ -283,136 +278,40 @@ function renderChatContext(hue) {
 }
 
 // ============================================================================
-// 4. SIDE-BY-SIDE COMPARISON: Box-Shadow vs Canvas
-// ============================================================================
-function renderComparison(hue) {
-  const sbC = (opts) => renderSidebarBobbitCanvas(opts);
-  const statuses = ['streaming', 'idle', 'starting', 'terminated'];
-  const accIds = Object.keys(ACCESSORY_DEFS);
-
-  const pair = (label, opts) => html`
-    <div class="cell">
-      <div style="display:flex;gap:2px;align-items:center;">
-        <div style="background:var(--sidebar);padding:4px;border-radius:4px;border:1px solid var(--border);">${sb(opts)}</div>
-        <div style="background:var(--sidebar);padding:4px;border-radius:4px;border:1px solid var(--ring,#888);">${sbC(opts)}</div>
-      </div>
-      <span class="cell-label">${label}</span>
-    </div>
-  `;
-
-  const tpl = html`
-    <h3>Status variants (box-shadow left, canvas right)</h3>
-    <div class="row">${statuses.map(s => pair(s, { status: s, hueRotate: hue }))}</div>
-    <h3>Selected</h3>
-    <div class="row">${statuses.filter(s=>s!=='starting'&&s!=='terminated').map(s => pair(s+' sel', { status: s, hueRotate: hue, isSelected: true }))}</div>
-    <h3>Compacting / Aborting</h3>
-    <div class="row">
-      ${pair('compacting', { status: 'streaming', isCompacting: true, hueRotate: hue })}
-      ${pair('aborting', { status: 'streaming', isAborting: true, hueRotate: hue })}
-    </div>
-    <h3>All accessories (hue=${hue}°)</h3>
-    <div class="row">${accIds.map(id => pair(id, { status: 'streaming', hueRotate: hue, accessory: acc(id) }))}</div>
-    <h3>14 hue colours</h3>
-    <div class="row">${HUES.map(h => pair(h+'°', { status: 'streaming', hueRotate: h }))}</div>
-    <h3>14 hue colours with crown</h3>
-    <div class="row">${HUES.map(h => pair(h+'°', { status: 'streaming', hueRotate: h, accessory: acc('crown') }))}</div>
-
-    <h3 style="margin-top:24px;border-top:2px solid var(--border);padding-top:12px;">Chat Blobs — box-shadow left, canvas right</h3>
-    <div class="row" style="gap:24px;">
-      ${[['active', 'bobbit-blob', ''], ['idle', 'bobbit-blob bobbit-blob--idle', ''],
-        ['crown', 'bobbit-blob', 'bobbit-crowned'], ['bandana', 'bobbit-blob', 'bobbit-bandana'],
-        ['wand', 'bobbit-blob', 'bobbit-wand'], ['flask', 'bobbit-blob', 'bobbit-flask'],
-        ['wizard-hat', 'bobbit-blob', 'bobbit-wizard-hat'],
-      ].map(([label, cls, ac]) => html`
-        <div class="cell">
-          <div style="display:flex;gap:4px;">
-            <div style="border:1px solid var(--border);border-radius:4px;">${renderChatBlob({ blobClass: cls, accClass: ac, hueRotate: hue })}</div>
-            <div style="border:1px solid var(--ring,#888);border-radius:4px;">${renderChatBlobCanvas({ blobClass: cls, accClass: ac, hueRotate: hue })}</div>
-          </div>
-          <span class="cell-label">${label}</span>
-        </div>
-      `)}
-    </div>
-
-    <h3>Idle with accessories</h3>
-    <div class="row" style="gap:24px;">
-      ${[['crown', 'bobbit-crowned'], ['bandana', 'bobbit-bandana'],
-        ['wand', 'bobbit-wand'], ['flask', 'bobbit-flask'],
-        ['wizard-hat', 'bobbit-wizard-hat'], ['magnifier', 'bobbit-magnifier'],
-        ['palette', 'bobbit-palette'], ['pencil', 'bobbit-pencil'],
-        ['shield', 'bobbit-shield'], ['set-square', 'bobbit-set-square'],
-      ].map(([label, ac]) => html`
-        <div class="cell">
-          <div style="display:flex;gap:4px;">
-            <div style="border:1px solid var(--border);border-radius:4px;">${renderChatBlob({ blobClass: 'bobbit-blob bobbit-blob--idle', accClass: ac, hueRotate: hue })}</div>
-            <div style="border:1px solid var(--ring,#888);border-radius:4px;">${renderChatBlobCanvas({ blobClass: 'bobbit-blob bobbit-blob--idle', accClass: ac, hueRotate: hue })}</div>
-          </div>
-          <span class="cell-label">${label}</span>
-        </div>
-      `)}
-    </div>
-
-    <h3>Chat Blobs — 14 hue colours</h3>
-    <div class="row" style="gap:8px;">${HUES.map(h => html`
-      <div class="cell">
-        <div style="display:flex;gap:2px;">
-          <div style="border:1px solid var(--border);border-radius:4px;">${renderChatBlob({ blobClass: 'bobbit-blob', hueRotate: h })}</div>
-          <div style="border:1px solid var(--ring,#888);border-radius:4px;">${renderChatBlobCanvas({ blobClass: 'bobbit-blob', hueRotate: h })}</div>
-        </div>
-        <span class="cell-label">${h}°</span>
-      </div>
-    `)}</div>
-
-    <h3 style="margin-top:24px;border-top:2px solid var(--border);padding-top:12px;">Role Manager — box-shadow left, canvas right</h3>
-    <div class="row" style="gap:16px;">
-      ${ACC_IDS.map((id, i) => html`
-        <div class="cell">
-          <div style="display:flex;gap:4px;align-items:center;">
-            <div style="border:1px solid var(--border);border-radius:4px;padding:4px;">${renderIdleBlob({ accId: id, accClass: accClass(id), size: 42, hueIndex: i, phaseIndex: i })}</div>
-            <div style="border:1px solid var(--ring,#888);border-radius:4px;padding:4px;">${renderIdleBlobCanvas({ accId: id, accClass: accClass(id), size: 42, hueIndex: i, phaseIndex: i })}</div>
-          </div>
-          <span class="cell-label">${id}</span>
-        </div>
-      `)}
-    </div>
-  `;
-  render(tpl, document.getElementById('comparison'));
-}
-
-// ============================================================================
-// 5. SIDEBAR ALL VARIANTS
+// 4. SIDEBAR ALL VARIANTS
 // ============================================================================
 function renderSidebarAll(hue) {
+  const sbC = (opts) => renderSidebarBobbitCanvas(opts);
   const tpl = html`
     <h3>Status variants</h3>
     <div class="row" style="background:var(--sidebar);padding:8px 12px;border-radius:6px;">
-      <div class="cell">${sb({ status: 'streaming' })}<span class="cell-label">streaming</span></div>
-      <div class="cell">${sb({ status: 'idle' })}<span class="cell-label">idle</span></div>
-      <div class="cell">${sb({ status: 'idle', isSelected: true })}<span class="cell-label">selected</span></div>
-      <div class="cell">${sb({ status: 'streaming', isCompacting: true })}<span class="cell-label">compacting</span></div>
-      <div class="cell">${sb({ status: 'streaming', isAborting: true })}<span class="cell-label">aborting</span></div>
-      <div class="cell">${sb({ status: 'starting' })}<span class="cell-label">starting</span></div>
-      <div class="cell">${sb({ status: 'terminated' })}<span class="cell-label">terminated</span></div>
+      <div class="cell">${sbC({ status: 'streaming' })}<span class="cell-label">streaming</span></div>
+      <div class="cell">${sbC({ status: 'idle' })}<span class="cell-label">idle</span></div>
+      <div class="cell">${sbC({ status: 'idle', isSelected: true })}<span class="cell-label">selected</span></div>
+      <div class="cell">${sbC({ status: 'streaming', isCompacting: true })}<span class="cell-label">compacting</span></div>
+      <div class="cell">${sbC({ status: 'streaming', isAborting: true })}<span class="cell-label">aborting</span></div>
+      <div class="cell">${sbC({ status: 'starting' })}<span class="cell-label">starting</span></div>
+      <div class="cell">${sbC({ status: 'terminated' })}<span class="cell-label">terminated</span></div>
     </div>
     <h3>14 session colours</h3>
     <div class="row" style="background:var(--sidebar);padding:8px 12px;border-radius:6px;">
-      ${HUES.map(h => html`<div class="cell">${sb({ status: 'streaming', hueRotate: h })}<span class="cell-label">${h}°</span></div>`)}
+      ${HUES.map(h => html`<div class="cell">${sbC({ status: 'streaming', hueRotate: h })}<span class="cell-label">${h}°</span></div>`)}
     </div>
     <h3>All accessories (hue=${hue}°)</h3>
     <div class="row" style="background:var(--sidebar);padding:8px 12px;border-radius:6px;">
-      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'streaming', hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+      ${ACC_IDS.map(id => html`<div class="cell">${sbC({ status: 'streaming', hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
     </div>
     <h3>Selected with accessories</h3>
     <div class="row" style="background:var(--sidebar);padding:8px 12px;border-radius:6px;">
-      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'streaming', hueRotate: hue, isSelected: true, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+      ${ACC_IDS.map(id => html`<div class="cell">${sbC({ status: 'streaming', hueRotate: hue, isSelected: true, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
     </div>
     <h3>Compacting with accessories</h3>
     <div class="row" style="background:var(--sidebar);padding:8px 12px;border-radius:6px;">
-      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'streaming', isCompacting: true, hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+      ${ACC_IDS.map(id => html`<div class="cell">${sbC({ status: 'streaming', isCompacting: true, hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
     </div>
     <h3>Idle with accessories</h3>
     <div class="row" style="background:var(--sidebar);padding:8px 12px;border-radius:6px;">
-      ${ACC_IDS.map(id => html`<div class="cell">${sb({ status: 'idle', hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
+      ${ACC_IDS.map(id => html`<div class="cell">${sbC({ status: 'idle', hueRotate: hue, accessory: acc(id) })}<span class="cell-label">${id}</span></div>`)}
     </div>
   `;
   render(tpl, document.getElementById('sidebar-grid'));
@@ -422,16 +321,16 @@ function renderSidebarAll(hue) {
 // 5. BLOB ALL VARIANTS
 // ============================================================================
 function renderBlobAll(hue) {
-  const blob = (cls, ac) => renderChatBlob({ blobClass: cls, accClass: ac, hueRotate: hue });
+  const blob = (cls, ac) => renderChatBlobCanvas({ blobClass: cls, accClass: ac, hueRotate: hue });
   const tpl = html`
     <h3>Active + Idle</h3>
     <div class="row">${blob('bobbit-blob', '')} ${blob('bobbit-blob bobbit-blob--idle', '')}</div>
     <h3>Active with accessories</h3>
     <div class="row" style="gap:8px;">${ACC_IDS.map(id => html`<div class="cell">${blob('bobbit-blob', accClass(id))}<span class="cell-label">${id}</span></div>`)}</div>
     <h3>14 session colours</h3>
-    <div class="row" style="gap:4px;">${HUES.map(h => html`<div class="cell">${renderChatBlob({ blobClass: 'bobbit-blob', hueRotate: h })}<span class="cell-label">${h}°</span></div>`)}</div>
+    <div class="row" style="gap:4px;">${HUES.map(h => html`<div class="cell">${renderChatBlobCanvas({ blobClass: 'bobbit-blob', hueRotate: h })}<span class="cell-label">${h}°</span></div>`)}</div>
     <h3>14 colours × crown</h3>
-    <div class="row" style="gap:4px;">${HUES.map(h => html`<div class="cell">${renderChatBlob({ blobClass: 'bobbit-blob', accClass: 'bobbit-crowned', hueRotate: h })}<span class="cell-label">${h}°</span></div>`)}</div>
+    <div class="row" style="gap:4px;">${HUES.map(h => html`<div class="cell">${renderChatBlobCanvas({ blobClass: 'bobbit-blob', accClass: 'bobbit-crowned', hueRotate: h })}<span class="cell-label">${h}°</span></div>`)}</div>
   `;
   render(tpl, document.getElementById('blob-grid'));
 }
@@ -442,7 +341,6 @@ function renderAll() {
   renderSidebarContext(hue);
   renderRoleContext(hue);
   renderChatContext(hue);
-  renderComparison(hue);
   renderSidebarAll(hue);
   renderBlobAll(hue);
 }

@@ -1,6 +1,6 @@
 import { patchSession } from "./api.js";
 import { activeSessionId, renderApp } from "./state.js";
-import { renderSidebarBobbitCanvas, ACCESSORY_DEFS, NO_ACCESSORY, type AccessoryDef } from "../ui/bobbit-render.js";
+import { renderSidebarBobbitCanvas, ACCESSORY_DEFS, NO_ACCESSORY, SPRITE_ACCESSORIES, type AccessoryDef } from "../ui/bobbit-render.js";
 
 // ============================================================================
 // ACCESSORY REGISTRY (derived from canonical sprite data)
@@ -11,8 +11,8 @@ export type AccessoryDefinition = AccessoryDef;
 
 /**
  * All available pixel-art accessories for Bobbit sprites.
- * Derived from canonical pixel data in bobbit-sprite-data.ts via pixelsToBoxShadow().
- * Each shadow string is counter-hue-rotated at render time to keep fixed colours
+ * Derived from canonical pixel data in bobbit-sprite-data.ts.
+ * Accessory pixels are counter-hue-rotated at render time to keep fixed colours
  * across session identity hues.
  */
 export const ACCESSORIES: Record<string, AccessoryDefinition> = {
@@ -26,6 +26,13 @@ export const ACCESSORY_IDS = Object.keys(ACCESSORIES) as string[];
 /** Resolve an accessory ID, falling back to "none" */
 export function getAccessory(id: string | undefined): AccessoryDefinition {
 	return (id && ACCESSORIES[id]) || ACCESSORIES.none;
+}
+
+/** Get the CSS box-shadow string for an accessory's pixels (for inline colour picker previews). */
+export function getAccessoryShadow(id: string): string {
+	const data = SPRITE_ACCESSORIES[id];
+	if (!data || data.pixels.length === 0) return "";
+	return data.pixels.map(([x, y, c]) => `${x}px ${y}px 0 ${c}`).join(",");
 }
 
 // ============================================================================
