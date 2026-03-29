@@ -55,7 +55,8 @@ export class McpManager {
    * Discover MCP servers from config files.
    * Priority order (later overrides earlier):
    *   0. Custom directories (lowest priority)
-   *   1. ~/.claude.json → mcpServers
+   *   1. ~/.claude.json → mcpServers (global)
+   *   1b. ~/.claude.json → projects[cwd] → mcpServers (per-project)
    *   2. ~/.claude/.mcp.json → mcpServers
    *   3. ~/.bobbit/.mcp.json → mcpServers
    *   4. .mcp.json in cwd
@@ -85,6 +86,7 @@ export class McpManager {
     const home = os.homedir();
     // User scope
     this._mergeConfigFile(merged, path.join(home, ".claude.json"), "mcpServers");
+    this._mergeProjectConfigFromClaudeJson(merged, path.join(home, ".claude.json"));
     this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(home, ".bobbit", ".mcp.json"), "mcpServers");
 
@@ -118,6 +120,52 @@ export class McpManager {
     } catch (err) {
       console.error(
         `[mcp] Failed to read config file ${filePath}:`,
+        (err as Error).message,
+      );
+    }
+  }
+
+  /**
+   * Read ~/.claude.json → projects → <matching-path> → mcpServers.
+   * Claude Code stores per-project MCP config under a "projects" map keyed by
+   * the project's absolute path. We match the current cwd against those keys
+   * (case-insensitive on Windows, normalized separators).
+   */
+  private _mergeProjectConfigFromClaudeJson(
+    target: Record<string, McpServerConfig>,
+    filePath: string,
+  ): void {
+    try {
+      if (!fs.existsSync(filePath)) return;
+      const raw = fs.readFileSync(filePath, "utf-8");
+      const parsed = JSON.parse(raw);
+
+      const projects = parsed.projects;
+      if (!projects || typeof projects !== "object") return;
+
+      // Normalize a path for comparison: forward slashes, lowercase on win32
+      const normalize = (p: string) => {
+        let n = p.replace(/\\/g, "/").replace(/\/+$/, "");
+        if (process.platform === "win32") n = n.toLowerCase();
+        return n;
+      };
+
+      const cwdNorm = normalize(this.cwd);
+      for (const [projectPath, projectConfig] of Object.entries(projects)) {
+        if (normalize(projectPath) !== cwdNorm) continue;
+        const servers = (projectConfig as any)?.mcpServers;
+        if (servers && typeof servers === "object") {
+          for (const [name, config] of Object.entries(servers)) {
+            if (config && typeof config === "object") {
+              target[name] = config as McpServerConfig;
+            }
+          }
+        }
+        break;
+      }
+    } catch (err) {
+      console.error(
+        `[mcp] Failed to read project config from ${filePath}:`,
         (err as Error).message,
       );
     }

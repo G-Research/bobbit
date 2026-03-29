@@ -101,6 +101,7 @@ The legacy `skill_directories` key still works for backward compatibility but `c
 
 1. Custom directories with type `"mcp"` from `config_directories` → scanned for `.mcp.json` files (lowest priority)
 2. `~/.claude.json` → `mcpServers` field (legacy Claude Code user config)
+2b. `~/.claude.json` → `projects[<cwd>].mcpServers` (Claude Code per-project config)
 3. `~/.claude/.mcp.json` → `mcpServers` field (Claude Code user-level MCP)
 4. `~/.bobbit/.mcp.json` → `mcpServers` field (Bobbit user-level MCP)
 5. `<project>/.mcp.json` → `mcpServers` field (project scope — shared via version control)
@@ -166,7 +167,7 @@ Each entry specifies a `path` (supports `~` expansion) and `types` array (`"skil
 | Type | Directories |
 |---|---|
 | Skills | `<project>/.claude/skills/`, `<project>/.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `<project>/.claude/commands/` |
-| MCP | `~/.claude.json`, `~/.claude/.mcp.json`, `~/.bobbit/.mcp.json`, `<project>/.mcp.json`, `<project>/.claude/.mcp.json`, `<project>/.bobbit/config/mcp.json` |
+| MCP | `~/.claude.json` (global + per-project), `~/.claude/.mcp.json`, `~/.bobbit/.mcp.json`, `<project>/.mcp.json`, `<project>/.claude/.mcp.json`, `<project>/.bobbit/config/mcp.json` |
 | Tools | `<project>/.bobbit/config/tools/` |
 
 Cross-links on the Skills page and Tools page ("Manage scan directories →") navigate directly to this tab. Server-side logic is in `src/server/agent/config-directories.ts`.
