@@ -469,8 +469,7 @@ function startLiveVerifTimer() {
 		els.forEach(el => {
 			const start = parseInt(el.getAttribute('data-verif-start')!, 10);
 			if (start > 0) {
-				const elapsed = Math.floor((Date.now() - start) / 1000);
-				el.textContent = `${elapsed}s`;
+				el.textContent = formatStepElapsed(start);
 			}
 		});
 	}, 1000);

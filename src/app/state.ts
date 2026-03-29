@@ -351,7 +351,8 @@ export function setRenderApp(fn: () => void): void {
 	_renderApp = fn;
 }
 
-export function renderApp(): void {
+/** @internal — use setState() or requestRender() instead. */
+function renderApp(): void {
 	if (_renderScheduled) return;
 	_renderScheduled = true;
 	requestAnimationFrame(() => {
