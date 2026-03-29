@@ -50,6 +50,7 @@ export default defineConfig({
 			BOBBIT_DIR: E2E_BOBBIT_DIR,
 			BOBBIT_LLM_REVIEW_SKIP: "1",
 			BOBBIT_SKIP_NPM_CI: "1",
+			BOBBIT_SKIP_MCP: "1",
 		},
 	},
 	globalTeardown: './tests/e2e/e2e-teardown.ts',
