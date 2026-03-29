@@ -72,7 +72,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command.
 
-**Add a new UI component**: Add to `src/ui/components/`, export from `src/ui/index.ts`.
+**Add a new UI component**: Add to `src/ui/components/`, export from `src/ui/index.ts`. To update app state, use `setState({ key: value })` from `state.ts` — never mutate `state` directly. Use `requestRender()` if only module-local variables changed.
 
 **Add a new tool renderer**: Create in `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`.
 
@@ -131,7 +131,7 @@ REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-serve
 
 **Debug compaction issues**: Check `_isCompacting`, `_compactionSyntheticMessages`, and `_usageStaleAfterCompaction` in `remote-agent.ts`. The `compacting_placeholder` message must be filtered out and re-added correctly across server refreshes. Manual compaction is fire-and-forget from the WS handler's perspective.
 
-**Debug renderApp performance**: `renderApp()` in `src/app/state.ts` is debounced via `requestAnimationFrame` — multiple calls within the same frame collapse into a single `doRenderApp()` execution. If you need synchronous DOM updates before layout measurement, use `renderAppSync()` from `state.ts` instead. To debug render frequency, add a temporary counter in the rAF callback in `state.ts` and log how many `doRenderApp()` calls occur per frame.
+**Debug rendering / state updates**: State mutations go through `setState(partial)` in `src/app/state.ts`, which merges the partial into `state` and schedules a `renderApp()` via `requestAnimationFrame` — multiple calls within the same frame collapse into a single `doRenderApp()` execution. Use `requestRender()` when module-local variables changed but `state` itself didn't. `renderApp()` is internal to `state.ts` — external files should never call it directly. If you need synchronous DOM updates before layout measurement, use `renderAppSync()` from `state.ts` instead. To debug render frequency, add a temporary counter in the rAF callback in `state.ts` and log how many `doRenderApp()` calls occur per frame. Note: elapsed timers in goal-dashboard and relative timestamps in render-helpers use targeted DOM updates (`data-verif-start` / `data-timestamp` attributes) instead of full re-render polling.
 
 **Debug gates**: Gate state is stored in `GateStore` (`.bobbit/state/gates.json`). Gate dependencies are enforced — if a signal fails, check gate status via `GET /api/goals/:id/gates`.
 

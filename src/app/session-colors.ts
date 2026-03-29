@@ -1,5 +1,5 @@
 import { patchSession } from "./api.js";
-import { activeSessionId, renderApp } from "./state.js";
+import { activeSessionId, requestRender } from "./state.js";
 import { renderSidebarBobbitCanvas, ACCESSORY_DEFS, NO_ACCESSORY, type AccessoryDef } from "../ui/bobbit-render.js";
 
 // ============================================================================
@@ -72,7 +72,7 @@ export function setSessionColor(sessionId: string, paletteIndex: number): void {
 	if (activeSessionId() === sessionId) {
 		document.documentElement.style.setProperty("--bobbit-hue-rotate", `${BOBBIT_HUE_ROTATIONS[paletteIndex]}deg`);
 	}
-	renderApp();
+	requestRender();
 }
 
 /**
