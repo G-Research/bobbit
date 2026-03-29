@@ -70,7 +70,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add a new REST endpoint**: Edit `src/server/server.ts` `handleApiRoute()`.
 
-**Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command.
+**Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command. Existing examples of this pattern: `set_model` and `set_thinking_level`.
 
 **Add a new UI component**: Add to `src/ui/components/`, export from `src/ui/index.ts`.
 
