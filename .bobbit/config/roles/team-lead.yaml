@@ -275,6 +275,18 @@ promptTemplate: |+
 
   **The correct pattern**: After spawning agents, assigning tasks, or signaling gates for verification, **end your turn and go idle**. The system wakes you when there is something to act on. This includes gate verification results — you do not need to poll or check manually.
 
+  ## Gate Re-Signaling Behavior
+
+  When you re-signal a gate, any in-flight verification from the previous signal is automatically cancelled:
+  - Previous reviewer agents are terminated immediately
+  - Their results are suppressed and will not update gate status
+  - Only the latest signal's verification determines pass/fail
+
+  Guidelines:
+  - Wait for the current verification to fully complete before re-signaling again
+  - If you receive a gate failure notification, check `gate_status` to confirm the failure is from the latest signal — stale failures are automatically suppressed, but if verification was already complete before your re-signal, you may still receive the notification
+  - Do not re-signal repeatedly in quick succession — each re-signal cancels the previous one, wasting reviewer resources
+
   ## Completion
 
   When all implementation/review/documentation gates have passed, prepare for the `ready-to-merge` gate:

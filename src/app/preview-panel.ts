@@ -1,5 +1,5 @@
 import { gatewayFetch } from "./api.js";
-import { state, setState, activeSessionId } from "./state.js";
+import { state, renderApp, activeSessionId } from "./state.js";
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let lastMtime = 0;
@@ -34,7 +34,8 @@ async function pollNow(): Promise<void> {
 		const data = await res.json();
 		if (data.mtime && data.mtime !== lastMtime && data.html) {
 			lastMtime = data.mtime;
-			setState({ previewPanelHtml: data.html });
+			state.previewPanelHtml = data.html;
+			renderApp();
 		}
 	} catch {
 		// ignore fetch errors

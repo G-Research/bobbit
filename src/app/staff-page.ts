@@ -4,7 +4,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, type TemplateResult } from "lit";
 import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
 import { fetchStaff, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, fetchPersonalities, gatewayFetch, refreshSessions, type StaffAgent, type PersonalityData } from "./api.js";
-import { state, requestRender } from "./state.js";
+import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
@@ -54,10 +54,10 @@ export async function loadStaffPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	deleting = false;
-	requestRender();
+	renderApp();
 	staffList = await fetchStaff();
 	loading = false;
-	requestRender();
+	renderApp();
 }
 
 // ============================================================================
@@ -102,7 +102,7 @@ export function navigateToStaffEdit(staffId: string): void {
 		deleting = false;
 		loadSessionAppearance(agent);
 	}
-	requestRender();
+	renderApp();
 }
 
 async function loadSessionAppearance(agent: StaffAgent): Promise<void> {
@@ -112,7 +112,7 @@ async function loadSessionAppearance(agent: StaffAgent): Promise<void> {
 	editColorIndex = session ? (sessionColorMap.get(session.id) ?? -1) : -1;
 	editAccessory = session?.accessory || "none";
 	editPersonalities = session?.personalities || [];
-	fetchPersonalities().then((p) => { availablePersonalities = p; requestRender(); });
+	fetchPersonalities().then((p) => { availablePersonalities = p; renderApp(); });
 }
 
 // ============================================================================
@@ -122,7 +122,7 @@ async function loadSessionAppearance(agent: StaffAgent): Promise<void> {
 async function handleSave(): Promise<void> {
 	if (!selectedStaff || saving) return;
 	saving = true;
-	requestRender();
+	renderApp();
 	const ok = await updateStaffAgent(selectedStaff.id, {
 		name: editName,
 		description: editDescription,
@@ -158,21 +158,21 @@ async function handleSave(): Promise<void> {
 		if (updated) selectedStaff = updated;
 	}
 	saving = false;
-	requestRender();
+	renderApp();
 }
 
 async function handleDelete(): Promise<void> {
 	if (!selectedStaff || deleting) return;
 	if (!confirm(`Delete staff agent "${selectedStaff.name}"?`)) return;
 	deleting = true;
-	requestRender();
+	renderApp();
 	const ok = await deleteStaffAgent(selectedStaff.id);
 	if (ok) {
 		staffList = await fetchStaff();
 		showList();
 	}
 	deleting = false;
-	requestRender();
+	renderApp();
 }
 
 async function handleTogglePause(): Promise<void> {
@@ -184,7 +184,7 @@ async function handleTogglePause(): Promise<void> {
 		const updated = staffList.find((s) => s.id === selectedStaff!.id);
 		if (updated) selectedStaff = updated;
 	}
-	requestRender();
+	renderApp();
 }
 
 async function handleWake(): Promise<void> {
@@ -211,18 +211,18 @@ function parseTriggers(json: string): TriggerDef[] {
 function updateTrigger(index: number, updater: (t: TriggerDef) => void) {
 	if (editTriggers[index]) {
 		updater(editTriggers[index]);
-		requestRender();
+		renderApp();
 	}
 }
 
 function removeTrigger(index: number) {
 	editTriggers.splice(index, 1);
-	requestRender();
+	renderApp();
 }
 
 function addTrigger() {
 	editTriggers.push({ type: "schedule", config: { cron: "0 9 * * *" }, enabled: true, prompt: "" });
-	requestRender();
+	renderApp();
 }
 
 function renderTriggersEditor() {
@@ -519,7 +519,7 @@ function renderEditView(): TemplateResult {
 						type: "text",
 						value: editName,
 						placeholder: "Staff agent name",
-						onInput: (e: Event) => { editName = (e.target as HTMLInputElement).value; requestRender(); },
+						onInput: (e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); },
 					})}
 				</div>
 				<div>
@@ -529,7 +529,7 @@ function renderEditView(): TemplateResult {
 						rows="2"
 						placeholder="What does this staff agent do?"
 						.value=${editDescription}
-						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; requestRender(); }}
+						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; renderApp(); }}
 					></textarea>
 				</div>
 				<div>
@@ -538,7 +538,7 @@ function renderEditView(): TemplateResult {
 						type: "text",
 						value: editCwd,
 						placeholder: state.defaultCwd || "(server default)",
-						onInput: (e: Event) => { editCwd = (e.target as HTMLInputElement).value; requestRender(); },
+						onInput: (e: Event) => { editCwd = (e.target as HTMLInputElement).value; renderApp(); },
 					})}
 				</div>
 				<!-- Colour picker -->
@@ -558,7 +558,7 @@ function renderEditView(): TemplateResult {
 												${isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : "hover:bg-secondary/50"}"
 											style="width:${hasAccessory ? 34 : 28}px;height:24px;"
 											title="Colour ${i + 1}"
-											@click=${() => { editColorIndex = i; requestRender(); }}
+											@click=${() => { editColorIndex = i; renderApp(); }}
 										>
 											<span style="position:absolute;left:${hasAccessory ? 3 : 4}px;top:3px;filter:hue-rotate(${rot}deg);">
 												<span style="position:absolute;left:0;top:0;display:block;width:1px;height:1px;image-rendering:pixelated;transform:scale(2);transform-origin:0 0;box-shadow:3px 0px 0 #000,4px 0px 0 #000,5px 0px 0 #000,6px 0px 0 #000,7px 0px 0 #000,2px 1px 0 #000,3px 1px 0 #8ec63f,4px 1px 0 #8ec63f,5px 1px 0 #8ec63f,6px 1px 0 #b5d98a,7px 1px 0 #b5d98a,8px 1px 0 #000,1px 2px 0 #000,2px 2px 0 #8ec63f,3px 2px 0 #8ec63f,4px 2px 0 #8ec63f,5px 2px 0 #8ec63f,6px 2px 0 #8ec63f,7px 2px 0 #b5d98a,8px 2px 0 #8ec63f,9px 2px 0 #000,0px 3px 0 #000,1px 3px 0 #8ec63f,2px 3px 0 #8ec63f,3px 3px 0 #8ec63f,4px 3px 0 #8ec63f,5px 3px 0 #8ec63f,6px 3px 0 #8ec63f,7px 3px 0 #8ec63f,8px 3px 0 #8ec63f,9px 3px 0 #000,0px 4px 0 #000,1px 4px 0 #8ec63f,2px 4px 0 #8ec63f,3px 4px 0 #1a3010,4px 4px 0 #8ec63f,5px 4px 0 #8ec63f,6px 4px 0 #1a3010,7px 4px 0 #8ec63f,8px 4px 0 #8ec63f,9px 4px 0 #000,0px 5px 0 #000,1px 5px 0 #8ec63f,2px 5px 0 #8ec63f,3px 5px 0 #1a3010,4px 5px 0 #8ec63f,5px 5px 0 #8ec63f,6px 5px 0 #1a3010,7px 5px 0 #8ec63f,8px 5px 0 #8ec63f,9px 5px 0 #000,0px 6px 0 #000,1px 6px 0 #6b9930,2px 6px 0 #8ec63f,3px 6px 0 #8ec63f,4px 6px 0 #8ec63f,5px 6px 0 #8ec63f,6px 6px 0 #8ec63f,7px 6px 0 #8ec63f,8px 6px 0 #8ec63f,9px 6px 0 #000,1px 7px 0 #000,2px 7px 0 #6b9930,3px 7px 0 #8ec63f,4px 7px 0 #8ec63f,5px 7px 0 #8ec63f,6px 7px 0 #8ec63f,7px 7px 0 #8ec63f,8px 7px 0 #000,2px 8px 0 #000,3px 8px 0 #000,4px 8px 0 #000,5px 8px 0 #000,6px 8px 0 #000,7px 8px 0 #000;"></span>
@@ -584,7 +584,7 @@ function renderEditView(): TemplateResult {
 										${isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : "hover:bg-secondary/50"}"
 									style="width:40px;"
 									title="${a.label}"
-									@click=${() => { editAccessory = accId; requestRender(); }}
+									@click=${() => { editAccessory = accId; renderApp(); }}
 								>
 									<span class="block" style="width:20px;height:18px;position:relative;">
 										${statusBobbit("idle", false, undefined, false, false, false, false, accId, true)}
@@ -613,7 +613,7 @@ function renderEditView(): TemplateResult {
 										} else {
 											editPersonalities = [...editPersonalities, p.name];
 										}
-										requestRender();
+										renderApp();
 									}}
 								>${p.label}</button>`;
 							})}
@@ -637,7 +637,7 @@ function renderEditView(): TemplateResult {
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle prompt edit mode"
-							@click=${() => { editPromptEditMode = !editPromptEditMode; requestRender(); }}
+							@click=${() => { editPromptEditMode = !editPromptEditMode; renderApp(); }}
 						>
 							${editPromptEditMode ? "Preview" : "Edit"}
 						</button>

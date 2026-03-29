@@ -3,8 +3,7 @@ import { html } from "lit";
 import { Archive, Bot, ChevronDown, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
 import {
 	state,
-	setState,
-	requestRender,
+	renderApp,
 	activeSessionId,
 	isDesktop,
 	expandedGoals,
@@ -74,7 +73,8 @@ async function ensurePersonalitiesLoaded(): Promise<void> {
 export async function toggleRolePicker(e: Event, goalId?: string): Promise<void> {
 	e.stopPropagation();
 	if (state.rolePickerOpen) {
-		setState({ rolePickerOpen: false });
+		state.rolePickerOpen = false;
+		renderApp();
 		return;
 	}
 	_pickerPersonalities = new Set();
@@ -95,7 +95,8 @@ export async function toggleRolePicker(e: Event, goalId?: string): Promise<void>
 	const generalRole = state.roles.find(r => r.name === "general");
 	_pickerRole = generalRole ? "general" : "";
 	_pickerFocusIndex = -1;
-	setState({ rolePickerOpen: true });
+	state.rolePickerOpen = true;
+	renderApp();
 }
 
 /** Exported for use in edit-session dialog and other places. */
@@ -106,12 +107,12 @@ export function renderRolePickerDropdown() {
 
 	const selectRole = (roleName: string) => {
 		_pickerRole = _pickerRole === roleName ? "" : roleName;
-		requestRender();
+		renderApp();
 	};
 	const togglePersonality = (personalityName: string) => {
 		if (_pickerPersonalities.has(personalityName)) _pickerPersonalities.delete(personalityName);
 		else _pickerPersonalities.add(personalityName);
-		requestRender();
+		renderApp();
 	};
 	const doCreate = () => {
 		state.rolePickerOpen = false;
@@ -150,7 +151,7 @@ export function renderRolePickerDropdown() {
 			@click=${(e: Event) => e.stopPropagation()}>
 			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
 				<span class="flex-1 text-xs font-semibold text-foreground">Create New Session</span>
-				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { setState({ rolePickerOpen: false }); }}>
+				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
 				</button>
 			</div>
@@ -196,19 +197,19 @@ export function renderRolePickerDropdown() {
 				<div class="text-[9px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
 				${cwdCombobox({
 					value: _pickerCwd,
-					onInput: (v: string) => { _pickerCwd = v; requestRender(); },
-					onSelect: (v: string) => { _pickerCwd = v; _pickerCwdDropdownOpen = false; requestRender(); },
+					onInput: (v: string) => { _pickerCwd = v; renderApp(); },
+					onSelect: (v: string) => { _pickerCwd = v; _pickerCwdDropdownOpen = false; renderApp(); },
 					dropdownOpen: _pickerCwdDropdownOpen,
-					onToggle: (open: boolean) => { _pickerCwdDropdownOpen = open; requestRender(); },
+					onToggle: (open: boolean) => { _pickerCwdDropdownOpen = open; renderApp(); },
 					highlightedIndex: _pickerCwdHighlightIndex,
-					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; requestRender(); },
+					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; renderApp(); },
 				})}
 			</div>
 			<!-- Worktree checkbox -->
 			<div class="border-t border-border/50 px-3 py-1.5 shrink-0">
 				<label class="flex items-center gap-2 cursor-pointer ${isFocused("worktree", "worktree") ? "ring-2 ring-ring rounded" : ""}">
 					<input type="checkbox" .checked=${_pickerWorktree}
-						@change=${(e: Event) => { _pickerWorktree = (e.target as HTMLInputElement).checked; requestRender(); }} />
+						@change=${(e: Event) => { _pickerWorktree = (e.target as HTMLInputElement).checked; renderApp(); }} />
 					<span class="text-[11px] text-foreground/70">Create worktree</span>
 					<span title="Creates an isolated git branch and worktree for this session"
 						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
@@ -229,7 +230,8 @@ export function renderRolePickerDropdown() {
 // Close role picker on outside click
 document.addEventListener("click", () => {
 	if (state.rolePickerOpen) {
-		setState({ rolePickerOpen: false });
+		state.rolePickerOpen = false;
+		renderApp();
 	}
 });
 
@@ -252,9 +254,10 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 				if (_pickerCwdDropdownOpen) {
 					// Close cwd dropdown first
 					_pickerCwdDropdownOpen = false;
-					requestRender();
+					renderApp();
 				} else {
-					setState({ rolePickerOpen: false });
+					state.rolePickerOpen = false;
+					renderApp();
 				}
 				e.preventDefault();
 				e.stopPropagation();
@@ -268,7 +271,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 				e.stopPropagation();
 				_pickerFocusIndex = total - 1; // create button
 				cwdInput.blur();
-				requestRender();
+				renderApp();
 				return;
 			}
 			// ArrowUp moves back to roles
@@ -277,7 +280,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 				e.stopPropagation();
 				_pickerFocusIndex = Math.max(0, _pickerFocusIndex - 1);
 				cwdInput.blur();
-				requestRender();
+				renderApp();
 				return;
 			}
 			// Let all other keys pass through to the input
@@ -288,7 +291,8 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 	if (e.key === "Escape") {
 		e.preventDefault();
 		e.stopPropagation();
-		setState({ rolePickerOpen: false });
+		state.rolePickerOpen = false;
+		renderApp();
 		return;
 	}
 
@@ -299,21 +303,21 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		if (focusedItem?.type === "personality") {
 			if (_pickerPersonalities.has(focusedItem.id)) _pickerPersonalities.delete(focusedItem.id);
 			else _pickerPersonalities.add(focusedItem.id);
-			requestRender();
+			renderApp();
 		} else if (focusedItem?.type === "role") {
 			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
-			requestRender();
+			renderApp();
 		} else if (focusedItem?.type === "worktree") {
 			_pickerWorktree = !_pickerWorktree;
-			requestRender();
+			renderApp();
 		} else {
 			// create button or no focus — create session
+			state.rolePickerOpen = false;
 			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
 			const worktree = _pickerWorktree || undefined;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
-			setState({ rolePickerOpen: false });
 			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
 		}
 		return;
@@ -325,20 +329,20 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		if (focusedItem.type === "personality") {
 			if (_pickerPersonalities.has(focusedItem.id)) _pickerPersonalities.delete(focusedItem.id);
 			else _pickerPersonalities.add(focusedItem.id);
-			requestRender();
+			renderApp();
 		} else if (focusedItem.type === "role") {
 			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
-			requestRender();
+			renderApp();
 		} else if (focusedItem.type === "worktree") {
 			_pickerWorktree = !_pickerWorktree;
-			requestRender();
+			renderApp();
 		} else if (focusedItem.type === "create") {
+			state.rolePickerOpen = false;
 			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
 			const worktree = _pickerWorktree || undefined;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
-			setState({ rolePickerOpen: false });
 			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
 		}
 		return;
@@ -357,7 +361,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 			_pickerFocusIndex = Math.min(total - 1, _pickerFocusIndex + step);
 		}
 		_focusCwdIfNeeded(items);
-		requestRender();
+		renderApp();
 		return;
 	}
 
@@ -372,7 +376,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 			_pickerFocusIndex = Math.max(0, _pickerFocusIndex - step);
 		}
 		_focusCwdIfNeeded(items);
-		requestRender();
+		renderApp();
 		return;
 	}
 
@@ -382,7 +386,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		if (_pickerFocusIndex < 0) { _pickerFocusIndex = 0; }
 		else { _pickerFocusIndex = Math.min(total - 1, _pickerFocusIndex + 1); }
 		_focusCwdIfNeeded(items);
-		requestRender();
+		renderApp();
 		return;
 	}
 
@@ -392,7 +396,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		if (_pickerFocusIndex < 0) { _pickerFocusIndex = 0; }
 		else { _pickerFocusIndex = Math.max(0, _pickerFocusIndex - 1); }
 		_focusCwdIfNeeded(items);
-		requestRender();
+		renderApp();
 		return;
 	}
 }, true); // capture phase so it fires before other handlers
@@ -413,9 +417,9 @@ function _focusCwdIfNeeded(items: PickerItem[]): void {
 // ============================================================================
 
 export function toggleSidebar(): void {
-	const newVal = !state.sidebarCollapsed;
-	localStorage.setItem("bobbit-sidebar-collapsed", String(newVal));
-	setState({ sidebarCollapsed: newVal });
+	state.sidebarCollapsed = !state.sidebarCollapsed;
+	localStorage.setItem("bobbit-sidebar-collapsed", String(state.sidebarCollapsed));
+	renderApp();
 }
 
 // ============================================================================
@@ -435,20 +439,22 @@ function ensureStaffLoaded(): void {
 		fetchArchivedSessions();
 	}
 	fetchStaff().then((list) => {
-		setState({ staffList: list.map((s) => ({
+		state.staffList = list.map((s) => ({
 			id: s.id, name: s.name, description: s.description, state: s.state,
 			lastWakeAt: s.lastWakeAt, currentSessionId: s.currentSessionId, triggers: s.triggers,
-		})) });
+		}));
+		renderApp();
 	});
 }
 
 /** Reload staff list (e.g. after creating one). */
 export function reloadStaffList(): Promise<void> {
 	return fetchStaff().then((list) => {
-		setState({ staffList: list.map((s) => ({
+		state.staffList = list.map((s) => ({
 			id: s.id, name: s.name, description: s.description, state: s.state,
 			lastWakeAt: s.lastWakeAt, currentSessionId: s.currentSessionId, triggers: s.triggers,
-		})) });
+		}));
+		renderApp();
 	});
 }
 
@@ -499,7 +505,7 @@ export function renderStaffSidebarSection() {
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
 				style="${mobile ? "" : `padding-left:${HEADER_CHEVRON_W}px;`}"
-				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); requestRender(); }}>
+				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); renderApp(); }}>
 				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-sm"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}">${staffSectionExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 ${mobile ? "text-sm" : "text-[9px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
@@ -713,7 +719,7 @@ export function renderSidebar() {
 								<div class="flex flex-col gap-0.5">
 									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 										style="padding-left:${HEADER_CHEVRON_W}px;"
-										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); requestRender(); }}>
+										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
 										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
 										<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 										<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
@@ -785,15 +791,15 @@ export function renderSidebar() {
 											class="relative flex items-center gap-1 pr-1 py-0.5 w-full text-left hover:bg-secondary/30 rounded-md transition-colors"
 											style="padding-left:${HEADER_CHEVRON_W}px;"
 											@click=${() => {
-												const newVal = !state.showArchived;
-												localStorage.setItem("bobbit-show-archived", String(newVal));
-												if (newVal) {
+												state.showArchived = !state.showArchived;
+												localStorage.setItem("bobbit-show-archived", String(state.showArchived));
+												if (state.showArchived) {
 													import("./api.js").then(m => m.fetchArchivedSessions());
 												} else {
 													resetArchivedExpandState();
 													import("./api.js").then(m => m.clearArchivedSessionsState());
 												}
-												setState({ showArchived: newVal });
+												renderApp();
 											}}
 										>
 											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.showArchived ? "▾" : "▸"}</span>
@@ -831,15 +837,17 @@ export function renderSidebar() {
 				<button
 					class="flex items-center gap-1.5 px-2 py-2 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
 					@click=${() => {
-						const newVal = !state.showArchived;
-						localStorage.setItem("bobbit-show-archived", String(newVal));
-						if (newVal) {
+						state.showArchived = !state.showArchived;
+						localStorage.setItem("bobbit-show-archived", String(state.showArchived));
+						if (state.showArchived) {
+							state.showArchived = true;
 							import("./api.js").then(m => m.fetchArchivedSessions());
 						} else {
+							state.showArchived = false;
 							resetArchivedExpandState();
 							import("./api.js").then(m => m.clearArchivedSessionsState());
 						}
-						setState({ showArchived: newVal });
+						renderApp();
 					}}
 					title="${state.showArchived ? "Hide archived sessions" : "Show archived sessions"}"
 				>
@@ -898,7 +906,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				@click=${() => { if (!tlActive) connectToSession(teamLead.id, true); }}
 			>
 				<span class="text-[9px] text-muted-foreground shrink-0 select-none" style="width:8px;text-align:center;cursor:pointer;"
-					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); requestRender(); }}
+					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); renderApp(); }}
 				>${children.length > 0 ? (tlExpanded ? "▾" : "▸") : ""}</span>
 				${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory)}
 				<span class="text-[8px] font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(tlTitle)}</span>
@@ -918,7 +926,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 						<button
 							class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
 							title=${goal.title}
-							@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); requestRender(); }}
+							@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 						>
 							<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 							<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
@@ -931,7 +939,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 					<button
 						class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
 						title="Ungrouped sessions"
-						@click=${() => { setUngroupedExpanded(!ungroupedExpanded); requestRender(); }}
+						@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}
 					>
 						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
 						<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
@@ -967,7 +975,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 								<button
 									class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
 									title=${goal.title}
-									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); requestRender(); }}
+									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 								>
 									<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 									<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>

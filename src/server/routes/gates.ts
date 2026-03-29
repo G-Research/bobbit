@@ -138,6 +138,9 @@ export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessag
 			});
 		}
 
+		// Cancel any in-flight verifications for the same gate before starting new ones
+		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+
 		// Fire-and-forget verification
 		verificationHarness.verifyGateSignal(
 			signal, gateDef, goal.cwd, goal.branch, "master", allGateStates, goal.spec,
