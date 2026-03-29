@@ -449,6 +449,10 @@ let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxToke
 let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
 let prefReviewModel = "";    // same format
 let prefNamingModel = "";    // same format
+let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|""
+let prefReviewThinking = "";
+let prefNamingThinking = "";
+let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
 let _modelsLoaded = false;
 
 function loadModelsState(): void {
@@ -456,9 +460,10 @@ function loadModelsState(): void {
 	_modelsLoaded = true;
 	(async () => {
 		try {
-			const [statusRes, prefsRes] = await Promise.all([
+			const [statusRes, prefsRes, modelsRes] = await Promise.all([
 				gatewayFetch("/api/aigw/status"),
 				gatewayFetch("/api/preferences"),
+				gatewayFetch("/api/models"),
 			]);
 			if (statusRes.ok) {
 				const data = await statusRes.json();
@@ -474,6 +479,15 @@ function loadModelsState(): void {
 				prefSessionModel = prefs["default.sessionModel"] || "";
 				prefReviewModel = prefs["default.reviewModel"] || "";
 				prefNamingModel = prefs["default.namingModel"] || "";
+				prefSessionThinking = prefs["default.sessionThinkingLevel"] || "";
+				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
+				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
+			}
+			if (modelsRes.ok) {
+				const models = await modelsRes.json();
+				if (Array.isArray(models)) {
+					allModels = models;
+				}
 			}
 		} catch {}
 		renderApp();
@@ -504,6 +518,22 @@ async function setReviewModel(value: string): Promise<void> {
 async function setNamingModel(value: string): Promise<void> {
 	prefNamingModel = value;
 	await savePref("default.namingModel", value || null);
+	renderApp();
+}
+
+async function setSessionThinking(value: string): Promise<void> {
+	prefSessionThinking = value;
+	await savePref("default.sessionThinkingLevel", value || null);
+	renderApp();
+}
+async function setReviewThinking(value: string): Promise<void> {
+	prefReviewThinking = value;
+	await savePref("default.reviewThinkingLevel", value || null);
+	renderApp();
+}
+async function setNamingThinking(value: string): Promise<void> {
+	prefNamingThinking = value;
+	await savePref("default.namingThinkingLevel", value || null);
 	renderApp();
 }
 
@@ -649,6 +679,44 @@ function renderModelPicker(label: string, hint: string, value: string, onChange:
 	`;
 }
 
+function renderThinkingPicker(label: string, hint: string, value: string, onChange: (v: string) => void, modelValue: string) {
+	// Determine if selected model supports reasoning
+	let disabled = false;
+	let disabledReason = "";
+	if (modelValue) {
+		const model = allModels.find(m => `${m.provider}/${m.id}` === modelValue);
+		if (model && !model.reasoning) {
+			disabled = true;
+			disabledReason = "Selected model does not support thinking";
+		}
+	}
+
+	return html`
+		<div class="flex flex-col gap-1.5">
+			<label class="text-sm font-medium text-foreground ${disabled ? "opacity-50" : ""}">${label}</label>
+			<select
+				class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+					focus:outline-none focus:ring-2 focus:ring-ring
+					${disabled ? "opacity-50 cursor-not-allowed" : ""}"
+				.value=${value}
+				?disabled=${disabled}
+				title=${disabled ? disabledReason : ""}
+				@change=${(e: Event) => {
+					onChange((e.target as HTMLSelectElement).value);
+				}}
+			>
+				<option value="">(Auto)</option>
+				<option value="off">Off</option>
+				<option value="minimal">Minimal</option>
+				<option value="low">Low</option>
+				<option value="medium">Medium</option>
+				<option value="high">High</option>
+			</select>
+			<p class="text-xs text-muted-foreground">${disabled ? disabledReason : hint}</p>
+		</div>
+	`;
+}
+
 function renderModelsTab() {
 	loadModelsState();
 
@@ -661,24 +729,51 @@ function renderModelsTab() {
 			<!-- Default model preferences -->
 			<div class="flex flex-col gap-4">
 				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
-				${renderModelPicker(
-					"Session Model",
-					"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
-					prefSessionModel,
-					setSessionModel,
-				)}
-				${renderModelPicker(
-					"Review Model",
-					"Model used for automated LLM code reviews during gate verification.",
-					prefReviewModel,
-					setReviewModel,
-				)}
-				${renderModelPicker(
-					"Naming Model",
-					"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
-					prefNamingModel,
-					setNamingModel,
-				)}
+				<div class="flex flex-col gap-3">
+					${renderModelPicker(
+						"Session Model",
+						"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
+						prefSessionModel,
+						setSessionModel,
+					)}
+					${renderThinkingPicker(
+						"Session Thinking Level",
+						"Thinking level applied to new sessions. Per-session toggle overrides this.",
+						prefSessionThinking,
+						setSessionThinking,
+						prefSessionModel,
+					)}
+				</div>
+				<div class="flex flex-col gap-3 pt-3 border-t border-border">
+					${renderModelPicker(
+						"Review Model",
+						"Model used for automated LLM code reviews during gate verification.",
+						prefReviewModel,
+						setReviewModel,
+					)}
+					${renderThinkingPicker(
+						"Review Thinking Level",
+						"Thinking level for automated gate review sessions.",
+						prefReviewThinking,
+						setReviewThinking,
+						prefReviewModel,
+					)}
+				</div>
+				<div class="flex flex-col gap-3 pt-3 border-t border-border">
+					${renderModelPicker(
+						"Naming Model",
+						"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
+						prefNamingModel,
+						setNamingModel,
+					)}
+					${renderThinkingPicker(
+						"Naming Thinking Level",
+						"Thinking level for session title generation.",
+						prefNamingThinking,
+						setNamingThinking,
+						prefNamingModel,
+					)}
+				</div>
 			</div>
 
 			<!-- AI Gateway section -->
@@ -858,30 +953,7 @@ function renderProjectTab() {
 
 	return html`
 		<div class="flex flex-col gap-3">
-			<!-- Default Thinking Level -->
-			<div class="flex flex-col gap-1.5">
-				<label class="text-sm font-medium text-foreground">Default Thinking Level</label>
-				<p class="text-xs text-muted-foreground">
-					Thinking level applied to new sessions. Per-session toggle overrides this.
-				</p>
-				<select
-					class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-					.value=${projectConfig["default_thinking_level"] || ""}
-					@change=${(e: Event) => {
-						projectConfig["default_thinking_level"] = (e.target as HTMLSelectElement).value;
-						projectSaveStatus = "";
-						renderApp();
-					}}
-				>
-					<option value="">(Agent default)</option>
-					<option value="off">Off</option>
-					<option value="minimal">Minimal</option>
-					<option value="low">Low</option>
-					<option value="medium">Medium</option>
-					<option value="high">High</option>
-				</select>
-			</div>
-			<hr class="border-border" />
+
 			<!-- Default entries -->
 			${defaultKeys.map((key) => html`
 				<div class="flex items-end gap-2">
