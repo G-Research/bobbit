@@ -853,8 +853,8 @@ function renderProjectTab() {
 	loadProjectConfig();
 
 	// Collect all keys: defaults first, then custom user keys
-	const defaultKeys = Object.keys(projectDefaults);
-	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults));
+	const defaultKeys = Object.keys(projectDefaults).filter((k) => k !== "default_thinking_level");
+	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults) && k !== "default_thinking_level");
 
 	return html`
 		<div class="flex flex-col gap-3">
