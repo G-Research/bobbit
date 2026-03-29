@@ -4,7 +4,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, type TemplateResult } from "lit";
 import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
 import { fetchStaff, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, fetchPersonalities, gatewayFetch, refreshSessions, type StaffAgent, type PersonalityData } from "./api.js";
-import { state, setState, requestRender } from "./state.js";
+import { state, requestRender } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";

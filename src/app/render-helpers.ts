@@ -124,7 +124,7 @@ export function startTimeRefresh(): void {
 		els.forEach(el => {
 			const ts = parseInt(el.getAttribute('data-timestamp')!, 10);
 			if (ts > 0) {
-				el.textContent = formatSessionAge(ts);
+				el.textContent = terseRelativeTime(ts);
 			}
 		});
 	}, 60_000);
