@@ -166,7 +166,12 @@ export class McpClient {
       }, CONNECTION_TIMEOUT_MS);
 
       try {
-        this._process = spawn(command!, args, {
+        // On Windows with shell: true, Node concatenates command + args without quoting.
+        // A path like "C:\Program Files\nodejs\node.exe" breaks into two tokens.
+        const cmd = (process.platform === 'win32' && command!.includes(' '))
+          ? `"${command!}"`
+          : command!;
+        this._process = spawn(cmd, args, {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: childEnv,
           cwd: cwd || undefined,
