@@ -49,6 +49,7 @@ export default defineConfig({
 	globalTeardown: "./tests/fullstack/fullstack-teardown.ts",
 	use: {
 		baseURL: `http://127.0.0.1:${PORT}`,
+		headless: true,
 		// Capture traces and screenshots on failure for debugging.
 		trace: "retain-on-failure",
 		screenshot: "only-on-failure",
