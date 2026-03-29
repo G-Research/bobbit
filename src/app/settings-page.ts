@@ -1,7 +1,8 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
+import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
-import { ArrowLeft, Plus, RotateCcw, X } from "lucide";
+import { ArrowLeft, Brain, Plus, RotateCcw, Sparkles, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -652,67 +653,74 @@ function openModelPicker(currentValue: string, onChange: (v: string) => void) {
 	});
 }
 
-function renderModelPicker(label: string, hint: string, value: string, onChange: (v: string) => void) {
-	const display = formatModelPref(value);
-	return html`
-		<div class="flex flex-col gap-1.5">
-			<label class="text-sm font-medium text-foreground">${label}</label>
-			<div class="flex gap-2">
-				<button
-					class="flex-1 px-3 py-2 text-left rounded-md border border-input bg-background text-sm
-						hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
-						${value ? "text-foreground" : "text-muted-foreground"}"
-					title="Choose model"
-					@click=${() => openModelPicker(value, onChange)}
-				>${display}</button>
-				${value ? html`
-					<button
-						class="px-2 py-2 rounded-md border border-input bg-background text-muted-foreground
-							hover:bg-secondary hover:text-foreground transition-colors"
-						title="Reset to auto"
-						@click=${() => onChange("")}
-					>${icon(X, "sm")}</button>
-				` : ""}
-			</div>
-			<p class="text-xs text-muted-foreground">${hint}</p>
-		</div>
-	`;
-}
+function renderModelRow(
+	label: string,
+	hint: string,
+	modelValue: string,
+	onModelChange: (v: string) => void,
+	thinkingValue: string,
+	onThinkingChange: (v: string) => void,
+	thinkingDefault: string = "medium",
+) {
+	const modelDisplay = formatModelPref(modelValue);
 
-function renderThinkingPicker(label: string, hint: string, value: string, onChange: (v: string) => void, modelValue: string) {
 	// Determine if selected model supports reasoning
-	let disabled = false;
-	let disabledReason = "";
+	let thinkingDisabled = false;
 	if (modelValue) {
 		const model = allModels.find(m => `${m.provider}/${m.id}` === modelValue);
 		if (model && !model.reasoning) {
-			disabled = true;
-			disabledReason = "Selected model does not support thinking";
+			thinkingDisabled = true;
 		}
 	}
 
 	return html`
-		<div class="flex flex-col gap-1.5">
-			<label class="text-sm font-medium text-foreground ${disabled ? "opacity-50" : ""}">${label}</label>
-			<select
-				class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-					focus:outline-none focus:ring-2 focus:ring-ring
-					${disabled ? "opacity-50 cursor-not-allowed" : ""}"
-				.value=${value}
-				?disabled=${disabled}
-				title=${disabled ? disabledReason : ""}
-				@change=${(e: Event) => {
-					onChange((e.target as HTMLSelectElement).value);
-				}}
-			>
-				<option value="">(Auto)</option>
-				<option value="off">Off</option>
-				<option value="minimal">Minimal</option>
-				<option value="low">Low</option>
-				<option value="medium">Medium</option>
-				<option value="high">High</option>
-			</select>
-			<p class="text-xs text-muted-foreground">${disabled ? disabledReason : hint}</p>
+		<div class="flex flex-col gap-1">
+			<div class="flex items-center gap-2">
+				<span class="text-sm font-medium text-foreground shrink-0 w-14">${label}</span>
+				<div class="flex items-center gap-1.5 rounded-lg border border-input bg-background px-1 py-1 flex-1 min-w-0">
+					<!-- Model picker button -->
+					<button
+						class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm
+							hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
+							flex-1 min-w-0 text-left
+							${modelValue ? "text-foreground" : "text-muted-foreground"}"
+						title="Choose model"
+						@click=${() => openModelPicker(modelValue, onModelChange)}
+					>
+						<span class="text-muted-foreground shrink-0">${icon(Sparkles, "sm")}</span>
+						<span class="truncate">${modelDisplay}</span>
+					</button>
+					${modelValue ? html`
+						<button
+							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+							title="Reset model to auto"
+							@click=${() => onModelChange("")}
+						>${icon(X, "xs")}</button>
+					` : ""}
+					<!-- Divider -->
+					<div class="w-px h-5 bg-border shrink-0"></div>
+					<!-- Thinking picker -->
+					<div class="shrink-0 ${thinkingDisabled ? "opacity-40 pointer-events-none" : ""}"
+						title=${thinkingDisabled ? "Selected model does not support thinking" : "Thinking level"}
+					>
+						${Select({
+							value: thinkingValue || thinkingDefault,
+							options: [
+								{ value: "off", label: "Off", icon: icon(Brain, "sm") },
+								{ value: "minimal", label: "Minimal", icon: icon(Brain, "sm") },
+								{ value: "low", label: "Low", icon: icon(Brain, "sm") },
+								{ value: "medium", label: "Medium", icon: icon(Brain, "sm") },
+								{ value: "high", label: "High", icon: icon(Brain, "sm") },
+							] as SelectOption[],
+							onChange: (value: string) => { onThinkingChange(value); },
+							size: "sm",
+							variant: "ghost",
+							fitContent: true,
+						})}
+					</div>
+				</div>
+			</div>
+			<p class="text-xs text-muted-foreground">${hint}</p>
 		</div>
 	`;
 }
@@ -729,55 +737,36 @@ function renderModelsTab() {
 			<!-- Default model preferences -->
 			<div class="flex flex-col gap-4">
 				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
-				<div class="flex flex-col gap-3">
-					${renderModelPicker(
-						"Session Model",
-						"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
-						prefSessionModel,
-						setSessionModel,
-					)}
-					${renderThinkingPicker(
-						"Session Thinking Level",
-						"Thinking level applied to new sessions. Per-session toggle overrides this.",
-						prefSessionThinking,
-						setSessionThinking,
-						prefSessionModel,
-					)}
-				</div>
-				<div class="flex flex-col gap-3 pt-3 border-t border-border">
-					${renderModelPicker(
-						"Review Model",
-						"Model used for automated LLM code reviews during gate verification.",
-						prefReviewModel,
-						setReviewModel,
-					)}
-					${renderThinkingPicker(
-						"Review Thinking Level",
-						"Thinking level for automated gate review sessions.",
-						prefReviewThinking,
-						setReviewThinking,
-						prefReviewModel,
-					)}
-				</div>
-				<div class="flex flex-col gap-3 pt-3 border-t border-border">
-					${renderModelPicker(
-						"Naming Model",
-						"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
-						prefNamingModel,
-						setNamingModel,
-					)}
-					${renderThinkingPicker(
-						"Naming Thinking Level",
-						"Thinking level for session title generation.",
-						prefNamingThinking,
-						setNamingThinking,
-						prefNamingModel,
-					)}
-				</div>
+				${renderModelRow(
+					"Session",
+					"Model and thinking level for new sessions.",
+					prefSessionModel,
+					setSessionModel,
+					prefSessionThinking,
+					setSessionThinking,
+				)}
+				${renderModelRow(
+					"Review",
+					"Model and thinking for automated gate verification reviews.",
+					prefReviewModel,
+					setReviewModel,
+					prefReviewThinking,
+					setReviewThinking,
+					"off",
+				)}
+				${renderModelRow(
+					"Naming",
+					"Lightweight model for auto-generating session titles. Best with a fast, cheap model.",
+					prefNamingModel,
+					setNamingModel,
+					prefNamingThinking,
+					setNamingThinking,
+					"off",
+				)}
 			</div>
 
 			<!-- AI Gateway section -->
-			<div class="flex flex-col gap-4 ${hasModels ? "pt-4 border-t border-border" : ""}">
+			<div class="flex flex-col gap-4 pt-4 border-t border-border">
 				<h3 class="text-sm font-semibold text-foreground">AI Gateway</h3>
 				<p class="text-sm text-muted-foreground">
 					Connect to an AI Gateway for on-prem LLM access through a single
