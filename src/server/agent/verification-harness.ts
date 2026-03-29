@@ -612,6 +612,7 @@ export class VerificationHarness {
 						const modelId = reviewModelPref.slice(slash + 1);
 						try {
 							await session.rpcClient.setModel(provider, modelId);
+							this.sessionManager?.persistSessionModel(sessionId, provider, modelId);
 							console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
 						} catch (err) {
 							console.warn(`[verification] Failed to set review model "${reviewModelPref}", using default:`, err);
