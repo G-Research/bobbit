@@ -4,7 +4,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Wrench } from "lucide";
 import { fetchTools, fetchToolDetail, updateTool, fetchRoles, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
-import { state, renderApp } from "./state.js";
+import { state, requestRender, setState } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
 
@@ -199,12 +199,12 @@ export async function loadToolPageData(): Promise<void> {
 	selectedTool = null;
 	loading = true;
 	saving = false;
-	renderApp();
+	requestRender();
 	const [t, r] = await Promise.all([fetchTools(), fetchRoles()]);
 	tools = t;
 	roles = r;
 	loading = false;
-	renderApp();
+	requestRender();
 }
 
 export function clearToolPageState(): void {
@@ -247,7 +247,7 @@ export function navigateToToolEdit(toolName: string): void {
 		editDocs = tool.docs || "";
 		editDetailDocs = tool.detail_docs || "";
 		saving = false;
-		renderApp();
+		requestRender();
 		// Also fetch full detail (may have docs)
 		fetchToolDetail(toolName).then((detail) => {
 			if (detail && selectedTool?.name === toolName) {
@@ -259,7 +259,7 @@ export function navigateToToolEdit(toolName: string): void {
 				if (editDetailDocs === (tool.detail_docs || "")) {
 					editDetailDocs = detail.detail_docs || "";
 				}
-				renderApp();
+				requestRender();
 			}
 		});
 	} else {
@@ -277,15 +277,14 @@ export function navigateToToolEdit(toolName: string): void {
 				currentView = "list";
 				selectedTool = null;
 			}
-			renderApp();
+			requestRender();
 		});
 	}
 }
 
 async function createToolAssistantSession(): Promise<void> {
 	if (state.creatingSession) return;
-	state.creatingSession = true;
-	renderApp();
+	setState({ creatingSession: true });
 	try {
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
@@ -300,8 +299,7 @@ async function createToolAssistantSession(): Promise<void> {
 		const msg = err instanceof Error ? err.message : String(err);
 		showConnectionError("Failed to create tool assistant", msg);
 	} finally {
-		state.creatingSession = false;
-		renderApp();
+		setState({ creatingSession: false });
 	}
 }
 
@@ -312,7 +310,7 @@ async function createToolAssistantSession(): Promise<void> {
 async function handleSave(): Promise<void> {
 	if (!selectedTool) return;
 	saving = true;
-	renderApp();
+	requestRender();
 
 	const ok = await updateTool(selectedTool.name, {
 		description: editDescription,
@@ -340,7 +338,7 @@ async function handleSave(): Promise<void> {
 		return;
 	}
 	saving = false;
-	renderApp();
+	requestRender();
 }
 
 function toggleGroup(group: string): void {
@@ -349,7 +347,7 @@ function toggleGroup(group: string): void {
 	} else {
 		collapsedGroups.add(group);
 	}
-	renderApp();
+	requestRender();
 }
 
 // ============================================================================
@@ -520,7 +518,7 @@ function renderEditView(): TemplateResult {
 							${Input({
 								value: editDescription,
 								placeholder: "Short description of what this tool does",
-								onInput: (e: Event) => { editDescription = (e.target as HTMLInputElement).value; renderApp(); },
+								onInput: (e: Event) => { editDescription = (e.target as HTMLInputElement).value; requestRender(); },
 							})}
 						</div>
 					</div>
@@ -528,7 +526,7 @@ function renderEditView(): TemplateResult {
 						<label class="tools-field-label">Group</label>
 						<select class="tools-select"
 							.value=${editGroup}
-							@change=${(e: Event) => { editGroup = (e.target as HTMLSelectElement).value; renderApp(); }}>
+							@change=${(e: Event) => { editGroup = (e.target as HTMLSelectElement).value; requestRender(); }}>
 							${TOOL_GROUPS.map((g) => html`<option value=${g} ?selected=${editGroup === g}>${g}</option>`)}
 						</select>
 					</div>
@@ -541,7 +539,7 @@ function renderEditView(): TemplateResult {
 						style="min-height:120px"
 						.value=${editDocs}
 						placeholder="Brief notes for the system prompt..."
-						@input=${(e: Event) => { editDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
+						@input=${(e: Event) => { editDocs = (e.target as HTMLTextAreaElement).value; requestRender(); }}
 					></textarea>
 				</div>
 				<div class="tools-section">
@@ -551,7 +549,7 @@ function renderEditView(): TemplateResult {
 						class="tools-docs-editor"
 						.value=${editDetailDocs}
 						placeholder="Full documentation with examples, edge cases..."
-						@input=${(e: Event) => { editDetailDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
+						@input=${(e: Event) => { editDetailDocs = (e.target as HTMLTextAreaElement).value; requestRender(); }}
 					></textarea>
 				</div>
 			</div>

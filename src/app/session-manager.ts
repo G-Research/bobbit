@@ -4,7 +4,8 @@ import type { ConnectionStatus } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
 import {
 	state,
-	renderApp,
+	setState,
+	requestRender,
 	activeSessionId,
 	isDesktop,
 	GW_URL_KEY,
@@ -231,12 +232,11 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		}
 	}
 
-	state.appView = "authenticated";
 	const route = getRouteFromHash();
 	if (route.view !== "session" && route.view !== "goal-dashboard" && !isConfigPageRoute()) {
 		setHashRoute("landing");
 	}
-	renderApp();
+	setState({ appView: "authenticated" });
 	await refreshSessions();
 	try {
 		const cwdRes = await gatewayFetch("/api/config/cwd");
@@ -359,19 +359,9 @@ function _setupPromptDraftHandlers(sessionId: string): void {
  * No async work. Bumps generation counter to invalidate in-flight hydrations.
  */
 export function selectSession(sessionId: string, replaceHistory?: boolean): void {
+	// Side effects that must happen before state update
 	state.switchGeneration++;
-	state.selectedSessionId = sessionId;
-
-	// Disconnect previous agent immediately
-	if (state.remoteAgent) {
-		state.remoteAgent.disconnect();
-		state.remoteAgent = null;
-		state.connectionStatus = "disconnected";
-	}
-	// Clear the old chat panel so the render never shows stale messages
-	// from the previous session while connecting to the new one.
-	state.chatPanel = null;
-	state.cwdDropdownOpen = false;
+	state.remoteAgent?.disconnect();
 
 	// Update hash route synchronously
 	setHashRoute("session", sessionId, replaceHistory);
@@ -394,7 +384,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	localStorage.setItem(GW_SESSION_KEY, sessionId);
 
 	// Synchronous render — sidebar highlight + header update instantly
-	renderApp();
+	setState({ selectedSessionId: sessionId, remoteAgent: null, connectionStatus: "disconnected", chatPanel: null, cwdDropdownOpen: false });
 }
 
 // ============================================================================
@@ -420,11 +410,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (state.remoteAgent === remote) state.remoteAgent = null;
 	};
 
-	state.connectingSessionId = sessionId;
-
 	// Show the chat UI shell immediately with a "Connecting..." state
-	state.chatPanel = new ChatPanel();
-	renderApp();
+	setState({ connectingSessionId: sessionId, chatPanel: new ChatPanel() });
 
 	try {
 		const url = localStorage.getItem(GW_URL_KEY)!;
@@ -483,7 +470,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (model?.provider && model?.id) {
 				saveSessionModel(sessionId, model.provider, model.id);
 			}
-			renderApp();
+			requestRender();
 		};
 
 		// Callbacks
@@ -507,15 +494,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Keep the active session marked as visited so it doesn't show unseen
 				markSessionVisited(sessionId);
 			}
-			renderApp();
+			requestRender();
 		};
 
 		remote.onConnectionStatusChange = (status: ConnectionStatus) => {
-			state.connectionStatus = status;
-			renderApp();
+			setState({ connectionStatus: status });
 		};
 
-		remote.onWorkflowUpdate = () => renderApp();
+		remote.onWorkflowUpdate = () => requestRender();
 
 		remote.onGoalSetupEvent = async () => {
 			// Refresh sessions and goals to pick up setupStatus changes
@@ -546,10 +532,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onPreviewChanged = (sid, preview) => {
 			if (sid === sessionId) {
-				state.isPreviewSession = preview;
 				if (preview) startPreviewPolling();
 				else stopPreviewPolling();
-				renderApp();
+				setState({ isPreviewSession: preview });
 			}
 		};
 
@@ -564,7 +549,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					} else if (res.status === 404) {
 						state.prStatusCache.delete(goalId);
 					}
-					renderApp();
+					requestRender();
 				} catch { /* silently ignore network errors */ }
 			})();
 		};
@@ -602,7 +587,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.previewPanelTab = "preview";
 				}
 			}
-			renderApp();
+			requestRender();
 		};
 
 		remote.onRoleProposal = (proposal) => {
@@ -618,7 +603,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 			// Persist draft to IndexedDB
 			saveRoleDraft(sessionId);
-			renderApp();
+			requestRender();
 		};
 
 		remote.onToolProposal = (proposal) => {
@@ -648,7 +633,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantTab === "chat" && !isDesktop()) {
 				state.assistantTab = "preview";
 			}
-			renderApp();
+			requestRender();
 		};
 
 		remote.onPersonalityProposal = (proposal: { name: string; label: string; description: string; prompt_fragment: string }) => {
@@ -662,7 +647,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.assistantTab = "preview";
 			}
 			savePersonalityDraft(sessionId);
-			renderApp();
+			requestRender();
 		};
 
 		remote.onSetupProposal = (proposal) => {
@@ -675,7 +660,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (proposal.action === "complete") {
 				state.setupComplete = true;
 			}
-			renderApp();
+			requestRender();
 		};
 
 		remote.onWorkflowProposal = (proposal) => {
@@ -699,10 +684,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 						description: proposal.description || "",
 						gates,
 					});
-					renderApp();
+					requestRender();
 				});
 			}
-			renderApp();
+			requestRender();
 		};
 
 		remote.onStaffProposal = (proposal) => {
@@ -716,82 +701,88 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantTab === "chat" && !isDesktop()) {
 				state.assistantTab = "preview";
 			}
-			renderApp();
+			requestRender();
 		};
 
 		if (isStale()) { remote.disconnect(); return; }
 
-		state.connectionStatus = "connected";
-		state.remoteAgent = remote;
-		state.appView = "authenticated";
 		markSessionVisited(sessionId);
 
 		// Detect assistant type from cached session data (no network needed).
 		const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
-		state.assistantType = options?.assistantType
+		const detectedAssistantType = options?.assistantType
 			|| sessionData?.assistantType
 			|| (options?.isGoalAssistant || sessionData?.goalAssistant ? "goal"
 			: options?.isRoleAssistant || sessionData?.roleAssistant ? "role"
 			: options?.isToolAssistant || sessionData?.toolAssistant ? "tool"
 			: options?.isStaffAssistant || sessionData?.staffAssistant ? "staff"
 			: null);
-		state.assistantTab = "chat";
-		state.assistantHasProposal = false;
-		state.setupPreviewSteps = [];
-		state.setupPreviewContent = "";
-		state.setupPreviewAction = "";
-		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
-		state.previewPanelHtml = ""; // Clear stale preview from previous session
-		if (state.isPreviewSession) startPreviewPolling();
+		const detectedIsPreview = options?.isPreview || sessionData?.preview || false;
+		if (detectedIsPreview) startPreviewPolling();
 		else stopPreviewPolling();
+
+		setState({
+			connectionStatus: "connected",
+			remoteAgent: remote,
+			appView: "authenticated",
+			assistantType: detectedAssistantType,
+			assistantTab: "chat",
+			assistantHasProposal: false,
+			setupPreviewSteps: [],
+			setupPreviewContent: "",
+			setupPreviewAction: "",
+			isPreviewSession: detectedIsPreview,
+			previewPanelHtml: "", // Clear stale preview from previous session
+		});
 
 		// ── Bind the agent to the early ChatPanel (created before connect
 		// to show the "Connecting…" shell instantly).
-		await state.chatPanel!.setAgent(remote as any, {
+		const chatPanel = state.chatPanel!;
+		await chatPanel.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
 		});
 		if (isStale()) { cleanupRemote(remote); return; }
 
 		// Listen for suggest-goal events from assistant messages
-		state.chatPanel.addEventListener('suggest-goal', () => {
+		chatPanel.addEventListener('suggest-goal', () => {
 			if (state.remoteAgent) {
 				state.remoteAgent.prompt("Based on our conversation, please create a goal proposal for the improvement you suggested. Format it as a <goal_proposal> block with <title>, <spec>, and optionally <cwd> tags.");
 			}
 		});
 
 		// Set cwd and branch on the AgentInterface stats bar
-		if (state.chatPanel.agentInterface && sessionData?.cwd) {
-			state.chatPanel.agentInterface.cwd = sessionData.cwd;
+		if (chatPanel.agentInterface && sessionData?.cwd) {
+			chatPanel.agentInterface.cwd = sessionData.cwd;
 			if (sessionData.goalId) {
 				const goal = state.goals.find((g) => g.id === sessionData.goalId);
 				if (goal?.branch) {
-					state.chatPanel.agentInterface.branch = goal.branch;
+					chatPanel.agentInterface.branch = goal.branch;
 				}
 			}
 		}
 
 		// Disable input for archived or explicitly read-only sessions
-		if (state.chatPanel.agentInterface && (remote.state.isArchived || options?.readOnly)) {
-			state.chatPanel.agentInterface.readOnly = true;
+		if (chatPanel.agentInterface && (remote.state.isArchived || options?.readOnly)) {
+			chatPanel.agentInterface.readOnly = true;
 		}
 
 		// Disable input for non-interactive sessions (e.g. verification reviewers)
-		if (state.chatPanel.agentInterface && sessionData?.nonInteractive) {
-			state.chatPanel.agentInterface.readOnly = true;
+		if (chatPanel.agentInterface && sessionData?.nonInteractive) {
+			chatPanel.agentInterface.readOnly = true;
 		}
 
 		// Set up bg process kill/dismiss handlers
-		if (state.chatPanel.agentInterface) {
-			state.chatPanel.agentInterface.onBgProcessKill = (processId: string) => {
+		if (chatPanel.agentInterface) {
+			chatPanel.agentInterface.onBgProcessKill = (processId: string) => {
 				killBgProcess(sessionId, processId);
 			};
-			state.chatPanel.agentInterface.onBgProcessDismiss = (processId: string) => {
+			chatPanel.agentInterface.onBgProcessDismiss = (processId: string) => {
 				dismissBgProcess(sessionId, processId);
 			};
-			state.chatPanel.agentInterface.onGitFetch = () => {
+			chatPanel.agentInterface.onGitFetch = () => {
 				refreshGitStatusForSession(sessionId, true);
 			};
-			state.chatPanel.agentInterface.onGitPush = async () => {
+			chatPanel.agentInterface.onGitPush = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-push`, {
 						method: 'POST',
@@ -806,7 +797,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					return err instanceof Error ? err.message : 'Network error';
 				}
 			};
-			state.chatPanel.agentInterface.onGitPull = async () => {
+			chatPanel.agentInterface.onGitPull = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-pull`, {
 						method: 'POST',
@@ -821,7 +812,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					return err instanceof Error ? err.message : 'Network error';
 				}
 			};
-			state.chatPanel.agentInterface.onPrMerge = async (method: string, admin?: boolean) => {
+			chatPanel.agentInterface.onPrMerge = async (method: string, admin?: boolean) => {
 				const sd = state.gatewaySessions.find((s) => s.id === sessionId);
 				const mergeUrl = sd?.goalId
 					? `/api/goals/${sd.goalId}/pr-merge`
@@ -847,7 +838,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// ── First render: connected state with new (empty) ChatPanel.
 		// The mobile header and session chrome appear immediately.
-		renderApp();
+		requestRender();
 
 		// Replace history if the hash changed to a goal-dashboard during the async gap
 		const currentRoute = getRouteFromHash();
@@ -1004,7 +995,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (state.connectingSessionId === sessionId) {
 			state.connectingSessionId = null;
 		}
-		renderApp();
+		requestRender();
 	}
 }
 
@@ -1014,9 +1005,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 export async function createAndConnectSession(goalId?: string, roleId?: string, personalities?: string[], cwd?: string, worktree?: boolean): Promise<void> {
 	if (state.creatingSession) return;
-	state.creatingSession = true;
-	state.creatingSessionForGoalId = goalId || null;
-	renderApp();
+	setState({ creatingSession: true, creatingSessionForGoalId: goalId || null });
 	try {
 		const body: any = {};
 		if (goalId) body.goalId = goalId;
@@ -1035,9 +1024,7 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		const msg = err instanceof Error ? err.message : String(err);
 		showConnectionError("Failed to create session", msg);
 	} finally {
-		state.creatingSession = false;
-		state.creatingSessionForGoalId = null;
-		renderApp();
+		setState({ creatingSession: false, creatingSessionForGoalId: null });
 	}
 }
 
@@ -1062,11 +1049,9 @@ export async function terminateSession(sessionId: string): Promise<void> {
 
 	if (activeSessionId() === sessionId) {
 		state.remoteAgent?.disconnect();
-		state.remoteAgent = null;
-		state.connectionStatus = "disconnected";
 		localStorage.removeItem(GW_SESSION_KEY);
 		setHashRoute("landing");
-		renderApp();
+		setState({ remoteAgent: null, connectionStatus: "disconnected" });
 	}
 
 	if (isTeamLead && goalId) {
@@ -1090,40 +1075,42 @@ export async function terminateSession(sessionId: string): Promise<void> {
 
 export function backToSessions(): void {
 	state.remoteAgent?.disconnect();
-	state.remoteAgent = null;
-	state.connectionStatus = "disconnected";
-	state.selectedSessionId = null;
-	state.activeGoalProposal = null;
-	state.activeRoleProposal = null;
-	state.assistantType = null;
-	state.assistantTab = "chat";
-	state.assistantHasProposal = false;
-	state.isPreviewSession = false;
 	stopPreviewPolling();
-	state.cwdDropdownOpen = false;
 	localStorage.removeItem(GW_SESSION_KEY);
-	state.appView = "authenticated";
 	teardownMobileScrollTracking();
 	setHashRoute("landing");
-	renderApp();
+	setState({
+		remoteAgent: null,
+		connectionStatus: "disconnected",
+		selectedSessionId: null,
+		activeGoalProposal: null,
+		activeRoleProposal: null,
+		assistantType: null,
+		assistantTab: "chat",
+		assistantHasProposal: false,
+		isPreviewSession: false,
+		cwdDropdownOpen: false,
+		appView: "authenticated",
+	});
 	refreshSessions();
 }
 
 export function disconnectGateway(): void {
 	state.remoteAgent?.disconnect();
-	state.remoteAgent = null;
-	state.connectionStatus = "disconnected";
-	state.selectedSessionId = null;
-	state.assistantType = null;
-	state.assistantTab = "chat";
-	state.assistantHasProposal = false;
-	state.isPreviewSession = false;
 	stopPreviewPolling();
-	state.appView = "disconnected";
 	localStorage.removeItem(GW_SESSION_KEY);
 	teardownMobileScrollTracking();
 	setHashRoute("landing");
-	renderApp();
+	setState({
+		remoteAgent: null,
+		connectionStatus: "disconnected",
+		selectedSessionId: null,
+		assistantType: null,
+		assistantTab: "chat",
+		assistantHasProposal: false,
+		isPreviewSession: false,
+		appView: "disconnected",
+	});
 }
 
 // ============================================================================
@@ -1222,7 +1209,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 		// Update goal grouping cache so sidebar reflects the new PR state immediately
 		if (goalId && data.state) {
 			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null, mergeable: data.mergeable });
-			renderApp();
+			requestRender();
 		}
 	} catch {
 		if (activeSessionId() === sessionId) {

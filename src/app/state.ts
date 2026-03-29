@@ -351,13 +351,25 @@ export function setRenderApp(fn: () => void): void {
 	_renderApp = fn;
 }
 
-export function renderApp(): void {
+/** @internal — use setState() or requestRender() instead. */
+function renderApp(): void {
 	if (_renderScheduled) return;
 	_renderScheduled = true;
 	requestAnimationFrame(() => {
 		_renderScheduled = false;
 		_renderApp();
 	});
+}
+
+/** Mutate app state and schedule a re-render. Sole way to update the `state` object. */
+export function setState(partial: Partial<typeof state>): void {
+	Object.assign(state, partial);
+	renderApp();
+}
+
+/** Schedule a re-render without mutating state. Use when module-local variables changed. */
+export function requestRender(): void {
+	renderApp();
 }
 
 /** Synchronous render — bypasses rAF debounce for cases needing immediate DOM update before layout measurement. */
