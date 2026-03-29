@@ -137,7 +137,7 @@ export class RemoteAgent {
 		return this._sessionId || undefined;
 	}
 	get thinkingBudgets() {
-		return undefined;
+		return { minimal: 1024, low: 4096, medium: 10240, high: 32768 };
 	}
 	get transport() {
 		return undefined;
@@ -500,6 +500,8 @@ export class RemoteAgent {
 
 	setThinkingLevel(level: any): void {
 		this._state.thinkingLevel = level;
+		this.send({ type: "set_thinking_level", level });
+		state.chatPanel?.agentInterface?.requestUpdate();
 	}
 
 	setTools(_tools: any[]): void {
