@@ -13,7 +13,7 @@ import {
 	type WorkflowGate,
 	type VerifyStep,
 } from "./api.js";
-import { state, renderApp } from "./state.js";
+import { state, setState, requestRender } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
 // ============================================================================
@@ -62,10 +62,10 @@ export async function loadWorkflowPageData(): Promise<void> {
 	expandedVStepKeys = new Set();
 	dragIndex = null;
 	dropTargetIndex = null;
-	renderApp();
+	requestRender();
 	workflows = await fetchWorkflows();
 	loading = false;
-	renderApp();
+	requestRender();
 }
 
 export function clearWorkflowPageState(): void {
@@ -112,7 +112,7 @@ function showNewEdit(): void {
 	saving = false;
 	expandedGateIndices = new Set();
 	expandedVStepKeys = new Set();
-	renderApp();
+	requestRender();
 }
 
 export function navigateToWorkflowEdit(workflowId: string): void {
@@ -123,7 +123,7 @@ export function navigateToWorkflowEdit(workflowId: string): void {
 		currentView = "list";
 		selectedWorkflow = null;
 	}
-	renderApp();
+	requestRender();
 }
 
 // ============================================================================
@@ -132,7 +132,7 @@ export function navigateToWorkflowEdit(workflowId: string): void {
 
 async function handleSave(): Promise<void> {
 	saving = true;
-	renderApp();
+	requestRender();
 
 	// Auto-compute dependsOn from gate order (each gate depends on the one above it)
 	const gatesWithDeps = editGates.map((g, i) => ({
@@ -167,7 +167,7 @@ async function handleSave(): Promise<void> {
 		}
 	}
 	saving = false;
-	renderApp();
+	requestRender();
 }
 
 async function handleDelete(workflow: Workflow): Promise<void> {
@@ -186,7 +186,7 @@ async function handleDelete(workflow: Workflow): Promise<void> {
 		if (selectedWorkflow?.id === workflow.id) {
 			showList();
 		}
-		renderApp();
+		requestRender();
 	}
 }
 
@@ -206,7 +206,7 @@ function addGate(): void {
 	}];
 	// Expand the newly added gate
 	expandedGateIndices.add(editGates.length - 1);
-	renderApp();
+	requestRender();
 }
 
 function removeGate(index: number): void {
@@ -218,12 +218,12 @@ function removeGate(index: number): void {
 		else if (idx > index) newExpanded.add(idx - 1);
 	}
 	expandedGateIndices = newExpanded;
-	renderApp();
+	requestRender();
 }
 
 function updateGateField(index: number, field: string, value: any): void {
 	editGates = editGates.map((g, i) => i === index ? { ...g, [field]: value } : g);
-	renderApp();
+	requestRender();
 }
 
 function toggleGateExpand(index: number): void {
@@ -232,7 +232,7 @@ function toggleGateExpand(index: number): void {
 	} else {
 		expandedGateIndices.add(index);
 	}
-	renderApp();
+	requestRender();
 }
 
 function toggleVStepExpand(gateIdx: number, stepIdx: number): void {
@@ -242,7 +242,7 @@ function toggleVStepExpand(gateIdx: number, stepIdx: number): void {
 	} else {
 		expandedVStepKeys.add(key);
 	}
-	renderApp();
+	requestRender();
 }
 
 // ============================================================================
@@ -270,7 +270,7 @@ function moveGate(fromIdx: number, toIdx: number): void {
 	for (const idx of expandedGateIndices) newExpanded.add(remap(idx));
 	expandedGateIndices = newExpanded;
 
-	renderApp();
+	requestRender();
 }
 
 function handleDragStart(e: DragEvent, index: number): void {
@@ -279,7 +279,7 @@ function handleDragStart(e: DragEvent, index: number): void {
 		e.dataTransfer.effectAllowed = "move";
 		e.dataTransfer.setData("text/plain", String(index));
 	}
-	renderApp();
+	requestRender();
 }
 
 function handleDragOver(e: DragEvent, index: number): void {
@@ -294,7 +294,7 @@ function handleDragOver(e: DragEvent, index: number): void {
 
 	if (newTarget !== dropTargetIndex) {
 		dropTargetIndex = newTarget;
-		renderApp();
+		requestRender();
 	}
 }
 
@@ -306,13 +306,13 @@ function handleDrop(e: DragEvent): void {
 	}
 	dragIndex = null;
 	dropTargetIndex = null;
-	renderApp();
+	requestRender();
 }
 
 function handleDragEnd(): void {
 	dragIndex = null;
 	dropTargetIndex = null;
-	renderApp();
+	requestRender();
 }
 
 // ============================================================================
@@ -329,7 +329,7 @@ function cancelTouchDrag(): void {
 		touchDragging = false;
 		dragIndex = null;
 		dropTargetIndex = null;
-		renderApp();
+		requestRender();
 	}
 }
 
@@ -348,7 +348,7 @@ function startTouchDrag(index: number, clientY: number): void {
 	dragIndex = index;
 	touchStartY = clientY;
 	dropTargetIndex = index;
-	renderApp();
+	requestRender();
 }
 
 /** Grip: immediate drag on touch */
@@ -386,7 +386,7 @@ function handleTouchMove(e: TouchEvent): void {
 	const target = touchDropTarget(touch.clientY);
 	if (target !== null && target !== dropTargetIndex) {
 		dropTargetIndex = target;
-		renderApp();
+		requestRender();
 	}
 }
 
@@ -400,7 +400,7 @@ function handleTouchEnd(): void {
 	touchDragging = false;
 	dragIndex = null;
 	dropTargetIndex = null;
-	renderApp();
+	requestRender();
 }
 
 // ============================================================================
@@ -501,8 +501,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 
 export async function createWorkflowAssistantSession(): Promise<void> {
 	if (state.creatingSession) return;
-	state.creatingSession = true;
-	renderApp();
+	setState({ creatingSession: true });
 	try {
 		// Initialize empty edit state for the panel
 		initAssistantEditState();
@@ -517,15 +516,13 @@ export async function createWorkflowAssistantSession(): Promise<void> {
 	} catch (err) {
 		console.error("Failed to create workflow assistant session:", err);
 	} finally {
-		state.creatingSession = false;
-		renderApp();
+		setState({ creatingSession: false });
 	}
 }
 
 export async function editWorkflowWithAssistant(wf: Workflow): Promise<void> {
 	if (state.creatingSession) return;
-	state.creatingSession = true;
-	renderApp();
+	setState({ creatingSession: true });
 	try {
 		populateAssistantEditState(wf);
 		const res = await gatewayFetch("/api/sessions", {
@@ -539,8 +536,7 @@ export async function editWorkflowWithAssistant(wf: Workflow): Promise<void> {
 	} catch (err) {
 		console.error("Failed to create workflow assistant session:", err);
 	} finally {
-		state.creatingSession = false;
-		renderApp();
+		setState({ creatingSession: false });
 	}
 }
 
@@ -607,7 +603,7 @@ export function populateFromProposal(data: { id: string; name: string; descripti
 /** Save workflow from the assistant panel (no navigation). */
 export async function saveWorkflowFromPanel(): Promise<boolean> {
 	saving = true;
-	renderApp();
+	requestRender();
 
 	try {
 		if (!selectedWorkflow) {
@@ -622,7 +618,7 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 				selectedWorkflow = result;
 				isNew = false;
 				workflows = await fetchWorkflows();
-				renderApp();
+				requestRender();
 				return true;
 			}
 		} else {
@@ -638,13 +634,13 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 				if (updated) {
 					selectedWorkflow = updated;
 				}
-				renderApp();
+				requestRender();
 				return true;
 			}
 		}
 	} finally {
 		saving = false;
-		renderApp();
+		requestRender();
 	}
 	return false;
 }
@@ -885,13 +881,13 @@ function renderEditView(): TemplateResult {
 					<label class="wf-field-label">ID</label>
 					${isNew ? html`
 						<input class="wf-input" style="width:140px;" .value=${editId} placeholder="e.g. bug-fix"
-							@input=${(e: Event) => { editId = (e.target as HTMLInputElement).value; renderApp(); }} />
+							@input=${(e: Event) => { editId = (e.target as HTMLInputElement).value; requestRender(); }} />
 					` : html`
 						<input class="wf-input" style="width:140px;opacity:0.6;cursor:not-allowed;" .value=${editId} disabled />
 					`}
 					<label class="wf-field-label" style="margin-left:8px;">Name</label>
 					<input class="wf-input" style="flex:1;min-width:0;" .value=${editName} placeholder="Workflow name"
-						@input=${(e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); }} />
+						@input=${(e: Event) => { editName = (e.target as HTMLInputElement).value; requestRender(); }} />
 				</div>
 				<div class="wf-identity-row">
 					<label class="wf-field-label" style="flex-shrink:0;">Description</label>
