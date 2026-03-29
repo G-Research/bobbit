@@ -2248,7 +2248,7 @@ export function doRenderApp(): void {
 		if (connected && state.assistantType) {
 			const previewPanel = getAssistantPreviewPanel(state.assistantType);
 			if (!previewPanel) {
-				// No preview panel (e.g. setup wizard) — use full-width chat
+				// No preview panel — use full-width chat
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex flex-col min-h-0">${state.chatPanel}</div>

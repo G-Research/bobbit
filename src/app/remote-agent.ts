@@ -805,29 +805,31 @@ export class RemoteAgent {
 			const callback = (this as any)[parser.callbackName];
 			if (!callback) continue;
 
-			const match = text.match(new RegExp(`<${parser.tag}>([\\s\\S]*?)<\\/${parser.tag}>`));
-			if (!match) continue;
+			// Match all occurrences (e.g. setup_proposal may appear multiple times)
+			const regex = new RegExp(`<${parser.tag}>([\\s\\S]*?)<\\/${parser.tag}>`, "g");
+			let match: RegExpExecArray | null;
+			while ((match = regex.exec(text)) !== null) {
+				const block = match[1];
+				const result: Record<string, string> = {};
+				for (const field of parser.fields) {
+					const m = block.match(new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`));
+					result[field] = m ? m[1].trim() : "";
+				}
 
-			const block = match[1];
-			const result: Record<string, string> = {};
-			for (const field of parser.fields) {
-				const m = block.match(new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`));
-				result[field] = m ? m[1].trim() : "";
+				// Normalize hyphenated keys to camelCase
+				const normalized: Record<string, string> = {};
+				for (const [k, v] of Object.entries(result)) {
+					normalized[k.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v;
+				}
+
+				const missing = parser.requiredFields.some(f => {
+					const key = f.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+					return !normalized[key];
+				});
+				if (missing) continue;
+
+				callback(normalized);
 			}
-
-			// Normalize hyphenated keys to camelCase
-			const normalized: Record<string, string> = {};
-			for (const [k, v] of Object.entries(result)) {
-				normalized[k.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v;
-			}
-
-			const missing = parser.requiredFields.some(f => {
-				const key = f.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
-				return !normalized[key];
-			});
-			if (missing) continue;
-
-			callback(normalized);
 		}
 	}
 
