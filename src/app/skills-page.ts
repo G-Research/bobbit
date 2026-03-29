@@ -288,7 +288,7 @@ export function renderSkillsPage(): TemplateResult {
 						</div>
 						<button
 							class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-							@click=${() => { import("./settings-page.js").then((m) => { m.setActiveSettingsTab("directories"); setHashRoute("settings"); }); }}
+							@click=${() => { setHashRoute("settings", "directories"); }}
 						>Manage scan directories &rarr;</button>
 					</div>
 

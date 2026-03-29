@@ -398,7 +398,7 @@ function renderNavBar(): TemplateResult {
 				<h1 class="tools-title">Tools</h1>
 				<button
 					class="text-xs text-muted-foreground hover:text-foreground transition-colors ml-2"
-					@click=${() => { import("./settings-page.js").then((m) => { m.setActiveSettingsTab("directories"); setHashRoute("settings"); }); }}
+					@click=${() => { setHashRoute("settings", "directories"); }}
 				>Manage scan directories &rarr;</button>
 			</div>
 			<div class="tools-nav-right">

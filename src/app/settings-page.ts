@@ -19,18 +19,20 @@ import {
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
 import { renderApp, state } from "./state.js";
-import { setHashRoute, toggleConfigPage } from "./routing.js";
+import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
-type SettingsTab = "general" | "shortcuts" | "palette" | "models" | "project" | "directories";
-// Shortcuts is the default tab so that Ctrl+, acts as a quick toggle for a
-// keyboard-shortcut reference — press once to open, press again to dismiss.
-let activeTab: SettingsTab = "shortcuts";
+type SettingsTab = SettingsTabId;
+const DEFAULT_TAB: SettingsTab = "shortcuts";
 
 /** Allow external code to deep-link to a specific settings tab. */
 export function setActiveSettingsTab(tab: SettingsTab): void {
-	activeTab = tab;
+	setHashRoute("settings", tab);
+}
+
+function getActiveTab(): SettingsTab {
+	return getRouteFromHash().settingsTab ?? DEFAULT_TAB;
 }
 
 // Rebind state (same as shortcuts-dialog)
@@ -1427,14 +1429,16 @@ export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
 
+	const currentTab = getActiveTab();
+
 	// Shortcuts first so the default tab doubles as a quick shortcut reference (Ctrl+,)
 	const tabs: { id: SettingsTab; label: string }[] = [
 		{ id: "shortcuts", label: "Shortcuts" },
 		{ id: "general" as SettingsTab, label: "General" },
 		{ id: "project", label: "Project" },
 		{ id: "models", label: "Models" },
-		{ id: "palette", label: "Color Palette" },
 		{ id: "directories", label: "Config Directories" },
+		{ id: "palette", label: "Color Palette" },
 	];
 
 	return html`
@@ -1453,24 +1457,24 @@ export function renderSettingsPage() {
 				${tabs.map((tab) => html`
 					<button
 						class="px-3 py-1.5 text-sm rounded-md transition-colors
-							${activeTab === tab.id
+							${currentTab === tab.id
 								? "bg-background text-foreground shadow-sm border border-border"
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 						title="${tab.label}"
-						@click=${() => { activeTab = tab.id; renderApp(); }}
+						@click=${() => { setHashRoute("settings", tab.id, true); }}
 					>${tab.label}</button>
 				`)}
 			</div>
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto">
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${activeTab === "project" || activeTab === "directories" ? "" : activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
-					${activeTab === "general" ? renderGeneralTab() : ""}
-					${activeTab === "project" ? renderProjectTab() : ""}
-					${activeTab === "models" ? renderModelsTab() : ""}
-					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
-					${activeTab === "palette" ? renderPaletteTab() : ""}
-					${activeTab === "directories" ? renderDirectoriesTab() : ""}
+				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
+					${currentTab === "general" ? renderGeneralTab() : ""}
+					${currentTab === "project" ? renderProjectTab() : ""}
+					${currentTab === "models" ? renderModelsTab() : ""}
+					${currentTab === "shortcuts" ? renderShortcutsTab() : ""}
+					${currentTab === "palette" ? renderPaletteTab() : ""}
+					${currentTab === "directories" ? renderDirectoriesTab() : ""}
 				</div>
 			 </div>
 			</div>

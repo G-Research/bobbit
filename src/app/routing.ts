@@ -4,7 +4,11 @@
 
 export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "skills" | "settings";
 
-export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string } {
+export type SettingsTabId = "shortcuts" | "general" | "project" | "models" | "palette" | "directories";
+
+const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "models", "palette", "directories"]);
+
+export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string; settingsTab?: SettingsTabId } {
 	const hash = window.location.hash || "";
 	const sessionMatch = hash.match(/^#\/session\/([a-f0-9-]+)$/i);
 	if (sessionMatch) {
@@ -52,8 +56,10 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	if (hash === "#/personalities") {
 		return { view: "personalities" };
 	}
-	if (hash === "#/settings") {
-		return { view: "settings" };
+	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z]+))?$/);
+	if (settingsMatch) {
+		const tab = settingsMatch[1] as SettingsTabId | undefined;
+		return { view: "settings", settingsTab: tab && SETTINGS_TABS.has(tab) ? tab : undefined };
 	}
 	return { view: "landing" };
 }
@@ -87,7 +93,7 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 	} else if (view === "personalities") {
 		newHash = "#/personalities";
 	} else if (view === "settings") {
-		newHash = "#/settings";
+		newHash = id ? `#/settings/${id}` : "#/settings";
 	} else {
 		newHash = "#/";
 	}
