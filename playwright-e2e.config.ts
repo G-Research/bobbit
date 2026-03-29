@@ -11,14 +11,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
 	testDir: "./tests/e2e",
-	testIgnore: [
-		"**/session-rename*",      // needs real LLM for title generation
-		"**/image-attachment*",    // needs real LLM vision
-		"**/compaction*",          // needs mock agent compaction support
-		"**/delegate-reconnect*",  // needs mock agent delegate support
-		"**/delegate-ui*",         // needs mock agent delegate support
-		"**/team-lifecycle*",      // needs real agent processes
-	],
+	testIgnore: [],
 	timeout: 30_000,
 	workers: 4,
 	// No webServer — each worker spawns its own via gateway-harness.ts
