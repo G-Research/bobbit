@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Archived Team Agents Filter Test</title>
+</head>
+<body>
+  <pre id="archivedForLiveLead"></pre>
+  <pre id="unmappedArchived"></pre>
+  <pre id="unmappedNoArchivedLeads"></pre>
+
+  <script>
+    // Mock session data
+    const GOAL_ID = "goal-1";
+    const LIVE_LEAD_ID = "live-lead-1";
+    const ARCHIVED_LEAD_ID = "archived-lead-1";
+
+    const archivedSessions = [
+      // 1. Member mapped to live lead
+      { id: "member-mapped", teamGoalId: GOAL_ID, teamLeadSessionId: LIVE_LEAD_ID, role: "coder", delegateOf: undefined },
+      // 2. Member with no teamLeadSessionId (the bug case)
+      { id: "member-unmapped", teamGoalId: GOAL_ID, teamLeadSessionId: undefined, role: "coder", delegateOf: undefined },
+      // 3. Member with empty string teamLeadSessionId
+      { id: "member-empty-lead", teamGoalId: GOAL_ID, teamLeadSessionId: "", role: "reviewer", delegateOf: undefined },
+      // 4. Member belonging to an archived lead
+      { id: "member-archived-lead", teamGoalId: GOAL_ID, teamLeadSessionId: ARCHIVED_LEAD_ID, role: "coder", delegateOf: undefined },
+      // 5. A delegate (should be excluded)
+      { id: "member-delegate", teamGoalId: GOAL_ID, teamLeadSessionId: undefined, role: "coder", delegateOf: "some-parent" },
+      // 6. A team-lead role (should be excluded from member lists)
+      { id: ARCHIVED_LEAD_ID, teamGoalId: GOAL_ID, teamLeadSessionId: undefined, role: "team-lead", delegateOf: undefined },
+      // 7. Member pointing to a non-existent lead
+      { id: "member-orphan-lead", teamGoalId: GOAL_ID, teamLeadSessionId: "non-existent-lead", role: "tester", delegateOf: undefined },
+      // 8. Member for a different goal (should be excluded)
+      { id: "member-other-goal", teamGoalId: "goal-other", teamLeadSessionId: undefined, role: "coder", delegateOf: undefined },
+    ];
+
+    /**
+     * FIXED filter: get archived members that should appear under the live team lead.
+     * Matches the fix from the design doc — includes members with:
+     *   - teamLeadSessionId === liveLeadId (directly mapped)
+     *   - !teamLeadSessionId (falsy — undefined or empty)
+     *   - teamLeadSessionId not in any known lead set (orphaned)
+     */
+    function getArchivedForLiveLead(goalId, liveLeadId, archived, archivedLeadIds) {
+      const allLeadIds = new Set(archivedLeadIds);
+      return archived.filter(s =>
+        s.teamGoalId === goalId &&
+        !s.delegateOf &&
+        s.role !== "team-lead" &&
+        (s.teamLeadSessionId === liveLeadId || !s.teamLeadSessionId || !allLeadIds.has(s.teamLeadSessionId))
+      );
+    }
+
+    /**
+     * Get unmapped archived members — those not claimed by any known lead (live or archived).
+     * This is the safety net for Bug 2.
+     */
+    function getUnmappedArchived(goalId, archived, allLeadIds) {
+      const leadSet = new Set(allLeadIds);
+      const archivedForGoal = archived.filter(s => s.teamGoalId === goalId && !s.delegateOf);
+      const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
+      const mappedIds = new Set(
+        archivedMembers
+          .filter(m => m.teamLeadSessionId && leadSet.has(m.teamLeadSessionId))
+          .map(m => m.id)
+      );
+      return archivedMembers.filter(m => !mappedIds.has(m.id));
+    }
+
+    // Scenario 1: Live lead exists, archived lead also exists
+    const archivedLeadIds = [ARCHIVED_LEAD_ID];
+    const forLiveLead = getArchivedForLiveLead(GOAL_ID, LIVE_LEAD_ID, archivedSessions, archivedLeadIds);
+    document.getElementById("archivedForLiveLead").textContent = JSON.stringify(forLiveLead.map(s => s.id));
+
+    // Scenario 2: Unmapped members (with both live + archived leads known)
+    const allLeads = [LIVE_LEAD_ID, ARCHIVED_LEAD_ID];
+    const unmapped = getUnmappedArchived(GOAL_ID, archivedSessions, allLeads);
+    document.getElementById("unmappedArchived").textContent = JSON.stringify(unmapped.map(s => s.id));
+
+    // Scenario 3: No archived leads exist — unmapped should still return members
+    const unmappedNoLeads = getUnmappedArchived(GOAL_ID, archivedSessions, []);
+    document.getElementById("unmappedNoArchivedLeads").textContent = JSON.stringify(unmappedNoLeads.map(s => s.id));
+  </script>
+</body>
+</html>
