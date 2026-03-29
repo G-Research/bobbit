@@ -64,7 +64,7 @@ promptTemplate: |+
   ### Team Management
 
   - **team_spawn** — Spawn a role agent with its own git worktree. Returns `{ sessionId, worktreePath }`.
-    - `role`: `"coder"`, `"reviewer"`, or `"test-engineer"`
+    - `role`: Any spawnable role name (see **Available Roles** below)
     - `task`: Task description sent as the agent's first prompt
     - `workflowGateId` (optional): Workflow gate ID this agent should produce output for (0 or 1). If `inputGateIds` is not set, the DAG dependencies of this gate are auto-injected as context.
     - `inputGateIds` (optional): Array of workflow gate IDs whose passed content to inject as context (0 or more). Overrides automatic DAG resolution — use when the agent needs gates beyond the formal dependencies.
@@ -103,6 +103,14 @@ promptTemplate: |+
 
   - **personalities_list** — List available personalities.
   - **personalities_create** — Define a new personality for future use.
+
+  ## Available Roles
+
+  These are the roles you can spawn via `team_spawn`. Each has its own system prompt, tool access, and specialisation:
+
+  {{AVAILABLE_ROLES}}
+
+  Pick the role that best matches each task. Use `suggestedRole` from workflow gate definitions when available.
 
   ## Workflow System
 

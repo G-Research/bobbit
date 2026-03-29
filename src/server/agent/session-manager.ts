@@ -23,6 +23,7 @@ import { TOOLS_DIR } from "./tool-manager.js";
 import { McpManager } from "../mcp/mcp-manager.js";
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
+import { buildAvailableRolesList } from "./team-manager.js";
 import { createWorktree } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
@@ -270,6 +271,7 @@ export class SessionManager {
 					rolePrompt = role.promptTemplate;
 					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
 					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.id).slice(0, 8)}`);
+					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
 					roleName = session.role;
 				}
 				if (role && role.allowedTools.length > 0) {
@@ -759,6 +761,7 @@ export class SessionManager {
 					rolePrompt = role.promptTemplate;
 					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
 					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
+					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
 					roleName = ps.role;
 				}
 				if (role && role.allowedTools.length > 0) {

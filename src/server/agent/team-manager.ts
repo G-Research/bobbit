@@ -3,7 +3,7 @@ import path from "node:path";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import type { GoalManager } from "./goal-manager.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
-import type { RoleStore } from "./role-store.js";
+import type { RoleStore, Role } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
 import { generateTeamName } from "./team-names.js";
@@ -12,6 +12,22 @@ import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 
+
+/**
+ * Build a markdown list of available roles (excluding team-lead and assistant)
+ * for injection into the team lead prompt via {{AVAILABLE_ROLES}}.
+ * Accepts anything with a getAll() method (RoleStore or RoleManager).
+ */
+export function buildAvailableRolesList(roleSource?: { getAll?: () => Role[]; listRoles?: () => Role[] }): string {
+	if (!roleSource) return "coder, reviewer, test-engineer";
+	const allRoles = roleSource.getAll?.() ?? roleSource.listRoles?.() ?? [];
+	const roles = allRoles.filter(r => r.name !== "team-lead" && r.name !== "assistant");
+	if (roles.length === 0) return "No spawnable roles defined.";
+	return roles.map(r => {
+		const tools = r.allowedTools.length > 0 ? r.allowedTools.slice(0, 8).join(", ") : "none";
+		return `- **${r.name}** (${r.label}) — tools: ${tools}`;
+	}).join("\n");
+}
 
 export class GateDependencyError extends Error {
 	constructor(message: string) {
@@ -378,7 +394,8 @@ export class TeamManager {
 		const teamLeadPromptTemplate = storedRole.promptTemplate;
 		const teamLeadPrompt = teamLeadPromptTemplate
 			.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch || "main")
-			.replace(/\{\{AGENT_ID\}\}/g, `team-lead-${goalId.slice(0, 8)}`);
+			.replace(/\{\{AGENT_ID\}\}/g, `team-lead-${goalId.slice(0, 8)}`)
+			.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(roleStore));
 
 		// Create the team lead session with the team tools extension.
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.
