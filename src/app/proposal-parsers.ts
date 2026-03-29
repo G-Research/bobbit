@@ -38,7 +38,7 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 	},
 	{
 		tag: "setup_proposal",
-		fields: ["action", "content", "language", "framework", "testing", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "worktree_setup_command", "session_model", "review_model", "naming_model", "system_prompt_context"],
+		fields: ["action", "content", "language", "framework", "testing", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "session_model", "review_model", "naming_model", "system_prompt_context"],
 		requiredFields: ["action"],
 		callbackName: "onSetupProposal",
 	},

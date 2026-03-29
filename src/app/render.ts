@@ -1231,7 +1231,6 @@ const SETUP_CMD_LABELS: Record<string, string> = {
 	typecheck_command: "Type Check",
 	test_unit_command: "Test (Unit)",
 	test_e2e_command: "Test (E2E)",
-	worktree_setup_command: "Worktree Setup",
 };
 
 async function saveSetupForm(): Promise<void> {
@@ -1292,7 +1291,7 @@ function setupPreviewPanel() {
 				type="text"
 				class="flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
 					focus:outline-none focus:ring-2 focus:ring-ring ${cmds[key] ? "text-foreground" : "text-muted-foreground"}"
-				placeholder=${key === "worktree_setup_command" ? "optional" : "detecting..."}
+				placeholder="detecting..."
 				.value=${cmds[key] || ""}
 				@input=${(e: Event) => {
 					state.setupFormCommands[key] = (e.target as HTMLInputElement).value;

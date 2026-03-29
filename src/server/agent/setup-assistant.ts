@@ -47,7 +47,6 @@ You populate these by emitting \`<setup_proposal>\` XML blocks. Each block has a
 <typecheck_command>npm run check</typecheck_command>
 <test_unit_command>npm run test:unit</test_unit_command>
 <test_e2e_command>npm run test:e2e</test_e2e_command>
-<worktree_setup_command>cp -r "$SOURCE_REPO/node_modules" node_modules</worktree_setup_command>
 </setup_proposal>
 \`\`\`
 

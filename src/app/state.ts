@@ -251,7 +251,6 @@ export const state = {
 		typecheck_command: "",
 		test_unit_command: "",
 		test_e2e_command: "",
-		worktree_setup_command: "",
 	} as Record<string, string>,
 	setupFormModels: { session_model: "", review_model: "", naming_model: "" },
 	setupFormSystemPrompt: "",
