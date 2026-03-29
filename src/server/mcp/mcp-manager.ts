@@ -83,7 +83,6 @@ export class McpManager {
     //   6. <project>/.bobbit/config/mcp.json — Bobbit project overrides
 
     const home = os.homedir();
-
     // User scope
     this._mergeConfigFile(merged, path.join(home, ".claude.json"), "mcpServers");
     this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), "mcpServers");
