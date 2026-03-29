@@ -341,12 +341,24 @@ export function resetArchivedExpandState(): void {
 // ============================================================================
 
 let _renderApp: () => void = () => {};
+let _renderScheduled = false;
 
 export function setRenderApp(fn: () => void): void {
 	_renderApp = fn;
 }
 
 export function renderApp(): void {
+	if (_renderScheduled) return;
+	_renderScheduled = true;
+	requestAnimationFrame(() => {
+		_renderScheduled = false;
+		_renderApp();
+	});
+}
+
+/** Synchronous render — bypasses rAF debounce for cases needing immediate DOM update before layout measurement. */
+export function renderAppSync(): void {
+	_renderScheduled = false;
 	_renderApp();
 }
 
