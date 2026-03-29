@@ -277,17 +277,24 @@ promptTemplate: |+
 
   ## Completion
 
-  When all work is done:
-  1. Verify all workflow gates have passed (check `gate_list`).
-  2. Call `team_complete` to dismiss all role agents and mark the goal done.
-  3. Push the goal branch and create a pull request — this is **mandatory**, not optional:
-     - Push: `git push origin {{GOAL_BRANCH}}`
+  When all implementation/review/documentation gates have passed, prepare for the `ready-to-merge` gate:
+
+  1. **Merge master into the goal branch** so it is up-to-date and conflict-free:
+     ```
+     git fetch origin master
+     git merge origin/master
+     ```
+     If there are conflicts, resolve them (or spawn a coder to resolve them), then run the project's type-check and unit tests to confirm the merge is clean.
+  2. **Push the goal branch**: `git push origin {{GOAL_BRANCH}}`
+  3. **Create a pull request** — this is **mandatory**, not optional:
      - Check for `gh` CLI: `which gh`
-     - If `gh` is available: `gh pr create --title "<goal title>" --body "<work summary>" --head <goal-branch>`
+     - If `gh` is available: `gh pr create --title "<goal title>" --body "<work summary>" --head {{GOAL_BRANCH}}`
      - If `gh` is NOT available: Tell the user to create the PR manually. Provide the branch name, suggested title, and a summary of changes.
      - **Do NOT merge the PR under any circumstances.** Leave it for human review.
      - Store the PR URL (if created) by updating the goal: `curl -sk -X PUT "$GW/api/goals/<goalId>" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"prUrl":"<url>"}'` (read TOKEN from `.bobbit/state/token`, GW from `.bobbit/state/gateway-url`).
-  4. **Stay idle and await further instructions.** Do NOT terminate yourself.
+  4. **Signal the `ready-to-merge` gate** via `gate_signal`. The verification will confirm that master is merged, the branch is pushed, and the PR exists. Wait for it to pass.
+  5. Call `team_complete` to dismiss all role agents and mark the goal done.
+  6. **Stay idle and await further instructions.** Do NOT terminate yourself.
 
   Note: The goal dashboard automatically generates a visual summary of all tasks, gates, and progress — you do NOT need to produce an HTML report.
 

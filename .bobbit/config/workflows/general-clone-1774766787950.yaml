@@ -1,14 +1,13 @@
-id: general
+id: general-clone-1774766787950
 name: General
 description: Lightweight workflow for general-purpose goals
-
 gates:
   - id: design-doc
     name: Design Document
     content: true
     inject_downstream: true
     verify:
-      - name: "Design review"
+      - name: Design review
         type: llm-review
         prompt: |
           Review this design document for structure, clarity, and completeness. Verify:
@@ -16,8 +15,7 @@ gates:
           2. File changes are listed with specific descriptions
           3. Acceptance criteria are specific and testable
           4. Edge cases and error handling are considered
-
-      - name: "Gap analysis"
+      - name: Gap analysis
         type: llm-review
         prompt: |
           Compare the goal specification to this design document.
@@ -32,21 +30,21 @@ gates:
           4. Any contradictions between the goal and the design
 
           Use your tools to read the design document content from the signal.
-
   - id: implementation
     name: Implementation
-    depends_on: [design-doc]
+    depends_on:
+      - design-doc
     verify:
-      - name: "Type check passes"
+      - name: Type check passes
         type: command
         run: "{{project.typecheck_command}}"
-      - name: "Unit tests"
+      - name: Unit tests
         type: command
         run: "{{project.test_unit_command}}"
-      - name: "E2E tests"
+      - name: E2E tests
         type: command
         run: "{{project.test_e2e_command}}"
-      - name: "Gap analysis"
+      - name: Gap analysis
         type: llm-review
         prompt: |
           Compare the goal specification and design document to the actual implementation on this branch.
@@ -61,8 +59,7 @@ gates:
           1. Features described in the goal/design but not implemented
           2. Acceptance criteria not met by the code changes
           3. Implemented behavior that contradicts the specification
-
-      - name: "Code quality review"
+      - name: Code quality review
         type: llm-review
         prompt: |
           Review the code changes on branch {{branch}} vs {{master}} for quality.
@@ -76,8 +73,7 @@ gates:
           3. Edge cases — null/undefined, empty arrays, boundary values
           4. Code style — consistent naming, no dead code, clear intent
           5. Test coverage — are new behaviors tested?
-
-      - name: "Security review"
+      - name: Security review
         type: llm-review
         prompt: |
           Security review of changes on branch {{branch}} vs {{master}}.
@@ -90,12 +86,12 @@ gates:
           3. Data validation — are inputs validated and sanitized?
           4. Secrets handling — no hardcoded secrets, tokens, or credentials
           5. Dependency risks — any new dependencies with known vulnerabilities?
-
   - id: documentation
     name: Documentation
-    depends_on: [implementation]
+    depends_on:
+      - implementation
     verify:
-      - name: "Documentation coverage"
+      - name: Documentation coverage
         type: llm-review
         prompt: |
           Review documentation for the changes on branch {{branch}} vs {{master}}.
@@ -150,17 +146,19 @@ gates:
           Summarize your findings with:
           - PASS/FAIL for each of the 3 checks
           - Specific items that need to be addressed (with file paths and descriptions)
-
   - id: ready-to-merge
     name: Ready to Merge
-    depends_on: [documentation]
+    depends_on:
+      - documentation
     verify:
-      - name: "Branch pushed to remote"
+      - name: Branch pushed to remote
         type: command
-        run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ."
-      - name: "Master merged into branch"
+        run: git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q .
+      - name: Master merged into branch
         type: command
         run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}"
-      - name: "PR raised"
+      - name: PR raised
         type: command
         run: "gh pr list --head {{branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q ."
+createdAt: 1774766787950
+updatedAt: 1774766787950
