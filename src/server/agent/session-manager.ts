@@ -172,7 +172,7 @@ export class SessionManager {
 
 	async initMcp(cwd: string): Promise<void> {
 		try {
-			const mgr = new McpManager(cwd);
+			const mgr = new McpManager(cwd, this.projectConfigStore);
 			await mgr.connectAll();
 			this.mcpManager = mgr;
 

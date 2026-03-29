@@ -8,6 +8,8 @@ import type {
   McpToolResult,
 } from "./mcp-types.js";
 import { bobbitConfigDir } from "../bobbit-dir.js";
+import { parseCustomDirectories } from "../agent/config-directories.js";
+import type { ProjectConfigReader } from "../agent/config-directories.js";
 
 /** Status of an MCP server */
 export interface McpServerStatus {
@@ -41,31 +43,51 @@ export class McpManager {
   private configs = new Map<string, McpServerConfig>();
   private errors = new Map<string, string>();
 
-  constructor(private cwd: string) {}
+  private projectConfigStore: ProjectConfigReader | null;
+
+  constructor(cwd: string, projectConfigStore?: ProjectConfigReader);
+  constructor(private cwd: string, projectConfigStore?: ProjectConfigReader) {
+    this.projectConfigStore = projectConfigStore ?? null;
+  }
 
   // ── Discovery ──────────────────────────────────────────────────────
 
   /**
    * Discover MCP servers from config files.
    * Priority order (later overrides earlier):
+   *   0. Custom directories (lowest priority)
    *   1. ~/.claude.json → mcpServers
-   *   2. .mcp.json in cwd
-   *   3. .bobbit/config/mcp.json → mcpServers
+   *   2. ~/.claude/.mcp.json → mcpServers
+   *   3. ~/.bobbit/.mcp.json → mcpServers
+   *   4. .mcp.json in cwd
+   *   5. .bobbit/config/mcp.json → mcpServers
    */
   discoverServers(): Record<string, McpServerConfig> {
     const merged: Record<string, McpServerConfig> = {};
 
+    // 0. Custom directories (lowest priority — merged first, overridden by everything)
+    if (this.projectConfigStore) {
+      const customDirs = parseCustomDirectories(this.projectConfigStore)
+        .filter(d => d.types.includes("mcp"));
+      for (const dir of customDirs) {
+        this._mergeConfigFile(merged, path.join(dir.path, ".mcp.json"), "mcpServers");
+      }
+    }
+
     // 1. User scope: ~/.claude.json
-    const userConfigPath = path.join(os.homedir(), ".claude.json");
-    this._mergeConfigFile(merged, userConfigPath, "mcpServers");
+    this._mergeConfigFile(merged, path.join(os.homedir(), ".claude.json"), "mcpServers");
 
-    // 2. Project scope: .mcp.json in cwd
-    const projectConfigPath = path.join(this.cwd, ".mcp.json");
-    this._mergeConfigFile(merged, projectConfigPath, "mcpServers");
+    // 2. User scope: ~/.claude/.mcp.json
+    this._mergeConfigFile(merged, path.join(os.homedir(), ".claude", ".mcp.json"), "mcpServers");
 
-    // 3. Bobbit overrides: .bobbit/config/mcp.json
-    const bobbitConfigPath = path.join(bobbitConfigDir(), "mcp.json");
-    this._mergeConfigFile(merged, bobbitConfigPath, "mcpServers");
+    // 3. User scope: ~/.bobbit/.mcp.json
+    this._mergeConfigFile(merged, path.join(os.homedir(), ".bobbit", ".mcp.json"), "mcpServers");
+
+    // 4. Project scope: .mcp.json in cwd
+    this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
+
+    // 5. Bobbit overrides: .bobbit/config/mcp.json
+    this._mergeConfigFile(merged, path.join(bobbitConfigDir(), "mcp.json"), "mcpServers");
 
     return merged;
   }
