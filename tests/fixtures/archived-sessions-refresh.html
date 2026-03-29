@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head><title>Archived Sessions Refresh Test</title></head>
+<body>
+<script>
+// ============================================================================
+// Simulate the archived-sessions refresh logic from src/app/api.ts to verify
+// that newly-archived sessions appear automatically when showArchived is on.
+// ============================================================================
+
+const state = {
+  gatewaySessions: [],
+  archivedSessions: [],
+  showArchived: false,
+  sessionsGeneration: -1,
+  sessionsLoading: false,
+  sessionsError: "",
+  goals: [],
+  goalsGeneration: -1,
+};
+
+let _renderCount = 0;
+function renderApp() { _renderCount++; }
+
+// --- Fetch log ---
+window.__fetchLog = [];
+let _archivedSessionsLoaded = false;
+
+// Configurable server responses
+window.__serverSessions = [];
+window.__serverArchivedSessions = [];
+window.__serverSessionsGeneration = 1;
+
+async function gatewayFetch(path) {
+  window.__fetchLog.push({ path, time: Date.now() });
+  if (path.includes("include=archived")) {
+    return {
+      ok: true,
+      json: async () => ({ sessions: [...window.__serverSessions, ...window.__serverArchivedSessions] }),
+    };
+  }
+  // Normal sessions endpoint
+  const since = new URL(path, "http://localhost").searchParams.get("since");
+  const gen = window.__serverSessionsGeneration;
+  if (since && Number(since) === gen) {
+    return { ok: true, json: async () => ({ generation: gen, changed: false }) };
+  }
+  return {
+    ok: true,
+    json: async () => ({ generation: gen, sessions: window.__serverSessions }),
+  };
+}
+
+// --- fetchArchivedSessions (mirrors src/app/api.ts) ---
+async function fetchArchivedSessions() {
+  _archivedSessionsLoaded = true;
+  const res = await gatewayFetch("/api/sessions?include=archived");
+  const data = await res.json();
+  const sessions = data.sessions || [];
+  state.archivedSessions = sessions.filter(s => s.archived === true);
+  renderApp();
+}
+
+function clearArchivedSessionsState() {
+  _archivedSessionsLoaded = false;
+  state.archivedSessions = [];
+}
+
+// --- refreshSessions (mirrors the relevant logic from src/app/api.ts) ---
+async function refreshSessions() {
+  const isInitial = state.gatewaySessions.length === 0 && !state.sessionsError;
+
+  let sessionsChanged = false;
+
+  const sessionsUrl = state.sessionsGeneration >= 0
+    ? `/api/sessions?since=${state.sessionsGeneration}`
+    : "/api/sessions";
+
+  const sessionsRes = await gatewayFetch(sessionsUrl);
+  const sessionsData = await sessionsRes.json();
+
+  if (sessionsData.changed === false) {
+    // no change
+  } else {
+    sessionsChanged = true;
+    state.gatewaySessions = sessionsData.sessions || [];
+    if (sessionsData.generation !== undefined) {
+      state.sessionsGeneration = sessionsData.generation;
+    }
+  }
+
+  if (sessionsChanged || isInitial) {
+    renderApp();
+  }
+
+  // THE FIX UNDER TEST: re-fetch archived when sessions change and showArchived is on
+  if (state.showArchived && (isInitial && !_archivedSessionsLoaded || sessionsChanged && _archivedSessionsLoaded)) {
+    await fetchArchivedSessions();
+  }
+}
+
+// Expose for tests
+window.__state = state;
+window.__refreshSessions = refreshSessions;
+window.__fetchArchivedSessions = fetchArchivedSessions;
+window.__clearArchivedSessionsState = clearArchivedSessionsState;
+window.__renderCount = () => _renderCount;
+window.__resetRenderCount = () => { _renderCount = 0; };
+window.__archivedSessionsLoaded = () => _archivedSessionsLoaded;
+window.__setArchivedSessionsLoaded = (v) => { _archivedSessionsLoaded = v; };
+</script>
+</body>
+</html>

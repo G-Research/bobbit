@@ -208,8 +208,10 @@ export async function refreshSessions(): Promise<void> {
 			.catch(() => {});
 	}
 
-	// Lazy-load archived sessions on initial load only if user had "Show archived" persisted
-	if (isInitial && state.showArchived && !_archivedSessionsLoaded) {
+	// Lazy-load archived sessions on initial load only if user had "Show archived" persisted.
+	// Also re-fetch when sessions changed while archived view is active, so newly-archived
+	// sessions appear immediately without requiring a manual toggle.
+	if (state.showArchived && (isInitial && !_archivedSessionsLoaded || sessionsChanged && _archivedSessionsLoaded)) {
 		fetchArchivedSessions();
 	}
 }
