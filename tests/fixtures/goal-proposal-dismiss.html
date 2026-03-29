@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Goal Proposal Dismiss Persistence Test</title>
+</head>
+<body>
+<script>
+// Minimal simulation of the goal proposal dismiss bug.
+// Mirrors the behavior in:
+//   - src/app/session-manager.ts onGoalProposal (~line 572)
+//   - src/app/render.ts handleDismiss (~line 1433)
+
+const SESSION_ID = "test-session-123";
+
+// --- State (mirrors src/app/state.ts) ---
+const state = {
+  activeGoalProposal: null,
+  assistantType: "normal",  // non-goal-assistant session
+};
+
+// --- Current (broken) onGoalProposal handler ---
+// From session-manager.ts line 572: unconditionally sets activeGoalProposal
+function onGoalProposal(proposal) {
+  // In the real code, goal-assistant sessions do extra work.
+  // For non-goal-assistant sessions, it just sets the proposal:
+  state.activeGoalProposal = proposal;
+}
+
+// --- Current (broken) handleDismiss ---
+// From render.ts line 1433: only clears in-memory state, nothing persisted
+function handleDismiss() {
+  state.activeGoalProposal = null;
+  // In real code: _proposalInitializedFrom = null, tab switching, renderApp()
+  // No localStorage write — this is the bug.
+}
+
+// --- Test execution ---
+const results = {};
+
+// Step 1: Fire onGoalProposal — should set state
+const proposal = { title: "Fix login bug", spec: "The login page has a bug..." };
+onGoalProposal(proposal);
+results.step1_proposalSet = state.activeGoalProposal !== null;
+
+// Step 2: Dismiss — should clear state
+handleDismiss();
+results.step2_dismissed = state.activeGoalProposal === null;
+
+// Step 3: Simulate reconnect — runDeferredProposalCheck re-scans messages
+// and calls onGoalProposal again with the same proposal.
+// After dismiss, this should NOT resurrect the proposal.
+onGoalProposal(proposal);
+results.step3_proposalStaysNull = state.activeGoalProposal === null;
+
+// This is the critical assertion:
+// In the FIXED version, onGoalProposal would check localStorage and skip.
+// In the BROKEN version, it unconditionally sets state, so this is false.
+results.step3_actualValue = state.activeGoalProposal;
+
+window.testResults = results;
+</script>
+</body>
+</html>
