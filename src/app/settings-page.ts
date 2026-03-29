@@ -853,11 +853,35 @@ function renderProjectTab() {
 	loadProjectConfig();
 
 	// Collect all keys: defaults first, then custom user keys
-	const defaultKeys = Object.keys(projectDefaults);
-	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults));
+	const defaultKeys = Object.keys(projectDefaults).filter((k) => k !== "default_thinking_level");
+	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults) && k !== "default_thinking_level");
 
 	return html`
 		<div class="flex flex-col gap-3">
+			<!-- Default Thinking Level -->
+			<div class="flex flex-col gap-1.5">
+				<label class="text-sm font-medium text-foreground">Default Thinking Level</label>
+				<p class="text-xs text-muted-foreground">
+					Thinking level applied to new sessions. Per-session toggle overrides this.
+				</p>
+				<select
+					class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+					.value=${projectConfig["default_thinking_level"] || ""}
+					@change=${(e: Event) => {
+						projectConfig["default_thinking_level"] = (e.target as HTMLSelectElement).value;
+						projectSaveStatus = "";
+						renderApp();
+					}}
+				>
+					<option value="">(Agent default)</option>
+					<option value="off">Off</option>
+					<option value="minimal">Minimal</option>
+					<option value="low">Low</option>
+					<option value="medium">Medium</option>
+					<option value="high">High</option>
+				</select>
+			</div>
+			<hr class="border-border" />
 			<!-- Default entries -->
 			${defaultKeys.map((key) => html`
 				<div class="flex items-end gap-2">

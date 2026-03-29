@@ -13,6 +13,7 @@ const DEFAULTS: Record<string, string> = {
 	typecheck_command: "npm run check",
 	test_unit_command: "npm run test:unit",
 	test_e2e_command: "npm run test:e2e",
+	default_thinking_level: "",  // Empty = use agent's built-in default ("medium")
 };
 
 /**

@@ -117,6 +117,8 @@ export interface SessionManagerOptions {
 	workflowStore?: import("./workflow-store.js").WorkflowStore;
 	/** Preferences store for aigw auto-model detection */
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
+	/** Project config store for reading project defaults (e.g. default_thinking_level) */
+	projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 }
 
 export class SessionManager {
@@ -131,6 +133,7 @@ export class SessionManager {
 	private toolManager?: ToolManager;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	private workflowStore?: import("./workflow-store.js").WorkflowStore;
+	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private mcpManager: McpManager | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	goalManager: GoalManager;
@@ -150,6 +153,7 @@ export class SessionManager {
 		this.toolManager = options?.toolManager;
 		this.preferencesStore = options?.preferencesStore;
 		this.workflowStore = options?.workflowStore;
+		this.projectConfigStore = options?.projectConfigStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
 	}
@@ -1093,6 +1097,9 @@ export class SessionManager {
 		// Auto-select aigw model when gateway is configured
 		await this.tryAutoSelectModel(session);
 
+		// Apply project-level default thinking level
+		await this.tryApplyDefaultThinkingLevel(session);
+
 		// Capture the agent's session file path and persist
 		this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist session ${id}:`, err);
@@ -1247,6 +1254,7 @@ export class SessionManager {
 		session.status = "idle";
 
 		await this.tryAutoSelectModel(session);
+		await this.tryApplyDefaultThinkingLevel(session);
 		this.persistSessionMetadata(session).catch(() => {});
 
 		// Notify connected clients that the session is ready
@@ -1500,6 +1508,21 @@ export class SessionManager {
 			});
 		} catch (err) {
 			console.warn(`[session-manager] Failed to auto-select model for ${session.id}:`, err);
+		}
+	}
+
+	/** Apply default_thinking_level from project config if set. */
+	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
+		if (!this.projectConfigStore) return;
+		const level = this.projectConfigStore.get("default_thinking_level");
+		if (!level) return;
+		const valid = ["off", "minimal", "low", "medium", "high"];
+		if (!valid.includes(level)) return;
+		try {
+			await session.rpcClient.setThinkingLevel(level);
+			console.log(`[session-manager] Applied default thinking level "${level}" for session ${session.id}`);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to apply default thinking level for ${session.id}:`, err);
 		}
 	}
 

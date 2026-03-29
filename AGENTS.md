@@ -124,11 +124,26 @@ REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-serve
 
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
 
+### Thinking level configuration
+
+The default thinking level for new sessions is configurable via `default_thinking_level` in `.bobbit/config/project.yaml` or the Settings page Project tab. Valid values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, or `""` (empty string = use the agent's built-in default of `"medium"`).
+
+On session creation, if `default_thinking_level` is set and non-empty, the server sends a `set_thinking_level` RPC to the agent process. The per-session thinking toggle in the chat input bar overrides the project default for that session.
+
+Thinking token budgets per level (hardcoded in `src/app/remote-agent.ts`, not currently configurable):
+
+| Level | Token budget |
+|---|---|
+| minimal | 1,024 |
+| low | 4,096 |
+| medium | 10,240 |
+| high | 32,768 |
+
 ## Debugging tips
 
 **Debug duplicate messages**: The deferred message pattern in `remote-agent.ts` is subtle. `MessageList` renders `state.messages` (completed), `StreamingMessageContainer` renders `state.streamMessage` (in-progress). They must never show the same message. Tool-call messages stay in streaming until the next message starts. Check `flushDeferredMessage()` and `_deferredAssistantMessage`.
 
-**Debug session connection timing**: `connectToSession()` in `session-manager.ts` overlaps ChatPanel creation with the WebSocket handshake. The ChatPanel is created and rendered (showing a "Connecting…" spinner) before `remote.connect()`. Model restore (`loadSessionModel` + dynamic import of `@mariozechner/pi-ai`) runs in parallel with the WebSocket connect via `Promise.all`. After connect resolves, `setAgent()` binds the agent to the pre-existing ChatPanel. The `switchGeneration` / `isStale()` guard invalidates in-flight work on rapid session switches. On connect failure, `state.chatPanel` is cleared to prevent a stuck spinner.
+**Debug session connection timing**: `connectToSession()` in `session-manager.ts` overlaps ChatPanel creation with the WebSocket handshake. The ChatPanel is created and rendered (showing a "Connecting…" spinner) before `remote.connect()`. Model restore (`loadSessionModel` + dynamic import of `@mariozechner/pi-ai`) runs in parallel with the WebSocket connect via `Promise.all`. After connect resolves, `setAgent()` binds the agent to the pre-existing ChatPanel. The `switchGeneration` / `isStale()` guard invalidates in-flight work on rapid session switches. On connect failure, `state.chatPanel` is cleared to prevent a stuck spinner. Both `model` and `thinkingLevel` are synced from the server's `get_state` response in `remote-agent.ts` `handleServerMessage()` on connect/reconnect, so the UI always reflects the server's actual values after a page refresh.
 
 **Debug session/goal refresh**: Both `SessionStore` and `GoalStore` track a `generation` counter (monotonically increasing, resets on server restart). `GET /api/sessions` and `GET /api/goals` return `{ generation, sessions/goals }`. Clients pass `?since=N` to skip unchanged data — the server returns `{ generation: N, changed: false }` when the generation matches. The client tracks `sessionsGeneration` and `goalsGeneration` in `state.ts` and skips `renderApp()` when nothing changed, making the 5s background poll essentially free.
 
@@ -206,7 +221,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `workflows/*.yaml` | `WorkflowStore` | Workflow templates (gate DAGs, verification configs) |
 | `personalities/*.yaml` | `PersonalityStore` | Personality definitions |
 | `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
-| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, custom config) |
+| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, default thinking level, custom config) |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompt definitions (goal, role, tool, personality, staff, setup) |
 | `mcp.json` | `McpManager` | MCP server overrides (Bobbit-specific additions to `.mcp.json`) |
 
