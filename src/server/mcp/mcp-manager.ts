@@ -45,7 +45,6 @@ export class McpManager {
 
   private projectConfigStore: ProjectConfigReader | null;
 
-  constructor(cwd: string, projectConfigStore?: ProjectConfigReader);
   constructor(private cwd: string, projectConfigStore?: ProjectConfigReader) {
     this.projectConfigStore = projectConfigStore ?? null;
   }
