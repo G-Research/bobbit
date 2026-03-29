@@ -1296,7 +1296,7 @@ export class SessionManager {
 		const titleSummary = opts.title || opts.instructions.split("\n")[0].slice(0, 60) || "Delegate";
 		const session: SessionInfo = {
 			id,
-			title: `⚡ ${titleSummary}`,
+			title: `⚡${titleSummary}`,
 			cwd: opts.cwd,
 			status: "starting",
 			createdAt: now,

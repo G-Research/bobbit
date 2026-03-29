@@ -137,9 +137,11 @@ export function stopTimeRefresh(): void {
 /** Render session title with a subtle rolling shadow when active. */
 let _waveIndex = 0;
 export function renderSessionTitle(title: string, isActive?: boolean) {
-	if (!isActive) { return title; }
+	// Emoji glyphs (e.g. ⚡) have built-in leading whitespace — pull a negative margin to compensate
+	const emojiLead = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(title) ? "margin-left:-2px" : "";
+	if (!isActive) { return emojiLead ? html`<span style="${emojiLead}">${title}</span>` : title; }
 	const delay = -((_waveIndex++ % 7) * 0.6);
-	return html`<span class="title-wave" style="animation-delay:${delay}s">${title}</span>`;
+	return html`<span class="title-wave" style="animation-delay:${delay}s;${emojiLead}">${title}</span>`;
 }
 
 /** Render a pulsing dot with conic sweep to indicate active session. */
