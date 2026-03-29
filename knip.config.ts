@@ -17,7 +17,7 @@ const config: KnipConfig = {
     'tests/**/*.ts',
   ],
   ignore: [
-    'src/server/defaults/**',
+    '.bobbit/config/**',
     'src/ui/speech-recognition.d.ts',
     'src/app/qrcode.d.ts',
   ],

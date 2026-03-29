@@ -218,7 +218,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 
 ### `.bobbit/config/tools/<group>/` — tool definitions and extensions
 
-Tool YAML definitions and extension code, organized by group (agent, browser, filesystem, shell, tasks, team, web). Scaffolded from `src/server/defaults/tools/`. Each group contains `*.yaml` tool definitions and optionally an `extension.ts` for custom tool logic.
+Tool YAML definitions and extension code, organized by group (agent, browser, filesystem, html, shell, tasks, team, web). Scaffolded from `.bobbit/config/tools/` in the Bobbit repo. Each group contains `*.yaml` tool definitions and optionally an `extension.ts` for custom tool logic.
 
 ### Global state (not per-project)
 
