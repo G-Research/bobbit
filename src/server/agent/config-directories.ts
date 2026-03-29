@@ -33,6 +33,7 @@ export interface ProjectConfigReader {
 /** Extended interface that also supports writing. */
 export interface ProjectConfigWriter extends ProjectConfigReader {
 	set(key: string, value: string): void;
+	remove(key: string): void;
 }
 
 /** Expand ~ to home directory and resolve the path. */
@@ -181,7 +182,8 @@ export function getAllConfigDirectories(
 
 /**
  * Save custom directories to project config via the `config_directories` key.
- * The legacy `skill_directories` key is left untouched for backward compatibility.
+ * Also removes the legacy `skill_directories` key to prevent stale entries
+ * from reappearing on next read (migrate forward).
  */
 export function saveCustomDirectories(
 	projectConfigStore: ProjectConfigWriter,
@@ -192,4 +194,5 @@ export function saveCustomDirectories(
 		types: d.types,
 	}));
 	projectConfigStore.set("config_directories", JSON.stringify(serializable));
+	projectConfigStore.remove("skill_directories");
 }
