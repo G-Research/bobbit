@@ -250,8 +250,8 @@ export async function handle(
 			});
 		}
 		sessions.sort((a, b) => b.totalCost - a.totalCost);
-		const totals = costTracker.getGoalCost(goalId, sessionIds);
-		json(res, { sessions, totals });
+		const aggregate = costTracker.getGoalCost(goalId, sessionIds);
+		json(res, { aggregate, sessions });
 		return true;
 	}
 
