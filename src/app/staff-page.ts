@@ -7,7 +7,7 @@ import { fetchStaff, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, fetchPe
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
-import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, statusBobbit, getAccessory, getAccessoryShadow } from "./session-colors.js";
+import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 
 // ============================================================================
 // STATE
@@ -468,8 +468,7 @@ function renderEditView(): TemplateResult {
 	if (!selectedStaff) return html`<div class="p-4">Staff agent not found</div>`;
 
 	const acc = getAccessory(editAccessory);
-	const accShadowStr = getAccessoryShadow(acc.id);
-	const hasAccessory = acc.id !== "none" && accShadowStr !== "";
+	const hasAccessory = acc.id !== "none" && acc.shadow !== "";
 	const ROW_SIZE = Math.ceil(BOBBIT_HUE_ROTATIONS.length / 2);
 
 	return html`
@@ -551,7 +550,7 @@ function renderEditView(): TemplateResult {
 								${BOBBIT_HUE_ROTATIONS.slice(start, start + ROW_SIZE).map((rot: number, j: number) => {
 									const i = start + j;
 									const isSelected = editColorIndex === i;
-									const accShadow = hasAccessory ? accShadowStr : "";
+									const accShadow = hasAccessory ? acc.shadow : "";
 									const accCounterFilter = acc.id !== "flask" ? `filter:hue-rotate(${-rot}deg);` : "";
 									return html`
 										<button

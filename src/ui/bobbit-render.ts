@@ -39,6 +39,7 @@ export interface BobbitPalette {
 export interface AccessoryDef {
 	id: string;
 	label: string;
+	shadow: string;
 	yOffset: number;
 	addsHeight: boolean;
 }
@@ -61,7 +62,12 @@ export const CANONICAL_PALETTE: BobbitPalette = { main: "#8ec63f", light: "#b5d9
 export const STARTING_PALETTE: BobbitPalette = { main: "#eab308", light: "#fde047", dark: "#ca8a04", eye: "#2d2006" };
 export const TERMINATED_PALETTE: BobbitPalette = { main: "#ef4444", light: "#fca5a5", dark: "#dc2626", eye: "#2c0b0e" };
 
-export const NO_ACCESSORY: AccessoryDef = { id: "none", label: "None", yOffset: 0, addsHeight: false };
+export const NO_ACCESSORY: AccessoryDef = { id: "none", label: "None", shadow: "", yOffset: 0, addsHeight: false };
+
+/** Convert sprite pixels to a CSS box-shadow string. */
+function pixelsToBoxShadow(pixels: SpritePixel[]): string {
+	return pixels.map(([x, y, c]) => `${x}px ${y}px 0 ${c}`).join(",");
+}
 
 /** Aurora borealis palette — 14 curated hue-rotate offsets from canonical green. */
 export const BOBBIT_HUE_ROTATIONS = [-110, -85, -60, -35, -10, 0, 15, 25, 40, 50, 65, 75, 100, 125];
@@ -200,6 +206,7 @@ export function spriteToAccessoryDef(data: AccessorySpriteData): AccessoryDef {
 	return {
 		id: data.id,
 		label: data.label,
+		shadow: pixelsToBoxShadow(data.pixels),
 		yOffset: data.yOffset,
 		addsHeight: data.addsHeight,
 	};
