@@ -74,7 +74,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add a new UI component**: Add to `src/ui/components/`, export from `src/ui/index.ts`.
 
-**Add a new tool renderer**: Create in `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`.
+**Add a new tool renderer**: Create in `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. Note: `WebFetchRenderer` detects markdown content (via `isMarkdownContent()` in `WebFetchRenderer.ts`) and renders it as formatted HTML using the `<markdown-web-content>` element (`MarkdownWebContent.ts`), which wraps `<markdown-block>` from mini-lit with a Preview/Raw toggle. Detection uses URL extension (`.md`, `.markdown`) and content-based heuristics (headings, code fences, links, etc.).
 
 **Add a slash skill**: Create a `SKILL.md` file in `.claude/skills/<name>/` (project-level) or `~/.claude/skills/<name>/` (personal). The file should have YAML frontmatter with `description` and optional `argument_hint`, `allowed_tools`, `context`, `agent` fields. Skills are discovered automatically via `discoverSlashSkills()` in `src/server/skills/slash-skills.ts` and served at `GET /api/slash-skills`. You can also configure additional skill directories via the Skills page UI (`#/skills`) or by adding `skill_directories` to `.bobbit/config/project.yaml`:
 

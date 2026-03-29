@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Markdown Web Content Tests</title>
+</head>
+<body>
+<script>
+/**
+ * isMarkdownContent — must stay in sync with src/ui/tools/renderers/WebFetchRenderer.ts
+ */
+function isMarkdownContent(url, content) {
+  // URL-based: path ends with .md or .markdown (case-insensitive, ignoring query/hash)
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    if (pathname.endsWith('.md') || pathname.endsWith('.markdown')) {
+      return true;
+    }
+  } catch {
+    // If URL parsing fails, try simple string check
+    const pathPart = url.split('?')[0].split('#')[0].toLowerCase();
+    if (pathPart.endsWith('.md') || pathPart.endsWith('.markdown')) {
+      return true;
+    }
+  }
+
+  // Content-based fallback: check first 500 chars for markdown patterns
+  const sample = content.slice(0, 500);
+
+  // Strong signals: starts with markdown frontmatter or heading
+  if (/^---\s*\n/.test(sample)) return true;
+  if (/^#{1,6}\s+\S/.test(sample)) return true;
+
+  // Weak signals: require multiple indicators
+  let indicators = 0;
+  if (/^#{1,6}\s+/m.test(sample)) indicators++;
+  if (/\[.+?\]\(.+?\)/.test(sample)) indicators++;
+  if (/```/.test(sample)) indicators++;
+  if (/^\s*[-*+]\s+/m.test(sample)) indicators++;
+  if (/^\s*\d+\.\s+/m.test(sample)) indicators++;
+  if (/\*\*.+?\*\*/.test(sample)) indicators++;
+
+  return indicators >= 2;
+}
+
+// Expose for Playwright
+window.isMarkdownContent = isMarkdownContent;
+</script>
+</body>
+</html>
