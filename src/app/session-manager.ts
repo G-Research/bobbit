@@ -489,8 +489,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Callbacks
 		remote.onTitleChange = (newTitle: string) => {
 			updateLocalSessionTitle(sessionId, newTitle);
-			renderApp();
-			refreshSessions();
 		};
 
 		remote.onStatusChange = (status: string) => {
