@@ -422,11 +422,28 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 	state.connectingSessionId = sessionId;
 
+	// Show the chat UI shell immediately with a "Connecting..." state
+	state.chatPanel = new ChatPanel();
+	renderApp();
+
 	try {
 		const url = localStorage.getItem(GW_URL_KEY)!;
 		const token = localStorage.getItem(GW_TOKEN_KEY)!;
 
 		const remote = new RemoteAgent();
+
+		// Start model restore in parallel with WebSocket connect
+		const modelRestorePromise = (async () => {
+			const savedModel = loadSessionModel(sessionId);
+			if (!savedModel) return null;
+			try {
+				const { getModel } = await import("@mariozechner/pi-ai");
+				return getModel(savedModel.provider as any, savedModel.modelId);
+			} catch {
+				return null; // Model no longer available
+			}
+		})();
+
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
 
@@ -452,19 +469,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (autoPrompt) remote.prompt(autoPrompt);
 		}
 
-		// Restore saved model
-		const savedModel = loadSessionModel(sessionId);
-		if (savedModel) {
-			const { getModel } = await import("@mariozechner/pi-ai");
-			try {
-				const model = getModel(savedModel.provider as any, savedModel.modelId);
-				remote.setModel(model);
-			} catch {
-				// Model no longer available
-			}
-		}
-
+		// Apply restored model (already resolved or resolving in parallel)
+		const restoredModel = await modelRestorePromise;
 		if (isStale()) { remote.disconnect(); return; }
+		if (restoredModel) {
+			remote.setModel(restoredModel);
+		}
 
 		// Intercept setModel to persist
 		const originalSetModel = remote.setModel.bind(remote);
@@ -737,10 +747,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
 
-		// ── Create ChatPanel immediately so the first render shows the new
-		// (empty) panel instead of a stale one or a blank gap.
-		state.chatPanel = new ChatPanel();
-		await state.chatPanel.setAgent(remote as any, {
+		// ── Bind the agent to the early ChatPanel (created before connect
+		// to show the "Connecting…" shell instantly).
+		await state.chatPanel!.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
 		});
 		if (isStale()) { cleanupRemote(remote); return; }
@@ -981,10 +990,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Wait for background work (refreshSessions + storage) to settle
 		await backgroundWork;
 		if (isStale()) { cleanupRemote(remote); return; }
-
-		refreshSessions();
 	} catch (err) {
 		if (!isStale()) {
+			// Clear the early ChatPanel so the UI doesn't show a stuck "Connecting…" spinner
+			state.chatPanel = null;
 			const msg = err instanceof Error ? err.message : String(err);
 			showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
 		}

@@ -123,6 +123,8 @@ REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-serve
 
 **Debug duplicate messages**: The deferred message pattern in `remote-agent.ts` is subtle. `MessageList` renders `state.messages` (completed), `StreamingMessageContainer` renders `state.streamMessage` (in-progress). They must never show the same message. Tool-call messages stay in streaming until the next message starts. Check `flushDeferredMessage()` and `_deferredAssistantMessage`.
 
+**Debug session connection timing**: `connectToSession()` in `session-manager.ts` overlaps ChatPanel creation with the WebSocket handshake. The ChatPanel is created and rendered (showing a "Connecting…" spinner) before `remote.connect()`. Model restore (`loadSessionModel` + dynamic import of `@mariozechner/pi-ai`) runs in parallel with the WebSocket connect via `Promise.all`. After connect resolves, `setAgent()` binds the agent to the pre-existing ChatPanel. The `switchGeneration` / `isStale()` guard invalidates in-flight work on rapid session switches. On connect failure, `state.chatPanel` is cleared to prevent a stuck spinner.
+
 **Debug session persistence**: Check `.bobbit/state/sessions.json` for persisted session data. Sessions restore on startup via `session-manager.ts` `restoreSessions()`. If an agent's `.jsonl` session file is missing, that session is skipped. Failed restores create dormant entries that revive on client connect.
 
 **Debug compaction issues**: Check `_isCompacting`, `_compactionSyntheticMessages`, and `_usageStaleAfterCompaction` in `remote-agent.ts`. The `compacting_placeholder` message must be filtered out and re-added correctly across server refreshes. Manual compaction is fire-and-forget from the WS handler's perspective.
