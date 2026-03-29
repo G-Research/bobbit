@@ -4,6 +4,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Globe } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import "./MarkdownWebContent.js";
 
 interface WebFetchParams {
 	url: string;
@@ -27,6 +28,40 @@ function getDomain(url: string): string {
 	} catch {
 		return url;
 	}
+}
+
+export function isMarkdownContent(url: string, content: string): boolean {
+	// URL-based: path ends with .md or .markdown (case-insensitive, ignoring query/hash)
+	try {
+		const pathname = new URL(url).pathname.toLowerCase();
+		if (pathname.endsWith(".md") || pathname.endsWith(".markdown")) {
+			return true;
+		}
+	} catch {
+		// If URL parsing fails, try simple string check
+		const pathPart = url.split("?")[0].split("#")[0].toLowerCase();
+		if (pathPart.endsWith(".md") || pathPart.endsWith(".markdown")) {
+			return true;
+		}
+	}
+
+	// Content-based fallback: check first 500 chars for markdown patterns
+	const sample = content.slice(0, 500);
+
+	// Strong signals: starts with markdown frontmatter or heading
+	if (/^---\s*\n/.test(sample)) return true;
+	if (/^#{1,6}\s+\S/.test(sample)) return true;
+
+	// Weak signals: require multiple indicators
+	let indicators = 0;
+	if (/^#{1,6}\s+/m.test(sample)) indicators++;
+	if (/\[.+?\]\(.+?\)/.test(sample)) indicators++;
+	if (/```/.test(sample)) indicators++;
+	if (/^\s*[-*+]\s+/m.test(sample)) indicators++;
+	if (/^\s*\d+\.\s+/m.test(sample)) indicators++;
+	if (/\*\*.+?\*\*/.test(sample)) indicators++;
+
+	return indicators >= 2;
 }
 
 function formatSize(chars: number): string {
@@ -70,7 +105,9 @@ export class WebFetchRenderer implements ToolRenderer<WebFetchParams, any> {
 							<div class="text-xs text-muted-foreground mt-2 mb-1">${metaText}</div>
 							${result.isError
 								? html`<console-block .content=${output} .variant=${"error"}></console-block>`
-								: html`<code-block .code=${output} language="text"></code-block>`}
+								: isMarkdownContent(params.url, output)
+									? html`<markdown-web-content .content=${output}></markdown-web-content>`
+									: html`<code-block .code=${output} language="text"></code-block>`}
 						</div>
 					</div>
 				`,
