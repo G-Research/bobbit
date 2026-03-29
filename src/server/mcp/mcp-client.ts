@@ -332,6 +332,26 @@ export class McpClient {
         throw new Error(`HTTP ${response.status}: ${body.slice(0, 500)}`);
       }
 
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        // SSE response — parse data: lines for JSON-RPC result
+        const text = await response.text();
+        let lastData: string | undefined;
+        for (const line of text.split('\n')) {
+          if (line.startsWith('data:')) {
+            lastData = line.slice(5).trim();
+          }
+        }
+        if (lastData) {
+          try {
+            return JSON.parse(lastData) as JsonRpcResponse;
+          } catch {
+            return { jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: lastData }] } } as any;
+          }
+        }
+        return { jsonrpc: '2.0', id: request.id, error: { code: -1, message: 'Empty SSE response' } } as any;
+      }
+
       return await response.json() as JsonRpcResponse;
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
