@@ -18,7 +18,16 @@ export async function handle(
 
 	// GET /api/goals
 	if (url.pathname === "/api/goals" && req.method === "GET") {
-		json(res, { goals: sessionManager.goalManager.listGoals() });
+		const currentGen = sessionManager.goalManager.getGoalGeneration();
+		const sinceParam = url.searchParams.get("since");
+		if (sinceParam !== null) {
+			const since = parseInt(sinceParam, 10);
+			if (!isNaN(since) && since === currentGen) {
+				json(res, { generation: currentGen, changed: false });
+				return true;
+			}
+		}
+		json(res, { generation: currentGen, goals: sessionManager.goalManager.listGoals() });
 		return true;
 	}
 

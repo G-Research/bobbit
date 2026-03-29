@@ -17,6 +17,15 @@ export async function handle(
 
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
+		const currentGen = sessionManager.getSessionStore().getGeneration();
+		const sinceParam = url.searchParams.get("since");
+		if (sinceParam !== null) {
+			const since = parseInt(sinceParam, 10);
+			if (!isNaN(since) && since === currentGen) {
+				json(res, { generation: currentGen, changed: false });
+				return true;
+			}
+		}
 		const sessions = sessionManager.listSessions().map((s) => ({
 			...s,
 			colorIndex: colorStore.get(s.id),
@@ -27,9 +36,9 @@ export async function handle(
 				...s,
 				colorIndex: colorStore.get(s.id),
 			}));
-			json(res, { sessions: [...sessions, ...archived] });
+			json(res, { generation: currentGen, sessions: [...sessions, ...archived] });
 		} else {
-			json(res, { sessions });
+			json(res, { generation: currentGen, sessions });
 		}
 		return true;
 	}
