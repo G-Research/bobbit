@@ -747,10 +747,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
 
-		// ── Create ChatPanel immediately so the first render shows the new
-		// (empty) panel instead of a stale one or a blank gap.
-		state.chatPanel = new ChatPanel();
-		await state.chatPanel.setAgent(remote as any, {
+		// ── Bind the agent to the early ChatPanel (created before connect
+		// to show the "Connecting…" shell instantly).
+		await state.chatPanel!.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
 		});
 		if (isStale()) { cleanupRemote(remote); return; }
@@ -993,6 +992,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (isStale()) { cleanupRemote(remote); return; }
 	} catch (err) {
 		if (!isStale()) {
+			// Clear the early ChatPanel so the UI doesn't show a stuck "Connecting…" spinner
+			state.chatPanel = null;
 			const msg = err instanceof Error ? err.message : String(err);
 			showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
 		}
