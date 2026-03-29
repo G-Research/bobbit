@@ -164,6 +164,7 @@ export class McpClient {
           env: childEnv,
           cwd: cwd || undefined,
           windowsHide: true,
+          shell: process.platform === 'win32',
         });
       } catch (err) {
         clearTimeout(timeout);

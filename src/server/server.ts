@@ -3132,7 +3132,10 @@ async function handleApiRoute(
 			await mcpManager.connectServer(serverName, discovered[serverName]);
 		} else {
 			await mcpManager.disconnectServer(serverName);
-			await mcpManager.connectServer(serverName, existing.config);
+			// Re-discover to pick up any config changes from disk
+			const refreshed = mcpManager.discoverServers();
+			const config = refreshed[serverName] || existing.config;
+			await mcpManager.connectServer(serverName, config);
 		}
 		// Re-register MCP tools with ToolManager
 		if (toolManager) {
