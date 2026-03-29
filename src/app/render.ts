@@ -18,7 +18,7 @@ import {
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup } from "./api.js";
 import { clearSessionModel } from "./routing.js";
-import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft } from "./session-manager.js";
+import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive } from "./sidebar.js";
 
@@ -1431,8 +1431,12 @@ function goalProposalPanel() {
 	};
 
 	const handleDismiss = () => {
+		const dismissed = state.activeGoalProposal;
 		state.activeGoalProposal = null;
 		_proposalInitializedFrom = null;
+		// Persist dismiss so it survives reconnect
+		const sid = activeSessionId();
+		if (sid && dismissed) markProposalDismissed(sid, dismissed);
 		// If preview tab still available, switch to it; otherwise back to chat
 		if (state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
