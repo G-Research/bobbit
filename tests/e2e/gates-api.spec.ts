@@ -73,10 +73,11 @@ test.describe("Gates API", () => {
 			expect(resp.status).toBe(200);
 			const { gates } = await resp.json();
 
-			expect(gates).toHaveLength(3);
+			expect(gates).toHaveLength(4);
 			const ids = gates.map((g: any) => g.gateId);
 			expect(ids).toContain("design-doc");
 			expect(ids).toContain("implementation");
+			expect(ids).toContain("documentation");
 			expect(ids).toContain("ready-to-merge");
 
 			for (const gate of gates) {
