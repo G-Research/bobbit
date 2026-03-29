@@ -1253,8 +1253,10 @@ async function addCustomDir(): Promise<void> {
 		.map((d) => ({ path: d.path, types: d.types }));
 	currentCustom.push({ path: trimmed, types: selectedTypes });
 	await saveConfigDirs(currentCustom);
-	newDirPath = "";
-	newDirTypes = { skills: false, mcp: false, tools: false };
+	if (configDirsSaveStatus !== "error") {
+		newDirPath = "";
+		newDirTypes = { skills: false, mcp: false, tools: false };
+	}
 }
 
 async function saveConfigDirs(customDirs: Array<{ path: string; types: string[] }>): Promise<void> {
@@ -1263,15 +1265,20 @@ async function saveConfigDirs(customDirs: Array<{ path: string; types: string[] 
 	try {
 		const res = await gatewayFetch("/api/project-config", {
 			method: "PUT",
-			body: JSON.stringify({ config_directories: JSON.stringify(customDirs) }),
+			body: JSON.stringify({ config_directories: JSON.stringify(customDirs), skill_directories: null }),
 		});
 		if (res.ok) {
 			configDirsSaveStatus = "saved";
-			// Reload directories from server to get updated existence checks
-			configDirsLoaded = false;
-			configDirsLoading = false;
-			loadConfigDirs();
-			setTimeout(() => { configDirsSaveStatus = ""; renderApp(); }, 2000);
+			renderApp();
+			// Reload directories from server after a short delay so "Saved" message is visible
+			setTimeout(() => {
+				configDirsLoaded = false;
+				configDirsLoading = false;
+				configDirsError = "";
+				loadConfigDirs();
+				configDirsSaveStatus = "";
+				renderApp();
+			}, 1500);
 		} else {
 			configDirsSaveStatus = "error";
 			setTimeout(() => { configDirsSaveStatus = ""; renderApp(); }, 3000);
