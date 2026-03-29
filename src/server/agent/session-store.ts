@@ -63,6 +63,10 @@ export interface PersistedSession {
 	repoPath?: string;
 	/** Branch name (preserved for worktree cleanup) */
 	branch?: string;
+	/** Model provider (e.g. "anthropic") — persisted so archived sessions can display model info */
+	modelProvider?: string;
+	/** Model ID (e.g. "claude-sonnet-4-20250514") — persisted so archived sessions can display model info */
+	modelId?: string;
 }
 
 const STORE_DIR = bobbitStateDir();
@@ -159,7 +163,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId">>): void {
+	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId">>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		this.generation++;
