@@ -317,6 +317,9 @@ async function initApp() {
 					const prefs = await prefRes.json();
 					if (prefs.palette && prefs.palette !== "forest") {
 						document.documentElement.dataset.palette = prefs.palette;
+						localStorage.setItem('palette', prefs.palette);
+					} else {
+						localStorage.removeItem('palette');
 					}
 					// Apply showTimestamps
 					if (prefs.showTimestamps) {
@@ -552,8 +555,10 @@ async function initApp() {
 			const palette = (prefs.palette as string) || "forest";
 			if (palette === "forest") {
 				delete document.documentElement.dataset.palette;
+				localStorage.removeItem('palette');
 			} else {
 				document.documentElement.dataset.palette = palette;
+				localStorage.setItem('palette', palette);
 			}
 			// Apply showTimestamps
 			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
