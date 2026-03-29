@@ -53,8 +53,9 @@ export interface ActiveVerification {
 	gateId: string;
 	signalId: string;
 	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed"; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
-	overallStatus: "running" | "passed" | "failed";
+	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
+	cancelled?: boolean;
 }
 
 export class VerificationHarness {
@@ -80,6 +81,46 @@ export class VerificationHarness {
 	/** Register a callback to notify the team lead agent when verification completes. */
 	setTeamLeadNotifier(fn: (goalId: string, message: string) => void): void {
 		this.notifyTeamLeadFn = fn;
+	}
+
+	/**
+	 * Cancel any in-flight verifications for the same (goalId, gateId).
+	 * Terminates reviewer sessions and removes from activeVerifications.
+	 */
+	async cancelStaleVerifications(goalId: string, gateId: string): Promise<void> {
+		for (const [signalId, active] of this.activeVerifications) {
+			if (active.goalId === goalId && active.gateId === gateId) {
+				// Mark as cancelled
+				active.cancelled = true;
+				active.overallStatus = "cancelled";
+
+				// Terminate all running reviewer sessions
+				for (const step of active.steps) {
+					if (step.sessionId && step.status === "running") {
+						try {
+							await this.sessionManager?.terminateSession(step.sessionId);
+						} catch { /* ignore — may already be terminated */ }
+						if (this.teamManager) {
+							try {
+								await this.teamManager.unregisterReviewerSession(goalId, step.sessionId);
+							} catch { /* ignore */ }
+						}
+					}
+				}
+
+				// Remove from active verifications
+				this.activeVerifications.delete(signalId);
+
+				// Broadcast cancellation
+				this.broadcastFn(goalId, {
+					type: "gate_verification_complete",
+					goalId, gateId, signalId,
+					status: "cancelled",
+				});
+
+				console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
+			}
+		}
 	}
 
 	private notifyTeamLead(goalId: string, gateId: string, status: string): void {
@@ -189,7 +230,7 @@ export class VerificationHarness {
 					const cached = cachedSteps.get(step.name);
 					if (cached) {
 						const cachedResult = { ...cached, output: `[cached from prior signal] ${cached.output}` };
-						this.broadcastFn(signal.goalId, {
+						if (!active.cancelled) this.broadcastFn(signal.goalId, {
 							type: "gate_verification_step_complete",
 							goalId: signal.goalId,
 							gateId: signal.gateId,
@@ -294,7 +335,7 @@ export class VerificationHarness {
 					}
 
 					const duration_ms = Date.now() - startTime;
-					this.broadcastFn(signal.goalId, {
+					if (!active.cancelled) this.broadcastFn(signal.goalId, {
 						type: "gate_verification_step_complete",
 						goalId: signal.goalId,
 						gateId: signal.gateId,
@@ -324,6 +365,12 @@ export class VerificationHarness {
 				})
 			);
 
+			// If cancelled while steps were running, skip result processing
+			if (active.cancelled) {
+				this.activeVerifications.delete(signal.id);
+				return;
+			}
+
 			// Sort by original YAML order for deterministic results
 			const results = indexedResults
 				.sort((a, b) => a.index - b.index)
@@ -351,6 +398,10 @@ export class VerificationHarness {
 			});
 			this.notifyTeamLead(signal.goalId, signal.gateId, status);
 		} catch (err: any) {
+			if (active.cancelled) {
+				this.activeVerifications.delete(signal.id);
+				return;
+			}
 			this.gateStore.updateSignalVerification(signal.id, {
 				status: "failed",
 				steps: [{ name: "Error", type: "command", passed: false, output: err.message, duration_ms: 0 }],
