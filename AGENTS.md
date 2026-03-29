@@ -75,7 +75,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add a new REST endpoint**: Edit `src/server/server.ts` `handleApiRoute()`.
 
-**Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command.
+**Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command. Existing examples of this pattern: `set_model` and `set_thinking_level`.
 
 **Add a new UI component**: Add to `src/ui/components/`, export from `src/ui/index.ts`.
 
@@ -131,6 +131,8 @@ REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-serve
 **Debug session connection timing**: `connectToSession()` in `session-manager.ts` overlaps ChatPanel creation with the WebSocket handshake. The ChatPanel is created and rendered (showing a "Connecting…" spinner) before `remote.connect()`. Model restore (`loadSessionModel` + dynamic import of `@mariozechner/pi-ai`) runs in parallel with the WebSocket connect via `Promise.all`. After connect resolves, `setAgent()` binds the agent to the pre-existing ChatPanel. The `switchGeneration` / `isStale()` guard invalidates in-flight work on rapid session switches. On connect failure, `state.chatPanel` is cleared to prevent a stuck spinner.
 
 **Debug session/goal refresh**: Both `SessionStore` and `GoalStore` track a `generation` counter (monotonically increasing, resets on server restart). `GET /api/sessions` and `GET /api/goals` return `{ generation, sessions/goals }`. Clients pass `?since=N` to skip unchanged data — the server returns `{ generation: N, changed: false }` when the generation matches. The client tracks `sessionsGeneration` and `goalsGeneration` in `state.ts` and skips `renderApp()` when nothing changed, making the 5s background poll essentially free.
+
+**Debug gate status cache**: `state.gateStatusCache` is refreshed via two paths: (1) bulk refresh in `refreshGateStatusCache()` during initial load or when goals change, and (2) per-goal refresh via `refreshGateStatusForGoal(goalId)` triggered by WebSocket `gate_status_changed` and `gate_verification_complete` events in `remote-agent.ts`. The dashboard's gate polling (`goal-dashboard.ts`) also syncs to this cache.
 
 **Debug session persistence**: Check `.bobbit/state/sessions.json` for persisted session data. Sessions restore on startup via `session-manager.ts` `restoreSessions()`. If an agent's `.jsonl` session file is missing, that session is skipped. Failed restores create dormant entries that revive on client connect.
 

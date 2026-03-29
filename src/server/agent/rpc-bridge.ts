@@ -136,6 +136,10 @@ export class RpcBridge {
 		return this.sendCommand({ type: "set_model", provider, modelId });
 	}
 
+	setThinkingLevel(level: string) {
+		return this.sendCommand({ type: "set_thinking_level", level });
+	}
+
 	compact(timeoutMs = 120_000) {
 		return this.sendCommand({ type: "compact" }, timeoutMs);
 	}

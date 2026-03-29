@@ -218,23 +218,15 @@ test.describe("Verification output streaming and timestamps", () => {
 				}),
 			});
 
-			// Collect all step_output events for this gate
-			const allOutputs: any[] = [];
-			const deadline = Date.now() + 15_000;
-			while (Date.now() < deadline) {
-				try {
-					const msg = await ws.waitFor(
-						(m) =>
-							m.type === "gate_verification_step_output" &&
-							m.gateId === "reproducing-test" &&
-							!allOutputs.some(o => o === m),
-						2_000,
-					);
-					allOutputs.push(msg);
-				} catch {
-					break; // No more output events
-				}
-			}
+			// Wait for gate verification to complete first, then inspect collected events
+			await waitForGateStatus(goalId, "reproducing-test", "passed", 30_000);
+
+			// Collect all step_output events that arrived during verification
+			const allOutputs = ws.messages.filter(
+				(m) =>
+					m.type === "gate_verification_step_output" &&
+					m.gateId === "reproducing-test",
+			);
 
 			// Should have at least one stderr output event
 			const stderrEvents = allOutputs.filter(o => o.stream === "stderr");
@@ -253,7 +245,6 @@ test.describe("Verification output streaming and timestamps", () => {
 				expect(typeof evt.ts).toBe("number");
 			}
 
-			await waitForGateStatus(goalId, "reproducing-test", "passed");
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
