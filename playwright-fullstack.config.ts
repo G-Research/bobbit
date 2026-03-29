@@ -45,14 +45,13 @@ export default defineConfig({
 			BOBBIT_LLM_REVIEW_SKIP: "1",
 			BOBBIT_SKIP_NPM_CI: "1",
 			BOBBIT_SKIP_MCP: "1",
+			BOBBIT_NO_OPEN: "1",
 		},
 	},
 	globalTeardown: "./tests/fullstack/fullstack-teardown.ts",
 	use: {
 		baseURL: `http://127.0.0.1:${PORT}`,
-		// Capture traces and screenshots on failure for debugging.
 		trace: "retain-on-failure",
 		screenshot: "only-on-failure",
-		launchOptions: { headless: true },
 	},
 });
