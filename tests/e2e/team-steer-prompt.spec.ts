@@ -4,7 +4,7 @@
  * Verifies: validation (400), membership enforcement (403),
  * steer status check (409), prompt dispatch behavior.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	apiFetch,
 	createSession,

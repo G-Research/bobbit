@@ -1,5 +1,5 @@
-import { test, expect } from "@playwright/test";
-import { readE2EToken, BASE, nonGitCwd } from "./e2e-setup.js";
+import { test, expect } from "./gateway-harness.js";
+import { readE2EToken, base, nonGitCwd } from "./e2e-setup.js";
 
 let token: string;
 
@@ -9,7 +9,7 @@ const headers = () => ({
 });
 
 async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
-	return fetch(`${BASE}${path}`, {
+	return fetch(`${base()}${path}`, {
 		...opts,
 		headers: { ...headers(), ...(opts?.headers || {}) },
 	});

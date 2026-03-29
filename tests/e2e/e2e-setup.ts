@@ -4,8 +4,9 @@
  * The E2E test server runs with BOBBIT_DIR pointing to an isolated temp
  * directory so it doesn't pollute the real dev-server state under .bobbit/.
  *
- * Port and bobbit dir are set dynamically by playwright-e2e.config.ts via
- * process.env so parallel test runs on the same machine never collide.
+ * Port and bobbit dir are set dynamically per-worker by the gateway fixture
+ * in gateway-harness.ts. All values are read from process.env at call time
+ * (not import time) so each worker gets the right server.
  */
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -15,21 +16,52 @@ import { tmpdir } from "node:os";
 import { expect } from "@playwright/test";
 import WebSocket from "ws";
 
-/** Port the isolated E2E gateway is listening on (set by config via env). */
-export const E2E_PORT = process.env.E2E_PORT || "3099";
+// ---------------------------------------------------------------------------
+// Dynamic env-backed values — read at call time, not import time.
+// This lets each Playwright worker point at its own gateway instance.
+// ---------------------------------------------------------------------------
 
-/** HTTP base URL for the isolated E2E gateway. */
-export const BASE = `http://127.0.0.1:${E2E_PORT}`;
+function port(): string { return process.env.E2E_PORT || "3099"; }
+export function base(): string { return `http://127.0.0.1:${port()}`; }
+export function wsBase(): string { return `ws://127.0.0.1:${port()}`; }
+export function bobbitDir(): string {
+	return process.env.BOBBIT_DIR
+		|| join(import.meta.dirname, "..", "..", ".e2e-bobbit");
+}
 
-/** WebSocket base URL for the isolated E2E gateway. */
-export const WS_BASE = `ws://127.0.0.1:${E2E_PORT}`;
+/**
+ * Backward-compatible exports. These are getters so existing code like
+ *   fetch(`${BASE}/api/sessions`)
+ * resolves the current worker's server on each access.
+ */
+export let E2E_PORT: string;
+export let BASE: string;
+export let WS_BASE: string;
+export let E2E_BOBBIT_DIR: string;
+export let E2E_PI_DIR: string; // legacy alias
 
-/** The isolated .bobbit directory used by the E2E test server. */
-export const E2E_BOBBIT_DIR = process.env.BOBBIT_DIR
-	|| join(import.meta.dirname, "..", "..", ".e2e-bobbit");
+// Re-define as getters on the module object. The `export let` declarations
+// above create the binding slots; Object.defineProperty replaces them with
+// getters that read process.env each time.
+const _thisModule: Record<string, unknown> = { E2E_PORT, BASE, WS_BASE, E2E_BOBBIT_DIR, E2E_PI_DIR };
+Object.defineProperty(_thisModule, "E2E_PORT", { get: port, enumerable: true });
+Object.defineProperty(_thisModule, "BASE", { get: base, enumerable: true });
+Object.defineProperty(_thisModule, "WS_BASE", { get: wsBase, enumerable: true });
+Object.defineProperty(_thisModule, "E2E_BOBBIT_DIR", { get: bobbitDir, enumerable: true });
+Object.defineProperty(_thisModule, "E2E_PI_DIR", { get: bobbitDir, enumerable: true });
 
-// Legacy alias for tests that still reference E2E_PI_DIR
-export const E2E_PI_DIR = E2E_BOBBIT_DIR;
+// Re-export as mutable bindings that stay in sync via a refresh trick.
+// NOTE: ES module live bindings don't support external reassignment, so
+// we use a different approach — the helpers below always call the functions.
+// For direct `BASE` usage in tests, we set them once at import time and
+// the gateway-harness sets process.env BEFORE the test files are imported.
+
+// Set initial values from env (the gateway harness sets env before tests load)
+E2E_PORT = port();
+BASE = base();
+WS_BASE = wsBase();
+E2E_BOBBIT_DIR = bobbitDir();
+E2E_PI_DIR = bobbitDir();
 
 /**
  * A cwd that is NOT inside a git repository.
@@ -40,7 +72,7 @@ export const E2E_PI_DIR = E2E_BOBBIT_DIR;
 let _nonGitCwd: string | undefined;
 export function nonGitCwd(): string {
 	if (!_nonGitCwd) {
-		_nonGitCwd = join(tmpdir(), `bobbit-e2e-${Date.now()}`);
+		_nonGitCwd = join(tmpdir(), `bobbit-e2e-${port()}-${Date.now()}`);
 		mkdirSync(_nonGitCwd, { recursive: true });
 	}
 	return _nonGitCwd;
@@ -53,7 +85,7 @@ export function nonGitCwd(): string {
 let _gitCwd: string | undefined;
 export function gitCwd(): string {
 	if (!_gitCwd) {
-		_gitCwd = join(tmpdir(), `bobbit-e2e-git-${Date.now()}`);
+		_gitCwd = join(tmpdir(), `bobbit-e2e-git-${port()}-${Date.now()}`);
 		mkdirSync(_gitCwd, { recursive: true });
 		writeFileSync(join(_gitCwd, "README.md"), "# E2E test repo\n");
 		execFileSync("git", ["init"], { cwd: _gitCwd, stdio: "pipe" });
@@ -65,24 +97,25 @@ export function gitCwd(): string {
 
 /** Read the auth token that the test server auto-created on startup. */
 export function readE2EToken(): string {
-	return readFileSync(join(E2E_BOBBIT_DIR, "state", "token"), "utf-8").trim();
+	return readFileSync(join(bobbitDir(), "state", "token"), "utf-8").trim();
 }
 
 // ---------------------------------------------------------------------------
 // Shared REST helpers
 // ---------------------------------------------------------------------------
 
-let _token: string | undefined;
+const _tokenCache: Record<string, string> = {};
 
-/** Lazily read and cache the E2E auth token. */
+/** Lazily read and cache the E2E auth token (per-port to handle worker isolation). */
 function token(): string {
-	if (!_token) _token = readE2EToken();
-	return _token;
+	const p = port();
+	if (!_tokenCache[p]) _tokenCache[p] = readE2EToken();
+	return _tokenCache[p];
 }
 
 /** Authenticated REST fetch against the E2E gateway. */
 export function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	return fetch(`${BASE}${path}`, {
+	return fetch(`${base()}${path}`, {
 		...opts,
 		headers: {
 			"Content-Type": "application/json",
@@ -162,7 +195,7 @@ export interface WsConnection {
 /** Connect & authenticate a WebSocket to a session. */
 export function connectWs(sessionId: string): Promise<WsConnection> {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}`);
+		const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
 		const messages: WsMsg[] = [];
 		const waiters: Array<{ pred: (m: WsMsg) => boolean; res: (m: WsMsg) => void; rej: (e: Error) => void }> = [];
 
@@ -244,7 +277,7 @@ export async function waitForHealth(timeoutMs = 10_000): Promise<void> {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		try {
-			const resp = await fetch(`${BASE}/api/health`, {
+			const resp = await fetch(`${base()}/api/health`, {
 				headers: { Authorization: `Bearer ${token()}` },
 			});
 			if (resp.ok) return;

@@ -4,7 +4,7 @@
  * These tests manage their own server lifecycle since they need to control
  * port allocation. They do NOT use the shared webServer gateway.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { createServer as createTcpServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, mkdirSync } from "node:fs";

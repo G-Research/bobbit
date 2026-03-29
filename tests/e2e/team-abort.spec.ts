@@ -4,7 +4,7 @@
  * Verifies: validation (400), membership enforcement (403),
  * successful abort of busy/idle agents.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	apiFetch,
 	createSession,

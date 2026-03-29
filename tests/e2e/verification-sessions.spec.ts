@@ -8,7 +8,7 @@
  * - Step definitions in gate_verification_started event
  * - Verification WS event ordering and completeness
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,

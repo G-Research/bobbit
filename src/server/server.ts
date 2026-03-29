@@ -261,8 +261,10 @@ export function createGateway(config: GatewayConfig) {
 						ws.send(data);
 						continue;
 					}
+					// Session is associated with a different goal — skip it
+					if (session?.teamGoalId || session?.goalId) continue;
 				}
-				// Fallback: if we can't determine goal association, still send
+				// Fallback: send to clients with no goal association
 				// (e.g. the user's browser session viewing the goal dashboard)
 				ws.send(data);
 			}

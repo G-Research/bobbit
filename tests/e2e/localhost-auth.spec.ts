@@ -11,13 +11,13 @@
  * skipped entirely. The --auth flag is the only toggle, and we verify it works.
  */
 
-import { test, expect } from "@playwright/test";
-import { BASE, readE2EToken } from "./e2e-setup.js";
+import { test, expect } from "./gateway-harness.js";
+import { base, readE2EToken } from "./e2e-setup.js";
 
 test.describe("Localhost auth flag", () => {
 	test("health returns localhost: false when --auth is set", async () => {
 		const token = readE2EToken();
-		const res = await fetch(`${BASE}/api/health`, {
+		const res = await fetch(`${base()}/api/health`, {
 			headers: { Authorization: `Bearer ${token}` },
 		});
 		expect(res.status).toBe(200);
@@ -28,7 +28,7 @@ test.describe("Localhost auth flag", () => {
 
 	test("health includes localhost field", async () => {
 		const token = readE2EToken();
-		const res = await fetch(`${BASE}/api/health`, {
+		const res = await fetch(`${base()}/api/health`, {
 			headers: { Authorization: `Bearer ${token}` },
 		});
 		const data = await res.json();
@@ -37,7 +37,7 @@ test.describe("Localhost auth flag", () => {
 
 	test("unauthenticated requests are rejected when --auth is set", async () => {
 		// Complementary to tools-e2e auth tests — confirms --auth forces auth
-		const res = await fetch(`${BASE}/api/sessions`);
+		const res = await fetch(`${base()}/api/sessions`);
 		expect(res.status).toBe(401);
 	});
 });

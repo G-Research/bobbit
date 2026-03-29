@@ -5,7 +5,7 @@
  * configure, status, test, and proxy routes.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { apiFetch } from "./e2e-setup.js";
 
 test.describe("AI Gateway API", () => {

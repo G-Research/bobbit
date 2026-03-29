@@ -8,12 +8,12 @@
  * PUT tests modify YAML files in tools/<group>/. We backup and restore
  * the specific YAML files that are modified by PUT tests.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readE2EToken, BASE, E2E_BOBBIT_DIR } from "./e2e-setup.js";
+import { readE2EToken, base, bobbitDir } from "./e2e-setup.js";
 
-const TOKEN = readE2EToken();
+let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 
 /**
  * YAML files modified by PUT tests — we backup/restore these.
@@ -31,11 +31,11 @@ const yamlBackups = new Map<string, string>();
 
 /** Authenticated fetch helper */
 function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	return fetch(`${BASE}${path}`, {
+	return fetch(`${base()}${path}`, {
 		...opts,
 		headers: {
 			"Content-Type": "application/json",
-			Authorization: `Bearer ${TOKEN}`,
+			Authorization: `Bearer ${TOKEN()}`,
 			...(opts.headers as Record<string, string> || {}),
 		},
 	});
@@ -44,7 +44,7 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 // Back up and restore YAML files around the test suite
 test.beforeAll(() => {
 	for (const yamlPath of MODIFIED_YAMLS) {
-		const abs = join(E2E_BOBBIT_DIR, yamlPath);
+		const abs = join(bobbitDir(), yamlPath);
 		if (existsSync(abs)) {
 			yamlBackups.set(yamlPath, readFileSync(abs, "utf-8"));
 		}
@@ -53,7 +53,7 @@ test.beforeAll(() => {
 
 test.afterAll(() => {
 	for (const [yamlPath, content] of yamlBackups) {
-		const abs = join(E2E_BOBBIT_DIR, yamlPath);
+		const abs = join(bobbitDir(), yamlPath);
 		writeFileSync(abs, content, "utf-8");
 	}
 });
@@ -329,7 +329,7 @@ test.describe("Backward compatibility", () => {
 		];
 
 		for (const { path, method } of endpoints) {
-			const resp = await fetch(`${BASE}${path}`, {
+			const resp = await fetch(`${base()}${path}`, {
 				method,
 				headers: { "Content-Type": "application/json" },
 				body: method === "PUT" ? JSON.stringify({ description: "x" }) : undefined,

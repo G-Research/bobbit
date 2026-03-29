@@ -4,7 +4,7 @@
  * Verifies that when the preview flag is toggled via REST PATCH,
  * a `preview_changed` message is broadcast to all connected WS clients.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	apiFetch,
 	createSession,

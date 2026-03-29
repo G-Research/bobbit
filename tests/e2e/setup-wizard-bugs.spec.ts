@@ -7,7 +7,7 @@
  * Bug 1: No project config API — GET /api/project-config returns 404.
  * Bug 2: Workflow verification uses hardcoded commands instead of template variables.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------

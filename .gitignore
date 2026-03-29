@@ -9,6 +9,8 @@ bobbit2/
 test-results/
 bobbit-screenshot.png
 tests/fullstack/screenshots/
+tests/e2e/screenshots/
+.e2e-worker*
 *-report.html
 nul
 .pi/

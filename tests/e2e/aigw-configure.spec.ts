@@ -5,7 +5,7 @@
  * then tests configure → status → model discovery end-to-end.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import http from "node:http";
 import { apiFetch } from "./e2e-setup.js";
 

@@ -12,8 +12,8 @@ npm run restart-server # Signal the harness to rebuild & restart the server
 npm start              # Run built gateway (serves embedded UI)
 npm run check          # Type-check both server and web without emitting
 npm test               # Run all tests (unit + E2E)
-npm run test:unit      # Unit tests (Playwright file:// fixtures)
-npm run test:e2e       # E2E tests (auto-starts sandboxed gateway via Playwright webServer)
+npm run test:unit      # Unit tests — Node test runner + Playwright file:// fixtures (<30s)
+npm run test:e2e       # E2E tests — each worker spawns its own gateway (<90s)
 ```
 
 ### Dev server harness
@@ -41,11 +41,14 @@ Pipe Playwright output through the test filter to keep context lean — it outpu
 # Type check first
 npm run check
 
-# Unit tests (fast, no server needed)
-npx playwright test --config tests/playwright.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
+# Unit tests — Node test runner + Playwright file:// fixtures (<30s, no server)
+npm run test:unit 2>&1 | tail -5
 
-# E2E tests (starts sandboxed gateway on port 3099 automatically)
-npm run build:server && npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
+# E2E tests — each worker spawns its own isolated gateway (<90s)
+npm run test:e2e 2>&1 | tail -5
+
+# Or use the JSON filter for structured output
+npm run build && npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
 ```
 
 The test filter accepts verbosity flags you can use when debugging failures:
@@ -53,16 +56,18 @@ The test filter accepts verbosity flags you can use when debugging failures:
 - `--verbose` — lists every test with OK/FAIL/SKIP status
 - `--full` — raw JSON pass-through
 
-If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. Server changes (`src/server/`) need E2E tests too. The E2E `npm run build:server` step recompiles automatically.
+If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. Server changes (`src/server/`) need E2E tests too.
 
 **Test structure:**
 
-- **Unit tests** (`tests/*.spec.ts`): Playwright with `file://` fixtures — plain HTML/JS files that test logic without a build step. See `tests/mobile-header.spec.ts` for the pattern.
-- **E2E tests** (`tests/e2e/*.spec.ts`): Run against a real sandboxed gateway on port 3099, auto-started by Playwright's `webServer` config. Covers REST API, WebSocket protocol, session lifecycle, and agent tool invocations.
+- **Unit tests** (`tests/*.spec.ts` + `tests/*.test.ts`): Playwright with `file://` fixtures (plain HTML/JS files that test UI logic without a build step) plus Node test runner tests for server logic. See `tests/mobile-header.spec.ts` for the Playwright pattern.
+- **E2E tests** (`tests/e2e/*.spec.ts`): Each Playwright worker spawns its own isolated gateway (unique port, unique `BOBBIT_DIR`, mock agent). Tests cover REST API, WebSocket protocol, session lifecycle, agent tool invocations, and fullstack browser tests against the real UI. The gateway fixture is in `tests/e2e/gateway-harness.ts`.
 
-**Writing new tests**: Prefer `file://` fixtures with plain HTML/JS that simulate the logic under test. Extract state machine logic into testable functions where possible. For tests that need a real server (WebSocket, API integration), add to `tests/e2e/` — they use the `webServer` pattern in `playwright-e2e.config.ts`.
+**Writing new tests**: Prefer `file://` fixtures with plain HTML/JS that simulate the logic under test. Extract state machine logic into testable functions where possible. For tests that need a real server (WebSocket, API integration, UI), add to `tests/e2e/` — import `test` from `./gateway-harness.js` to get an auto-started gateway per worker. For fullstack browser tests, use a Playwright `page` fixture alongside the gateway (see `session-lifecycle-ui.spec.ts`).
 
-**Test isolation**: All tests must operate in isolation. Avoid using centralised or non-ephemeral systems and dependencies. E2E tests run with `BOBBIT_DIR` set to `.e2e-bobbit-<id>/` (a gitignored temp directory), so the test server's state files (sessions, goals, tasks, costs, tokens) are fully separated from the real dev server's `.bobbit/`. Never read from or write to `.bobbit/` in tests — use the isolated directory via `readE2EToken()` from `tests/e2e/e2e-setup.ts`. Unit tests should use `file://` fixtures with no external dependencies.
+**Test isolation**: All tests must operate in isolation. E2E tests each get their own gateway with a unique `BOBBIT_DIR` (`.e2e-worker-<port>/`, gitignored, cleaned up on teardown). Tests never share server state. Never read from or write to `.bobbit/` in tests — use the isolated directory via helpers from `tests/e2e/e2e-setup.ts`. Unit tests should use `file://` fixtures with no external dependencies.
+
+**Screenshots**: Fullstack E2E tests can capture screenshots via `SCREENSHOT=1` env var. Screenshots are saved to `tests/e2e/screenshots/` (gitignored).
 
 **Do NOT start background servers manually** from bash (`node server.js &`, `nohup`, etc.) — the bash tool waits for all stdout/stderr pipes to close, so backgrounded processes that inherit those FDs cause the bash tool to hang forever and crash the agent session. Always use Playwright's `webServer` config instead.
 

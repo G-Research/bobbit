@@ -5,21 +5,21 @@
  * A mock MCP server (tests/fixtures/mock-mcp-server.mjs) provides
  * deterministic tool responses via stdio transport.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readE2EToken, BASE, E2E_BOBBIT_DIR } from "./e2e-setup.js";
+import { readE2EToken, base, bobbitDir } from "./e2e-setup.js";
 
-const TOKEN = readE2EToken();
+let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 
 /** Authenticated fetch helper */
 function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	return fetch(`${BASE}${path}`, {
+	return fetch(`${base()}${path}`, {
 		...opts,
 		headers: {
 			"Content-Type": "application/json",
-			Authorization: `Bearer ${TOKEN}`,
+			Authorization: `Bearer ${TOKEN()}`,
 			...(opts.headers as Record<string, string> || {}),
 		},
 	});
@@ -28,7 +28,7 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 // Resolve paths for the mock MCP server
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
-const MCP_CONFIG_DIR = join(E2E_BOBBIT_DIR, "config");
+const MCP_CONFIG_DIR = join(bobbitDir(), "config");
 const MCP_CONFIG_PATH = join(MCP_CONFIG_DIR, "mcp.json");
 
 /** The MCP config that points to our mock server */
@@ -221,7 +221,7 @@ test.describe("MCP API Authentication", () => {
 		];
 
 		for (const { path, method } of endpoints) {
-			const resp = await fetch(`${BASE}${path}`, {
+			const resp = await fetch(`${base()}${path}`, {
 				method,
 				headers: { "Content-Type": "application/json" },
 				body: method === "POST" ? JSON.stringify({}) : undefined,

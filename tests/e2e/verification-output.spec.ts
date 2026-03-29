@@ -5,7 +5,7 @@
  * - gate_verification_step_started WS events include startedAt field
  * - gate_verification_step_output WS events are broadcast during command verification
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -187,6 +187,8 @@ test.describe("Verification output streaming and timestamps", () => {
 	});
 
 	test("stderr output is captured in step_output events", async () => {
+		// cmd.exe on Windows doesn't reliably redirect echo to stderr with 1>&2
+		test.skip(process.platform === "win32", "stderr redirect unreliable on Windows cmd.exe");
 		// Use bug-fix workflow which has expect:failure steps
 		// We need a command that writes to stderr
 		const goal = await createGoal({

@@ -11,9 +11,9 @@
  *
  * Run with: npm run build:server && npx playwright test --config playwright-e2e.config.ts tests/e2e/tools-e2e.spec.ts
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import WebSocket from "ws";
-import { readE2EToken, BASE, WS_BASE, waitForHealth, nonGitCwd } from "./e2e-setup.js";
+import { readE2EToken, base, wsBase, waitForHealth, nonGitCwd } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Config — agent tool tests need much longer timeouts
@@ -24,15 +24,15 @@ test.setTimeout(30_000);
 // Helpers
 // ---------------------------------------------------------------------------
 
-const TOKEN = readE2EToken();
+let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 
 /** Authenticated REST helper */
 function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	return fetch(`${BASE}${path}`, {
+	return fetch(`${base()}${path}`, {
 		...opts,
 		headers: {
 			"Content-Type": "application/json",
-			Authorization: `Bearer ${TOKEN}`,
+			Authorization: `Bearer ${TOKEN()}`,
 			...(opts.headers as Record<string, string> || {}),
 		},
 	});
@@ -65,7 +65,7 @@ function connectWs(sessionId: string): Promise<{
 	close: () => void;
 }> {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}`);
+		const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
 		const messages: WsMsg[] = [];
 		const waiters: Array<{ pred: (m: WsMsg) => boolean; res: (m: WsMsg) => void; rej: (e: Error) => void }> = [];
 
@@ -80,7 +80,7 @@ function connectWs(sessionId: string): Promise<{
 			}
 		});
 
-		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: TOKEN })));
+		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: TOKEN() })));
 		ws.on("error", reject);
 
 		const iv = setInterval(() => {
@@ -515,12 +515,12 @@ Do something with $ARGUMENTS.
 
 test.describe("Auth enforcement", () => {
 	test("rejects unauthenticated requests", async () => {
-		expect((await fetch(`${BASE}/api/sessions`)).status).toBe(401);
-		expect((await fetch(`${BASE}/api/goals`)).status).toBe(401);
+		expect((await fetch(`${base()}/api/sessions`)).status).toBe(401);
+		expect((await fetch(`${base()}/api/goals`)).status).toBe(401);
 	});
 
 	test("rejects invalid token", async () => {
-		const resp = await fetch(`${BASE}/api/sessions`, {
+		const resp = await fetch(`${base()}/api/sessions`, {
 			headers: { Authorization: "Bearer invalid-token-12345" },
 		});
 		expect(resp.status).toBe(401);
@@ -554,7 +554,7 @@ test.describe("WebSocket protocol", () => {
 	test("rejects invalid auth token", async () => {
 		sessionId = await createSession();
 		const result = await new Promise<string>((resolve) => {
-			const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}`);
+			const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
 			ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: "bad-token" })));
 			ws.on("message", (data) => {
 				const msg = JSON.parse(data.toString());

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { apiFetch, gitCwd, nonGitCwd } from "./e2e-setup.js";
