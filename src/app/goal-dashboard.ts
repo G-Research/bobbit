@@ -4,7 +4,7 @@ import "../ui/components/VerificationOutputModal.js";
 import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { state, renderApp, type Goal } from "./state.js";
+import { state, requestRender, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, type GateState, type GateSignal } from "./api.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
@@ -124,7 +124,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	currentGoalId = goalId;
 	loading = true;
 	error = "";
-	renderApp();
+	requestRender();
 
 	document.addEventListener("gate-verification-event", handleLiveVerificationEvent);
 	startAgentPolling(goalId);
@@ -201,7 +201,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		loading = false;
 	}
 
-	renderApp();
+	requestRender();
 }
 
 async function fetchActiveVerifications(goalId: string): Promise<void> {
@@ -236,7 +236,7 @@ async function fetchActiveVerifications(goalId: string): Promise<void> {
 			startLiveVerifTimer();
 		}
 
-		renderApp();
+		requestRender();
 	} catch (err) {
 		// Non-fatal — WS events will still work
 		console.warn("[dashboard] Failed to fetch active verifications:", err);
@@ -286,7 +286,7 @@ export async function refreshDashboardGoal(): Promise<void> {
 		const res = await gatewayFetch(`/api/goals/${currentGoalId}`);
 		if (res.ok) {
 			currentGoal = await res.json();
-			renderApp();
+			requestRender();
 		}
 	} catch { /* ignore — polling will catch up */ }
 }
@@ -335,7 +335,7 @@ function startTaskPolling(goalId: string): void {
 				const newTasks: Task[] = data.tasks || [];
 				if (JSON.stringify(newTasks) !== JSON.stringify(tasks)) {
 					tasks = newTasks;
-					renderApp();
+					requestRender();
 				}
 			}
 		} catch { /* ignore */ }
@@ -348,12 +348,12 @@ function stopTaskPolling(): void {
 
 function startAgentPolling(goalId: string): void {
 	stopAgentPolling();
-	fetchAgents(goalId).then((a) => { agents = a; renderApp(); });
+	fetchAgents(goalId).then((a) => { agents = a; requestRender(); });
 	agentPollTimer = setInterval(async () => {
 		agents = await fetchAgents(goalId);
 		const teamState = await getTeamState(goalId);
 		teamActive = teamState != null;
-		renderApp();
+		requestRender();
 	}, 5000);
 }
 
@@ -370,7 +370,7 @@ function startGatePolling(goalId: string): void {
 			const newGates = await fetchGoalGates(goalId);
 			if (JSON.stringify(newGates) !== JSON.stringify(gates)) {
 				gates = newGates;
-				renderApp();
+				requestRender();
 			}
 			// Also refresh active verifications alongside gate polling
 			fetchActiveVerifications(goalId);
@@ -398,7 +398,7 @@ function handleLiveVerificationEvent(e: Event) {
 			}));
 			liveVerifications.set(key, { gateId: detail.gateId, signalId: detail.signalId, steps, overallStatus: "running" });
 			startLiveVerifTimer();
-			renderApp();
+			requestRender();
 			break;
 		}
 		case "gate_verification_step_started": {
@@ -409,7 +409,7 @@ function handleLiveVerificationEvent(e: Event) {
 					startedAt: detail.startedAt || entry.steps[detail.stepIndex].startedAt,
 					sessionId: detail.sessionId,
 				};
-				renderApp();
+				requestRender();
 			}
 			break;
 		}
@@ -433,7 +433,7 @@ function handleLiveVerificationEvent(e: Event) {
 				output: detail.output,
 				sessionId: detail.sessionId ?? entry.steps[detail.stepIndex].sessionId,
 			};
-			renderApp();
+			requestRender();
 			break;
 		}
 		case "gate_verification_step_output": {
@@ -452,11 +452,11 @@ function handleLiveVerificationEvent(e: Event) {
 				entry.overallStatus = detail.status;
 				// Re-fetch gates to update signal history
 				if (currentGoalId) {
-					fetchGoalGates(currentGoalId).then(g => { gates = g; renderApp(); });
+					fetchGoalGates(currentGoalId).then(g => { gates = g; requestRender(); });
 				}
 			}
 			stopLiveVerifTimerIfDone();
-			renderApp();
+			requestRender();
 			break;
 		}
 	}
@@ -464,7 +464,16 @@ function handleLiveVerificationEvent(e: Event) {
 
 function startLiveVerifTimer() {
 	if (liveVerifTimer) return;
-	liveVerifTimer = setInterval(() => renderApp(), 1000);
+	liveVerifTimer = setInterval(() => {
+		const els = document.querySelectorAll('[data-verif-start]');
+		els.forEach(el => {
+			const start = parseInt(el.getAttribute('data-verif-start')!, 10);
+			if (start > 0) {
+				const elapsed = Math.floor((Date.now() - start) / 1000);
+				el.textContent = `${elapsed}s`;
+			}
+		});
+	}, 1000);
 }
 
 function stopLiveVerifTimerIfDone() {
@@ -489,7 +498,7 @@ function startCostPolling(goalId: string): void {
 				const newCost: GoalCost = await res.json();
 				if (newCost.totalCost !== goalCost?.totalCost) {
 					goalCost = newCost;
-					renderApp();
+					requestRender();
 				}
 			}
 		} catch { /* ignore */ }
@@ -531,7 +540,7 @@ function startGitStatusPolling(goalId: string): void {
 				needRender = true;
 			}
 		} catch { /* ignore */ }
-		if (needRender) renderApp();
+		if (needRender) requestRender();
 	}, 60_000);
 }
 
@@ -754,28 +763,28 @@ function deriveBadges(commitList: CommitInfo[], taskList: Task[]): Map<string, C
 
 async function handleStartTeam(goalId: string): Promise<void> {
 	teamStarting = true;
-	renderApp();
+	requestRender();
 	const sessionId = await startTeam(goalId);
 	teamStarting = false;
 	if (sessionId) {
 		teamActive = true;
-		renderApp();
+		requestRender();
 		connectToSession(sessionId, false);
 	} else {
-		renderApp();
+		requestRender();
 	}
 }
 
 async function handleEndTeam(goalId: string): Promise<void> {
 	teamStopping = true;
-	renderApp();
+	requestRender();
 	const ok = await teardownTeam(goalId);
 	teamStopping = false;
 	if (ok) {
 		teamActive = false;
 		agents = [];
 	}
-	renderApp();
+	requestRender();
 }
 
 // ============================================================================
@@ -816,7 +825,7 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>
 		else prStatus = null;
 	} catch { /* ignore */ }
 	refreshPrStatusCache();
-	renderApp();
+	requestRender();
 }
 
 async function handleGitFetch(): Promise<void> {
@@ -826,7 +835,7 @@ async function handleGitFetch(): Promise<void> {
 		const res = await gatewayFetch(`/api/goals/${goalId}/git-status?fetch=true`).catch(() => null);
 		if (res && res.ok) {
 			gitStatus = await res.json();
-			renderApp();
+			requestRender();
 		}
 	} catch { /* ignore */ }
 }
@@ -866,7 +875,7 @@ async function handleRetrySetup(goalId: string): Promise<void> {
 				(currentGoal as any).setupStatus = "preparing";
 				(currentGoal as any).setupError = undefined;
 			}
-			renderApp();
+			requestRender();
 		}
 	} catch (err) {
 		console.error("[goal-dashboard] Retry setup failed:", err);
@@ -1008,19 +1017,19 @@ function renderSessionButton(goal: Goal): TemplateResult {
 async function toggleRoleDropdown(): Promise<void> {
 	if (roleDropdownOpen) {
 		roleDropdownOpen = false;
-		renderApp();
+		requestRender();
 		return;
 	}
 	if (state.roles.length === 0) await fetchRoles();
 	roleDropdownOpen = true;
-	renderApp();
+	requestRender();
 }
 
 // Close role dropdown on outside click
 document.addEventListener("click", () => {
 	if (roleDropdownOpen) {
 		roleDropdownOpen = false;
-		renderApp();
+		requestRender();
 	}
 });
 
@@ -1052,7 +1061,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						e.stopPropagation();
 						if (!costPopoverOpen) {
 							costPopoverOpen = true;
-							renderApp();
+							requestRender();
 						}
 					}}
 					title="Click for cost breakdown">
@@ -1063,7 +1072,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.open=${costPopoverOpen}
 						.goalId=${currentGoal?.id || ""}
 						anchor="left"
-						@close=${(e: Event) => { e.stopPropagation(); costPopoverOpen = false; renderApp(); }}
+						@close=${(e: Event) => { e.stopPropagation(); costPopoverOpen = false; requestRender(); }}
 					></cost-popover>
 				</div>
 			</div>
@@ -1166,7 +1175,7 @@ function toggleGateExpand(gateId: string): void {
 	} else {
 		expandedGateIds.add(gateId);
 	}
-	renderApp();
+	requestRender();
 }
 
 function toggleSignalExpand(signalId: string): void {
@@ -1175,7 +1184,7 @@ function toggleSignalExpand(signalId: string): void {
 	} else {
 		expandedSignalIds.add(signalId);
 	}
-	renderApp();
+	requestRender();
 }
 
 // ============================================================================
@@ -1184,7 +1193,7 @@ function toggleSignalExpand(signalId: string): void {
 
 function setTab(tab: typeof dashboardTab): void {
 	dashboardTab = tab;
-	renderApp();
+	requestRender();
 }
 
 function renderTabBar(): TemplateResult {
@@ -1666,7 +1675,7 @@ function toggleLiveStepExpand(key: string): void {
 	} else {
 		expandedLiveStepKeys.add(key);
 	}
-	renderApp();
+	requestRender();
 }
 
 function formatStepElapsed(startedAt: number): string {
@@ -1731,7 +1740,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							@click=${clickable ? () => {
 								if (isRunningCmd) {
 									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || "" };
-									renderApp();
+									requestRender();
 								} else if (hasOutput) {
 									toggleLiveStepExpand(stepKey);
 								}
@@ -1741,9 +1750,10 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							</span>
 							<span class="verify-card__name">${step.name}</span>
 							<span class="verify-card__type-badge ${isLlm ? "verify-card__type-badge--llm" : ""}">${step.type}</span>
-							<span class="verify-card__duration">
-								${isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
-							</span>
+							${isRunning
+								? html`<span class="verify-card__duration" data-verif-start="${step.startedAt}">${formatStepElapsed(step.startedAt)}</span>`
+								: html`<span class="verify-card__duration">${step.durationMs != null ? formatStepDuration(step.durationMs) : ""}</span>`
+							}
 							${step.sessionId ? html`
 								<a href="/?token=${encodeURIComponent(localStorage.getItem("gateway.token") || "")}#/session/${step.sessionId}"
 								   target="_blank" rel="noopener"
@@ -1830,7 +1840,7 @@ export function renderGoalDashboard(): TemplateResult {
 				.stepName=${dashboardModalStep.stepName}
 				.open=${true}
 				.initialOutput=${dashboardModalStep.liveOutput}
-				@close=${() => { dashboardModalStep = null; renderApp(); }}
+				@close=${() => { dashboardModalStep = null; requestRender(); }}
 			></verification-output-modal>
 		` : nothing}
 	`;
