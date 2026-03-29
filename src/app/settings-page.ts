@@ -933,35 +933,46 @@ async function saveProjectConfig(): Promise<void> {
 	renderApp();
 }
 
+/** Human-readable labels for known project config keys. */
+const PROJECT_KEY_LABELS: Record<string, string> = {
+	build_command: "Build",
+	test_command: "Test",
+	typecheck_command: "Type Check",
+	test_unit_command: "Test (Unit)",
+	test_e2e_command: "Test (E2E)",
+	worktree_setup_command: "Worktree Setup",
+	skill_directories: "Skill Dirs",
+};
+
+function projectKeyLabel(key: string): string {
+	return PROJECT_KEY_LABELS[key] || key;
+}
+
 function renderProjectTab() {
 	loadProjectConfig();
 
-	// Collect all keys: defaults first, then custom user keys
-	const defaultKeys = Object.keys(projectDefaults).filter((k) => k !== "default_thinking_level");
+	// Known command keys (from defaults), excluding thinking level (handled in Models tab)
+	const commandKeys = Object.keys(projectDefaults).filter((k) => k !== "default_thinking_level");
+	// Custom keys not in defaults
 	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults) && k !== "default_thinking_level");
 
-	return html`
-		<div class="flex flex-col gap-3">
+	// Shared label width class for vertical alignment across all sections
+	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
+	const inputClass = `flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
 
-			<!-- Default entries -->
-			${defaultKeys.map((key) => html`
-				<div class="flex items-end gap-2">
-					<div class="flex flex-col gap-1 flex-1 min-w-0">
-						<label class="text-xs text-muted-foreground">Key</label>
+	return html`
+		<div class="flex flex-col gap-4">
+
+			<!-- Commands -->
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
+				${commandKeys.map((key) => html`
+					<div class="flex items-center gap-3">
+						<span class="${labelClass}">${projectKeyLabel(key)}</span>
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-muted/50 text-muted-foreground text-sm
-								focus:outline-none cursor-not-allowed"
-							.value=${key}
-							disabled
-						/>
-					</div>
-					<div class="flex flex-col gap-1 flex-[2] min-w-0">
-						<label class="text-xs text-muted-foreground">Value</label>
-						<input
-							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="${inputClass} ${projectConfig[key] && projectConfig[key] !== projectDefaults[key] ? "text-foreground" : "text-muted-foreground"}"
 							placeholder=${projectDefaults[key] || ""}
 							.value=${projectConfig[key] || ""}
 							@input=${(e: Event) => {
@@ -971,20 +982,22 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
+						<div class="w-7 shrink-0"></div>
 					</div>
-					<div class="w-9 shrink-0"></div>
-				</div>
-			`)}
+				`)}
+			</div>
 
-			<!-- Custom user entries -->
-			${customKeys.map((key) => html`
-				<div class="flex items-end gap-2">
-					<div class="flex flex-col gap-1 flex-1 min-w-0">
-						<label class="text-xs text-muted-foreground">Key</label>
+			<hr class="border-border" />
+
+			<!-- Custom settings -->
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Custom Settings</div>
+				${customKeys.map((key) => html`
+					<div class="flex items-center gap-3">
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="w-28 sm:w-44 shrink-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+								font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
 							.value=${key}
 							@input=${(e: Event) => {
 								const newKey = (e.target as HTMLInputElement).value;
@@ -995,13 +1008,9 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
-					</div>
-					<div class="flex flex-col gap-1 flex-[2] min-w-0">
-						<label class="text-xs text-muted-foreground">Value</label>
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="${inputClass} text-foreground"
 							.value=${projectConfig[key] || ""}
 							@input=${(e: Event) => {
 								projectConfig[key] = (e.target as HTMLInputElement).value;
@@ -1009,25 +1018,20 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
+						<button
+							class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+							title="Remove"
+							@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; renderApp(); }}
+						>${icon(X, "xs")}</button>
 					</div>
-					<button
-						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-						title="Remove"
-						@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; renderApp(); }}
-					>${icon(X, "xs")}</button>
-				</div>
-			`)}
-
-			<!-- New entries being added -->
-			${projectNewEntries.map((entry, i) => html`
-				<div class="flex items-end gap-2">
-					<div class="flex flex-col gap-1 flex-1 min-w-0">
-						<label class="text-xs text-muted-foreground">Key</label>
+				`)}
+				${projectNewEntries.map((entry, i) => html`
+					<div class="flex items-center gap-3">
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
-							placeholder="setting_name"
+							class="w-28 sm:w-44 shrink-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+								font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="key"
 							.value=${entry.key}
 							@input=${(e: Event) => {
 								projectNewEntries[i].key = (e.target as HTMLInputElement).value;
@@ -1035,13 +1039,9 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
-					</div>
-					<div class="flex flex-col gap-1 flex-[2] min-w-0">
-						<label class="text-xs text-muted-foreground">Value</label>
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="${inputClass} text-foreground"
 							placeholder="value"
 							.value=${entry.value}
 							@input=${(e: Event) => {
@@ -1050,24 +1050,22 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
+						<button
+							class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+							title="Remove"
+							@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; renderApp(); }}
+						>${icon(X, "xs")}</button>
 					</div>
-					<button
-						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-						title="Remove"
-						@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; renderApp(); }}
-					>${icon(X, "xs")}</button>
-				</div>
-			`)}
+				`)}
+				<button
+					class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground
+						hover:bg-muted rounded-md transition-colors self-start"
+					@click=${() => { projectNewEntries.push({ key: "", value: "" }); renderApp(); }}
+				>${icon(Plus, "xs")} Add Setting</button>
+			</div>
 
-			<!-- Add Setting button -->
-			<button
-				class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground
-					hover:bg-muted rounded-md transition-colors self-start"
-				@click=${() => { projectNewEntries.push({ key: "", value: "" }); renderApp(); }}
-			>${icon(Plus, "xs")} Add Setting</button>
-
-			<!-- Save button -->
-			<div class="flex items-center gap-3 pt-2">
+			<!-- Save -->
+			<div class="flex items-center gap-3 pt-2 border-t border-border">
 				<button
 					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
 						hover:bg-primary/90 transition-colors disabled:opacity-50"
@@ -1221,7 +1219,7 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto">
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
+				<div class="${activeTab === "project" ? "" : activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
 					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "project" ? renderProjectTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}
