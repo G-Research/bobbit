@@ -79,6 +79,7 @@ test.describe("Gates API", () => {
 			expect(ids).toContain("implementation");
 			expect(ids).toContain("documentation");
 			expect(ids).toContain("ready-to-merge");
+			expect(ids).toContain("ready-to-merge");
 
 			for (const gate of gates) {
 				expect(gate.status).toBe("pending");

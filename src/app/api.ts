@@ -1,7 +1,6 @@
 import {
 	state,
-	setState,
-	requestRender,
+	renderApp,
 	expandedGoals,
 	saveExpandedGoals,
 	GW_URL_KEY,
@@ -52,7 +51,7 @@ export function updateLocalSessionTitle(sessionId: string, title: string): void 
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
 		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], title };
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -60,7 +59,7 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
 		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status, lastActivity: Date.now() };
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -83,66 +82,107 @@ export function stopSessionPolling(): void {
 export async function refreshSessions(): Promise<void> {
 	const isInitial = state.gatewaySessions.length === 0 && !state.sessionsError;
 	if (isInitial) {
-		setState({ sessionsLoading: true, sessionsError: "" });
+		state.sessionsLoading = true;
+		state.sessionsError = "";
+		renderApp();
 	}
 
+	let sessionsChanged = false;
+	let goalsChanged = false;
+
 	try {
+		// Build URLs with generation params for conditional fetch
+		const sessionsUrl = state.sessionsGeneration >= 0
+			? `/api/sessions?since=${state.sessionsGeneration}`
+			: "/api/sessions";
+		const goalsUrl = state.goalsGeneration >= 0
+			? `/api/goals?since=${state.goalsGeneration}`
+			: "/api/goals";
+
 		const [sessionsRes, goalsRes] = await Promise.all([
-			gatewayFetch("/api/sessions"),
-			gatewayFetch("/api/goals"),
+			gatewayFetch(sessionsUrl),
+			gatewayFetch(goalsUrl),
 		]);
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
 		const sessionsData = await sessionsRes.json();
-		const newSessions: GatewaySession[] = sessionsData.sessions || [];
 
-		// Beep when a non-active background session finishes streaming
-		const activeId = state.remoteAgent?.gatewaySessionId;
-		for (const s of newSessions) {
-			const prev = _prevSessionStatus.get(s.id);
-			const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
-			if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
-				RemoteAgent.playNotificationBeep();
-				showFaviconBadge();
+		// Process sessions — skip if server says unchanged
+		if (sessionsData.changed === false) {
+			// Generation matches — nothing to do
+		} else {
+			sessionsChanged = true;
+			const newSessions: GatewaySession[] = sessionsData.sessions || [];
+
+			// Beep when a non-active background session finishes streaming
+			const activeId = state.remoteAgent?.gatewaySessionId;
+			for (const s of newSessions) {
+				const prev = _prevSessionStatus.get(s.id);
+				const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
+				if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
+					RemoteAgent.playNotificationBeep();
+					showFaviconBadge();
+				}
+			}
+			for (const s of newSessions) {
+				_prevSessionStatus.set(s.id, s.status);
+			}
+
+			state.gatewaySessions = newSessions;
+
+			for (const s of state.gatewaySessions) {
+				if (s.colorIndex !== undefined && !sessionColorMap.has(s.id)) {
+					sessionColorMap.set(s.id, s.colorIndex);
+				}
+				sessionHueRotation(s.id);
+			}
+
+			if (sessionsData.generation !== undefined) {
+				state.sessionsGeneration = sessionsData.generation;
 			}
 		}
-		for (const s of newSessions) {
-			_prevSessionStatus.set(s.id, s.status);
-		}
 
-		for (const s of newSessions) {
-			if (s.colorIndex !== undefined && !sessionColorMap.has(s.id)) {
-				sessionColorMap.set(s.id, s.colorIndex);
-			}
-			sessionHueRotation(s.id);
-		}
-
-		let newGoals = state.goals;
+		// Process goals — skip if server says unchanged
 		if (goalsRes.ok) {
 			const goalsData = await goalsRes.json();
-			const prevGoalIds = new Set(state.goals.map((g) => g.id));
-			newGoals = goalsData.goals || [];
-			// Auto-expand only newly discovered goals that have sessions — never
-			// re-expand a goal the user has already seen (and may have collapsed).
-			for (const g of newGoals) {
-				if (!prevGoalIds.has(g.id) && newSessions.some((s) => s.goalId === g.id)) {
-					expandedGoals.add(g.id);
-					saveExpandedGoals();
+			if (goalsData.changed === false) {
+				// Generation matches — nothing to do
+			} else {
+				goalsChanged = true;
+				const prevGoalIds = new Set(state.goals.map((g) => g.id));
+				state.goals = goalsData.goals || [];
+				// Auto-expand only newly discovered goals that have sessions — never
+				// re-expand a goal the user has already seen (and may have collapsed).
+				for (const g of state.goals) {
+					if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
+						expandedGoals.add(g.id);
+						saveExpandedGoals();
+					}
+				}
+
+				if (goalsData.generation !== undefined) {
+					state.goalsGeneration = goalsData.generation;
 				}
 			}
 		}
 
-		setState({ gatewaySessions: newSessions, goals: newGoals, sessionsError: "", sessionsLoading: false });
+		state.sessionsError = "";
 	} catch (err) {
 		if (isInitial) {
-			setState({ sessionsError: err instanceof Error ? err.message : String(err), gatewaySessions: [], sessionsLoading: false });
-		} else {
-			setState({ sessionsLoading: false });
+			state.sessionsError = err instanceof Error ? err.message : String(err);
+			state.gatewaySessions = [];
+		}
+	} finally {
+		state.sessionsLoading = false;
+		if (sessionsChanged || goalsChanged || isInitial) {
+			renderApp();
 		}
 	}
 
 	// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion).
-	// These call requestRender() only if data actually changed, avoiding redundant re-renders.
-	refreshGateStatusCache();
+	// These call renderApp() only if data actually changed, avoiding redundant re-renders.
+	if (goalsChanged || isInitial) {
+		refreshGateStatusCache();
+	}
 	const now = Date.now();
 	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS && document.visibilityState === "visible") {
 		_lastPrRefresh = now;
@@ -162,7 +202,7 @@ export async function refreshSessions(): Promise<void> {
 							changed = true;
 						}
 					}
-					if (changed) requestRender();
+					if (changed) renderApp();
 				}
 			})
 			.catch(() => {});
@@ -197,7 +237,8 @@ export async function fetchArchivedSessions(): Promise<void> {
 		const data = await res.json();
 		const sessions: GatewaySession[] = data.sessions || [];
 		// Filter to only archived ones
-		setState({ archivedSessions: sessions.filter((s: any) => s.archived === true) });
+		state.archivedSessions = sessions.filter((s: any) => s.archived === true);
+		renderApp();
 	} catch {
 		// Silently fail
 	}
@@ -226,7 +267,7 @@ async function refreshGateStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) requestRender();
+	if (changed) renderApp();
 }
 
 /** Fetch PR status for all goals with branches and update the cache. */
@@ -268,7 +309,7 @@ export async function refreshPrStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) requestRender();
+	if (changed) renderApp();
 	} finally {
 		_prRefreshInFlight = false;
 	}
@@ -543,22 +584,6 @@ export async function deleteWorkflow(id: string): Promise<boolean> {
 	} catch (err) {
 		showConnectionError("Failed to delete workflow", err instanceof Error ? err.message : String(err));
 		return false;
-	}
-}
-
-export async function cloneWorkflow(id: string): Promise<Workflow | null> {
-	try {
-		const res = await gatewayFetch(`/api/workflows/${encodeURIComponent(id)}/clone`, {
-			method: "POST",
-		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
-		return await res.json();
-	} catch (err) {
-		showConnectionError("Failed to clone workflow", err instanceof Error ? err.message : String(err));
-		return null;
 	}
 }
 
@@ -870,11 +895,11 @@ export async function fetchRoles(): Promise<RoleData[]> {
 		const data = await res.json();
 		const roles: RoleData[] = data.roles || data || [];
 		// Also cache into state for the role picker sidebar
-		setState({ roles: roles.map((r) => ({
+		state.roles = roles.map((r) => ({
 			name: r.name,
 			label: r.label,
 			accessory: r.accessory,
-		})) });
+		}));
 		return roles;
 	} catch (err) {
 		console.error("[role-api] fetchRoles failed:", err);
@@ -1011,7 +1036,8 @@ export async function dismissSetup(): Promise<void> {
 	try {
 		await gatewayFetch("/api/setup-status/dismiss", { method: "POST" });
 	} catch { /* ignore */ }
-	setState({ setupComplete: true });
+	state.setupComplete = true;
+	renderApp();
 }
 
 // ============================================================================
