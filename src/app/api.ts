@@ -109,37 +109,35 @@ export async function refreshSessions(): Promise<void> {
 			_prevSessionStatus.set(s.id, s.status);
 		}
 
-		state.gatewaySessions = newSessions;
-
-		for (const s of state.gatewaySessions) {
+		for (const s of newSessions) {
 			if (s.colorIndex !== undefined && !sessionColorMap.has(s.id)) {
 				sessionColorMap.set(s.id, s.colorIndex);
 			}
 			sessionHueRotation(s.id);
 		}
 
+		let newGoals = state.goals;
 		if (goalsRes.ok) {
 			const goalsData = await goalsRes.json();
 			const prevGoalIds = new Set(state.goals.map((g) => g.id));
-			state.goals = goalsData.goals || [];
+			newGoals = goalsData.goals || [];
 			// Auto-expand only newly discovered goals that have sessions — never
 			// re-expand a goal the user has already seen (and may have collapsed).
-			for (const g of state.goals) {
-				if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
+			for (const g of newGoals) {
+				if (!prevGoalIds.has(g.id) && newSessions.some((s) => s.goalId === g.id)) {
 					expandedGoals.add(g.id);
 					saveExpandedGoals();
 				}
 			}
 		}
 
-		state.sessionsError = "";
+		setState({ gatewaySessions: newSessions, goals: newGoals, sessionsError: "", sessionsLoading: false });
 	} catch (err) {
 		if (isInitial) {
-			state.sessionsError = err instanceof Error ? err.message : String(err);
-			state.gatewaySessions = [];
+			setState({ sessionsError: err instanceof Error ? err.message : String(err), gatewaySessions: [], sessionsLoading: false });
+		} else {
+			setState({ sessionsLoading: false });
 		}
-	} finally {
-		setState({ sessionsLoading: false });
 	}
 
 	// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion).
@@ -872,11 +870,11 @@ export async function fetchRoles(): Promise<RoleData[]> {
 		const data = await res.json();
 		const roles: RoleData[] = data.roles || data || [];
 		// Also cache into state for the role picker sidebar
-		state.roles = roles.map((r) => ({
+		setState({ roles: roles.map((r) => ({
 			name: r.name,
 			label: r.label,
 			accessory: r.accessory,
-		}));
+		})) });
 		return roles;
 	} catch (err) {
 		console.error("[role-api] fetchRoles failed:", err);
