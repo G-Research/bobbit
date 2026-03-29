@@ -403,13 +403,18 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 
 	console.log("[aigw] No internet detected — probing for local AI Gateway...");
 
-	// Try well-known local gateway URLs
-	const candidates = [
-		"http://aigw-local.c3.zone/v1",
-		"http://aigw-local.c3.zone",
-		"http://localhost:1111/v1",
-		"http://127.0.0.1:1111/v1",
-	];
+	// Build candidate list from environment, then fall back to localhost
+	const candidates: string[] = [];
+	const anthropicBase = process.env.ANTHROPIC_BASE_URL;
+	if (anthropicBase) {
+		const base = anthropicBase.replace(/\/+$/, "");
+		candidates.push(base.endsWith("/v1") ? base : `${base}/v1`);
+	}
+	const openaiBase = process.env.OPENAI_BASE_URL;
+	if (openaiBase) {
+		candidates.push(openaiBase.replace(/\/+$/, ""));
+	}
+	candidates.push("http://localhost:1111/v1", "http://127.0.0.1:1111/v1");
 
 	for (const url of candidates) {
 		try {

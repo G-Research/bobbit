@@ -440,7 +440,7 @@ function renderPaletteTab() {
 
 // ── Models tab ──
 
-let aigwUrl = "http://aigw-local.c3.zone/v1";
+let aigwUrl = "";
 let aigwStatus: "idle" | "testing" | "saving" | "removing" = "idle";
 let aigwError = "";
 let aigwConfigured = false;
