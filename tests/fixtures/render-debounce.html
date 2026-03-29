@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+let _renderScheduled = false;
+let renderCount = 0;
+
+function doRender() { renderCount++; }
+
+function renderApp() {
+  if (_renderScheduled) return;
+  _renderScheduled = true;
+  requestAnimationFrame(() => {
+    _renderScheduled = false;
+    doRender();
+  });
+}
+
+function renderAppSync() {
+  _renderScheduled = false;
+  doRender();
+}
+
+function resetCount() { renderCount = 0; _renderScheduled = false; }
+
+// Expose to Playwright
+window.renderApp = renderApp;
+window.renderAppSync = renderAppSync;
+window.resetCount = resetCount;
+Object.defineProperty(window, 'renderCount', { get: () => renderCount });
+</script>
+</body>
+</html>
