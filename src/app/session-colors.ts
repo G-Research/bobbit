@@ -11,7 +11,7 @@ export type AccessoryDefinition = AccessoryDef;
 
 /**
  * All available pixel-art accessories for Bobbit sprites.
- * Derived from canonical pixel data in bobbit-sprite-data.ts via pixelsToBoxShadow().
+ * Derived from canonical pixel data in bobbit-sprite-data.ts.
  * Each shadow string is counter-hue-rotated at render time to keep fixed colours
  * across session identity hues.
  */
