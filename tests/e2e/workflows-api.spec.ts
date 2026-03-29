@@ -203,21 +203,6 @@ test.describe("Workflow CRUD API", () => {
 		await apiFetch(`/api/workflows/${id}`, { method: "DELETE" });
 	});
 
-	test("Clone creates independent copy", async () => {
-		const resp = await apiFetch("/api/workflows/bug-fix/clone", {
-			method: "POST",
-		});
-		expect(resp.status).toBe(201);
-		const cloned = await resp.json();
-		expect(cloned.id).not.toBe("bug-fix");
-		expect(cloned.id).toContain("bug-fix-clone-");
-		expect(cloned.gates.length).toBeGreaterThan(0);
-		expect(cloned.name).toBe("Bug Fix");
-
-		// Cleanup — delete the clone
-		await apiFetch(`/api/workflows/${cloned.id}`, { method: "DELETE" });
-	});
-
 	test("DELETE blocked when workflow in-use by active goal", async () => {
 		// Create a test workflow
 		const wfId = "e2e-delete-block-" + Date.now();

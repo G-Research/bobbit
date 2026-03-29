@@ -587,22 +587,6 @@ export async function deleteWorkflow(id: string): Promise<boolean> {
 	}
 }
 
-export async function cloneWorkflow(id: string): Promise<Workflow | null> {
-	try {
-		const res = await gatewayFetch(`/api/workflows/${encodeURIComponent(id)}/clone`, {
-			method: "POST",
-		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
-		return await res.json();
-	} catch (err) {
-		showConnectionError("Failed to clone workflow", err instanceof Error ? err.message : String(err));
-		return null;
-	}
-}
-
 
 
 // ── Gate API ─────────────────────────────────────────────────────

@@ -83,26 +83,7 @@ export class WorkflowManager {
 		return true;
 	}
 
-	cloneWorkflow(id: string): Workflow {
-		const original = this.store.get(id);
-		if (!original) {
-			throw new Error(`Workflow "${id}" not found`);
-		}
 
-		const cloned: Workflow = JSON.parse(JSON.stringify(original));
-
-		const suffix = `-clone-${Date.now()}`;
-		const maxBaseLen = 60 - suffix.length;
-		const base = id.length > maxBaseLen ? id.slice(0, maxBaseLen) : id;
-		cloned.id = base + suffix;
-
-		const now = Date.now();
-		cloned.createdAt = now;
-		cloned.updatedAt = now;
-
-		this.store.put(cloned);
-		return cloned;
-	}
 
 	/**
 	 * Validate workflow gates:
