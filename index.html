@@ -12,6 +12,12 @@
 	</head>
 	<body class="bg-background">
 		<div id="app"></div>
+		<script>
+			(function() {
+				var p = localStorage.getItem('palette');
+				if (p && p !== 'forest') document.documentElement.dataset.palette = p;
+			})();
+		</script>
 		<script type="module" src="/src/app/main.ts"></script>
 	</body>
 </html>

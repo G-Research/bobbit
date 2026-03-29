@@ -831,8 +831,10 @@ export class RemoteAgent {
 			const palette = prefs.palette as string;
 			if (!palette || palette === "forest") {
 				delete document.documentElement.dataset.palette;
+				localStorage.removeItem('palette');
 			} else {
 				document.documentElement.dataset.palette = palette;
+				localStorage.setItem('palette', palette);
 			}
 		}
 
