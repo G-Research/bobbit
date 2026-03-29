@@ -178,9 +178,16 @@ export class StreamingMessageContainer extends LitElement {
 			requestAnimationFrame(async () => {
 				// Only apply the update if we haven't been cleared
 				if (!this._immediateUpdate && this._pendingMessage !== null) {
-					// Deep clone the message to ensure Lit detects changes in nested properties
-					// (like toolCall.arguments being mutated during streaming)
-					this._message = JSON.parse(JSON.stringify(this._pendingMessage));
+					// Shallow-copy the message so Lit sees a new reference and
+					// propagates the change to child components (e.g.
+					// <assistant-message>). This replaces the previous
+					// JSON.parse(JSON.stringify()) deep clone which serialized
+					// the entire message tree ~60x/sec during streaming.
+					// A shallow copy is sufficient: child templates read
+					// message.content (the array ref) directly, and the server
+					// replaces the content array on each update rather than
+					// mutating it in place.
+					this._message = { ...this._pendingMessage } as AgentMessage;
 					this.requestUpdate();
 				}
 				// Reset for next batch
