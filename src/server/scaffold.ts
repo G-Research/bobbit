@@ -40,17 +40,23 @@ export function scaffoldBobbitDir(projectRoot: string): void {
         copyDir(defaultToolsDir, toolsConfigDir);
       }
     } else {
-      // Incremental: add extension.ts files if missing (for existing installations)
+      // Incremental: add new tool groups and missing extension.ts files (for existing installations)
       const defaultsDir = path.join(__dirname, "defaults");
       const defaultToolsDir = path.join(defaultsDir, "tools");
       if (fs.existsSync(defaultToolsDir)) {
         for (const groupEntry of fs.readdirSync(defaultToolsDir, { withFileTypes: true })) {
           if (!groupEntry.isDirectory()) continue;
-          const extSrc = path.join(defaultToolsDir, groupEntry.name, "extension.ts");
-          const extDest = path.join(toolsConfigDir, groupEntry.name, "extension.ts");
-          if (fs.existsSync(extSrc) && !fs.existsSync(extDest)) {
-            fs.mkdirSync(path.join(toolsConfigDir, groupEntry.name), { recursive: true });
-            fs.copyFileSync(extSrc, extDest);
+          const groupDest = path.join(toolsConfigDir, groupEntry.name);
+          if (!fs.existsSync(groupDest)) {
+            // New tool group — copy entire directory
+            copyDir(path.join(defaultToolsDir, groupEntry.name), groupDest);
+          } else {
+            // Existing group — add missing extension.ts only
+            const extSrc = path.join(defaultToolsDir, groupEntry.name, "extension.ts");
+            const extDest = path.join(groupDest, "extension.ts");
+            if (fs.existsSync(extSrc) && !fs.existsSync(extDest)) {
+              fs.copyFileSync(extSrc, extDest);
+            }
           }
         }
       }

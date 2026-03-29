@@ -1,0 +1,56 @@
+name: preview_open
+description: "Open the live preview panel with HTML content"
+summary: "Open or update the live preview side-panel with HTML content. The panel auto-refreshes on subsequent calls."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: HTML
+docs: |-
+  Pass `html` for inline content or `file` to load from disk. The preview panel appears as a split-pane beside the chat and auto-updates on each call. Use for design mockups, data visualizations, and interactive prototypes.
+detail_docs: |-
+  ## Purpose
+
+  Open the live preview side-panel in the Bobbit UI with HTML content. The panel splits the screen alongside the chat, showing a live-rendered iframe. Each subsequent call to `preview_open` updates the content in-place — the panel polls for changes every second.
+
+  This replaces the manual workflow of calling gateway APIs, managing session IDs, and writing to specific file paths.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `html` | string | No (one of html/file required) | Raw HTML content to render in the preview panel. |
+  | `file` | string | No (one of html/file required) | Path to an HTML file on disk to load into the preview. |
+
+  If both are provided, `html` takes precedence.
+
+  ## When to Use
+
+  - **Design mockups** — show UI proposals, component variations, animation demos.
+  - **Data visualizations** — render charts, tables, dashboards inline.
+  - **Interactive prototypes** — let the user explore states, toggle options, adjust parameters.
+  - **Iterative development** — update the preview repeatedly as you refine the HTML.
+
+  ## When NOT to Use
+
+  - **Static file output** — if the user just wants an HTML file saved, use `write` instead. Files written with `.html` extension render inline in the chat automatically.
+  - **Screenshots or images** — use `browser_screenshot` for capturing rendered pages.
+
+  ## Examples
+
+  ```
+  # Show inline HTML in the preview panel
+  preview_open(html="<h1>Hello</h1><p>This appears in the side panel</p>")
+
+  # Load an existing HTML file into the preview
+  preview_open(file="mockups/dashboard.html")
+
+  # Update the preview with new content (panel stays open)
+  preview_open(html="<h1>Updated</h1><p>Content refreshed automatically</p>")
+  ```
+
+  ## Notes / Gotchas
+
+  - **Same-origin with Vite dev server** — the preview iframe can reference real app CSS via `<link rel='stylesheet' href='/src/ui/app.css'>` for pixel-accurate mockups.
+  - **Auto-updates** — the panel polls every second. Multiple rapid calls are fine; only the latest content is shown.
+  - **One preview per session** — each session has its own preview. Switching sessions shows the correct preview.
+  - **User may need to refresh once** — after the first `preview_open`, the user may need to refresh the page to pick up the split-pane layout.

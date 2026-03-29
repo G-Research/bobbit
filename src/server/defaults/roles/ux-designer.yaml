@@ -26,6 +26,8 @@ allowedTools:
   - browser_type
   - browser_eval
   - browser_wait
+  - preview_open
+  - preview_close
   - find
   - grep
   - ls

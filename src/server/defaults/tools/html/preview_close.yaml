@@ -1,0 +1,29 @@
+name: preview_close
+description: "Close the live preview panel"
+summary: "Close the live preview side-panel and clean up the preview content."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: HTML
+docs: |-
+  No parameters. Closes the preview panel and clears its content. The chat returns to full-width layout.
+detail_docs: |-
+  ## Purpose
+
+  Close the live preview side-panel that was opened with `preview_open`. Clears the preview content and returns the chat to full-width layout.
+
+  ## Parameters
+
+  None.
+
+  ## When to Use
+
+  - **Finished iterating** — the user has approved or rejected the mockup.
+  - **Switching context** — moving to a non-visual task where the preview panel wastes screen space.
+
+  ## Examples
+
+  ```
+  # Close the preview panel
+  preview_close()
+  ```
