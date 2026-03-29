@@ -282,8 +282,14 @@ export function renderSkillsPage(): TemplateResult {
 			${renderNavBar()}
 			<div class="flex-1 overflow-y-auto">
 				<div class="max-w-3xl mx-auto px-4 py-6 flex flex-col gap-6">
-					<div class="text-sm text-muted-foreground">
-						${total} skill${total !== 1 ? "s" : ""} available
+					<div class="flex items-center justify-between">
+						<div class="text-sm text-muted-foreground">
+							${total} skill${total !== 1 ? "s" : ""} available
+						</div>
+						<button
+							class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+							@click=${() => { import("./settings-page.js").then((m) => { m.setActiveSettingsTab("directories"); setHashRoute("settings"); }); }}
+						>Manage scan directories &rarr;</button>
 					</div>
 
 					${renderDirectoriesSection()}

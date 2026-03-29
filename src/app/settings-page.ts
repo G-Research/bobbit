@@ -23,10 +23,15 @@ import { setHashRoute, toggleConfigPage } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
-type SettingsTab = "general" | "shortcuts" | "palette" | "models" | "project";
+type SettingsTab = "general" | "shortcuts" | "palette" | "models" | "project" | "directories";
 // Shortcuts is the default tab so that Ctrl+, acts as a quick toggle for a
 // keyboard-shortcut reference — press once to open, press again to dismiss.
 let activeTab: SettingsTab = "shortcuts";
+
+/** Allow external code to deep-link to a specific settings tab. */
+export function setActiveSettingsTab(tab: SettingsTab): void {
+	activeTab = tab;
+}
 
 // Rebind state (same as shortcuts-dialog)
 let rebindingId: string | null = null;
@@ -1179,6 +1184,244 @@ function renderGeneralTab() {
 	`;
 }
 
+// ── Config Directories tab state ──
+
+interface ConfigDirectory {
+	path: string;
+	types: string[];
+	scope: "built-in" | "user" | "project" | "custom";
+	exists: boolean;
+	isRemovable: boolean;
+}
+
+let configDirs: ConfigDirectory[] = [];
+let configDirsLoaded = false;
+let configDirsLoading = false;
+let configDirsError = "";
+let configDirsSaveStatus: "" | "saving" | "saved" | "error" = "";
+
+// Add-directory form state
+let newDirPath = "";
+let newDirTypes: { skills: boolean; mcp: boolean; tools: boolean } = { skills: false, mcp: false, tools: false };
+
+function loadConfigDirs(): void {
+	if (configDirsLoaded || configDirsLoading) return;
+	configDirsLoading = true;
+	configDirsError = "";
+	(async () => {
+		try {
+			const res = await gatewayFetch("/api/config-directories");
+			if (res.ok) {
+				configDirs = await res.json();
+				configDirsLoaded = true;
+			} else {
+				configDirsError = "Failed to load directory configuration";
+			}
+		} catch {
+			configDirsError = "Failed to load directory configuration";
+		}
+		configDirsLoading = false;
+		renderApp();
+	})();
+}
+
+function retryLoadConfigDirs(): void {
+	configDirsLoaded = false;
+	configDirsLoading = false;
+	configDirsError = "";
+	loadConfigDirs();
+}
+
+async function removeCustomDir(path: string): Promise<void> {
+	const customDirs = configDirs
+		.filter((d) => d.isRemovable && d.path !== path)
+		.map((d) => ({ path: d.path, types: d.types }));
+	// Also keep custom dirs that we aren't removing
+	const remaining = configDirs
+		.filter((d) => d.isRemovable)
+		.filter((d) => d.path !== path)
+		.map((d) => ({ path: d.path, types: d.types }));
+	await saveConfigDirs(remaining);
+}
+
+async function addCustomDir(): Promise<void> {
+	const trimmed = newDirPath.trim();
+	if (!trimmed) return;
+	const selectedTypes: string[] = [];
+	if (newDirTypes.skills) selectedTypes.push("skills");
+	if (newDirTypes.mcp) selectedTypes.push("mcp");
+	if (newDirTypes.tools) selectedTypes.push("tools");
+	if (selectedTypes.length === 0) return;
+
+	// Check for duplicates
+	const existing = configDirs.find((d) => d.path === trimmed || d.path.replace(/[\\/]+$/, "") === trimmed.replace(/[\\/]+$/, ""));
+	if (existing) return;
+
+	const currentCustom = configDirs
+		.filter((d) => d.isRemovable)
+		.map((d) => ({ path: d.path, types: d.types }));
+	currentCustom.push({ path: trimmed, types: selectedTypes });
+	await saveConfigDirs(currentCustom);
+	newDirPath = "";
+	newDirTypes = { skills: false, mcp: false, tools: false };
+}
+
+async function saveConfigDirs(customDirs: Array<{ path: string; types: string[] }>): Promise<void> {
+	configDirsSaveStatus = "saving";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/project-config", {
+			method: "PUT",
+			body: JSON.stringify({ config_directories: JSON.stringify(customDirs) }),
+		});
+		if (res.ok) {
+			configDirsSaveStatus = "saved";
+			// Reload directories from server to get updated existence checks
+			configDirsLoaded = false;
+			configDirsLoading = false;
+			loadConfigDirs();
+			setTimeout(() => { configDirsSaveStatus = ""; renderApp(); }, 2000);
+		} else {
+			configDirsSaveStatus = "error";
+		}
+	} catch {
+		configDirsSaveStatus = "error";
+	}
+	renderApp();
+}
+
+function scopeBadge(scope: string) {
+	const colors: Record<string, string> = {
+		"built-in": "bg-green-500/15 text-green-700 dark:text-green-400",
+		"user": "bg-purple-500/15 text-purple-700 dark:text-purple-400",
+		"project": "bg-blue-500/15 text-blue-700 dark:text-blue-400",
+		"custom": "bg-teal-500/15 text-teal-700 dark:text-teal-400",
+	};
+	const cls = colors[scope] || "bg-muted text-muted-foreground";
+	return html`<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-full ${cls}">${scope}</span>`;
+}
+
+function existsDot(exists: boolean) {
+	return html`<span class="inline-block w-2 h-2 rounded-full ${exists ? "bg-green-500" : "bg-red-500"}" title="${exists ? "Directory exists" : "Directory not found"}"></span>`;
+}
+
+function renderDirRow(dir: ConfigDirectory) {
+	return html`
+		<div class="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/30 transition-colors">
+			${existsDot(dir.exists)}
+			<code class="flex-1 text-xs break-all min-w-0">${dir.path}</code>
+			${scopeBadge(dir.scope)}
+			${dir.types.map((t) => html`<span class="text-[10px] px-1 py-0.5 rounded bg-secondary text-secondary-foreground">${t}</span>`)}
+			${dir.isRemovable ? html`
+				<button
+					class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+					title="Remove directory"
+					@click=${() => removeCustomDir(dir.path)}
+				>${icon(X, "xs")}</button>
+			` : html`<div class="w-6 shrink-0"></div>`}
+		</div>
+	`;
+}
+
+function renderDirectoriesTab() {
+	loadConfigDirs();
+
+	if (configDirsLoading && !configDirsLoaded) {
+		return html`<div class="text-sm text-muted-foreground">Loading directory configuration…</div>`;
+	}
+
+	if (configDirsError) {
+		return html`
+			<div class="flex flex-col items-center justify-center py-12 gap-3">
+				<p class="text-sm text-destructive">${configDirsError}</p>
+				<button
+					class="text-xs text-muted-foreground hover:text-foreground underline"
+					@click=${retryLoadConfigDirs}
+				>Retry</button>
+			</div>
+		`;
+	}
+
+	const skillsDirs = configDirs.filter((d) => d.types.includes("skills"));
+	const mcpDirs = configDirs.filter((d) => d.types.includes("mcp"));
+	const toolsDirs = configDirs.filter((d) => d.types.includes("tools"));
+
+	const hasAtLeastOneType = newDirTypes.skills || newDirTypes.mcp || newDirTypes.tools;
+
+	return html`
+		<div class="flex flex-col gap-5">
+			<p class="text-sm text-muted-foreground">
+				Directories Bobbit scans for configuration files. Custom directories can be added or removed.
+			</p>
+
+			<!-- Skills -->
+			<div class="flex flex-col gap-1">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">Skills</div>
+				<div class="flex flex-col gap-0.5">
+					${skillsDirs.length > 0 ? skillsDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No skills directories.</div>`}
+				</div>
+			</div>
+
+			<!-- MCP -->
+			<div class="flex flex-col gap-1">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">MCP</div>
+				<div class="flex flex-col gap-0.5">
+					${mcpDirs.length > 0 ? mcpDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No MCP directories.</div>`}
+				</div>
+			</div>
+
+			<!-- Tools -->
+			<div class="flex flex-col gap-1">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">Tools</div>
+				<div class="flex flex-col gap-0.5">
+					${toolsDirs.length > 0 ? toolsDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No tools directories.</div>`}
+				</div>
+			</div>
+
+			<!-- Add directory form -->
+			<div class="flex flex-col gap-2 pt-3 border-t border-border">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Add Custom Directory</div>
+				<div class="flex items-center gap-2">
+					<input
+						type="text"
+						class="flex-1 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
+							focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder="~/my-config or /absolute/path"
+						.value=${newDirPath}
+						@input=${(e: Event) => { newDirPath = (e.target as HTMLInputElement).value; renderApp(); }}
+						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newDirPath.trim() && hasAtLeastOneType) addCustomDir(); }}
+					/>
+				</div>
+				<div class="flex items-center gap-4">
+					<label class="flex items-center gap-1.5 text-xs cursor-pointer">
+						<input type="checkbox" class="accent-primary" .checked=${newDirTypes.skills}
+							@change=${(e: Event) => { newDirTypes.skills = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						Skills
+					</label>
+					<label class="flex items-center gap-1.5 text-xs cursor-pointer">
+						<input type="checkbox" class="accent-primary" .checked=${newDirTypes.mcp}
+							@change=${(e: Event) => { newDirTypes.mcp = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						MCP
+					</label>
+					<label class="flex items-center gap-1.5 text-xs cursor-pointer">
+						<input type="checkbox" class="accent-primary" .checked=${newDirTypes.tools}
+							@change=${(e: Event) => { newDirTypes.tools = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						Tools
+					</label>
+					<button
+						class="ml-auto px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground
+							hover:bg-primary/90 transition-colors disabled:opacity-50"
+						?disabled=${!newDirPath.trim() || !hasAtLeastOneType}
+						@click=${addCustomDir}
+					>Add</button>
+				</div>
+				${configDirsSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved successfully.</span>` : ""}
+				${configDirsSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+			</div>
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
@@ -1190,6 +1433,7 @@ export function renderSettingsPage() {
 		{ id: "project", label: "Project" },
 		{ id: "models", label: "Models" },
 		{ id: "palette", label: "Color Palette" },
+		{ id: "directories", label: "Config Directories" },
 	];
 
 	return html`
@@ -1219,12 +1463,13 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto">
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${activeTab === "project" ? "" : activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
+				<div class="${activeTab === "project" || activeTab === "directories" ? "" : activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
 					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "project" ? renderProjectTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}
 					${activeTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${activeTab === "palette" ? renderPaletteTab() : ""}
+					${activeTab === "directories" ? renderDirectoriesTab() : ""}
 				</div>
 			 </div>
 			</div>
