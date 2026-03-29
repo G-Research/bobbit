@@ -24,12 +24,13 @@ async function createSlowWorkflow(): Promise<void> {
 				{
 					id: "slow-gate",
 					name: "Slow Gate",
+					dependsOn: [],
 					verify: [
 						{
 							name: "Slow check",
 							type: "command",
-							// 8-second sleep — long enough to re-signal before it finishes
-							run: 'node -e "setTimeout(()=>{console.log(\'done\');process.exit(0)},8000)"',
+							// 5-second sleep — long enough to re-signal before it finishes
+							run: 'node -e "setTimeout(()=>{console.log(\'done\');process.exit(0)},5000)"',
 						},
 					],
 				},
@@ -88,6 +89,9 @@ async function pollUntil<T>(
 }
 
 test.describe("Gate Re-signal Cancellation", () => {
+	// These tests use slow verification commands (5s each), so they need more time
+	test.setTimeout(60_000);
+
 	let goalId: string;
 
 	test.beforeAll(async () => {
