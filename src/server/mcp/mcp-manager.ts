@@ -55,17 +55,26 @@ export class McpManager {
   discoverServers(): Record<string, McpServerConfig> {
     const merged: Record<string, McpServerConfig> = {};
 
-    // 1. User scope: ~/.claude.json
-    const userConfigPath = path.join(os.homedir(), ".claude.json");
-    this._mergeConfigFile(merged, userConfigPath, "mcpServers");
+    // Discovery mirrors the same root directories used for skills.
+    // Later entries override earlier ones (lowest → highest priority):
+    //   1. ~/.claude.json          — legacy Claude Code user config
+    //   2. ~/.claude/.mcp.json     — Claude Code user-level MCP
+    //   3. ~/.bobbit/.mcp.json     — Bobbit user-level MCP
+    //   4. <project>/.mcp.json     — project scope (shared via git)
+    //   5. <project>/.claude/.mcp.json — Claude Code project-level MCP
+    //   6. <project>/.bobbit/config/mcp.json — Bobbit project overrides
 
-    // 2. Project scope: .mcp.json in cwd
-    const projectConfigPath = path.join(this.cwd, ".mcp.json");
-    this._mergeConfigFile(merged, projectConfigPath, "mcpServers");
+    const home = os.homedir();
 
-    // 3. Bobbit overrides: .bobbit/config/mcp.json
-    const bobbitConfigPath = path.join(bobbitConfigDir(), "mcp.json");
-    this._mergeConfigFile(merged, bobbitConfigPath, "mcpServers");
+    // User scope
+    this._mergeConfigFile(merged, path.join(home, ".claude.json"), "mcpServers");
+    this._mergeConfigFile(merged, path.join(home, ".claude", ".mcp.json"), "mcpServers");
+    this._mergeConfigFile(merged, path.join(home, ".bobbit", ".mcp.json"), "mcpServers");
+
+    // Project scope
+    this._mergeConfigFile(merged, path.join(this.cwd, ".mcp.json"), "mcpServers");
+    this._mergeConfigFile(merged, path.join(this.cwd, ".claude", ".mcp.json"), "mcpServers");
+    this._mergeConfigFile(merged, path.join(bobbitConfigDir(), "mcp.json"), "mcpServers");
 
     return merged;
   }
