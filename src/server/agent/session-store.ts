@@ -76,6 +76,8 @@ export class SessionStore {
 	private sessions: Map<string, PersistedSession> = new Map();
 	private saveTimer: ReturnType<typeof setTimeout> | null = null;
 	private static SAVE_DEBOUNCE_MS = 1000;
+	/** Monotonically increasing counter — bumped on every mutation. Resets to 0 on server restart. */
+	private generation = 0;
 
 	constructor() {
 		this.load();
@@ -131,7 +133,13 @@ export class SessionStore {
 		}, SessionStore.SAVE_DEBOUNCE_MS);
 	}
 
+	/** Current generation counter — bumped on every mutation. */
+	getGeneration(): number {
+		return this.generation;
+	}
+
 	put(session: PersistedSession): void {
+		this.generation++;
 		this.sessions.set(session.id, session);
 		this.saveNow(); // immediate — structural change
 	}
@@ -141,6 +149,7 @@ export class SessionStore {
 	}
 
 	remove(id: string): void {
+		this.generation++;
 		this.sessions.delete(id);
 		this.saveNow(); // immediate — structural change
 	}
@@ -153,6 +162,7 @@ export class SessionStore {
 	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId">>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
+		this.generation++;
 		Object.assign(existing, updates);
 		this.save(); // debounced — frequent field updates
 	}
@@ -169,6 +179,7 @@ export class SessionStore {
 	setDraft(sessionId: string, type: string, data: unknown): boolean {
 		const session = this.sessions.get(sessionId);
 		if (!session) return false;
+		this.generation++;
 		if (!session.drafts) session.drafts = {};
 		session.drafts[type] = data;
 		this.save();
@@ -179,6 +190,7 @@ export class SessionStore {
 	deleteDraft(sessionId: string, type: string): boolean {
 		const session = this.sessions.get(sessionId);
 		if (!session?.drafts) return false;
+		this.generation++;
 		delete session.drafts[type];
 		// Clean up empty drafts object
 		if (Object.keys(session.drafts).length === 0) {
@@ -192,6 +204,7 @@ export class SessionStore {
 	archive(id: string): boolean {
 		const existing = this.sessions.get(id);
 		if (!existing) return false;
+		this.generation++;
 		existing.archived = true;
 		existing.archivedAt = Date.now();
 		this.saveNow(); // immediate — structural change
@@ -212,6 +225,7 @@ export class SessionStore {
 	purge(id: string): boolean {
 		const existing = this.sessions.get(id);
 		if (!existing) return false;
+		this.generation++;
 		this.sessions.delete(id);
 		this.saveNow();
 		return true;
