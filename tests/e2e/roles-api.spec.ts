@@ -5,8 +5,8 @@
  * The server reads roles from .e2e-bobbit-<id>/config/roles/ — completely
  * separate from the real repo's roles. No backup/restore needed.
  */
-import { test, expect } from "@playwright/test";
-import { apiFetch, BASE } from "./e2e-setup.js";
+import { test, expect } from "./gateway-harness.js";
+import { apiFetch, base } from "./e2e-setup.js";
 
 // Clean up any test roles after each test
 test.afterEach(async () => {
@@ -327,12 +327,12 @@ test.describe("Role persistence", () => {
 
 test.describe("Auth required", () => {
 	test("rejects unauthenticated requests to /api/roles", async () => {
-		const resp = await fetch(`${BASE}/api/roles`);
+		const resp = await fetch(`${base()}/api/roles`);
 		expect(resp.status).toBe(401);
 	});
 
 	test("rejects unauthenticated requests to /api/tools", async () => {
-		const resp = await fetch(`${BASE}/api/tools`);
+		const resp = await fetch(`${base()}/api/tools`);
 		expect(resp.status).toBe(401);
 	});
 });

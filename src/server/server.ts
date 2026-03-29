@@ -157,6 +157,7 @@ export function createGateway(config: GatewayConfig) {
 		toolManager,
 		workflowStore,
 		preferencesStore,
+		projectConfigStore,
 	});
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
@@ -261,8 +262,10 @@ export function createGateway(config: GatewayConfig) {
 						ws.send(data);
 						continue;
 					}
+					// Session is associated with a different goal — skip it
+					if (session?.teamGoalId || session?.goalId) continue;
 				}
-				// Fallback: if we can't determine goal association, still send
+				// Fallback: send to clients with no goal association
 				// (e.g. the user's browser session viewing the goal dashboard)
 				ws.send(data);
 			}
@@ -338,11 +341,13 @@ export function createGateway(config: GatewayConfig) {
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
 
-			// Initialize MCP servers
-			try {
-				await sessionManager.initMcp(process.cwd());
-			} catch (err) {
-				console.error('[mcp] MCP init failed:', (err as Error).message);
+			// Initialize MCP servers (skip in test environments)
+			if (!process.env.BOBBIT_SKIP_MCP) {
+				try {
+					await sessionManager.initMcp(process.cwd());
+				} catch (err) {
+					console.error('[mcp] MCP init failed:', (err as Error).message);
+				}
 			}
 
 			// Restore persisted sessions before accepting connections

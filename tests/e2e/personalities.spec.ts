@@ -5,7 +5,7 @@
  * The server reads personalities from .e2e-bobbit-<id>/config/personalities/
  * — completely separate from the real repo. No backup/restore needed.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { apiFetch, createSession, deleteSession, nonGitCwd } from "./e2e-setup.js";
 
 // Clean up test personalities after each test

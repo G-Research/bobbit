@@ -137,9 +137,11 @@ export function stopTimeRefresh(): void {
 /** Render session title with a subtle rolling shadow when active. */
 let _waveIndex = 0;
 export function renderSessionTitle(title: string, isActive?: boolean) {
-	if (!isActive) { return title; }
+	// Emoji glyphs (e.g. ⚡) have built-in leading whitespace — pull a negative margin to compensate
+	const emojiLead = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(title) ? "margin-left:-2px" : "";
+	if (!isActive) { return emojiLead ? html`<span style="${emojiLead}">${title}</span>` : title; }
 	const delay = -((_waveIndex++ % 7) * 0.6);
-	return html`<span class="title-wave" style="animation-delay:${delay}s">${title}</span>`;
+	return html`<span class="title-wave" style="animation-delay:${delay}s;${emojiLead}">${title}</span>`;
 }
 
 /** Render a pulsing dot with conic sweep to indicate active session. */
@@ -174,7 +176,7 @@ function renderSessionTime(session: GatewaySession, selected = false) {
 export const SESSION_ROW_PY = "py-0.5";
 
 /** Consistent indent per nesting level (px). */
-export const INDENT = 10;
+export const INDENT = 5;
 /** Width of the chevron/spacer slot (px) — same for all chevrons. */
 export const CHEVRON_W = 14;
 /** Wider chevron slot for level-0 section headers (extra right breathing room). */

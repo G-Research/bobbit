@@ -4,7 +4,7 @@
  * Tests verify session lifecycle (streaming/idle/abort) and tool invocations
  * (Bash, Write, Read, Edit) via the mock agent's deterministic responses.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

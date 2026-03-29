@@ -152,6 +152,35 @@ theme-toggle button {
 	100% { transform: scale(1.6) scaleX(1)    scaleY(1)    translateX(-0.5px); }
 }
 
+/* Smooth sidebar variants — no scale(1.6) base, image already at target CSS size.
+ * Translate values multiplied by 1.6 to match visual output. */
+@keyframes bobbit-squish-s {
+	0%   { transform: scaleX(1)    scaleY(1)   ; }
+	8%   { transform: scaleX(1.1)  scaleY(0.8) ; }
+	20%  { transform: scaleX(1.08) scaleY(0.84); }
+	30%  { transform: scaleX(1.03) scaleY(0.93); }
+	42%  { transform: scaleX(1.14) scaleY(0.74); }
+	52%  { transform: scaleX(1.08) scaleY(0.84); }
+	65%  { transform: scaleX(1.18) scaleY(0.68); }
+	75%  { transform: scaleX(1.2)  scaleY(0.66); }
+	82%  { transform: scaleX(1.16) scaleY(0.7) ; }
+	92%  { transform: scaleX(1.06) scaleY(0.9) ; }
+	100% { transform: scaleX(1)    scaleY(1)   ; }
+}
+@keyframes bobbit-squish-crown-s {
+	0%   { transform: scaleX(1)    scaleY(1)    translateX(-0.8px); }
+	8%   { transform: scaleX(1.1)  scaleY(0.8)  translateX(-0.8px); }
+	20%  { transform: scaleX(1.08) scaleY(0.84) translateX(-0.8px); }
+	30%  { transform: scaleX(1.03) scaleY(0.93) translateX(-0.8px); }
+	42%  { transform: scaleX(1.14) scaleY(0.74) translateX(-0.8px); }
+	52%  { transform: scaleX(1.08) scaleY(0.84) translateX(-0.8px); }
+	65%  { transform: scaleX(1.18) scaleY(0.68) translateX(-0.8px); }
+	75%  { transform: scaleX(1.2)  scaleY(0.66) translateX(-0.8px); }
+	82%  { transform: scaleX(1.16) scaleY(0.7)  translateX(-0.8px); }
+	92%  { transform: scaleX(1.06) scaleY(0.9)  translateX(-0.8px); }
+	100% { transform: scaleX(1)    scaleY(1)    translateX(-0.8px); }
+}
+
 /* ============================================================================
  * BOBBIT — eye animation (blink + look around)
  * ============================================================================ */
@@ -170,6 +199,24 @@ theme-toggle button {
 	74%, 86%  { transform: scale(1.6) scaleX(1.0) scaleY(0.75) translateX(1px) translateY(4.5px); opacity: 1; transform-origin: 0 9px; }
 	87%, 89%  { transform: scale(1.6) scaleX(1.0) scaleY(0.75) translateY(4.5px); opacity: 0; transform-origin: 0 9px; }
 	90%, 100% { transform: scale(1.6) scaleX(1.0) scaleY(0.75) translateY(4.5px); opacity: 1; transform-origin: 0 9px; }
+}
+
+/* Smooth sidebar variants — image already at target CSS size */
+@keyframes bobbit-eyes-s {
+	0%, 55%   { opacity: 1; }
+	56%, 58%  { opacity: 0; }
+	59%, 72%  { opacity: 1; }
+	74%, 86%  { transform: translateX(1.6px); opacity: 1; }
+	87%, 89%  { opacity: 0; }
+	90%, 100% { opacity: 1; }
+}
+@keyframes bobbit-eyes-squash-s {
+	0%, 55%   { transform: scaleY(0.75) translateY(7.2px); opacity: 1; transform-origin: 0 14.4px; }
+	56%, 58%  { transform: scaleY(0.75) translateY(7.2px); opacity: 0; transform-origin: 0 14.4px; }
+	59%, 72%  { transform: scaleY(0.75) translateY(7.2px); opacity: 1; transform-origin: 0 14.4px; }
+	74%, 86%  { transform: scaleY(0.75) translateX(1.6px) translateY(7.2px); opacity: 1; transform-origin: 0 14.4px; }
+	87%, 89%  { transform: scaleY(0.75) translateY(7.2px); opacity: 0; transform-origin: 0 14.4px; }
+	90%, 100% { transform: scaleY(0.75) translateY(7.2px); opacity: 1; transform-origin: 0 14.4px; }
 }
 
 /* ============================================================================

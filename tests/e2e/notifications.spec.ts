@@ -4,7 +4,7 @@
  * Verifies that `task_changed` WS events are broadcast to connected clients
  * when tasks are created and updated via WS commands.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,

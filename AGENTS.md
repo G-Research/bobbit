@@ -12,8 +12,8 @@ npm run restart-server # Signal the harness to rebuild & restart the server
 npm start              # Run built gateway (serves embedded UI)
 npm run check          # Type-check both server and web without emitting
 npm test               # Run all tests (unit + E2E)
-npm run test:unit      # Unit tests (Playwright file:// fixtures)
-npm run test:e2e       # E2E tests (auto-starts sandboxed gateway via Playwright webServer)
+npm run test:unit      # Unit tests — Node test runner + Playwright file:// fixtures (<30s)
+npm run test:e2e       # E2E tests — each worker spawns its own gateway (<90s)
 ```
 
 ### Dev server harness
@@ -41,11 +41,14 @@ Pipe Playwright output through the test filter to keep context lean — it outpu
 # Type check first
 npm run check
 
-# Unit tests (fast, no server needed)
-npx playwright test --config tests/playwright.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
+# Unit tests — Node test runner + Playwright file:// fixtures (<30s, no server)
+npm run test:unit 2>&1 | tail -5
 
-# E2E tests (starts sandboxed gateway on port 3099 automatically)
-npm run build:server && npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
+# E2E tests — each worker spawns its own isolated gateway (<90s)
+npm run test:e2e 2>&1 | tail -5
+
+# Or use the JSON filter for structured output
+npm run build && npx playwright test --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
 ```
 
 The test filter accepts verbosity flags you can use when debugging failures:
@@ -53,16 +56,18 @@ The test filter accepts verbosity flags you can use when debugging failures:
 - `--verbose` — lists every test with OK/FAIL/SKIP status
 - `--full` — raw JSON pass-through
 
-If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. Server changes (`src/server/`) need E2E tests too. The E2E `npm run build:server` step recompiles automatically.
+If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. Server changes (`src/server/`) need E2E tests too.
 
 **Test structure:**
 
-- **Unit tests** (`tests/*.spec.ts`): Playwright with `file://` fixtures — plain HTML/JS files that test logic without a build step. See `tests/mobile-header.spec.ts` for the pattern.
-- **E2E tests** (`tests/e2e/*.spec.ts`): Run against a real sandboxed gateway on port 3099, auto-started by Playwright's `webServer` config. Covers REST API, WebSocket protocol, session lifecycle, and agent tool invocations.
+- **Unit tests** (`tests/*.spec.ts` + `tests/*.test.ts`): Playwright with `file://` fixtures (plain HTML/JS files that test UI logic without a build step) plus Node test runner tests for server logic. See `tests/mobile-header.spec.ts` for the Playwright pattern.
+- **E2E tests** (`tests/e2e/*.spec.ts`): Each Playwright worker spawns its own isolated gateway (unique port, unique `BOBBIT_DIR`, mock agent). Tests cover REST API, WebSocket protocol, session lifecycle, agent tool invocations, and fullstack browser tests against the real UI. The gateway fixture is in `tests/e2e/gateway-harness.ts`.
 
-**Writing new tests**: Prefer `file://` fixtures with plain HTML/JS that simulate the logic under test. Extract state machine logic into testable functions where possible. For tests that need a real server (WebSocket, API integration), add to `tests/e2e/` — they use the `webServer` pattern in `playwright-e2e.config.ts`.
+**Writing new tests**: Prefer `file://` fixtures with plain HTML/JS that simulate the logic under test. Extract state machine logic into testable functions where possible. For tests that need a real server (WebSocket, API integration, UI), add to `tests/e2e/` — import `test` from `./gateway-harness.js` to get an auto-started gateway per worker. For fullstack browser tests, use a Playwright `page` fixture alongside the gateway (see `session-lifecycle-ui.spec.ts`).
 
-**Test isolation**: All tests must operate in isolation. Avoid using centralised or non-ephemeral systems and dependencies. E2E tests run with `BOBBIT_DIR` set to `.e2e-bobbit-<id>/` (a gitignored temp directory), so the test server's state files (sessions, goals, tasks, costs, tokens) are fully separated from the real dev server's `.bobbit/`. Never read from or write to `.bobbit/` in tests — use the isolated directory via `readE2EToken()` from `tests/e2e/e2e-setup.ts`. Unit tests should use `file://` fixtures with no external dependencies.
+**Test isolation**: All tests must operate in isolation. E2E tests each get their own gateway with a unique `BOBBIT_DIR` (`.e2e-worker-<port>/`, gitignored, cleaned up on teardown). Tests never share server state. Never read from or write to `.bobbit/` in tests — use the isolated directory via helpers from `tests/e2e/e2e-setup.ts`. Unit tests should use `file://` fixtures with no external dependencies.
+
+**Screenshots**: Fullstack E2E tests can capture screenshots via `SCREENSHOT=1` env var. Screenshots are saved to `tests/e2e/screenshots/` (gitignored).
 
 **Do NOT start background servers manually** from bash (`node server.js &`, `nohup`, etc.) — the bash tool waits for all stdout/stderr pipes to close, so backgrounded processes that inherit those FDs cause the bash tool to hang forever and crash the agent session. Always use Playwright's `webServer` config instead.
 
@@ -70,7 +75,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add a new REST endpoint**: Edit `src/server/server.ts` `handleApiRoute()`.
 
-**Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command.
+**Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command. Existing examples of this pattern: `set_model` and `set_thinking_level`.
 
 **Add a new UI component**: Add to `src/ui/components/`, export from `src/ui/index.ts`.
 
@@ -119,17 +124,36 @@ REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-serve
 
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
 
+### Thinking level configuration
+
+The default thinking level for new sessions is configurable via `default_thinking_level` in `.bobbit/config/project.yaml` or the Settings page Project tab. Valid values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, or `""` (empty string = use the agent's built-in default of `"medium"`).
+
+On session creation, if `default_thinking_level` is set and non-empty, the server sends a `set_thinking_level` RPC to the agent process. The per-session thinking toggle in the chat input bar overrides the project default for that session.
+
+Thinking token budgets per level (hardcoded in `src/app/remote-agent.ts`, not currently configurable):
+
+| Level | Token budget |
+|---|---|
+| minimal | 1,024 |
+| low | 4,096 |
+| medium | 10,240 |
+| high | 32,768 |
+
 ## Debugging tips
 
 **Debug duplicate messages**: The deferred message pattern in `remote-agent.ts` is subtle. `MessageList` renders `state.messages` (completed), `StreamingMessageContainer` renders `state.streamMessage` (in-progress). They must never show the same message. Tool-call messages stay in streaming until the next message starts. Check `flushDeferredMessage()` and `_deferredAssistantMessage`.
 
-**Debug session connection timing**: `connectToSession()` in `session-manager.ts` overlaps ChatPanel creation with the WebSocket handshake. The ChatPanel is created and rendered (showing a "Connecting…" spinner) before `remote.connect()`. Model restore (`loadSessionModel` + dynamic import of `@mariozechner/pi-ai`) runs in parallel with the WebSocket connect via `Promise.all`. After connect resolves, `setAgent()` binds the agent to the pre-existing ChatPanel. The `switchGeneration` / `isStale()` guard invalidates in-flight work on rapid session switches. On connect failure, `state.chatPanel` is cleared to prevent a stuck spinner.
+**Debug session connection timing**: `connectToSession()` in `session-manager.ts` overlaps ChatPanel creation with the WebSocket handshake. The ChatPanel is created and rendered (showing a "Connecting…" spinner) before `remote.connect()`. Model restore (`loadSessionModel` + dynamic import of `@mariozechner/pi-ai`) runs in parallel with the WebSocket connect via `Promise.all`. After connect resolves, `setAgent()` binds the agent to the pre-existing ChatPanel. The `switchGeneration` / `isStale()` guard invalidates in-flight work on rapid session switches. On connect failure, `state.chatPanel` is cleared to prevent a stuck spinner. Both `model` and `thinkingLevel` are synced from the server's `get_state` response in `remote-agent.ts` `handleServerMessage()` on connect/reconnect, so the UI always reflects the server's actual values after a page refresh.
 
 **Debug session/goal refresh**: Both `SessionStore` and `GoalStore` track a `generation` counter (monotonically increasing, resets on server restart). `GET /api/sessions` and `GET /api/goals` return `{ generation, sessions/goals }`. Clients pass `?since=N` to skip unchanged data — the server returns `{ generation: N, changed: false }` when the generation matches. The client tracks `sessionsGeneration` and `goalsGeneration` in `state.ts` and skips `renderApp()` when nothing changed, making the 5s background poll essentially free.
+
+**Debug gate status cache**: `state.gateStatusCache` is refreshed via two paths: (1) bulk refresh in `refreshGateStatusCache()` during initial load or when goals change, and (2) per-goal refresh via `refreshGateStatusForGoal(goalId)` triggered by WebSocket `gate_status_changed` and `gate_verification_complete` events in `remote-agent.ts`. The dashboard's gate polling (`goal-dashboard.ts`) also syncs to this cache.
 
 **Debug session persistence**: Check `.bobbit/state/sessions.json` for persisted session data. Sessions restore on startup via `session-manager.ts` `restoreSessions()`. If an agent's `.jsonl` session file is missing, that session is skipped. Failed restores create dormant entries that revive on client connect.
 
 **Debug compaction issues**: Check `_isCompacting`, `_compactionSyntheticMessages`, and `_usageStaleAfterCompaction` in `remote-agent.ts`. The `compacting_placeholder` message must be filtered out and re-added correctly across server refreshes. Manual compaction is fire-and-forget from the WS handler's perspective.
+
+**Debug goal proposal dismiss persistence**: Dismissed goal proposals are tracked via `localStorage` keys with the pattern `bobbit-goal-proposal-dismissed-<sessionId>`. Each key stores a djb2 hash fingerprint of the dismissed proposal's `title + "\n" + spec`. When `onGoalProposal` fires in non-goal-assistant sessions (`session-manager.ts`), it checks `isProposalDismissed()` and skips showing proposals that match a stored fingerprint. `handleDismiss()` in `render.ts` calls `markProposalDismissed()` to persist. Cleanup happens in `terminateSession()` via `clearDismissedProposal()`. If a dismissed proposal reappears, check: (1) the localStorage key exists for that session ID, (2) the stored fingerprint matches the proposal's hash, (3) the session is not a goal-assistant type (those use IndexedDB draft persistence instead).
 
 **Debug renderApp performance**: `renderApp()` in `src/app/state.ts` is debounced via `requestAnimationFrame` — multiple calls within the same frame collapse into a single `doRenderApp()` execution. If you need synchronous DOM updates before layout measurement, use `renderAppSync()` from `state.ts` instead. To debug render frequency, add a temporary counter in the rAF callback in `state.ts` and log how many `doRenderApp()` calls occur per frame.
 
@@ -199,7 +223,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `workflows/*.yaml` | `WorkflowStore` | Workflow templates (gate DAGs, verification configs) |
 | `personalities/*.yaml` | `PersonalityStore` | Personality definitions |
 | `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
-| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, custom config) |
+| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, default thinking level, custom config) |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompt definitions (goal, role, tool, personality, staff, setup) |
 | `mcp.json` | `McpManager` | MCP server overrides (Bobbit-specific additions to `.mcp.json`) |
 

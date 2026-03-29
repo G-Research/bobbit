@@ -146,7 +146,11 @@ export function handleWebSocketConnection(
 				case "get_state": {
 					const archived = sessionManager.getArchivedSession(sessionId);
 					if (archived) {
-						send(ws, { type: "state", data: { archived: true, archivedAt: archived.archivedAt, title: archived.title } });
+						const archivedData: Record<string, unknown> = { archived: true, archivedAt: archived.archivedAt, title: archived.title };
+						if (archived.modelProvider && archived.modelId) {
+							archivedData.model = { provider: archived.modelProvider, id: archived.modelId };
+						}
+						send(ws, { type: "state", data: archivedData });
 					}
 					break;
 				}
@@ -246,6 +250,10 @@ export function handleWebSocketConnection(
 				case "set_model":
 					await session.rpcClient.setModel(msg.provider, msg.modelId);
 					sessionManager.updateModelNameFile(session.id, msg.modelId);
+					sessionManager.persistSessionModel(session.id, msg.provider, msg.modelId);
+					break;
+				case "set_thinking_level":
+					await session.rpcClient.setThinkingLevel(msg.level);
 					break;
 				case "compact":
 					// Fire-and-forget: don't block the WS message loop.

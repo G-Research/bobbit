@@ -612,12 +612,26 @@ export class VerificationHarness {
 						const modelId = reviewModelPref.slice(slash + 1);
 						try {
 							await session.rpcClient.setModel(provider, modelId);
+							this.sessionManager?.persistSessionModel(sessionId, provider, modelId);
 							console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
 						} catch (err) {
 							console.warn(`[verification] Failed to set review model "${reviewModelPref}", using default:`, err);
 						}
 					} else {
 						console.warn(`[verification] Malformed default.reviewModel preference: "${reviewModelPref}", ignoring`);
+					}
+				}
+			}
+
+			// Apply review thinking level if set
+			if (this.preferencesStore) {
+				const reviewThinking = this.preferencesStore.get("default.reviewThinkingLevel") as string | undefined;
+				if (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking)) {
+					try {
+						await session.rpcClient.setThinkingLevel(reviewThinking);
+						console.log(`[verification] Set review thinking level "${reviewThinking}" for ${sessionId}`);
+					} catch (err) {
+						console.warn(`[verification] Failed to set review thinking level:`, err);
 					}
 				}
 			}
@@ -724,6 +738,19 @@ export class VerificationHarness {
 						}
 					} else {
 						console.warn(`[verification] Malformed default.reviewModel preference: "${reviewModelPref}", ignoring`);
+					}
+				}
+			}
+
+			// Apply review thinking level if set
+			if (this.preferencesStore) {
+				const reviewThinking = this.preferencesStore.get("default.reviewThinkingLevel") as string | undefined;
+				if (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking)) {
+					try {
+						await rpc.setThinkingLevel(reviewThinking);
+						console.log(`[verification] Set review thinking level "${reviewThinking}" for ${subSessionId}`);
+					} catch (err) {
+						console.warn(`[verification] Failed to set review thinking level:`, err);
 					}
 				}
 			}

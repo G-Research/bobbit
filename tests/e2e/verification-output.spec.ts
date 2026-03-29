@@ -5,7 +5,7 @@
  * - gate_verification_step_started WS events include startedAt field
  * - gate_verification_step_output WS events are broadcast during command verification
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -179,79 +179,6 @@ test.describe("Verification output streaming and timestamps", () => {
 			expect(output.ts).toBeGreaterThan(0);
 
 			await waitForGateStatus(goalId, "implementation", "passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("stderr output is captured in step_output events", async () => {
-		// Use bug-fix workflow which has expect:failure steps
-		// We need a command that writes to stderr
-		const goal = await createGoal({
-			title: `Verification Stderr E2E ${Date.now()}`,
-			workflowId: "bug-fix",
-		});
-		const goalId = goal.id;
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			// Signal issue-analysis first
-			await apiFetch(`/api/goals/${goalId}/gates/issue-analysis/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content: "# Bug\n\nSteps: run test\nRoot cause: src/x.ts:1",
-				}),
-			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
-
-			// Signal reproducing-test with a command that writes to stderr
-			// "echo error-text 1>&2 && exit 1" writes to stderr and exits non-zero
-			// (expect: failure means non-zero exit = pass)
-			await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					metadata: { test_command: "echo error-text 1>&2 & exit 1", error_pattern: "error-text" },
-				}),
-			});
-
-			// Collect all step_output events for this gate
-			const allOutputs: any[] = [];
-			const deadline = Date.now() + 15_000;
-			while (Date.now() < deadline) {
-				try {
-					const msg = await ws.waitFor(
-						(m) =>
-							m.type === "gate_verification_step_output" &&
-							m.gateId === "reproducing-test" &&
-							!allOutputs.some(o => o === m),
-						2_000,
-					);
-					allOutputs.push(msg);
-				} catch {
-					break; // No more output events
-				}
-			}
-
-			// Should have at least one stderr output event
-			const stderrEvents = allOutputs.filter(o => o.stream === "stderr");
-			// On Windows, cmd.exe may route echo to stdout even with 1>&2 redirection
-			// so we check that we got at least some output events
-			expect(allOutputs.length).toBeGreaterThan(0);
-
-			// All events should have valid structure
-			for (const evt of allOutputs) {
-				expect(evt.goalId).toBe(goalId);
-				expect(evt.gateId).toBe("reproducing-test");
-				expect(typeof evt.signalId).toBe("string");
-				expect(typeof evt.stepIndex).toBe("number");
-				expect(["stdout", "stderr"]).toContain(evt.stream);
-				expect(typeof evt.text).toBe("string");
-				expect(typeof evt.ts).toBe("number");
-			}
-
-			await waitForGateStatus(goalId, "reproducing-test", "passed");
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);

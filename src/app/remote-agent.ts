@@ -2,6 +2,7 @@ import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { state } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
+import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
 
 /**
@@ -136,7 +137,7 @@ export class RemoteAgent {
 		return this._sessionId || undefined;
 	}
 	get thinkingBudgets() {
-		return undefined;
+		return { minimal: 1024, low: 4096, medium: 10240, high: 32768 };
 	}
 	get transport() {
 		return undefined;
@@ -499,6 +500,8 @@ export class RemoteAgent {
 
 	setThinkingLevel(level: any): void {
 		this._state.thinkingLevel = level;
+		this.send({ type: "set_thinking_level", level });
+		state.chatPanel?.agentInterface?.requestUpdate();
 	}
 
 	setTools(_tools: any[]): void {
@@ -576,6 +579,9 @@ export class RemoteAgent {
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
+				}
+				if (msg.data?.thinkingLevel) {
+					this._state.thinkingLevel = msg.data.thinkingLevel;
 				}
 				this.emit({ type: "state_update", data: msg.data });
 				break;
@@ -707,6 +713,7 @@ export class RemoteAgent {
 			case "gate_status_changed": {
 				const gateCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" \u2192 ${(msg as any).status}`, gateCat);
+				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 
@@ -721,6 +728,7 @@ export class RemoteAgent {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
 				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 

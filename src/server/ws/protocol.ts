@@ -22,6 +22,7 @@ export type ClientMessage =
 	| { type: "abort" }
 	| { type: "retry" }
 	| { type: "set_model"; provider: string; modelId: string }
+	| { type: "set_thinking_level"; level: string }
 	| { type: "compact" }
 	| { type: "get_state" }
 	| { type: "get_messages" }

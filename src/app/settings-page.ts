@@ -1,7 +1,8 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
+import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
-import { ArrowLeft, Plus, RotateCcw, X } from "lucide";
+import { ArrowLeft, Brain, Plus, RotateCcw, Sparkles, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -449,6 +450,10 @@ let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxToke
 let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
 let prefReviewModel = "";    // same format
 let prefNamingModel = "";    // same format
+let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|""
+let prefReviewThinking = "";
+let prefNamingThinking = "";
+let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
 let _modelsLoaded = false;
 
 function loadModelsState(): void {
@@ -456,9 +461,10 @@ function loadModelsState(): void {
 	_modelsLoaded = true;
 	(async () => {
 		try {
-			const [statusRes, prefsRes] = await Promise.all([
+			const [statusRes, prefsRes, modelsRes] = await Promise.all([
 				gatewayFetch("/api/aigw/status"),
 				gatewayFetch("/api/preferences"),
+				gatewayFetch("/api/models"),
 			]);
 			if (statusRes.ok) {
 				const data = await statusRes.json();
@@ -474,6 +480,15 @@ function loadModelsState(): void {
 				prefSessionModel = prefs["default.sessionModel"] || "";
 				prefReviewModel = prefs["default.reviewModel"] || "";
 				prefNamingModel = prefs["default.namingModel"] || "";
+				prefSessionThinking = prefs["default.sessionThinkingLevel"] || "";
+				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
+				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
+			}
+			if (modelsRes.ok) {
+				const models = await modelsRes.json();
+				if (Array.isArray(models)) {
+					allModels = models;
+				}
 			}
 		} catch {}
 		renderApp();
@@ -504,6 +519,22 @@ async function setReviewModel(value: string): Promise<void> {
 async function setNamingModel(value: string): Promise<void> {
 	prefNamingModel = value;
 	await savePref("default.namingModel", value || null);
+	renderApp();
+}
+
+async function setSessionThinking(value: string): Promise<void> {
+	prefSessionThinking = value;
+	await savePref("default.sessionThinkingLevel", value || null);
+	renderApp();
+}
+async function setReviewThinking(value: string): Promise<void> {
+	prefReviewThinking = value;
+	await savePref("default.reviewThinkingLevel", value || null);
+	renderApp();
+}
+async function setNamingThinking(value: string): Promise<void> {
+	prefNamingThinking = value;
+	await savePref("default.namingThinkingLevel", value || null);
 	renderApp();
 }
 
@@ -622,27 +653,72 @@ function openModelPicker(currentValue: string, onChange: (v: string) => void) {
 	});
 }
 
-function renderModelPicker(label: string, hint: string, value: string, onChange: (v: string) => void) {
-	const display = formatModelPref(value);
+function renderModelRow(
+	label: string,
+	hint: string,
+	modelValue: string,
+	onModelChange: (v: string) => void,
+	thinkingValue: string,
+	onThinkingChange: (v: string) => void,
+	thinkingDefault: string = "medium",
+) {
+	const modelDisplay = formatModelPref(modelValue);
+
+	// Determine if selected model supports reasoning
+	let thinkingDisabled = false;
+	if (modelValue) {
+		const model = allModels.find(m => `${m.provider}/${m.id}` === modelValue);
+		if (model && !model.reasoning) {
+			thinkingDisabled = true;
+		}
+	}
+
 	return html`
-		<div class="flex flex-col gap-1.5">
-			<label class="text-sm font-medium text-foreground">${label}</label>
-			<div class="flex gap-2">
-				<button
-					class="flex-1 px-3 py-2 text-left rounded-md border border-input bg-background text-sm
-						hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
-						${value ? "text-foreground" : "text-muted-foreground"}"
-					title="Choose model"
-					@click=${() => openModelPicker(value, onChange)}
-				>${display}</button>
-				${value ? html`
+		<div class="flex flex-col gap-1">
+			<div class="flex items-center gap-2">
+				<span class="text-sm font-medium text-foreground shrink-0 w-14">${label}</span>
+				<div class="flex items-center gap-1.5 rounded-lg border border-input bg-background px-1 py-1 flex-1 min-w-0">
+					<!-- Model picker button -->
 					<button
-						class="px-2 py-2 rounded-md border border-input bg-background text-muted-foreground
-							hover:bg-secondary hover:text-foreground transition-colors"
-						title="Reset to auto"
-						@click=${() => onChange("")}
-					>${icon(X, "sm")}</button>
-				` : ""}
+						class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm
+							hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
+							flex-1 min-w-0 text-left
+							${modelValue ? "text-foreground" : "text-muted-foreground"}"
+						title="Choose model"
+						@click=${() => openModelPicker(modelValue, onModelChange)}
+					>
+						<span class="text-muted-foreground shrink-0">${icon(Sparkles, "sm")}</span>
+						<span class="truncate">${modelDisplay}</span>
+					</button>
+					${modelValue ? html`
+						<button
+							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+							title="Reset model to auto"
+							@click=${() => onModelChange("")}
+						>${icon(X, "xs")}</button>
+					` : ""}
+					<!-- Divider -->
+					<div class="w-px h-5 bg-border shrink-0"></div>
+					<!-- Thinking picker -->
+					<div class="shrink-0 ${thinkingDisabled ? "opacity-40 pointer-events-none" : ""}"
+						title=${thinkingDisabled ? "Selected model does not support thinking" : "Thinking level"}
+					>
+						${Select({
+							value: thinkingValue || thinkingDefault,
+							options: [
+								{ value: "off", label: "Off", icon: icon(Brain, "sm") },
+								{ value: "minimal", label: "Minimal", icon: icon(Brain, "sm") },
+								{ value: "low", label: "Low", icon: icon(Brain, "sm") },
+								{ value: "medium", label: "Medium", icon: icon(Brain, "sm") },
+								{ value: "high", label: "High", icon: icon(Brain, "sm") },
+							] as SelectOption[],
+							onChange: (value: string) => { onThinkingChange(value); },
+							size: "sm",
+							variant: "ghost",
+							fitContent: true,
+						})}
+					</div>
+				</div>
 			</div>
 			<p class="text-xs text-muted-foreground">${hint}</p>
 		</div>
@@ -661,28 +737,36 @@ function renderModelsTab() {
 			<!-- Default model preferences -->
 			<div class="flex flex-col gap-4">
 				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
-				${renderModelPicker(
-					"Session Model",
-					"Model used when creating new sessions. \"Auto\" picks the best available model by tier.",
+				${renderModelRow(
+					"Session",
+					"Model and thinking level for new sessions.",
 					prefSessionModel,
 					setSessionModel,
+					prefSessionThinking,
+					setSessionThinking,
 				)}
-				${renderModelPicker(
-					"Review Model",
-					"Model used for automated LLM code reviews during gate verification.",
+				${renderModelRow(
+					"Review",
+					"Model and thinking for automated gate verification reviews.",
 					prefReviewModel,
 					setReviewModel,
+					prefReviewThinking,
+					setReviewThinking,
+					"off",
 				)}
-				${renderModelPicker(
-					"Naming Model",
-					"Lightweight model used to auto-generate session titles. Best with a fast, cheap model like Haiku.",
+				${renderModelRow(
+					"Naming",
+					"Lightweight model for auto-generating session titles. Best with a fast, cheap model.",
 					prefNamingModel,
 					setNamingModel,
+					prefNamingThinking,
+					setNamingThinking,
+					"off",
 				)}
 			</div>
 
 			<!-- AI Gateway section -->
-			<div class="flex flex-col gap-4 ${hasModels ? "pt-4 border-t border-border" : ""}">
+			<div class="flex flex-col gap-4 pt-4 border-t border-border">
 				<h3 class="text-sm font-semibold text-foreground">AI Gateway</h3>
 				<p class="text-sm text-muted-foreground">
 					Connect to an AI Gateway for on-prem LLM access through a single
@@ -849,34 +933,46 @@ async function saveProjectConfig(): Promise<void> {
 	renderApp();
 }
 
+/** Human-readable labels for known project config keys. */
+const PROJECT_KEY_LABELS: Record<string, string> = {
+	build_command: "Build",
+	test_command: "Test",
+	typecheck_command: "Type Check",
+	test_unit_command: "Test (Unit)",
+	test_e2e_command: "Test (E2E)",
+	worktree_setup_command: "Worktree Setup",
+	skill_directories: "Skill Dirs",
+};
+
+function projectKeyLabel(key: string): string {
+	return PROJECT_KEY_LABELS[key] || key;
+}
+
 function renderProjectTab() {
 	loadProjectConfig();
 
-	// Collect all keys: defaults first, then custom user keys
-	const defaultKeys = Object.keys(projectDefaults);
-	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults));
+	// Known command keys (from defaults), excluding thinking level (handled in Models tab)
+	const commandKeys = Object.keys(projectDefaults).filter((k) => k !== "default_thinking_level");
+	// Custom keys not in defaults
+	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults) && k !== "default_thinking_level");
+
+	// Shared label width class for vertical alignment across all sections
+	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
+	const inputClass = `flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
 
 	return html`
-		<div class="flex flex-col gap-3">
-			<!-- Default entries -->
-			${defaultKeys.map((key) => html`
-				<div class="flex items-end gap-2">
-					<div class="flex flex-col gap-1 flex-1 min-w-0">
-						<label class="text-xs text-muted-foreground">Key</label>
+		<div class="flex flex-col gap-4">
+
+			<!-- Commands -->
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
+				${commandKeys.map((key) => html`
+					<div class="flex items-center gap-3">
+						<span class="${labelClass}">${projectKeyLabel(key)}</span>
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-muted/50 text-muted-foreground text-sm
-								focus:outline-none cursor-not-allowed"
-							.value=${key}
-							disabled
-						/>
-					</div>
-					<div class="flex flex-col gap-1 flex-[2] min-w-0">
-						<label class="text-xs text-muted-foreground">Value</label>
-						<input
-							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="${inputClass} ${projectConfig[key] && projectConfig[key] !== projectDefaults[key] ? "text-foreground" : "text-muted-foreground"}"
 							placeholder=${projectDefaults[key] || ""}
 							.value=${projectConfig[key] || ""}
 							@input=${(e: Event) => {
@@ -886,20 +982,22 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
+						<div class="w-7 shrink-0"></div>
 					</div>
-					<div class="w-9 shrink-0"></div>
-				</div>
-			`)}
+				`)}
+			</div>
 
-			<!-- Custom user entries -->
-			${customKeys.map((key) => html`
-				<div class="flex items-end gap-2">
-					<div class="flex flex-col gap-1 flex-1 min-w-0">
-						<label class="text-xs text-muted-foreground">Key</label>
+			<hr class="border-border" />
+
+			<!-- Custom settings -->
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Custom Settings</div>
+				${customKeys.map((key) => html`
+					<div class="flex items-center gap-3">
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="w-28 sm:w-44 shrink-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+								font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
 							.value=${key}
 							@input=${(e: Event) => {
 								const newKey = (e.target as HTMLInputElement).value;
@@ -910,13 +1008,9 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
-					</div>
-					<div class="flex flex-col gap-1 flex-[2] min-w-0">
-						<label class="text-xs text-muted-foreground">Value</label>
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="${inputClass} text-foreground"
 							.value=${projectConfig[key] || ""}
 							@input=${(e: Event) => {
 								projectConfig[key] = (e.target as HTMLInputElement).value;
@@ -924,25 +1018,20 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
+						<button
+							class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+							title="Remove"
+							@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; renderApp(); }}
+						>${icon(X, "xs")}</button>
 					</div>
-					<button
-						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-						title="Remove"
-						@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; renderApp(); }}
-					>${icon(X, "xs")}</button>
-				</div>
-			`)}
-
-			<!-- New entries being added -->
-			${projectNewEntries.map((entry, i) => html`
-				<div class="flex items-end gap-2">
-					<div class="flex flex-col gap-1 flex-1 min-w-0">
-						<label class="text-xs text-muted-foreground">Key</label>
+				`)}
+				${projectNewEntries.map((entry, i) => html`
+					<div class="flex items-center gap-3">
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
-							placeholder="setting_name"
+							class="w-28 sm:w-44 shrink-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+								font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="key"
 							.value=${entry.key}
 							@input=${(e: Event) => {
 								projectNewEntries[i].key = (e.target as HTMLInputElement).value;
@@ -950,13 +1039,9 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
-					</div>
-					<div class="flex flex-col gap-1 flex-[2] min-w-0">
-						<label class="text-xs text-muted-foreground">Value</label>
 						<input
 							type="text"
-							class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
+							class="${inputClass} text-foreground"
 							placeholder="value"
 							.value=${entry.value}
 							@input=${(e: Event) => {
@@ -965,24 +1050,22 @@ function renderProjectTab() {
 								renderApp();
 							}}
 						/>
+						<button
+							class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+							title="Remove"
+							@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; renderApp(); }}
+						>${icon(X, "xs")}</button>
 					</div>
-					<button
-						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-						title="Remove"
-						@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; renderApp(); }}
-					>${icon(X, "xs")}</button>
-				</div>
-			`)}
+				`)}
+				<button
+					class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground
+						hover:bg-muted rounded-md transition-colors self-start"
+					@click=${() => { projectNewEntries.push({ key: "", value: "" }); renderApp(); }}
+				>${icon(Plus, "xs")} Add Setting</button>
+			</div>
 
-			<!-- Add Setting button -->
-			<button
-				class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground
-					hover:bg-muted rounded-md transition-colors self-start"
-				@click=${() => { projectNewEntries.push({ key: "", value: "" }); renderApp(); }}
-			>${icon(Plus, "xs")} Add Setting</button>
-
-			<!-- Save button -->
-			<div class="flex items-center gap-3 pt-2">
+			<!-- Save -->
+			<div class="flex items-center gap-3 pt-2 border-t border-border">
 				<button
 					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
 						hover:bg-primary/90 transition-colors disabled:opacity-50"
@@ -1136,7 +1219,7 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto">
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
+				<div class="${activeTab === "project" ? "" : activeTab === "palette" || activeTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
 					${activeTab === "general" ? renderGeneralTab() : ""}
 					${activeTab === "project" ? renderProjectTab() : ""}
 					${activeTab === "models" ? renderModelsTab() : ""}

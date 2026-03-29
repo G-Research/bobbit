@@ -5,7 +5,7 @@
  * before E2E tests run). No server needed — pure function tests.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { inferMeta } from "../../dist/server/agent/aigw-manager.js";
 import { modelRecencyRank } from "../../dist/server/agent/model-registry.js";
 

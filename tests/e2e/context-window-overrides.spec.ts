@@ -6,7 +6,7 @@
  * This test FAILS on unfixed code — proving the 200k compaction bug exists.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";

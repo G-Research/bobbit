@@ -5,16 +5,16 @@
  * Verifies GET /api/setup-status, POST /api/setup-status/dismiss,
  * GET /api/health setupComplete field, and setup assistant session creation.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { apiFetch, BASE, E2E_BOBBIT_DIR, createSession, deleteSession, nonGitCwd } from "./e2e-setup.js";
+import { base, bobbitDir, apiFetch, nonGitCwd, deleteSession } from "./e2e-setup.js";
 
 // Run tests serially — dismiss test modifies shared state (sentinel file)
 test.describe.configure({ mode: "serial" });
 
 /** Path to the setup-complete sentinel file in the E2E state dir. */
-const SENTINEL_PATH = join(E2E_BOBBIT_DIR, "state", "setup-complete");
+const SENTINEL_PATH = join(bobbitDir(), "state", "setup-complete");
 
 /** Remove sentinel file to reset setup status. */
 function removeSentinel() {
@@ -45,7 +45,7 @@ test.describe("GET /api/setup-status", () => {
 	});
 
 	test("requires authentication", async () => {
-		const resp = await fetch(`${BASE}/api/setup-status`);
+		const resp = await fetch(`${base()}/api/setup-status`);
 		expect(resp.status).toBe(401);
 	});
 });
@@ -82,7 +82,7 @@ test.describe("POST /api/setup-status/dismiss", () => {
 	});
 
 	test("requires authentication", async () => {
-		const resp = await fetch(`${BASE}/api/setup-status/dismiss`, { method: "POST" });
+		const resp = await fetch(`${base()}/api/setup-status/dismiss`, { method: "POST" });
 		expect(resp.status).toBe(401);
 	});
 });

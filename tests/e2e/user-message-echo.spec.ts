@@ -7,7 +7,7 @@
  * 3. Verifying a message_end event with role=user arrives
  * 4. Testing reconnection scenarios to see if messages survive
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { createSession, connectWs, messageEndPredicate } from "./e2e-setup.js";
 
 test.describe("User message echo", () => {

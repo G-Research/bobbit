@@ -4,7 +4,7 @@
  * Tests create sessions, connect via WebSocket, and verify queue behavior.
  * The mock agent stays busy via STAY_BUSY prompts so we can test queueing.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import {
 	createSession,
 	connectWs,

@@ -18,6 +18,8 @@ export interface TitleGenOptions {
 	namingModel?: string;
 	/** AI Gateway URL for proxying requests (used when provider is "aigw") */
 	aigwUrl?: string;
+	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high" */
+	thinkingLevel?: string;
 }
 
 interface AuthCredentials {
@@ -132,12 +134,12 @@ async function resolveGatewayModelId(baseUrl: string, strippedId: string): Promi
 /**
  * Generate title via the AI Gateway using OpenAI-compatible chat completions.
  */
-async function generateViaGateway(aigwUrl: string, modelId: string, preview: string): Promise<string | null> {
+async function generateViaGateway(aigwUrl: string, modelId: string, preview: string, thinkingLevel?: string): Promise<string | null> {
 	const baseUrl = aigwUrl.replace(/\/+$/, "");
 	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId);
 	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
-	const body = {
+	const body: any = {
 		model: resolvedModel,
 		max_tokens: 20,
 		messages: [
@@ -151,6 +153,16 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 			},
 		],
 	};
+
+	// Add thinking if configured and not "off"
+	if (thinkingLevel && thinkingLevel !== "off") {
+		const budgets: Record<string, number> = { minimal: 1024, low: 4096, medium: 10240, high: 32768 };
+		const budget = budgets[thinkingLevel];
+		if (budget) {
+			body.thinking = { type: "enabled", budget_tokens: budget };
+			body.max_tokens = Math.max(body.max_tokens, budget + 20);
+		}
+	}
 
 	console.log(`[title-gen] Requesting title via gateway model "${resolvedModel}"${resolvedModel !== modelId ? ` (resolved from "${modelId}")` : ""}…`);
 
@@ -183,7 +195,7 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 /**
  * Generate title via direct Anthropic API call.
  */
-async function generateViaAnthropic(preview: string): Promise<string | null> {
+async function generateViaAnthropic(preview: string, thinkingLevel?: string): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
@@ -214,7 +226,7 @@ async function generateViaAnthropic(preview: string): Promise<string | null> {
 		? `You are Claude Code, Anthropic's official CLI for Claude. ${coreInstruction}`
 		: coreInstruction;
 
-	const body = {
+	const body: any = {
 		model: DEFAULT_TITLE_MODEL,
 		max_tokens: 12,
 		system: auth.type === "oauth"
@@ -227,6 +239,16 @@ async function generateViaAnthropic(preview: string): Promise<string | null> {
 			},
 		],
 	};
+
+	// Add thinking if configured and not "off"
+	if (thinkingLevel && thinkingLevel !== "off") {
+		const budgets: Record<string, number> = { minimal: 1024, low: 4096, medium: 10240, high: 32768 };
+		const budget = budgets[thinkingLevel];
+		if (budget) {
+			body.thinking = { type: "enabled", budget_tokens: budget };
+			body.max_tokens = Math.max(body.max_tokens, budget + 12);
+		}
+	}
 
 	console.log(`[title-gen] Requesting title via ${DEFAULT_TITLE_MODEL}…`);
 
@@ -280,7 +302,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		const slash = options.namingModel.indexOf("/");
 		if (slash > 0 && slash < options.namingModel.length - 1) {
 			const modelId = options.namingModel.slice(slash + 1);
-			return generateViaGateway(options.aigwUrl, modelId, preview);
+			return generateViaGateway(options.aigwUrl, modelId, preview, options.thinkingLevel);
 		}
 		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
 	}
@@ -288,7 +310,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	// Default: direct Anthropic API (works for both public and gateway-less setups).
 	// We don't fall back to the gateway without an explicit naming model because
 	// the gateway may not host the default Haiku model ID.
-	return generateViaAnthropic(preview);
+	return generateViaAnthropic(preview, options?.thinkingLevel);
 }
 
 // ── Goal title summarization ──────────────────────────────────────────
