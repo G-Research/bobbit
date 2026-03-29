@@ -14,7 +14,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List all sessions (includes title, status, color, goal) |
+| `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
@@ -30,7 +30,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/goals` | List all goals |
+| `GET` | `/api/goals` | List all goals. Supports `?since=N` generation counter for conditional fetch |
 | `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
@@ -233,3 +233,20 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 |---|---|---|
 | `GET` | `/api/preview` | Get preview HTML for a session (`?sessionId=`) |
 | `POST` | `/api/preview` | Set preview HTML for a session (`?sessionId=`, `{ html }`) |
+
+### Generation counters (conditional fetch)
+
+`GET /api/sessions` and `GET /api/goals` support a `?since=N` query parameter for efficient polling. Both stores maintain a monotonically increasing generation counter that increments on every mutation.
+
+**When `?since=N` matches the current generation** (nothing changed):
+```json
+{ "generation": 42, "changed": false }
+```
+
+**When data has changed** (or `?since` is omitted):
+```json
+{ "generation": 43, "sessions": [...] }
+{ "generation": 18, "goals": [...] }
+```
+
+The generation resets to 0 on server restart. Clients should initialize their tracked generation to -1 so the first request always fetches the full payload.
