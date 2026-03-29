@@ -1,6 +1,7 @@
 import {
 	state,
-	renderApp,
+	setState,
+	requestRender,
 	expandedGoals,
 	saveExpandedGoals,
 	GW_URL_KEY,
@@ -51,7 +52,7 @@ export function updateLocalSessionTitle(sessionId: string, title: string): void 
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
 		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], title };
-		renderApp();
+		requestRender();
 	}
 }
 
@@ -59,7 +60,7 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
 		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status, lastActivity: Date.now() };
-		renderApp();
+		requestRender();
 	}
 }
 
@@ -82,9 +83,7 @@ export function stopSessionPolling(): void {
 export async function refreshSessions(): Promise<void> {
 	const isInitial = state.gatewaySessions.length === 0 && !state.sessionsError;
 	if (isInitial) {
-		state.sessionsLoading = true;
-		state.sessionsError = "";
-		renderApp();
+		setState({ sessionsLoading: true, sessionsError: "" });
 	}
 
 	try {
@@ -140,12 +139,11 @@ export async function refreshSessions(): Promise<void> {
 			state.gatewaySessions = [];
 		}
 	} finally {
-		state.sessionsLoading = false;
-		renderApp();
+		setState({ sessionsLoading: false });
 	}
 
 	// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion).
-	// These call renderApp() only if data actually changed, avoiding redundant re-renders.
+	// These call requestRender() only if data actually changed, avoiding redundant re-renders.
 	refreshGateStatusCache();
 	const now = Date.now();
 	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS && document.visibilityState === "visible") {
@@ -166,7 +164,7 @@ export async function refreshSessions(): Promise<void> {
 							changed = true;
 						}
 					}
-					if (changed) renderApp();
+					if (changed) requestRender();
 				}
 			})
 			.catch(() => {});
@@ -201,8 +199,7 @@ export async function fetchArchivedSessions(): Promise<void> {
 		const data = await res.json();
 		const sessions: GatewaySession[] = data.sessions || [];
 		// Filter to only archived ones
-		state.archivedSessions = sessions.filter((s: any) => s.archived === true);
-		renderApp();
+		setState({ archivedSessions: sessions.filter((s: any) => s.archived === true) });
 	} catch {
 		// Silently fail
 	}
@@ -231,7 +228,7 @@ async function refreshGateStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) renderApp();
+	if (changed) requestRender();
 }
 
 /** Fetch PR status for all goals with branches and update the cache. */
@@ -273,7 +270,7 @@ export async function refreshPrStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) renderApp();
+	if (changed) requestRender();
 	} finally {
 		_prRefreshInFlight = false;
 	}
@@ -1016,8 +1013,7 @@ export async function dismissSetup(): Promise<void> {
 	try {
 		await gatewayFetch("/api/setup-status/dismiss", { method: "POST" });
 	} catch { /* ignore */ }
-	state.setupComplete = true;
-	renderApp();
+	setState({ setupComplete: true });
 }
 
 // ============================================================================

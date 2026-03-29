@@ -356,6 +356,17 @@ export function renderApp(): void {
 	});
 }
 
+/** Mutate app state and schedule a re-render. Sole way to update the `state` object. */
+export function setState(partial: Partial<typeof state>): void {
+	Object.assign(state, partial);
+	renderApp();
+}
+
+/** Schedule a re-render without mutating state. Use when module-local variables changed. */
+export function requestRender(): void {
+	renderApp();
+}
+
 /** Synchronous render — bypasses rAF debounce for cases needing immediate DOM update before layout measurement. */
 export function renderAppSync(): void {
 	_renderScheduled = false;
