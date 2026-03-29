@@ -85,8 +85,8 @@ export function generateMcpProxyExtension(
     name: ${JSON.stringify(fullName)},
     description: ${desc},
     parameters: ${schema},
-    execute: async (args) => {
-      const body = JSON.stringify({ tool: ${JSON.stringify(fullName)}, args });
+    execute: async (toolCallId, params) => {
+      const body = JSON.stringify({ tool: ${JSON.stringify(fullName)}, args: params });
       const url = new URL(gwUrl + "/api/internal/mcp-call");
       const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
       const result = await new Promise((resolve, reject) => {
@@ -106,11 +106,15 @@ export function generateMcpProxyExtension(
         req.end();
       });
       const r = result;
+      let text;
       if (r && r.content && Array.isArray(r.content)) {
-        return r.content.map(c => c.text || "").join("\\n");
+        text = r.content.map(c => c.text || "").join("\\n");
+      } else if (r && r.error) {
+        text = "Error: " + r.error + (r.stack ? "\\n" + r.stack : "");
+      } else {
+        text = JSON.stringify(r);
       }
-      if (r && r.error) return "Error: " + r.error + (r.stack ? "\\n" + r.stack : "");
-      return JSON.stringify(r);
+      return { content: [{ type: "text", text: text || "(no output)" }] };
     }
   });`;
 	}).join('\n');
