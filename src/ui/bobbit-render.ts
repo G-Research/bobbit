@@ -541,6 +541,7 @@ export function renderSidebarBobbit(opts: SidebarBobbitOptions): TemplateResult 
 	const filters: string[] = [];
 	if (hueRotate && status !== "starting" && status !== "terminated") filters.push(`hue-rotate(${hueRotate}deg)`);
 	if (isCancelling) filters.push("saturate(0.3)");
+	else if (status === "terminated") filters.push("saturate(0.35)");
 	else if (isIdle) filters.push("saturate(0.4)");
 	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
 	const idleAnim = isIdle ? "animation:bobbit-breathe 4s ease-in-out infinite;" : "";
@@ -691,6 +692,7 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	const filters: string[] = [];
 	if (hueRotate && status !== "starting" && status !== "terminated") filters.push(`hue-rotate(${hueRotate}deg)`);
 	if (isCancelling) filters.push("saturate(0.3)");
+	else if (status === "terminated") filters.push("saturate(0.35)");
 	else if (isIdle) filters.push("saturate(0.4)");
 	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
 	const idleAnim = isIdle ? "animation:bobbit-breathe 4s ease-in-out infinite;" : "";
