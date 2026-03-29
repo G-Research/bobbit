@@ -2,6 +2,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AppContext } from "../app-context.js";
 import { readBody, json } from "./utils.js";
 import { isGitRepo, getRepoRoot } from "../skills/git.js";
+import { getPromptSections } from "../agent/system-prompt.js";
+import fs from "node:fs";
+import path from "node:path";
+import { bobbitStateDir } from "../bobbit-dir.js";
 
 export async function handle(
 	ctx: AppContext,
@@ -489,6 +493,158 @@ export async function handle(
 			return true;
 		}
 		json(res, cost);
+		return true;
+	}
+
+	// GET /api/sessions/:id/file-content — read a file from session cwd
+	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/file-content")) {
+		const id = url.pathname.split("/")[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json(res, { error: "Session not found" }, 404); return true; }
+
+		const filePath = url.searchParams.get("path");
+		if (!filePath) { json(res, { error: "Missing path parameter" }, 400); return true; }
+
+		const snapshotId = url.searchParams.get("snapshotId");
+		const snapshotDir = path.join(bobbitStateDir(), "html-snapshots");
+		const snapshotFile = snapshotId ? path.join(snapshotDir, `${snapshotId.replace(/[^a-zA-Z0-9_-]/g, "")}.html`) : null;
+
+		if (snapshotFile && fs.existsSync(snapshotFile)) {
+			try {
+				const content = fs.readFileSync(snapshotFile, "utf-8");
+				json(res, { content });
+			} catch {
+				json(res, { error: "Snapshot read failed" }, 500);
+			}
+			return true;
+		}
+
+		const resolved = path.isAbsolute(filePath)
+			? path.resolve(filePath)
+			: path.resolve(session.cwd, filePath);
+
+		try {
+			const stat = fs.statSync(resolved);
+			if (stat.isDirectory() || stat.size > 512 * 1024) {
+				json(res, { error: "File too large or is a directory" }, 400);
+				return true;
+			}
+			const content = fs.readFileSync(resolved, "utf-8");
+			if (snapshotFile) {
+				try {
+					fs.mkdirSync(snapshotDir, { recursive: true });
+					fs.writeFileSync(snapshotFile, content, "utf-8");
+				} catch { /* best-effort */ }
+			}
+			json(res, { content });
+		} catch {
+			json(res, { error: "File not found" }, 404);
+		}
+		return true;
+	}
+
+	// POST /api/sessions/:id/bg-processes — create background process
+	const bgCreateMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes$/);
+	if (bgCreateMatch && req.method === "POST") {
+		const id = bgCreateMatch[1];
+		const session = sessionManager.getSession(id);
+		if (!session) { json(res, { error: "Session not found" }, 404); return true; }
+		const body = await readBody(req);
+		if (!body?.command) { json(res, { error: "command is required" }, 400); return true; }
+		const info = ctx.bgProcessManager.create(id, body.command, session.cwd);
+		json(res, info, 201);
+		return true;
+	}
+
+	// GET /api/sessions/:id/bg-processes — list background processes
+	if (bgCreateMatch && req.method === "GET") {
+		const id = bgCreateMatch[1];
+		json(res, { processes: ctx.bgProcessManager.list(id) });
+		return true;
+	}
+
+	// GET /api/sessions/:id/bg-processes/:pid/logs — get logs
+	const bgLogsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/logs$/);
+	if (bgLogsMatch && req.method === "GET") {
+		const [, sessionId, processId] = bgLogsMatch;
+		const logs = ctx.bgProcessManager.getLogs(sessionId, processId);
+		if (!logs) { json(res, { error: "Process not found" }, 404); return true; }
+		const tail = parseInt(url.searchParams.get("tail") || "200", 10);
+		json(res, {
+			log: logs.log.slice(-tail),
+			stdout: logs.stdout.slice(-tail),
+			stderr: logs.stderr.slice(-tail),
+		});
+		return true;
+	}
+
+	// DELETE /api/sessions/:id/bg-processes/:pid — kill or remove a background process
+	const bgKillMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)$/);
+	if (bgKillMatch && req.method === "DELETE") {
+		const [, sessionId, processId] = bgKillMatch;
+		const killed = ctx.bgProcessManager.kill(sessionId, processId);
+		if (!killed) {
+			const removed = ctx.bgProcessManager.remove(sessionId, processId);
+			if (!removed) { json(res, { error: "Process not found" }, 404); return true; }
+		}
+		json(res, { ok: true });
+		return true;
+	}
+
+	// PUT /api/sessions/:id/draft — upsert a draft
+	const draftMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
+	if (draftMatch && req.method === "PUT") {
+		const id = draftMatch[1];
+		const body = await readBody(req);
+		if (!body || typeof body.type !== "string") {
+			json(res, { error: "Missing type" }, 400);
+			return true;
+		}
+		const ok = sessionManager.setDraft(id, body.type, body.data);
+		if (!ok) { json(res, { error: "Session not found" }, 404); return true; }
+		json(res, { ok: true });
+		return true;
+	}
+
+	// GET /api/sessions/:id/prompt-sections — return system prompt broken into labeled sections
+	const promptSectionsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-sections$/);
+	if (promptSectionsMatch && req.method === "GET") {
+		const id = promptSectionsMatch[1];
+		const parts = sessionManager.getPromptParts(id);
+		if (!parts) { json(res, { error: "Session not found or no prompt data" }, 404); return true; }
+		if (!parts.toolDocs && ctx.toolManager) {
+			parts.toolDocs = ctx.toolManager.getToolDocsForPrompt(parts.allowedTools);
+		}
+		const sections = getPromptSections(parts);
+		json(res, { sections });
+		return true;
+	}
+
+	// GET /api/sessions/:id/draft?type=prompt — retrieve a draft
+	if (draftMatch && req.method === "GET") {
+		const id = draftMatch[1];
+		const type = url.searchParams.get("type");
+		if (!type) { json(res, { error: "Missing type query param" }, 400); return true; }
+		const data = sessionManager.getDraft(id, type);
+		if (data === undefined) {
+			const session = sessionManager.getSession(id);
+			if (!session) { json(res, { error: "Session not found" }, 404); return true; }
+			json(res, { error: "Draft not found" }, 404);
+			return true;
+		}
+		json(res, { type, data });
+		return true;
+	}
+
+	// DELETE /api/sessions/:id/draft?type=prompt — clear a draft
+	if (draftMatch && req.method === "DELETE") {
+		const id = draftMatch[1];
+		const type = url.searchParams.get("type");
+		if (!type) { json(res, { error: "Missing type query param" }, 400); return true; }
+		const session = sessionManager.getSession(id);
+		if (!session) { json(res, { error: "Session not found" }, 404); return true; }
+		sessionManager.deleteDraft(id, type);
+		json(res, { ok: true });
 		return true;
 	}
 
