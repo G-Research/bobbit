@@ -17,7 +17,7 @@ import {
 	type KeyBinding,
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
-import { requestRender, setState, state } from "./state.js";
+import { renderApp, state } from "./state.js";
 import { setHashRoute, toggleConfigPage } from "./routing.js";
 import { gatewayFetch } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
@@ -67,7 +67,7 @@ function handleRebindKeydown(e: KeyboardEvent): void {
 	if (["Control", "Meta", "Shift", "Alt"].includes(e.key)) return;
 	if (e.key === "Escape") {
 		resetRebindState();
-		requestRender();
+		renderApp();
 		return;
 	}
 	const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -83,7 +83,7 @@ function handleRebindKeydown(e: KeyboardEvent): void {
 			const isDuplicate = entry.currentBindings.some((b) => bindingsEqual(b, newBinding));
 			if (isDuplicate) {
 				resetRebindState();
-				requestRender();
+				renderApp();
 				return;
 			}
 		}
@@ -93,14 +93,14 @@ function handleRebindKeydown(e: KeyboardEvent): void {
 		pendingBinding = newBinding;
 		conflictEntry = conflict;
 		browserReservedWarning = false;
-		requestRender();
+		renderApp();
 		return;
 	}
 	if (isBrowserReserved(newBinding)) {
 		pendingBinding = newBinding;
 		conflictEntry = null;
 		browserReservedWarning = true;
-		requestRender();
+		renderApp();
 		return;
 	}
 	applyBinding(newBinding);
@@ -115,7 +115,7 @@ async function applyBinding(binding: KeyBinding): Promise<void> {
 	}
 	resetRebindState();
 	await saveBindings();
-	requestRender();
+	renderApp();
 }
 
 async function unbindConflictAndApply(): Promise<void> {
@@ -144,19 +144,19 @@ async function acceptBrowserReservedAndApply(): Promise<void> {
 async function handleResetBinding(id: string): Promise<void> {
 	resetBinding(id);
 	await saveBindings();
-	requestRender();
+	renderApp();
 }
 
 async function handleResetAll(): Promise<void> {
 	resetAllBindings();
 	await saveBindings();
-	requestRender();
+	renderApp();
 }
 
 async function handleRemoveBinding(id: string, index: number): Promise<void> {
 	removeBinding(id, index);
 	await saveBindings();
-	requestRender();
+	renderApp();
 }
 
 function startRebind(id: string, index: number | null): void {
@@ -165,7 +165,7 @@ function startRebind(id: string, index: number | null): void {
 	pendingBinding = null;
 	conflictEntry = null;
 	browserReservedWarning = false;
-	requestRender();
+	renderApp();
 }
 
 function updateKeydownListener(): void {
@@ -241,7 +241,7 @@ function renderShortcutRow(entry: ShortcutEntry, index = 0) {
 						</p>
 						<div class="flex gap-2">
 							${Button({ size: "sm", onClick: unbindConflictAndApply, children: "Unbind & Assign" })}
-							${Button({ variant: "ghost", size: "sm", onClick: () => { resetRebindState(); requestRender(); }, children: "Cancel" })}
+							${Button({ variant: "ghost", size: "sm", onClick: () => { resetRebindState(); renderApp(); }, children: "Cancel" })}
 						</div>
 					</div>
 				`
@@ -254,7 +254,7 @@ function renderShortcutRow(entry: ShortcutEntry, index = 0) {
 						</p>
 						<div class="flex gap-2">
 							${Button({ size: "sm", onClick: acceptBrowserReservedAndApply, children: "Assign Anyway" })}
-							${Button({ variant: "ghost", size: "sm", onClick: () => { resetRebindState(); requestRender(); }, children: "Cancel" })}
+							${Button({ variant: "ghost", size: "sm", onClick: () => { resetRebindState(); renderApp(); }, children: "Cancel" })}
 						</div>
 					</div>
 				`
@@ -347,7 +347,7 @@ async function selectPalette(id: string): Promise<void> {
 			body: JSON.stringify({ palette: id }),
 		});
 	} catch {}
-	requestRender();
+	renderApp();
 }
 
 function renderPalettePreview(palette: ColorPalette) {
@@ -474,7 +474,7 @@ function loadModelsState(): void {
 				prefNamingModel = prefs["default.namingModel"] || "";
 			}
 		} catch {}
-		requestRender();
+		renderApp();
 	})();
 }
 
@@ -490,26 +490,26 @@ async function savePref(key: string, value: string | null): Promise<void> {
 async function setSessionModel(value: string): Promise<void> {
 	prefSessionModel = value;
 	await savePref("default.sessionModel", value || null);
-	requestRender();
+	renderApp();
 }
 
 async function setReviewModel(value: string): Promise<void> {
 	prefReviewModel = value;
 	await savePref("default.reviewModel", value || null);
-	requestRender();
+	renderApp();
 }
 
 async function setNamingModel(value: string): Promise<void> {
 	prefNamingModel = value;
 	await savePref("default.namingModel", value || null);
-	requestRender();
+	renderApp();
 }
 
 async function testAigwConnection(): Promise<void> {
 	if (!aigwUrl.trim()) return;
 	aigwStatus = "testing";
 	aigwError = "";
-	requestRender();
+	renderApp();
 	try {
 		const res = await gatewayFetch("/api/aigw/test", {
 			method: "POST",
@@ -526,14 +526,14 @@ async function testAigwConnection(): Promise<void> {
 		aigwError = err.message || "Connection failed";
 	}
 	aigwStatus = "idle";
-	requestRender();
+	renderApp();
 }
 
 async function saveAigwConfig(): Promise<void> {
 	if (!aigwUrl.trim()) return;
 	aigwStatus = "saving";
 	aigwError = "";
-	requestRender();
+	renderApp();
 	try {
 		const res = await gatewayFetch("/api/aigw/configure", {
 			method: "POST",
@@ -552,13 +552,13 @@ async function saveAigwConfig(): Promise<void> {
 		aigwError = err.message || "Save failed";
 	}
 	aigwStatus = "idle";
-	requestRender();
+	renderApp();
 }
 
 async function refreshAigwModels(): Promise<void> {
 	aigwStatus = "testing";
 	aigwError = "";
-	requestRender();
+	renderApp();
 	try {
 		const res = await gatewayFetch("/api/aigw/refresh", { method: "POST" });
 		const data = await res.json();
@@ -572,13 +572,13 @@ async function refreshAigwModels(): Promise<void> {
 		aigwError = err.message || "Refresh failed";
 	}
 	aigwStatus = "idle";
-	requestRender();
+	renderApp();
 }
 
 async function removeAigwConfig(): Promise<void> {
 	aigwStatus = "removing";
 	aigwError = "";
-	requestRender();
+	renderApp();
 	try {
 		await gatewayFetch("/api/aigw/configure", { method: "DELETE" });
 		aigwConfigured = false;
@@ -590,7 +590,7 @@ async function removeAigwConfig(): Promise<void> {
 		aigwError = err.message || "Remove failed";
 	}
 	aigwStatus = "idle";
-	requestRender();
+	renderApp();
 }
 
 function formatTokens(tokens: number): string {
@@ -798,13 +798,13 @@ function loadProjectConfig(): void {
 				projectNewEntries = [];
 			}
 		} catch {}
-		requestRender();
+		renderApp();
 	})();
 }
 
 async function saveProjectConfig(): Promise<void> {
 	projectSaveStatus = "saving";
-	requestRender();
+	renderApp();
 	try {
 		const body: Record<string, string | null> = {};
 		// For each key in projectConfig: send null if value matches the default (don't persist redundant entries),
@@ -837,14 +837,14 @@ async function saveProjectConfig(): Promise<void> {
 			}
 			projectNewEntries = [];
 			projectSaveStatus = "saved";
-			setTimeout(() => { projectSaveStatus = ""; requestRender(); }, 2000);
+			setTimeout(() => { projectSaveStatus = ""; renderApp(); }, 2000);
 		} else {
 			projectSaveStatus = "error";
 		}
 	} catch {
 		projectSaveStatus = "error";
 	}
-	requestRender();
+	renderApp();
 }
 
 function renderProjectTab() {
@@ -881,7 +881,7 @@ function renderProjectTab() {
 								const v = (e.target as HTMLInputElement).value;
 								projectConfig[key] = v || projectDefaults[key] || "";
 								projectSaveStatus = "";
-								requestRender();
+								renderApp();
 							}}
 						/>
 					</div>
@@ -905,7 +905,7 @@ function renderProjectTab() {
 								delete projectConfig[key];
 								if (newKey) projectConfig[newKey] = val;
 								projectSaveStatus = "";
-								requestRender();
+								renderApp();
 							}}
 						/>
 					</div>
@@ -919,14 +919,14 @@ function renderProjectTab() {
 							@input=${(e: Event) => {
 								projectConfig[key] = (e.target as HTMLInputElement).value;
 								projectSaveStatus = "";
-								requestRender();
+								renderApp();
 							}}
 						/>
 					</div>
 					<button
 						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 						title="Remove"
-						@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; requestRender(); }}
+						@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; renderApp(); }}
 					>${icon(X, "xs")}</button>
 				</div>
 			`)}
@@ -945,7 +945,7 @@ function renderProjectTab() {
 							@input=${(e: Event) => {
 								projectNewEntries[i].key = (e.target as HTMLInputElement).value;
 								projectSaveStatus = "";
-								requestRender();
+								renderApp();
 							}}
 						/>
 					</div>
@@ -960,14 +960,14 @@ function renderProjectTab() {
 							@input=${(e: Event) => {
 								projectNewEntries[i].value = (e.target as HTMLInputElement).value;
 								projectSaveStatus = "";
-								requestRender();
+								renderApp();
 							}}
 						/>
 					</div>
 					<button
 						class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 						title="Remove"
-						@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; requestRender(); }}
+						@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; renderApp(); }}
 					>${icon(X, "xs")}</button>
 				</div>
 			`)}
@@ -976,7 +976,7 @@ function renderProjectTab() {
 			<button
 				class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground
 					hover:bg-muted rounded-md transition-colors self-start"
-				@click=${() => { projectNewEntries.push({ key: "", value: "" }); requestRender(); }}
+				@click=${() => { projectNewEntries.push({ key: "", value: "" }); renderApp(); }}
 			>${icon(Plus, "xs")} Add Setting</button>
 
 			<!-- Save button -->
@@ -1007,7 +1007,7 @@ function loadGeneralSettings() {
 				if (res.ok) {
 					const prefs = await res.json();
 					settingsShowTimestamps = !!prefs.showTimestamps;
-					requestRender();
+					renderApp();
 				}
 			} catch {}
 		})();
@@ -1016,7 +1016,7 @@ function loadGeneralSettings() {
 
 async function toggleShowTimestamps(): Promise<void> {
 	settingsShowTimestamps = !settingsShowTimestamps;
-	requestRender();
+	renderApp();
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
@@ -1027,7 +1027,7 @@ async function toggleShowTimestamps(): Promise<void> {
 
 async function saveDefaultCwd(): Promise<void> {
 	settingsCwdSaveStatus = "saving";
-	requestRender();
+	renderApp();
 	try {
 		const res = await gatewayFetch("/api/config/cwd", {
 			method: "PUT",
@@ -1035,16 +1035,16 @@ async function saveDefaultCwd(): Promise<void> {
 		});
 		if (res.ok) {
 			const data = await res.json();
-			setState({ defaultCwd: data.cwd });
+			state.defaultCwd = data.cwd;
 			settingsCwdSaveStatus = "saved";
-			setTimeout(() => { settingsCwdSaveStatus = ""; requestRender(); }, 2000);
+			setTimeout(() => { settingsCwdSaveStatus = ""; renderApp(); }, 2000);
 		} else {
 			settingsCwdSaveStatus = "error";
 		}
 	} catch {
 		settingsCwdSaveStatus = "error";
 	}
-	requestRender();
+	renderApp();
 }
 
 function renderGeneralTab() {
@@ -1063,7 +1063,7 @@ function renderGeneralTab() {
 							focus:outline-none focus:ring-2 focus:ring-ring"
 						.value=${settingsCwd}
 						placeholder="e.g. C:\\Users\\you\\projects"
-						@input=${(e: Event) => { settingsCwd = (e.target as HTMLInputElement).value; settingsCwdSaveStatus = ""; requestRender(); }}
+						@input=${(e: Event) => { settingsCwd = (e.target as HTMLInputElement).value; settingsCwdSaveStatus = ""; renderApp(); }}
 					/>
 					<button
 						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
@@ -1127,7 +1127,7 @@ export function renderSettingsPage() {
 								? "bg-background text-foreground shadow-sm border border-border"
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 						title="${tab.label}"
-						@click=${() => { activeTab = tab.id; requestRender(); }}
+						@click=${() => { activeTab = tab.id; renderApp(); }}
 					>${tab.label}</button>
 				`)}
 			</div>

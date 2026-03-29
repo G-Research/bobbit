@@ -1534,6 +1534,9 @@ async function handleApiRoute(
 			});
 		}
 
+		// Cancel any in-flight verifications for the same gate before starting new ones
+		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+
 		// Fire-and-forget verification
 		verificationHarness.verifyGateSignal(
 			signal, gateDef, goal.cwd, goal.branch, "master", allGateStates, goal.spec,

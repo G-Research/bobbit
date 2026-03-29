@@ -130,6 +130,16 @@ Gates can define automated verification that runs when signaled:
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
 
+### Gate Re-Signal Cancellation
+
+When a gate is re-signaled while a previous verification is still running:
+- The in-flight verification is cancelled — its reviewer sessions are terminated and its results are suppressed
+- Only the latest signal's verification determines the gate's pass/fail status
+- The team lead is not notified about superseded verification results
+- Command steps that are already running will complete but their results won't update gate status
+
+This prevents reviewer agent proliferation when gates are re-signaled multiple times. The cancellation is triggered by `cancelStaleVerifications()` in `verification-harness.ts`, which is called before starting a new verification in the gate signal handler.
+
 ### Tasks
 
 **Tasks** are the operational work items within a goal. They track what needs to be done, who's doing it, and what state it's in.
@@ -250,6 +260,7 @@ Here's the typical flow for a team goal with a workflow:
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate — triggers verification |
 | `GET` | `/api/goals/:id/gates/:gateId/signals` | Get signal history for a gate |
 | `GET` | `/api/goals/:id/gates/:gateId/content` | Get the current passed content of a gate |
+| `GET` | `/api/goals/:id/verifications/active` | Get in-flight verification state (running steps, sessions) |
 
 ### Tasks (gate-linked)
 

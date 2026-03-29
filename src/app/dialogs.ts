@@ -8,8 +8,7 @@ import { cwdCombobox } from "./cwd-combobox.js";
 import QRCode from "qrcode";
 import {
 	state,
-	setState,
-	requestRender,
+	renderApp,
 	activeSessionId,
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
@@ -820,7 +819,8 @@ export function showGoalDialog(existingGoal?: Goal): void {
 
 async function createGoalAssistantSession(): Promise<void> {
 	if (state.creatingSession) return;
-	setState({ creatingSession: true });
+	state.creatingSession = true;
+	renderApp();
 	try {
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
@@ -834,7 +834,8 @@ async function createGoalAssistantSession(): Promise<void> {
 		const msg = err instanceof Error ? err.message : String(err);
 		showConnectionError("Failed to create goal assistant", msg);
 	} finally {
-		setState({ creatingSession: false });
+		state.creatingSession = false;
+		renderApp();
 	}
 }
 
@@ -1006,7 +1007,7 @@ export async function showAssignRoleDialog(sessionId: string): Promise<void> {
 			console.error("[assign-role] Failed:", err);
 		}
 		cleanup();
-		requestRender();
+		renderApp();
 	};
 
 	const renderDialog = () => {

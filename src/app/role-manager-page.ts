@@ -6,7 +6,7 @@ import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchRoles, fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
-import { state, setState, requestRender } from "./state.js";
+import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
 // ============================================================================
@@ -65,12 +65,12 @@ export async function loadRolePageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	deleting = false;
-	requestRender();
+	renderApp();
 	const [r, t] = await Promise.all([fetchRoles(), fetchTools()]);
 	roles = r;
 	availableTools = t;
 	loading = false;
-	requestRender();
+	renderApp();
 }
 
 export function clearRolePageState(): void {
@@ -109,7 +109,7 @@ function showEdit(role: RoleData): void {
 			assistantPrompts = prompts;
 			editedPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
 			originalPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
-			requestRender();
+			renderApp();
 		});
 	} else {
 		assistantPrompts = [];
@@ -138,7 +138,7 @@ export function navigateToRoleEdit(roleName: string): void {
 				assistantPrompts = prompts;
 				editedPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
 				originalPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
-				requestRender();
+				renderApp();
 			});
 		} else {
 			assistantPrompts = [];
@@ -147,12 +147,13 @@ export function navigateToRoleEdit(roleName: string): void {
 		currentView = "list";
 		selectedRole = null;
 	}
-	requestRender();
+	renderApp();
 }
 
 async function createRoleAssistantSession(): Promise<void> {
 	if (state.creatingSession) return;
-	setState({ creatingSession: true });
+	state.creatingSession = true;
+	renderApp();
 	try {
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
@@ -167,7 +168,8 @@ async function createRoleAssistantSession(): Promise<void> {
 		const msg = err instanceof Error ? err.message : String(err);
 		showConnectionError("Failed to create role assistant", msg);
 	} finally {
-		setState({ creatingSession: false });
+		state.creatingSession = false;
+		renderApp();
 	}
 }
 
@@ -177,7 +179,7 @@ async function createRoleAssistantSession(): Promise<void> {
 
 async function handleSave(): Promise<void> {
 	saving = true;
-	requestRender();
+	renderApp();
 
 	if (selectedRole) {
 		const ok = await updateRole(selectedRole.name, {
@@ -207,7 +209,7 @@ async function handleSave(): Promise<void> {
 		}
 	}
 	saving = false;
-	requestRender();
+	renderApp();
 }
 
 async function handleDelete(): Promise<void> {
@@ -222,7 +224,7 @@ async function handleDelete(): Promise<void> {
 	if (!confirmed) return;
 
 	deleting = true;
-	requestRender();
+	renderApp();
 	const ok = await deleteRole(selectedRole.name);
 	if (ok) {
 		const [r] = await Promise.all([fetchRoles()]);
@@ -230,7 +232,7 @@ async function handleDelete(): Promise<void> {
 		showList();
 	} else {
 		deleting = false;
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -241,7 +243,7 @@ function toggleTool(tool: string): void {
 	} else {
 		editTools = [...editTools, tool];
 	}
-	requestRender();
+	renderApp();
 }
 
 function toggleToolGroup(group: string): void {
@@ -253,7 +255,7 @@ function toggleToolGroup(group: string): void {
 		const toAdd = groupNames.filter(n => !editTools.includes(n));
 		editTools = [...editTools, ...toAdd];
 	}
-	requestRender();
+	renderApp();
 }
 
 // ============================================================================
@@ -345,7 +347,7 @@ async function handleDeleteFromList(role: RoleData): Promise<void> {
 	if (ok) {
 		const [r] = await Promise.all([fetchRoles()]);
 		roles = r;
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -470,7 +472,7 @@ function renderEditView(): TemplateResult {
 							${Input({
 								value: editLabel,
 								placeholder: "e.g. Documentation Writer",
-								onInput: (e: Event) => { editLabel = (e.target as HTMLInputElement).value; requestRender(); },
+								onInput: (e: Event) => { editLabel = (e.target as HTMLInputElement).value; renderApp(); },
 							})}
 						</div>
 					</div>
@@ -487,7 +489,7 @@ function renderEditView(): TemplateResult {
 								<button
 									class="roles-accessory-option ${selected ? "roles-accessory-option--selected" : ""}"
 									title="${acc.label}"
-									@click=${() => { editAccessory = accId; requestRender(); }}
+									@click=${() => { editAccessory = accId; renderApp(); }}
 								>
 									<span class="roles-accessory-preview">
 										${accId === "none"
@@ -508,12 +510,12 @@ function renderEditView(): TemplateResult {
 						<div class="roles-prompt-tabs">
 							<button
 								class="roles-prompt-tab ${activePromptTab === "baseline" ? "roles-prompt-tab--active" : ""}"
-								@click=${() => { activePromptTab = "baseline"; requestRender(); }}
+								@click=${() => { activePromptTab = "baseline"; renderApp(); }}
 							>Shared Baseline</button>
 							${assistantPrompts.map((p) => html`
 								<button
 									class="roles-prompt-tab ${activePromptTab === p.type ? "roles-prompt-tab--active" : ""}"
-									@click=${() => { activePromptTab = p.type; requestRender(); }}
+									@click=${() => { activePromptTab = p.type; renderApp(); }}
 								>${p.title.replace(" Assistant", "").replace(" Wizard", "")}</button>
 							`)}
 						</div>
@@ -530,7 +532,7 @@ function renderEditView(): TemplateResult {
 						<textarea
 							class="roles-prompt-editor"
 							.value=${editedPrompts.get(activePromptTab) ?? ""}
-							@input=${(e: Event) => { editedPrompts.set(activePromptTab, (e.target as HTMLTextAreaElement).value); requestRender(); }}
+							@input=${(e: Event) => { editedPrompts.set(activePromptTab, (e.target as HTMLTextAreaElement).value); renderApp(); }}
 						></textarea>
 					`}
 				</div>

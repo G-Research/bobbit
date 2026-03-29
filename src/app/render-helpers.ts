@@ -3,7 +3,7 @@ import { html, nothing, svg, type TemplateResult } from "lit";
 import { Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
-	requestRender,
+	renderApp,
 	activeSessionId,
 	expandedGoals,
 	saveExpandedGoals,
@@ -116,18 +116,10 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 
 let _timeRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Start a 60s timer that updates relative-time elements in-place. */
+/** Start a 60s timer that re-renders the app to update relative times. */
 export function startTimeRefresh(): void {
 	if (_timeRefreshTimer) return;
-	_timeRefreshTimer = setInterval(() => {
-		const els = document.querySelectorAll('[data-timestamp]');
-		els.forEach(el => {
-			const ts = parseInt(el.getAttribute('data-timestamp')!, 10);
-			if (ts > 0) {
-				el.textContent = terseRelativeTime(ts);
-			}
-		});
-	}, 60_000);
+	_timeRefreshTimer = setInterval(() => renderApp(), 60_000);
 }
 
 export function stopTimeRefresh(): void {
@@ -167,7 +159,6 @@ function renderSessionTime(session: GatewaySession, selected = false) {
 	return html`<span
 		class="shrink-0 inline-flex items-center gap-0.5 text-[11px] tabular-nums ${selected ? (unseen ? "text-foreground font-medium" : "text-foreground/50") : (unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50")}"
 		style="vertical-align:middle;"
-		data-timestamp="${session.lastActivity}"
 		title="${formatSessionAge(session.lastActivity)}"
 	>${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
 }
@@ -228,7 +219,7 @@ export function renderSessionRow(session: GatewaySession) {
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); requestRender(); }}
+				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
 				${connecting
@@ -296,14 +287,14 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); requestRender(); }}
+				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse" : "Expand"}"
 			>${expanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
 			<div class="flex-1 min-w-0 font-normal truncate ${mobile ? "text-base" : "text-xs"}">${displayTitle}</div>
-			${session.archivedAt ? html`<span class="shrink-0 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground" data-timestamp="${session.archivedAt}">${terseRelativeTime(session.archivedAt)}</span>` : ""}
+			${session.archivedAt ? html`<span class="shrink-0 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground">${terseRelativeTime(session.archivedAt)}</span>` : ""}
 		</div>
 	`;
 }
@@ -344,11 +335,11 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 		e.stopPropagation();
 		if (!goalId) return;
 		teamLoading.add(goalId);
-		requestRender();
+		renderApp();
 		await teardownTeam(goalId);
 		teamLoading.delete(goalId);
 		await refreshSessions();
-		requestRender();
+		renderApp();
 	};
 
 	const buttons = html`
@@ -363,7 +354,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const chevron = html`<span
 		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
 		style="width:${CHEVRON_W}px;"
-		@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(session.id); requestRender(); }}
+		@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(session.id); renderApp(); }}
 		title="${expanded ? "Collapse agents" : "Expand agents"}"
 	>${expanded ? "▾" : "▸"}</span>`;
 
@@ -468,16 +459,16 @@ export function renderGoalGroup(goal: Goal) {
 	const toggleExpand = () => {
 		if (isExpanded) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id);
 		saveExpandedGoals();
-		requestRender();
+		renderApp();
 	};
 
 	const handleStartTeam = async (e?: Event) => {
 		e?.stopPropagation();
 		teamLoading.add(goal.id);
-		requestRender();
+		renderApp();
 		const sid = await startTeam(goal.id);
 		teamLoading.delete(goal.id);
-		if (sid) connectToSession(sid, false); else requestRender();
+		if (sid) connectToSession(sid, false); else renderApp();
 	};
 
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
