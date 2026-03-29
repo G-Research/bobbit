@@ -1,13 +1,12 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Copy, GripVertical, MessageSquare, Pencil, Plus, Terminal, Trash2 } from "lucide";
+import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Terminal, Trash2 } from "lucide";
 import {
 	fetchWorkflows,
 	createWorkflow,
 	updateWorkflow,
 	deleteWorkflow,
-	cloneWorkflow,
 	gatewayFetch,
 	type Workflow,
 	type WorkflowGate,
@@ -190,13 +189,6 @@ async function handleDelete(workflow: Workflow): Promise<void> {
 	}
 }
 
-async function handleClone(workflow: Workflow): Promise<void> {
-	const result = await cloneWorkflow(workflow.id);
-	if (result) {
-		workflows = await fetchWorkflows();
-		showEdit(result);
-	}
-}
 
 function addGate(): void {
 	editGates = [...editGates, {
@@ -742,9 +734,6 @@ function renderWorkflowRow(wf: Workflow): TemplateResult {
 			<div class="wf-row-actions">
 				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); editWorkflowWithAssistant(wf); }} title="Edit with Assistant">
 					${icon(MessageSquare, "sm")}
-				</button>
-				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); handleClone(wf); }} title="Clone">
-					${icon(Copy, "sm")}
 				</button>
 				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(wf); }} title="Edit">
 					${icon(Pencil, "sm")}
