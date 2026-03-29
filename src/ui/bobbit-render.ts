@@ -35,7 +35,7 @@ export interface BobbitPalette {
 	eye: string;
 }
 
-/** Legacy accessory definition with pre-computed box-shadow string. */
+/** Accessory definition derived from canonical sprite data. */
 export interface AccessoryDef {
 	id: string;
 	label: string;
@@ -64,22 +64,13 @@ export const TERMINATED_PALETTE: BobbitPalette = { main: "#ef4444", light: "#fca
 
 export const NO_ACCESSORY: AccessoryDef = { id: "none", label: "None", shadow: "", yOffset: 0, addsHeight: false };
 
-/** Aurora borealis palette — 14 curated hue-rotate offsets from canonical green. */
-export const BOBBIT_HUE_ROTATIONS = [-110, -85, -60, -35, -10, 0, 15, 25, 40, 50, 65, 75, 100, 125];
-
-// ============================================================================
-// PIXEL → BOX-SHADOW CONVERSION
-// ============================================================================
-
 /** Convert sprite pixels to a CSS box-shadow string. */
-export function pixelsToBoxShadow(pixels: SpritePixel[]): string {
+function pixelsToBoxShadow(pixels: SpritePixel[]): string {
 	return pixels.map(([x, y, c]) => `${x}px ${y}px 0 ${c}`).join(",");
 }
 
-/** Convert shadow pixels (with alpha) to a CSS box-shadow string. */
-export function shadowPixelsToBoxShadow(pixels: ShadowPixel[]): string {
-	return pixels.map(([x, y, a]) => `${x}px ${y}px 0 rgba(0,0,0,${a})`).join(",");
-}
+/** Aurora borealis palette — 14 curated hue-rotate offsets from canonical green. */
+export const BOBBIT_HUE_ROTATIONS = [-110, -85, -60, -35, -10, 0, 15, 25, 40, 50, 65, 75, 100, 125];
 
 // ============================================================================
 // BODY PIXEL RESOLUTION
@@ -210,7 +201,7 @@ export function renderAccessoryToDataURL(pixels: SpritePixel[]): { url: string; 
 // SPRITE DATA → LEGACY ACCESSORY DEF BRIDGE
 // ============================================================================
 
-/** Convert AccessorySpriteData → AccessoryDef (with pre-computed box-shadow string). */
+/** Convert AccessorySpriteData → AccessoryDef. */
 export function spriteToAccessoryDef(data: AccessorySpriteData): AccessoryDef {
 	return {
 		id: data.id,
@@ -238,40 +229,6 @@ export interface IdleBlobOptions {
 	phaseIndex?: number;
 }
 
-/**
- * Render an idle chat blob with accessory, sized to fit a container.
- * Uses the exact same DOM as StreamingMessageContainer.
- * Extracted from role-manager-page.ts idleBlob().
- */
-export function renderIdleBlob(opts: IdleBlobOptions): TemplateResult {
-	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
-	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
-	const naturalSize = 76;
-	const s = size / naturalSize;
-	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
-	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
-	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
-	return html`
-		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
-			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
-				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
-					<div class="bobbit-blob__sprite"></div>
-					<div class="bobbit-blob__crown"></div>
-					<div class="bobbit-blob__bandana"></div>
-					<div class="bobbit-blob__magnifier"></div>
-					<div class="bobbit-blob__palette"></div>
-					<div class="bobbit-blob__pencil"></div>
-					<div class="bobbit-blob__shield"></div>
-					<div class="bobbit-blob__set-square"></div>
-					<div class="bobbit-blob__flask"></div>
-					<div class="bobbit-blob__wand"></div>
-					<div class="bobbit-blob__wizard-hat"></div>
-				</div>
-			</div>
-		</div>
-	`;
-}
-
 // ============================================================================
 // CHAT BLOB RENDERER
 // ============================================================================
@@ -280,27 +237,6 @@ export interface ChatBlobOptions {
 	blobClass: string;
 	accClass?: string;
 	hueRotate?: number;
-}
-
-/** Render a chat blob with the exact DOM structure from StreamingMessageContainer. */
-export function renderChatBlob(opts: ChatBlobOptions): TemplateResult {
-	const { blobClass, accClass = "", hueRotate = 0 } = opts;
-	return html`<div class="${accClass}" style="--bobbit-hue-rotate:${hueRotate}deg;display:inline-block;padding:8px 20px 40px 20px;">
-		<div class="${blobClass}">
-			<div class="bobbit-blob__sprite"></div>
-			<div class="bobbit-blob__crown"></div>
-			<div class="bobbit-blob__bandana"></div>
-			<div class="bobbit-blob__magnifier"></div>
-			<div class="bobbit-blob__palette"></div>
-			<div class="bobbit-blob__pencil"></div>
-			<div class="bobbit-blob__shield"></div>
-			<div class="bobbit-blob__set-square"></div>
-			<div class="bobbit-blob__flask"></div>
-			<div class="bobbit-blob__wand"></div>
-			<div class="bobbit-blob__wizard-hat"></div>
-			<div class="bobbit-blob__shadow"></div>
-		</div>
-	</div>`;
 }
 
 // ============================================================================
@@ -459,7 +395,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 // ============================================================================
 
 /**
- * Render an idle blob using canvas inside the same DOM structure as renderIdleBlob.
+ * Render an idle blob using canvas-based <img> for the sprite body.
  * Only the sprite body is canvas-rendered; accessories use CSS box-shadow.
  */
 export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
@@ -505,99 +441,13 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 }
 
 // ============================================================================
-// SIDEBAR BOBBIT RENDERER
-// ============================================================================
-
-/** Pure renderer for sidebar bobbit — same output as statusBobbit() but takes all inputs explicitly. */
-export function renderSidebarBobbit(opts: SidebarBobbitOptions): TemplateResult {
-	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false } = opts;
-	const acc = opts.accessory ?? NO_ACCESSORY;
-	const hasAccessory = acc.id !== "none" && acc.shadow !== "";
-	const addsHeight = acc.addsHeight;
-
-	let p: BobbitPalette;
-	if (status === "starting") p = STARTING_PALETTE;
-	else if (status === "terminated") p = TERMINATED_PALETTE;
-	else p = CANONICAL_PALETTE;
-
-	const isBusy = status === "streaming" || isCompacting;
-
-	// Resolve body pixels from sprite data
-	const eyeColor = isSelected ? p.main : p.eye;
-	const bodyPixels = resolveBodyPixels(p, "center", false, eyeColor);
-	const shadow = pixelsToBoxShadow(bodyPixels);
-
-	// Eye overlay (separate span, only when selected for independent animation)
-	const eyePos = EYE_POSITIONS["center"];
-	const eyeShadow = pixelsToBoxShadow([
-		[eyePos.lx, eyePos.ly, p.eye], [eyePos.rx, eyePos.ry, p.eye],
-		[eyePos.lx, eyePos.ly + 1, p.eye], [eyePos.rx, eyePos.ry + 1, p.eye],
-	]);
-
-	const shimmerDelay = -(Date.now() % 8000);
-	const shimmer = isBusy && !isCompacting ? `animation:blob-shimmer 8s ease-in-out infinite;animation-delay:${shimmerDelay}ms;` : "";
-	const isIdle = status === "idle" && !isCompacting && !isSelected && !noDesaturate;
-	const isCancelling = isAborting && (status === "streaming" || isBusy);
-	const filters: string[] = [];
-	if (hueRotate && status !== "starting" && status !== "terminated") filters.push(`hue-rotate(${hueRotate}deg)`);
-	if (isCancelling) filters.push("saturate(0.3)");
-	else if (status === "terminated") filters.push("saturate(0)");
-	else if (isIdle) filters.push("saturate(0.4)");
-	const filterStyle = filters.length ? `filter:${filters.join(" ")};` : "";
-	const idleAnim = isIdle ? "animation:bobbit-breathe 4s ease-in-out infinite;" : "";
-	const bobAnim = isBusy && !isCancelling && !isCompacting ? "animation:bobbit-bob 1.8s cubic-bezier(0.34,1.2,0.64,1) infinite;" : "";
-	const cancelAnim = isCancelling ? "animation:bobbit-cancel-fade 1.2s ease-in-out infinite;" : "";
-	const compactSquish = isCompacting && !isCancelling;
-	const baseTransform = isCompacting
-		? (compactSquish
-			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
-			: "transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(4.5px);transform-origin:0 9px;")
-		: "transform:scale(1.6);transform-origin:0 0;";
-	const eyeAnim = isSelected
-		? (compactSquish
-			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
-			: `animation:${isCompacting ? "bobbit-eyes-squash" : "bobbit-eyes"} 6s step-end infinite;transform-origin:0 ${isCompacting ? "9px" : "0"};`)
-		: baseTransform;
-
-	const compactTopOffset = compactSquish ? 5.4 : 0;
-	const eyeTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
-	const eyeLayer = isSelected
-		? html`<span style="position:absolute;left:0;top:${eyeTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;box-shadow:${eyeShadow};${eyeAnim}"></span>`
-		: "";
-
-	const accFilter = hueRotate && status !== "starting" && status !== "terminated" && acc.id !== "flask"
-		? `filter:hue-rotate(${-hueRotate}deg);`
-		: "";
-	const isBandanaStyle = acc.id === "bandana";
-	const isCrown = acc.id === "crown";
-	const accTransform = isCompacting
-		? (compactSquish
-			? `transform-origin:0 9px;animation:${isCrown ? "bobbit-squish-crown" : "bobbit-squish"} 3s ease-in-out infinite;`
-			: `transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(${isBandanaStyle ? "4px" : "4.5px"})${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 9px;`)
-		: `transform:scale(1.6)${isBandanaStyle ? " translateY(-0.5px)" : ""}${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 0;`;
-	const accTop = addsHeight ? `${acc.yOffset + compactTopOffset}px` : `${compactTopOffset}px`;
-	const accessoryLayer = hasAccessory
-		? html`<span style="position:absolute;left:0;top:${accTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;box-shadow:${acc.shadow};${accTransform}${accFilter}"></span>`
-		: "";
-
-	const innerTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
-	const containerHeight = addsHeight ? "19px" : "15px";
-	const containerWidth = "20px";
-
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}"><span style="position:absolute;left:0;top:${innerTop};display:block;width:1px;height:1px;image-rendering:pixelated;will-change:transform;backface-visibility:hidden;${baseTransform}box-shadow:${shadow};${shimmer}"></span>${eyeLayer}${accessoryLayer}</span>`;
-}
-
-// ============================================================================
-// CANVAS SIDEBAR RENDERER (for preview / comparison)
+// CANVAS SIDEBAR RENDERER
 // ============================================================================
 
 /**
  * Render a sidebar bobbit to a canvas-based <img> element.
- * Uses the same data as renderSidebarBobbit but draws to canvas
- * instead of box-shadow. For side-by-side comparison in the preview page.
- *
- * Note: animations (bob, shimmer, eye blink) still use CSS on the container.
- * Only the pixel rendering technique differs (canvas vs box-shadow).
+ * Draws body, eyes, and accessories to off-screen canvases displayed via <img>.
+ * Animations (bob, shimmer, eye blink) still use CSS on the container.
  */
 export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateResult {
 	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false } = opts;
