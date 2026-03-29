@@ -61,3 +61,5 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `goal_setup_error` | `goalId`, `error` | Goal setup failed |
 | `team_agent_spawned` | `goalId`, `sessionId`, `role`, `name` | Team agent was spawned |
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
+| `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |
+| `pr_status_changed` | `goalId?`, `sessionId?`, `status` | PR status changed for a goal or session |
