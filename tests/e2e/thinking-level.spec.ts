@@ -5,14 +5,10 @@
  * so sending one produces an UNKNOWN_TYPE error. This test will pass
  * once the server-side plumbing is wired up.
  */
-import { expect } from "@playwright/test";
-import { test } from "./gateway-harness.js";
-import { createSession, connectWs, waitForHealth } from "./e2e-setup.js";
+import { test, expect } from "./gateway-harness.js";
+import { createSession, connectWs } from "./e2e-setup.js";
 
 test.describe("Thinking Level", () => {
-	test.beforeAll(async () => {
-		await waitForHealth();
-	});
 
 	test("set_thinking_level is handled by the server", async () => {
 		const sessionId = await createSession();

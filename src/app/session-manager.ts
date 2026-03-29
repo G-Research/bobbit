@@ -22,6 +22,42 @@ import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
 
 // ============================================================================
+// GOAL PROPOSAL DISMISS PERSISTENCE
+// ============================================================================
+
+function proposalFingerprint(proposal: { title: string; spec: string }): string {
+	let hash = 5381;
+	const str = proposal.title + "\n" + proposal.spec;
+	for (let i = 0; i < str.length; i++) {
+		hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+	}
+	return String(hash);
+}
+
+function dismissedProposalKey(sessionId: string): string {
+	return `bobbit-goal-proposal-dismissed-${sessionId}`;
+}
+
+export function isProposalDismissed(sessionId: string, proposal: { title: string; spec: string }): boolean {
+	try {
+		const stored = localStorage.getItem(dismissedProposalKey(sessionId));
+		return stored === proposalFingerprint(proposal);
+	} catch { return false; }
+}
+
+export function markProposalDismissed(sessionId: string, proposal: { title: string; spec: string }): void {
+	try {
+		localStorage.setItem(dismissedProposalKey(sessionId), proposalFingerprint(proposal));
+	} catch { /* ignore */ }
+}
+
+function clearDismissedProposal(sessionId: string): void {
+	try {
+		localStorage.removeItem(dismissedProposalKey(sessionId));
+	} catch { /* ignore */ }
+}
+
+// ============================================================================
 // GOAL DRAFT PERSISTENCE HELPERS
 // ============================================================================
 
@@ -570,8 +606,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onGoalProposal = (proposal) => {
-			state.activeGoalProposal = proposal;
 			if (state.assistantType === "goal") {
+				state.activeGoalProposal = proposal;
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
 				if (!state.previewCwdEdited) state.previewCwd = proposal.cwd || "";
 				if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
@@ -592,7 +628,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Persist draft to IndexedDB
 				saveGoalDraft(sessionId);
 			} else {
-				// Non-goal-assistant session: show inline preview panel
+				// Non-goal-assistant session: check if this proposal was previously dismissed
+				if (isProposalDismissed(sessionId, proposal)) return;
+				// Show inline preview panel
+				state.activeGoalProposal = proposal;
 				state.previewPanelActiveTab = "goal";
 				// Un-collapse panel on desktop
 				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
@@ -1081,6 +1120,7 @@ export async function terminateSession(sessionId: string): Promise<void> {
 	deleteGoalDraft(sessionId);
 	deleteRoleDraft(sessionId);
 	deletePersonalityDraft(sessionId);
+	clearDismissedProposal(sessionId);
 	await refreshSessions();
 }
 

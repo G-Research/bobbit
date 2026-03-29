@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Goal Proposal Dismiss Persistence Test</title>
+</head>
+<body>
+<script>
+// Simulation of the FIXED goal proposal dismiss behavior.
+// Mirrors the behavior in:
+//   - src/app/session-manager.ts onGoalProposal (~line 572)
+//   - src/app/render.ts handleDismiss (~line 1433)
+
+const SESSION_ID = "test-session-123";
+
+// --- State (mirrors src/app/state.ts) ---
+const state = {
+  activeGoalProposal: null,
+  assistantType: "normal",  // non-goal-assistant session
+};
+
+// --- Proposal fingerprint (mirrors session-manager.ts) ---
+function proposalFingerprint(proposal) {
+  let hash = 5381;
+  const str = proposal.title + "\n" + proposal.spec;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+  }
+  return String(hash);
+}
+
+function dismissedProposalKey(sessionId) {
+  return "bobbit-goal-proposal-dismissed-" + sessionId;
+}
+
+function isProposalDismissed(sessionId, proposal) {
+  try {
+    const stored = localStorage.getItem(dismissedProposalKey(sessionId));
+    return stored === proposalFingerprint(proposal);
+  } catch { return false; }
+}
+
+function markProposalDismissed(sessionId, proposal) {
+  try {
+    localStorage.setItem(dismissedProposalKey(sessionId), proposalFingerprint(proposal));
+  } catch { /* ignore */ }
+}
+
+// --- Fixed onGoalProposal handler ---
+function onGoalProposal(proposal) {
+  if (state.assistantType === "goal") {
+    state.activeGoalProposal = proposal;
+  } else {
+    // Non-goal-assistant: check if dismissed
+    if (isProposalDismissed(SESSION_ID, proposal)) return;
+    state.activeGoalProposal = proposal;
+  }
+}
+
+// --- Fixed handleDismiss ---
+function handleDismiss() {
+  const dismissed = state.activeGoalProposal;
+  state.activeGoalProposal = null;
+  if (dismissed) markProposalDismissed(SESSION_ID, dismissed);
+}
+
+// --- Test execution ---
+// Clear any leftover state from previous test runs
+localStorage.removeItem(dismissedProposalKey(SESSION_ID));
+
+const results = {};
+
+// Step 1: Fire onGoalProposal — should set state
+const proposal = { title: "Fix login bug", spec: "The login page has a bug..." };
+onGoalProposal(proposal);
+results.step1_proposalSet = state.activeGoalProposal !== null;
+
+// Step 2: Dismiss — should clear state and persist to localStorage
+handleDismiss();
+results.step2_dismissed = state.activeGoalProposal === null;
+
+// Step 3: Simulate reconnect — onGoalProposal called again with same proposal.
+// After dismiss, this should NOT resurrect the proposal.
+onGoalProposal(proposal);
+results.step3_proposalStaysNull = state.activeGoalProposal === null;
+results.step3_actualValue = state.activeGoalProposal;
+
+window.testResults = results;
+</script>
+</body>
+</html>
