@@ -147,6 +147,9 @@ export async function runDelegateSession(
 
 		const result = await waitForDelegate(sessionId, timeoutMs, signal);
 
+		// Terminate the delegate session now that it's done — no reason to keep it alive
+		gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+
 		return {
 			id: sessionId.slice(0, 12),
 			sessionId,
