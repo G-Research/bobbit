@@ -81,13 +81,15 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Add a new tool renderer**: Create in `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`.
 
-**Add a slash skill**: Create a `SKILL.md` file in `.claude/skills/<name>/` (project-level) or `~/.claude/skills/<name>/` (personal). The file should have YAML frontmatter with `description` and optional `argument_hint`, `allowed_tools`, `context`, `agent` fields. Skills are discovered automatically via `discoverSlashSkills()` in `src/server/skills/slash-skills.ts` and served at `GET /api/slash-skills`. You can also configure additional skill directories via the Skills page UI (`#/skills`) or by adding `skill_directories` to `.bobbit/config/project.yaml`:
+**Add a slash skill**: Create a `SKILL.md` file in `.claude/skills/<name>/` (project-level) or `~/.claude/skills/<name>/` (personal). The file should have YAML frontmatter with `description` and optional `argument_hint`, `allowed_tools`, `context`, `agent` fields. Skills are discovered automatically via `discoverSlashSkills()` in `src/server/skills/slash-skills.ts` and served at `GET /api/slash-skills`. You can also configure additional skill directories via Settings → Config Directories tab or by adding `config_directories` to `.bobbit/config/project.yaml`:
 
 ```yaml
-skill_directories: '[{"path":"~/my-team-skills"},{"path":"/shared/skills"}]'
+config_directories: '[{"path":"~/my-team-skills","types":["skills"]},{"path":"/shared/skills","types":["skills"]}]'
 ```
 
-The value is a JSON-encoded array of `{"path": "..."}` objects. Paths support `~` expansion. Custom directories are additive — the default directories (`.claude/skills/`, `.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `.claude/commands/`) are always scanned. Skills from custom directories get source label `"custom"` and have lower priority than built-in directories (built-in skills with the same name win).
+The value is a JSON-encoded array of `{"path": "...", "types": [...]}` objects where types can include `"skills"`, `"mcp"`, and/or `"tools"`. Paths support `~` expansion. Custom directories are additive — the default directories (`.claude/skills/`, `.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `.claude/commands/`) are always scanned. Skills from custom directories get source label `"custom"` and have lower priority than built-in directories (built-in skills with the same name win).
+
+The legacy `skill_directories` key still works for backward compatibility but `config_directories` is preferred. When saving from the Config Directories UI, `skill_directories` is migrated to `config_directories` automatically.
 
 **Add a goal-related feature**: Goal CRUD is in `goal-manager.ts`/`goal-store.ts`. REST endpoints in `server.ts`. Goal assistant prompt in `goal-assistant.ts`. Client-side proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`. Re-attempt flow: `buildReattemptContext()` in `goal-assistant.ts`, `startReattempt()` in `session-manager.ts` (client), re-attempt buttons in `goal-dashboard.ts` and `render-helpers.ts`.
 
@@ -97,12 +99,15 @@ The value is a JSON-encoded array of `{"path": "..."}` objects. Paths support `~
 
 **Add/use MCP servers**: Bobbit auto-discovers MCP (Model Context Protocol) server configurations from Claude Code-compatible locations and exposes their tools as first-class Bobbit tools. Discovery mirrors the same root directories used for skills. Sources (later overrides earlier):
 
-1. `~/.claude.json` → `mcpServers` field (legacy Claude Code user config)
-2. `~/.claude/.mcp.json` → `mcpServers` field (Claude Code user-level MCP)
-3. `~/.bobbit/.mcp.json` → `mcpServers` field (Bobbit user-level MCP)
-4. `<project>/.mcp.json` → `mcpServers` field (project scope — shared via version control)
-5. `<project>/.claude/.mcp.json` → `mcpServers` field (Claude Code project-level MCP)
-6. `<project>/.bobbit/config/mcp.json` → `mcpServers` field (Bobbit project overrides)
+1. Custom directories with type `"mcp"` from `config_directories` → scanned for `.mcp.json` files (lowest priority)
+2. `~/.claude.json` → `mcpServers` field (legacy Claude Code user config)
+3. `~/.claude/.mcp.json` → `mcpServers` field (Claude Code user-level MCP)
+4. `~/.bobbit/.mcp.json` → `mcpServers` field (Bobbit user-level MCP)
+5. `<project>/.mcp.json` → `mcpServers` field (project scope — shared via version control)
+6. `<project>/.claude/.mcp.json` → `mcpServers` field (Claude Code project-level MCP)
+7. `<project>/.bobbit/config/mcp.json` → `mcpServers` field (Bobbit project overrides)
+
+Custom MCP directories can be added via Settings → Config Directories tab or the `config_directories` key in `project.yaml` (see "Manage config scan directories" below).
 
 Configuration format matches Claude Code's `.mcp.json`:
 ```json
@@ -125,6 +130,8 @@ Supported transports: **stdio** (spawn child process, most common) and **HTTP** 
 
 REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-servers/:name/restart` (reconnect a server, also triggers re-discovery), `POST /api/internal/mcp-call` (internal proxy for tool execution).
 
+**Manage config scan directories**: Bobbit scans multiple directories for skills, MCP servers, and tools. View all scanned directories and add custom ones via Settings → Config Directories tab (`#/settings`, Directories tab) or by editing `config_directories` in `.bobbit/config/project.yaml`. See "Config scan directories" section below for details. REST API: `GET /api/config-directories` returns all directories with path, types, scope, exists status, and whether they're removable.
+
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
 
 ### Thinking level configuration
@@ -141,6 +148,28 @@ Thinking token budgets per level (hardcoded in `src/app/remote-agent.ts`, not cu
 | low | 4,096 |
 | medium | 10,240 |
 | high | 32,768 |
+
+### Config scan directories
+
+The Settings → Config Directories tab shows every directory Bobbit scans for configuration, organized by type (Skills, MCP, Tools). Each entry shows its path, scope (built-in/user/project/custom), and whether the directory exists on disk. Custom directories can be added or removed; built-in directories are read-only.
+
+Storage uses `config_directories` in `.bobbit/config/project.yaml`:
+
+```yaml
+config_directories: '[{"path":"~/my-team-config","types":["skills","mcp"]},{"path":"/shared/tools","types":["tools"]}]'
+```
+
+Each entry specifies a `path` (supports `~` expansion) and `types` array (`"skills"`, `"mcp"`, `"tools"`). Custom directories are additive — built-in directories are always scanned and have higher priority.
+
+**Built-in directories:**
+
+| Type | Directories |
+|---|---|
+| Skills | `<project>/.claude/skills/`, `<project>/.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `<project>/.claude/commands/` |
+| MCP | `~/.claude.json`, `~/.claude/.mcp.json`, `~/.bobbit/.mcp.json`, `<project>/.mcp.json`, `<project>/.claude/.mcp.json`, `<project>/.bobbit/config/mcp.json` |
+| Tools | `<project>/.bobbit/config/tools/` |
+
+Cross-links on the Skills page and Tools page ("Manage scan directories →") navigate directly to this tab. Server-side logic is in `src/server/agent/config-directories.ts`.
 
 ## Debugging tips
 
@@ -224,7 +253,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `workflows/*.yaml` | `WorkflowStore` | Workflow templates (gate DAGs, verification configs) |
 | `personalities/*.yaml` | `PersonalityStore` | Personality definitions |
 | `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
-| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, default thinking level, custom config) |
+| `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, default thinking level, config_directories, custom config) |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompt definitions (goal, role, tool, personality, staff, setup) |
 | `mcp.json` | `McpManager` | MCP server overrides (Bobbit-specific additions to `.mcp.json`) |
 
