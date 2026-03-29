@@ -8,19 +8,6 @@ export async function handle(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
 ): Promise<boolean> {
-	// POST /api/workflows/:id/clone (must be checked BEFORE single-workflow route)
-	const workflowCloneMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/clone$/);
-	if (workflowCloneMatch && req.method === "POST") {
-		const id = decodeURIComponent(workflowCloneMatch[1]);
-		try {
-			const cloned = ctx.workflowManager.cloneWorkflow(id);
-			json(res, cloned, 201);
-		} catch (err: any) {
-			json(res, { error: err.message }, 404);
-		}
-		return true;
-	}
-
 	// GET /api/workflows
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
