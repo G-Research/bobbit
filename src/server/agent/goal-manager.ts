@@ -200,6 +200,11 @@ export class GoalManager {
 		return this.store.get(id);
 	}
 
+	/** Current generation counter from the underlying store. */
+	getGoalGeneration(): number {
+		return this.store.getGeneration();
+	}
+
 	listGoals(): PersistedGoal[] {
 		return this.store.getAll();
 	}

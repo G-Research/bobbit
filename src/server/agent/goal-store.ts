@@ -53,6 +53,8 @@ const STORE_FILE = path.join(STORE_DIR, "goals.json");
  */
 export class GoalStore {
 	private goals: Map<string, PersistedGoal> = new Map();
+	/** Monotonically increasing counter — bumped on every mutation. Resets to 0 on server restart. */
+	private generation = 0;
 
 	constructor() {
 		this.load();
@@ -101,7 +103,13 @@ export class GoalStore {
 		}
 	}
 
+	/** Current generation counter — bumped on every mutation. */
+	getGeneration(): number {
+		return this.generation;
+	}
+
 	put(goal: PersistedGoal): void {
+		this.generation++;
 		this.goals.set(goal.id, goal);
 		this.save();
 	}
@@ -111,6 +119,7 @@ export class GoalStore {
 	}
 
 	remove(id: string): void {
+		this.generation++;
 		this.goals.delete(id);
 		this.save();
 	}
@@ -122,6 +131,7 @@ export class GoalStore {
 	archive(id: string): boolean {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
+		this.generation++;
 		existing.archived = true;
 		existing.archivedAt = Date.now();
 		this.save();
@@ -139,6 +149,7 @@ export class GoalStore {
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
+		this.generation++;
 		// Strip undefined values to avoid overwriting existing fields
 		const cleaned: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(updates)) {

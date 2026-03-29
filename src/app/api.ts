@@ -87,48 +87,80 @@ export async function refreshSessions(): Promise<void> {
 		renderApp();
 	}
 
+	let sessionsChanged = false;
+	let goalsChanged = false;
+
 	try {
+		// Build URLs with generation params for conditional fetch
+		const sessionsUrl = state.sessionsGeneration >= 0
+			? `/api/sessions?since=${state.sessionsGeneration}`
+			: "/api/sessions";
+		const goalsUrl = state.goalsGeneration >= 0
+			? `/api/goals?since=${state.goalsGeneration}`
+			: "/api/goals";
+
 		const [sessionsRes, goalsRes] = await Promise.all([
-			gatewayFetch("/api/sessions"),
-			gatewayFetch("/api/goals"),
+			gatewayFetch(sessionsUrl),
+			gatewayFetch(goalsUrl),
 		]);
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
 		const sessionsData = await sessionsRes.json();
-		const newSessions: GatewaySession[] = sessionsData.sessions || [];
 
-		// Beep when a non-active background session finishes streaming
-		const activeId = state.remoteAgent?.gatewaySessionId;
-		for (const s of newSessions) {
-			const prev = _prevSessionStatus.get(s.id);
-			const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
-			if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
-				RemoteAgent.playNotificationBeep();
-				showFaviconBadge();
+		// Process sessions — skip if server says unchanged
+		if (sessionsData.changed === false) {
+			// Generation matches — nothing to do
+		} else {
+			sessionsChanged = true;
+			const newSessions: GatewaySession[] = sessionsData.sessions || [];
+
+			// Beep when a non-active background session finishes streaming
+			const activeId = state.remoteAgent?.gatewaySessionId;
+			for (const s of newSessions) {
+				const prev = _prevSessionStatus.get(s.id);
+				const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
+				if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
+					RemoteAgent.playNotificationBeep();
+					showFaviconBadge();
+				}
+			}
+			for (const s of newSessions) {
+				_prevSessionStatus.set(s.id, s.status);
+			}
+
+			state.gatewaySessions = newSessions;
+
+			for (const s of state.gatewaySessions) {
+				if (s.colorIndex !== undefined && !sessionColorMap.has(s.id)) {
+					sessionColorMap.set(s.id, s.colorIndex);
+				}
+				sessionHueRotation(s.id);
+			}
+
+			if (sessionsData.generation !== undefined) {
+				state.sessionsGeneration = sessionsData.generation;
 			}
 		}
-		for (const s of newSessions) {
-			_prevSessionStatus.set(s.id, s.status);
-		}
 
-		state.gatewaySessions = newSessions;
-
-		for (const s of state.gatewaySessions) {
-			if (s.colorIndex !== undefined && !sessionColorMap.has(s.id)) {
-				sessionColorMap.set(s.id, s.colorIndex);
-			}
-			sessionHueRotation(s.id);
-		}
-
+		// Process goals — skip if server says unchanged
 		if (goalsRes.ok) {
 			const goalsData = await goalsRes.json();
-			const prevGoalIds = new Set(state.goals.map((g) => g.id));
-			state.goals = goalsData.goals || [];
-			// Auto-expand only newly discovered goals that have sessions — never
-			// re-expand a goal the user has already seen (and may have collapsed).
-			for (const g of state.goals) {
-				if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
-					expandedGoals.add(g.id);
-					saveExpandedGoals();
+			if (goalsData.changed === false) {
+				// Generation matches — nothing to do
+			} else {
+				goalsChanged = true;
+				const prevGoalIds = new Set(state.goals.map((g) => g.id));
+				state.goals = goalsData.goals || [];
+				// Auto-expand only newly discovered goals that have sessions — never
+				// re-expand a goal the user has already seen (and may have collapsed).
+				for (const g of state.goals) {
+					if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
+						expandedGoals.add(g.id);
+						saveExpandedGoals();
+					}
+				}
+
+				if (goalsData.generation !== undefined) {
+					state.goalsGeneration = goalsData.generation;
 				}
 			}
 		}
@@ -141,12 +173,16 @@ export async function refreshSessions(): Promise<void> {
 		}
 	} finally {
 		state.sessionsLoading = false;
-		renderApp();
+		if (sessionsChanged || goalsChanged || isInitial) {
+			renderApp();
+		}
 	}
 
 	// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion).
 	// These call renderApp() only if data actually changed, avoiding redundant re-renders.
-	refreshGateStatusCache();
+	if (goalsChanged || isInitial) {
+		refreshGateStatusCache();
+	}
 	const now = Date.now();
 	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS && document.visibilityState === "visible") {
 		_lastPrRefresh = now;
