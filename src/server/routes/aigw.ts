@@ -1,29 +1,12 @@
 import http from "node:http";
 import type { AppContext } from "../app-context.js";
-import { readBody, json } from "./utils.js";
+import { readBody, json, broadcastPreferencesChanged } from "./utils.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest } from "../agent/aigw-manager.js";
 import { discoverModelsForConfig } from "../agent/model-registry.js";
 import type { CustomProviderConfig } from "../agent/model-registry.js";
 
 export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
 	const { preferencesStore, broadcastToAll } = ctx;
-
-	/** Return preferences with sensitive keys (providerKey.*) filtered out. */
-	function getSafePreferences(): Record<string, unknown> {
-		const all = preferencesStore.getAll();
-		const filtered: Record<string, unknown> = {};
-		for (const [key, value] of Object.entries(all)) {
-			if (!key.startsWith("providerKey.")) {
-				filtered[key] = value;
-			}
-		}
-		return filtered;
-	}
-
-	/** Broadcast preferences_changed with sensitive keys filtered out. */
-	function broadcastPreferencesChanged(): void {
-		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
-	}
 
 	// ── Custom Providers ──
 
@@ -167,7 +150,7 @@ export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessag
 		}
 		try {
 			const models = await configureAigw(body.url, preferencesStore);
-			broadcastPreferencesChanged();
+			broadcastPreferencesChanged(preferencesStore, broadcastToAll);
 			json(res, { ok: true, models });
 		} catch (err: any) {
 			json(res, { error: `Failed to configure AI Gateway: ${err.message}` }, 502);
@@ -178,7 +161,7 @@ export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessag
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
 		removeAigw(preferencesStore);
-		broadcastPreferencesChanged();
+		broadcastPreferencesChanged(preferencesStore, broadcastToAll);
 		json(res, { ok: true });
 		return true;
 	}
@@ -208,7 +191,7 @@ export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessag
 		}
 		try {
 			const models = await configureAigw(aigwUrl, preferencesStore);
-			broadcastPreferencesChanged();
+			broadcastPreferencesChanged(preferencesStore, broadcastToAll);
 			json(res, { models });
 		} catch (err: any) {
 			json(res, { error: err.message || "Refresh failed" }, 502);

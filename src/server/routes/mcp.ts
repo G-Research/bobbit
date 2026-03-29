@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { AppContext } from "../app-context.js";
-import { json } from "./utils.js";
+import { json, readBody } from "./utils.js";
 
 export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
 	const { sessionManager, toolManager } = ctx;
@@ -72,12 +72,12 @@ export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessag
 			return true;
 		}
 		try {
-			const body = await new Promise<string>((resolve) => {
-				let data = "";
-				req.on("data", (chunk: Buffer) => data += chunk.toString());
-				req.on("end", () => resolve(data));
-			});
-			const { tool, args } = JSON.parse(body);
+			const body = await readBody(req);
+			if (!body) {
+				json(res, { error: "Invalid request body" }, 400);
+				return true;
+			}
+			const { tool, args } = body;
 			if (!tool) {
 				json(res, { error: "Missing 'tool' field" }, 400);
 				return true;

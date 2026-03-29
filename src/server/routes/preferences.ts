@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { AppContext } from "../app-context.js";
-import { json, readBody } from "./utils.js";
+import { json, readBody, getSafePreferences, broadcastPreferencesChanged } from "./utils.js";
 
 export async function handle(
 	ctx: AppContext,
@@ -31,26 +31,9 @@ export async function handle(
 
 	// ── Preferences ──
 
-	/** Return preferences with sensitive keys (providerKey.*) filtered out. */
-	function getSafePreferences(): Record<string, unknown> {
-		const all = ctx.preferencesStore.getAll();
-		const filtered: Record<string, unknown> = {};
-		for (const [key, value] of Object.entries(all)) {
-			if (!key.startsWith("providerKey.")) {
-				filtered[key] = value;
-			}
-		}
-		return filtered;
-	}
-
-	/** Broadcast preferences_changed with sensitive keys filtered out. */
-	function broadcastPreferencesChanged(): void {
-		ctx.broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
-	}
-
 	// GET /api/preferences — return all preferences (filter sensitive keys)
 	if (url.pathname === "/api/preferences" && req.method === "GET") {
-		json(res, getSafePreferences());
+		json(res, getSafePreferences(ctx.preferencesStore));
 		return true;
 	}
 
@@ -66,7 +49,7 @@ export async function handle(
 			}
 		}
 		json(res, { ok: true });
-		broadcastPreferencesChanged();
+		broadcastPreferencesChanged(ctx.preferencesStore, ctx.broadcastToAll);
 		return true;
 	}
 
