@@ -66,9 +66,23 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 **Do NOT start background servers manually** from bash (`node server.js &`, `nohup`, etc.) — the bash tool waits for all stdout/stderr pipes to close, so backgrounded processes that inherit those FDs cause the bash tool to hang forever and crash the agent session. Always use Playwright's `webServer` config instead.
 
+## Server route architecture
+
+API routes are organized into domain-grouped modules under `src/server/routes/`:
+
+| File | Purpose |
+|---|---|
+| `src/server/app-context.ts` | `AppContext` interface — typed service container holding all stores, managers, and broadcast functions. Passed as a single object to all route handlers. |
+| `src/server/routes/index.ts` | Router that dispatches requests to route modules by URL prefix (O(1) Map lookup) |
+| `src/server/routes/utils.ts` | Shared utilities: `readBody()`, `json()`, `hasTransitiveDep()` |
+| `src/server/routes/*.ts` | 19 route modules: health, sessions, goals, teams, gates, tasks, roles, tools, aigw, models, preferences, personalities, workflows, auth, skills, staff, mcp, git, preview |
+| `src/server/services/github-service.ts` | PR/git caching helpers (`getCachedPrStatus`, `execGit`, `execGitSafe`, `getViewerIsAdmin`) |
+
+Each route module exports `handle(ctx: AppContext, url: URL, req, res) => Promise<boolean>` — returns `true` if it handled the request. `server.ts` (~300 lines) handles only bootstrap, static file serving, and WebSocket setup.
+
 ## Common tasks
 
-**Add a new REST endpoint**: Edit `src/server/server.ts` `handleApiRoute()`.
+**Add a new REST endpoint**: Add or edit the appropriate route module in `src/server/routes/` (e.g. `sessions.ts`, `goals.ts`, `teams.ts`). Each module receives an `AppContext` with all services. Register new prefixes in `src/server/routes/index.ts` if needed. See "Server route architecture" below.
 
 **Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command.
 
@@ -84,9 +98,9 @@ skill_directories: '[{"path":"~/my-team-skills"},{"path":"/shared/skills"}]'
 
 The value is a JSON-encoded array of `{"path": "..."}` objects. Paths support `~` expansion. Custom directories are additive — the default directories (`.claude/skills/`, `.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `.claude/commands/`) are always scanned. Skills from custom directories get source label `"custom"` and have lower priority than built-in directories (built-in skills with the same name win).
 
-**Add a goal-related feature**: Goal CRUD is in `goal-manager.ts`/`goal-store.ts`. REST endpoints in `server.ts`. Goal assistant prompt in `goal-assistant.ts`. Client-side proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`. Re-attempt flow: `buildReattemptContext()` in `goal-assistant.ts`, `startReattempt()` in `session-manager.ts` (client), re-attempt buttons in `goal-dashboard.ts` and `render-helpers.ts`.
+**Add a goal-related feature**: Goal CRUD is in `goal-manager.ts`/`goal-store.ts`. REST endpoints in `src/server/routes/goals.ts`. Goal assistant prompt in `goal-assistant.ts`. Client-side proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`. Re-attempt flow: `buildReattemptContext()` in `goal-assistant.ts`, `startReattempt()` in `session-manager.ts` (client), re-attempt buttons in `goal-dashboard.ts` and `render-helpers.ts`.
 
-**Add/edit tool documentation**: Navigate to `#/tools`, click a tool, edit the Description/Group/Docs fields, and Save. Or launch a Tool Assistant session for AI-guided documentation. Server-side: tool metadata lives in `.bobbit/config/tools/<group>/*.yaml` files, managed by `tool-manager.ts`, API routes in `server.ts`.
+**Add/edit tool documentation**: Navigate to `#/tools`, click a tool, edit the Description/Group/Docs fields, and Save. Or launch a Tool Assistant session for AI-guided documentation. Server-side: tool metadata lives in `.bobbit/config/tools/<group>/*.yaml` files, managed by `tool-manager.ts`, API routes in `src/server/routes/tools.ts`.
 
 **Add a new tool**: Create a YAML file in the appropriate `.bobbit/config/tools/<group>/` directory (e.g. `.bobbit/config/tools/filesystem/my_tool.yaml`). Define `name`, `description`, `summary`, `group`, `provider`, and optionally `renderer` and `docs`. If the tool needs a custom extension, add code to the group's `extension.ts` in `.bobbit/config/tools/<group>/`. Register a renderer in `src/ui/tools/renderers/` if needed. MCP tools are auto-discovered from `.mcp.json` config files and don't require manual YAML definitions. See "Add/use MCP servers" below.
 
