@@ -174,7 +174,7 @@ function renderSessionTime(session: GatewaySession, selected = false) {
 export const SESSION_ROW_PY = "py-0.5";
 
 /** Consistent indent per nesting level (px). */
-export const INDENT = 10;
+export const INDENT = 5;
 /** Width of the chevron/spacer slot (px) — same for all chevrons. */
 export const CHEVRON_W = 14;
 /** Wider chevron slot for level-0 section headers (extra right breathing room). */

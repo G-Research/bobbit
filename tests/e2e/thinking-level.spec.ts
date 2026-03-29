@@ -5,7 +5,7 @@
  * so sending one produces an UNKNOWN_TYPE error. This test will pass
  * once the server-side plumbing is wired up.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./gateway-harness.js";
 import { createSession, connectWs, waitForHealth } from "./e2e-setup.js";
 
 test.describe("Thinking Level", () => {
