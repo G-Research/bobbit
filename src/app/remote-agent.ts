@@ -580,6 +580,9 @@ export class RemoteAgent {
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
 				}
+				if (msg.data?.thinkingLevel) {
+					this._state.thinkingLevel = msg.data.thinkingLevel;
+				}
 				this.emit({ type: "state_update", data: msg.data });
 				break;
 

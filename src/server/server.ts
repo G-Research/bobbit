@@ -157,6 +157,7 @@ export function createGateway(config: GatewayConfig) {
 		toolManager,
 		workflowStore,
 		preferencesStore,
+		projectConfigStore,
 	});
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
