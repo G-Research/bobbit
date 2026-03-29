@@ -4,7 +4,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchPersonalities, createPersonality, updatePersonality, deletePersonality, type PersonalityData } from "./api.js";
-import { requestRender } from "./state.js";
+import { renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 
 // ============================================================================
@@ -37,10 +37,10 @@ export async function loadPersonalityPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	deleting = false;
-	requestRender();
+	renderApp();
 	personalities = await fetchPersonalities();
 	loading = false;
-	requestRender();
+	renderApp();
 }
 
 export function clearPersonalityPageState(): void {
@@ -82,7 +82,7 @@ function showCreate(): void {
 	editPromptFragment = "";
 	saving = false;
 	deleting = false;
-	requestRender();
+	renderApp();
 }
 
 /** Called by the main router when navigating to #/personalities/:name */
@@ -101,7 +101,7 @@ export function navigateToPersonalityEdit(personalityName: string): void {
 		currentView = "list";
 		selectedPersonality = null;
 	}
-	requestRender();
+	renderApp();
 }
 
 // ============================================================================
@@ -110,13 +110,13 @@ export function navigateToPersonalityEdit(personalityName: string): void {
 
 async function handleSave(): Promise<void> {
 	saving = true;
-	requestRender();
+	renderApp();
 
 	if (currentView === "create") {
 		const trimmedName = editName.trim();
 		if (!trimmedName || !editLabel.trim()) {
 			saving = false;
-			requestRender();
+			renderApp();
 			return;
 		}
 		const ok = await createPersonality({
@@ -145,7 +145,7 @@ async function handleSave(): Promise<void> {
 		}
 	}
 	saving = false;
-	requestRender();
+	renderApp();
 }
 
 async function handleDelete(): Promise<void> {
@@ -160,14 +160,14 @@ async function handleDelete(): Promise<void> {
 	if (!confirmed) return;
 
 	deleting = true;
-	requestRender();
+	renderApp();
 	const ok = await deletePersonality(selectedPersonality.name);
 	if (ok) {
 		personalities = await fetchPersonalities();
 		showList();
 	} else {
 		deleting = false;
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -184,7 +184,7 @@ async function handleDeleteFromList(personality: PersonalityData): Promise<void>
 	const ok = await deletePersonality(personality.name);
 	if (ok) {
 		personalities = await fetchPersonalities();
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -358,7 +358,7 @@ function renderEditView(): TemplateResult {
 						? Input({
 							value: editName,
 							placeholder: "personality-name",
-							onInput: (e: Event) => { editName = (e.target as HTMLInputElement).value; requestRender(); },
+							onInput: (e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); },
 						})
 						: html`<div class="personalities-field-readonly">${editName}</div>`
 					}
@@ -368,7 +368,7 @@ function renderEditView(): TemplateResult {
 					${Input({
 						value: editLabel,
 						placeholder: "e.g. Concise Communicator",
-						onInput: (e: Event) => { editLabel = (e.target as HTMLInputElement).value; requestRender(); },
+						onInput: (e: Event) => { editLabel = (e.target as HTMLInputElement).value; renderApp(); },
 					})}
 				</div>
 			</div>
@@ -380,7 +380,7 @@ function renderEditView(): TemplateResult {
 					${Input({
 						value: editDescription,
 						placeholder: "One-line tooltip description",
-						onInput: (e: Event) => { editDescription = (e.target as HTMLInputElement).value; requestRender(); },
+						onInput: (e: Event) => { editDescription = (e.target as HTMLInputElement).value; renderApp(); },
 					})}
 				</div>
 			</div>
@@ -392,7 +392,7 @@ function renderEditView(): TemplateResult {
 					class="personalities-prompt-editor"
 					.value=${editPromptFragment}
 					placeholder="1-2 sentences injected into the agent's system prompt that define this personality."
-					@input=${(e: Event) => { editPromptFragment = (e.target as HTMLTextAreaElement).value; requestRender(); }}
+					@input=${(e: Event) => { editPromptFragment = (e.target as HTMLTextAreaElement).value; renderApp(); }}
 				></textarea>
 			</div>
 		</div>

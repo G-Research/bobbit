@@ -1,7 +1,6 @@
 import {
 	state,
-	setState,
-	requestRender,
+	renderApp,
 	expandedGoals,
 	saveExpandedGoals,
 	GW_URL_KEY,
@@ -52,7 +51,7 @@ export function updateLocalSessionTitle(sessionId: string, title: string): void 
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
 		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], title };
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -60,7 +59,7 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
 		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status, lastActivity: Date.now() };
-		requestRender();
+		renderApp();
 	}
 }
 
@@ -83,7 +82,9 @@ export function stopSessionPolling(): void {
 export async function refreshSessions(): Promise<void> {
 	const isInitial = state.gatewaySessions.length === 0 && !state.sessionsError;
 	if (isInitial) {
-		setState({ sessionsLoading: true, sessionsError: "" });
+		state.sessionsLoading = true;
+		state.sessionsError = "";
+		renderApp();
 	}
 
 	let sessionsChanged = false;
@@ -173,7 +174,7 @@ export async function refreshSessions(): Promise<void> {
 	} finally {
 		state.sessionsLoading = false;
 		if (sessionsChanged || goalsChanged || isInitial) {
-			requestRender();
+			renderApp();
 		}
 	}
 
@@ -201,7 +202,7 @@ export async function refreshSessions(): Promise<void> {
 							changed = true;
 						}
 					}
-					if (changed) requestRender();
+					if (changed) renderApp();
 				}
 			})
 			.catch(() => {});
@@ -236,7 +237,8 @@ export async function fetchArchivedSessions(): Promise<void> {
 		const data = await res.json();
 		const sessions: GatewaySession[] = data.sessions || [];
 		// Filter to only archived ones
-		setState({ archivedSessions: sessions.filter((s: any) => s.archived === true) });
+		state.archivedSessions = sessions.filter((s: any) => s.archived === true);
+		renderApp();
 	} catch {
 		// Silently fail
 	}
@@ -265,7 +267,7 @@ async function refreshGateStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) requestRender();
+	if (changed) renderApp();
 }
 
 /** Fetch PR status for all goals with branches and update the cache. */
@@ -307,7 +309,7 @@ export async function refreshPrStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) requestRender();
+	if (changed) renderApp();
 	} finally {
 		_prRefreshInFlight = false;
 	}
@@ -1034,7 +1036,8 @@ export async function dismissSetup(): Promise<void> {
 	try {
 		await gatewayFetch("/api/setup-status/dismiss", { method: "POST" });
 	} catch { /* ignore */ }
-	setState({ setupComplete: true });
+	state.setupComplete = true;
+	renderApp();
 }
 
 // ============================================================================

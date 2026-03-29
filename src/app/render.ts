@@ -7,8 +7,7 @@ import { html, render } from "lit";
 import { Archive, ArrowLeft, FileText, MessagesSquare, ChevronDown, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
-	setState,
-	requestRender,
+	renderApp,
 	isDesktop,
 	hasActiveSession,
 	activeSessionId,
@@ -168,7 +167,7 @@ function renderMobileLanding() {
 									<div class="border-t border-border/30 my-1 mx-2"></div>
 									<div class="flex flex-col gap-0.5">
 										<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
-											@click=${() => { setUngroupedExpanded(!ungroupedExpanded); requestRender(); }}>
+											@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
 											<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${isUngroupedExpanded ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
 										<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
@@ -251,15 +250,15 @@ function renderMobileLanding() {
 			</button>`; })()}
 			<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} active:bg-secondary/50 rounded transition-colors"
 				@click=${() => {
-					const newVal = !state.showArchived;
-					localStorage.setItem("bobbit-show-archived", String(newVal));
-					if (newVal) {
+					state.showArchived = !state.showArchived;
+					localStorage.setItem("bobbit-show-archived", String(state.showArchived));
+					if (state.showArchived) {
 						import("./api.js").then(m => m.fetchArchivedSessions());
 					} else {
 						resetArchivedExpandState();
 						import("./api.js").then(m => m.clearArchivedSessionsState());
 					}
-					setState({ showArchived: newVal });
+					renderApp();
 				}}
 				title="${state.showArchived ? "Hide archived sessions" : "Show archived sessions"}">
 				${icon(Archive, "sm")}
@@ -287,7 +286,7 @@ export function setSelectedWorkflowId(id: string): void {
 function ensureWorkflowsLoaded(): void {
 	if (_workflowsLoaded) return;
 	_workflowsLoaded = true;
-	fetchWorkflows().then((wfs) => { _cachedWorkflows = wfs; requestRender(); });
+	fetchWorkflows().then((wfs) => { _cachedWorkflows = wfs; renderApp(); });
 }
 
 function goalPreviewPanel() {
@@ -297,7 +296,13 @@ function goalPreviewPanel() {
 		const trimmedTitle = state.previewTitle.trim();
 		if (!trimmedTitle) return;
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) state.remoteAgent.disconnect();
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
+		state.assistantType = null;
+		state.activeGoalProposal = null;
 		const workflowId = _selectedWorkflowId || "general";
 		_selectedWorkflowId = "general";
 		// Clean up persisted draft
@@ -305,7 +310,7 @@ function goalPreviewPanel() {
 			deleteGoalDraft(sessionId);
 		}
 		localStorage.removeItem("gateway.sessionId");
-		setState({ remoteAgent: null, connectionStatus: "disconnected", assistantType: null, activeGoalProposal: null, appView: "authenticated" });
+		state.appView = "authenticated";
 
 		// Detect re-attempt context from the current session
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
@@ -336,7 +341,7 @@ function goalPreviewPanel() {
 		} else {
 			setHashRoute("landing");
 		}
-		requestRender();
+		renderApp();
 	};
 
 	return html`
@@ -372,19 +377,23 @@ function goalPreviewPanel() {
 					${cwdCombobox({
 						value: state.previewCwd,
 						onInput: (v) => {
-							setState({ previewCwd: v, previewCwdEdited: true });
+							state.previewCwd = v;
+							state.previewCwdEdited = true;
 							const sid = activeSessionId();
 							if (sid) saveGoalDraft(sid);
+							renderApp();
 						},
 						onSelect: (v) => {
-							setState({ previewCwd: v, previewCwdEdited: true });
+							state.previewCwd = v;
+							state.previewCwdEdited = true;
 							const sid = activeSessionId();
 							if (sid) saveGoalDraft(sid);
+							renderApp();
 						},
 						dropdownOpen: state.cwdDropdownOpen,
-						onToggle: (open) => { setState({ cwdDropdownOpen: open }); },
+						onToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
 						highlightedIndex: state.cwdHighlightIndex,
-						onHighlight: (i) => { setState({ cwdHighlightIndex: i }); },
+						onHighlight: (i) => { state.cwdHighlightIndex = i; renderApp(); },
 					})}
 					<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(state.previewCwd, state.previewTitle)}</code></p>
 					</div>
@@ -394,7 +403,7 @@ function goalPreviewPanel() {
 						<select
 							class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
 							.value=${_selectedWorkflowId}
-							@change=${(e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; requestRender(); }}
+							@change=${(e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); }}
 						>
 							${_cachedWorkflows.map((wf) => html`
 								<option value=${wf.id} ?selected=${_selectedWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
@@ -408,7 +417,7 @@ function goalPreviewPanel() {
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
-							@click=${() => { setState({ previewSpecEditMode: !state.previewSpecEditMode }); }}
+							@click=${() => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); }}
 						>
 							${state.previewSpecEditMode ? "Preview" : "Edit"}
 						</button>
@@ -458,7 +467,7 @@ let _toolsLoaded = false;
 function ensureToolsLoaded(): void {
 	if (_toolsLoaded) return;
 	_toolsLoaded = true;
-	fetchTools().then((tools) => { _availableTools = tools; requestRender(); });
+	fetchTools().then((tools) => { _availableTools = tools; renderApp(); });
 }
 
 function rolePreviewPanel() {
@@ -469,13 +478,18 @@ function rolePreviewPanel() {
 		const trimmedLabel = state.rolePreviewLabel.trim();
 		if (!trimmedName || !trimmedLabel) return;
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) state.remoteAgent.disconnect();
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
+		state.assistantType = null;
+		state.activeRoleProposal = null;
 		// Clean up persisted draft
 		if (sessionId) {
 			deleteRoleDraft(sessionId);
 		}
 		localStorage.removeItem("gateway.sessionId");
-		setState({ remoteAgent: null, connectionStatus: "disconnected", assistantType: null, activeRoleProposal: null });
 
 		// Parse tools: comma-separated string -> array
 		const toolsList = state.rolePreviewTools
@@ -500,7 +514,7 @@ function rolePreviewPanel() {
 		const { loadRolePageData } = await import("./role-manager-page.js");
 		await loadRolePageData();
 		setHashRoute("roles");
-		requestRender();
+		renderApp();
 	};
 
 	// Parse current tools string into array for display
@@ -550,9 +564,11 @@ function rolePreviewPanel() {
 								<button
 									class="flex flex-col items-center gap-1 px-2 py-1.5 rounded border transition-colors ${isSelected ? "border-primary bg-primary/10" : "border-border hover:border-muted-foreground/50"}"
 									@click=${() => {
-										setState({ rolePreviewAccessory: accId, rolePreviewAccessoryEdited: true });
+										state.rolePreviewAccessory = accId;
+										state.rolePreviewAccessoryEdited = true;
 										const sid = activeSessionId();
 										if (sid) saveRoleDraft(sid);
+										renderApp();
 									}}
 									title=${acc.label}
 								>
@@ -571,9 +587,11 @@ function rolePreviewPanel() {
 								${tool}
 								<button class="hover:text-destructive" title="Remove tool" @click=${() => {
 									const remaining = currentTools.filter((t) => t !== tool);
-									setState({ rolePreviewTools: remaining.join(", "), rolePreviewToolsEdited: true });
+									state.rolePreviewTools = remaining.join(", ");
+									state.rolePreviewToolsEdited = true;
 									const sid = activeSessionId();
 									if (sid) saveRoleDraft(sid);
+									renderApp();
 								}}>&times;</button>
 							</span>
 						`)}
@@ -587,9 +605,11 @@ function rolePreviewPanel() {
 									title="${tool.description}"
 									@click=${() => {
 										const newTools = [...currentTools, tool.name];
-										setState({ rolePreviewTools: newTools.join(", "), rolePreviewToolsEdited: true });
+										state.rolePreviewTools = newTools.join(", ");
+										state.rolePreviewToolsEdited = true;
 										const sid = activeSessionId();
 										if (sid) saveRoleDraft(sid);
+										renderApp();
 									}}
 								>+ ${tool.name}</button>
 							`)}
@@ -602,7 +622,7 @@ function rolePreviewPanel() {
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
-							@click=${() => { setState({ rolePreviewPromptEditMode: !state.rolePreviewPromptEditMode }); }}
+							@click=${() => { state.rolePreviewPromptEditMode = !state.rolePreviewPromptEditMode; renderApp(); }}
 						>
 							${state.rolePreviewPromptEditMode ? "Preview" : "Edit"}
 						</button>
@@ -651,7 +671,7 @@ function toolPreviewPanel() {
 		const { loadToolPageData } = await import("./tool-manager-page.js");
 		await loadToolPageData();
 		setHashRoute("tool-edit", toolName);
-		requestRender();
+		renderApp();
 	};
 
 	const checklist = state.toolPreviewChecklist;
@@ -764,14 +784,18 @@ function updateTrigger(index: number, updater: (t: TriggerDef) => void) {
 	const triggers = parseTriggers(state.staffPreviewTriggers);
 	if (triggers[index]) {
 		updater(triggers[index]);
-		setState({ staffPreviewTriggers: JSON.stringify(triggers), staffPreviewTriggersEdited: true });
+		state.staffPreviewTriggers = JSON.stringify(triggers);
+		state.staffPreviewTriggersEdited = true;
+		renderApp();
 	}
 }
 
 function removeTrigger(index: number) {
 	const triggers = parseTriggers(state.staffPreviewTriggers);
 	triggers.splice(index, 1);
-	setState({ staffPreviewTriggers: JSON.stringify(triggers), staffPreviewTriggersEdited: true });
+	state.staffPreviewTriggers = JSON.stringify(triggers);
+	state.staffPreviewTriggersEdited = true;
+	renderApp();
 }
 
 function renderTriggersEditor() {
@@ -938,10 +962,16 @@ function staffPreviewPanel() {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) state.remoteAgent.disconnect();
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
+		state.assistantType = null;
+		state.activeStaffProposal = null;
 		localStorage.removeItem("gateway.sessionId");
 		setHashRoute("landing");
-		setState({ remoteAgent: null, connectionStatus: "disconnected", assistantType: null, activeStaffProposal: null, appView: "authenticated" });
+		state.appView = "authenticated";
 
 		let triggers: any[] = [];
 		try {
@@ -965,7 +995,7 @@ function staffPreviewPanel() {
 			const { connectToSession } = await import("./session-manager.js");
 			await connectToSession(result.currentSessionId, false);
 		}
-		requestRender();
+		renderApp();
 	};
 
 	return html`
@@ -1017,7 +1047,9 @@ function staffPreviewPanel() {
 							@click=${() => {
 								const triggers = parseTriggers(state.staffPreviewTriggers);
 								triggers.push({ type: "manual", config: {}, enabled: true, prompt: "" });
-								setState({ staffPreviewTriggers: JSON.stringify(triggers), staffPreviewTriggersEdited: true });
+								state.staffPreviewTriggers = JSON.stringify(triggers);
+								state.staffPreviewTriggersEdited = true;
+								renderApp();
 							}}
 						>+ Add trigger</button>
 					</div>
@@ -1029,7 +1061,7 @@ function staffPreviewPanel() {
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
-							@click=${() => { setState({ staffPreviewPromptEditMode: !state.staffPreviewPromptEditMode }); }}
+							@click=${() => { state.staffPreviewPromptEditMode = !state.staffPreviewPromptEditMode; renderApp(); }}
 						>
 							${state.staffPreviewPromptEditMode ? "Preview" : "Edit"}
 						</button>
@@ -1072,8 +1104,13 @@ function personalityPreviewPanel() {
 		const trimmedLabel = state.personalityPreviewLabel.trim();
 		if (!trimmedName || !trimmedLabel) return;
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) state.remoteAgent.disconnect();
-		setState({ remoteAgent: null, connectionStatus: "disconnected", assistantType: null, activePersonalityProposal: null });
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
+		state.assistantType = null;
+		state.activePersonalityProposal = null;
 		if (sessionId) {
 			const { deletePersonalityDraft } = await import("./session-manager.js");
 			deletePersonalityDraft(sessionId);
@@ -1096,7 +1133,7 @@ function personalityPreviewPanel() {
 		const { loadPersonalityPageData } = await import("./personality-manager-page.js");
 		await loadPersonalityPageData();
 		setHashRoute("personalities");
-		requestRender();
+		renderApp();
 	};
 
 	return html`
@@ -1150,7 +1187,7 @@ function personalityPreviewPanel() {
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
-							@click=${() => { setState({ personalityPreviewPromptFragmentEditMode: !state.personalityPreviewPromptFragmentEditMode }); }}
+							@click=${() => { state.personalityPreviewPromptFragmentEditMode = !state.personalityPreviewPromptFragmentEditMode; renderApp(); }}
 						>
 							${state.personalityPreviewPromptFragmentEditMode ? "Preview" : "Edit"}
 						</button>
@@ -1262,7 +1299,7 @@ function setupPreviewPanel() {
 let _workflowPageModule: typeof import("./workflow-page.js") | null = null;
 function ensureWorkflowPageLoaded() {
 	if (!_workflowPageModule) {
-		import("./workflow-page.js").then(mod => { _workflowPageModule = mod; requestRender(); });
+		import("./workflow-page.js").then(mod => { _workflowPageModule = mod; renderApp(); });
 	}
 }
 
@@ -1275,16 +1312,21 @@ function workflowPreviewPanel() {
 			if (!ok) return;
 		}
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) state.remoteAgent.disconnect();
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
+		state.assistantType = null;
 		localStorage.removeItem("gateway.sessionId");
-		setState({ remoteAgent: null, connectionStatus: "disconnected", assistantType: null, appView: "authenticated" });
+		state.appView = "authenticated";
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
 		await refreshSessions();
 		setHashRoute("workflows");
-		requestRender();
+		renderApp();
 	};
 
 	if (!_workflowPageModule) {
@@ -1370,7 +1412,7 @@ function goalProposalPanel() {
 		const trimmedTitle = _proposalTitle.trim();
 		if (!trimmedTitle || _proposalSaving) return;
 		_proposalSaving = true;
-		requestRender();
+		renderApp();
 
 		try {
 			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
@@ -1384,21 +1426,21 @@ function goalProposalPanel() {
 			}
 		} finally {
 			_proposalSaving = false;
-			requestRender();
+			renderApp();
 		}
 	};
 
 	const handleDismiss = () => {
+		state.activeGoalProposal = null;
 		_proposalInitializedFrom = null;
 		// If preview tab still available, switch to it; otherwise back to chat
-		const updates: Partial<typeof state> = { activeGoalProposal: null };
 		if (state.isPreviewSession) {
-			updates.previewPanelActiveTab = "preview";
-			if (state.previewPanelTab === "goal") updates.previewPanelTab = "preview";
+			state.previewPanelActiveTab = "preview";
+			if (state.previewPanelTab === "goal") state.previewPanelTab = "preview";
 		} else {
-			if (state.previewPanelTab === "goal") updates.previewPanelTab = "chat";
+			if (state.previewPanelTab === "goal") state.previewPanelTab = "chat";
 		}
-		setState(updates);
+		renderApp();
 	};
 
 	return html`
@@ -1416,12 +1458,12 @@ function goalProposalPanel() {
 				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
 				${cwdCombobox({
 					value: _proposalCwd,
-					onInput: (v) => { _proposalCwd = v; requestRender(); },
-					onSelect: (v) => { _proposalCwd = v; requestRender(); },
+					onInput: (v) => { _proposalCwd = v; renderApp(); },
+					onSelect: (v) => { _proposalCwd = v; renderApp(); },
 					dropdownOpen: _proposalCwdDropdownOpen,
-					onToggle: (open) => { _proposalCwdDropdownOpen = open; requestRender(); },
+					onToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
 					highlightedIndex: _proposalCwdHighlightIndex,
-					onHighlight: (i) => { _proposalCwdHighlightIndex = i; requestRender(); },
+					onHighlight: (i) => { _proposalCwdHighlightIndex = i; renderApp(); },
 				})}
 				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(_proposalCwd, _proposalTitle)}</code></p>
 				</div>
@@ -1431,7 +1473,7 @@ function goalProposalPanel() {
 					<select
 						class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
 						.value=${_proposalWorkflowId}
-						@change=${(e: Event) => { _proposalWorkflowId = (e.target as HTMLSelectElement).value; requestRender(); }}
+						@change=${(e: Event) => { _proposalWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); }}
 					>
 						${_cachedWorkflows.map((wf) => html`
 							<option value=${wf.id} ?selected=${_proposalWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
@@ -1445,7 +1487,7 @@ function goalProposalPanel() {
 					<button
 						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 						title="Toggle edit/preview mode"
-						@click=${() => { _proposalSpecEditMode = !_proposalSpecEditMode; requestRender(); }}
+						@click=${() => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); }}
 					>
 						${_proposalSpecEditMode ? "Preview" : "Edit"}
 					</button>
@@ -1581,7 +1623,7 @@ function setupPreviewSwipe(): void {
 			else if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
 			state.previewPanelTab = tabs[newIdx];
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
-			requestRender();
+			renderApp();
 		}
 	});
 
@@ -1648,7 +1690,7 @@ function setupPreviewSwipe(): void {
 		}
 		captured = false;
 		decided = false;
-		requestRender();
+		renderApp();
 	}, { passive: true });
 }
 
@@ -1717,7 +1759,7 @@ function setupAssistantSwipe(): void {
 		}
 		captured = false;
 		decided = false;
-		requestRender();
+		renderApp();
 	}, { passive: true });
 }
 
@@ -1935,12 +1977,12 @@ export function doRenderApp(): void {
 				<button
 					class="goal-tab-pill ${state.assistantTab === "chat" ? "goal-tab-pill--active" : ""}"
 					title="Chat"
-					@click=${() => { setState({ assistantTab: "chat" }); }}
+					@click=${() => { state.assistantTab = "chat"; renderApp(); }}
 				>Chat</button>
 				<button
 					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
 					title="${state.assistantType === "workflow" ? "Editor" : "Preview"}"
-					@click=${() => { setState({ assistantTab: "preview" }); }}
+					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
 				>
 					${state.assistantType === "workflow" ? "Editor" : "Preview"}${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
 				</button>
@@ -1955,20 +1997,20 @@ export function doRenderApp(): void {
 				<button
 					class="goal-tab-pill ${state.previewPanelTab === "chat" ? "goal-tab-pill--active" : ""}"
 					title="Chat"
-					@click=${() => { setState({ previewPanelTab: "chat" }); }}
+					@click=${() => { state.previewPanelTab = "chat"; renderApp(); }}
 				>Chat</button>
 				${state.isPreviewSession ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "preview" ? "goal-tab-pill--active" : ""}"
 						title="Preview"
-						@click=${() => { setState({ previewPanelTab: "preview" }); }}
+						@click=${() => { state.previewPanelTab = "preview"; renderApp(); }}
 					>Preview</button>
 				` : ""}
 				${state.activeGoalProposal != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
 						title="Goal"
-						@click=${() => { setState({ previewPanelTab: "goal" }); }}
+						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
 					>Goal <span class="goal-tab-dot"></span></button>
 				` : ""}
 			</div>
@@ -1980,7 +2022,7 @@ export function doRenderApp(): void {
 	const togglePreviewCollapse = () => {
 		const next = !isPreviewCollapsed();
 		localStorage.setItem(previewCollapseKey(), String(next));
-		requestRender();
+		renderApp();
 	};
 
 	/** Render the HTML preview iframe content (no header — unified panel provides it). */
@@ -2019,14 +2061,14 @@ export function doRenderApp(): void {
 							<button
 								class="goal-tab-pill ${state.previewPanelActiveTab === "preview" ? "goal-tab-pill--active" : ""}"
 								title="Preview"
-								@click=${() => { setState({ previewPanelActiveTab: "preview" }); }}
+								@click=${() => { state.previewPanelActiveTab = "preview"; renderApp(); }}
 							>Preview</button>
 						` : ""}
 						${showGoalTab ? html`
 							<button
 								class="goal-tab-pill ${state.previewPanelActiveTab === "goal" ? "goal-tab-pill--active" : ""}"
 								title="Goal"
-								@click=${() => { setState({ previewPanelActiveTab: "goal" }); }}
+								@click=${() => { state.previewPanelActiveTab = "goal"; renderApp(); }}
 							>Goal <span class="goal-tab-dot"></span></button>
 						` : ""}
 					</div>

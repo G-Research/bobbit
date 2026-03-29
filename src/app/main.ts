@@ -4,8 +4,7 @@ import { ChatPanel } from "../ui/index.js";
 import {
 	state,
 	setRenderApp,
-	setState,
-	requestRender,
+	renderApp,
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	activeSessionId,
@@ -39,13 +38,19 @@ async function handleHashChange(): Promise<void> {
 		const savedToken = localStorage.getItem(GW_TOKEN_KEY);
 
 		if (!savedUrl || !savedToken) {
-			setState({ appView: "disconnected" });
+			state.appView = "disconnected";
+			renderApp();
 			return;
 		}
 
 		if (route.view === "goal" && route.goalId) {
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.appView = "authenticated";
 			await refreshSessions();
 			await loadDashboardData(route.goalId);
 		} else if (route.view === "session" && route.sessionId) {
@@ -56,107 +61,198 @@ async function handleHashChange(): Promise<void> {
 			if (state.remoteAgent?.gatewaySessionId === route.sessionId) {
 				return;
 			}
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", goalDashboardId: null });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.goalDashboardId = null;
 			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 			if (checkRes.ok) {
 				await connectToSession(route.sessionId, true);
 			} else {
 				setHashRoute("landing");
-				setState({ appView: "authenticated" });
+				state.appView = "authenticated";
+				renderApp();
 				await refreshSessions();
 			}
 		} else if (route.view === "goal-dashboard" && route.goalId) {
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: route.goalId, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = route.goalId;
+			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
+			renderApp();
 			await refreshSessions();
 		} else if (route.view === "roles") {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadRolePageData } = await import("./role-manager-page.js");
 			loadRolePageData();
+			renderApp();
 			await refreshSessions();
 		} else if (route.view === "role-edit" && route.roleName) {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadRolePageData, navigateToRoleEdit } = await import("./role-manager-page.js");
 			await loadRolePageData();
 			navigateToRoleEdit(route.roleName);
 			await refreshSessions();
 		} else if (route.view === "tools") {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadToolPageData } = await import("./tool-manager-page.js");
 			loadToolPageData();
+			renderApp();
 			await refreshSessions();
 		} else if (route.view === "tool-edit" && route.toolName) {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadToolPageData, navigateToToolEdit } = await import("./tool-manager-page.js");
 			await loadToolPageData();
 			navigateToToolEdit(route.toolName);
 			await refreshSessions();
 		} else if (route.view === "workflows") {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadWorkflowPageData } = await import("./workflow-page.js");
 			loadWorkflowPageData();
+			renderApp();
 			await refreshSessions();
 		} else if (route.view === "workflow-edit" && route.workflowId) {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadWorkflowPageData, navigateToWorkflowEdit } = await import("./workflow-page.js");
 			await loadWorkflowPageData();
 			navigateToWorkflowEdit(route.workflowId);
 			await refreshSessions();
 		} else if (route.view === "skills") {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadSkillsPageData } = await import("./skills-page.js");
 			loadSkillsPageData();
+			renderApp();
 			await refreshSessions();
 		} else if (route.view === "staff") {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadStaffPageData } = await import("./staff-page.js");
 			loadStaffPageData();
+			renderApp();
 			await refreshSessions();
 		} else if (route.view === "staff-edit" && route.staffId) {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadStaffPageData, navigateToStaffEdit } = await import("./staff-page.js");
 			await loadStaffPageData();
 			navigateToStaffEdit(route.staffId);
 			await refreshSessions();
 		} else if (route.view === "personalities") {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadPersonalityPageData } = await import("./personality-manager-page.js");
 			loadPersonalityPageData();
+			renderApp();
 			await refreshSessions();
 		} else if (route.view === "personality-edit" && route.personalityName) {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			const { loadPersonalityPageData, navigateToPersonalityEdit } = await import("./personality-manager-page.js");
 			await loadPersonalityPageData();
 			navigateToPersonalityEdit(route.personalityName);
 			await refreshSessions();
 		} else {
 			clearDashboardState();
-			if (state.remoteAgent) state.remoteAgent.disconnect();
-			setState({ remoteAgent: null, connectionStatus: "disconnected", selectedSessionId: null, goalDashboardId: null, appView: "authenticated" });
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
+			renderApp();
 			await refreshSessions();
 		}
 	} finally {
@@ -208,7 +304,7 @@ async function initApp() {
 		}
 	}
 
-	requestRender();
+	renderApp();
 
 	if (savedUrl && savedToken) {
 		try {
@@ -238,8 +334,9 @@ async function initApp() {
 					await connectToSession(route.sessionId, true);
 				}
 			} else if (route.view === "goal-dashboard" && route.goalId) {
-				setState({ goalDashboardId: route.goalId });
+				state.goalDashboardId = route.goalId;
 				loadDashboardData(route.goalId);
+				renderApp();
 				await refreshSessions();
 			} else if (route.view === "roles") {
 				const { loadRolePageData } = await import("./role-manager-page.js");
@@ -281,7 +378,7 @@ async function initApp() {
 				navigateToPersonalityEdit(route.personalityName);
 			}
 		} catch {
-			requestRender();
+			renderApp();
 		}
 	}
 
@@ -376,8 +473,9 @@ async function initApp() {
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			localStorage.setItem("bobbit-sidebar-collapsed", String(!state.sidebarCollapsed));
-			setState({ sidebarCollapsed: !state.sidebarCollapsed });
+			state.sidebarCollapsed = !state.sidebarCollapsed;
+			localStorage.setItem("bobbit-sidebar-collapsed", String(state.sidebarCollapsed));
+			renderApp();
 		},
 	});
 
@@ -405,7 +503,7 @@ async function initApp() {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
 				localStorage.setItem(key, String(!collapsed));
-				requestRender();
+				renderApp();
 			}
 		},
 	});
