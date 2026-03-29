@@ -611,11 +611,28 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 
 	const isBusy = status === "streaming" || isCompacting;
 
-	// Draw body to canvas data URL
-	const eyeColor = isSelected ? p.main : p.eye;
-	const bodyUrl = renderBodyToDataURL(p, "center", false, eyeColor);
+	// Smooth rendering: draw at HI× into the canvas, display at CSS target size
+	// with image-rendering:auto (bilinear downsampling). No CSS scale() needed.
+	const HI = 8;
+	const S = 1.6; // sidebar display scale factor
+	const cssW = BODY_WIDTH * S;  // 16
+	const cssH = BODY_HEIGHT * S; // 14.4
 
-	// Eye overlay data URL (only when selected)
+	// Draw body to canvas at HI× scale
+	const eyeColor = isSelected ? p.main : p.eye;
+	const bodyPixels = resolveBodyPixels(p, "center", false, eyeColor);
+	const bodyCanvas = document.createElement("canvas");
+	bodyCanvas.width = BODY_WIDTH * HI;
+	bodyCanvas.height = BODY_HEIGHT * HI;
+	const bodyCtx = bodyCanvas.getContext("2d")!;
+	bodyCtx.imageSmoothingEnabled = false;
+	for (const [x, y, color] of bodyPixels) {
+		bodyCtx.fillStyle = color;
+		bodyCtx.fillRect(x * HI, y * HI, HI, HI);
+	}
+	const bodyUrl = bodyCanvas.toDataURL();
+
+	// Eye overlay at HI× (only when selected)
 	let eyeUrl = "";
 	if (isSelected) {
 		const eyePos = EYE_POSITIONS["center"];
@@ -623,45 +640,50 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 			[eyePos.lx, eyePos.ly, p.eye], [eyePos.rx, eyePos.ry, p.eye],
 			[eyePos.lx, eyePos.ly + 1, p.eye], [eyePos.rx, eyePos.ry + 1, p.eye],
 		];
-		const canvas = document.createElement("canvas");
-		canvas.width = BODY_WIDTH;
-		canvas.height = BODY_HEIGHT;
-		drawPixels(canvas.getContext("2d")!, eyePixels);
-		eyeUrl = canvas.toDataURL();
+		const eyeCanvas = document.createElement("canvas");
+		eyeCanvas.width = BODY_WIDTH * HI;
+		eyeCanvas.height = BODY_HEIGHT * HI;
+		const eyeCtx = eyeCanvas.getContext("2d")!;
+		eyeCtx.imageSmoothingEnabled = false;
+		for (const [x, y, color] of eyePixels) {
+			eyeCtx.fillStyle = color;
+			eyeCtx.fillRect(x * HI, y * HI, HI, HI);
+		}
+		eyeUrl = eyeCanvas.toDataURL();
 	}
 
-	// Accessory data URL — render at same coordinate origin as box-shadow (0,0)
-	// so CSS transforms (translateX, scale, transform-origin) behave identically
+	// Accessory at HI× scale
 	let accUrl = "";
-	let accCanvasW = 0;
-	let accCanvasH = 0;
+	let accCssW = 0;
+	let accCssH = 0;
 	if (hasAccessory) {
 		const spriteData = SPRITE_ACCESSORIES[acc.id];
 		if (spriteData && spriteData.pixels.length > 0) {
-			// Find bounds to size the canvas, but keep pixel coordinates absolute
 			let minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 			for (const [x, y] of spriteData.pixels) {
 				if (y < minY) minY = y;
 				if (x > maxX) maxX = x;
 				if (y > maxY) maxY = y;
 			}
-			// Canvas origin at (0, minY) — shift negative y values to canvas y=0
 			const yShift = Math.min(0, minY);
-			accCanvasW = maxX + 1;
-			accCanvasH = maxY - yShift + 1;
-			const canvas = document.createElement("canvas");
-			canvas.width = accCanvasW;
-			canvas.height = accCanvasH;
-			const ctx = canvas.getContext("2d")!;
+			const srcW = maxX + 1;
+			const srcH = maxY - yShift + 1;
+			accCssW = srcW * S;
+			accCssH = srcH * S;
+			const accCanvas = document.createElement("canvas");
+			accCanvas.width = srcW * HI;
+			accCanvas.height = srcH * HI;
+			const accCtx = accCanvas.getContext("2d")!;
+			accCtx.imageSmoothingEnabled = false;
 			for (const [x, y, color] of spriteData.pixels) {
-				ctx.fillStyle = color;
-				ctx.fillRect(x, y - yShift, 1, 1);
+				accCtx.fillStyle = color;
+				accCtx.fillRect(x * HI, (y - yShift) * HI, HI, HI);
 			}
-			accUrl = canvas.toDataURL();
+			accUrl = accCanvas.toDataURL();
 		}
 	}
 
-	// Reuse all the CSS animation logic from box-shadow version
+	// Animation styles (same logic as before)
 	const shimmerDelay = -(Date.now() % 8000);
 	const shimmer = isBusy && !isCompacting ? `animation:blob-shimmer 8s ease-in-out infinite;animation-delay:${shimmerDelay}ms;` : "";
 	const isIdle = status === "idle" && !isCompacting && !isSelected && !noDesaturate;
@@ -678,21 +700,23 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 
 	const compactTopOffset = compactSquish ? 5.4 : 0;
 
-	// Body transform: scale(1.6) via CSS on the img
+	// Body transform: image already at CSS target size, no base scale needed.
+	// Compaction uses -s (smooth) keyframes that omit scale(1.6).
+	// transform-origin adjusted from 9px (sprite coords) to 14.4px (CSS coords).
 	const bodyTransform = isCompacting
 		? (compactSquish
-			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
-			: "transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(4.5px);transform-origin:0 9px;")
-		: "transform:scale(1.6);transform-origin:0 0;";
+			? `transform-origin:0 ${BODY_HEIGHT * S}px;animation:bobbit-squish-s 3s ease-in-out infinite;`
+			: `transform:scaleY(0.75) translateY(${4.5 * S}px);transform-origin:0 ${BODY_HEIGHT * S}px;`)
+		: "";
 
-	// Eye animation
+	// Eye animation — smooth variants
 	const eyeAnim = isSelected
 		? (compactSquish
-			? "transform-origin:0 9px;animation:bobbit-squish 3s ease-in-out infinite;"
-			: `animation:${isCompacting ? "bobbit-eyes-squash" : "bobbit-eyes"} 6s step-end infinite;transform-origin:0 ${isCompacting ? "9px" : "0"};`)
+			? `transform-origin:0 ${BODY_HEIGHT * S}px;animation:bobbit-squish-s 3s ease-in-out infinite;`
+			: `animation:${isCompacting ? "bobbit-eyes-squash-s" : "bobbit-eyes-s"} 6s step-end infinite;transform-origin:0 ${isCompacting ? `${BODY_HEIGHT * S}px` : "0"};`)
 		: bodyTransform;
 
-	// Accessory transform
+	// Accessory transform — smooth variants
 	const isBandanaStyle = acc.id === "bandana";
 	const isCrown = acc.id === "crown";
 	const accFilter = hueRotate && status !== "starting" && status !== "terminated" && acc.id !== "flask"
@@ -700,9 +724,9 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		: "";
 	const accTransform = isCompacting
 		? (compactSquish
-			? `transform-origin:0 9px;animation:${isCrown ? "bobbit-squish-crown" : "bobbit-squish"} 3s ease-in-out infinite;`
-			: `transform:scale(1.6) scaleX(1.0) scaleY(0.75) translateY(${isBandanaStyle ? "4px" : "4.5px"})${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 9px;`)
-		: `transform:scale(1.6)${isBandanaStyle ? " translateY(-0.5px)" : ""}${isCrown ? " translateX(-0.5px)" : ""};transform-origin:0 0;`;
+			? `transform-origin:0 ${BODY_HEIGHT * S}px;animation:${isCrown ? "bobbit-squish-crown-s" : "bobbit-squish-s"} 3s ease-in-out infinite;`
+			: `transform:scaleY(0.75) translateY(${(isBandanaStyle ? 4 : 4.5) * S}px)${isCrown ? ` translateX(${-0.5 * S}px)` : ""};transform-origin:0 ${BODY_HEIGHT * S}px;`)
+		: `${isBandanaStyle ? `transform:translateY(${-0.5 * S}px);` : ""}${isCrown ? `transform:translateX(${-0.5 * S}px);` : ""}`;
 
 	const innerTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
 	const eyeTop = addsHeight ? `${4 + compactTopOffset}px` : `${compactTopOffset}px`;
@@ -710,17 +734,17 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	const containerHeight = addsHeight ? "19px" : "15px";
 	const containerWidth = "20px";
 
-	// Body layer: canvas-rendered img with pixelated scaling
-	const bodyLayer = html`<img src="${bodyUrl}" width="${BODY_WIDTH}" height="${BODY_HEIGHT}" style="position:absolute;left:0;top:${innerTop};image-rendering:pixelated;will-change:transform;${bodyTransform}${shimmer}">`;
+	// Body layer: high-res canvas img displayed at CSS target size, smooth downsampling
+	const bodyLayer = html`<img src="${bodyUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:0;top:${innerTop};width:${cssW}px;height:${cssH}px;will-change:transform;${bodyTransform}${shimmer}">`;
 
 	// Eye layer (only when selected)
 	const eyeLayer = isSelected && eyeUrl
-		? html`<img src="${eyeUrl}" width="${BODY_WIDTH}" height="${BODY_HEIGHT}" style="position:absolute;left:0;top:${eyeTop};image-rendering:pixelated;will-change:transform;${eyeAnim}">`
+		? html`<img src="${eyeUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:0;top:${eyeTop};width:${cssW}px;height:${cssH}px;will-change:transform;${eyeAnim}">`
 		: "";
 
-	// Accessory layer — positioned at left:0;top:accTop just like the box-shadow span
+	// Accessory layer
 	const accessoryLayer = accUrl
-		? html`<img src="${accUrl}" width="${accCanvasW}" height="${accCanvasH}" style="position:absolute;left:0;top:${accTop};image-rendering:pixelated;will-change:transform;${accTransform}${accFilter}">`
+		? html`<img src="${accUrl}" style="position:absolute;left:0;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
 		: "";
 
 	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${eyeLayer}${accessoryLayer}</span>`;
