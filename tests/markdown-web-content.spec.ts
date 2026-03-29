@@ -101,10 +101,10 @@ test.describe("isMarkdownContent detection", () => {
 			expect(result).toBe(true);
 		});
 
-		test("content with images and links", async ({ page }) => {
+		test("content with links and list items", async ({ page }) => {
 			await page.goto(TEST_PAGE);
 			const result = await page.evaluate((url) =>
-				(window as any).isMarkdownContent(url, "![Logo](https://example.com/logo.png)\n\n[Visit site](https://example.com)"),
+				(window as any).isMarkdownContent(url, "Check out [the docs](https://example.com)\n\n- Item one\n- Item two"),
 				nonMdUrl,
 			);
 			expect(result).toBe(true);
@@ -119,10 +119,19 @@ test.describe("isMarkdownContent detection", () => {
 			expect(result).toBe(false);
 		});
 
-		test("single heading alone is not enough (need 2+ indicators)", async ({ page }) => {
+		test("single heading at start is a strong signal (detected as markdown)", async ({ page }) => {
 			await page.goto(TEST_PAGE);
 			const result = await page.evaluate((url) =>
 				(window as any).isMarkdownContent(url, "# Just a heading\n\nSome plain text after it."),
+				nonMdUrl,
+			);
+			expect(result).toBe(true);
+		});
+
+		test("heading NOT at start needs 2+ indicators", async ({ page }) => {
+			await page.goto(TEST_PAGE);
+			const result = await page.evaluate((url) =>
+				(window as any).isMarkdownContent(url, "Some intro text\n\n## A heading\n\nMore text."),
 				nonMdUrl,
 			);
 			expect(result).toBe(false);

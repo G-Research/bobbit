@@ -7,50 +7,39 @@
 <body>
 <script>
 /**
- * isMarkdownContent — copied from design doc spec for testing.
- * This must stay in sync with src/ui/tools/renderers/WebFetchRenderer.ts
+ * isMarkdownContent — must stay in sync with src/ui/tools/renderers/WebFetchRenderer.ts
  */
 function isMarkdownContent(url, content) {
-  // 1. URL-based: path ends with .md or .markdown (case-insensitive, ignoring query/hash)
+  // URL-based: path ends with .md or .markdown (case-insensitive, ignoring query/hash)
   try {
     const pathname = new URL(url).pathname.toLowerCase();
     if (pathname.endsWith('.md') || pathname.endsWith('.markdown')) {
       return true;
     }
   } catch {
-    // invalid URL, fall through to content check
+    // If URL parsing fails, try simple string check
+    const pathPart = url.split('?')[0].split('#')[0].toLowerCase();
+    if (pathPart.endsWith('.md') || pathPart.endsWith('.markdown')) {
+      return true;
+    }
   }
 
-  // 2. Content-based fallback: first 500 chars
-  const snippet = content.slice(0, 500);
+  // Content-based fallback: check first 500 chars for markdown patterns
+  const sample = content.slice(0, 500);
 
-  // Starts with frontmatter delimiter
-  if (snippet.startsWith('---\n') || snippet.startsWith('---\r\n')) {
-    return true;
-  }
+  // Strong signals: starts with markdown frontmatter or heading
+  if (/^---\s*\n/.test(sample)) return true;
+  if (/^#{1,6}\s+\S/.test(sample)) return true;
 
-  // Count markdown indicators
+  // Weak signals: require multiple indicators
   let indicators = 0;
+  if (/^#{1,6}\s+/m.test(sample)) indicators++;
+  if (/\[.+?\]\(.+?\)/.test(sample)) indicators++;
+  if (/```/.test(sample)) indicators++;
+  if (/^\s*[-*+]\s+/m.test(sample)) indicators++;
+  if (/^\s*\d+\.\s+/m.test(sample)) indicators++;
+  if (/\*\*.+?\*\*/.test(sample)) indicators++;
 
-  // Headings (# at start of line)
-  if (/^#{1,6}\s/m.test(snippet)) indicators++;
-
-  // Links [text](url)
-  if (/\[.+?\]\(.+?\)/.test(snippet)) indicators++;
-
-  // Code fences ```
-  if (/^```/m.test(snippet)) indicators++;
-
-  // Bold/italic **text** or *text*
-  if (/\*\*.+?\*\*/.test(snippet) || /(?<!\*)\*(?!\*).+?(?<!\*)\*(?!\*)/.test(snippet)) indicators++;
-
-  // Unordered list items (- item or * item at start of line)
-  if (/^[\-\*]\s/m.test(snippet)) indicators++;
-
-  // Images ![alt](url)
-  if (/!\[.*?\]\(.+?\)/.test(snippet)) indicators++;
-
-  // Need at least 2 indicators for content-based detection
   return indicators >= 2;
 }
 
