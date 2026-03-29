@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { AppContext } from "../app-context.js";
-import { readBody, json } from "./utils.js";
+import { json } from "./utils.js";
 
 export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
 	const { sessionManager, toolManager } = ctx;

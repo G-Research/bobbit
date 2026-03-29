@@ -156,5 +156,23 @@ export async function handle(
 		return true;
 	}
 
+	// GET /api/tasks/:id/cost — cost for the session(s) assigned to a task
+	const taskCostMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cost$/);
+	if (taskCostMatch && req.method === "GET") {
+		const taskId = taskCostMatch[1];
+		const task = sessionManager.taskManager.getTask(taskId);
+		if (!task) {
+			json(res, { error: "Task not found" }, 404);
+			return true;
+		}
+		if (!task.assignedSessionId) {
+			json(res, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			return true;
+		}
+		const cost = sessionManager.getCostTracker().getSessionCost(task.assignedSessionId);
+		json(res, cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+		return true;
+	}
+
 	return false;
 }

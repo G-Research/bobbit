@@ -6,7 +6,7 @@ import type { AppContext } from "../app-context.js";
 import { json, readBody } from "./utils.js";
 
 export async function handle(
-	ctx: AppContext,
+	_ctx: AppContext,
 	url: URL,
 	req: http.IncomingMessage,
 	res: http.ServerResponse,

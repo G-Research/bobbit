@@ -62,8 +62,12 @@ const handlers: Array<{ prefix: string; handle: RouteHandler }> = [
 	{ prefix: "/api/tools", handle: tools.handle },
 
 	// Config / preferences
+	{ prefix: "/api/config", handle: preferences.handle },
 	{ prefix: "/api/preferences", handle: preferences.handle },
 	{ prefix: "/api/project-config", handle: preferences.handle },
+
+	// PR status cache (bulk hydration)
+	{ prefix: "/api/pr-status-cache", handle: git.handle },
 	{ prefix: "/api/models", handle: models.handle },
 
 	// AI Gateway

@@ -1,20 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AppContext } from "../app-context.js";
 import { readBody, json } from "./utils.js";
+import { execGit, execGitSafe } from "../services/github-service.js";
 import fs from "node:fs";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
-
-// ── Async git helpers (local copies until github-service.ts is integrated) ──
-async function execGit(cmd: string, cwd: string, timeout = 5000): Promise<string> {
-	const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout });
-	return stdout.trim();
-}
-async function execGitSafe(cmd: string, cwd: string, fallback = ""): Promise<string> {
-	try { return await execGit(cmd, cwd); } catch { return fallback; }
-}
 
 export async function handle(
 	ctx: AppContext,
@@ -221,6 +213,61 @@ export async function handle(
 			json(res, { ok: true });
 			return true;
 		}
+	}
+
+	// GET /api/goals/:goalId/cost/breakdown — per-session cost breakdown for a goal
+	const goalCostBreakdownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/cost\/breakdown$/);
+	if (goalCostBreakdownMatch && req.method === "GET") {
+		const goalId = goalCostBreakdownMatch[1];
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) {
+			json(res, { error: "Goal not found" }, 404);
+			return true;
+		}
+		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
+		const costTracker = sessionManager.getCostTracker();
+		const allCosts = costTracker.getAllCosts();
+
+		// Build per-session breakdown with metadata
+		const sessions: any[] = [];
+		for (const sid of sessionIds) {
+			const cost = allCosts.get(sid);
+			if (!cost || cost.totalCost === 0) continue;
+
+			// Get session metadata from live sessions or store
+			const live = sessionManager.listSessions().find(s => s.id === sid);
+			const archived = !live ? sessionManager.listArchivedSessions().find(s => s.id === sid) : null;
+			const meta = live || archived;
+
+			sessions.push({
+				sessionId: sid,
+				title: (meta as any)?.title || sid.slice(0, 8),
+				role: (meta as any)?.role || null,
+				delegateOf: (meta as any)?.delegateOf || null,
+				assistantType: (meta as any)?.assistantType || null,
+				taskId: (meta as any)?.taskId || null,
+				...cost,
+			});
+		}
+		sessions.sort((a, b) => b.totalCost - a.totalCost);
+		const totals = costTracker.getGoalCost(goalId, sessionIds);
+		json(res, { sessions, totals });
+		return true;
+	}
+
+	// GET /api/goals/:goalId/cost — aggregate cost across all sessions linked to a goal
+	const goalCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/cost$/);
+	if (goalCostMatch && req.method === "GET") {
+		const goalId = goalCostMatch[1];
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) {
+			json(res, { error: "Goal not found" }, 404);
+			return true;
+		}
+		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
+		const cost = sessionManager.getCostTracker().getGoalCost(goalId, sessionIds);
+		json(res, cost);
+		return true;
 	}
 
 	return false;

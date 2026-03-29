@@ -2,7 +2,7 @@ import http from "node:http";
 import type { AppContext } from "../app-context.js";
 import { readBody, json } from "./utils.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest } from "../agent/aigw-manager.js";
-import { getAvailableModels, discoverModelsForConfig } from "../agent/model-registry.js";
+import { discoverModelsForConfig } from "../agent/model-registry.js";
 import type { CustomProviderConfig } from "../agent/model-registry.js";
 
 export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {

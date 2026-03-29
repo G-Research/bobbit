@@ -180,6 +180,12 @@ export async function handle(ctx: AppContext, url: URL, req: http.IncomingMessag
 		return true;
 	}
 
+	// GET /api/pr-status-cache — bulk PR status from disk cache (startup hydration)
+	if (req.method === "GET" && url.pathname === "/api/pr-status-cache") {
+		json(res, prStatusStore.getAll());
+		return true;
+	}
+
 	// ── Goal PR routes ──
 
 	// GET /api/goals/:id/pr-status — PR status for goal branch (async + cached)

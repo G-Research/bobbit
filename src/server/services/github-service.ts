@@ -28,7 +28,7 @@ export async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
-export async function _fetchPrStatus(cwd: string, branch?: string): Promise<any | null> {
+export async function fetchPrStatus(cwd: string, branch?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	try {
 		const branchArg = branch ? ` ${branch}` : "";
@@ -57,7 +57,7 @@ export async function getCachedPrStatus(cwd: string, branch?: string): Promise<a
 	const existing = _prInFlight.get(cacheKey);
 	if (existing) return existing;
 
-	const p = _fetchPrStatus(cwd, branch);
+	const p = fetchPrStatus(cwd, branch);
 	_prInFlight.set(cacheKey, p);
 	try { return await p; } finally { _prInFlight.delete(cacheKey); }
 }
