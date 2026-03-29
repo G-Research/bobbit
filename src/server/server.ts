@@ -490,6 +490,15 @@ async function handleApiRoute(
 
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
+		const currentGen = sessionManager.getSessionStore().getGeneration();
+		const sinceParam = url.searchParams.get("since");
+		if (sinceParam !== null) {
+			const since = parseInt(sinceParam, 10);
+			if (!isNaN(since) && since === currentGen) {
+				json({ generation: currentGen, changed: false });
+				return;
+			}
+		}
 		const sessions = sessionManager.listSessions().map((s) => ({
 			...s,
 			colorIndex: colorStore.get(s.id),
@@ -500,9 +509,9 @@ async function handleApiRoute(
 				...s,
 				colorIndex: colorStore.get(s.id),
 			}));
-			json({ sessions: [...sessions, ...archived] });
+			json({ generation: currentGen, sessions: [...sessions, ...archived] });
 		} else {
-			json({ sessions });
+			json({ generation: currentGen, sessions });
 		}
 		return;
 	}
@@ -732,7 +741,16 @@ async function handleApiRoute(
 
 	// GET /api/goals
 	if (url.pathname === "/api/goals" && req.method === "GET") {
-		json({ goals: sessionManager.goalManager.listGoals() });
+		const currentGen = sessionManager.goalManager.getGoalGeneration();
+		const sinceParam = url.searchParams.get("since");
+		if (sinceParam !== null) {
+			const since = parseInt(sinceParam, 10);
+			if (!isNaN(since) && since === currentGen) {
+				json({ generation: currentGen, changed: false });
+				return;
+			}
+		}
+		json({ generation: currentGen, goals: sessionManager.goalManager.listGoals() });
 		return;
 	}
 
