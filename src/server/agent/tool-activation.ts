@@ -74,10 +74,10 @@ export function jsonSchemaToTypeBox(schema: Record<string, unknown>): string {
  */
 export function generateMcpProxyExtension(
 	serverName: string,
-	tools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>,
+	tools: Array<{ name: string; bobbitName: string; description?: string; inputSchema: Record<string, unknown> }>,
 ): string {
 	const toolRegistrations = tools.map(tool => {
-		const fullName = `mcp__${serverName}__${tool.name}`;
+		const fullName = tool.bobbitName;
 		const schema = jsonSchemaToTypeBox(tool.inputSchema);
 		const desc = tool.description ? JSON.stringify(tool.description) : `"MCP tool ${tool.name} from ${serverName}"`;
 		return `
@@ -154,6 +154,7 @@ export function writeMcpProxyExtensions(mcpManager: McpManager): string[] {
 	for (const [serverName, tools] of byServer) {
 		const toolDefs = tools.map(t => ({
 			name: t.mcpToolName,
+			bobbitName: t.name,
 			description: t.description,
 			inputSchema: t.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
 		}));

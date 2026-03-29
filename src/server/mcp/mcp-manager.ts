@@ -37,11 +37,16 @@ export interface McpToolInfo {
  * Scans config files for MCP server definitions, connects to them,
  * caches tool definitions, and routes tool calls to the correct client.
  */
+/** Max tool name length (Anthropic API limit). */
+const MAX_TOOL_NAME_LENGTH = 64;
+
 export class McpManager {
   private clients = new Map<string, McpClient>();
   private toolDefs = new Map<string, McpToolDef[]>();
   private configs = new Map<string, McpServerConfig>();
   private errors = new Map<string, string>();
+  /** Maps truncated Bobbit tool names back to original MCP tool names. */
+  private _toolNameMap = new Map<string, { serverName: string; mcpToolName: string }>();
 
   private projectConfigStore: ProjectConfigReader | null;
 
@@ -270,7 +275,7 @@ export class McpManager {
     for (const [serverName, tools] of this.toolDefs) {
       for (const tool of tools) {
         infos.push({
-          name: `mcp__${serverName}__${tool.name}`,
+          name: this._makeBobbitToolName(serverName, tool.name),
           description: tool.description || `MCP tool ${tool.name} from ${serverName}`,
           group: `MCP: ${serverName}`,
           docs: this._generateToolDocs(tool),
@@ -375,14 +380,41 @@ export class McpManager {
   }
 
   /**
-   * Parse a Bobbit MCP tool name (mcp__server__tool) into server and tool parts.
-   * Uses first double-underscore after "mcp" as server separator,
-   * second double-underscore as tool name start. Tool name may contain __.
+   * Build a Bobbit tool name from server + MCP tool name, truncating if needed.
+   * Registers the mapping so _parseToolName can reverse it.
+   */
+  private _makeBobbitToolName(serverName: string, mcpToolName: string): string {
+    let fullName = `mcp__${serverName}__${mcpToolName}`;
+    if (fullName.length > MAX_TOOL_NAME_LENGTH) {
+      // Truncate the tool name portion, keeping the prefix and server intact
+      const prefix = `mcp__${serverName}__`;
+      const maxToolLen = MAX_TOOL_NAME_LENGTH - prefix.length;
+      if (maxToolLen < 4) {
+        // Server name itself is too long — truncate it too
+        fullName = fullName.slice(0, MAX_TOOL_NAME_LENGTH);
+      } else {
+        fullName = prefix + mcpToolName.slice(0, maxToolLen);
+      }
+    }
+    this._toolNameMap.set(fullName, { serverName, mcpToolName });
+    return fullName;
+  }
+
+  /**
+   * Parse a Bobbit MCP tool name back to server + MCP tool name.
+   * Uses the lookup map first (handles truncated names), falls back to parsing.
    */
   private _parseToolName(bobbitToolName: string): {
     serverName: string;
     toolName: string;
   } {
+    // Check lookup map first (handles truncated names)
+    const mapped = this._toolNameMap.get(bobbitToolName);
+    if (mapped) {
+      return { serverName: mapped.serverName, toolName: mapped.mcpToolName };
+    }
+
+    // Fallback: parse from the name structure
     const prefix = "mcp__";
     if (!bobbitToolName.startsWith(prefix)) {
       throw new Error(
