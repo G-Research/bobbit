@@ -19,7 +19,7 @@ import {
 import { gatewayFetch, updateGoal } from "./api.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
-import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
+import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory, getAccessoryShadow } from "./session-colors.js";
 import { fetchPersonalities, type PersonalityData } from "./api.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
@@ -590,7 +590,8 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 		const displayAccessory = displayRoleObj?.accessory
 			?? (displayRole === "team-lead" ? "crown" : displayRole === "coder" ? "bandana" : "none");
 		const acc = getAccessory(displayAccessory);
-		const hasAccessory = acc.id !== "none" && acc.shadow !== "";
+		const accShadowStr = getAccessoryShadow(acc.id);
+		const hasAccessory = acc.id !== "none" && accShadowStr !== "";
 
 		// Split 14 colours into 2 equal rows of 7
 		const ROW_SIZE = Math.ceil(BOBBIT_HUE_ROTATIONS.length / 2);
@@ -658,7 +659,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 												${BOBBIT_HUE_ROTATIONS.slice(start, start + ROW_SIZE).map((rot, j) => {
 													const i = start + j;
 													const isSelected = displayColorIndex === i;
-													const accShadow = hasAccessory ? acc.shadow : "";
+													const accShadow = hasAccessory ? accShadowStr : "";
 													// Counter-rotate accessory to cancel parent's hue-rotate (except flask which intentionally shifts)
 													const accCounterFilter = acc.id !== "flask" ? `filter:hue-rotate(${-rot}deg);` : "";
 													return html`
