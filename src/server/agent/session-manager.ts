@@ -1511,10 +1511,16 @@ export class SessionManager {
 		}
 	}
 
-	/** Apply default_thinking_level from project config if set. */
+	/** Apply default_thinking_level from preferences (per-model) or project config (legacy). */
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
-		if (!this.projectConfigStore) return;
-		const level = this.projectConfigStore.get("default_thinking_level");
+		// Prefer per-model thinking preference, fall back to project config
+		let level: string | undefined;
+		if (this.preferencesStore) {
+			level = this.preferencesStore.get("default.sessionThinkingLevel") as string | undefined;
+		}
+		if (!level && this.projectConfigStore) {
+			level = this.projectConfigStore.get("default_thinking_level");
+		}
 		if (!level) return;
 		const valid = ["off", "minimal", "low", "medium", "high"];
 		if (!valid.includes(level)) return;
