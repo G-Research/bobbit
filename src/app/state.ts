@@ -111,6 +111,10 @@ export const state = {
 
 	gatewaySessions: [] as GatewaySession[],
 	goals: [] as Goal[],
+	/** Server generation counter for sessions — used to skip redundant refreshes */
+	sessionsGeneration: -1,
+	/** Server generation counter for goals — used to skip redundant refreshes */
+	goalsGeneration: -1,
 	/** Gate status cache: goalId → { passed, total, verifying } */
 	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean }>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */

@@ -479,8 +479,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Callbacks
 		remote.onTitleChange = (newTitle: string) => {
 			updateLocalSessionTitle(sessionId, newTitle);
-			renderApp();
-			refreshSessions();
 		};
 
 		remote.onStatusChange = (status: string) => {
@@ -981,8 +979,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Wait for background work (refreshSessions + storage) to settle
 		await backgroundWork;
 		if (isStale()) { cleanupRemote(remote); return; }
-
-		refreshSessions();
 	} catch (err) {
 		if (!isStale()) {
 			const msg = err instanceof Error ? err.message : String(err);
