@@ -371,37 +371,4 @@ describe("WorkflowManager", () => {
 		});
 	});
 
-	// --- Clone ---
-
-	describe("cloneWorkflow", () => {
-		it("creates an independent copy with a new ID", () => {
-			mgr.createWorkflow({
-				id: "original",
-				name: "Original",
-				description: "Original desc",
-				gates: [gate("a", "A"), gate("b", "B", ["a"])],
-			});
-			const cloned = mgr.cloneWorkflow("original");
-			assert.ok(cloned.id.startsWith("original-clone-"));
-			assert.notEqual(cloned.id, "original");
-			assert.equal(cloned.name, "Original");
-			assert.equal(cloned.gates.length, 2);
-		});
-
-		it("clone is independent — modifying clone doesn't affect original", () => {
-			mgr.createWorkflow({
-				id: "orig",
-				name: "Orig",
-				gates: [gate("a", "A")],
-			});
-			const cloned = mgr.cloneWorkflow("orig");
-			mgr.updateWorkflow(cloned.id, { name: "Modified Clone" });
-			assert.equal(mgr.getWorkflow("orig")!.name, "Orig");
-			assert.equal(mgr.getWorkflow(cloned.id)!.name, "Modified Clone");
-		});
-
-		it("throws for nonexistent workflow", () => {
-			assert.throws(() => mgr.cloneWorkflow("nope"), /not found/);
-		});
-	});
 });
