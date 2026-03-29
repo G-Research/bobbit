@@ -260,6 +260,7 @@ Here's the typical flow for a team goal with a workflow:
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate — triggers verification |
 | `GET` | `/api/goals/:id/gates/:gateId/signals` | Get signal history for a gate |
 | `GET` | `/api/goals/:id/gates/:gateId/content` | Get the current passed content of a gate |
+| `GET` | `/api/goals/:id/verifications/active` | Get in-flight verification state (running steps, sessions) |
 
 ### Tasks (gate-linked)
 
