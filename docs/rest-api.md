@@ -140,6 +140,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `GET` | `/api/project-config` | Get project settings (build/test/typecheck commands, custom config) |
 | `GET` | `/api/project-config/defaults` | Get default project config values |
 | `PUT` | `/api/project-config` | Update project config fields |
+| `GET` | `/api/config-directories` | List all config scan directories (skills, MCP, tools) with path, types, scope, exists, isRemovable |
 
 ### Setup
 

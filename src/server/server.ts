@@ -35,6 +35,7 @@ import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
+import { getAllConfigDirectories } from "./agent/config-directories.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -1016,6 +1017,12 @@ async function handleApiRoute(
 	// GET /api/project-config/defaults — return just the defaults
 	if (url.pathname === "/api/project-config/defaults" && req.method === "GET") {
 		json(projectConfigStore.getDefaults());
+		return;
+	}
+
+	// GET /api/config-directories — return all scanned config directories
+	if (url.pathname === "/api/config-directories" && req.method === "GET") {
+		json(getAllConfigDirectories(config.defaultCwd, projectConfigStore));
 		return;
 	}
 
@@ -3176,7 +3183,9 @@ async function handleApiRoute(
 			const result = await mcpManager.callTool(tool, args || {});
 			json(result);
 		} catch (err) {
-			json({ error: (err as Error).message }, 500);
+			const e = err as Error;
+			console.error(`[mcp] Tool call failed:`, e.stack || e);
+			json({ error: e.message, stack: e.stack }, 500);
 		}
 		return;
 	}

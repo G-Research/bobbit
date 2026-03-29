@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { parseCustomDirectories as parseCustomDirsFromConfig } from "../agent/config-directories.js";
 
 export interface SlashSkill {
 	/** Slash command name (without leading /) */
@@ -198,31 +199,12 @@ const BUILTIN_SKILLS: SlashSkill[] = [
 	},
 ];
 
-/** Parse custom skill directories from project config store. */
-function parseCustomDirectories(projectConfigStore?: { get(key: string): string | undefined }): { path: string }[] {
+/** Parse custom skill directories from project config store (delegates to shared config-directories module). */
+function parseCustomSkillDirectories(projectConfigStore?: { get(key: string): string | undefined }): { path: string }[] {
 	if (!projectConfigStore) return [];
-	const raw = projectConfigStore.get("skill_directories");
-	if (!raw) return [];
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch (err) {
-		console.warn(`[slash-skills] Invalid skill_directories JSON, ignoring:`, err);
-		return [];
-	}
-
-	if (!Array.isArray(parsed)) return [];
-
-	return parsed.filter(
-		(entry): entry is { path: string } =>
-			typeof entry === "object" && entry !== null &&
-			typeof (entry as any).path === "string" && (entry as any).path.trim().length > 0
-	).map((entry) => ({
-		path: entry.path.startsWith("~")
-			? path.join(os.homedir(), entry.path.slice(1))
-			: entry.path,
-	}));
+	return parseCustomDirsFromConfig(projectConfigStore)
+		.filter(d => d.types.includes("skills"))
+		.map(d => ({ path: d.path }));
 }
 
 /**
@@ -241,7 +223,7 @@ export function getSkillDirectories(
 		{ path: path.join(cwd, ".claude", "commands"), source: "legacy", isCustom: false },
 	];
 
-	for (const entry of parseCustomDirectories(projectConfigStore)) {
+	for (const entry of parseCustomSkillDirectories(projectConfigStore)) {
 		dirs.push({ path: entry.path, source: "custom", isCustom: true });
 	}
 
@@ -261,7 +243,7 @@ export function discoverSlashSkills(
 	cwd: string,
 	projectConfigStore?: { get(key: string): string | undefined },
 ): SlashSkill[] {
-	const configVal = projectConfigStore?.get("skill_directories") ?? "";
+	const configVal = (projectConfigStore?.get("skill_directories") ?? "") + "|" + (projectConfigStore?.get("config_directories") ?? "");
 	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
 		return _cache.skills;
 	}
@@ -280,7 +262,7 @@ export function discoverSlashSkills(
 
 	// Scan custom directories
 	const customSkills: SlashSkill[] = [];
-	for (const entry of parseCustomDirectories(projectConfigStore)) {
+	for (const entry of parseCustomSkillDirectories(projectConfigStore)) {
 		customSkills.push(...scanSkillDir(entry.path, "custom"));
 	}
 

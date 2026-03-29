@@ -109,7 +109,7 @@ export function generateMcpProxyExtension(
       if (r && r.content && Array.isArray(r.content)) {
         return r.content.map(c => c.text || "").join("\\n");
       }
-      if (r && r.error) return "Error: " + r.error;
+      if (r && r.error) return "Error: " + r.error + (r.stack ? "\\n" + r.stack : "");
       return JSON.stringify(r);
     }
   });`;

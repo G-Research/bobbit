@@ -56,8 +56,8 @@ Personality definitions that modify agent behaviour via prompt fragments.
 
 Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 
-- **Discovery**: Skills are found in `.claude/skills/<name>/SKILL.md` (project), `~/.claude/skills/<name>/SKILL.md` (personal), `.bobbit/skills/<name>/SKILL.md` (project/personal), and `.claude/commands/<name>.md` (legacy). Additional directories can be configured via the Skills page UI or `skill_directories` in `.bobbit/config/project.yaml`.
-- **Custom directories**: Configure via the Skills page (`#/skills`) "Skill Directories" section or by setting `skill_directories` in project config. Custom directories are additive — defaults always scan. Skills from custom dirs get source `"custom"` with lower priority than built-in directories.
+- **Discovery**: Skills are found in `.claude/skills/<name>/SKILL.md` (project), `~/.claude/skills/<name>/SKILL.md` (personal), `.bobbit/skills/<name>/SKILL.md` (project/personal), and `.claude/commands/<name>.md` (legacy). Additional directories can be configured via the Settings → Config Directories tab or `config_directories` in `.bobbit/config/project.yaml`.
+- **Custom directories**: Configure via Settings → Config Directories tab (`#/settings`, Directories tab) or by setting `config_directories` in project config. The legacy `skill_directories` key is still read for backward compatibility but `config_directories` is preferred. Custom directories are additive — defaults always scan. Skills from custom dirs get source `"custom"` with lower priority than built-in directories.
 - **Invocation**: Via `/skill-name` slash commands in the chat input. Skill instructions are injected into the agent's prompt.
 - **Frontmatter**: YAML frontmatter supports `description`, `argument_hint`, `allowed_tools`, `context` (e.g. `fork`), `agent`, `disable_model_invocation`, and `user_invocable`.
 - **API**: `GET /api/slash-skills` for autocomplete data, `GET /api/slash-skills/details` for full content, file paths, and scanned directories.

@@ -89,13 +89,20 @@ export class McpClient {
     const response = await this._sendRequest('tools/call', { name, arguments: args });
 
     if (response.error) {
+      const errMsg = typeof response.error === 'object'
+        ? (response.error.message || JSON.stringify(response.error))
+        : String(response.error);
       return {
-        content: [{ type: 'text', text: response.error.message }],
+        content: [{ type: 'text', text: errMsg }],
         isError: true,
       };
     }
 
     const result = response.result as McpToolResult | undefined;
+    if (result && !Array.isArray(result.content)) {
+      this._log(`Warning: tools/call "${name}" returned result with non-array content: ${JSON.stringify(result).slice(0, 500)}`);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], isError: false };
+    }
     return result ?? { content: [], isError: false };
   }
 
@@ -159,7 +166,12 @@ export class McpClient {
       }, CONNECTION_TIMEOUT_MS);
 
       try {
-        this._process = spawn(command!, args, {
+        // On Windows with shell: true, Node concatenates command + args without quoting.
+        // A path like "C:\Program Files\nodejs\node.exe" breaks into two tokens.
+        const cmd = (process.platform === 'win32' && command!.includes(' '))
+          ? `"${command!}"`
+          : command!;
+        this._process = spawn(cmd, args, {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: childEnv,
           cwd: cwd || undefined,
