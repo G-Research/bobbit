@@ -3183,7 +3183,9 @@ async function handleApiRoute(
 			const result = await mcpManager.callTool(tool, args || {});
 			json(result);
 		} catch (err) {
-			json({ error: (err as Error).message }, 500);
+			const e = err as Error;
+			console.error(`[mcp] Tool call failed:`, e.stack || e);
+			json({ error: e.message, stack: e.stack }, 500);
 		}
 		return;
 	}

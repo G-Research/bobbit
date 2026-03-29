@@ -136,12 +136,13 @@ export function getAllConfigDirectories(
 		});
 	}
 
-	// ── MCP (5 built-in) ──
+	// ── MCP (6 built-in) ──
 	const mcpDirs: Array<{ p: string; scope: "project" | "user" }> = [
 		{ p: path.join(os.homedir(), ".claude.json"), scope: "user" },
 		{ p: path.join(os.homedir(), ".claude", ".mcp.json"), scope: "user" },
 		{ p: path.join(os.homedir(), ".bobbit", ".mcp.json"), scope: "user" },
 		{ p: path.join(cwd, ".mcp.json"), scope: "project" },
+		{ p: path.join(cwd, ".claude", ".mcp.json"), scope: "project" },
 		{ p: path.join(cwd, ".bobbit", "config", "mcp.json"), scope: "project" },
 	];
 	for (const { p, scope } of mcpDirs) {

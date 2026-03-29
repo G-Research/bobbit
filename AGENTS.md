@@ -95,11 +95,14 @@ The value is a JSON-encoded array of `{"path": "..."}` objects. Paths support `~
 
 **Add a new tool**: Create a YAML file in the appropriate `.bobbit/config/tools/<group>/` directory (e.g. `.bobbit/config/tools/filesystem/my_tool.yaml`). Define `name`, `description`, `summary`, `group`, `provider`, and optionally `renderer` and `docs`. If the tool needs a custom extension, add code to the group's `extension.ts` in `.bobbit/config/tools/<group>/`. Register a renderer in `src/ui/tools/renderers/` if needed. MCP tools are auto-discovered from `.mcp.json` config files and don't require manual YAML definitions. See "Add/use MCP servers" below.
 
-**Add/use MCP servers**: Bobbit auto-discovers MCP (Model Context Protocol) server configurations from Claude Code-compatible locations and exposes their tools as first-class Bobbit tools. Discovery sources (later overrides earlier):
+**Add/use MCP servers**: Bobbit auto-discovers MCP (Model Context Protocol) server configurations from Claude Code-compatible locations and exposes their tools as first-class Bobbit tools. Discovery mirrors the same root directories used for skills. Sources (later overrides earlier):
 
-1. `~/.claude.json` → `mcpServers` field (user scope)
-2. `.mcp.json` in project root (project scope — shared via version control)
-3. `.bobbit/config/mcp.json` → `mcpServers` field (Bobbit-specific overrides)
+1. `~/.claude.json` → `mcpServers` field (legacy Claude Code user config)
+2. `~/.claude/.mcp.json` → `mcpServers` field (Claude Code user-level MCP)
+3. `~/.bobbit/.mcp.json` → `mcpServers` field (Bobbit user-level MCP)
+4. `<project>/.mcp.json` → `mcpServers` field (project scope — shared via version control)
+5. `<project>/.claude/.mcp.json` → `mcpServers` field (Claude Code project-level MCP)
+6. `<project>/.bobbit/config/mcp.json` → `mcpServers` field (Bobbit project overrides)
 
 Configuration format matches Claude Code's `.mcp.json`:
 ```json
