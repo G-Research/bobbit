@@ -1458,6 +1458,7 @@ export class SessionManager {
 				try {
 					await session.rpcClient.setModel(provider, modelId);
 					this._writeModelNameFile(session.id, sessionModelPref);
+					this.store.update(session.id, { modelProvider: provider, modelId });
 					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}`);
 					broadcast(session.clients, {
 						type: "state",
@@ -1490,6 +1491,7 @@ export class SessionManager {
 
 			await session.rpcClient.setModel("aigw", modelToUse.id);
 			this._writeModelNameFile(session.id, modelToUse.id);
+			this.store.update(session.id, { modelProvider: "aigw", modelId: modelToUse.id });
 			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
 
 			broadcast(session.clients, {
@@ -2108,6 +2110,11 @@ export class SessionManager {
 	/** Update the model name file for a session (called from WS handler on setModel). */
 	updateModelNameFile(sessionId: string, modelId: string): void {
 		this._writeModelNameFile(sessionId, modelId);
+	}
+
+	/** Persist model provider/id so archived sessions can display model info. */
+	persistSessionModel(sessionId: string, provider: string, modelId: string): void {
+		this.store.update(sessionId, { modelProvider: provider, modelId });
 	}
 
 	async terminateSession(id: string): Promise<boolean> {

@@ -711,7 +711,7 @@ export function renderSidebar() {
 							</div>`
 						: html`
 							${liveGoals.map((goal, i) => html`
-								${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
+								${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 								${renderGoalGroup(goal)}
 							`)}
 							${liveGoals.length > 0 ? html`

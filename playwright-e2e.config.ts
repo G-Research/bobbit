@@ -12,15 +12,12 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
 	testDir: "./tests/e2e",
 	testIgnore: [
-		"**/mobile-header-race-e2e*",
-		"**/session-rename*",
-		"**/image-attachment*",
-		"**/compaction*",
-		"**/delegate-reconnect*",
-		"**/delegate-ui*",
-		"**/goals*",
-		"**/team-lifecycle*",
-		"**/real-app-mobile*",
+		"**/session-rename*",      // needs real LLM for title generation
+		"**/image-attachment*",    // needs real LLM vision
+		"**/compaction*",          // needs mock agent compaction support
+		"**/delegate-reconnect*",  // needs mock agent delegate support
+		"**/delegate-ui*",         // needs mock agent delegate support
+		"**/team-lifecycle*",      // needs real agent processes
 	],
 	timeout: 30_000,
 	workers: 4,
