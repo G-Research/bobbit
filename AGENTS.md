@@ -137,6 +137,8 @@ REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-serve
 
 **Debug gate re-signal cancellation**: When a gate is re-signaled, `cancelStaleVerifications()` in `verification-harness.ts` terminates reviewer sessions from the prior signal and marks the old `ActiveVerification` as cancelled. The cancelled flag is checked after `Promise.all` resolves to suppress stale results. If reviewer sessions aren't being cancelled, check that `sessionManager` and `teamManager` are passed to the `VerificationHarness` constructor. Active verifications are tracked in `activeVerifications` map, keyed by signal ID — use `GET /api/goals/:goalId/verifications/active` to inspect in-flight state.
 
+**Debug archived session sidebar rendering**: Archived team members are shown under their team lead when "See Archived" is toggled on. The mapping uses `teamLeadSessionId` — members with a matching ID go to that lead, members with no `teamLeadSessionId` default to the live team lead, and orphan references (pointing to non-existent leads) also default to the live lead. The rendering logic is in `renderGoalGroup()` in `src/app/render-helpers.ts`. If archived members don't appear, check that `state.showArchived` is true and that the filtering in `archivedForLiveLead` and the archived block's `unmapped` fallback cover the member's `teamLeadSessionId` state.
+
 ## Git conventions
 
 The primary branch is **`master`** (not `main`). If the user refers to "main", treat it as `master`. Never create a `main` branch.
