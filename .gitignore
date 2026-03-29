@@ -8,12 +8,14 @@ Thumbs.db
 bobbit2/
 test-results/
 bobbit-screenshot.png
+tests/fullstack/screenshots/
 *-report.html
 nul
 .pi/
 # .bobbit/state/ is excluded by .bobbit/.gitignore
 .e2e-pi*
 .e2e-bobbit*
+.e2e-fullstack*
 .e2e-real-pi
 .e2e-real-bobbit
 .e2e-ui-pi
