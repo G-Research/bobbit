@@ -1233,13 +1233,8 @@ function retryLoadConfigDirs(): void {
 }
 
 async function removeCustomDir(path: string): Promise<void> {
-	const customDirs = configDirs
-		.filter((d) => d.isRemovable && d.path !== path)
-		.map((d) => ({ path: d.path, types: d.types }));
-	// Also keep custom dirs that we aren't removing
 	const remaining = configDirs
-		.filter((d) => d.isRemovable)
-		.filter((d) => d.path !== path)
+		.filter((d) => d.isRemovable && d.path !== path)
 		.map((d) => ({ path: d.path, types: d.types }));
 	await saveConfigDirs(remaining);
 }
