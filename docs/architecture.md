@@ -45,3 +45,4 @@ dist/
 - [WebSocket Protocol](websocket-protocol.md) — real-time communication protocol
 - [Security](security.md) — auth, TLS, and threat model
 - [Networking](networking.md) — remote access and multi-device setup
+- [Ruflo Integration](ruflo-integration.md) — design document evaluating ruflo integration into Bobbit
