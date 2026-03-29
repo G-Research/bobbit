@@ -370,6 +370,14 @@ function startGatePolling(goalId: string): void {
 			const newGates = await fetchGoalGates(goalId);
 			if (JSON.stringify(newGates) !== JSON.stringify(gates)) {
 				gates = newGates;
+				// Sync to sidebar gate status cache
+				const goal = state.goals.find(g => g.id === goalId);
+				if (goal?.workflow?.gates.length) {
+					const passed = newGates.filter((g: any) => g.status === "passed").length;
+					const total = goal.workflow.gates.length;
+					const verifying = newGates.some((g: any) => g.signals?.some((s: any) => s.verification?.status === "running"));
+					state.gateStatusCache.set(goalId, { passed, total, verifying });
+				}
 				renderApp();
 			}
 			// Also refresh active verifications alongside gate polling

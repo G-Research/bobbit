@@ -236,7 +236,7 @@ async function main() {
 	console.log();
 
 	// Auto-open browser when serving the UI, passing token so the UI auto-connects
-	if (args.staticDir) {
+	if (args.staticDir && !process.env.BOBBIT_NO_OPEN) {
 		const cmd =
 			process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
 		import("node:child_process").then(({ exec }) => exec(`${cmd} ${fullUrl}`));

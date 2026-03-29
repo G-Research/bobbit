@@ -270,6 +270,21 @@ async function refreshGateStatusCache() {
 	if (changed) renderApp();
 }
 
+/** Refresh gate status cache for a single goal (called from WS event handlers). */
+export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
+	const goal = state.goals.find(g => g.id === goalId);
+	if (!goal?.workflow?.gates.length) return;
+	const gates = await fetchGoalGates(goalId);
+	const passed = gates.filter(gs => gs.status === "passed").length;
+	const total = goal.workflow.gates.length;
+	const verifying = gates.some(gs => gs.signals?.some((s: any) => s.verification?.status === "running"));
+	const prev = state.gateStatusCache.get(goalId);
+	if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying) {
+		state.gateStatusCache.set(goalId, { passed, total, verifying });
+		renderApp();
+	}
+}
+
 /** Fetch PR status for all goals with branches and update the cache. */
 let _prRefreshInFlight = false;
 export async function refreshPrStatusCache() {

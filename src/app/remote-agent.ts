@@ -2,6 +2,7 @@ import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { state } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
+import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
 
 /**
@@ -707,6 +708,7 @@ export class RemoteAgent {
 			case "gate_status_changed": {
 				const gateCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" \u2192 ${(msg as any).status}`, gateCat);
+				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 
@@ -721,6 +723,7 @@ export class RemoteAgent {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
 				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 

@@ -338,11 +338,13 @@ export function createGateway(config: GatewayConfig) {
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
 
-			// Initialize MCP servers
-			try {
-				await sessionManager.initMcp(process.cwd());
-			} catch (err) {
-				console.error('[mcp] MCP init failed:', (err as Error).message);
+			// Initialize MCP servers (skip in test environments)
+			if (!process.env.BOBBIT_SKIP_MCP) {
+				try {
+					await sessionManager.initMcp(process.cwd());
+				} catch (err) {
+					console.error('[mcp] MCP init failed:', (err as Error).message);
+				}
 			}
 
 			// Restore persisted sessions before accepting connections
