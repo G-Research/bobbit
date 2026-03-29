@@ -86,14 +86,15 @@ test.describe("Session lifecycle (full-stack UI)", () => {
 			return remaining.length === 0;
 		});
 
-		// The session was deleted server-side. Verify the UI reflects this:
-		// either the textarea disappears, or we see "No sessions" in the sidebar.
-		await expect(textarea).not.toBeVisible({ timeout: 15_000 }).catch(async () => {
-			// If textarea is still visible (the chat panel hasn't cleared yet),
-			// check that the sidebar at least shows no sessions.
-			const base = `http://127.0.0.1:${process.env.E2E_PORT}`;
-			await page.goto(`${base}/#/landing`);
-			await expect(page.getByText("No sessions")).toBeVisible({ timeout: 10_000 });
-		});
+		// The session was deleted server-side. The UI may still be showing
+		// the chat panel (WebSocket reconnect loop). Reload at the landing
+		// route to get a fresh state and verify no chat is rendered.
+		const base = `http://127.0.0.1:${process.env.E2E_PORT}`;
+		const token = readE2EToken();
+		await page.goto(`${base}/?token=${encodeURIComponent(token)}#/landing`);
+		await expect(
+			page.locator("button[title='New session']").first(),
+		).toBeVisible({ timeout: 15_000 });
+		await expect(textarea).not.toBeVisible({ timeout: 5_000 });
 	});
 });
