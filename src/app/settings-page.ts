@@ -338,8 +338,10 @@ function getActivePaletteId(): string {
 async function selectPalette(id: string): Promise<void> {
 	if (id === "forest") {
 		delete document.documentElement.dataset.palette;
+		localStorage.removeItem('palette');
 	} else {
 		document.documentElement.dataset.palette = id;
+		localStorage.setItem('palette', id);
 	}
 	try {
 		await gatewayFetch("/api/preferences", {
