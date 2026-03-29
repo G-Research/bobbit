@@ -1205,7 +1205,7 @@ let newDirPath = "";
 let newDirTypes: { skills: boolean; mcp: boolean; tools: boolean } = { skills: false, mcp: false, tools: false };
 
 function loadConfigDirs(): void {
-	if (configDirsLoaded || configDirsLoading) return;
+	if (configDirsLoaded || configDirsLoading || configDirsError) return;
 	configDirsLoading = true;
 	configDirsError = "";
 	(async () => {
@@ -1248,10 +1248,6 @@ async function addCustomDir(): Promise<void> {
 	if (newDirTypes.tools) selectedTypes.push("tools");
 	if (selectedTypes.length === 0) return;
 
-	// Check for duplicates
-	const existing = configDirs.find((d) => d.path === trimmed || d.path.replace(/[\\/]+$/, "") === trimmed.replace(/[\\/]+$/, ""));
-	if (existing) return;
-
 	const currentCustom = configDirs
 		.filter((d) => d.isRemovable)
 		.map((d) => ({ path: d.path, types: d.types }));
@@ -1278,9 +1274,11 @@ async function saveConfigDirs(customDirs: Array<{ path: string; types: string[] 
 			setTimeout(() => { configDirsSaveStatus = ""; renderApp(); }, 2000);
 		} else {
 			configDirsSaveStatus = "error";
+			setTimeout(() => { configDirsSaveStatus = ""; renderApp(); }, 3000);
 		}
 	} catch {
 		configDirsSaveStatus = "error";
+		setTimeout(() => { configDirsSaveStatus = ""; renderApp(); }, 3000);
 	}
 	renderApp();
 }
@@ -1311,6 +1309,7 @@ function renderDirRow(dir: ConfigDirectory) {
 				<button
 					class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
 					title="Remove directory"
+					?disabled=${configDirsSaveStatus === "saving"}
 					@click=${() => removeCustomDir(dir.path)}
 				>${icon(X, "xs")}</button>
 			` : html`<div class="w-6 shrink-0"></div>`}
@@ -1406,7 +1405,7 @@ function renderDirectoriesTab() {
 					<button
 						class="ml-auto px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground
 							hover:bg-primary/90 transition-colors disabled:opacity-50"
-						?disabled=${!newDirPath.trim() || !hasAtLeastOneType}
+						?disabled=${!newDirPath.trim() || !hasAtLeastOneType || configDirsSaveStatus === "saving"}
 						@click=${addCustomDir}
 					>Add</button>
 				</div>
