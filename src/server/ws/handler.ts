@@ -247,6 +247,9 @@ export function handleWebSocketConnection(
 					await session.rpcClient.setModel(msg.provider, msg.modelId);
 					sessionManager.updateModelNameFile(session.id, msg.modelId);
 					break;
+				case "set_thinking_level":
+					await session.rpcClient.setThinkingLevel(msg.level);
+					break;
 				case "compact":
 					// Fire-and-forget: don't block the WS message loop.
 					// The async IIFE handles the full lifecycle.
