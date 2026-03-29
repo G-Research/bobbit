@@ -35,34 +35,16 @@ When mocking up UI changes, animations, or visual design options, write a self-c
 
 ### Live preview panel — the preferred approach
 
-**Always prefer live previews over static mockups.** Bobbit has a built-in preview panel that shows an HTML file in a split-pane view alongside the chat. The preview auto-updates when you edit the source file, giving the user real-time visual feedback.
+**Always prefer live previews over static mockups.** Use the `preview_open` tool to show HTML in a split-pane alongside the chat. The panel auto-updates on each call, giving the user real-time visual feedback.
 
-**How it works:**
-
-1. **Enable preview mode** on the session via `PATCH /api/sessions/:id` with `{ "preview": true }`:
-   ```bash
-   TOKEN=$(cat .bobbit/state/token) && GW=$(cat .bobbit/state/gateway-url)
-   curl -sk "$GW/api/sessions/$SESSION_ID" -X PATCH \
-     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-     -d '{"preview": true}'
-   ```
-   The user may need to refresh the page once to pick up the flag. After that, the split-pane appears.
-
-2. **Write your preview HTML to `.bobbit/state/preview-$BOBBIT_SESSION_ID.html`** (the `BOBBIT_SESSION_ID` environment variable is set automatically). The panel polls this file every second and auto-updates the iframe. Each session has its own preview file so switching sessions shows the correct preview.
-
-3. **Reference real app CSS and components** — do NOT duplicate styles. Since the preview iframe is same-origin with the Vite dev server, you can `<link rel="stylesheet" href="/src/ui/app.css">` to use the actual production CSS. Use the same DOM structure and class names as the real components. This guarantees the preview is pixel-identical to the app.
-
-4. **Add interactive controls** (dropdowns, sliders, toggles) so the user can explore variants, states, and parameters without asking you to regenerate the preview.
-
-**Example pattern** — a preview that uses the real CSS and real DOM structure:
-```html
-<link rel="stylesheet" href="/src/ui/app.css">
-<!-- Then use the exact same class names and DOM as the real components -->
+```
+preview_open(html="<link rel='stylesheet' href='/src/ui/app.css'><!-- your HTML here -->")
 ```
 
-This approach is fast, accurate, and eliminates the risk of preview-vs-reality drift. Every CSS change hot-reloads into the preview automatically.
-
-5. **Do NOT render preview HTML inline in the chat.** When iterating with the preview panel, write the file to `.bobbit/state/preview-$BOBBIT_SESSION_ID.html` only — the user sees it in the side panel. Rendering it again in the chat message is redundant noise. Just describe what changed and let the preview speak for itself.
+- **Reference real app CSS** — the preview iframe is same-origin with the Vite dev server, so `<link rel="stylesheet" href="/src/ui/app.css">` gives pixel-accurate mockups.
+- **Add interactive controls** (dropdowns, sliders, toggles) so the user can explore variants without asking you to regenerate.
+- **Do NOT render preview HTML inline in the chat.** The user sees it in the side panel. Just describe what changed.
+- Call `preview_close()` when done iterating.
 
 ### Process — do the homework first
 

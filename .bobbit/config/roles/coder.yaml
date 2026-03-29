@@ -20,6 +20,8 @@ allowedTools:
   - browser_screenshot
   - browser_type
   - browser_wait
+  - preview_open
+  - preview_close
   - find
   - grep
   - ls
