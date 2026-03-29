@@ -2,7 +2,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, TemplateResult } from "lit";
 import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, FolderOpen, Plus, X, Zap } from "lucide";
-import { renderApp } from "./state.js";
+import { requestRender } from "./state.js";
 import { gatewayFetch } from "./api.js";
 import { setHashRoute } from "./routing.js";
 
@@ -31,7 +31,7 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 	if (showLoading) {
 		loading = true;
 		error = "";
-		renderApp();
+		requestRender();
 	}
 
 	try {
@@ -64,13 +64,13 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 		error = err instanceof Error ? err.message : String(err);
 	} finally {
 		loading = false;
-		renderApp();
+		requestRender();
 	}
 }
 
 function toggleSkill(id: string): void {
 	expandedSkill = expandedSkill === id ? null : id;
-	renderApp();
+	requestRender();
 }
 
 function renderNavBar(): TemplateResult {
@@ -137,7 +137,7 @@ function renderSkillCard(skill: typeof slashSkills[0]): TemplateResult {
 }
 
 async function saveCustomDirs(): Promise<void> {
-	renderApp();
+	requestRender();
 	try {
 		await gatewayFetch("/api/project-config", {
 			method: "PUT",
@@ -150,7 +150,7 @@ async function saveCustomDirs(): Promise<void> {
 			const data = await slashRes.json();
 			slashSkills = data.skills || [];
 			directories = data.directories || [];
-			renderApp();
+			requestRender();
 		}
 	} catch {
 		// ignore save errors
@@ -177,7 +177,7 @@ function renderDirectoriesSection(): TemplateResult {
 		<div class="rounded-lg border border-border overflow-hidden">
 			<button
 				class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-secondary/30 transition-colors cursor-pointer"
-				@click=${() => { directoriesExpanded = !directoriesExpanded; renderApp(); }}
+				@click=${() => { directoriesExpanded = !directoriesExpanded; requestRender(); }}
 			>
 				<span class="text-muted-foreground shrink-0">${icon(directoriesExpanded ? ChevronDown : ChevronRight, "sm")}</span>
 				<span class="text-muted-foreground shrink-0">${icon(FolderOpen, "sm")}</span>
@@ -221,7 +221,7 @@ function renderDirectoriesSection(): TemplateResult {
 							class="flex-1 text-xs px-2 py-1.5 rounded border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 							placeholder="~/my-skills or /absolute/path"
 							.value=${newDirPath}
-							@input=${(e: Event) => { newDirPath = (e.target as HTMLInputElement).value; renderApp(); }}
+							@input=${(e: Event) => { newDirPath = (e.target as HTMLInputElement).value; requestRender(); }}
 							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newDirPath.trim()) addCustomDir(); }}
 						/>
 						<button
