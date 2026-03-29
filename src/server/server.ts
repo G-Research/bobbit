@@ -468,6 +468,45 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/system-prompt-context — read the project context section from system-prompt.md
+	if (url.pathname === "/api/system-prompt-context" && req.method === "GET") {
+		const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
+		if (!fs.existsSync(systemPromptPath)) { json({ context: "" }); return; }
+		try {
+			const content = fs.readFileSync(systemPromptPath, "utf-8");
+			// Extract everything after the last "# Project Context" heading, or return empty
+			const marker = "# Project Context";
+			const idx = content.lastIndexOf(marker);
+			if (idx === -1) { json({ context: "" }); return; }
+			const context = content.slice(idx + marker.length).trim();
+			json({ context });
+		} catch { json({ context: "" }); }
+		return;
+	}
+
+	// PUT /api/system-prompt-context — append/replace the project context section in system-prompt.md
+	if (url.pathname === "/api/system-prompt-context" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body || typeof body.context !== "string") { json({ error: "Missing context" }, 400); return; }
+		const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
+		try {
+			let existing = "";
+			if (fs.existsSync(systemPromptPath)) {
+				existing = fs.readFileSync(systemPromptPath, "utf-8");
+			}
+			const marker = "# Project Context";
+			const idx = existing.lastIndexOf(marker);
+			const base = idx !== -1 ? existing.slice(0, idx).trimEnd() : existing.trimEnd();
+			const newContent = base + "\n\n" + marker + "\n\n" + body.context.trim() + "\n";
+			fs.mkdirSync(path.dirname(systemPromptPath), { recursive: true });
+			fs.writeFileSync(systemPromptPath, newContent);
+			json({ ok: true });
+		} catch (err: any) {
+			json({ error: err.message }, 500);
+		}
+		return;
+	}
+
 	// POST /api/shutdown — graceful shutdown (used by coverage teardown to flush V8 coverage)
 	if (url.pathname === "/api/shutdown" && req.method === "POST") {
 		json({ status: "shutting down" });

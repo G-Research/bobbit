@@ -242,10 +242,24 @@ export const state = {
 	workflowPreviewDescription: "",
 	workflowPreviewGates: "",
 
-	// Setup assistant preview state
-	setupPreviewContent: "",
-	setupPreviewAction: "",  // last action: "system-prompt", "preferences", "complete"
-	setupPreviewSteps: [] as Array<{ action: string; content: string }>,
+	// Setup assistant preview state — form fields populated by setup_proposal XML
+	setupPreviewAction: "",
+	setupFormStack: { language: "", framework: "", testing: "" },
+	setupFormCommands: {
+		build_command: "",
+		test_command: "",
+		typecheck_command: "",
+		test_unit_command: "",
+		test_e2e_command: "",
+		worktree_setup_command: "",
+	} as Record<string, string>,
+	setupFormModels: { session_model: "", review_model: "", naming_model: "" },
+	setupFormSystemPrompt: "",
+	setupFormSystemPromptEdited: false,
+	setupFormCommandsEdited: {} as Record<string, boolean>,
+	setupFormModelsEdited: {} as Record<string, boolean>,
+	setupFormSaving: false,
+	setupFormSaved: false,
 
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,

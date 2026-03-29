@@ -1225,17 +1225,102 @@ function personalityPreviewPanel() {
 // SETUP PREVIEW PANEL (setup wizard split-screen)
 // ============================================================================
 
-function setupPreviewPanel() {
-	const handleDone = () => {
-		backToSessions();
-	};
+const SETUP_CMD_LABELS: Record<string, string> = {
+	build_command: "Build",
+	test_command: "Test",
+	typecheck_command: "Type Check",
+	test_unit_command: "Test (Unit)",
+	test_e2e_command: "Test (E2E)",
+	worktree_setup_command: "Worktree Setup",
+};
 
-	const actionLabels: Record<string, string> = {
-		"system-prompt": "System Prompt",
-		"preferences": "Preferences",
-		"project-config": "Project Config",
-		"complete": "Setup Complete",
-	};
+async function saveSetupForm(): Promise<void> {
+	state.setupFormSaving = true;
+	renderApp();
+	try {
+		// 1. Save project config (commands)
+		const configBody: Record<string, string | null> = {};
+		for (const [key, value] of Object.entries(state.setupFormCommands)) {
+			configBody[key] = value || null;
+		}
+		await gatewayFetch("/api/project-config", { method: "PUT", body: JSON.stringify(configBody) });
+
+		// 2. Save system prompt context
+		if (state.setupFormSystemPrompt.trim()) {
+			await gatewayFetch("/api/system-prompt-context", {
+				method: "PUT",
+				body: JSON.stringify({ context: state.setupFormSystemPrompt }),
+			});
+		}
+
+		// 3. Save model preferences
+		const prefBody: Record<string, string | null> = {};
+		if (state.setupFormModels.session_model) prefBody["default.sessionModel"] = state.setupFormModels.session_model;
+		if (state.setupFormModels.review_model) prefBody["default.reviewModel"] = state.setupFormModels.review_model;
+		if (state.setupFormModels.naming_model) prefBody["default.namingModel"] = state.setupFormModels.naming_model;
+		if (Object.keys(prefBody).length > 0) {
+			await gatewayFetch("/api/preferences", { method: "PUT", body: JSON.stringify(prefBody) });
+		}
+
+		// 4. Mark setup complete
+		await gatewayFetch("/api/setup-status/dismiss", { method: "POST" });
+		state.setupComplete = true;
+		state.setupFormSaved = true;
+	} catch (err) {
+		console.error("[setup] Save failed:", err);
+	}
+	state.setupFormSaving = false;
+	renderApp();
+}
+
+function setupPreviewPanel() {
+	const handleDone = () => { backToSessions(); };
+
+	const stack = state.setupFormStack;
+	const cmds = state.setupFormCommands;
+	const models = state.setupFormModels;
+	const hasStack = !!(stack.language || stack.framework || stack.testing);
+	const hasCmds = Object.values(cmds).some(v => !!v);
+	const hasPrompt = !!state.setupFormSystemPrompt.trim();
+	const canSave = hasCmds || hasPrompt;
+
+	const sectionLabel = (text: string) => html`<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">${text}</div>`;
+	const cmdInput = (key: string) => html`
+		<div class="flex items-center gap-3">
+			<span class="text-sm font-medium text-foreground w-28 sm:w-36 shrink-0">${SETUP_CMD_LABELS[key] || key}</span>
+			<input
+				type="text"
+				class="flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
+					focus:outline-none focus:ring-2 focus:ring-ring ${cmds[key] ? "text-foreground" : "text-muted-foreground"}"
+				placeholder=${key === "worktree_setup_command" ? "optional" : "detecting..."}
+				.value=${cmds[key] || ""}
+				@input=${(e: Event) => {
+					state.setupFormCommands[key] = (e.target as HTMLInputElement).value;
+					state.setupFormCommandsEdited[key] = true;
+					state.setupFormSaved = false;
+					renderApp();
+				}}
+			/>
+		</div>
+	`;
+	const modelInput = (key: string, label: string) => html`
+		<div class="flex items-center gap-3">
+			<span class="text-sm font-medium text-foreground w-28 sm:w-36 shrink-0">${label}</span>
+			<input
+				type="text"
+				class="flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
+					focus:outline-none focus:ring-2 focus:ring-ring ${(models as any)[key] ? "text-foreground" : "text-muted-foreground"}"
+				placeholder="(use default)"
+				.value=${(models as any)[key] || ""}
+				@input=${(e: Event) => {
+					(state.setupFormModels as any)[key] = (e.target as HTMLInputElement).value;
+					(state.setupFormModelsEdited as any)[key] = true;
+					state.setupFormSaved = false;
+					renderApp();
+				}}
+			/>
+		</div>
+	`;
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -1244,53 +1329,77 @@ function setupPreviewPanel() {
 				<div>
 					<div class="text-lg font-semibold flex items-center gap-2">
 						${icon(WandSparkles, "sm")}
-						Setup Progress
+						Project Setup
 					</div>
-					${state.setupComplete ? html`
+					${state.setupFormSaved ? html`
 						<div class="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-500/15 text-green-700 dark:text-green-400">
-							<span class="text-green-500">&#10003;</span> Setup Complete
+							<span class="text-green-500">&#10003;</span> Saved
 						</div>
 					` : ""}
 				</div>
 
-				<!-- Completed steps -->
-				${state.setupPreviewSteps.length > 0 ? html`
-					<div>
-						<div class="text-xs text-muted-foreground mb-2 font-medium">Completed Steps</div>
-						<div class="flex flex-col gap-2">
-							${state.setupPreviewSteps.map((step, _i) => html`
-								<div class="flex items-start gap-2.5 p-2.5 rounded-md border border-border ${step.action === "complete" ? "bg-green-500/5" : ""}">
-									<div class="mt-0.5 text-sm">
-										<span class="text-green-500">&#10003;</span>
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="text-sm font-medium">${actionLabels[step.action] || step.action}</div>
-										${step.content ? html`<div class="text-xs text-muted-foreground mt-0.5 line-clamp-2">${step.content.slice(0, 200)}</div>` : ""}
-									</div>
-								</div>
-							`)}
-						</div>
-					</div>
-				` : html`
-					<div class="text-xs text-muted-foreground italic p-3 border border-dashed border-border rounded-md">
-						The setup wizard will configure your project. Steps will appear here as they complete.
-					</div>
-				`}
-
-				<!-- Current content preview -->
-				${state.setupPreviewContent ? html`
-					<div>
-						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Latest Update</div>
-						<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[300px]">
-							<markdown-block .content=${state.setupPreviewContent}></markdown-block>
+				<!-- Detected stack badges -->
+				${hasStack ? html`
+					<div class="flex flex-col gap-2">
+						${sectionLabel("Detected Stack")}
+						<div class="flex flex-wrap gap-2">
+							${stack.language ? html`<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">${stack.language}</span>` : ""}
+							${stack.framework ? html`<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">${stack.framework}</span>` : ""}
+							${stack.testing ? html`<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">${stack.testing}</span>` : ""}
 						</div>
 					</div>
 				` : ""}
+
+				<!-- Commands -->
+				<div class="flex flex-col gap-2">
+					${sectionLabel("Commands")}
+					${Object.keys(SETUP_CMD_LABELS).map(key => cmdInput(key))}
+				</div>
+
+				<hr class="border-border" />
+
+				<!-- Models -->
+				<div class="flex flex-col gap-2">
+					${sectionLabel("Default Models")}
+					${modelInput("session_model", "Session")}
+					${modelInput("review_model", "Review")}
+					${modelInput("naming_model", "Naming")}
+				</div>
+
+				<hr class="border-border" />
+
+				<!-- System prompt context -->
+				<div class="flex flex-col gap-2">
+					${sectionLabel("System Prompt \u2014 Project Context")}
+					<textarea
+						class="w-full min-h-[120px] px-3 py-2 rounded-md border border-input bg-background text-sm
+							font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+						placeholder="The assistant will draft project-specific directives here..."
+						.value=${state.setupFormSystemPrompt}
+						@input=${(e: Event) => {
+							state.setupFormSystemPrompt = (e.target as HTMLTextAreaElement).value;
+							state.setupFormSystemPromptEdited = true;
+							state.setupFormSaved = false;
+							renderApp();
+						}}
+					></textarea>
+				</div>
 			</div>
 
 			<!-- Footer -->
-			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
+			<div class="shrink-0 flex items-center justify-between px-5 py-3 border-t border-border">
+				<div class="text-xs text-muted-foreground">
+					${state.setupFormSaved ? html`<span class="text-green-600 dark:text-green-400">&#10003; Saved to config files</span>` : ""}
+				</div>
+				<div class="flex items-center gap-2">
+					${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
+					${Button({
+						variant: "default",
+						onClick: saveSetupForm,
+						disabled: !canSave || state.setupFormSaving,
+						children: state.setupFormSaving ? "Saving\u2026" : "Save Setup",
+					})}
+				</div>
 			</div>
 		</div>
 	`;
