@@ -592,7 +592,7 @@ export function renderGoalGroup(goal: Goal) {
 
 						return html`
 							${archivedLeads.map((s, i) => renderLeadWithMembers(s, i === archivedLeads.length - 1 && !teamLead))}
-							${teamLead && unmapped.length > 0 ? unmapped.map(m => html`
+							${!teamLead && unmapped.length > 0 ? unmapped.map(m => html`
 								${renderArchivedSessionRow(m)}
 								${renderArchivedDelegates(m.id)}
 							`) : ""}
