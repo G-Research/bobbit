@@ -262,7 +262,7 @@ Cross-links on the Skills page and Tools page ("Manage scan directories →") na
 
 **Debug git diff viewer**: The `GitStatusWidget` fetches diffs on file click via REST (`/api/sessions/:id/git-diff` or `/api/goals/:id/git-diff`). The dropdown renders into a portal (`document.body`) so diffs aren't clipped by overflow. A `_currentDiffFile` guard prevents stale responses from overwriting when the user clicks a different file before the first fetch completes. If diffs don't appear, check: (1) the widget has `sessionId` or `goalId` and `token` set, (2) the server's path sanitization isn't rejecting the file path (it rejects `..` and absolute paths), (3) the git command isn't timing out (5s limit, 500KB response cap).
 
-**Debug sandbox sessions**: Check `GET /api/sandbox-status` for Docker availability and image status. Session metadata in `sessions.json` includes `sandboxed: boolean`. The sandbox proxy logs to console with `[sandbox-proxy]` prefix — look for `BLOCKED` or `CONNECT` entries to diagnose network issues. Rate limiting on web proxy endpoints is 10 req/min per client IP (HTTP 429 when exceeded). If the container can't reach the gateway, verify `host.docker.internal` resolves (check `--add-host` in the `docker run` args logged by rpc-bridge). If tool extensions fail auth, check that `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` env vars are set inside the container.
+**Debug sandbox sessions**: Check `GET /api/sandbox-status` for Docker availability and image status. Session metadata in `sessions.json` includes `sandboxed: boolean`. The sandbox proxy logs to console with `[sandbox-proxy]` prefix — look for `BLOCKED` or `CONNECT` entries to diagnose network issues. Rate limiting on web proxy endpoints is 10 req/min per client IP (HTTP 429 when exceeded). If the container can't reach the gateway, verify `host.docker.internal` resolves (check `--add-host` in the `docker run` args logged by rpc-bridge). If tool extensions fail auth, check that `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` env vars are set inside the container. If sandboxed sessions don't survive restarts, check that `agentSessionFile` in `.bobbit/state/sessions.json` contains a host-native path (not starting with `/home/node/`). Path remapping between container and host paths is handled by `containerToHostSessionPath()` and `hostToContainerSessionPath()` in `rpc-bridge.ts`.
 
 **Debug gate re-signal cancellation**: When a gate is re-signaled, `cancelStaleVerifications()` in `verification-harness.ts` terminates reviewer sessions from the prior signal and marks the old `ActiveVerification` as cancelled. The cancelled flag is checked after `Promise.all` resolves to suppress stale results. If reviewer sessions aren't being cancelled, check that `sessionManager` and `teamManager` are passed to the `VerificationHarness` constructor. Active verifications are tracked in `activeVerifications` map, keyed by signal ID — use `GET /api/goals/:goalId/verifications/active` to inspect in-flight state.
 
@@ -409,6 +409,7 @@ When a session is created with `sandboxed: true`:
    - Project directory mounted at `/workspace` (read-write)
    - Agent modules at `/agent-modules` (read-only)
    - Tool extensions at `/tools` (read-only)
+   - Agent sessions directory at `/home/node/.pi/agent/sessions` (read-write, for session persistence across restarts)
    - `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` as env vars (no `.bobbit/` mount)
 3. **Tool extensions** read gateway credentials from env vars (falling back to file reads for non-sandboxed sessions)
 4. **Sandbox proxy** controls all outbound HTTP/HTTPS from the container
@@ -442,7 +443,7 @@ Containers always run on the default Docker bridge network — they are **not** 
 
 ### Security
 
-- **Filesystem isolation**: The container only sees `/workspace` (project dir), `/agent-modules` (read-only), and `/tools` (read-only). Host directories like `~/.ssh`, `~/.aws`, `~/.config` are not accessible. `BOBBIT_DIR` is never mounted — the agent communicates with the gateway via env-var-based auth.
+- **Filesystem isolation**: The container only sees `/workspace` (project dir), `/agent-modules` (read-only), `/tools` (read-only), and `~/.pi/agent/sessions/` (read-write, for session persistence). Only the `sessions/` subdirectory of `~/.pi/agent/` is mounted — `auth.json` and other files in `~/.pi/agent/` remain inaccessible. Host directories like `~/.ssh`, `~/.aws`, `~/.config` are not accessible. `BOBBIT_DIR` is never mounted — the agent communicates with the gateway via env-var-based auth.
 - **Non-root execution**: Containers run as the `node` user (uid=1000), not root.
 - **Network control**: All outbound HTTP/HTTPS is routed through the sandbox proxy. With an empty allowlist, the container cannot make any outbound connections (except to the gateway).
 - **Mount validation**: `sandbox_mounts` are validated against a blocklist of system paths (`/proc`, `/sys`, `/dev`, `/etc`, `/root`, `/home`, etc.) and sensitive path substrings (`/.ssh`, `/.aws`, `/.gnupg`, `/.docker`, etc.). Relative paths, paths with `..`, home dir expansion (`~`), and drive roots are rejected.
@@ -458,7 +459,7 @@ Containers always run on the default Docker bridge network — they are **not** 
 | `src/server/agent/sandbox-proxy.ts` | HTTP/HTTPS forward proxy with hostname allowlist |
 | `src/server/agent/sandbox-status.ts` | Docker availability check (`docker info` + image inspect) |
 
-The sandbox also required changes to: `rpc-bridge.ts` (Docker spawn path), `session-manager.ts` (sandbox wiring and mount validation), `session-store.ts` (`sandboxed` field on `PersistedSession`), `server.ts` (REST endpoints), `sidebar.ts` (sandbox checkbox), `settings-page.ts` (Docker Sandbox config section), and all tool extensions (env var fallback for gateway credentials).
+The sandbox also required changes to: `rpc-bridge.ts` (Docker spawn path, path remapping helpers for sandbox session persistence), `session-manager.ts` (sandbox wiring, mount validation, and session path remapping on persist/restore), `session-store.ts` (`sandboxed` field on `PersistedSession`), `server.ts` (REST endpoints), `sidebar.ts` (sandbox checkbox), `settings-page.ts` (Docker Sandbox config section), and all tool extensions (env var fallback for gateway credentials).
 
 ## Goals, workflows, tasks & gates
 
