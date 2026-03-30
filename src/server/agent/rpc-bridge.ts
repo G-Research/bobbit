@@ -351,11 +351,28 @@ export class RpcBridge {
 	 * The container already has all bind mounts and env vars configured.
 	 */
 	private spawnDockerExec(containerId: string, _cliPath: string, agentArgs: string[]): ChildProcess {
-		const execArgs: string[] = [
-			"exec", "-i", containerId,
+		const execArgs: string[] = ["exec", "-i"];
+
+		// Pass session-specific env vars via docker exec -e (overrides container env)
+		if (this.options.sandboxProxyPort) {
+			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
+			execArgs.push("-e", `http_proxy=${proxyUrl}`);
+			execArgs.push("-e", `https_proxy=${proxyUrl}`);
+			execArgs.push("-e", "no_proxy=host.docker.internal,localhost,127.0.0.1");
+		}
+		if (this.options.env?.BOBBIT_SESSION_ID) {
+			execArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);
+		}
+		if (this.options.env?.BOBBIT_GOAL_ID) {
+			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
+		}
+		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
+
+		execArgs.push(
+			containerId,
 			"node", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
 			...this.remapArgsForContainer(agentArgs, true),
-		];
+		);
 
 		console.log(`[rpc-bridge] Docker exec args: ${execArgs.join(" ")}`);
 

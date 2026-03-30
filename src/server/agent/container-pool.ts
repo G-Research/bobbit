@@ -4,9 +4,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { bobbitDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
+import { toDockerPath, resolveAgentModulesDir } from "./rpc-bridge.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,33 +32,6 @@ export interface ContainerPoolOptions {
 	gatewayUrl: string;
 	gatewayToken: string;
 	sandboxProxyPort?: number;
-}
-
-// ── Helpers (re-implemented from rpc-bridge.ts since they're private there) ──
-
-/**
- * Convert a Windows path (e.g. C:\foo\bar) to Docker-compatible POSIX path (/c/foo/bar).
- * On non-Windows platforms, returns the path unchanged.
- */
-function toDockerPath(p: string): string {
-	const match = p.match(/^([A-Za-z]):[/\\](.*)/);
-	if (match) {
-		const drive = match[1].toLowerCase();
-		const rest = match[2].replace(/\\/g, "/");
-		return `/${drive}/${rest}`;
-	}
-	return p.replace(/\\/g, "/");
-}
-
-/**
- * Resolve the parent directory of @mariozechner/pi-coding-agent package.
- * This is the directory that will be mounted as /node_modules in Docker.
- */
-function resolveAgentModulesDir(): string {
-	const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
-	const mainPath = fileURLToPath(mainUrl);
-	const pkgRoot = path.resolve(path.dirname(mainPath), "..");
-	return path.resolve(pkgRoot, "..", "..");
 }
 
 /**
@@ -465,6 +438,7 @@ export class ContainerPool {
 		for (const id of toRemove) {
 			const current = this.containers.get(id);
 			if (!current) continue; // already removed
+			if (current.state === "claimed") continue; // claimed between snapshot and apply
 
 			this.containers.delete(id);
 

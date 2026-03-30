@@ -443,6 +443,47 @@ export function createGateway(config: GatewayConfig) {
 					let credentials: Record<string, string> = {};
 					try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
 
+					// Validate mounts — same security checks as session-manager.ts
+					const blockedPaths = [
+						"/var/run/docker.sock", "/run/docker.sock",
+						"/var/run/containerd", "/run/containerd",
+						"/proc", "/sys", "/dev",
+						"/etc", "/boot", "/sbin", "/bin", "/lib", "/lib64",
+						"/usr/sbin", "/usr/bin", "/usr/lib",
+						"/root", "/home",
+					];
+					const sensitiveSubstrings = [
+						"/.ssh", "/.aws", "/.gnupg", "/.config",
+						"/.kube", "/.docker", "/.npmrc", "/.netrc",
+						"/.git-credentials", "/.env",
+						"/docker.sock",
+					];
+					if (Array.isArray(mounts)) {
+						mounts = mounts.filter((m: string) => {
+							const parts = m.split(":");
+							if (parts.length < 2) return false;
+							const src = parts[0];
+							if (!path.isAbsolute(src)) { console.warn(`[container-pool] Rejecting non-absolute mount: ${m}`); return false; }
+							if (src.includes("..")) { console.warn(`[container-pool] Rejecting mount with "..": ${m}`); return false; }
+							if (src.startsWith("~") || src.startsWith("$")) { console.warn(`[container-pool] Rejecting mount with variable/home dir: ${m}`); return false; }
+							const normalizedSrc = src.replace(/\\/g, "/").toLowerCase();
+							for (const blocked of blockedPaths) {
+								if (normalizedSrc === blocked || normalizedSrc.startsWith(blocked + "/")) {
+									console.warn(`[container-pool] Rejecting mount to system path: ${m}`);
+									return false;
+								}
+							}
+							for (const pat of sensitiveSubstrings) {
+								if (normalizedSrc.includes(pat)) { console.warn(`[container-pool] Rejecting mount with sensitive path: ${m}`); return false; }
+							}
+							if (/^[a-z]:\/?$/i.test(src.replace(/\\/g, "/"))) {
+								console.warn(`[container-pool] Rejecting mount of drive root: ${m}`);
+								return false;
+							}
+							return true;
+						});
+					}
+
 					containerPool = new ContainerPool({
 						poolSize,
 						maxIdleSeconds,
