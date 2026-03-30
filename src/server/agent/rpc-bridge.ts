@@ -58,6 +58,8 @@ export interface RpcBridgeOptions {
 	gatewayToken?: string;
 	/** Proxy port for network allowlist (set when SandboxProxy is active) */
 	sandboxProxyPort?: number;
+	/** Container ID to use with docker exec (pool mode) */
+	containerId?: string;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -94,7 +96,9 @@ export class RpcBridge {
 			args.push("--extension", bashExtPath);
 		}
 
-		if (this.options.sandboxed) {
+		if (this.options.containerId) {
+			this.process = this.spawnDockerExec(this.options.containerId, cliPath, args);
+		} else if (this.options.sandboxed) {
 			this.process = this.spawnDocker(cliPath, args);
 		} else {
 			this.process = spawn("node", [cliPath, ...args], {
@@ -123,7 +127,8 @@ export class RpcBridge {
 
 		// Brief pause for process initialization.
 		// Docker containers need longer — container startup + node init is ~2-3s.
-		const startupDelay = this.options.sandboxed ? 3000 : 200;
+		// Pool mode (docker exec into pre-warmed container) is fast like bare node.
+		const startupDelay = this.options.containerId ? 200 : this.options.sandboxed ? 3000 : 200;
 		await new Promise((r) => setTimeout(r, startupDelay));
 	}
 
@@ -330,16 +335,65 @@ export class RpcBridge {
 		dockerArgs.push("node", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js");
 
 		// Remap agent args: replace host paths with container paths
+		dockerArgs.push(...this.remapArgsForContainer(agentArgs, false));
+
+		console.log(`[rpc-bridge] Docker sandbox args: ${dockerArgs.join(" ")}`);
+
+		return spawn("docker", dockerArgs, {
+			stdio: ["pipe", "pipe", "pipe"],
+			cwd: this.options.cwd,
+			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+		});
+	}
+
+	/**
+	 * Spawn an agent process inside an already-running pool container via docker exec.
+	 * The container already has all bind mounts and env vars configured.
+	 */
+	private spawnDockerExec(containerId: string, _cliPath: string, agentArgs: string[]): ChildProcess {
+		const execArgs: string[] = [
+			"exec", "-i", containerId,
+			"node", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+			...this.remapArgsForContainer(agentArgs, true),
+		];
+
+		console.log(`[rpc-bridge] Docker exec args: ${execArgs.join(" ")}`);
+
+		return spawn("docker", execArgs, {
+			stdio: ["pipe", "pipe", "pipe"],
+			cwd: this.options.cwd,
+			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+		});
+	}
+
+	/**
+	 * Remap agent CLI args from host paths to container paths.
+	 * @param agentArgs - The agent CLI arguments with host paths
+	 * @param isPoolMode - When true, system prompt maps to /tmp/session-prompts/<filename>;
+	 *                     when false, maps to /tmp/system-prompt (single-file mount).
+	 */
+	private remapArgsForContainer(agentArgs: string[], isPoolMode: boolean): string[] {
+		const toolsDir = TOOLS_DIR;
+		const mcpExtDir = path.join(bobbitDir(), "state", "mcp-extensions");
 		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
 		const normalizedMcpExtDir = mcpExtDir.replace(/\\/g, "/");
 		const remappedArgs: string[] = [];
+
 		for (let i = 0; i < agentArgs.length; i++) {
 			const arg = agentArgs[i];
 			if (arg === "--cwd") {
 				remappedArgs.push("--cwd", "/workspace");
 				i++; // skip the next arg (the host cwd path)
 			} else if (arg === "--system-prompt") {
-				remappedArgs.push("--system-prompt", "/tmp/system-prompt");
+				if (isPoolMode) {
+					// Pool mode: session-prompts/ dir is mounted at /tmp/session-prompts/
+					const hostPath = agentArgs[i + 1] || "";
+					const filename = path.basename(hostPath);
+					remappedArgs.push("--system-prompt", `/tmp/session-prompts/${filename}`);
+				} else {
+					// Docker-run mode: single file mounted at /tmp/system-prompt
+					remappedArgs.push("--system-prompt", "/tmp/system-prompt");
+				}
 				i++; // skip the next arg (the host prompt path)
 			} else {
 				const normalized = arg.replace(/\\/g, "/");
@@ -356,15 +410,8 @@ export class RpcBridge {
 				}
 			}
 		}
-		dockerArgs.push(...remappedArgs);
 
-		console.log(`[rpc-bridge] Docker sandbox args: ${dockerArgs.join(" ")}`);
-
-		return spawn("docker", dockerArgs, {
-			stdio: ["pipe", "pipe", "pipe"],
-			cwd: this.options.cwd,
-			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-		});
+		return remappedArgs;
 	}
 
 	// --- Private ---
@@ -405,7 +452,7 @@ export class RpcBridge {
  * Convert a Windows path (e.g. C:\foo\bar) to Docker-compatible POSIX path (/c/foo/bar).
  * On non-Windows platforms, returns the path unchanged.
  */
-function toDockerPath(p: string): string {
+export function toDockerPath(p: string): string {
 	// Match drive letter pattern: C:\ or C:/
 	const match = p.match(/^([A-Za-z]):[/\\](.*)/);
 	if (match) {
@@ -421,7 +468,7 @@ function toDockerPath(p: string): string {
  * This is the directory that will be mounted as /node_modules in Docker,
  * so that /node_modules/@mariozechner/pi-coding-agent/dist/cli.js works.
  */
-function resolveAgentModulesDir(): string {
+export function resolveAgentModulesDir(): string {
 	const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
 	const mainPath = fileURLToPath(mainUrl);
 	// mainPath = .../node_modules/@mariozechner/pi-coding-agent/dist/index.js
