@@ -207,6 +207,28 @@ export class SessionManager {
 		}).join('\n');
 	}
 
+	/** Build tool restrictions text including available-but-ungranted MCP tools. */
+	private buildToolRestrictionsText(allowedTools: string[]): string {
+		const toolList = allowedTools.join(", ");
+		let text = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools that are not listed above or mentioned below.`;
+
+		// List available-but-not-granted MCP tools so the agent knows
+		// it can attempt them (the stub will error and trigger a
+		// permission grant prompt in the UI).
+		if (this.mcpManager) {
+			const mcpInfos = this.mcpManager.getToolInfos();
+			const ungrantedMcp = mcpInfos.filter(
+				t => !allowedTools.some(a => a.toLowerCase() === t.name.toLowerCase())
+			);
+			if (ungrantedMcp.length > 0) {
+				const ungrantedList = ungrantedMcp.map(t => `- **${t.name}**: ${t.description}`).join("\n");
+				text += `\n\n### Additional tools available with permission\n\nThe following tools exist but are not currently granted to your role. If a task would benefit from one of these tools, go ahead and attempt to call it — the user will be prompted to grant you access.\n\n${ungrantedList}`;
+			}
+		}
+
+		return text;
+	}
+
 	/** Generate tool docs and inject into prompt parts before assembly. */
 	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
 		if (this.toolManager && !parts.toolDocs) {
@@ -275,8 +297,7 @@ export class SessionManager {
 					roleName = session.role;
 				}
 				if (role && role.allowedTools.length > 0) {
-					const toolList = role.allowedTools.join(", ");
-					toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+					toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools);
 				}
 			}
 
@@ -863,8 +884,7 @@ export class SessionManager {
 					roleName = ps.role;
 				}
 				if (role && role.allowedTools.length > 0) {
-					const toolList = role.allowedTools.join(", ");
-					toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+					toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools);
 				}
 			}
 
@@ -1086,8 +1106,7 @@ export class SessionManager {
 			// Build tool restrictions text if allowedTools is specified and non-empty
 			let toolRestrictionsText: string | undefined;
 			if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-				const toolList = effectiveAllowedTools.join(", ");
-				toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+				toolRestrictionsText = this.buildToolRestrictionsText(effectiveAllowedTools);
 			}
 
 			// Build task context if taskId is provided
@@ -1273,8 +1292,7 @@ export class SessionManager {
 		const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
 		let toolRestrictionsText: string | undefined;
 		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const toolList = effectiveAllowedTools.join(", ");
-			toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+			toolRestrictionsText = this.buildToolRestrictionsText(effectiveAllowedTools);
 		}
 
 		let taskTitle: string | undefined;
@@ -1925,8 +1943,7 @@ export class SessionManager {
 		const goalSpec = goal?.spec;
 		let toolRestrictionsText: string | undefined;
 		if (role.allowedTools.length > 0) {
-			const toolList = role.allowedTools.join(", ");
-			toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+			toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools);
 		}
 
 		// Resolve personalities for system prompt
@@ -2063,8 +2080,7 @@ export class SessionManager {
 				roleName = role.name;
 				if (role.allowedTools.length > 0) {
 					roleAllowedTools = role.allowedTools;
-					const toolList = role.allowedTools.join(", ");
-					toolRestrictionsText = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools. If a task requires a tool you don't have access to, explain what you need and ask for help instead of attempting to use the restricted tool.`;
+					toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools);
 				}
 			}
 		}
