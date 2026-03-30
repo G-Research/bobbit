@@ -693,8 +693,10 @@ export class SessionManager {
 
 		if (newTools.length === 0) return role.allowedTools;
 
-		// Enforce never-ask policy: reject grants for tools explicitly marked as never-ask
-		if (this.toolManager) {
+		// Enforce grant policy server-side: resolve the effective policy for the
+		// primary tool and override client-provided mode to prevent bypass.
+		// Also reject never-ask tools entirely.
+		if (this.toolManager || this.mcpManager) {
 			const filtered = newTools.filter(t => {
 				const mcpInfo = this.mcpManager?.getToolInfos().find(i => i.name === t);
 				const policy = resolveGrantPolicy(t, mcpInfo?.group, role, this.toolManager!);
@@ -706,6 +708,16 @@ export class SessionManager {
 			}
 			newTools.length = 0;
 			newTools.push(...filtered);
+
+			// Override mode based on server-resolved policy for the primary tool
+			const primaryInfo = this.mcpManager?.getToolInfos().find(i => i.name === toolName);
+			const primaryPolicy = resolveGrantPolicy(toolName, primaryInfo?.group, role, this.toolManager ?? undefined);
+			if (primaryPolicy === 'always-ask') {
+				mode = 'one-time';
+			} else if (primaryPolicy === 'ask-once') {
+				mode = 'session-only';
+			}
+			// null (no explicit policy) → keep client mode (defaults to persistent)
 		}
 
 		if (mode === "one-time") {
@@ -745,8 +757,10 @@ export class SessionManager {
 		const ps = this.store.get(session.id);
 		if (!ps) return;
 
-		// Save connected clients before teardown
+		// Save state that must survive the restart
 		const clients = new Set(session.clients);
+		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 
 		// Stop the current agent process
 		session.unsubscribe();
@@ -755,10 +769,18 @@ export class SessionManager {
 		// Remove from sessions map — restoreSession will re-add it
 		this.sessions.delete(session.id);
 
+		// Temporarily store overridden allowedTools so restoreSession can use them.
+		// restoreSession normally derives allowedTools from the role YAML, but for
+		// session-only and one-time grants the in-memory list includes extra tools.
+		(ps as any)._overrideAllowedTools = savedAllowedTools;
+
 		// Restore the session (re-launches with correct tool activation)
 		await this.restoreSession(ps);
 
-		// Re-attach the saved clients to the restored session
+		// Clean up the temporary override
+		delete (ps as any)._overrideAllowedTools;
+
+		// Re-attach the saved clients and carry over grant state
 		const restored = this.sessions.get(session.id);
 		if (restored) {
 			for (const ws of clients) {
@@ -766,6 +788,9 @@ export class SessionManager {
 					restored.clients.add(ws);
 				}
 			}
+			// Restore in-memory grant state that restoreSession doesn't know about
+			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 			broadcast(restored.clients, { type: "session_status", status: "idle" });
 		}
 	}
@@ -906,11 +931,14 @@ export class SessionManager {
 		}
 
 		// Restore tool activation from role's allowedTools
+		// Use overridden allowedTools if provided (session-only/one-time grants)
+		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
-			if (role && role.allowedTools.length > 0) {
-				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools, role, this.toolManager) : undefined;
-				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, ps.cwd, mcpExtPaths);
+			const effectiveAllowed = overrideAllowedTools ?? (role ? role.allowedTools : []);
+			if (effectiveAllowed.length > 0) {
+				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowed, role, this.toolManager) : undefined;
+				const activation = computeToolActivationArgs(effectiveAllowed, this.toolManager, ps.cwd, mcpExtPaths);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -922,7 +950,9 @@ export class SessionManager {
 
 		// Derive allowedTools from role so restored prompts filter tool docs correctly
 		let restoredAllowedTools: string[] | undefined;
-		if (ps.role && this.roleManager) {
+		if (overrideAllowedTools) {
+			restoredAllowedTools = overrideAllowedTools;
+		} else if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
 			if (role && role.allowedTools.length > 0) {
 				restoredAllowedTools = role.allowedTools;
