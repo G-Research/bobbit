@@ -53,6 +53,18 @@ export class SystemPromptDialog extends DialogBase {
 		}
 	}
 
+	private truncatePath(source: string): { display: string; full: string; isPath: boolean } {
+		const isPath = source.includes('/') || source.includes('\\');
+		if (!isPath) return { display: source, full: source, isPath: false };
+
+		const normalized = source.replace(/\\/g, '/');
+		const segments = normalized.split('/');
+		const display = segments.length > 3
+			? '…/' + segments.slice(-3).join('/')
+			: source;
+		return { display, full: source, isPath: true };
+	}
+
 	private toggleSection(index: number) {
 		const next = new Set(this.expandedSections);
 		if (next.has(index)) {
@@ -107,9 +119,15 @@ export class SystemPromptDialog extends DialogBase {
 					>
 						<path d="m9 18 6-6-6-6"></path>
 					</svg>
-					<div class="flex-1 min-w-0">
-						<span class="font-medium text-sm text-foreground">${section.label}</span>
-						<span class="text-xs text-muted-foreground ml-2">${section.source}</span>
+					<div class="flex-1 min-w-0 flex items-center gap-2">
+						${(() => { const p = this.truncatePath(section.source); return html`
+						<span
+							class="text-sm text-foreground truncate ${p.isPath ? 'font-mono' : 'font-medium'}"
+							title="${p.full}"
+							style="max-width: 70%"
+						>${p.display}</span>
+						<span class="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground shrink-0">${section.label}</span>
+						`; })()}
 					</div>
 					<span class="text-xs text-muted-foreground shrink-0">${this.formatSize(section.content.length)}</span>
 				</button>
