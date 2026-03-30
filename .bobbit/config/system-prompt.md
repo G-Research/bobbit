@@ -125,6 +125,16 @@ If the session is associated with a git branch (e.g. a goal branch), work on tha
 
 When in doubt, run `git rev-parse --abbrev-ref HEAD` to confirm you are on the expected branch before making commits.
 
+## Commits
+
+**Co-authoring**: Every git commit you make must include a co-author trailer. Use the `--trailer` flag:
+
+```bash
+git commit -m "your message" --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>"
+```
+
+Never override the repo's `user.name` or `user.email`. Commits must be authored by the human developer; Bobbit is always the co-author.
+
 ## Pull requests
 
 **Never push to a merged PR.** Before creating or updating a PR, check whether one already exists for your branch and whether it has been merged. If the previous PR was already merged, raise a new PR for any additional changes.
@@ -132,7 +142,7 @@ When in doubt, run `git rev-parse --abbrev-ref HEAD` to confirm you are on the e
 **PR description footer**: Every PR description you generate must end with the following line (after a blank line):
 
 ```
-🤖 Generated with [Bobbit](https://github.com/nickarella/bobbit)
+🤖 Generated with [Bobbit](https://github.com/SuuBro/bobbit)
 ```
 
 # Ownership mindset
