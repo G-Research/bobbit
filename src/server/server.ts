@@ -38,6 +38,7 @@ import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability } from "./agent/sandbox-status.js";
+import { ContainerPool } from "./agent/container-pool.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -252,6 +253,9 @@ export function createGateway(config: GatewayConfig) {
 	// Verification harness — assigned after wss is created (closure captures the reference)
 	let verificationHarness: VerificationHarness;
 
+	// Container pool — assigned in start() when sandbox=docker and pool_size>0
+	let containerPool: ContainerPool | null = null;
+
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
@@ -292,7 +296,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, containerPool);
 
 			return;
 		}
@@ -423,6 +427,42 @@ export function createGateway(config: GatewayConfig) {
 			// Wire verification harness before session restore so orphan cleanup can skip resuming sessions
 			sessionManager.setVerificationHarness(verificationHarness);
 
+			// ── Container pool initialization ──
+			const sandboxCfg = projectConfigStore.get("sandbox") || "none";
+			const poolSize = parseInt(projectConfigStore.get("sandbox_pool_size") || "2", 10);
+			if (sandboxCfg === "docker" && poolSize > 0) {
+				try {
+					const gwToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+					const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+					const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
+					const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+					const mountsRaw = projectConfigStore.get("sandbox_mounts") || "";
+					const credentialsRaw = projectConfigStore.get("sandbox_credentials") || "";
+					let mounts: string[] = [];
+					try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
+					let credentials: Record<string, string> = {};
+					try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
+
+					containerPool = new ContainerPool({
+						poolSize,
+						maxIdleSeconds,
+						image: imageName,
+						projectDir: config.defaultCwd,
+						healthCheckIntervalMs: 30_000,
+						sandboxMounts: mounts,
+						sandboxCredentials: credentials,
+						gatewayUrl: gwUrl,
+						gatewayToken: gwToken,
+					});
+					await containerPool.init();
+					console.log(`[container-pool] Initialized with poolSize=${poolSize}`);
+				} catch (err) {
+					console.error("[container-pool] Failed to initialize:", err);
+					containerPool = null;
+				}
+			}
+			sessionManager.setContainerPool(containerPool);
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 			sessionManager.startPurgeSchedule();
@@ -467,6 +507,9 @@ export function createGateway(config: GatewayConfig) {
 			triggerEngine.stop();
 			wss.close();
 			await sessionManager.shutdown();
+			if (containerPool) {
+				await containerPool.shutdown();
+			}
 			server.close();
 		},
 	};
@@ -537,6 +580,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
+	containerPool: ContainerPool | null,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -626,6 +670,16 @@ async function handleApiRoute(
 			"Content-Length": certData.length,
 		});
 		res.end(certData);
+		return;
+	}
+
+	// GET /api/sandbox-pool
+	if (url.pathname === "/api/sandbox-pool" && req.method === "GET") {
+		if (!containerPool) {
+			json({ enabled: false });
+		} else {
+			json({ enabled: true, ...containerPool.getStats() });
+		}
 		return;
 	}
 

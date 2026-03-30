@@ -29,6 +29,7 @@ import { buildAvailableRolesList } from "./team-manager.js";
 import { createWorktree } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { SandboxProxy } from "./sandbox-proxy.js";
+import type { ContainerPool } from "./container-pool.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -73,6 +74,8 @@ export interface SessionInfo {
 	staffId?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory?: string;
+	/** Container ID if using a pooled Docker container */
+	containerId?: string;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
 	/** Personality names */
@@ -147,6 +150,7 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
+	private containerPool: ContainerPool | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	goalManager: GoalManager;
@@ -159,6 +163,10 @@ export class SessionManager {
 
 	setVerificationHarness(harness: import("./verification-harness.js").VerificationHarness): void {
 		this._verificationHarness = harness;
+	}
+
+	setContainerPool(pool: ContainerPool | null): void {
+		this.containerPool = pool;
 	}
 
 	constructor(options?: SessionManagerOptions) {
@@ -1481,6 +1489,16 @@ export class SessionManager {
 			}
 		}
 
+		// ── Container pool: claim a pre-warmed container if available ──
+		if (bridgeOptions.sandboxed && this.containerPool) {
+			const containerId = this.containerPool.claim(id);
+			if (containerId) {
+				bridgeOptions.containerId = containerId;
+			} else {
+				console.warn("[session-manager] Container pool exhausted, falling back to cold docker run");
+			}
+		}
+
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 
@@ -1509,6 +1527,11 @@ export class SessionManager {
 		// Mark session as sandboxed (persisted later in store.put() via _sandboxed flag)
 		if (opts?.sandboxed) {
 			(session as any)._sandboxed = true;
+		}
+
+		// Store container ID from pool claim
+		if (bridgeOptions.containerId) {
+			session.containerId = bridgeOptions.containerId;
 		}
 
 		// Auto-assign task to this session
@@ -2626,6 +2649,11 @@ export class SessionManager {
 		session.unsubscribe();
 		await session.rpcClient.stop();
 		session.status = "terminated";
+
+		// Release pooled container back to the pool
+		if (session.containerId && this.containerPool) {
+			this.containerPool.release(session.id, session.containerId);
+		}
 
 		// Clean up background processes
 		if ((this as any).bgProcessManager) {

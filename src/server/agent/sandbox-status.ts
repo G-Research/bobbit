@@ -8,6 +8,7 @@ export interface SandboxStatus {
 	error?: string;
 	dockerVersion?: string;
 	imageExists?: boolean;
+	pool?: { total: number; idle: number; claimed: number; warming: number };
 }
 
 export async function checkDockerAvailability(imageName?: string): Promise<SandboxStatus> {
