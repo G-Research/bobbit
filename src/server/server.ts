@@ -234,7 +234,38 @@ export function createGateway(config: GatewayConfig) {
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
-	const cleanupInterval = setInterval(() => rateLimiter.cleanup(), 60_000);
+
+	// Rate limiting for web proxy endpoints (10 req/min per client IP)
+	const webProxyRequests = new Map<string, number[]>();
+	const WEB_PROXY_RATE_LIMIT = 10;
+	const WEB_PROXY_WINDOW_MS = 60_000;
+
+	function checkWebProxyRateLimit(clientIp: string): boolean {
+		const now = Date.now();
+		const timestamps = webProxyRequests.get(clientIp) || [];
+		const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
+		if (recent.length >= WEB_PROXY_RATE_LIMIT) {
+			webProxyRequests.set(clientIp, recent);
+			return false;
+		}
+		recent.push(now);
+		webProxyRequests.set(clientIp, recent);
+		return true;
+	}
+
+	const cleanupInterval = setInterval(() => {
+		rateLimiter.cleanup();
+		// Clean stale web proxy rate limit entries
+		const now = Date.now();
+		for (const [ip, timestamps] of webProxyRequests) {
+			const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
+			if (recent.length === 0) {
+				webProxyRequests.delete(ip);
+			} else {
+				webProxyRequests.set(ip, recent);
+			}
+		}
+	}, 60_000);
 
 	// Verification harness — assigned after wss is created (closure captures the reference)
 	let verificationHarness: VerificationHarness;
@@ -602,6 +633,11 @@ async function handleApiRoute(
 
 	// POST /api/web-proxy/search
 	if (url.pathname === "/api/web-proxy/search" && req.method === "POST") {
+		const clientIp = req.socket.remoteAddress || "unknown";
+		if (!checkWebProxyRateLimit(clientIp)) {
+			json({ error: "Rate limit exceeded: max 10 web proxy requests per minute" }, 429);
+			return;
+		}
 		const body = await readBody(req);
 		const query = body?.query;
 		if (!query || typeof query !== "string") {
@@ -648,6 +684,11 @@ async function handleApiRoute(
 
 	// POST /api/web-proxy/fetch
 	if (url.pathname === "/api/web-proxy/fetch" && req.method === "POST") {
+		const clientIp = req.socket.remoteAddress || "unknown";
+		if (!checkWebProxyRateLimit(clientIp)) {
+			json({ error: "Rate limit exceeded: max 10 web proxy requests per minute" }, 429);
+			return;
+		}
 		const body = await readBody(req);
 		const targetUrl = body?.url;
 		if (!targetUrl || typeof targetUrl !== "string") {
