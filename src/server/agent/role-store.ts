@@ -4,7 +4,7 @@ import { stringify, parse } from "yaml";
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
 /** Grant policy controlling what happens when an agent uses an ungranted MCP tool. */
-export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask';
+export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask' | 'always-allow' | 'never';
 
 export interface Role {
 	/** Unique identifier — lowercase alphanumeric + hyphens, immutable after creation */
@@ -13,7 +13,7 @@ export interface Role {
 	label: string;
 	/** Markdown system prompt template (supports {{GOAL_BRANCH}} and {{AGENT_ID}} placeholders) */
 	promptTemplate: string;
-	/** Subset of allowed agent tools */
+	/** Derived from toolPolicies — tools whose resolved policy is "always-allow". Written to YAML for backward compat. */
 	allowedTools: string[];
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory: string;
@@ -21,8 +21,18 @@ export interface Role {
 	defaultPersonalities?: string[];
 	/** Per-tool or per-group grant policy overrides (tool name or MCP server prefix → policy) */
 	toolPolicies?: Record<string, GrantPolicy>;
+	/** Whether this role has been migrated from allowedTools to toolPolicies */
+	_policyMigrated?: boolean;
 	createdAt: number;
 	updatedAt: number;
+}
+
+/** Compute allowedTools from toolPolicies: collect all keys where value is "always-allow" */
+function deriveAllowedTools(toolPolicies?: Record<string, GrantPolicy>): string[] {
+	if (!toolPolicies) return [];
+	return Object.entries(toolPolicies)
+		.filter(([, v]) => v === 'always-allow')
+		.map(([k]) => k);
 }
 
 /** roles/ directory in .bobbit/config — version controlled */
@@ -59,17 +69,48 @@ export class RoleStore {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
 				if (data && typeof data === "object" && data.name) {
-					this.roles.set(data.name, {
+					const toolPolicies: Record<string, GrantPolicy> | undefined =
+						data.toolPolicies && typeof data.toolPolicies === "object" ? data.toolPolicies : undefined;
+					const allowedTools: string[] = Array.isArray(data.allowedTools) ? data.allowedTools : [];
+					const policyMigrated: boolean = !!data._policyMigrated;
+
+					const role: Role = {
 						name: data.name,
 						label: data.label ?? data.name,
 						promptTemplate: data.promptTemplate ?? "",
-						allowedTools: Array.isArray(data.allowedTools) ? data.allowedTools : [],
+						allowedTools,
 						accessory: data.accessory ?? "none",
 						defaultPersonalities: Array.isArray(data.defaultPersonalities) ? data.defaultPersonalities : undefined,
-						toolPolicies: data.toolPolicies && typeof data.toolPolicies === "object" ? data.toolPolicies : undefined,
+						toolPolicies,
+						_policyMigrated: policyMigrated,
 						createdAt: data.createdAt ?? 0,
 						updatedAt: data.updatedAt ?? 0,
-					});
+					};
+
+					// Migration: allowedTools → toolPolicies
+					if (!policyMigrated) {
+						const policies: Record<string, GrantPolicy> = { ...toolPolicies };
+						let migrated = false;
+						for (const tool of allowedTools) {
+							if (!(tool in policies)) {
+								policies[tool] = 'always-allow';
+								migrated = true;
+							}
+						}
+						role.toolPolicies = Object.keys(policies).length > 0 ? policies : undefined;
+						role._policyMigrated = true;
+						// Recompute allowedTools from the (now authoritative) toolPolicies
+						role.allowedTools = deriveAllowedTools(role.toolPolicies);
+						this.roles.set(data.name, role);
+						// Persist migration
+						if (migrated || !policyMigrated) {
+							this.saveOne(role);
+						}
+					} else {
+						// Already migrated — allowedTools is derived from toolPolicies
+						role.allowedTools = deriveAllowedTools(role.toolPolicies);
+						this.roles.set(data.name, role);
+					}
 				}
 			} catch (err) {
 				console.error(`[role-store] Failed to load ${filePath}:`, err);
@@ -80,11 +121,14 @@ export class RoleStore {
 	private saveOne(role: Role): void {
 		const filePath = this.roleFilePath(role.name);
 		try {
+			// Derive allowedTools from toolPolicies for backward compatibility
+			const derivedAllowed = deriveAllowedTools(role.toolPolicies);
+
 			const obj: Record<string, unknown> = {
 				name: role.name,
 				label: role.label,
 				accessory: role.accessory,
-				allowedTools: role.allowedTools,
+				allowedTools: derivedAllowed,
 			};
 			if (role.defaultPersonalities && role.defaultPersonalities.length > 0) {
 				obj.defaultPersonalities = role.defaultPersonalities;
@@ -92,6 +136,7 @@ export class RoleStore {
 			if (role.toolPolicies && Object.keys(role.toolPolicies).length > 0) {
 				obj.toolPolicies = role.toolPolicies;
 			}
+			obj._policyMigrated = true;
 			obj.createdAt = role.createdAt;
 			obj.updatedAt = role.updatedAt;
 			obj.promptTemplate = role.promptTemplate;
@@ -135,6 +180,31 @@ export class RoleStore {
 		for (const [k, v] of Object.entries(updates)) {
 			if (v !== undefined) cleaned[k] = v;
 		}
+
+		// If toolPolicies is being updated, recompute allowedTools
+		if ('toolPolicies' in updates && updates.toolPolicies !== undefined) {
+			cleaned.allowedTools = deriveAllowedTools(updates.toolPolicies);
+		}
+
+		// If allowedTools is updated directly (backward compat), merge into toolPolicies as "always-allow"
+		if ('allowedTools' in updates && updates.allowedTools !== undefined && !('toolPolicies' in updates)) {
+			const newPolicies: Record<string, GrantPolicy> = { ...(existing.toolPolicies ?? {}) };
+			// Remove existing "always-allow" entries that are no longer in the new allowedTools
+			const newAllowed = new Set(updates.allowedTools);
+			for (const [tool, policy] of Object.entries(newPolicies)) {
+				if (policy === 'always-allow' && !newAllowed.has(tool)) {
+					delete newPolicies[tool];
+				}
+			}
+			// Add new allowedTools entries
+			for (const tool of updates.allowedTools) {
+				if (!(tool in newPolicies)) {
+					newPolicies[tool] = 'always-allow';
+				}
+			}
+			cleaned.toolPolicies = Object.keys(newPolicies).length > 0 ? newPolicies : undefined;
+		}
+
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
 		this.saveOne(existing);
 		return true;
