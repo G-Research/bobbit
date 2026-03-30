@@ -154,7 +154,7 @@ export function generateMcpStubExtension(
     description: ${desc},
     parameters: ${schema},
     execute: async (toolCallId, params) => {
-      return { content: [{ type: "text", text: "Error: Tool ${JSON.stringify(fullName)} is not allowed for your current role. Ask the user to grant permission." }], isError: true };
+      return { content: [{ type: "text", text: ${JSON.stringify(`Error: Tool ${fullName} is not allowed for your current role. Ask the user to grant permission.`)} }], isError: true };
     }
   });`;
 	}).join('\n');
