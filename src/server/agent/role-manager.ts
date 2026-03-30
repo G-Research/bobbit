@@ -64,6 +64,7 @@ export class RoleManager {
 		promptTemplate?: string;
 		allowedTools?: string[];
 		accessory?: string;
+		toolPolicies?: Record<string, import("./role-store.js").GrantPolicy>;
 	}): boolean {
 		return this.store.update(name, updates);
 	}

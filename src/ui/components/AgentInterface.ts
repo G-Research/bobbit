@@ -519,8 +519,8 @@ export class AgentInterface extends LitElement {
 						: undefined}
 					@grant-tool-permission=${(e: CustomEvent) => {
 						if (!this.session) return;
-						const { toolName, scope, group, lastPromptText } = e.detail;
-						(this.session as any).grantToolPermission?.(toolName, scope, group, lastPromptText);
+						const { toolName, scope, group, lastPromptText, grantPolicy } = e.detail;
+						(this.session as any).grantToolPermission?.(toolName, scope, group, lastPromptText, grantPolicy);
 					}}
 					@deny-tool-permission=${(e: CustomEvent) => {
 						if (!this.session) return;

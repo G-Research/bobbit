@@ -991,6 +991,7 @@ async function handleApiRoute(
 				group: body.group,
 				docs: body.docs,
 				detail_docs: body.detail_docs,
+				grantPolicy: body.grantPolicy,
 			});
 			if (!ok) { json({ error: "Tool not found" }, 404); return; }
 			json({ ok: true });
@@ -1389,6 +1390,7 @@ async function handleApiRoute(
 				promptTemplate: body.promptTemplate,
 				allowedTools: body.allowedTools,
 				accessory: body.accessory,
+				toolPolicies: body.toolPolicies,
 			});
 			if (!ok) { json({ error: "Role not found" }, 404); return; }
 			json({ ok: true });
@@ -1579,6 +1581,63 @@ async function handleApiRoute(
 		try {
 			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
 		} catch { /* ignore */ }
+
+		// Reject if verification is already running for this gate+commit
+		if (commitSha !== "unknown") {
+			const activeVers = verificationHarness.getActiveVerifications(goalId);
+			const runningDup = activeVers.find(v => {
+				if (v.gateId !== gateId || v.overallStatus !== "running") return false;
+				const gs = gateStore.getGate(goalId, gateId);
+				const s = gs?.signals.find(s => s.id === v.signalId);
+				return s?.commitSha === commitSha;
+			});
+			if (runningDup) {
+				json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
+				return;
+			}
+		}
+
+		// Auto-pass if a prior signal for the same commit already fully passed
+		if (commitSha !== "unknown") {
+			const existingGateForCache = gateStore.getGate(goalId, gateId);
+			if (existingGateForCache) {
+				const priorPassed = existingGateForCache.signals.find(s =>
+					s.commitSha === commitSha && s.verification?.status === "passed"
+				);
+				if (priorPassed?.verification) {
+					// Create a signal record with cached results
+					const cachedSignal = {
+						id: randomUUID(),
+						gateId,
+						goalId,
+						sessionId: body?.sessionId || "unknown",
+						timestamp: Date.now(),
+						commitSha,
+						metadata: body?.metadata,
+						content: body?.content,
+						contentVersion: body?.content ? (existingGateForCache.currentContentVersion || 0) + 1 : undefined,
+						verification: {
+							status: "passed" as const,
+							steps: priorPassed.verification.steps.map(s => ({ ...s, output: `[cached from prior signal] ${s.output}` })),
+						},
+					};
+					gateStore.recordSignal(cachedSignal);
+					if (body?.content && cachedSignal.contentVersion) {
+						gateStore.updateGateContent(goalId, gateId, body.content, cachedSignal.contentVersion);
+					}
+					if (body?.metadata) {
+						gateStore.updateGateMetadata(goalId, gateId, body.metadata);
+					}
+					gateStore.updateGateStatus(goalId, gateId, "passed");
+					broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
+					broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
+					broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "passed" });
+					const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+					json({ signal: { id: cachedSignal.id, gateId, goalId, status: "passed", steps: verifySteps, cached: true } }, 201);
+					return;
+				}
+			}
+		}
 
 		// Compute content version
 		const existingGate = gateStore.getGate(goalId, gateId);
