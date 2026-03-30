@@ -278,7 +278,7 @@ export class McpManager {
           name: this._makeBobbitToolName(serverName, tool.name),
           description: tool.description || `MCP tool ${tool.name} from ${serverName}`,
           group: `MCP: ${serverName}`,
-          docs: this._generateToolDocs(tool),
+          docs: undefined,
           serverName,
           mcpToolName: tool.name,
           inputSchema: tool.inputSchema as Record<string, unknown>,
@@ -289,7 +289,8 @@ export class McpManager {
     return infos;
   }
 
-  /** Auto-generate docs from inputSchema. */
+  /** Auto-generate docs from inputSchema. Kept for potential use in Tools UI detail view. */
+  // @ts-expect-error Intentionally unused — kept for future use
   private _generateToolDocs(tool: McpToolDef): string {
     const schema = tool.inputSchema;
     if (!schema || typeof schema !== "object") return "";
