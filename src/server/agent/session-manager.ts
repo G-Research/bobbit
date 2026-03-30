@@ -7,7 +7,7 @@ import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
-import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { RpcBridge, type RpcBridgeOptions, containerToHostSessionPath, hostToContainerSessionPath } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -989,6 +989,38 @@ export class SessionManager {
 			bridgeOptions.env.BOBBIT_STAFF_ID = ps.staffId;
 		}
 
+		// ── Restore Docker sandbox wiring ──
+		if (ps.sandboxed && this.projectConfigStore) {
+			const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
+			const allowlistRaw = this.projectConfigStore.get("sandbox_network_allowlist") || "";
+			const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
+			const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
+
+			let allowlist: string[] = [];
+			try { allowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch { /* empty */ }
+			let credentials: Record<string, string> = {};
+			try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* empty */ }
+			let mounts: string[] = [];
+			try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* empty */ }
+
+			const proxyPort = await this.ensureSandboxProxy(allowlist);
+
+			try {
+				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+				bridgeOptions.gatewayUrl = gwUrl;
+				bridgeOptions.gatewayToken = token;
+			} catch (err) {
+				console.warn(`[session-manager] Could not read gateway credentials for sandbox restore: ${err}`);
+			}
+
+			bridgeOptions.sandboxed = true;
+			bridgeOptions.sandboxImage = sandboxImage;
+			bridgeOptions.sandboxCredentials = credentials;
+			bridgeOptions.sandboxMounts = mounts;
+			bridgeOptions.sandboxProxyPort = proxyPort;
+		}
+
 		// Restore extension args for goal/team sessions
 		if (ps.goalId && !ps.assistantType) {
 			const isTeamLead = ps.role === "team-lead";
@@ -1154,8 +1186,9 @@ export class SessionManager {
 		await rpcClient.start();
 
 		// Resume the agent's previous session file
+		const switchSessionPath = ps.sandboxed ? hostToContainerSessionPath(ps.agentSessionFile) : ps.agentSessionFile;
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: ps.agentSessionFile },
+			{ type: "switch_session", sessionPath: switchSessionPath },
 			15_000,
 		);
 		restoring = false;
@@ -1960,7 +1993,9 @@ export class SessionManager {
 			id: session.id,
 			title: session.title,
 			cwd: session.cwd,
-			agentSessionFile: stateResp.data.sessionFile,
+			agentSessionFile: existing?.sandboxed
+				? containerToHostSessionPath(stateResp.data.sessionFile)
+				: stateResp.data.sessionFile,
 			createdAt: session.createdAt,
 			lastActivity: session.lastActivity,
 			goalId: session.goalId,
@@ -2306,8 +2341,10 @@ export class SessionManager {
 
 		// Restore conversation from session file
 		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
+			const rolePersisted = this.store.get(id);
+			const roleSwitchPath = rolePersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: agentSessionFile },
+				{ type: "switch_session", sessionPath: roleSwitchPath },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -2445,8 +2482,10 @@ export class SessionManager {
 		await rpcClient.start();
 
 		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
+			const persoPersisted = this.store.get(id);
+			const persoSwitchPath = persoPersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: agentSessionFile },
+				{ type: "switch_session", sessionPath: persoSwitchPath },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -2942,8 +2981,10 @@ export class SessionManager {
 
 			// Resume session if we have the session file
 			if (agentSessionFile && fs.existsSync(agentSessionFile)) {
+				const abortPersisted = this.store.get(id);
+				const abortSwitchPath = abortPersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 				const switchResp = await rpcClient.sendCommand(
-					{ type: "switch_session", sessionPath: agentSessionFile },
+					{ type: "switch_session", sessionPath: abortSwitchPath },
 					15_000,
 				);
 				if (!switchResp.success) {

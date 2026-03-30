@@ -1,9 +1,37 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
+
+/** Container home directory for the Docker sandbox (node:20-slim, USER node) */
+export const CONTAINER_HOME = "/home/node";
+/** Container-side agent directory prefix (always forward slashes) */
+export const CONTAINER_AGENT_DIR = "/home/node/.pi/agent/";
+
+/**
+ * Remap a container-internal path to the equivalent host path.
+ * e.g. /home/node/.pi/agent/sessions/x/y.jsonl → <homedir>/.pi/agent/sessions/x/y.jsonl
+ * Non-matching paths pass through unchanged.
+ */
+export function containerToHostSessionPath(containerPath: string): string {
+	if (!containerPath.startsWith(CONTAINER_AGENT_DIR)) return containerPath;
+	const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
+	return path.join(os.homedir(), ".pi", "agent", relative).replace(/\\/g, "/");
+}
+
+/**
+ * Remap a host path back to the container-internal path. Inverse of containerToHostSessionPath.
+ */
+export function hostToContainerSessionPath(hostPath: string): string {
+	const hostAgentDir = path.join(os.homedir(), ".pi", "agent").replace(/\\/g, "/") + "/";
+	const normalized = hostPath.replace(/\\/g, "/");
+	if (!normalized.startsWith(hostAgentDir)) return hostPath;
+	const relative = normalized.substring(hostAgentDir.length);
+	return CONTAINER_AGENT_DIR + relative;
+}
 
 export interface RpcBridgeOptions {
 	/** Path to pi-coding-agent cli.js. Auto-resolved if omitted. */
@@ -213,23 +241,11 @@ export class RpcBridge {
 		dockerArgs.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		dockerArgs.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
-		// Mount API auth directory if it exists on the host.
-		// The agent needs read-write access: OAuth token refresh writes updated
-		// tokens back to auth.json, and sessions are created under this dir.
-		const homeDir = process.env.HOME || process.env.USERPROFILE || "";
-		const authDir = path.join(homeDir, ".pi", "agent");
-		try {
-			if (fs.statSync(path.join(authDir, "auth.json")).isFile()) {
-				dockerArgs.push("-v", `${toDockerPath(authDir)}:/home/node/.pi/agent`);
-			}
-		} catch { /* auth dir doesn't exist — skip */ }
-
-		// Pass through common API key env vars if set on host
-		for (const key of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]) {
-			if (process.env[key]) {
-				dockerArgs.push("-e", `${key}=${process.env[key]}`);
-			}
-		}
+		// Mount host sessions dir so agent .jsonl session files persist across container restarts.
+		// Only mount sessions/ (not all of ~/.pi/agent/) to avoid exposing auth.json.
+		const hostSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
+		fs.mkdirSync(hostSessionsDir, { recursive: true });
+		dockerArgs.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.pi/agent/sessions`);
 
 		// Additional user-configured mounts
 		if (this.options.sandboxMounts) {
@@ -336,9 +352,7 @@ export class RpcBridge {
 		}
 		dockerArgs.push(...remappedArgs);
 
-		const fullCmd = `docker ${dockerArgs.join(" ")}`;
-		console.log(`[rpc-bridge] Starting Docker sandbox: ${fullCmd}`);
-		fs.writeFileSync(path.join(bobbitDir(), "state", "last-docker-cmd.txt"), fullCmd, "utf-8");
+		console.log(`[rpc-bridge] Starting Docker sandbox: docker ${dockerArgs.slice(0, 10).join(" ")} ...`);
 
 		return spawn("docker", dockerArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
