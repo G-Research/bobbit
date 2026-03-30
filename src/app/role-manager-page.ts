@@ -202,7 +202,7 @@ async function handleSave(): Promise<void> {
 			promptTemplate: editPrompt,
 			allowedTools: editTools,
 			accessory: editAccessory,
-			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : undefined,
+			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : {},
 		});
 
 		// Save dirty sub-prompts

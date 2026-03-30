@@ -1017,7 +1017,7 @@ async function handleApiRoute(
 		const group = decodeURIComponent(groupPolicyMatch[1]);
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const validPolicies = ['always-allow', 'ask-once', 'always-ask', 'never-ask'];
+		const validPolicies = ['always-allow', 'ask-once', 'always-ask', 'never-ask', 'never'];
 		if (body.policy && !validPolicies.includes(body.policy)) {
 			json({ error: `Invalid policy. Must be one of: ${validPolicies.join(', ')}` }, 400);
 			return;

@@ -694,7 +694,7 @@ function renderEditView(): TemplateResult {
 													} else {
 														delete updated[toolName];
 													}
-													await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : undefined });
+													await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
 													// Refresh roles
 													roles = await fetchRoles();
 													renderApp();

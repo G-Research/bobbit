@@ -12,29 +12,22 @@ import { stringify, parse } from "yaml";
 import { bobbitConfigDir } from "../bobbit-dir.js";
 import type { GrantPolicy } from "./role-store.js";
 
-/**
- * Extended policy type that includes 'always-allow' for the system fallback
- * and resolved policy values. The base GrantPolicy from role-store covers
- * the configurable policies; this adds the implicit "always allowed" state.
- */
-export type ResolvedPolicy = GrantPolicy | 'always-allow';
-
 const POLICY_FILE = () => path.join(bobbitConfigDir(), "tool-group-policies.yaml");
 
-const VALID_POLICIES = new Set<string>(['always-ask', 'ask-once', 'never-ask', 'always-allow']);
+const VALID_POLICIES = new Set<string>(['always-ask', 'ask-once', 'never-ask', 'never', 'always-allow']);
 
 export class ToolGroupPolicyStore {
 	/** Read all group policies from disk. */
-	getAll(): Record<string, ResolvedPolicy> {
+	getAll(): Record<string, GrantPolicy> {
 		const filePath = POLICY_FILE();
 		try {
 			const raw = fs.readFileSync(filePath, "utf-8");
 			const data = parse(raw);
 			if (!data || typeof data !== "object") return {};
-			const result: Record<string, ResolvedPolicy> = {};
+			const result: Record<string, GrantPolicy> = {};
 			for (const [key, value] of Object.entries(data)) {
 				if (typeof value === "string" && VALID_POLICIES.has(value)) {
-					result[key] = value as ResolvedPolicy;
+					result[key] = value as GrantPolicy;
 				}
 			}
 			return result;
@@ -45,13 +38,13 @@ export class ToolGroupPolicyStore {
 	}
 
 	/** Get the default policy for a specific group. Returns null if not set. */
-	getGroupPolicy(group: string): ResolvedPolicy | null {
+	getGroupPolicy(group: string): GrantPolicy | null {
 		const all = this.getAll();
 		return all[group] ?? null;
 	}
 
 	/** Set or clear the default policy for a group. Pass null to remove. */
-	setGroupPolicy(group: string, policy: ResolvedPolicy | null): void {
+	setGroupPolicy(group: string, policy: GrantPolicy | null): void {
 		const all = this.getAll();
 		if (policy === null) {
 			delete all[group];

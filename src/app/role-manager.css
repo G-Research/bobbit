@@ -754,7 +754,7 @@
 
 .roles-policy-override-remove:hover {
 	color: var(--destructive);
-	background: var(--destructive)/10;
+	background: color-mix(in oklch, var(--destructive) 10%, transparent);
 }
 
 .roles-policy-add-btn {
