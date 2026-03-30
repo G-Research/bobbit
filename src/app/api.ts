@@ -871,7 +871,6 @@ export interface RoleData {
 	allowedTools: string[];
 	toolPolicies?: Record<string, string>;
 	accessory: string;
-	toolPolicies?: Record<string, string>;
 	createdAt: number;
 	updatedAt: number;
 }

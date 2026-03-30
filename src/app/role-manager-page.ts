@@ -477,7 +477,7 @@ const POLICY_OPTIONS: { value: string; label: string }[] = [
 	{ value: "always-allow", label: "Always Allow" },
 	{ value: "ask-once", label: "Ask Once Per Session" },
 	{ value: "always-ask", label: "Ask Every Time" },
-	{ value: "never", label: "Never (hidden)" },
+	{ value: "never-ask", label: "Never (hidden)" },
 ];
 
 function handleOverridePolicyChange(key: string, newPolicy: string): void {

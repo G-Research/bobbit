@@ -756,7 +756,7 @@ export class SessionManager {
 			// tool_permission_needed message includes lastPromptText, and
 			// the client re-sends it after receiving the session_status: idle
 			// broadcast from the restart.
-			return updatedTools;
+			return updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
 		}
 	}
 
