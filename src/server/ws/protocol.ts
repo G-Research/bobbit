@@ -69,4 +69,4 @@ export type ServerMessage =
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "pr_status_changed"; goalId: string }
-	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string };
+	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string };

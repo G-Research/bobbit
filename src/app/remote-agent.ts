@@ -508,8 +508,19 @@ export class RemoteAgent {
 		// no-op: tools are server-side for the coding agent
 	}
 
-	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string): void {
+	/** Pending prompt text to replay after a tool permission grant restarts the session */
+	private _pendingGrantReplay?: string;
+
+	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string): void {
+		// Save the prompt to replay after the session restarts with the new tool
+		this._pendingGrantReplay = lastPromptText;
 		this.send({ type: "grant_tool_permission", toolName, scope, group });
+	}
+
+	denyToolPermission(messageId: string): void {
+		// Remove the tool_permission_needed message from state
+		this._state.messages = this._state.messages.filter((m: any) => m.id !== messageId);
+		this.emit({ type: "render" });
 	}
 
 	setSystemPrompt(prompt: string): void {
@@ -682,6 +693,16 @@ export class RemoteAgent {
 					}
 				}
 				if (msg.status !== "streaming") this._isAborting = false;
+				// After a tool permission grant, the server restarts the session.
+				// When it becomes idle, replay the original prompt so the tool call succeeds.
+				if (msg.status === "idle" && this._pendingGrantReplay) {
+					const replayText = this._pendingGrantReplay;
+					this._pendingGrantReplay = undefined;
+					// Small delay to ensure the session is fully ready
+					setTimeout(() => {
+						this.send({ type: "prompt", text: replayText });
+					}, 200);
+				}
 				this.onStatusChange?.(msg.status);
 				break;
 
@@ -768,13 +789,24 @@ export class RemoteAgent {
 
 			case "tool_permission_needed": {
 				const perm = msg as any;
-				// Inject a permission-request message into the chat
+				// The server has aborted the agent turn. Clean up:
+				// 1. Clear any in-progress streaming message
+				this._state.streamMessage = undefined;
+				// 2. Remove messages added after the last user message (tool error + agent response from the aborted turn)
+				const lastUserIdx = this._state.messages.findLastIndex(
+					(m: any) => m.role === "user" || m.role === "user-with-attachments"
+				);
+				if (lastUserIdx >= 0) {
+					this._state.messages = this._state.messages.slice(0, lastUserIdx + 1);
+				}
+				// 3. Add the permission-request card
 				this._state.messages = [...this._state.messages, {
 					role: "tool_permission_needed" as any,
 					toolName: perm.toolName,
 					group: perm.group,
 					roleName: perm.roleName,
 					roleLabel: perm.roleLabel,
+					lastPromptText: perm.lastPromptText,
 					timestamp: Date.now(),
 					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
 				} as any];

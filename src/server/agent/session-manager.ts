@@ -88,6 +88,8 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
+	/** True if a tool_permission_needed broadcast was already sent this turn (prevents duplicates) */
+	permissionBroadcastSent?: boolean;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
 }
@@ -506,10 +508,12 @@ export class SessionManager {
 				}
 			}
 
-			if (deniedToolName) {
+			if (deniedToolName && !session.permissionBroadcastSent) {
 				const mcpInfos = this.mcpManager.getToolInfos();
 				const mcpTool = mcpInfos.find(t => t.name === deniedToolName);
 				if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === deniedToolName!.toLowerCase())) {
+					// Mark as sent to prevent duplicate broadcasts from multiple detection paths
+					session.permissionBroadcastSent = true;
 					// Use explicit role or fall back to "general" (implicit default)
 					const roleName = session.role || "general";
 					const role = this.roleManager?.getRole(roleName);
@@ -519,7 +523,10 @@ export class SessionManager {
 						group: mcpTool.group,
 						roleName: role?.name ?? roleName,
 						roleLabel: role?.label ?? roleName,
+						lastPromptText: session.lastPromptText,
 					});
+					// Abort the agent turn to prevent it from chatting about the denial
+					session.rpcClient.abort().catch(() => {});
 				} else {
 					console.warn(
 						`[session-manager] MCP tool denial detected for "${deniedToolName}" in session ${session.id} ` +
@@ -540,6 +547,7 @@ export class SessionManager {
 			session.status = "streaming";
 			session.lastTurnErrored = false;
 			session.turnHadToolCalls = false;
+			session.permissionBroadcastSent = false;
 			session.streamingStartedAt = Date.now();
 			this.store.update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
@@ -660,6 +668,11 @@ export class SessionManager {
 			// Retry so the agent continues with the tool now available
 			// The session needs a full restart to reload extensions with the new tool
 			await this._restartSessionWithUpdatedRole(session);
+
+			// Note: prompt replay after grant is handled client-side. The
+			// tool_permission_needed message includes lastPromptText, and
+			// the client re-sends it after receiving the session_status: idle
+			// broadcast from the restart.
 		}
 
 		return role.allowedTools;

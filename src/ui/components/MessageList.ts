@@ -103,7 +103,8 @@ export class MessageList extends LitElement {
 						.group=${perm.group}
 						.roleName=${perm.roleName}
 						.roleLabel=${perm.roleLabel}
-						.onGrant=${(scope: "tool" | "group") => this.dispatchEvent(new CustomEvent("grant-tool-permission", { detail: { toolName: perm.toolName, scope, group: perm.group }, bubbles: true, composed: true }))}
+						.onGrant=${(scope: "tool" | "group") => this.dispatchEvent(new CustomEvent("grant-tool-permission", { detail: { toolName: perm.toolName, scope, group: perm.group, lastPromptText: perm.lastPromptText }, bubbles: true, composed: true }))}
+						.onDeny=${() => this.dispatchEvent(new CustomEvent("deny-tool-permission", { detail: { id: perm.id }, bubbles: true, composed: true }))}
 					></tool-permission-card>`,
 				});
 				i++;

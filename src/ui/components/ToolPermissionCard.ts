@@ -14,15 +14,17 @@ export class ToolPermissionCard extends LitElement {
 	@property() roleName = "";
 	@property() roleLabel = "";
 	@property({ attribute: false }) onGrant?: (scope: "tool" | "group") => void;
+	@property({ attribute: false }) onDeny?: () => void;
 	@state() private _granting = false;
 	@state() private _granted = false;
+	@state() private _denied = false;
 
 	protected override createRenderRoot() {
 		return this;
 	}
 
 	private _handleGrant(scope: "tool" | "group") {
-		if (this._granting || this._granted) return;
+		if (this._granting || this._granted || this._denied) return;
 		this._granting = true;
 		this.onGrant?.(scope);
 		// Show success after a short delay (server will restart the session)
@@ -30,6 +32,12 @@ export class ToolPermissionCard extends LitElement {
 			this._granting = false;
 			this._granted = true;
 		}, 1500);
+	}
+
+	private _handleDeny() {
+		if (this._granting || this._granted || this._denied) return;
+		this._denied = true;
+		this.onDeny?.();
 	}
 
 	// Extract a short display name from the full tool name
@@ -50,7 +58,16 @@ export class ToolPermissionCard extends LitElement {
 			return html`
 				<div class="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/30 text-sm text-green-600 dark:text-green-400">
 					${icon(ShieldCheck, "sm")}
-					<span>Permission granted — session restarting with new tools…</span>
+					<span>Permission granted — re-executing with new tools…</span>
+				</div>
+			`;
+		}
+
+		if (this._denied) {
+			return html`
+				<div class="flex items-center gap-2 px-3 py-2 rounded-md bg-muted border border-border text-sm text-muted-foreground">
+					${icon(ShieldCheck, "sm")}
+					<span>Permission denied for <code class="px-1 py-0.5 rounded bg-muted text-xs">${this._shortToolName}</code></span>
 				</div>
 			`;
 		}
@@ -79,6 +96,10 @@ export class ToolPermissionCard extends LitElement {
 						class="px-3 py-1.5 text-xs font-medium rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors cursor-pointer"
 						@click=${() => this._handleGrant("tool")}
 					>Allow just ${this._shortToolName}</button>
+					<button
+						class="px-3 py-1.5 text-xs font-medium rounded-md border border-border text-muted-foreground hover:bg-muted transition-colors cursor-pointer"
+						@click=${() => this._handleDeny()}
+					>Deny</button>
 				</div>
 			</div>
 		`;
