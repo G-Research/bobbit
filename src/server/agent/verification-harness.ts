@@ -211,7 +211,7 @@ export class VerificationHarness {
 					for (const prev of gateState.signals) {
 						if (prev.id === signal.id) continue;
 						if (prev.commitSha !== signal.commitSha) continue;
-						if (prev.verification?.status !== "failed") continue;
+						if (!prev.verification?.status || prev.verification.status === "running") continue;
 						for (const s of prev.verification.steps) {
 							if (s.passed && !cachedSteps.has(s.name)) {
 								cachedSteps.set(s.name, s);
@@ -222,6 +222,40 @@ export class VerificationHarness {
 				if (cachedSteps.size > 0) {
 					console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 				}
+			}
+
+			// If ALL steps can be served from cache, skip spawning agents entirely
+			if (cachedSteps.size >= steps.length && steps.every(s => cachedSteps.has(s.name))) {
+				console.log(`[verification] All ${steps.length} step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
+				const results = steps.map(s => {
+					const cached = cachedSteps.get(s.name)!;
+					return { ...cached, output: `[cached from prior signal] ${cached.output}` };
+				});
+				const allPassed = results.every(r => r.passed);
+				const status = allPassed ? "passed" as const : "failed" as const;
+				this.gateStore.updateSignalVerification(signal.id, { status, steps: results });
+				this.gateStore.updateGateStatus(signal.goalId, signal.gateId, status);
+				this.activeVerifications.delete(signal.id);
+				// Broadcast step completions and overall result
+				results.forEach((r, index) => {
+					this.broadcastFn(signal.goalId, {
+						type: "gate_verification_step_complete",
+						goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+						stepIndex: index, stepName: r.name,
+						status: r.passed ? "passed" : "failed",
+						durationMs: r.duration_ms || 0, output: r.output,
+					});
+				});
+				this.broadcastFn(signal.goalId, {
+					type: "gate_verification_complete",
+					goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, status,
+				});
+				this.broadcastFn(signal.goalId, {
+					type: "gate_status_changed",
+					goalId: signal.goalId, gateId: signal.gateId, status,
+				});
+				this.notifyTeamLead(signal.goalId, signal.gateId, status);
+				return;
 			}
 
 			// Run all verification steps in parallel (skipping cached passes)
