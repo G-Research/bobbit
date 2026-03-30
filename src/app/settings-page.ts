@@ -1353,15 +1353,20 @@ function renderDirectoriesTab() {
 
 	const hasAtLeastOneType = newDirTypes.skills || newDirTypes.mcp || newDirTypes.tools || newDirTypes.agents;
 
+	const onlyAgents = newDirTypes.agents && !newDirTypes.skills && !newDirTypes.mcp && !newDirTypes.tools;
+	const mixedWithAgents = newDirTypes.agents && (newDirTypes.skills || newDirTypes.mcp || newDirTypes.tools);
+	const placeholder = onlyAgents ? "~/path/to/AGENTS.md" : mixedWithAgents ? "~/path/to/dir or file" : "~/my-config-dir";
+
 	return html`
 		<div class="flex flex-col gap-5">
 			<p class="text-sm text-muted-foreground">
-				Directories Bobbit scans for configuration files. Custom directories can be added or removed.
+				Locations Bobbit scans for configuration. Custom entries can be added or removed.
 			</p>
 
 			<!-- Skills -->
 			<div class="flex flex-col gap-1">
 				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">Skills</div>
+				<div class="text-xs text-muted-foreground px-1 -mt-0.5 mb-0.5">Directories containing SKILL.md files — slash commands available in chat.</div>
 				<div class="flex flex-col gap-0.5">
 					${skillsDirs.length > 0 ? skillsDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No skills directories.</div>`}
 				</div>
@@ -1370,6 +1375,7 @@ function renderDirectoriesTab() {
 			<!-- MCP -->
 			<div class="flex flex-col gap-1">
 				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">MCP</div>
+				<div class="text-xs text-muted-foreground px-1 -mt-0.5 mb-0.5">Config files defining MCP servers whose tools appear in Bobbit.</div>
 				<div class="flex flex-col gap-0.5">
 					${mcpDirs.length > 0 ? mcpDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No MCP directories.</div>`}
 				</div>
@@ -1378,6 +1384,7 @@ function renderDirectoriesTab() {
 			<!-- Tools -->
 			<div class="flex flex-col gap-1">
 				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">Tools</div>
+				<div class="text-xs text-muted-foreground px-1 -mt-0.5 mb-0.5">Directories containing tool YAML definitions and extension code.</div>
 				<div class="flex flex-col gap-0.5">
 					${toolsDirs.length > 0 ? toolsDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No tools directories.</div>`}
 				</div>
@@ -1386,6 +1393,7 @@ function renderDirectoriesTab() {
 			<!-- Agents -->
 			<div class="flex flex-col gap-1">
 				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">Agents</div>
+				<div class="text-xs text-muted-foreground px-1 -mt-0.5 mb-0.5">Markdown files (e.g. AGENTS.md) concatenated into the system prompt for every session. These are file paths, not directories.</div>
 				<div class="flex flex-col gap-0.5">
 					${agentsDirs.length > 0 ? agentsDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No agent files.</div>`}
 				</div>
@@ -1393,13 +1401,13 @@ function renderDirectoriesTab() {
 
 			<!-- Add directory form -->
 			<div class="flex flex-col gap-2 pt-3 border-t border-border">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Add Custom Directory</div>
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Add Custom Path</div>
 				<div class="flex items-center gap-2">
 					<input
 						type="text"
 						class="flex-1 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
 							focus:outline-none focus:ring-2 focus:ring-ring"
-						placeholder="~/my-config or /path/to/AGENTS.md"
+						placeholder="${placeholder}"
 						.value=${newDirPath}
 						@input=${(e: Event) => { newDirPath = (e.target as HTMLInputElement).value; renderApp(); }}
 						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newDirPath.trim() && hasAtLeastOneType) addCustomDir(); }}
