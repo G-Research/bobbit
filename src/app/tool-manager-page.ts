@@ -2,8 +2,8 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Info, Pencil, Plus, Wrench } from "lucide";
-import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
+import { ArrowLeft, Pencil, Plus, Wrench } from "lucide";
+import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
@@ -181,6 +181,7 @@ type View = "list" | "edit";
 let currentView: View = "list";
 let tools: ToolInfo[] = [];
 let roles: RoleData[] = [];
+let groupPolicies: Record<string, string> = {};
 let selectedTool: ToolInfo | null = null;
 let loading = true;
 let editDescription = "";
@@ -192,6 +193,59 @@ let saving = false;
 let collapsedGroups = new Set<string>();
 
 // ============================================================================
+// POLICY HELPERS
+// ============================================================================
+
+/** Human-readable labels for policy values */
+const POLICY_LABELS: Record<string, string> = {
+	"always-allow": "Always Allow",
+	"ask-once": "Ask Once Per Session",
+	"always-ask": "Ask Every Time",
+	"never-ask": "Never (Hidden)",
+};
+
+/** Resolve effective policy for a tool using the layered resolution order */
+function resolveEffectivePolicy(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
+	// 1. Role + tool override
+	if (roleToolPolicies?.[toolName]) return roleToolPolicies[toolName];
+	// 2. Role + group override (check MCP server prefix and display group name)
+	if (roleToolPolicies) {
+		// Check MCP-style prefix (e.g. "mcp__playwright" for "mcp__playwright__click")
+		const parts = toolName.split("__");
+		if (parts.length >= 3) {
+			const serverPrefix = parts.slice(0, 2).join("__");
+			if (roleToolPolicies[serverPrefix]) return roleToolPolicies[serverPrefix];
+		}
+		// Check display group name (e.g. "Browser")
+		if (roleToolPolicies[toolGroup]) return roleToolPolicies[toolGroup];
+	}
+	// 3. Tool default
+	const tool = tools.find(t => t.name === toolName);
+	if (tool?.grantPolicy) return tool.grantPolicy;
+	// 4. Group default
+	if (groupPolicies[toolGroup]) return groupPolicies[toolGroup];
+	// 5. System fallback
+	return "always-allow";
+}
+
+/** Describe where a resolved policy came from */
+function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
+	if (roleToolPolicies?.[toolName]) return "tool override";
+	if (roleToolPolicies) {
+		const parts = toolName.split("__");
+		if (parts.length >= 3) {
+			const serverPrefix = parts.slice(0, 2).join("__");
+			if (roleToolPolicies[serverPrefix]) return `from ${serverPrefix}`;
+		}
+		if (roleToolPolicies[toolGroup]) return `from ${toolGroup} role override`;
+	}
+	const tool = tools.find(t => t.name === toolName);
+	if (tool?.grantPolicy) return "tool default";
+	if (groupPolicies[toolGroup]) return "group default";
+	return "system default";
+}
+
+// ============================================================================
 // DATA LOADING
 // ============================================================================
 
@@ -201,9 +255,10 @@ export async function loadToolPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	renderApp();
-	const [t, r] = await Promise.all([fetchTools(), fetchRoles()]);
+	const [t, r, gp] = await Promise.all([fetchTools(), fetchRoles(), fetchGroupPolicies()]);
 	tools = t;
 	roles = r;
+	groupPolicies = gp;
 	// Start with all groups collapsed
 	collapsedGroups = new Set(TOOL_GROUPS);
 	// Also collapse any groups not in TOOL_GROUPS
@@ -269,6 +324,9 @@ export function navigateToToolEdit(toolName: string): void {
 				if (editDetailDocs === (tool.detail_docs || "")) {
 					editDetailDocs = detail.detail_docs || "";
 				}
+				if (editGrantPolicy === (tool.grantPolicy || "")) {
+					editGrantPolicy = detail.grantPolicy || "";
+				}
 				renderApp();
 			}
 		});
@@ -330,7 +388,7 @@ async function handleSave(): Promise<void> {
 		group: editGroup,
 		docs: editDocs,
 		detail_docs: editDetailDocs,
-		grantPolicy: editGrantPolicy,
+		grantPolicy: editGrantPolicy || null,
 	});
 
 	if (ok) {
@@ -390,12 +448,6 @@ function renderNavBar(): TemplateResult {
 					</div>
 				</div>
 				<div class="tools-nav-right">
-					${Button({
-						variant: "ghost" as any,
-						size: "sm",
-						onClick: createToolAssistantSession,
-						children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} Tool Assistant</span>`,
-					})}
 					${Button({
 						variant: "default",
 						size: "sm",
@@ -497,6 +549,7 @@ function renderListView(): TemplateResult {
 			${sortedGroups.map((groupName) => {
 				const groupTools = groups.get(groupName)!;
 				const isCollapsed = collapsedGroups.has(groupName);
+				const currentGroupPolicy = groupPolicies[groupName] || "";
 				return html`
 					<div class="tool-group ${isCollapsed ? "collapsed" : ""}">
 						<button class="tool-group-header" title="Toggle ${groupName} group" @click=${() => toggleGroup(groupName)}>
@@ -504,6 +557,24 @@ function renderListView(): TemplateResult {
 							<span class="tool-group-name">${groupName}</span>
 							<span class="tool-group-count">${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}</span>
 						</button>
+						<div class="tool-group-policy" style="display:flex;align-items:center;gap:6px;padding:4px 12px 4px 36px;font-size:12px;color:var(--muted-foreground);">
+							<span>Group default policy:</span>
+							<select class="tools-select" style="font-size:12px;padding:1px 4px;width:auto;"
+								.value=${currentGroupPolicy}
+								@click=${(e: Event) => e.stopPropagation()}
+								@change=${async (e: Event) => {
+									const val = (e.target as HTMLSelectElement).value;
+									await updateGroupPolicy(groupName, val || null);
+									groupPolicies = await fetchGroupPolicies();
+									renderApp();
+								}}>
+								<option value="" ?selected=${!currentGroupPolicy}>Always Allow (system default)</option>
+								<option value="always-allow" ?selected=${currentGroupPolicy === "always-allow"}>Always Allow</option>
+								<option value="ask-once" ?selected=${currentGroupPolicy === "ask-once"}>Ask Once Per Session</option>
+								<option value="always-ask" ?selected=${currentGroupPolicy === "always-ask"}>Ask Every Time</option>
+								<option value="never-ask" ?selected=${currentGroupPolicy === "never-ask"}>Never (Hidden)</option>
+							</select>
+						</div>
 						<div class="tool-group-items">
 							${groupTools.map((tool) => renderToolRow(tool))}
 						</div>
@@ -521,11 +592,12 @@ function renderListView(): TemplateResult {
 function renderEditView(): TemplateResult {
 	if (!selectedTool) return html``;
 
-	// Determine role access for this tool (including General)
-	const roleAccess = roles.map((role) => {
-		const allowed = role.allowedTools.includes(selectedTool!.name);
-		return { role, allowed };
-	});
+	const toolName = selectedTool.name;
+	const toolGroup = selectedTool.group || "Other";
+
+	// Resolve the effective group-level policy for hint display
+	const groupDefault = groupPolicies[toolGroup] || "always-allow";
+	const groupDefaultLabel = POLICY_LABELS[groupDefault] || groupDefault;
 
 	return html`
 		<div class="tools-edit">
@@ -583,76 +655,58 @@ function renderEditView(): TemplateResult {
 			<div class="tools-sidebar">
 				<!-- Default Grant Policy -->
 				<div class="tools-section">
-					<h2 class="tools-section-title" style="display:flex;align-items:center;gap:6px">
-						Default Grant Policy
-						<span class="tools-info-icon" title="Controls what happens when an agent uses this tool without explicit role access. Can be overridden per role below.">${icon(Info, "sm")}</span>
-					</h2>
+					<h2 class="tools-section-title">Default Grant Policy</h2>
+					<p class="tools-note">Controls what happens when an agent uses this tool without explicit role permission.</p>
 					<select class="tools-select"
 						.value=${editGrantPolicy}
 						@change=${(e: Event) => { editGrantPolicy = (e.target as HTMLSelectElement).value; renderApp(); }}>
-						<option value="" ?selected=${editGrantPolicy === ""}>Always</option>
-						<option value="ask-once" ?selected=${editGrantPolicy === "ask-once"}>Ask once per session</option>
-						<option value="always-ask" ?selected=${editGrantPolicy === "always-ask"}>Ask every time</option>
-						<option value="never-ask" ?selected=${editGrantPolicy === "never-ask"}>Never (hidden)</option>
+						<option value="" ?selected=${!editGrantPolicy}>Use group default</option>
+						<option value="always-allow" ?selected=${editGrantPolicy === "always-allow"}>Always Allow</option>
+						<option value="ask-once" ?selected=${editGrantPolicy === "ask-once"}>Ask Once Per Session</option>
+						<option value="always-ask" ?selected=${editGrantPolicy === "always-ask"}>Ask Every Time</option>
+						<option value="never-ask" ?selected=${editGrantPolicy === "never-ask"}>Never (Hidden)</option>
 					</select>
+					${!editGrantPolicy ? html`<p class="tools-note" style="margin-top:4px;font-style:italic;">\u2192 ${groupDefaultLabel} (from group)</p>` : nothing}
 				</div>
 
-				<!-- Role access & per-role policy -->
+				<!-- Role Access -->
 				<div class="tools-section">
 					<h2 class="tools-section-title">Role Access</h2>
-					<p class="tools-note">Per-role access level for this tool.</p>
-					${roleAccess.length > 0 ? html`
+					<p class="tools-note">Per-role policy overrides for this tool.</p>
+					${roles.length > 0 ? html`
 						<div class="tools-role-list">
-							${roleAccess.map(({ role, allowed }) => {
-								const policyOverride = role.toolPolicies?.[selectedTool!.name] || "";
-								// Compute effective value for the unified dropdown
-								const effectiveValue = allowed ? "allowed" : policyOverride || "default";
+							${roles.map((role) => {
+								const rolePolicy = role.toolPolicies?.[toolName] || "";
+								const effective = resolveEffectivePolicy(toolName, toolGroup, role.toolPolicies);
+								const effectiveLabel = POLICY_LABELS[effective] || effective;
+								const source = policySource(toolName, toolGroup, role.toolPolicies);
 								return html`
-									<div class="tools-role-row tools-role-row--policy">
+									<div class="tools-role-row" style="flex-direction:column;align-items:stretch;gap:4px;cursor:default;">
 										<span class="tools-role-name">${role.label}</span>
-										<select class="tools-select tools-select--sm"
-											.value=${effectiveValue}
-											@click=${(e: Event) => e.stopPropagation()}
-											@change=${(e: Event) => {
-												const value = (e.target as HTMLSelectElement).value;
-												const toolName = selectedTool!.name;
-												const newAllowed = [...role.allowedTools];
-												const policies = { ...(role.toolPolicies || {}) };
-
-												if (value === "allowed") {
-													// Add to allowedTools, clear policy override
-													if (!newAllowed.includes(toolName)) newAllowed.push(toolName);
-													delete policies[toolName];
-												} else {
-													// Remove from allowedTools
-													const idx = newAllowed.indexOf(toolName);
-													if (idx >= 0) newAllowed.splice(idx, 1);
-													// Set or clear policy override
-													if (value === "default") {
-														delete policies[toolName];
+										<div style="display:flex;align-items:center;gap:6px;">
+											<select class="tools-select" style="flex:1;font-size:12px;padding:2px 4px;"
+												.value=${rolePolicy}
+												@change=${async (e: Event) => {
+													const val = (e.target as HTMLSelectElement).value;
+													const updated = { ...(role.toolPolicies || {}) };
+													if (val) {
+														updated[toolName] = val;
 													} else {
-														policies[toolName] = value;
+														delete updated[toolName];
 													}
-												}
-
-												const updates: Parameters<typeof updateRole>[1] = {
-													allowedTools: newAllowed,
-													toolPolicies: Object.keys(policies).length > 0 ? policies : undefined,
-												};
-												updateRole(role.name, updates).then((ok) => {
-													if (ok) {
-														role.allowedTools = newAllowed;
-														role.toolPolicies = Object.keys(policies).length > 0 ? policies : undefined;
-														renderApp();
-													}
-												});
-											}}>
-											<option value="allowed" ?selected=${effectiveValue === "allowed"}>Always allow</option>
-											<option value="default" ?selected=${effectiveValue === "default"}>Use default</option>
-											<option value="ask-once" ?selected=${effectiveValue === "ask-once"}>Ask once per session</option>
-											<option value="always-ask" ?selected=${effectiveValue === "always-ask"}>Ask every time</option>
-											<option value="never-ask" ?selected=${effectiveValue === "never-ask"}>Never (hidden)</option>
-										</select>
+													await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
+													// Refresh roles
+													roles = await fetchRoles();
+													renderApp();
+												}}>
+												<option value="" ?selected=${!rolePolicy}>Use default</option>
+												<option value="always-allow" ?selected=${rolePolicy === "always-allow"}>Always Allow</option>
+												<option value="ask-once" ?selected=${rolePolicy === "ask-once"}>Ask Once Per Session</option>
+												<option value="always-ask" ?selected=${rolePolicy === "always-ask"}>Ask Every Time</option>
+												<option value="never-ask" ?selected=${rolePolicy === "never-ask"}>Never (Hidden)</option>
+											</select>
+										</div>
+										${!rolePolicy ? html`<span style="font-size:11px;color:var(--muted-foreground);font-style:italic;">\u2192 ${effectiveLabel} (${source})</span>` : nothing}
 									</div>
 								`;
 							})}
@@ -675,6 +729,16 @@ function renderEditView(): TemplateResult {
 					${renderRendererPreview(selectedTool.name)}
 				</div>
 
+				<!-- Tool Assistant shortcut -->
+				<div class="tools-section">
+					<h2 class="tools-section-title">Actions</h2>
+					${Button({
+						variant: "ghost" as any,
+						size: "sm",
+						onClick: createToolAssistantSession,
+						children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} Open Tool Assistant</span>`,
+					})}
+				</div>
 			</div>
 		</div>
 	`;

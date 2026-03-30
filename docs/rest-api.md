@@ -96,10 +96,17 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles` | List all roles |
-| `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, allowedTools?, accessory? }`) |
-| `GET` | `/api/roles/:name` | Get a role |
-| `PUT` | `/api/roles/:name` | Update a role |
+| `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, toolPolicies?, allowedTools?, accessory? }`). `toolPolicies` is the source of truth for tool access; `allowedTools` is accepted for backward compatibility and merged as `always-allow` entries. |
+| `GET` | `/api/roles/:name` | Get a role (includes `toolPolicies` and derived `allowedTools`) |
+| `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. |
 | `DELETE` | `/api/roles/:name` | Delete a role |
+
+### Tool Group Policies
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/tool-group-policies` | Get all group default policies as `Record<string, GrantPolicy>` |
+| `PUT` | `/api/tool-group-policies/:group` | Set or clear a group default policy (`{ policy: GrantPolicy \| null }`). Valid values: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Pass `null` to clear. |
 
 ### Personalities
 

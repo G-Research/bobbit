@@ -284,7 +284,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 
 		await apiFetch("/api/roles/general", {
 			method: "PUT",
-			body: JSON.stringify({ ...origRole, allowedTools: [] }),
+			body: JSON.stringify({ ...origRole, allowedTools: [], toolPolicies: {} }),
 		});
 
 		try {

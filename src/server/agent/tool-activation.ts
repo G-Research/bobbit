@@ -20,20 +20,27 @@ import type { ToolManager, ToolProvider } from "./tool-manager.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
+// ToolGroupPolicyStore interface used inline to avoid circular deps
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 
+/** Interface for the group policy store to avoid circular dependency on the class. */
+export interface GroupPolicyProvider {
+	getGroupPolicy(group: string): GrantPolicy | null;
+}
+
 /**
  * Resolve the effective grant policy for a tool.
- * Priority: role tool-specific > role group-level > tool YAML default > null.
- * Returns null when no explicit policy is configured (preserves current behavior).
+ * Priority: role tool-specific > role group-level > tool YAML default > group default > system fallback.
+ * Always returns a concrete policy (never null).
  */
 export function resolveGrantPolicy(
 	toolName: string,
 	toolGroup: string | undefined,
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	toolManager: ToolManager | undefined,
-): GrantPolicy | null {
+	groupPolicyStore?: GroupPolicyProvider,
+): GrantPolicy {
 	// 1. Role-level tool-specific override
 	if (role?.toolPolicies?.[toolName]) return role.toolPolicies[toolName];
 
@@ -44,8 +51,14 @@ export function resolveGrantPolicy(
 	const toolDef = toolManager?.getToolByName(toolName);
 	if (toolDef?.grantPolicy) return toolDef.grantPolicy;
 
-	// 4. No explicit policy — return null (preserve current behavior)
-	return null;
+	// 4. Group-level default policy
+	if (toolGroup && groupPolicyStore) {
+		const gp = groupPolicyStore.getGroupPolicy(toolGroup);
+		if (gp) return gp;
+	}
+
+	// 5. System fallback — always allow
+	return 'always-allow';
 }
 
 export interface ToolActivationResult {
@@ -204,7 +217,7 @@ ${toolRegistrations}
  * the ones in its allowedTools list. Filtered extensions are written to
  * a hash-based subdirectory to avoid conflicts with other sessions.
  */
-export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }, toolManager?: ToolManager): string[] {
+export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }, toolManager?: ToolManager, groupPolicyStore?: GroupPolicyProvider): string[] {
 	const infos = mcpManager.getToolInfos();
 
 	// Determine if we're filtering
@@ -221,9 +234,12 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 		const mcpAllowed = allowedTools!.filter(t => t.toLowerCase().startsWith("mcp__")).sort();
 		let hashInput = mcpAllowed.join(",").toLowerCase();
 		// Include explicitly hidden tools in hash (never-ask changes the extension set)
-		if (role || toolManager) {
+		if (role || toolManager || groupPolicyStore) {
 			const hiddenTools = infos
-				.filter(i => !allowedSet?.has(i.name.toLowerCase()) && resolveGrantPolicy(i.name, i.group, role, toolManager) === 'never-ask')
+				.filter(i => {
+					const p = resolveGrantPolicy(i.name, i.group, role, toolManager, groupPolicyStore);
+					return !allowedSet?.has(i.name.toLowerCase()) && (p === 'never-ask' || p === 'never');
+				})
 				.map(i => i.name.toLowerCase())
 				.sort();
 			if (hiddenTools.length > 0) {
@@ -248,12 +264,13 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 			if (!allowedByServer.has(info.serverName)) allowedByServer.set(info.serverName, []);
 			allowedByServer.get(info.serverName)!.push(info);
 		} else {
-			// Check grant policy — only explicit 'never-ask' hides the tool (no stub)
-			const policy = resolveGrantPolicy(info.name, info.group, role, toolManager);
-			if (policy === 'never-ask') {
+			// Check grant policy — 'never-ask' or 'never' hides the tool (no stub)
+			const policy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+			if (policy === 'never-ask' || policy === 'never') {
 				continue; // Explicitly hidden — no stub, tool invisible to agent
 			}
-			// null, 'always-ask', or 'ask-once' — generate stub (null preserves current behavior)
+			// 'always-ask' or 'ask-once' — generate stub so agent sees the tool
+			// and the grant-permission flow can trigger on attempted use
 			if (!disallowedByServer.has(info.serverName)) disallowedByServer.set(info.serverName, []);
 			disallowedByServer.get(info.serverName)!.push(info);
 		}

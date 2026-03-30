@@ -1,5 +1,5 @@
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
-export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask';
+export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask' | 'always-allow' | 'never';
 
 /** A message waiting in the server-side prompt queue */
 export interface QueuedMessage {
