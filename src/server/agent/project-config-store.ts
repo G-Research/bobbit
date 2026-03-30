@@ -14,6 +14,11 @@ const DEFAULTS: Record<string, string> = {
 	test_unit_command: "npm run test:unit",
 	test_e2e_command: "npm run test:e2e",
 	default_thinking_level: "",  // Empty = use agent's built-in default ("medium")
+	sandbox: "none",                    // "none" | "docker"
+	sandbox_image: "bobbit-agent",      // Docker image name
+	sandbox_network_allowlist: "",      // JSON array: '["github.com","api.github.com"]'
+	sandbox_credentials: "",            // JSON object: '{"GITHUB_TOKEN":"ghp_xxx"}'
+	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
 };
 
 /**

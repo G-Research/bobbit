@@ -28,6 +28,7 @@ import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 import { createWorktree } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { SandboxProxy } from "./sandbox-proxy.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -145,6 +146,7 @@ export class SessionManager {
 	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private mcpManager: McpManager | null = null;
+	private sandboxProxy: SandboxProxy | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
@@ -167,6 +169,18 @@ export class SessionManager {
 		this.projectConfigStore = options?.projectConfigStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
+	}
+
+	/** Ensure a SandboxProxy is running with the given allowlist. Returns the port. */
+	private async ensureSandboxProxy(allowlist: string[]): Promise<number> {
+		const newKey = [...allowlist].sort().join(",").toLowerCase();
+		if (this.sandboxProxy && this.sandboxProxy.port > 0) {
+			const oldKey = [...this.sandboxProxy.allowlist].sort().join(",").toLowerCase();
+			if (oldKey === newKey) return this.sandboxProxy.port;
+			this.sandboxProxy.stop();
+		}
+		this.sandboxProxy = new SandboxProxy(allowlist);
+		return this.sandboxProxy.start();
 	}
 
 	getCostTracker(): CostTracker {
@@ -1127,7 +1141,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean }): Promise<SessionInfo> {
 		const id = randomUUID();
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
@@ -1310,6 +1324,89 @@ export class SessionManager {
 			}
 		}
 
+		// ── Docker sandbox wiring ──
+		if (opts?.sandboxed && this.projectConfigStore) {
+			const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
+			if (sandboxConfig === "docker") {
+				const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
+				const allowlistRaw = this.projectConfigStore.get("sandbox_network_allowlist") || "";
+				const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
+				const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
+
+				let networkAllowlist: string[] = [];
+				try { networkAllowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch { /* ignore */ }
+
+				let credentials: Record<string, string> = {};
+				try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
+
+				let mounts: string[] = [];
+				try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
+
+				// Validate mounts — comprehensive security checks
+				const blockedPaths = [
+					"/var/run/docker.sock", "/run/docker.sock",
+					"/var/run/containerd", "/run/containerd",
+					"/proc", "/sys", "/dev",
+					"/etc", "/boot", "/sbin", "/bin", "/lib", "/lib64",
+					"/usr/sbin", "/usr/bin", "/usr/lib",
+					"/root", "/home",
+				];
+				const sensitiveSubstrings = [
+					"/.ssh", "/.aws", "/.gnupg", "/.config",
+					"/.kube", "/.docker", "/.npmrc", "/.netrc",
+					"/.git-credentials", "/.env",
+					"/docker.sock",
+				];
+				const validatedMounts = mounts.filter((m: string) => {
+					const parts = m.split(":");
+					if (parts.length < 2) { console.warn(`[session-manager] Rejecting invalid sandbox mount format: ${m}`); return false; }
+					const src = parts[0];
+					if (!path.isAbsolute(src)) { console.warn(`[session-manager] Rejecting non-absolute sandbox mount: ${m}`); return false; }
+					if (src.includes("..")) { console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`); return false; }
+					if (src.startsWith("~") || src.startsWith("$")) { console.warn(`[session-manager] Rejecting sandbox mount with variable/home dir: ${m}`); return false; }
+					const normalizedSrc = src.replace(/\\/g, "/").toLowerCase();
+					for (const blocked of blockedPaths) {
+						if (normalizedSrc === blocked || normalizedSrc.startsWith(blocked + "/")) {
+							console.warn(`[session-manager] Rejecting sandbox mount to system path: ${m}`);
+							return false;
+						}
+					}
+					for (const pat of sensitiveSubstrings) {
+						if (normalizedSrc.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
+					}
+					if (/^[a-z]:\/?$/i.test(src.replace(/\\/g, "/"))) {
+						console.warn(`[session-manager] Rejecting sandbox mount of drive root: ${m}`);
+						return false;
+					}
+					return true;
+				});
+
+				// Always start sandbox proxy — it controls outbound network access.
+				// With empty allowlist: blocks all outbound (equivalent to --network=none
+				// but still allows gateway callbacks via no_proxy).
+				// With entries: allows only those hosts through.
+				const proxyPort = await this.ensureSandboxProxy(networkAllowlist);
+
+				// Read gateway URL and token for the container
+				let gatewayUrl: string;
+				let gatewayToken: string;
+				try {
+					gatewayUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+					gatewayToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				} catch (err) {
+					throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
+				}
+
+				bridgeOptions.sandboxed = true;
+				bridgeOptions.sandboxImage = sandboxImage;
+				bridgeOptions.sandboxCredentials = credentials;
+				bridgeOptions.sandboxMounts = validatedMounts;
+				bridgeOptions.gatewayUrl = gatewayUrl;
+				bridgeOptions.gatewayToken = gatewayToken;
+				bridgeOptions.sandboxProxyPort = proxyPort;
+			}
+		}
+
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 
@@ -1334,6 +1431,11 @@ export class SessionManager {
 			allowedTools: effectiveAllowedTools ?? opts?.allowedTools,
 			promptQueue: new PromptQueue(),
 		};
+
+		// Persist sandboxed flag on session metadata
+		if (opts?.sandboxed) {
+			this.store.update(id, { sandboxed: true });
+		}
 
 		// Auto-assign task to this session
 		if (opts?.taskId) {
@@ -1834,6 +1936,7 @@ export class SessionManager {
 			nonInteractive: session.nonInteractive,
 			preview: session.preview,
 			personalities: session.personalities,
+			sandboxed: existing?.sandboxed,
 		});
 	}
 

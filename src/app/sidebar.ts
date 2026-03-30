@@ -19,7 +19,7 @@ import {
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog } from "./dialogs.js";
-import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, type PersonalityData } from "./api.js";
+import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -41,6 +41,7 @@ let _pickerCwd = "";
 let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
 let _pickerWorktree = false;
+let _pickerSandbox = false;
 /** Goal ID context for the picker (if launched from a goal). */
 let _pickerGoalId: string | undefined;
 /** Anchor rect for positioning the popover near the button. */
@@ -96,6 +97,9 @@ export async function toggleRolePicker(e: Event, goalId?: string): Promise<void>
 	_pickerRole = generalRole ? "general" : "";
 	_pickerFocusIndex = -1;
 	state.rolePickerOpen = true;
+	if (!state.sandboxStatus) {
+		fetchSandboxStatus().then(s => { if (s) { state.sandboxStatus = s; renderApp(); } });
+	}
 	renderApp();
 }
 
@@ -119,9 +123,11 @@ export function renderRolePickerDropdown() {
 		const personalities = [..._pickerPersonalities];
 		const cwd = _pickerCwd || undefined;
 		const worktree = _pickerWorktree || undefined;
+		const sandboxed = _pickerSandbox || undefined;
 		_pickerCwd = "";
 		_pickerCwdDropdownOpen = false;
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
+		_pickerSandbox = false;
+		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree, sandboxed);
 	};
 
 	// All roles including general (the server default)
@@ -215,6 +221,21 @@ export function renderRolePickerDropdown() {
 						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 				</label>
 			</div>
+			<!-- Sandbox checkbox (only when docker sandbox is configured) -->
+			${state.sandboxStatus?.configured ? html`
+			<div class="border-t border-border/50 px-3 py-1.5 shrink-0">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input type="checkbox" .checked=${_pickerSandbox}
+						@change=${(e: Event) => { _pickerSandbox = (e.target as HTMLInputElement).checked; renderApp(); }}
+						?disabled=${!state.sandboxStatus?.available} />
+					<span class="text-[11px] text-foreground/70 ${!state.sandboxStatus?.available ? 'opacity-50' : ''}">Sandbox (Docker)</span>
+					<span title=${state.sandboxStatus?.available
+						? "Run agent in an isolated Docker container"
+						: `Docker unavailable: ${state.sandboxStatus?.error || "not detected"}`}
+						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+				</label>
+			</div>
+			` : ""}
 			<!-- Create button (pinned at bottom) -->
 			<div class="border-t border-border/50 px-3 py-2 shrink-0">
 				<button
