@@ -14,7 +14,7 @@ function injectCoAuthorTrailer(command, modelName) {
   // Strip provider suffix like " (anthropic)" to keep it clean
   const cleanModel = modelName ? modelName.replace(/\s*\([^)]*\)\s*$/, '') : '';
   const author = cleanModel ? `Bobbit (${cleanModel})` : 'Bobbit';
-  const trailer = `--trailer "Co-Authored-By: ${author} <noreply@bobbit.dev>"`;
+  const trailer = `--trailer "Co-Authored-By: ${author} <272323393+bobbit-ai@users.noreply.github.com>"`;
 
   return command.replace(
     /(\bgit\s+commit\b(?:\s+[^&|;]*)?)/g,

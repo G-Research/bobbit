@@ -206,8 +206,11 @@ export class RpcBridge {
 		// by the proxy (empty allowlist = deny all) or restricted to allowlisted hosts.
 
 		// Bind mounts
+		// Mount node_modules at /node_modules so ESM resolution works — Node walks up
+		// from the cli.js file looking for node_modules/ directories in ancestor paths.
+		// /node_modules is an ancestor of any path, so packages resolve correctly.
 		dockerArgs.push("-v", `${toDockerPath(projectDir)}:/workspace`);
-		dockerArgs.push("-v", `${toDockerPath(agentModulesDir)}:/agent-modules:ro`);
+		dockerArgs.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		dockerArgs.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
 		// Additional user-configured mounts
@@ -284,7 +287,7 @@ export class RpcBridge {
 		dockerArgs.push(image);
 
 		// Command: node + agent CLI path remapped to container
-		dockerArgs.push("node", "/agent-modules/@mariozechner/pi-coding-agent/dist/cli.js");
+		dockerArgs.push("node", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js");
 
 		// Remap agent args: replace host paths with container paths
 		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
@@ -320,6 +323,7 @@ export class RpcBridge {
 		return spawn("docker", dockerArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
 			cwd: this.options.cwd,
+			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 		});
 	}
 
@@ -374,8 +378,8 @@ function toDockerPath(p: string): string {
 
 /**
  * Resolve the parent directory of @mariozechner/pi-coding-agent package.
- * This is the directory that will be mounted as /agent-modules in Docker,
- * so that /agent-modules/@mariozechner/pi-coding-agent/dist/cli.js works.
+ * This is the directory that will be mounted as /node_modules in Docker,
+ * so that /node_modules/@mariozechner/pi-coding-agent/dist/cli.js works.
  */
 function resolveAgentModulesDir(): string {
 	const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
@@ -384,7 +388,7 @@ function resolveAgentModulesDir(): string {
 	// Package root = .../node_modules/@mariozechner/pi-coding-agent
 	const pkgRoot = path.resolve(path.dirname(mainPath), "..");
 	// We need the parent of @mariozechner (= node_modules dir)
-	// so that /agent-modules/@mariozechner/pi-coding-agent/... works
+	// so that /node_modules/@mariozechner/pi-coding-agent/... works
 	return path.resolve(pkgRoot, "..", "..");
 }
 

@@ -94,7 +94,7 @@ function injectCoAuthorTrailer(command: string, sessionId: string | undefined): 
 	// Build the trailer value — strip provider suffix like " (anthropic)" to keep it clean
 	const modelName = getModelName(sessionId).replace(/\s*\([^)]*\)\s*$/, '');
 	const author = modelName ? `Bobbit (${modelName})` : 'Bobbit';
-	const trailer = `--trailer "Co-Authored-By: ${author} <noreply@bobbit.dev>"`;
+	const trailer = `--trailer "Co-Authored-By: ${author} <272323393+bobbit-ai@users.noreply.github.com>"`;
 
 	// For chained commands (&&, ;, ||), find and modify each git commit portion
 	return command.replace(
