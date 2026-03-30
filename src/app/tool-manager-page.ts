@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Pencil, Plus, Wrench } from "lucide";
+import { ArrowLeft, Pencil, Plus } from "lucide";
 import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
@@ -191,6 +191,7 @@ let editDetailDocs = "";
 let editGrantPolicy = "";
 let saving = false;
 let collapsedGroups = new Set<string>();
+let editTab: "access" | "docs" = "access";
 
 // ============================================================================
 // POLICY HELPERS
@@ -295,6 +296,7 @@ function showEdit(tool: ToolInfo): void {
 	editDocs = tool.docs || "";
 	editDetailDocs = tool.detail_docs || "";
 	editGrantPolicy = tool.grantPolicy || "";
+	editTab = "access";
 	saving = false;
 	setHashRoute("tool-edit", tool.name);
 }
@@ -589,19 +591,125 @@ function renderListView(): TemplateResult {
 // RENDER: EDIT VIEW
 // ============================================================================
 
-function renderEditView(): TemplateResult {
+function renderAccessTab(): TemplateResult {
 	if (!selectedTool) return html``;
 
 	const toolName = selectedTool.name;
 	const toolGroup = selectedTool.group || "Other";
-
-	// Resolve the effective group-level policy for hint display
 	const groupDefault = groupPolicies[toolGroup] || "always-allow";
 	const groupDefaultLabel = POLICY_LABELS[groupDefault] || groupDefault;
 
 	return html`
+		<!-- Default Grant Policy -->
+		<div class="tools-section">
+			<h2 class="tools-section-title">Default Grant Policy</h2>
+			<p class="tools-note">Controls what happens when an agent uses this tool without explicit role permission.</p>
+			<select class="tools-select" style="max-width:360px"
+				.value=${editGrantPolicy}
+				@change=${(e: Event) => { editGrantPolicy = (e.target as HTMLSelectElement).value; renderApp(); }}>
+				<option value="" ?selected=${!editGrantPolicy}>Use group default</option>
+				<option value="always-allow" ?selected=${editGrantPolicy === "always-allow"}>Always Allow</option>
+				<option value="ask-once" ?selected=${editGrantPolicy === "ask-once"}>Ask Once Per Session</option>
+				<option value="always-ask" ?selected=${editGrantPolicy === "always-ask"}>Ask Every Time</option>
+				<option value="never-ask" ?selected=${editGrantPolicy === "never-ask"}>Never (Hidden)</option>
+			</select>
+			${!editGrantPolicy ? html`<p class="tools-note" style="margin-top:4px;font-style:italic;">\u2192 ${groupDefaultLabel} (from group)</p>` : nothing}
+		</div>
+
+		<!-- Role Access -->
+		<div class="tools-section">
+			<h2 class="tools-section-title">Role Access</h2>
+			<p class="tools-note">Per-role policy overrides for this tool.</p>
+			${roles.length > 0 ? html`
+				<div class="tools-role-list" style="max-width:480px">
+					${roles.map((role) => {
+						const rolePolicy = role.toolPolicies?.[toolName] || "";
+						const effective = resolveEffectivePolicy(toolName, toolGroup, role.toolPolicies);
+						const effectiveLabel = POLICY_LABELS[effective] || effective;
+						const source = policySource(toolName, toolGroup, role.toolPolicies);
+						return html`
+							<div class="tools-role-row" style="flex-direction:column;align-items:stretch;gap:4px;cursor:default;">
+								<span class="tools-role-name">${role.label}</span>
+								<div style="display:flex;align-items:center;gap:6px;">
+									<select class="tools-select" style="flex:1;font-size:12px;padding:2px 4px;"
+										.value=${rolePolicy}
+										@change=${async (e: Event) => {
+											const val = (e.target as HTMLSelectElement).value;
+											const updated = { ...(role.toolPolicies || {}) };
+											if (val) {
+												updated[toolName] = val;
+											} else {
+												delete updated[toolName];
+											}
+											await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
+											roles = await fetchRoles();
+											renderApp();
+										}}>
+										<option value="" ?selected=${!rolePolicy}>Use default</option>
+										<option value="always-allow" ?selected=${rolePolicy === "always-allow"}>Always Allow</option>
+										<option value="ask-once" ?selected=${rolePolicy === "ask-once"}>Ask Once Per Session</option>
+										<option value="always-ask" ?selected=${rolePolicy === "always-ask"}>Ask Every Time</option>
+										<option value="never-ask" ?selected=${rolePolicy === "never-ask"}>Never (Hidden)</option>
+									</select>
+								</div>
+								${!rolePolicy ? html`<span style="font-size:11px;color:var(--muted-foreground);font-style:italic;">\u2192 ${effectiveLabel} (${source})</span>` : nothing}
+							</div>
+						`;
+					})}
+				</div>
+			` : html`<p class="tools-note">No roles defined yet.</p>`}
+		</div>
+	`;
+}
+
+function renderDocsTab(): TemplateResult {
+	if (!selectedTool) return html``;
+
+	return html`
+		<div class="tools-section">
+			<h2 class="tools-section-title">Prompt Documentation</h2>
+			<p class="tools-note">Injected into every agent's system prompt. Keep this brief — critical notes and gotchas only. The model already knows tool names, descriptions, and parameter schemas.</p>
+			<textarea
+				class="tools-docs-editor"
+				style="min-height:120px"
+				.value=${editDocs}
+				placeholder="Brief notes for the system prompt..."
+				@input=${(e: Event) => { editDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
+			></textarea>
+		</div>
+		<div class="tools-section" style="flex:1;display:flex;flex-direction:column;">
+			<h2 class="tools-section-title">Detailed Documentation</h2>
+			<p class="tools-note">Full reference — examples, edge cases, parameter descriptions. Agents can read this on demand from the YAML file; it is NOT injected into prompts.</p>
+			<textarea
+				class="tools-docs-editor"
+				.value=${editDetailDocs}
+				placeholder="Full documentation with examples, edge cases..."
+				@input=${(e: Event) => { editDetailDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
+			></textarea>
+		</div>
+
+		<!-- Renderer info -->
+		<div class="tools-section">
+			<h2 class="tools-section-title">Renderer</h2>
+			<div class="tools-renderer-card" style="max-width:480px">
+				<div class="tools-renderer-status">
+					<span class="tools-renderer-dot ${selectedTool.hasRenderer ? "tools-renderer-dot--custom" : "tools-renderer-dot--default"}"></span>
+					<span class="tools-renderer-label">${selectedTool.hasRenderer ? "Custom renderer" : "Default renderer"}</span>
+				</div>
+				${selectedTool.rendererFile
+					? html`<span class="tools-renderer-path">${selectedTool.rendererFile}</span>`
+					: nothing}
+			</div>
+			${renderRendererPreview(selectedTool.name)}
+		</div>
+	`;
+}
+
+function renderEditView(): TemplateResult {
+	if (!selectedTool) return html``;
+
+	return html`
 		<div class="tools-edit">
-			<!-- Left panel -->
 			<div class="tools-edit-main">
 				<div class="tools-section">
 					<h2 class="tools-section-title">Identity</h2>
@@ -621,123 +729,25 @@ function renderEditView(): TemplateResult {
 					</div>
 					<div class="tools-field">
 						<label class="tools-field-label">Group</label>
-						<select class="tools-select"
+						<select class="tools-select" style="max-width:240px"
 							.value=${editGroup}
 							@change=${(e: Event) => { editGroup = (e.target as HTMLSelectElement).value; renderApp(); }}>
 							${TOOL_GROUPS.map((g) => html`<option value=${g} ?selected=${editGroup === g}>${g}</option>`)}
 						</select>
 					</div>
 				</div>
-				<div class="tools-section">
-					<h2 class="tools-section-title">Prompt Documentation</h2>
-					<p class="tools-note">Injected into every agent's system prompt. Keep this brief — critical notes and gotchas only. The model already knows tool names, descriptions, and parameter schemas.</p>
-					<textarea
-						class="tools-docs-editor"
-						style="min-height:120px"
-						.value=${editDocs}
-						placeholder="Brief notes for the system prompt..."
-						@input=${(e: Event) => { editDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
-					></textarea>
-				</div>
-				<div class="tools-section">
-					<h2 class="tools-section-title">Detailed Documentation</h2>
-					<p class="tools-note">Full reference — examples, edge cases, parameter descriptions. Agents can read this on demand from the YAML file; it is NOT injected into prompts.</p>
-					<textarea
-						class="tools-docs-editor"
-						.value=${editDetailDocs}
-						placeholder="Full documentation with examples, edge cases..."
-						@input=${(e: Event) => { editDetailDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
-					></textarea>
-				</div>
-			</div>
 
-			<!-- Right sidebar -->
-			<div class="tools-sidebar">
-				<!-- Default Grant Policy -->
-				<div class="tools-section">
-					<h2 class="tools-section-title">Default Grant Policy</h2>
-					<p class="tools-note">Controls what happens when an agent uses this tool without explicit role permission.</p>
-					<select class="tools-select"
-						.value=${editGrantPolicy}
-						@change=${(e: Event) => { editGrantPolicy = (e.target as HTMLSelectElement).value; renderApp(); }}>
-						<option value="" ?selected=${!editGrantPolicy}>Use group default</option>
-						<option value="always-allow" ?selected=${editGrantPolicy === "always-allow"}>Always Allow</option>
-						<option value="ask-once" ?selected=${editGrantPolicy === "ask-once"}>Ask Once Per Session</option>
-						<option value="always-ask" ?selected=${editGrantPolicy === "always-ask"}>Ask Every Time</option>
-						<option value="never-ask" ?selected=${editGrantPolicy === "never-ask"}>Never (Hidden)</option>
-					</select>
-					${!editGrantPolicy ? html`<p class="tools-note" style="margin-top:4px;font-style:italic;">\u2192 ${groupDefaultLabel} (from group)</p>` : nothing}
+				<!-- Sub-tab row -->
+				<div class="tools-tab-bar">
+					<button class="tools-tab ${editTab === "access" ? "tools-tab--active" : ""}"
+						@click=${() => { editTab = "access"; renderApp(); }}>Access</button>
+					<button class="tools-tab ${editTab === "docs" ? "tools-tab--active" : ""}"
+						@click=${() => { editTab = "docs"; renderApp(); }}>Docs</button>
 				</div>
 
-				<!-- Role Access -->
-				<div class="tools-section">
-					<h2 class="tools-section-title">Role Access</h2>
-					<p class="tools-note">Per-role policy overrides for this tool.</p>
-					${roles.length > 0 ? html`
-						<div class="tools-role-list">
-							${roles.map((role) => {
-								const rolePolicy = role.toolPolicies?.[toolName] || "";
-								const effective = resolveEffectivePolicy(toolName, toolGroup, role.toolPolicies);
-								const effectiveLabel = POLICY_LABELS[effective] || effective;
-								const source = policySource(toolName, toolGroup, role.toolPolicies);
-								return html`
-									<div class="tools-role-row" style="flex-direction:column;align-items:stretch;gap:4px;cursor:default;">
-										<span class="tools-role-name">${role.label}</span>
-										<div style="display:flex;align-items:center;gap:6px;">
-											<select class="tools-select" style="flex:1;font-size:12px;padding:2px 4px;"
-												.value=${rolePolicy}
-												@change=${async (e: Event) => {
-													const val = (e.target as HTMLSelectElement).value;
-													const updated = { ...(role.toolPolicies || {}) };
-													if (val) {
-														updated[toolName] = val;
-													} else {
-														delete updated[toolName];
-													}
-													await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
-													// Refresh roles
-													roles = await fetchRoles();
-													renderApp();
-												}}>
-												<option value="" ?selected=${!rolePolicy}>Use default</option>
-												<option value="always-allow" ?selected=${rolePolicy === "always-allow"}>Always Allow</option>
-												<option value="ask-once" ?selected=${rolePolicy === "ask-once"}>Ask Once Per Session</option>
-												<option value="always-ask" ?selected=${rolePolicy === "always-ask"}>Ask Every Time</option>
-												<option value="never-ask" ?selected=${rolePolicy === "never-ask"}>Never (Hidden)</option>
-											</select>
-										</div>
-										${!rolePolicy ? html`<span style="font-size:11px;color:var(--muted-foreground);font-style:italic;">\u2192 ${effectiveLabel} (${source})</span>` : nothing}
-									</div>
-								`;
-							})}
-						</div>
-					` : html`<p class="tools-note">No roles defined yet.</p>`}
-				</div>
-
-				<!-- Renderer info -->
-				<div class="tools-section">
-					<h2 class="tools-section-title">Renderer</h2>
-					<div class="tools-renderer-card">
-						<div class="tools-renderer-status">
-							<span class="tools-renderer-dot ${selectedTool.hasRenderer ? "tools-renderer-dot--custom" : "tools-renderer-dot--default"}"></span>
-							<span class="tools-renderer-label">${selectedTool.hasRenderer ? "Custom renderer" : "Default renderer"}</span>
-						</div>
-						${selectedTool.rendererFile
-							? html`<span class="tools-renderer-path">${selectedTool.rendererFile}</span>`
-							: nothing}
-					</div>
-					${renderRendererPreview(selectedTool.name)}
-				</div>
-
-				<!-- Tool Assistant shortcut -->
-				<div class="tools-section">
-					<h2 class="tools-section-title">Actions</h2>
-					${Button({
-						variant: "ghost" as any,
-						size: "sm",
-						onClick: createToolAssistantSession,
-						children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} Open Tool Assistant</span>`,
-					})}
+				<!-- Tab content -->
+				<div class="tools-tab-content">
+					${editTab === "access" ? renderAccessTab() : renderDocsTab()}
 				</div>
 			</div>
 		</div>
