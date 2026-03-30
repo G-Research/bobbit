@@ -39,6 +39,12 @@ export class GitStatusWidget extends LitElement {
 
     private _modalEl: HTMLElement | null = null;
 
+    private _onEscapeKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape' && this._modalEl) {
+            this._closeModal();
+        }
+    };
+
     @state() private expanded = false;
     @state() private merging = false;
     @state() private mergeError = '';
@@ -408,6 +414,7 @@ export class GitStatusWidget extends LitElement {
         this._modalEl = document.createElement('div');
         this._modalEl.id = 'git-diff-modal';
         document.body.appendChild(this._modalEl);
+        document.addEventListener('keydown', this._onEscapeKey);
         this._renderModal();
     }
 
@@ -456,6 +463,7 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _removeModal() {
+        document.removeEventListener('keydown', this._onEscapeKey);
         if (this._modalEl) {
             this._modalEl.remove();
             this._modalEl = null;
