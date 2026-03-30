@@ -264,6 +264,9 @@ export const state = {
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,
 	/** Whether the new-session role picker dropdown is open */
 	rolePickerOpen: false,
+
+	/** Docker sandbox status (fetched on demand) */
+	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean } | null,
 };
 
 // ============================================================================
