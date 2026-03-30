@@ -1079,6 +1079,16 @@ export async function dismissSetup(): Promise<void> {
 }
 
 // ============================================================================
+// SANDBOX STATUS API
+// ============================================================================
+
+export async function fetchSandboxStatus() {
+	const res = await gatewayFetch("/api/sandbox-status");
+	if (!res.ok) return null;
+	return res.json();
+}
+
+// ============================================================================
 // DRAFT API
 // ============================================================================
 
