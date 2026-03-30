@@ -262,6 +262,8 @@ Cross-links on the Skills page and Tools page ("Manage scan directories →") na
 
 **Debug git diff viewer**: The `GitStatusWidget` fetches diffs on file click via REST (`/api/sessions/:id/git-diff` or `/api/goals/:id/git-diff`). The dropdown renders into a portal (`document.body`) so diffs aren't clipped by overflow. A `_currentDiffFile` guard prevents stale responses from overwriting when the user clicks a different file before the first fetch completes. If diffs don't appear, check: (1) the widget has `sessionId` or `goalId` and `token` set, (2) the server's path sanitization isn't rejecting the file path (it rejects `..` and absolute paths), (3) the git command isn't timing out (5s limit, 500KB response cap).
 
+**Debug sandbox sessions**: Check `GET /api/sandbox-status` for Docker availability and image status. Session metadata in `sessions.json` includes `sandboxed: boolean`. The sandbox proxy logs to console with `[sandbox-proxy]` prefix — look for `BLOCKED` or `CONNECT` entries to diagnose network issues. Rate limiting on web proxy endpoints is 10 req/min per client IP (HTTP 429 when exceeded). If the container can't reach the gateway, verify `host.docker.internal` resolves (check `--add-host` in the `docker run` args logged by rpc-bridge). If tool extensions fail auth, check that `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` env vars are set inside the container.
+
 **Debug gate re-signal cancellation**: When a gate is re-signaled, `cancelStaleVerifications()` in `verification-harness.ts` terminates reviewer sessions from the prior signal and marks the old `ActiveVerification` as cancelled. The cancelled flag is checked after `Promise.all` resolves to suppress stale results. If reviewer sessions aren't being cancelled, check that `sessionManager` and `teamManager` are passed to the `VerificationHarness` constructor. Active verifications are tracked in `activeVerifications` map, keyed by signal ID — use `GET /api/goals/:goalId/verifications/active` to inspect in-flight state.
 
 ## Git conventions
@@ -361,6 +363,102 @@ Tool YAML definitions and extension code, organized by group (agent, browser, fi
 | File | Owner | Purpose |
 |---|---|---|
 | `~/.pi/agent/auth.json` | `oauth.ts` | API auth credentials — global, not per-project |
+
+## Docker sandbox mode
+
+Agent sessions can optionally run inside Docker containers with restricted filesystem, network, and credential access. This is an opt-in feature — the default (`sandbox: "none"`) preserves the existing bare-process behavior.
+
+### Why sandboxing exists
+
+Agents execute arbitrary code via `bash`, `write`, and other tools. In a team setting or when working on untrusted codebases, you may want to limit what an agent can access beyond the project directory. Docker sandboxing prevents agents from reading `~/.ssh`, `~/.aws`, `~/.config`, or any host path outside the project, and controls which network hosts they can reach.
+
+### Configuration
+
+All sandbox settings live in `project.yaml` (editable via Settings → Project tab → Docker Sandbox section):
+
+```yaml
+sandbox: "docker"                      # "none" (default) or "docker"
+sandbox_image: "bobbit-agent"          # Docker image name (default: "bobbit-agent")
+sandbox_network_allowlist: '["github.com", "api.github.com"]'  # JSON array of hostnames
+sandbox_credentials: '{"GITHUB_TOKEN": "ghp_..."}'             # JSON object of env vars
+sandbox_mounts: '["/data/shared:/data:ro"]'                    # JSON array of bind mounts
+```
+
+- **`sandbox`**: Set to `"docker"` to enable. When `"none"`, all sandbox options are ignored.
+- **`sandbox_image`**: Docker image to use. Must be built beforehand (see below).
+- **`sandbox_network_allowlist`**: JSON array of hostnames the agent is allowed to reach. Empty array (`[]`) blocks all outbound traffic. The gateway itself is always reachable (bypasses the proxy).
+- **`sandbox_credentials`**: JSON object of environment variables injected into the container. Keys must match `^[A-Za-z_][A-Za-z0-9_]*$` — invalid keys are silently skipped.
+- **`sandbox_mounts`**: JSON array of Docker bind-mount strings (`source:target[:options]`). Subject to comprehensive validation (see Security below).
+
+### Docker image
+
+Build the image from `docker/Dockerfile`:
+
+```bash
+docker build -t bobbit-agent docker/
+```
+
+The image includes Node.js 20, git, curl, gh CLI, and build-essential. The agent CLI itself is **not baked in** — it is bind-mounted from the host at runtime so sandboxed sessions always use the same agent version as the gateway. See `docker/README.md` for customization instructions.
+
+### How it works
+
+When a session is created with `sandboxed: true`:
+
+1. **Session manager** reads sandbox config from `project.yaml`, validates mounts, and starts the sandbox proxy
+2. **RpcBridge** spawns `docker run` instead of bare `node`, with:
+   - Project directory mounted at `/workspace` (read-write)
+   - Agent modules at `/agent-modules` (read-only)
+   - Tool extensions at `/tools` (read-only)
+   - `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` as env vars (no `.bobbit/` mount)
+3. **Tool extensions** read gateway credentials from env vars (falling back to file reads for non-sandboxed sessions)
+4. **Sandbox proxy** controls all outbound HTTP/HTTPS from the container
+
+### Network architecture
+
+Containers always run on the default Docker bridge network — they are **not** started with `--network=none`. Instead, outbound network access is controlled by a sandbox proxy:
+
+- A lightweight HTTP/HTTPS forward proxy (`SandboxProxy`) runs on the gateway host, binding to `0.0.0.0` on a random port
+- The container's `http_proxy` and `https_proxy` env vars point to this proxy via `host.docker.internal`
+- **Empty allowlist**: the proxy blocks all outbound traffic (functionally equivalent to `--network=none`, but the gateway remains reachable)
+- **Non-empty allowlist**: the proxy allows only CONNECT/requests to listed hostnames, blocking everything else
+- The gateway is always reachable via `host.docker.internal`, which bypasses the proxy via the `no_proxy` env var
+- `web_search` and `web_fetch` are routed through gateway API endpoints (`POST /api/web-proxy/search`, `POST /api/web-proxy/fetch`) and work regardless of the allowlist
+
+**Security note**: The proxy binds to `0.0.0.0`, making it accessible to other containers or machines on the same network. On shared hosts, use firewall rules to restrict access to the proxy port.
+
+### UI
+
+- **Sandbox checkbox**: In the session creation popover, a "Sandbox" checkbox appears below the "Create worktree" option when `sandbox: "docker"` is configured. The checkbox is disabled with a tooltip when Docker is unavailable or the sandbox image is missing.
+- **Settings page**: Settings → Project tab has a "Docker Sandbox" section showing sandbox mode, Docker status, image name, network allowlist, credentials, and additional mounts.
+
+### REST API
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/sandbox-status` | GET | Docker availability, image status, and whether sandbox is configured. Returns `{ available, configured, dockerVersion?, imageExists?, error? }` |
+| `/api/web-proxy/search` | POST | Gateway-mediated web search for sandboxed agents. Body: `{ query, maxResults? }`. Rate-limited to 10 req/min per client IP |
+| `/api/web-proxy/fetch` | POST | Gateway-mediated URL fetch for sandboxed agents. Body: `{ url, maxLength? }`. Rate-limited to 10 req/min per client IP |
+| `/api/sessions` | POST | Accepts `sandboxed: true` in body. Returns 400 if sandbox is not configured |
+
+### Security
+
+- **Filesystem isolation**: The container only sees `/workspace` (project dir), `/agent-modules` (read-only), and `/tools` (read-only). Host directories like `~/.ssh`, `~/.aws`, `~/.config` are not accessible. `BOBBIT_DIR` is never mounted — the agent communicates with the gateway via env-var-based auth.
+- **Non-root execution**: Containers run as the `node` user (uid=1000), not root.
+- **Network control**: All outbound HTTP/HTTPS is routed through the sandbox proxy. With an empty allowlist, the container cannot make any outbound connections (except to the gateway).
+- **Mount validation**: `sandbox_mounts` are validated against a blocklist of system paths (`/proc`, `/sys`, `/dev`, `/etc`, `/root`, `/home`, etc.) and sensitive path substrings (`/.ssh`, `/.aws`, `/.gnupg`, `/.docker`, etc.). Relative paths, paths with `..`, home dir expansion (`~`), and drive roots are rejected.
+- **Credential key sanitization**: Only keys matching `^[A-Za-z_][A-Za-z0-9_]*$` are passed through. This prevents shell injection via malformed env var names.
+- **No Docker socket**: The Docker socket is never mounted. The container cannot control Docker or escape to the host.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `docker/Dockerfile` | Agent sandbox image definition |
+| `docker/README.md` | Image build instructions and customization guide |
+| `src/server/agent/sandbox-proxy.ts` | HTTP/HTTPS forward proxy with hostname allowlist |
+| `src/server/agent/sandbox-status.ts` | Docker availability check (`docker info` + image inspect) |
+
+The sandbox also required changes to: `rpc-bridge.ts` (Docker spawn path), `session-manager.ts` (sandbox wiring and mount validation), `session-store.ts` (`sandboxed` field on `PersistedSession`), `server.ts` (REST endpoints), `sidebar.ts` (sandbox checkbox), `settings-page.ts` (Docker Sandbox config section), and all tool extensions (env var fallback for gateway credentials).
 
 ## Goals, workflows, tasks & gates
 
