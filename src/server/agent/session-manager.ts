@@ -462,28 +462,23 @@ export class SessionManager {
 			session.lastTurnErrored = event.message.stopReason === "error";
 		}
 
-		// Detect "Tool X not found" errors for MCP tools that exist but aren't
+		// Detect failed tool executions for MCP tools that exist but aren't
 		// in the session's role allowedTools — prompt the user to grant permission.
-		if (event.type === "message_end" && event.message?.role === "toolResult" && event.message.isError) {
-			const text = Array.isArray(event.message.content)
-				? event.message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")
-				: "";
-			const notFoundMatch = text.match(/^Tool (\S+) not found$/);
-			if (notFoundMatch && session.role && this.mcpManager) {
-				const toolName = notFoundMatch[1];
-				const mcpInfos = this.mcpManager.getToolInfos();
-				const mcpTool = mcpInfos.find(t => t.name === toolName);
-				if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === toolName.toLowerCase())) {
-					const role = this.roleManager?.getRole(session.role);
-					if (role) {
-						broadcast(session.clients, {
-							type: "tool_permission_needed",
-							toolName: mcpTool.name,
-							group: mcpTool.group,
-							roleName: role.name,
-							roleLabel: role.label,
-						});
-					}
+		// Uses tool_execution_end (structured fields) rather than parsing error text.
+		if (event.type === "tool_execution_end" && event.isError && event.toolName && session.role && this.mcpManager) {
+			const toolName: string = event.toolName;
+			const mcpInfos = this.mcpManager.getToolInfos();
+			const mcpTool = mcpInfos.find(t => t.name === toolName);
+			if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === toolName.toLowerCase())) {
+				const role = this.roleManager?.getRole(session.role);
+				if (role) {
+					broadcast(session.clients, {
+						type: "tool_permission_needed",
+						toolName: mcpTool.name,
+						group: mcpTool.group,
+						roleName: role.name,
+						roleLabel: role.label,
+					});
 				}
 			}
 		}

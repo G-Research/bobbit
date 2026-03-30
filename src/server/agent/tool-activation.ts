@@ -12,6 +12,7 @@
  * All sessions use `--no-extensions` so Bobbit has complete control over extension loading.
  */
 
+
 import fs from "node:fs";
 import path from "node:path";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
@@ -92,7 +93,7 @@ export function generateMcpProxyExtension(
       const result = await new Promise((resolve, reject) => {
         const req = mod.request(url, {
           method: "POST",
-          headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+          headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "X-Bobbit-Session-Id": process.env.BOBBIT_SESSION_ID || "" },
           ...(url.protocol === "https:" ? { rejectUnauthorized: false } : {}),
         }, (res) => {
           let data = "";
@@ -136,17 +137,44 @@ ${toolRegistrations}
 /**
  * Write proxy extension files for all connected MCP servers.
  * Returns array of written file paths.
+ *
+ * When `allowedTools` is provided and non-empty, only MCP tools whose
+ * `bobbitName` appears in the list (case-insensitive) are included.
+ * If a server has zero allowed tools after filtering, its extension file
+ * is skipped entirely. Filtered extensions are written to a hash-based
+ * subdirectory to avoid conflicts with other sessions.
  */
-export function writeMcpProxyExtensions(mcpManager: McpManager): string[] {
+export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[]): string[] {
 	const infos = mcpManager.getToolInfos();
 
-	const extensionPaths: string[] = [];
-	const extDir = path.join(bobbitStateDir(), "mcp-extensions");
+	// Determine if we're filtering
+	const filtering = allowedTools && allowedTools.length > 0;
+	const allowedSet = filtering
+		? new Set(allowedTools!.map(t => t.toLowerCase()))
+		: undefined;
+
+	// Choose output directory: hash-based subdir for filtered, root for unrestricted
+	const baseExtDir = path.join(bobbitStateDir(), "mcp-extensions");
+	let extDir: string;
+	if (filtering) {
+		// Collect only the MCP tool names from allowedTools for the hash
+		const mcpAllowed = allowedTools!.filter(t => t.toLowerCase().startsWith("mcp__")).sort();
+		const hashInput = mcpAllowed.join(",").toLowerCase();
+		const hash = crypto.createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
+		extDir = path.join(baseExtDir, hash);
+	} else {
+		extDir = baseExtDir;
+	}
 	fs.mkdirSync(extDir, { recursive: true });
+
+	const extensionPaths: string[] = [];
 
 	// Group tool infos by server
 	const byServer = new Map<string, typeof infos>();
 	for (const info of infos) {
+		// Filter by allowedTools if restricting
+		if (allowedSet && !allowedSet.has(info.name.toLowerCase())) continue;
+
 		if (!byServer.has(info.serverName)) byServer.set(info.serverName, []);
 		byServer.get(info.serverName)!.push(info);
 	}
