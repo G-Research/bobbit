@@ -775,10 +775,12 @@ export class SessionManager {
 		(ps as any)._overrideAllowedTools = savedAllowedTools;
 
 		// Restore the session (re-launches with correct tool activation)
-		await this.restoreSession(ps);
-
-		// Clean up the temporary override
-		delete (ps as any)._overrideAllowedTools;
+		try {
+			await this.restoreSession(ps);
+		} finally {
+			// Clean up the temporary override even if restoreSession fails
+			delete (ps as any)._overrideAllowedTools;
+		}
 
 		// Re-attach the saved clients and carry over grant state
 		const restored = this.sessions.get(session.id);
