@@ -19,7 +19,6 @@ allowedTools:
   - browser_wait
   - workflow
   - bash_bg
-  - preview_close
   - preview_open
 toolPolicies:
   read: always-allow
@@ -40,7 +39,6 @@ toolPolicies:
   browser_wait: always-allow
   workflow: always-allow
   bash_bg: always-allow
-  preview_close: always-allow
   preview_open: always-allow
 _policyMigrated: true
 createdAt: 0

@@ -21,7 +21,6 @@ allowedTools:
   - browser_type
   - browser_wait
   - preview_open
-  - preview_close
   - find
   - grep
   - ls
@@ -45,7 +44,6 @@ toolPolicies:
   browser_type: always-allow
   browser_wait: always-allow
   preview_open: always-allow
-  preview_close: always-allow
   find: always-allow
   grep: always-allow
   ls: always-allow

@@ -1,7 +1,7 @@
 /**
  * HTML Preview extension — open and close an HTML preview panel in the Bobbit UI.
  *
- * Registers `preview_open` and `preview_close` tools that let agents show
+ * Registers the `preview_open` tool that lets agents show
  * live HTML previews alongside the chat.
  */
 
@@ -127,46 +127,7 @@ const extension: ExtensionFactory = (pi) => {
 		},
 	});
 
-	pi.registerTool({
-		name: "preview_close",
-		label: "Preview Close",
-		description: "Close the HTML preview panel in the Bobbit UI.",
-		parameters: Type.Object({}),
 
-		async execute() {
-			const sessionId = process.env.BOBBIT_SESSION_ID;
-
-			if (!sessionId) {
-				return { content: [{ type: "text", text: "No session ID available — preview panel may already be closed." }] };
-			}
-
-			try {
-				// Step 1: Disable preview mode
-				const patchResp = await gatewayFetch(`/api/sessions/${sessionId}`, {
-					method: "PATCH",
-					body: JSON.stringify({ preview: false }),
-				});
-				if (!patchResp.ok) {
-					const errText = await patchResp.text();
-					return { content: [{ type: "text", text: `Error disabling preview mode: ${patchResp.status} ${errText}` }] };
-				}
-
-				// Step 2: Clear the preview content
-				const postResp = await gatewayFetch(`/api/preview?sessionId=${encodeURIComponent(sessionId)}`, {
-					method: "POST",
-					body: JSON.stringify({ html: "" }),
-				});
-				if (!postResp.ok) {
-					const errText = await postResp.text();
-					return { content: [{ type: "text", text: `Error clearing preview content: ${postResp.status} ${errText}` }] };
-				}
-
-				return { content: [{ type: "text", text: "Preview panel is closed." }] };
-			} catch (err: any) {
-				return { content: [{ type: "text", text: `Error closing preview: ${err.message}` }] };
-			}
-		},
-	});
 };
 
 export default extension;

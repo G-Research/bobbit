@@ -44,7 +44,7 @@ preview_open(html="<link rel='stylesheet' href='/src/ui/app.css'><!-- your HTML 
 - **Reference real app CSS** — the preview iframe is same-origin with the Vite dev server, so `<link rel="stylesheet" href="/src/ui/app.css">` gives pixel-accurate mockups.
 - **Add interactive controls** (dropdowns, sliders, toggles) so the user can explore variants without asking you to regenerate.
 - **Do NOT render preview HTML inline in the chat.** The user sees it in the side panel. Just describe what changed.
-- Call `preview_close()` when done iterating.
+
 
 ### Process — do the homework first
 
