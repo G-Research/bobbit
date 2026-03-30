@@ -213,6 +213,24 @@ export class RpcBridge {
 		dockerArgs.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		dockerArgs.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
+		// Mount API auth directory if it exists on the host.
+		// The agent needs read-write access: OAuth token refresh writes updated
+		// tokens back to auth.json, and sessions are created under this dir.
+		const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+		const authDir = path.join(homeDir, ".pi", "agent");
+		try {
+			if (fs.statSync(path.join(authDir, "auth.json")).isFile()) {
+				dockerArgs.push("-v", `${toDockerPath(authDir)}:/home/node/.pi/agent`);
+			}
+		} catch { /* auth dir doesn't exist — skip */ }
+
+		// Pass through common API key env vars if set on host
+		for (const key of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]) {
+			if (process.env[key]) {
+				dockerArgs.push("-e", `${key}=${process.env[key]}`);
+			}
+		}
+
 		// Additional user-configured mounts
 		if (this.options.sandboxMounts) {
 			for (const mount of this.options.sandboxMounts) {
@@ -318,7 +336,9 @@ export class RpcBridge {
 		}
 		dockerArgs.push(...remappedArgs);
 
-		console.log(`[rpc-bridge] Starting Docker sandbox: docker ${dockerArgs.slice(0, 10).join(" ")} ...`);
+		const fullCmd = `docker ${dockerArgs.join(" ")}`;
+		console.log(`[rpc-bridge] Starting Docker sandbox: ${fullCmd}`);
+		fs.writeFileSync(path.join(bobbitDir(), "state", "last-docker-cmd.txt"), fullCmd, "utf-8");
 
 		return spawn("docker", dockerArgs, {
 			stdio: ["pipe", "pipe", "pipe"],

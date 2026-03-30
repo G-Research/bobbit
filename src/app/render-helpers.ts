@@ -151,6 +151,19 @@ function renderActiveShimmer() {
 	return html`<span class="sidebar-active-dot" style="--dot-delay:${delay}s"></span>`;
 }
 
+/** Render a small container icon with a status dot for sandboxed sessions. */
+export function renderSandboxIndicator(status: string) {
+	const isActive = status === "streaming" || status === "busy";
+	return html`<span class="shrink-0 inline-flex items-center" style="margin-left:3px;position:relative;" title="Sandboxed (Docker)">
+		<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted-foreground);opacity:0.6;">
+			<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
+			<path d="m3.3 7 8.7 5 8.7-5"/>
+			<path d="M12 22V12"/>
+		</svg>
+		<span style="position:absolute;bottom:-1px;right:-1px;width:5px;height:5px;border-radius:50%;background:${isActive ? "#22c55e" : "var(--muted-foreground)"};opacity:${isActive ? "1" : "0.5"};"></span>
+	</span>`;
+}
+
 /** Render terse relative time with optional unseen indicator dot. */
 function renderSessionTime(session: GatewaySession, selected = false) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
