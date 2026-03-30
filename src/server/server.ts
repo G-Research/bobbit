@@ -35,6 +35,7 @@ import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
+import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
@@ -199,6 +200,7 @@ export function createGateway(config: GatewayConfig) {
 	const roleStore = new RoleStore();
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager();
+	const groupPolicyStore = new ToolGroupPolicyStore();
 	const gateStore = new GateStore();
 	const workflowStore = new WorkflowStore();
 	const sessionManager = new SessionManager({
@@ -212,6 +214,8 @@ export function createGateway(config: GatewayConfig) {
 		preferencesStore,
 		projectConfigStore,
 	});
+	// Expose group policy store for unified policy resolution (session-manager picks this up)
+	(sessionManager as any).groupPolicyStore = groupPolicyStore;
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
@@ -275,7 +279,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, broadcastToGoal, broadcastToAll);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll);
 
 			return;
 		}
@@ -491,6 +495,7 @@ async function handleApiRoute(
 	verificationHarness: VerificationHarness,
 	preferencesStore: PreferencesStore,
 	projectConfigStore: ProjectConfigStore,
+	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
 ) {
@@ -997,6 +1002,25 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// ── Tool group policies ──
+
+	// GET /api/tool-group-policies
+	if (url.pathname === "/api/tool-group-policies" && req.method === "GET") {
+		json(groupPolicyStore.getAll());
+		return;
+	}
+
+	// PUT /api/tool-group-policies/:group
+	const groupPolicyMatch = url.pathname.match(/^\/api\/tool-group-policies\/(.+)$/);
+	if (groupPolicyMatch && req.method === "PUT") {
+		const group = decodeURIComponent(groupPolicyMatch[1]);
+		const body = await readBody(req);
+		if (!body) { json({ error: "Missing body" }, 400); return; }
+		groupPolicyStore.setGroupPolicy(group, body.policy || null);
+		json({ ok: true });
+		return;
 	}
 
 	// ── Config: default cwd ──
