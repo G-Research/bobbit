@@ -69,6 +69,12 @@ interface GoalGitStatus {
 	aheadOfPrimary: number;
 	behindPrimary: number;
 	mergedIntoPrimary: boolean;
+	hasUpstream?: boolean;
+	ahead?: number;
+	behind?: number;
+	unpushed?: boolean;
+	status?: Array<{ file: string; status: string }>;
+	summary?: string;
 }
 let gitStatus: GoalGitStatus | null = null;
 
