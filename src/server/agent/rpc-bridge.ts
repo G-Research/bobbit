@@ -240,7 +240,7 @@ export class RpcBridge {
 		// Sandbox credentials (explicitly configured env vars)
 		if (this.options.sandboxCredentials) {
 			for (const [key, value] of Object.entries(this.options.sandboxCredentials)) {
-				// Validate env var name: must be alphanumeric + underscore, not start with digit
+				// Validate env var name: alphanumeric + underscore, must not start with digit
 				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
 					console.warn(`[rpc-bridge] Skipping invalid sandbox credential key: ${key}`);
 					continue;

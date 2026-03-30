@@ -235,24 +235,6 @@ export function createGateway(config: GatewayConfig) {
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
 
-	// Rate limiting for web proxy endpoints (10 req/min per client IP)
-	const webProxyRequests = new Map<string, number[]>();
-	const WEB_PROXY_RATE_LIMIT = 10;
-	const WEB_PROXY_WINDOW_MS = 60_000;
-
-	function checkWebProxyRateLimit(clientIp: string): boolean {
-		const now = Date.now();
-		const timestamps = webProxyRequests.get(clientIp) || [];
-		const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
-		if (recent.length >= WEB_PROXY_RATE_LIMIT) {
-			webProxyRequests.set(clientIp, recent);
-			return false;
-		}
-		recent.push(now);
-		webProxyRequests.set(clientIp, recent);
-		return true;
-	}
-
 	const cleanupInterval = setInterval(() => {
 		rateLimiter.cleanup();
 		// Clean stale web proxy rate limit entries
@@ -505,6 +487,24 @@ function isSetupComplete(): boolean {
 	} catch {
 		return false;
 	}
+}
+
+// Rate limiting for web proxy endpoints (10 req/min per client IP)
+const webProxyRequests = new Map<string, number[]>();
+const WEB_PROXY_RATE_LIMIT = 10;
+const WEB_PROXY_WINDOW_MS = 60_000;
+
+function checkWebProxyRateLimit(clientIp: string): boolean {
+	const now = Date.now();
+	const timestamps = webProxyRequests.get(clientIp) || [];
+	const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
+	if (recent.length >= WEB_PROXY_RATE_LIMIT) {
+		webProxyRequests.set(clientIp, recent);
+		return false;
+	}
+	recent.push(now);
+	webProxyRequests.set(clientIp, recent);
+	return true;
 }
 
 async function handleApiRoute(
