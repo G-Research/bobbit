@@ -1,4 +1,4 @@
-import { exec } from "node:child_process";
+import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -43,6 +43,7 @@ import type { CustomProviderConfig } from "./agent/model-registry.js";
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFileCb);
 
 // ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
@@ -116,6 +117,7 @@ async function execGitSafe(cmd: string, cwd: string, fallback = ""): Promise<str
 const DIFF_MAX_BYTES = 500 * 1024; // 500KB
 
 async function getGitDiff(cwd: string, file?: string): Promise<string> {
+	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd); } catch { hasHead = false; }
 
@@ -126,17 +128,17 @@ async function getGitDiff(cwd: string, file?: string): Promise<string> {
 			throw new Error("INVALID_PATH");
 		}
 		if (hasHead) {
-			const { stdout } = await execAsync(`git diff HEAD -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
+			const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--", file], opts);
 			diff = stdout;
 		} else {
-			const { stdout: s1 } = await execAsync(`git diff --cached -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
-			const { stdout: s2 } = await execAsync(`git diff -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
+			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached", "--", file], opts);
+			const { stdout: s2 } = await execFileAsync("git", ["diff", "--", file], opts);
 			diff = s1 + s2;
 		}
 		// Try untracked if empty
 		if (!diff.trim()) {
 			try {
-				const { stdout } = await execAsync(`git diff --no-index /dev/null -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
+				const { stdout } = await execFileAsync("git", ["diff", "--no-index", "/dev/null", "--", file], opts);
 				diff = stdout;
 			} catch (e: any) {
 				// git diff --no-index exits 1 when there are differences
@@ -145,11 +147,11 @@ async function getGitDiff(cwd: string, file?: string): Promise<string> {
 		}
 	} else {
 		if (hasHead) {
-			const { stdout } = await execAsync("git diff HEAD", { cwd, encoding: "utf-8", timeout: 5000 });
+			const { stdout } = await execFileAsync("git", ["diff", "HEAD"], opts);
 			diff = stdout;
 		} else {
-			const { stdout: s1 } = await execAsync("git diff --cached", { cwd, encoding: "utf-8", timeout: 5000 });
-			const { stdout: s2 } = await execAsync("git diff", { cwd, encoding: "utf-8", timeout: 5000 });
+			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached"], opts);
+			const { stdout: s2 } = await execFileAsync("git", ["diff"], opts);
 			diff = s1 + s2;
 		}
 	}

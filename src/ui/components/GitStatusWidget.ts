@@ -391,6 +391,7 @@ export class GitStatusWidget extends LitElement {
             const headers: Record<string, string> = {};
             if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
             const resp = await fetch(url, { headers });
+            if (this._expandedFile !== file) return; // user switched to another file
             if (!resp.ok) {
                 const body = await resp.json().catch(() => ({}));
                 this._diffError = (body as Record<string, string>).error || `HTTP ${resp.status}`;
@@ -399,6 +400,7 @@ export class GitStatusWidget extends LitElement {
                 this._diffContent = (body as Record<string, string>).diff;
             }
         } catch (err) {
+            if (this._expandedFile !== file) return; // user switched to another file
             this._diffError = String(err);
         }
         this._loadingDiff = null;
