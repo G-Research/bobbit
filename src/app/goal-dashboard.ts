@@ -1084,6 +1084,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.branch=${gs?.branch ?? branch}
 						.primaryBranch=${gs?.primaryBranch ?? "master"}
 						.isOnPrimary=${gs?.isOnPrimary ?? false}
+						.summary=${gs?.summary ?? ''}
 						.clean=${gs?.clean ?? true}
 						.hasUpstream=${gs?.hasUpstream ?? true}
 						.ahead=${gs?.ahead ?? 0}
