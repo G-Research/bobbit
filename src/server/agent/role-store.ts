@@ -3,6 +3,9 @@ import path from "node:path";
 import { stringify, parse } from "yaml";
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
+/** Grant policy controlling what happens when an agent uses an ungranted MCP tool. */
+export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask';
+
 export interface Role {
 	/** Unique identifier — lowercase alphanumeric + hyphens, immutable after creation */
 	name: string;
@@ -16,6 +19,8 @@ export interface Role {
 	accessory: string;
 	/** Default personalities applied when no explicit personalities are specified */
 	defaultPersonalities?: string[];
+	/** Per-tool or per-group grant policy overrides (tool name or MCP server prefix → policy) */
+	toolPolicies?: Record<string, GrantPolicy>;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -61,6 +66,7 @@ export class RoleStore {
 						allowedTools: Array.isArray(data.allowedTools) ? data.allowedTools : [],
 						accessory: data.accessory ?? "none",
 						defaultPersonalities: Array.isArray(data.defaultPersonalities) ? data.defaultPersonalities : undefined,
+						toolPolicies: data.toolPolicies && typeof data.toolPolicies === "object" ? data.toolPolicies : undefined,
 						createdAt: data.createdAt ?? 0,
 						updatedAt: data.updatedAt ?? 0,
 					});
@@ -82,6 +88,9 @@ export class RoleStore {
 			};
 			if (role.defaultPersonalities && role.defaultPersonalities.length > 0) {
 				obj.defaultPersonalities = role.defaultPersonalities;
+			}
+			if (role.toolPolicies && Object.keys(role.toolPolicies).length > 0) {
+				obj.toolPolicies = role.toolPolicies;
 			}
 			obj.createdAt = role.createdAt;
 			obj.updatedAt = role.updatedAt;

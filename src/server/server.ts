@@ -939,6 +939,7 @@ async function handleApiRoute(
 				group: body.group,
 				docs: body.docs,
 				detail_docs: body.detail_docs,
+				grantPolicy: body.grantPolicy,
 			});
 			if (!ok) { json({ error: "Tool not found" }, 404); return; }
 			json({ ok: true });
@@ -1337,6 +1338,7 @@ async function handleApiRoute(
 				promptTemplate: body.promptTemplate,
 				allowedTools: body.allowedTools,
 				accessory: body.accessory,
+				toolPolicies: body.toolPolicies,
 			});
 			if (!ok) { json({ error: "Role not found" }, 404); return; }
 			json({ ok: true });

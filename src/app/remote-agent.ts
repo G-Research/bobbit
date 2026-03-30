@@ -511,10 +511,16 @@ export class RemoteAgent {
 	/** Pending prompt text to replay after a tool permission grant restarts the session */
 	private _pendingGrantReplay?: string;
 
-	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string): void {
+	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, grantPolicy?: string): void {
 		// Save the prompt to replay after the session restarts with the new tool
 		this._pendingGrantReplay = lastPromptText;
-		this.send({ type: "grant_tool_permission", toolName, scope, group });
+
+		let mode: "persistent" | "session-only" | "one-time" | undefined;
+		if (grantPolicy === "always-ask") mode = "one-time";
+		else if (grantPolicy === "ask-once") mode = "session-only";
+		// else (null, undefined, ""): no mode → server defaults to "persistent" (current behavior)
+
+		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
 	}
 
 	denyToolPermission(messageId: string): void {
@@ -807,6 +813,7 @@ export class RemoteAgent {
 					roleName: perm.roleName,
 					roleLabel: perm.roleLabel,
 					lastPromptText: perm.lastPromptText,
+					grantPolicy: perm.grantPolicy,  // pass through from server
 					timestamp: Date.now(),
 					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
 				} as any];
