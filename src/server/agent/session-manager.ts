@@ -1011,8 +1011,9 @@ export class SessionManager {
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
 					roleName = ps.role;
 				}
-				if (role && role.allowedTools.length > 0) {
-					toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools, role);
+				const effectiveTools = restoredAllowedTools ?? role?.allowedTools;
+				if (effectiveTools && effectiveTools.length > 0) {
+					toolRestrictionsText = this.buildToolRestrictionsText(effectiveTools, role);
 				}
 			}
 
