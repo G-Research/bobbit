@@ -139,6 +139,8 @@ export interface PromptSection {
 	label: string;
 	source: string;
 	content: string;
+	/** Estimated token count (~4 chars/token for Claude models) */
+	tokens: number;
 }
 
 /**
@@ -237,13 +239,18 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
  * Takes the same PromptParts as assembleSystemPrompt but returns structured
  * sections instead of writing to disk.
  */
+/** Estimate token count from text (~4 chars per token for Claude models) */
+function estimateTokens(text: string): number {
+	return Math.ceil(text.length / 4);
+}
+
 export function getPromptSections(parts: PromptParts): PromptSection[] {
 	const sections: PromptSection[] = [];
 
 	// 1. Global system prompt
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const base = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
-		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base });
+		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base, tokens: estimateTokens(base) });
 	}
 
 	// 2. Agent files (individual sections per file for provenance)
@@ -255,7 +262,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 				const content = fs.readFileSync(entry.path, "utf-8");
 				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
 				if (resolved.trim()) {
-					sections.push({ label: "Project Context", source: entry.path, content: resolved.trim() });
+					sections.push({ label: "Project Context", source: entry.path, content: resolved.trim(), tokens: estimateTokens(resolved.trim()) });
 				}
 			} catch {
 				// skip unreadable files
@@ -267,7 +274,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		if (fs.existsSync(agentsPath)) {
 			const content = readAgentsMd(parts.cwd);
 			if (content.trim()) {
-				sections.push({ label: "Project Context", source: agentsPath, content: content.trim() });
+				sections.push({ label: "Project Context", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()) });
 			}
 		}
 	}
@@ -277,28 +284,30 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		const header = parts.goalTitle
 			? `**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
 			: "";
-		sections.push({ label: "Goal", source: `Goal: ${parts.goalTitle || "Untitled"}`, content: (header ? header + "\n\n" : "") + parts.goalSpec.trim() });
+		const goalContent = (header ? header + "\n\n" : "") + parts.goalSpec.trim();
+		sections.push({ label: "Goal", source: `Goal: ${parts.goalTitle || "Untitled"}`, content: goalContent, tokens: estimateTokens(goalContent) });
 	}
 
 	// 4. Role prompt
 	if (parts.rolePrompt?.trim()) {
-		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim() });
+		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim(), tokens: estimateTokens(parts.rolePrompt.trim()) });
 	}
 
 	// 5. Tool restrictions
 	if (parts.toolRestrictions?.trim()) {
-		sections.push({ label: "Tool Restrictions", source: "Allowed tools filter", content: parts.toolRestrictions.trim() });
+		sections.push({ label: "Tool Restrictions", source: "Allowed tools filter", content: parts.toolRestrictions.trim(), tokens: estimateTokens(parts.toolRestrictions.trim()) });
 	}
 
 	// 6. Personalities
 	if (parts.personalities && parts.personalities.length > 0) {
 		const lines = parts.personalities.map(p => `- **${p.label}**: ${p.promptFragment}`);
-		sections.push({ label: "Personality", source: "Personalities", content: lines.join("\n") });
+		const personalityContent = lines.join("\n");
+		sections.push({ label: "Personality", source: "Personalities", content: personalityContent, tokens: estimateTokens(personalityContent) });
 	}
 
 	// 7. Tool docs
 	if (parts.toolDocs?.trim()) {
-		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim() });
+		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()) });
 	}
 
 	// 8. Task context
@@ -311,12 +320,13 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 			taskLines.push("\n## Dependencies");
 			for (const dep of parts.taskDependsOn) taskLines.push(`- ${dep}`);
 		}
-		sections.push({ label: "Task", source: `Task: ${parts.taskTitle || "Untitled"}`, content: taskLines.join("\n") });
+		const taskContent = taskLines.join("\n");
+		sections.push({ label: "Task", source: `Task: ${parts.taskTitle || "Untitled"}`, content: taskContent, tokens: estimateTokens(taskContent) });
 	}
 
 	// 9. Workflow context
 	if (parts.workflowContext?.trim()) {
-		sections.push({ label: "Workflow Context", source: "Upstream gates", content: parts.workflowContext.trim() });
+		sections.push({ label: "Workflow Context", source: "Upstream gates", content: parts.workflowContext.trim(), tokens: estimateTokens(parts.workflowContext.trim()) });
 	}
 
 	return sections;

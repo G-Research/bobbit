@@ -3159,7 +3159,8 @@ async function handleApiRoute(
 		}
 
 		const sections = getPromptSections(parts);
-		json({ sections });
+		const totalTokens = sections.reduce((sum, s) => sum + s.tokens, 0);
+		json({ sections, totalTokens });
 		return;
 	}
 

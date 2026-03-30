@@ -9,11 +9,13 @@ interface PromptSection {
 	label: string;
 	source: string;
 	content: string;
+	tokens: number;
 }
 
 @customElement("system-prompt-dialog")
 export class SystemPromptDialog extends DialogBase {
 	@state() private sections: PromptSection[] = [];
+	@state() private totalTokens = 0;
 	@state() private loading = true;
 	@state() private error = "";
 	@state() private expandedSections = new Set<number>();
@@ -46,6 +48,7 @@ export class SystemPromptDialog extends DialogBase {
 			}
 			const data = await resp.json();
 			this.sections = data.sections ?? [];
+			this.totalTokens = data.totalTokens ?? 0;
 		} catch (err) {
 			this.error = `Failed to load prompt sections: ${err}`;
 		} finally {
@@ -129,7 +132,7 @@ export class SystemPromptDialog extends DialogBase {
 						<span class="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground shrink-0">${section.label}</span>
 						`; })()}
 					</div>
-					<span class="text-xs text-muted-foreground shrink-0">${this.formatSize(section.content.length)}</span>
+					<span class="text-xs text-muted-foreground shrink-0">${this.formatTokens(section.tokens)}</span>
 				</button>
 				${expanded
 					? html`
@@ -145,9 +148,9 @@ export class SystemPromptDialog extends DialogBase {
 		`;
 	}
 
-	private formatSize(chars: number): string {
-		if (chars < 1000) return `${chars} chars`;
-		return `${(chars / 1000).toFixed(1)}k chars`;
+	private formatTokens(tokens: number): string {
+		if (tokens < 1000) return `~${tokens} tokens`;
+		return `~${(tokens / 1000).toFixed(1)}k tokens`;
 	}
 
 	protected override renderContent() {
@@ -157,7 +160,9 @@ export class SystemPromptDialog extends DialogBase {
 				children: html`
 					${DialogHeader({
 						title: "System Prompt Inspector",
-						description: `Assembled prompt sections for this session`,
+						description: this.totalTokens > 0
+							? `Assembled prompt sections for this session — ~${this.formatTokens(this.totalTokens)} total`
+							: `Assembled prompt sections for this session`,
 					})}
 
 					<div class="flex-1 overflow-y-auto mt-4 space-y-2">
