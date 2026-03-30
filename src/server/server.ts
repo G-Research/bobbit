@@ -36,6 +36,7 @@ import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
+import { checkDockerAvailability } from "./agent/sandbox-status.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -585,6 +586,104 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/sandbox-status
+	if (url.pathname === "/api/sandbox-status" && req.method === "GET") {
+		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
+		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+		const configured = sandboxConfig === "docker";
+		const status = await checkDockerAvailability(configured ? imageName : undefined);
+		json({ ...status, configured });
+		return;
+	}
+
+	// POST /api/web-proxy/search
+	if (url.pathname === "/api/web-proxy/search" && req.method === "POST") {
+		const body = await readBody(req);
+		const query = body?.query;
+		if (!query || typeof query !== "string") {
+			json({ error: "Missing query" }, 400);
+			return;
+		}
+		const maxResults = Math.min(Math.max(1, body?.maxResults || 10), 20);
+		try {
+			const encoded = encodeURIComponent(query);
+			const { stdout } = await execAsync(
+				`curl -sL "https://lite.duckduckgo.com/lite/?q=${encoded}" -H "User-Agent: Mozilla/5.0"`,
+				{ timeout: 15000, maxBuffer: 1024 * 1024 },
+			);
+			// Parse DuckDuckGo lite HTML for results
+			const results: Array<{ title: string; url: string; snippet: string }> = [];
+			const linkRegex = /<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>([^<]*)<\/a>/gi;
+			const snippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
+			const links: Array<{ url: string; title: string }> = [];
+			let match;
+			while ((match = linkRegex.exec(stdout)) !== null) {
+				const href = match[1];
+				const title = match[2].replace(/<[^>]+>/g, "").trim();
+				if (href && title && !href.includes("duckduckgo.com")) {
+					links.push({ url: href, title });
+				}
+			}
+			const snippets: string[] = [];
+			while ((match = snippetRegex.exec(stdout)) !== null) {
+				snippets.push(match[1].replace(/<[^>]+>/g, "").trim());
+			}
+			for (let i = 0; i < Math.min(links.length, maxResults); i++) {
+				results.push({
+					title: links[i].title,
+					url: links[i].url,
+					snippet: snippets[i] || "",
+				});
+			}
+			json({ results });
+		} catch (err) {
+			json({ error: `Search failed: ${err}` }, 502);
+		}
+		return;
+	}
+
+	// POST /api/web-proxy/fetch
+	if (url.pathname === "/api/web-proxy/fetch" && req.method === "POST") {
+		const body = await readBody(req);
+		const targetUrl = body?.url;
+		if (!targetUrl || typeof targetUrl !== "string") {
+			json({ error: "Missing url" }, 400);
+			return;
+		}
+		// Validate URL scheme
+		try {
+			const parsed = new URL(targetUrl);
+			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+				json({ error: "URL must use http or https" }, 400);
+				return;
+			}
+		} catch {
+			json({ error: "Invalid URL" }, 400);
+			return;
+		}
+		const maxLength = Math.min(body?.maxLength || 20000, 100000);
+		try {
+			const { stdout } = await execAsync(
+				`curl -sL --max-time 30 ${JSON.stringify(targetUrl)}`,
+				{ timeout: 35000, maxBuffer: 5 * 1024 * 1024 },
+			);
+			// Strip HTML tags for a basic text extraction
+			let text = stdout
+				.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+				.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+				.replace(/<[^>]+>/g, " ")
+				.replace(/\s+/g, " ")
+				.trim();
+			if (text.length > maxLength) {
+				text = text.substring(0, maxLength);
+			}
+			json({ text, length: text.length });
+		} catch (err) {
+			json({ error: `Fetch failed: ${err}` }, 502);
+		}
+		return;
+	}
+
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
 		const currentGen = sessionManager.getSessionStore().getGeneration();
@@ -794,8 +893,23 @@ async function handleApiRoute(
 		// ── Re-attempt support ──
 		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
 
+		// ── Sandbox validation ──
+		const sandboxed = body?.sandboxed === true;
+		if (sandboxed) {
+			const sandboxConfig = projectConfigStore.get("sandbox") || "none";
+			if (sandboxConfig !== "docker") {
+				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
+				return;
+			}
+			const dockerStatus = await checkDockerAvailability();
+			if (!dockerStatus.available) {
+				json({ error: `Docker is not available: ${dockerStatus.error || "Docker not detected"}` }, 503);
+				return;
+			}
+		}
+
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId });
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed });
 
 			// Set role metadata if a role was specified
 			if (roleForMeta) {

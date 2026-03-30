@@ -40,6 +40,7 @@ export interface DelegateDetails {
 // ── Gateway API helpers ──
 
 function getGatewayUrl(): string {
+	if (process.env.BOBBIT_GATEWAY_URL) return process.env.BOBBIT_GATEWAY_URL.replace(/\/+$/, "");
 	// Prefer BOBBIT_DIR (always set by rpc-bridge), fall back to ~/.pi/
 	const stateDir = process.env.BOBBIT_DIR
 		? path.join(process.env.BOBBIT_DIR, "state")
@@ -52,6 +53,7 @@ function getGatewayUrl(): string {
 }
 
 function getGatewayToken(): string {
+	if (process.env.BOBBIT_TOKEN) return process.env.BOBBIT_TOKEN;
 	// Prefer BOBBIT_DIR (always set by rpc-bridge), fall back to ~/.pi/
 	const stateDir = process.env.BOBBIT_DIR
 		? path.join(process.env.BOBBIT_DIR, "state")
