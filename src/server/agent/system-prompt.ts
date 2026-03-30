@@ -243,12 +243,34 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// 1. Global system prompt
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const base = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
-		if (base) sections.push({ label: "System Prompt", source: "config/system-prompt.md", content: base });
+		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base });
 	}
 
-	// 2. Agent files
-	const agentsMd = readAllAgentFiles(parts.cwd, parts.projectConfigStore);
-	if (agentsMd.trim()) sections.push({ label: "Project Context", source: "AGENTS.md", content: agentsMd.trim() });
+	// 2. Agent files (individual sections per file for provenance)
+	if (parts.projectConfigStore) {
+		const dirs = getAllConfigDirectories(parts.cwd, parts.projectConfigStore);
+		const agentEntries = dirs.filter(d => d.types.includes("agents") && d.exists);
+		for (const entry of agentEntries) {
+			try {
+				const content = fs.readFileSync(entry.path, "utf-8");
+				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
+				if (resolved.trim()) {
+					sections.push({ label: "Project Context", source: entry.path, content: resolved.trim() });
+				}
+			} catch {
+				// skip unreadable files
+			}
+		}
+	} else {
+		// Legacy fallback: single AGENTS.md with absolute path
+		const agentsPath = path.join(parts.cwd, "AGENTS.md");
+		if (fs.existsSync(agentsPath)) {
+			const content = readAgentsMd(parts.cwd);
+			if (content.trim()) {
+				sections.push({ label: "Project Context", source: agentsPath, content: content.trim() });
+			}
+		}
+	}
 
 	// 3. Goal spec (separate from role)
 	if (parts.goalSpec?.trim()) {
