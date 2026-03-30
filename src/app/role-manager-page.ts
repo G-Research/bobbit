@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
+import { ArrowLeft, Pencil, Plus, Trash2, X } from "lucide";
 import { fetchRoles, fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
@@ -46,8 +46,15 @@ let editTools: string[] = [];
 let editAccessory = "none";
 let editName = "";
 
+let editToolPolicies: Record<string, string> = {};
+
 let saving = false;
 let deleting = false;
+
+// Add override form state
+let showAddOverride = false;
+let addOverrideSearch = "";
+let addOverridePolicy = "always-allow";
 
 // Assistant sub-prompt state
 let assistantPrompts: AssistantPromptInfo[] = [];
@@ -99,8 +106,12 @@ function showEdit(role: RoleData): void {
 	editTools = [...role.allowedTools];
 	editAccessory = role.accessory;
 	editName = role.name;
+	editToolPolicies = { ...(role.toolPolicies ?? {}) };
 	saving = false;
 	deleting = false;
+	showAddOverride = false;
+	addOverrideSearch = "";
+	addOverridePolicy = "always-allow";
 	activePromptTab = "baseline";
 	editedPrompts = new Map();
 	originalPrompts = new Map();
@@ -128,8 +139,12 @@ export function navigateToRoleEdit(roleName: string): void {
 		editTools = [...role.allowedTools];
 		editAccessory = role.accessory;
 		editName = role.name;
+		editToolPolicies = { ...(role.toolPolicies ?? {}) };
 		saving = false;
 		deleting = false;
+		showAddOverride = false;
+		addOverrideSearch = "";
+		addOverridePolicy = "always-allow";
 		activePromptTab = "baseline";
 		editedPrompts = new Map();
 		originalPrompts = new Map();
@@ -187,6 +202,7 @@ async function handleSave(): Promise<void> {
 			promptTemplate: editPrompt,
 			allowedTools: editTools,
 			accessory: editAccessory,
+			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : undefined,
 		});
 
 		// Save dirty sub-prompts
@@ -267,11 +283,13 @@ function renderNavBar(): TemplateResult {
 		const subPromptsDirty = Array.from(editedPrompts.entries()).some(
 			([type, content]) => content !== (originalPrompts.get(type) ?? ""),
 		);
+		const toolPoliciesChanged = JSON.stringify(editToolPolicies) !== JSON.stringify(selectedRole?.toolPolicies ?? {});
 		const hasChanges = selectedRole && (
 			editLabel !== selectedRole.label ||
 			editPrompt !== selectedRole.promptTemplate ||
 			JSON.stringify([...editTools].sort()) !== JSON.stringify([...selectedRole.allowedTools].sort()) ||
 			editAccessory !== selectedRole.accessory ||
+			toolPoliciesChanged ||
 			subPromptsDirty
 		);
 		// Edit view: back goes to roles list, breadcrumb shows hierarchy, actions on right
@@ -452,6 +470,131 @@ function renderToolGroups(): TemplateResult {
 }
 
 // ============================================================================
+// RENDER: TOOL POLICY OVERRIDES
+// ============================================================================
+
+const POLICY_OPTIONS: { value: string; label: string }[] = [
+	{ value: "always-allow", label: "Always Allow" },
+	{ value: "ask-once", label: "Ask Once Per Session" },
+	{ value: "always-ask", label: "Ask Every Time" },
+	{ value: "never", label: "Never (hidden)" },
+];
+
+function handleOverridePolicyChange(key: string, newPolicy: string): void {
+	editToolPolicies = { ...editToolPolicies, [key]: newPolicy };
+	renderApp();
+}
+
+function handleRemoveOverride(key: string): void {
+	const { [key]: _, ...rest } = editToolPolicies;
+	editToolPolicies = rest;
+	renderApp();
+}
+
+function handleAddOverride(): void {
+	const name = addOverrideSearch.trim();
+	if (!name || name in editToolPolicies) return;
+	editToolPolicies = { ...editToolPolicies, [name]: addOverridePolicy };
+	showAddOverride = false;
+	addOverrideSearch = "";
+	addOverridePolicy = "always-allow";
+	renderApp();
+}
+
+function getFilteredSuggestions(): string[] {
+	const query = addOverrideSearch.toLowerCase().trim();
+	// Collect tool names and unique group names
+	const toolNames = availableTools.map((t) => t.name);
+	const groupNames = [...new Set(availableTools.map((t) => t.group))];
+	const all = [...groupNames, ...toolNames];
+	// Filter out already-overridden and match query
+	return all
+		.filter((name) => !(name in editToolPolicies))
+		.filter((name) => !query || name.toLowerCase().includes(query))
+		.slice(0, 20);
+}
+
+function renderToolPolicyOverrides(): TemplateResult {
+	const entries = Object.entries(editToolPolicies);
+	return html`
+		<div class="roles-edit-section">
+			<h2 class="roles-section-title">Tool Policy Overrides</h2>
+			<p class="roles-tools-note" style="margin-bottom:8px;">Explicit policy overrides for specific tools or groups. These take priority over tool and group defaults.</p>
+			${entries.length > 0 ? html`
+				<div class="roles-policy-overrides-list">
+					${entries.map(([key, policy]) => html`
+						<div class="roles-policy-override-row">
+							<span class="roles-policy-override-name" title="${key}">${key}</span>
+							<select
+								class="roles-policy-override-select"
+								.value=${policy}
+								@change=${(e: Event) => handleOverridePolicyChange(key, (e.target as HTMLSelectElement).value)}
+							>
+								${POLICY_OPTIONS.map((opt) => html`
+									<option value=${opt.value} ?selected=${policy === opt.value}>${opt.label}</option>
+								`)}
+							</select>
+							<button class="roles-policy-override-remove" title="Remove override" @click=${() => handleRemoveOverride(key)}>
+								${icon(X, "sm")}
+							</button>
+						</div>
+					`)}
+				</div>
+			` : html`
+				<p class="text-sm text-muted-foreground" style="margin-bottom:8px;">No overrides configured. Tools use their default or group policy.</p>
+			`}
+			${showAddOverride ? html`
+				<div class="roles-policy-add-form">
+					<div class="roles-policy-add-input-wrap">
+						<input
+							class="roles-policy-add-input"
+							type="text"
+							placeholder="Type tool or group name\u2026"
+							.value=${addOverrideSearch}
+							@input=${(e: Event) => { addOverrideSearch = (e.target as HTMLInputElement).value; renderApp(); }}
+							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") handleAddOverride(); if (e.key === "Escape") { showAddOverride = false; renderApp(); } }}
+						/>
+						${addOverrideSearch.trim() ? html`
+							<div class="roles-policy-suggestions">
+								${getFilteredSuggestions().map((name) => html`
+									<button class="roles-policy-suggestion" @click=${() => { addOverrideSearch = name; renderApp(); }}>${name}</button>
+								`)}
+							</div>
+						` : nothing}
+					</div>
+					<select
+						class="roles-policy-override-select"
+						.value=${addOverridePolicy}
+						@change=${(e: Event) => { addOverridePolicy = (e.target as HTMLSelectElement).value; }}
+					>
+						${POLICY_OPTIONS.map((opt) => html`
+							<option value=${opt.value} ?selected=${addOverridePolicy === opt.value}>${opt.label}</option>
+						`)}
+					</select>
+					${Button({
+						variant: "default",
+						size: "sm",
+						onClick: handleAddOverride,
+						disabled: !addOverrideSearch.trim() || addOverrideSearch.trim() in editToolPolicies,
+						children: "Add",
+					})}
+					${Button({
+						variant: "ghost" as any,
+						size: "sm",
+						onClick: () => { showAddOverride = false; addOverrideSearch = ""; renderApp(); },
+						children: "Cancel",
+					})}
+				</div>
+			` : html`
+				<button class="roles-policy-add-btn" @click=${() => { showAddOverride = true; renderApp(); }}>
+					${icon(Plus, "sm")} Add Override
+				</button>
+			`}
+		</div>
+	`;
+}
+
+// ============================================================================
 // RENDER: EDIT VIEW
 // ============================================================================
 
@@ -549,7 +692,8 @@ function renderEditView(): TemplateResult {
 					${renderToolGroups()}
 				</div>
 
-
+				<!-- Tool Policy Overrides section -->
+				${renderToolPolicyOverrides()}
 			</div>
 		</div>
 	`;
