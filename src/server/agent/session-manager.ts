@@ -2028,8 +2028,10 @@ export class SessionManager {
 		const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
 		let toolRestrictionsText: string | undefined;
+		// Look up the full role (with toolPolicies) from roleManager if available
+		const fullRole = this.roleManager?.getRole(role.name);
 		if (role.allowedTools.length > 0) {
-			toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools, role);
+			toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools, fullRole);
 		}
 
 		// Resolve personalities for system prompt
@@ -2066,7 +2068,7 @@ export class SessionManager {
 
 		// Apply tool activation args based on role's allowedTools
 		if (role.allowedTools.length > 0) {
-			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools, role, this.toolManager) : undefined;
+			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools, fullRole, this.toolManager) : undefined;
 			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {

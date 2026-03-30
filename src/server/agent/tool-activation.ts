@@ -19,7 +19,7 @@ import path from "node:path";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
-import type { GrantPolicy, Role } from "./role-store.js";
+import type { GrantPolicy } from "./role-store.js";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 
@@ -31,7 +31,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 export function resolveGrantPolicy(
 	toolName: string,
 	toolGroup: string | undefined,
-	role: Role | undefined,
+	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	toolManager: ToolManager | undefined,
 ): GrantPolicy | null {
 	// 1. Role-level tool-specific override
@@ -204,7 +204,7 @@ ${toolRegistrations}
  * the ones in its allowedTools list. Filtered extensions are written to
  * a hash-based subdirectory to avoid conflicts with other sessions.
  */
-export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[], role?: Role, toolManager?: ToolManager): string[] {
+export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }, toolManager?: ToolManager): string[] {
 	const infos = mcpManager.getToolInfos();
 
 	// Determine if we're filtering
