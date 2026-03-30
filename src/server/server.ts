@@ -112,6 +112,56 @@ async function execGitSafe(cmd: string, cwd: string, fallback = ""): Promise<str
 	try { return await execGit(cmd, cwd); } catch { return fallback; }
 }
 
+// ── Git diff helper (shared between session and goal endpoints) ──
+const DIFF_MAX_BYTES = 500 * 1024; // 500KB
+
+async function getGitDiff(cwd: string, file?: string): Promise<string> {
+	let hasHead = true;
+	try { await execGit("git rev-parse --verify HEAD", cwd); } catch { hasHead = false; }
+
+	let diff = "";
+	if (file) {
+		// Sanitize: reject path traversal, absolute paths, drive letters
+		if (file.includes("..") || path.isAbsolute(file) || /^[a-zA-Z]:/.test(file)) {
+			throw new Error("INVALID_PATH");
+		}
+		if (hasHead) {
+			const { stdout } = await execAsync(`git diff HEAD -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
+			diff = stdout;
+		} else {
+			const { stdout: s1 } = await execAsync(`git diff --cached -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
+			const { stdout: s2 } = await execAsync(`git diff -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
+			diff = s1 + s2;
+		}
+		// Try untracked if empty
+		if (!diff.trim()) {
+			try {
+				const { stdout } = await execAsync(`git diff --no-index /dev/null -- "${file}"`, { cwd, encoding: "utf-8", timeout: 5000 });
+				diff = stdout;
+			} catch (e: any) {
+				// git diff --no-index exits 1 when there are differences
+				if (e.stdout) diff = e.stdout;
+			}
+		}
+	} else {
+		if (hasHead) {
+			const { stdout } = await execAsync("git diff HEAD", { cwd, encoding: "utf-8", timeout: 5000 });
+			diff = stdout;
+		} else {
+			const { stdout: s1 } = await execAsync("git diff --cached", { cwd, encoding: "utf-8", timeout: 5000 });
+			const { stdout: s2 } = await execAsync("git diff", { cwd, encoding: "utf-8", timeout: 5000 });
+			diff = s1 + s2;
+		}
+	}
+
+	if (!diff.trim()) throw new Error("NO_DIFF");
+
+	if (Buffer.byteLength(diff, "utf-8") > DIFF_MAX_BYTES) {
+		diff = diff.slice(0, DIFF_MAX_BYTES) + "\n\n--- Diff truncated (exceeded 500KB) ---";
+	}
+	return diff;
+}
+
 export interface TlsConfig {
 	cert: string;  // path to PEM certificate
 	key: string;   // path to PEM private key
@@ -1887,10 +1937,73 @@ async function handleApiRoute(
 				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, "0"), 10) || 0;
 				mergedIntoPrimary = aheadOfPrimary === 0;
 			}
-			const statusRaw = await execGitSafe("git status --porcelain", cwd);
-			const clean = !statusRaw.trim();
-			json({ branch, primaryBranch, isOnPrimary, clean, aheadOfPrimary, behindPrimary, mergedIntoPrimary });
+			// Don't use execGit here — its trim() strips the leading space from
+			// porcelain status lines like " M file.txt", corrupting the first filename.
+			let statusRaw = "";
+			try {
+				const { stdout } = await execAsync('git status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
+				statusRaw = stdout.replace(/\s+$/, '');
+			} catch {}
+			const statusLines = statusRaw ? statusRaw.split("\n") : [];
+			const status = statusLines.map(line => {
+				const l = line.endsWith("\r") ? line.slice(0, -1) : line;
+				return { file: l.substring(3), status: l.substring(0, 2).trim() };
+			});
+
+			let hasUpstream = false;
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch { /* no upstream */ }
+
+			let ahead = 0, behind = 0;
+			if (hasUpstream) {
+				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0'), 10) || 0;
+				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0'), 10) || 0;
+			}
+
+			const clean = statusLines.length === 0;
+			let summary = 'clean';
+			if (!clean) {
+				const counts: Record<string, number> = {};
+				for (const line of statusLines) {
+					const code = line.substring(0, 2).trim();
+					let key: string;
+					if (code.includes('?')) key = '?';
+					else if (code.includes('M')) key = 'M';
+					else if (code.includes('A')) key = 'A';
+					else if (code.includes('D')) key = 'D';
+					else if (code.includes('R')) key = 'R';
+					else if (code.includes('U')) key = 'U';
+					else key = code;
+					counts[key] = (counts[key] || 0) + 1;
+				}
+				summary = Object.entries(counts).map(([k, v]) => `${v}${k}`).join(' ');
+			}
+
+			json({
+				branch, primaryBranch, isOnPrimary, status, hasUpstream,
+				ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
+				clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
+			});
 		} catch (err) {
+			json({ error: String(err) }, 500);
+		}
+		return;
+	}
+
+	// GET /api/goals/:id/git-diff — unified diff for goal worktree
+	const goalDiffMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/git-diff$/);
+	if (goalDiffMatch && req.method === "GET") {
+		const goalId = goalDiffMatch[1];
+		const goal = sessionManager.goalManager.getGoal(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const cwd = goal.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const file = url.searchParams.get("file") || undefined;
+		try {
+			const diff = await getGitDiff(cwd, file);
+			json({ diff });
+		} catch (err: any) {
+			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
+			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
 			json({ error: String(err) }, 500);
 		}
 		return;
@@ -2560,6 +2673,24 @@ async function handleApiRoute(
 				clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
 			});
 		} catch (err) {
+			json({ error: String(err) }, 500);
+		}
+		return;
+	}
+	// GET /api/sessions/:id/git-diff — unified diff for session working directory
+	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-diff')) {
+		const id = url.pathname.split('/')[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const cwd = session.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const file = url.searchParams.get("file") || undefined;
+		try {
+			const diff = await getGitDiff(cwd, file);
+			json({ diff });
+		} catch (err: any) {
+			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
+			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
 			json({ error: String(err) }, 500);
 		}
 		return;
