@@ -121,8 +121,10 @@ export class RpcBridge {
 			this.process = null;
 		});
 
-		// Brief pause for process initialization
-		await new Promise((r) => setTimeout(r, 200));
+		// Brief pause for process initialization.
+		// Docker containers need longer — container startup + node init is ~2-3s.
+		const startupDelay = this.options.sandboxed ? 3000 : 200;
+		await new Promise((r) => setTimeout(r, startupDelay));
 	}
 
 	/** Subscribe to agent events. Returns unsubscribe function. */
@@ -180,7 +182,9 @@ export class RpcBridge {
 	}
 
 	setModel(provider: string, modelId: string) {
-		return this.sendCommand({ type: "set_model", provider, modelId });
+		// Docker containers need longer for first API call (OAuth token refresh)
+		const timeout = this.options.sandboxed ? 90_000 : 30_000;
+		return this.sendCommand({ type: "set_model", provider, modelId }, timeout);
 	}
 
 	setThinkingLevel(level: string) {
@@ -241,11 +245,13 @@ export class RpcBridge {
 		dockerArgs.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		dockerArgs.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
-		// Mount host sessions dir so agent .jsonl session files persist across container restarts.
-		// Only mount sessions/ (not all of ~/.pi/agent/) to avoid exposing auth.json.
-		const hostSessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
-		fs.mkdirSync(hostSessionsDir, { recursive: true });
-		dockerArgs.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.pi/agent/sessions`);
+		// Mount the host's ~/.pi/agent directory into the container.
+		// Contains auth.json (OAuth tokens), models.json (model registry),
+		// and sessions/ (agent conversation logs). All read-write so OAuth
+		// token refresh and session persistence work.
+		const hostAgentDir = path.join(os.homedir(), ".pi", "agent");
+		fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
+		dockerArgs.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.pi/agent`);
 
 		// Additional user-configured mounts
 		if (this.options.sandboxMounts) {
@@ -352,7 +358,7 @@ export class RpcBridge {
 		}
 		dockerArgs.push(...remappedArgs);
 
-		console.log(`[rpc-bridge] Starting Docker sandbox: docker ${dockerArgs.slice(0, 10).join(" ")} ...`);
+		console.log(`[rpc-bridge] Docker sandbox args: ${dockerArgs.join(" ")}`);
 
 		return spawn("docker", dockerArgs, {
 			stdio: ["pipe", "pipe", "pipe"],

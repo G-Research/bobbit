@@ -1187,9 +1187,10 @@ export class SessionManager {
 
 		// Resume the agent's previous session file
 		const switchSessionPath = ps.sandboxed ? hostToContainerSessionPath(ps.agentSessionFile) : ps.agentSessionFile;
+		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: switchSessionPath },
-			15_000,
+			switchTimeout,
 		);
 		restoring = false;
 		if (!switchResp.success) {
@@ -1993,7 +1994,7 @@ export class SessionManager {
 			id: session.id,
 			title: session.title,
 			cwd: session.cwd,
-			agentSessionFile: existing?.sandboxed
+			agentSessionFile: (existing?.sandboxed || (session as any)._sandboxed)
 				? containerToHostSessionPath(stateResp.data.sessionFile)
 				: stateResp.data.sessionFile,
 			createdAt: session.createdAt,
