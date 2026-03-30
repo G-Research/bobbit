@@ -1505,9 +1505,9 @@ export class SessionManager {
 			promptQueue: new PromptQueue(),
 		};
 
-		// Persist sandboxed flag on session metadata
+		// Mark session as sandboxed (persisted later in store.put() via _sandboxed flag)
 		if (opts?.sandboxed) {
-			this.store.update(id, { sandboxed: true });
+			(session as any)._sandboxed = true;
 		}
 
 		// Auto-assign task to this session
@@ -2011,7 +2011,7 @@ export class SessionManager {
 			nonInteractive: session.nonInteractive,
 			preview: session.preview,
 			personalities: session.personalities,
-			sandboxed: existing?.sandboxed,
+			sandboxed: existing?.sandboxed || (session as any)._sandboxed,
 		});
 	}
 
@@ -2110,6 +2110,7 @@ export class SessionManager {
 		preview?: boolean;
 		personalities?: string[];
 		reattemptGoalId?: string;
+		sandboxed?: boolean;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => ({
 			id: s.id,
@@ -2138,6 +2139,7 @@ export class SessionManager {
 			preview: s.preview,
 			personalities: s.personalities,
 			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
+			sandboxed: this.store.get(s.id)?.sandboxed,
 		}));
 	}
 
@@ -2715,6 +2717,7 @@ export class SessionManager {
 		preview?: boolean;
 		personalities?: string[];
 		reattemptGoalId?: string;
+		sandboxed?: boolean;
 		archived: boolean;
 		archivedAt?: number;
 	}> {
@@ -2740,6 +2743,7 @@ export class SessionManager {
 			preview: ps.preview,
 			personalities: ps.personalities,
 			reattemptGoalId: ps.reattemptGoalId,
+			sandboxed: ps.sandboxed,
 			archived: true,
 			archivedAt: ps.archivedAt,
 		}));

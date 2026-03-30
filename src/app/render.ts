@@ -22,7 +22,7 @@ import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraf
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive } from "./sidebar.js";
 
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, INDENT } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -2005,7 +2005,7 @@ export function doRenderApp(): void {
 					<div class="flex items-center w-full pr-0.5 relative" style="min-height:40px;">
 						<div class="shrink-0">${backBtn}</div>
 						<div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-							<span class="text-sm font-medium text-foreground truncate px-14" title=${sessionTitle}>${sessionTitle}</span>
+							<span class="text-sm font-medium text-foreground truncate px-14 inline-flex items-center gap-1" title=${sessionTitle}>${sessionTitle}${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}</span>
 							${goalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate px-14 uppercase tracking-wider">${goalTitle}</span>` : ""}
 						</div>
 						<div class="ml-auto shrink-0">${editDeleteBtns}</div>
@@ -2018,7 +2018,7 @@ export function doRenderApp(): void {
 			return html`
 				<div class="flex items-center gap-2 px-3">
 					<div class="flex flex-col min-w-0 py-1">
-						<span class="text-sm font-medium text-foreground truncate max-w-[320px]" title=${sessionTitle}>${sessionTitle}</span>
+						<span class="text-sm font-medium text-foreground truncate max-w-[320px] inline-flex items-center gap-1" title=${sessionTitle}>${sessionTitle}${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}</span>
 						${deskGoalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate max-w-[320px] uppercase tracking-wider">${deskGoalTitle}</span>` : ""}
 					</div>
 				</div>

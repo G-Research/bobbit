@@ -11,4 +11,4 @@ worktree_setup_command: cp -r "$SOURCE_REPO/node_modules" node_modules
 config_directories: '[{"path":"C:\\tmp\\.bobbit","types":["skills"]},{"path":"C:\\Users\\jsubr\\.claude\\AGENTS.md","types":["agents"]}]'
 sandbox: "docker"
 sandbox_image: "bobbit-agent"
-sandbox_network_allowlist: '["github.com","api.github.com"]'
+sandbox_network_allowlist: '["github.com","api.github.com","api.anthropic.com","anthropic.com","auth.anthropic.com"]'

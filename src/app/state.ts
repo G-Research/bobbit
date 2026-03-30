@@ -46,6 +46,8 @@ export interface GatewaySession {
 	preview?: boolean;
 	/** Goal ID this session is re-attempting (for goal assistant sessions) */
 	reattemptGoalId?: string;
+	/** Whether this session runs in a Docker sandbox */
+	sandboxed?: boolean;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
 	/** Personality names assigned to this session */
