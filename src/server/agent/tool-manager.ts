@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, parseDocument } from "yaml";
+import type { GrantPolicy } from "./role-store.js";
 
 export interface ToolProvider {
 	type: 'builtin' | 'bobbit-extension' | 'mcp';
@@ -20,6 +21,8 @@ interface BaseToolInfo {
 	docs?: string;
 	detail_docs?: string;
 	provider?: ToolProvider;
+	/** Grant policy loaded from YAML; undefined means "not configured" */
+	grantPolicy?: GrantPolicy;
 	/** Subdirectory name within tools/ (e.g. "shell", "filesystem"). Empty string for flat files. */
 	groupDir: string;
 	/** Absolute path to the YAML file on disk. */
@@ -34,6 +37,8 @@ export interface ToolInfo {
 	detail_docs?: string;
 	hasRenderer: boolean;
 	rendererFile?: string;
+	/** Grant policy from YAML; undefined means "not configured" */
+	grantPolicy?: GrantPolicy;
 }
 
 import { bobbitConfigDir } from "../bobbit-dir.js";
@@ -82,6 +87,7 @@ function loadToolDefinitions(): BaseToolInfo[] {
 								docs: data.docs,
 								detail_docs: data.detail_docs,
 								provider: data.provider,
+								grantPolicy: data.grantPolicy,
 								groupDir,
 								filePath,
 							});
@@ -114,6 +120,7 @@ function loadToolDefinitions(): BaseToolInfo[] {
 						docs: data.docs,
 						detail_docs: data.detail_docs,
 						provider: data.provider,
+						grantPolicy: data.grantPolicy,
 						groupDir: "",
 						filePath,
 					});
@@ -163,6 +170,7 @@ export class ToolManager {
 			detail_docs: tool.detail_docs,
 			hasRenderer: !!tool.renderer,
 			rendererFile: tool.renderer,
+			grantPolicy: tool.grantPolicy,
 		}));
 		for (const ext of this.externalTools.values()) {
 			result.push({
@@ -173,19 +181,23 @@ export class ToolManager {
 				detail_docs: undefined,
 				hasRenderer: false,
 				rendererFile: undefined,
+				grantPolicy: undefined,
 			});
 		}
 		return result;
 	}
 
-	/** Returns a single tool's full detail, or undefined if not found. */
+	/** Returns a single tool's full detail, or undefined if not found. Case-insensitive lookup. */
 	getToolByName(name: string): ToolInfo | undefined {
-		const ext = this.externalTools.get(name);
-		if (ext) {
-			return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined };
+		const nameLower = name.toLowerCase();
+		// Check external tools (case-insensitive)
+		for (const ext of this.externalTools.values()) {
+			if (ext.name.toLowerCase() === nameLower) {
+				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined };
+			}
 		}
 		const tools = loadToolDefinitions();
-		const base = tools.find((t) => t.name === name);
+		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
 		if (!base) return undefined;
 		return {
 			name: base.name,
@@ -195,6 +207,7 @@ export class ToolManager {
 			detail_docs: base.detail_docs,
 			hasRenderer: !!base.renderer,
 			rendererFile: base.renderer,
+			grantPolicy: base.grantPolicy,
 		};
 	}
 
@@ -297,7 +310,7 @@ export class ToolManager {
 	}
 
 	/** Updates tool metadata (description, group, docs) by writing directly to the YAML file. */
-	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string }): boolean {
+	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string }): boolean {
 		const tools = loadToolDefinitions();
 		const base = tools.find((t) => t.name === name);
 		if (!base) return false;
@@ -310,6 +323,7 @@ export class ToolManager {
 			if (updates.group !== undefined) doc.set("group", updates.group);
 			if (updates.docs !== undefined) doc.set("docs", updates.docs);
 			if (updates.detail_docs !== undefined) doc.set("detail_docs", updates.detail_docs);
+			if (updates.grantPolicy !== undefined) doc.set("grantPolicy", updates.grantPolicy);
 
 			fs.writeFileSync(base.filePath, doc.toString(), "utf-8");
 			return true;

@@ -106,19 +106,32 @@ test.describe("MCP Server Discovery", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 test.describe("MCP Tool Calls", () => {
+	let testSessionId: string;
+
 	test.beforeAll(async () => {
 		// Ensure the mock server is connected before running tool call tests
 		await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
+
+		// Create a test session — required for X-Bobbit-Session-Id header
+		const sessResp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ title: "mcp-test-session" }),
+		});
+		const sessData = await sessResp.json();
+		testSessionId = sessData.id;
 	});
 
-	test("POST /api/internal/mcp-call executes echo tool", async () => {
-		const resp = await apiFetch("/api/internal/mcp-call", {
+	/** Helper to call MCP tool with session header */
+	function mcpCall(tool: string, args: Record<string, unknown>): Promise<Response> {
+		return apiFetch("/api/internal/mcp-call", {
 			method: "POST",
-			body: JSON.stringify({
-				tool: "mcp__mock__echo",
-				args: { message: "hello world" },
-			}),
+			headers: { "X-Bobbit-Session-Id": testSessionId },
+			body: JSON.stringify({ tool, args }),
 		});
+	}
+
+	test("POST /api/internal/mcp-call executes echo tool", async () => {
+		const resp = await mcpCall("mcp__mock__echo", { message: "hello world" });
 		expect(resp.status).toBe(200);
 		const result = await resp.json();
 		expect(result.content).toBeDefined();
@@ -130,13 +143,7 @@ test.describe("MCP Tool Calls", () => {
 	});
 
 	test("POST /api/internal/mcp-call executes add tool", async () => {
-		const resp = await apiFetch("/api/internal/mcp-call", {
-			method: "POST",
-			body: JSON.stringify({
-				tool: "mcp__mock__add",
-				args: { a: 2, b: 3 },
-			}),
-		});
+		const resp = await mcpCall("mcp__mock__add", { a: 2, b: 3 });
 		expect(resp.status).toBe(200);
 		const result = await resp.json();
 		expect(result.content).toBeDefined();
@@ -146,13 +153,7 @@ test.describe("MCP Tool Calls", () => {
 	});
 
 	test("POST /api/internal/mcp-call returns error for unknown tool on server", async () => {
-		const resp = await apiFetch("/api/internal/mcp-call", {
-			method: "POST",
-			body: JSON.stringify({
-				tool: "mcp__mock__nonexistent",
-				args: {},
-			}),
-		});
+		const resp = await mcpCall("mcp__mock__nonexistent", {});
 		expect(resp.status).toBe(200);
 		const result = await resp.json();
 		expect(result.content[0].text).toBe("Unknown tool");
@@ -160,13 +161,7 @@ test.describe("MCP Tool Calls", () => {
 	});
 
 	test("POST /api/internal/mcp-call returns error for unknown server", async () => {
-		const resp = await apiFetch("/api/internal/mcp-call", {
-			method: "POST",
-			body: JSON.stringify({
-				tool: "mcp__nonexistent__sometool",
-				args: {},
-			}),
-		});
+		const resp = await mcpCall("mcp__nonexistent__sometool", {});
 		// Should return an error status (400 or 404)
 		expect(resp.status).toBeGreaterThanOrEqual(400);
 	});
