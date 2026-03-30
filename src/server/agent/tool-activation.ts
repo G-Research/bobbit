@@ -136,14 +136,47 @@ ${toolRegistrations}
 }
 
 /**
+ * Generate an extension that registers MCP tools as stubs returning an error.
+ * The agent sees these tools exist but gets a clear error on invocation,
+ * which triggers the grant-permission UI flow.
+ */
+export function generateMcpStubExtension(
+	serverName: string,
+	tools: Array<{ name: string; bobbitName: string; description?: string; inputSchema: Record<string, unknown> }>,
+): string {
+	const toolRegistrations = tools.map(tool => {
+		const fullName = tool.bobbitName;
+		const schema = jsonSchemaToTypeBox(tool.inputSchema);
+		const desc = tool.description ? JSON.stringify(tool.description) : `"MCP tool ${tool.name} from ${serverName}"`;
+		return `
+  pi.registerTool({
+    name: ${JSON.stringify(fullName)},
+    description: ${desc},
+    parameters: ${schema},
+    execute: async (toolCallId, params) => {
+      return { content: [{ type: "text", text: "Error: Tool ${JSON.stringify(fullName)} is not allowed for your current role. Ask the user to grant permission." }], isError: true };
+    }
+  });`;
+	}).join('\n');
+
+	return `import { Type } from "@sinclair/typebox";
+
+export default function(pi) {
+${toolRegistrations}
+}
+`;
+}
+
+/**
  * Write proxy extension files for all connected MCP servers.
  * Returns array of written file paths.
  *
- * When `allowedTools` is provided and non-empty, only MCP tools whose
- * `bobbitName` appears in the list (case-insensitive) are included.
- * If a server has zero allowed tools after filtering, its extension file
- * is skipped entirely. Filtered extensions are written to a hash-based
- * subdirectory to avoid conflicts with other sessions.
+ * When `allowedTools` is provided and non-empty, allowed MCP tools get
+ * full proxy extensions while disallowed MCP tools get stub extensions
+ * that return an immediate error. This ensures the agent sees all MCP
+ * tools (so the grant-permission flow can trigger) but can only execute
+ * the ones in its allowedTools list. Filtered extensions are written to
+ * a hash-based subdirectory to avoid conflicts with other sessions.
  */
 export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[]): string[] {
 	const infos = mcpManager.getToolInfos();
@@ -170,17 +203,18 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 
 	const extensionPaths: string[] = [];
 
-	// Group tool infos by server
-	const byServer = new Map<string, typeof infos>();
+	// Group tool infos by server, separating allowed vs disallowed
+	const allowedByServer = new Map<string, typeof infos>();
+	const disallowedByServer = new Map<string, typeof infos>();
 	for (const info of infos) {
-		// Filter by allowedTools if restricting
-		if (allowedSet && !allowedSet.has(info.name.toLowerCase())) continue;
-
-		if (!byServer.has(info.serverName)) byServer.set(info.serverName, []);
-		byServer.get(info.serverName)!.push(info);
+		const isAllowed = !allowedSet || allowedSet.has(info.name.toLowerCase());
+		const target = isAllowed ? allowedByServer : disallowedByServer;
+		if (!target.has(info.serverName)) target.set(info.serverName, []);
+		target.get(info.serverName)!.push(info);
 	}
 
-	for (const [serverName, tools] of byServer) {
+	// Write full proxy extensions for allowed tools
+	for (const [serverName, tools] of allowedByServer) {
 		const toolDefs = tools.map(t => ({
 			name: t.mcpToolName,
 			bobbitName: t.name,
@@ -191,6 +225,27 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 		const filePath = path.join(extDir, `${serverName}.ts`);
 		fs.writeFileSync(filePath, code, "utf-8");
 		extensionPaths.push(filePath);
+	}
+
+	// Write stub extensions for disallowed tools (so the agent sees them
+	// and the grant-permission flow triggers on attempted use)
+	if (filtering) {
+		for (const [serverName, tools] of disallowedByServer) {
+			// Skip if this server already has a full proxy extension (mixed allowed/disallowed)
+			const stubFileName = allowedByServer.has(serverName)
+				? `${serverName}-denied.ts`
+				: `${serverName}.ts`;
+			const toolDefs = tools.map(t => ({
+				name: t.mcpToolName,
+				bobbitName: t.name,
+				description: t.description,
+				inputSchema: t.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
+			}));
+			const code = generateMcpStubExtension(serverName, toolDefs);
+			const filePath = path.join(extDir, stubFileName);
+			fs.writeFileSync(filePath, code, "utf-8");
+			extensionPaths.push(filePath);
+		}
 	}
 
 	return extensionPaths;
