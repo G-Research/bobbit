@@ -529,7 +529,8 @@ export class SessionManager {
 					const policy = resolveGrantPolicy(deniedToolName, mcpTool.group, role, this.toolManager);
 
 					if (policy === 'never-ask') {
-						// Guard: should not happen (stubs shouldn't exist for never-ask tools), but skip
+						// Guard: should not happen (stubs shouldn't exist for never-ask tools)
+						console.warn(`[session-manager] Unexpected denial for never-ask tool "${deniedToolName}" in session ${session.id}`);
 					} else {
 						// Mark as sent to prevent duplicate broadcasts from multiple detection paths
 						session.permissionBroadcastSent = true;
@@ -692,6 +693,21 @@ export class SessionManager {
 
 		if (newTools.length === 0) return role.allowedTools;
 
+		// Enforce never-ask policy: reject grants for tools explicitly marked as never-ask
+		if (this.toolManager) {
+			const filtered = newTools.filter(t => {
+				const mcpInfo = this.mcpManager?.getToolInfos().find(i => i.name === t);
+				const policy = resolveGrantPolicy(t, mcpInfo?.group, role, this.toolManager!);
+				return policy !== 'never-ask';
+			});
+			if (filtered.length === 0) {
+				console.warn(`[session-manager] Grant rejected: all requested tools have never-ask policy`);
+				return role.allowedTools;
+			}
+			newTools.length = 0;
+			newTools.push(...filtered);
+		}
+
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
@@ -716,7 +732,7 @@ export class SessionManager {
 			// tool_permission_needed message includes lastPromptText, and
 			// the client re-sends it after receiving the session_status: idle
 			// broadcast from the restart.
-			return role.allowedTools;
+			return updatedTools;
 		}
 	}
 
