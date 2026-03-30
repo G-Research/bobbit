@@ -3180,6 +3180,20 @@ async function handleApiRoute(
 				json({ error: "Missing 'tool' field" }, 400);
 				return;
 			}
+
+			// Enforce allowedTools for the calling session
+			const mcpSessionId = req.headers["x-bobbit-session-id"] as string | undefined;
+			if (mcpSessionId) {
+				const mcpSession = sessionManager.getSession(mcpSessionId);
+				if (mcpSession?.allowedTools && mcpSession.allowedTools.length > 0) {
+					const toolLower = (tool as string).toLowerCase();
+					if (!mcpSession.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
+						json({ error: `Tool "${tool}" is not allowed for this session` }, 403);
+						return;
+					}
+				}
+			}
+
 			const result = await mcpManager.callTool(tool, args || {});
 			json(result);
 		} catch (err) {

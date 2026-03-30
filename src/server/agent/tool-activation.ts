@@ -13,6 +13,7 @@
  */
 
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
@@ -160,7 +161,7 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 		// Collect only the MCP tool names from allowedTools for the hash
 		const mcpAllowed = allowedTools!.filter(t => t.toLowerCase().startsWith("mcp__")).sort();
 		const hashInput = mcpAllowed.join(",").toLowerCase();
-		const hash = crypto.createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
+		const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
 		extDir = path.join(baseExtDir, hash);
 	} else {
 		extDir = baseExtDir;

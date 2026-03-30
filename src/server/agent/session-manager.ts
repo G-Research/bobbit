@@ -790,7 +790,7 @@ export class SessionManager {
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
 			if (role && role.allowedTools.length > 0) {
-				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools) : undefined;
 				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, ps.cwd, mcpExtPaths);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
@@ -1132,7 +1132,7 @@ export class SessionManager {
 
 		// Apply tool activation args based on allowedTools (controls --tools and --extension flags)
 		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowedTools) : undefined;
 			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
@@ -1316,7 +1316,7 @@ export class SessionManager {
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 
 		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowedTools) : undefined;
 			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
@@ -1963,7 +1963,7 @@ export class SessionManager {
 
 		// Apply tool activation args based on role's allowedTools
 		if (role.allowedTools.length > 0) {
-			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools) : undefined;
 			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
@@ -2102,7 +2102,7 @@ export class SessionManager {
 		if (session.role && this.roleManager) {
 			const role = this.roleManager.getRole(session.role);
 			if (role && role.allowedTools.length > 0) {
-				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools) : undefined;
 				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
@@ -2594,7 +2594,7 @@ export class SessionManager {
 			if (session.role && this.roleManager) {
 				const role = this.roleManager.getRole(session.role);
 				if (role && role.allowedTools.length > 0) {
-					const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager) : undefined;
+					const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools) : undefined;
 					const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
 					bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
 				} else if (this.mcpManager) {
