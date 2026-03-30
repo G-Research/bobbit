@@ -27,6 +27,7 @@ import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 import { createWorktree } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { SandboxProxy } from "./sandbox-proxy.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -141,6 +142,7 @@ export class SessionManager {
 	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private mcpManager: McpManager | null = null;
+	private sandboxProxy: SandboxProxy | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
@@ -162,6 +164,15 @@ export class SessionManager {
 		this.projectConfigStore = options?.projectConfigStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
+	}
+
+	/** Ensure a SandboxProxy is running with the given allowlist. Returns the port. */
+	private async ensureSandboxProxy(allowlist: string[]): Promise<number> {
+		if (this.sandboxProxy && this.sandboxProxy.port > 0) {
+			return this.sandboxProxy.port;
+		}
+		this.sandboxProxy = new SandboxProxy(allowlist);
+		return this.sandboxProxy.start();
 	}
 
 	getCostTracker(): CostTracker {
@@ -1117,7 +1128,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean }): Promise<SessionInfo> {
 		const id = randomUUID();
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
@@ -1300,6 +1311,56 @@ export class SessionManager {
 			}
 		}
 
+		// ── Docker sandbox wiring ──
+		if (opts?.sandboxed && this.projectConfigStore) {
+			const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
+			if (sandboxConfig === "docker") {
+				const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
+				const allowlistRaw = this.projectConfigStore.get("sandbox_network_allowlist") || "";
+				const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
+				const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
+
+				let networkAllowlist: string[] = [];
+				try { networkAllowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch { /* ignore */ }
+
+				let credentials: Record<string, string> = {};
+				try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
+
+				let mounts: string[] = [];
+				try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
+
+				// Validate mounts
+				const validatedMounts = mounts.filter(m => {
+					const src = m.split(":")[0];
+					if (src.includes("..")) { console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`); return false; }
+					if (src.startsWith("~") || src.startsWith("$HOME")) { console.warn(`[session-manager] Rejecting sandbox mount with home dir: ${m}`); return false; }
+					const sensitivePatterns = ["/.ssh", "/.aws", "/.gnupg", "/.config"];
+					for (const pat of sensitivePatterns) {
+						if (src.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
+					}
+					return true;
+				});
+
+				// Start/reuse sandbox proxy if allowlist is non-empty
+				let proxyPort: number | undefined;
+				if (networkAllowlist.length > 0) {
+					proxyPort = await this.ensureSandboxProxy(networkAllowlist);
+				}
+
+				// Read gateway URL and token for the container
+				const gatewayUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+				const gatewayToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+
+				bridgeOptions.sandboxed = true;
+				bridgeOptions.sandboxImage = sandboxImage;
+				bridgeOptions.sandboxCredentials = credentials;
+				bridgeOptions.sandboxMounts = validatedMounts;
+				bridgeOptions.gatewayUrl = gatewayUrl;
+				bridgeOptions.gatewayToken = gatewayToken;
+				if (proxyPort) bridgeOptions.sandboxProxyPort = proxyPort;
+			}
+		}
+
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 
@@ -1324,6 +1385,11 @@ export class SessionManager {
 			allowedTools: effectiveAllowedTools ?? opts?.allowedTools,
 			promptQueue: new PromptQueue(),
 		};
+
+		// Persist sandboxed flag on session metadata
+		if (opts?.sandboxed) {
+			this.store.update(id, { sandboxed: true });
+		}
 
 		// Auto-assign task to this session
 		if (opts?.taskId) {
@@ -1824,6 +1890,7 @@ export class SessionManager {
 			nonInteractive: session.nonInteractive,
 			preview: session.preview,
 			personalities: session.personalities,
+			sandboxed: existing?.sandboxed,
 		});
 	}
 

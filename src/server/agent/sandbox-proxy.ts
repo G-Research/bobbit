@@ -33,7 +33,7 @@ export class SandboxProxy {
 				this.handleRequest(req, res);
 			});
 
-			server.on("connect", (req, clientSocket, head) => {
+			server.on("connect", (req, clientSocket: net.Socket, head) => {
 				this.handleConnect(req, clientSocket, head);
 			});
 
