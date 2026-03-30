@@ -487,11 +487,13 @@ export class SessionManager {
 		// Two detection paths:
 		// 1. tool_execution_end with isError (if the runtime propagates it)
 		// 2. message_end with toolResult containing our sentinel error text
-		if (session.role && this.mcpManager) {
+		if (this.mcpManager) {
 			let deniedToolName: string | undefined;
 
-			if (event.type === "tool_execution_end" && event.isError && event.toolName) {
-				deniedToolName = event.toolName;
+			if (event.type === "tool_execution_end") {
+				if (event.isError && event.toolName) {
+					deniedToolName = event.toolName;
+				}
 			}
 
 			if (event.type === "message_end" && event.message?.role === "toolResult") {
@@ -508,16 +510,21 @@ export class SessionManager {
 				const mcpInfos = this.mcpManager.getToolInfos();
 				const mcpTool = mcpInfos.find(t => t.name === deniedToolName);
 				if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === deniedToolName!.toLowerCase())) {
-					const role = this.roleManager?.getRole(session.role);
-					if (role) {
-						broadcast(session.clients, {
-							type: "tool_permission_needed",
-							toolName: mcpTool.name,
-							group: mcpTool.group,
-							roleName: role.name,
-							roleLabel: role.label,
-						});
-					}
+					// Use explicit role or fall back to "general" (implicit default)
+					const roleName = session.role || "general";
+					const role = this.roleManager?.getRole(roleName);
+					broadcast(session.clients, {
+						type: "tool_permission_needed",
+						toolName: mcpTool.name,
+						group: mcpTool.group,
+						roleName: role?.name ?? roleName,
+						roleLabel: role?.label ?? roleName,
+					});
+				} else {
+					console.warn(
+						`[session-manager] MCP tool denial detected for "${deniedToolName}" in session ${session.id} ` +
+						`but grant not triggered: mcpTool=${!!mcpTool}, allowedTools=${JSON.stringify(session.allowedTools?.slice(0, 5))}, role=${session.role}`
+					);
 				}
 			}
 		}
@@ -620,10 +627,12 @@ export class SessionManager {
 	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string): Promise<string[]> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
-		if (!session.role || !this.roleManager) throw new Error("Session has no role");
+		if (!this.roleManager) throw new Error("No role manager available");
 
-		const role = this.roleManager.getRole(session.role);
-		if (!role) throw new Error(`Role "${session.role}" not found`);
+		// Use explicit role, or fall back to "general" role (implicit default for all sessions)
+		const roleName = session.role || "general";
+		const role = this.roleManager.getRole(roleName);
+		if (!role) throw new Error(`Role "${roleName}" not found`);
 
 		const newTools: string[] = [];
 		if (scope === "group" && group && this.mcpManager) {

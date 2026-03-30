@@ -38,6 +38,12 @@ function extractFilePath(text) {
 function respondToPrompt(text) {
 	const lower = text.toLowerCase();
 
+	// Detect TOOL_DENIED:<toolName> pattern — emit tool denial events for permission testing
+	const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
+	if (toolDeniedMatch) {
+		return { toolDenied: toolDeniedMatch[1] };
+	}
+
 	// Detect tool requests by keywords
 	if (lower.includes("bash") || lower.includes("echo ")) {
 		return { tool: "Bash", input: { command: "echo BOBBIT_TOOL_TEST_OK_12345" }, output: "BOBBIT_TOOL_TEST_OK_12345\n" };
@@ -94,7 +100,44 @@ async function handlePrompt(requestId, text) {
 
 	const toolAction = respondToPrompt(text);
 
-	if (toolAction) {
+	if (toolAction && toolAction.toolDenied) {
+		// Simulate a tool permission denial — emit the events that a real agent
+		// would produce when executing a stub extension for an ungranted MCP tool.
+		const deniedTool = toolAction.toolDenied;
+		const toolId = `tool_${Date.now()}`;
+
+		// Tool execution start (the agent attempted the tool)
+		emit({
+			type: "tool_execution_start",
+			toolName: deniedTool,
+			toolId,
+			input: {},
+		});
+
+		// Tool execution end with error
+		emit({
+			type: "tool_execution_end",
+			toolId,
+			toolName: deniedTool,
+			isError: true,
+		});
+
+		// toolResult message_end with the sentinel error text
+		const toolResultMsg = {
+			role: "toolResult",
+			content: [{ type: "text", text: `Error: Tool ${deniedTool} is not allowed for your current role. Ask the user to grant permission.` }],
+		};
+		conversationMessages.push(toolResultMsg);
+		emit({ type: "message_end", message: toolResultMsg });
+
+		// Assistant acknowledges the denial
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: `I tried to use ${deniedTool} but it is not allowed. Please grant permission.` }],
+		};
+		conversationMessages.push(assistantMsg);
+		emit({ type: "message_end", message: assistantMsg });
+	} else if (toolAction) {
 		const toolId = `tool_${Date.now()}`;
 
 		// Tool execution start
