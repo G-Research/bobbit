@@ -1,6 +1,5 @@
 /* ============================================================================
  * TOOL MANAGER PAGE
- * Mirrors role-manager.css with .tools-* prefix
  * ============================================================================ */
 
 .tools-container {
@@ -20,7 +19,7 @@
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: 12px 20px;
+	padding: 10px 20px;
 	border-bottom: 1px solid var(--border);
 	background: var(--background);
 	position: sticky;
@@ -68,7 +67,7 @@
 }
 
 .tools-title {
-	font-size: 16px;
+	font-size: 15px;
 	font-weight: 600;
 	margin: 0;
 	white-space: nowrap;
@@ -77,7 +76,7 @@
 }
 
 .tools-breadcrumb {
-	font-size: 14px;
+	font-size: 13px;
 	color: var(--muted-foreground);
 	cursor: pointer;
 	transition: color 150ms;
@@ -88,7 +87,7 @@
 }
 
 .tools-breadcrumb-sep {
-	font-size: 14px;
+	font-size: 13px;
 	color: var(--muted-foreground);
 	flex-shrink: 0;
 }
@@ -101,7 +100,7 @@
 	flex: 1;
 	min-height: 0;
 	overflow-y: auto;
-	padding: 20px;
+	padding: 16px 20px;
 }
 
 .tools-body:has(.tools-edit) {
@@ -222,7 +221,6 @@
 	white-space: nowrap;
 }
 
-/* Row action buttons */
 .tool-row-actions {
 	display: flex;
 	gap: 4px;
@@ -263,13 +261,61 @@
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
-	gap: 16px;
-	max-width: 700px;
+	gap: 0;
+	max-width: 680px;
 	margin: 0 auto;
 	width: 100%;
 }
 
-/* Tab bar */
+/* ── Identity section — compact inline rows ── */
+
+.tools-identity-section {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding-bottom: 12px;
+}
+
+.tools-identity-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.tools-field-label {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--muted-foreground);
+	flex-shrink: 0;
+}
+
+.tools-field-readonly {
+	font-size: 13px;
+	font-family: var(--font-mono, monospace);
+	color: var(--muted-foreground);
+	padding: 5px 8px;
+	background: var(--secondary);
+	border-radius: 6px;
+	border: 1px solid var(--border);
+}
+
+.tools-input {
+	padding: 5px 8px;
+	font-size: 13px;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--background);
+	color: var(--foreground);
+	outline: none;
+	flex: 1;
+	min-width: 0;
+}
+.tools-input:focus {
+	border-color: var(--ring);
+}
+
+/* ── Tab bar ── */
+
 .tools-tab-bar {
 	display: flex;
 	gap: 0;
@@ -277,8 +323,8 @@
 }
 
 .tools-tab {
-	padding: 8px 16px;
-	font-size: 13px;
+	padding: 7px 14px;
+	font-size: 12px;
 	font-weight: 500;
 	color: var(--muted-foreground);
 	background: none;
@@ -293,21 +339,25 @@
 }
 .tools-tab--active {
 	color: var(--foreground);
-	border-bottom-color: var(--foreground);
+	border-bottom-color: var(--primary);
 }
 
-/* Tab content */
+/* ── Tab content ── */
+
 .tools-tab-content {
 	display: flex;
 	flex-direction: column;
-	gap: 16px;
+	gap: 14px;
+	padding-top: 14px;
 	flex: 1;
 }
+
+/* ── Sections ── */
 
 .tools-section {
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 6px;
 }
 
 .tools-section-title {
@@ -326,39 +376,60 @@
 	line-height: 1.4;
 }
 
-/* Form fields */
-.tools-identity-row {
-	display: flex;
-	gap: 12px;
-	align-items: flex-start;
-}
+/* ── Access list (shared by default policy + role rows) ── */
 
-.tools-field {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-}
-
-.tools-field-label {
-	font-size: 12px;
-	color: var(--muted-foreground);
-}
-
-.tools-field-readonly {
-	font-size: 13px;
-	font-family: var(--font-mono, monospace);
-	color: var(--muted-foreground);
-	padding: 8px 12px;
-	background: var(--secondary);
-	border-radius: 6px;
+.tools-access-list {
 	border: 1px solid var(--border);
+	border-radius: 8px;
+	overflow: hidden;
+	max-width: 460px;
 }
+
+.tools-access-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 12px;
+	transition: background 120ms;
+}
+.tools-access-row + .tools-access-row {
+	border-top: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+}
+.tools-access-row:hover {
+	background: color-mix(in oklch, var(--secondary) 50%, transparent);
+}
+
+.tools-access-row-label {
+	font-size: 12px;
+	font-weight: 500;
+	width: 90px;
+	flex-shrink: 0;
+}
+
+.tools-access-row-select {
+	width: 180px !important;
+	flex-shrink: 0;
+	font-size: 12px !important;
+	padding: 3px 6px !important;
+	padding-right: 22px !important;
+	background-position: right 6px center !important;
+}
+
+.tools-access-row-hint {
+	font-size: 11px;
+	color: var(--muted-foreground);
+	font-style: italic;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+/* ── Docs textarea ── */
 
 .tools-docs-editor {
 	width: 100%;
 	min-height: 180px;
 	flex: 1;
-	padding: 12px;
+	padding: 10px;
 	border-radius: 6px;
 	border: 1px solid var(--border);
 	background: var(--background);
@@ -374,25 +445,21 @@
 	border-color: var(--ring);
 }
 
-/* Renderer card */
-.tools-renderer-card {
+/* ── Renderer ── */
+
+.tools-renderer-card-inline {
 	border: 1px solid var(--border);
 	border-radius: 8px;
-	padding: 12px;
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-}
-
-.tools-renderer-status {
+	padding: 10px 12px;
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	max-width: 400px;
 }
 
 .tools-renderer-dot {
-	width: 8px;
-	height: 8px;
+	width: 7px;
+	height: 7px;
 	border-radius: 50%;
 	flex-shrink: 0;
 }
@@ -416,71 +483,52 @@
 	word-break: break-all;
 }
 
-/* Role access list */
-.tools-role-list {
+.tools-renderer-preview {
 	display: flex;
 	flex-direction: column;
-	gap: 0;
+	gap: 8px;
+}
+
+.tools-renderer-preview-label {
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--muted-foreground);
+}
+
+.tools-renderer-preview-box {
+	padding: 8px 10px;
+	background: var(--background);
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: 6px;
+	font-size: 13px;
 	overflow: hidden;
 }
 
-.tools-role-row {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding: 8px 12px;
-	transition: background 120ms;
+/* ============================================================================
+ * SELECT (styled)
+ * ============================================================================ */
+
+.tools-select {
+	width: 100%;
+	padding: 5px 8px;
+	border-radius: 6px;
+	border: 1px solid var(--border);
+	background: var(--background);
+	color: var(--foreground);
+	font-size: 13px;
+	outline: none;
 	cursor: pointer;
-	text-decoration: none;
-	color: inherit;
-}
-.tools-role-row--policy {
-	cursor: default;
-}
-.tools-role-row + .tools-role-row {
-	border-top: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
-}
-.tools-role-row:hover {
-	background: color-mix(in oklch, var(--secondary) 50%, transparent);
-}
-.tools-info-icon {
-	color: var(--muted-foreground);
-	cursor: help;
-	display: inline-flex;
-	opacity: 0.6;
-	transition: opacity 150ms;
-}
-.tools-info-icon:hover {
-	opacity: 1;
-}
-.tools-select--sm {
-	padding: 4px 8px;
-	font-size: 11px;
+	transition: border-color 150ms;
+	appearance: none;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 8px center;
 	padding-right: 26px;
-	background-position: right 6px center;
 }
-
-.tools-role-name {
-	font-size: 12px;
-	font-weight: 500;
-	flex: 1;
-}
-
-.tools-role-badge {
-	font-size: 10px;
-	padding: 2px 8px;
-	border-radius: 10px;
-	font-weight: 500;
-}
-.tools-role-badge--allowed {
-	background: color-mix(in oklch, #22c55e 12%, transparent);
-	color: #22c55e;
-}
-.tools-role-badge--restricted {
-	background: color-mix(in oklch, var(--muted-foreground) 12%, transparent);
-	color: var(--muted-foreground);
+.tools-select:focus {
+	border-color: var(--ring);
 }
 
 /* ============================================================================
@@ -523,31 +571,6 @@
 }
 
 /* ============================================================================
- * SELECT (styled)
- * ============================================================================ */
-
-.tools-select {
-	width: 100%;
-	padding: 8px 12px;
-	border-radius: 6px;
-	border: 1px solid var(--border);
-	background: var(--background);
-	color: var(--foreground);
-	font-size: 13px;
-	outline: none;
-	cursor: pointer;
-	transition: border-color 150ms;
-	appearance: none;
-	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-	background-repeat: no-repeat;
-	background-position: right 10px center;
-	padding-right: 30px;
-}
-.tools-select:focus {
-	border-color: var(--ring);
-}
-
-/* ============================================================================
  * RESPONSIVE
  * ============================================================================ */
 
@@ -572,32 +595,4 @@
 	.tools-edit-main {
 		max-width: none;
 	}
-}
-
-/* ============================================================================
- * RENDERER PREVIEW
- * ============================================================================ */
-
-.tools-renderer-preview {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-	margin-top: 12px;
-}
-
-.tools-renderer-preview-label {
-	font-size: 10px;
-	font-weight: 600;
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	color: var(--muted-foreground);
-}
-
-.tools-renderer-preview-box {
-	padding: 10px;
-	background: var(--background);
-	border: 1px solid var(--border);
-	border-radius: 6px;
-	font-size: 13px;
-	overflow: hidden;
 }

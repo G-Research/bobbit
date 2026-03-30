@@ -1,6 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
 import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
@@ -191,7 +190,7 @@ let editDetailDocs = "";
 let editGrantPolicy = "";
 let saving = false;
 let collapsedGroups = new Set<string>();
-let editTab: "access" | "docs" = "access";
+let editTab: "access" | "context" | "renderer" = "access";
 
 // ============================================================================
 // POLICY HELPERS
@@ -299,6 +298,21 @@ function showEdit(tool: ToolInfo): void {
 	editTab = "access";
 	saving = false;
 	setHashRoute("tool-edit", tool.name);
+}
+
+/** Shared access-row template used by both default policy and role rows */
+function renderAccessRow(label: string, selectValue: string, onChangeSelect: (val: string) => void, options: { value: string; label: string }[], hint?: string): TemplateResult {
+	return html`
+		<div class="tools-access-row">
+			<span class="tools-access-row-label">${label}</span>
+			<select class="tools-select tools-access-row-select"
+				.value=${selectValue}
+				@change=${(e: Event) => onChangeSelect((e.target as HTMLSelectElement).value)}>
+				${options.map(o => html`<option value=${o.value} ?selected=${selectValue === o.value}>${o.label}</option>`)}
+			</select>
+			<span class="tools-access-row-hint">${hint ? html`\u2192 ${hint}` : nothing}</span>
+		</div>
+	`;
 }
 
 /** Called by the main router when navigating to #/tools/:name */
@@ -591,6 +605,22 @@ function renderListView(): TemplateResult {
 // RENDER: EDIT VIEW
 // ============================================================================
 
+const POLICY_OPTIONS = [
+	{ value: "", label: "Use group default" },
+	{ value: "always-allow", label: "Always Allow" },
+	{ value: "ask-once", label: "Ask Once Per Session" },
+	{ value: "always-ask", label: "Ask Every Time" },
+	{ value: "never-ask", label: "Never (Hidden)" },
+];
+
+const ROLE_POLICY_OPTIONS = [
+	{ value: "", label: "Use default" },
+	{ value: "always-allow", label: "Always Allow" },
+	{ value: "ask-once", label: "Ask Once" },
+	{ value: "always-ask", label: "Always Ask" },
+	{ value: "never-ask", label: "Never" },
+];
+
 function renderAccessTab(): TemplateResult {
 	if (!selectedTool) return html``;
 
@@ -604,57 +634,40 @@ function renderAccessTab(): TemplateResult {
 		<div class="tools-section">
 			<h2 class="tools-section-title">Default Grant Policy</h2>
 			<p class="tools-note">Controls what happens when an agent uses this tool without explicit role permission.</p>
-			<select class="tools-select" style="max-width:360px"
-				.value=${editGrantPolicy}
-				@change=${(e: Event) => { editGrantPolicy = (e.target as HTMLSelectElement).value; renderApp(); }}>
-				<option value="" ?selected=${!editGrantPolicy}>Use group default</option>
-				<option value="always-allow" ?selected=${editGrantPolicy === "always-allow"}>Always Allow</option>
-				<option value="ask-once" ?selected=${editGrantPolicy === "ask-once"}>Ask Once Per Session</option>
-				<option value="always-ask" ?selected=${editGrantPolicy === "always-ask"}>Ask Every Time</option>
-				<option value="never-ask" ?selected=${editGrantPolicy === "never-ask"}>Never (Hidden)</option>
-			</select>
-			${!editGrantPolicy ? html`<p class="tools-note" style="margin-top:4px;font-style:italic;">\u2192 ${groupDefaultLabel} (from group)</p>` : nothing}
+			<div class="tools-access-list">
+				${renderAccessRow(
+					"Default",
+					editGrantPolicy,
+					(val) => { editGrantPolicy = val; renderApp(); },
+					POLICY_OPTIONS,
+					!editGrantPolicy ? `${groupDefaultLabel} (from group)` : undefined,
+				)}
+			</div>
 		</div>
 
 		<!-- Role Access -->
 		<div class="tools-section">
 			<h2 class="tools-section-title">Role Access</h2>
-			<p class="tools-note">Per-role policy overrides for this tool.</p>
 			${roles.length > 0 ? html`
-				<div class="tools-role-list" style="max-width:480px">
+				<div class="tools-access-list">
 					${roles.map((role) => {
 						const rolePolicy = role.toolPolicies?.[toolName] || "";
 						const effective = resolveEffectivePolicy(toolName, toolGroup, role.toolPolicies);
 						const effectiveLabel = POLICY_LABELS[effective] || effective;
 						const source = policySource(toolName, toolGroup, role.toolPolicies);
-						return html`
-							<div class="tools-role-row" style="flex-direction:column;align-items:stretch;gap:4px;cursor:default;">
-								<span class="tools-role-name">${role.label}</span>
-								<div style="display:flex;align-items:center;gap:6px;">
-									<select class="tools-select" style="flex:1;font-size:12px;padding:2px 4px;"
-										.value=${rolePolicy}
-										@change=${async (e: Event) => {
-											const val = (e.target as HTMLSelectElement).value;
-											const updated = { ...(role.toolPolicies || {}) };
-											if (val) {
-												updated[toolName] = val;
-											} else {
-												delete updated[toolName];
-											}
-											await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
-											roles = await fetchRoles();
-											renderApp();
-										}}>
-										<option value="" ?selected=${!rolePolicy}>Use default</option>
-										<option value="always-allow" ?selected=${rolePolicy === "always-allow"}>Always Allow</option>
-										<option value="ask-once" ?selected=${rolePolicy === "ask-once"}>Ask Once Per Session</option>
-										<option value="always-ask" ?selected=${rolePolicy === "always-ask"}>Ask Every Time</option>
-										<option value="never-ask" ?selected=${rolePolicy === "never-ask"}>Never (Hidden)</option>
-									</select>
-								</div>
-								${!rolePolicy ? html`<span style="font-size:11px;color:var(--muted-foreground);font-style:italic;">\u2192 ${effectiveLabel} (${source})</span>` : nothing}
-							</div>
-						`;
+						return renderAccessRow(
+							role.label,
+							rolePolicy,
+							async (val) => {
+								const updated = { ...(role.toolPolicies || {}) };
+								if (val) { updated[toolName] = val; } else { delete updated[toolName]; }
+								await updateRole(role.name, { toolPolicies: Object.keys(updated).length > 0 ? updated : {} });
+								roles = await fetchRoles();
+								renderApp();
+							},
+							ROLE_POLICY_OPTIONS,
+							!rolePolicy ? `${effectiveLabel} (${source})` : undefined,
+						);
 					})}
 				</div>
 			` : html`<p class="tools-note">No roles defined yet.</p>`}
@@ -662,13 +675,13 @@ function renderAccessTab(): TemplateResult {
 	`;
 }
 
-function renderDocsTab(): TemplateResult {
+function renderContextTab(): TemplateResult {
 	if (!selectedTool) return html``;
 
 	return html`
 		<div class="tools-section">
 			<h2 class="tools-section-title">Prompt Documentation</h2>
-			<p class="tools-note">Injected into every agent's system prompt. Keep this brief — critical notes and gotchas only. The model already knows tool names, descriptions, and parameter schemas.</p>
+			<p class="tools-note">Injected into every agent's system prompt. Keep brief — critical notes and gotchas only.</p>
 			<textarea
 				class="tools-docs-editor"
 				style="min-height:120px"
@@ -679,7 +692,7 @@ function renderDocsTab(): TemplateResult {
 		</div>
 		<div class="tools-section" style="flex:1;display:flex;flex-direction:column;">
 			<h2 class="tools-section-title">Detailed Documentation</h2>
-			<p class="tools-note">Full reference — examples, edge cases, parameter descriptions. Agents can read this on demand from the YAML file; it is NOT injected into prompts.</p>
+			<p class="tools-note">Full reference — examples, edge cases. Agents read on demand; NOT injected into prompts.</p>
 			<textarea
 				class="tools-docs-editor"
 				.value=${editDetailDocs}
@@ -687,22 +700,35 @@ function renderDocsTab(): TemplateResult {
 				@input=${(e: Event) => { editDetailDocs = (e.target as HTMLTextAreaElement).value; renderApp(); }}
 			></textarea>
 		</div>
+	`;
+}
 
-		<!-- Renderer info -->
+function renderRendererTab(): TemplateResult {
+	if (!selectedTool) return html``;
+
+	return html`
 		<div class="tools-section">
-			<h2 class="tools-section-title">Renderer</h2>
-			<div class="tools-renderer-card" style="max-width:480px">
-				<div class="tools-renderer-status">
-					<span class="tools-renderer-dot ${selectedTool.hasRenderer ? "tools-renderer-dot--custom" : "tools-renderer-dot--default"}"></span>
-					<span class="tools-renderer-label">${selectedTool.hasRenderer ? "Custom renderer" : "Default renderer"}</span>
-				</div>
+			<div class="tools-renderer-card-inline">
+				<span class="tools-renderer-dot ${selectedTool.hasRenderer ? "tools-renderer-dot--custom" : "tools-renderer-dot--default"}"></span>
+				<span class="tools-renderer-label">${selectedTool.hasRenderer ? "Custom renderer" : "Default renderer"}</span>
 				${selectedTool.rendererFile
-					? html`<span class="tools-renderer-path">${selectedTool.rendererFile}</span>`
+					? html`<span class="tools-renderer-path" style="margin-left:auto;">${selectedTool.rendererFile}</span>`
 					: nothing}
 			</div>
+		</div>
+		<div class="tools-section">
+			<h2 class="tools-section-title">Preview</h2>
 			${renderRendererPreview(selectedTool.name)}
 		</div>
 	`;
+}
+
+function renderActiveTab(): TemplateResult {
+	switch (editTab) {
+		case "access": return renderAccessTab();
+		case "context": return renderContextTab();
+		case "renderer": return renderRendererTab();
+	}
 }
 
 function renderEditView(): TemplateResult {
@@ -711,29 +737,24 @@ function renderEditView(): TemplateResult {
 	return html`
 		<div class="tools-edit">
 			<div class="tools-edit-main">
-				<div class="tools-section">
-					<h2 class="tools-section-title">Identity</h2>
+				<!-- Compact identity rows -->
+				<div class="tools-identity-section">
 					<div class="tools-identity-row">
-						<div class="tools-field">
-							<label class="tools-field-label">Name</label>
-							<div class="tools-field-readonly">${selectedTool.name}</div>
-						</div>
-						<div class="tools-field" style="flex:1;min-width:0">
-							<label class="tools-field-label">Description</label>
-							${Input({
-								value: editDescription,
-								placeholder: "Short description of what this tool does",
-								onInput: (e: Event) => { editDescription = (e.target as HTMLInputElement).value; renderApp(); },
-							})}
-						</div>
-					</div>
-					<div class="tools-field">
-						<label class="tools-field-label">Group</label>
-						<select class="tools-select" style="max-width:240px"
+						<label class="tools-field-label">Name</label>
+						<div class="tools-field-readonly">${selectedTool.name}</div>
+						<label class="tools-field-label" style="margin-left:8px;">Group</label>
+						<select class="tools-select" style="width:auto"
 							.value=${editGroup}
 							@change=${(e: Event) => { editGroup = (e.target as HTMLSelectElement).value; renderApp(); }}>
 							${TOOL_GROUPS.map((g) => html`<option value=${g} ?selected=${editGroup === g}>${g}</option>`)}
 						</select>
+					</div>
+					<div class="tools-identity-row">
+						<label class="tools-field-label">Description</label>
+						<input class="tools-input"
+							.value=${editDescription}
+							placeholder="Short description of what this tool does"
+							@input=${(e: Event) => { editDescription = (e.target as HTMLInputElement).value; renderApp(); }} />
 					</div>
 				</div>
 
@@ -741,13 +762,15 @@ function renderEditView(): TemplateResult {
 				<div class="tools-tab-bar">
 					<button class="tools-tab ${editTab === "access" ? "tools-tab--active" : ""}"
 						@click=${() => { editTab = "access"; renderApp(); }}>Access</button>
-					<button class="tools-tab ${editTab === "docs" ? "tools-tab--active" : ""}"
-						@click=${() => { editTab = "docs"; renderApp(); }}>Docs</button>
+					<button class="tools-tab ${editTab === "context" ? "tools-tab--active" : ""}"
+						@click=${() => { editTab = "context"; renderApp(); }}>Context</button>
+					<button class="tools-tab ${editTab === "renderer" ? "tools-tab--active" : ""}"
+						@click=${() => { editTab = "renderer"; renderApp(); }}>Renderer</button>
 				</div>
 
 				<!-- Tab content -->
 				<div class="tools-tab-content">
-					${editTab === "access" ? renderAccessTab() : renderDocsTab()}
+					${renderActiveTab()}
 				</div>
 			</div>
 		</div>
