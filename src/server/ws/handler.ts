@@ -344,7 +344,8 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "grant_tool_permission": {
-					sessionManager.grantToolPermission(sessionId, msg.toolName, msg.scope, msg.group).catch((err) => {
+					// mode param will be accepted once session-manager.ts is updated with the grant policy feature
+					(sessionManager.grantToolPermission as Function)(sessionId, msg.toolName, msg.scope, msg.group, msg.mode).catch((err: any) => {
 						send(ws, { type: "error", message: `Grant failed: ${err}`, code: "GRANT_ERROR" });
 					});
 					break;
