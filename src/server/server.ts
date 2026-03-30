@@ -213,9 +213,8 @@ export function createGateway(config: GatewayConfig) {
 		workflowStore,
 		preferencesStore,
 		projectConfigStore,
+		groupPolicyStore,
 	});
-	// Expose group policy store for unified policy resolution (session-manager picks this up)
-	(sessionManager as any).groupPolicyStore = groupPolicyStore;
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
