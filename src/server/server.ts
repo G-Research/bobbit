@@ -1418,7 +1418,17 @@ async function handleApiRoute(
 				promptTemplate: body.promptTemplate,
 				allowedTools: body.allowedTools,
 				accessory: body.accessory,
-				toolPolicies: body.toolPolicies,
+				toolPolicies: body.toolPolicies !== undefined ? (() => {
+					// Validate toolPolicies values
+					const validPolicies = new Set(['always-allow', 'ask-once', 'always-ask', 'never-ask', 'never']);
+					const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
+					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
+						for (const [k, v] of Object.entries(body.toolPolicies)) {
+							if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v as import("./agent/role-store.js").GrantPolicy;
+						}
+					}
+					return cleaned;
+				})() : undefined,
 			});
 			if (!ok) { json({ error: "Role not found" }, 404); return; }
 			json({ ok: true });
