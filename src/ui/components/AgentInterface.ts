@@ -826,6 +826,8 @@ export class AgentInterface extends LitElement {
 								></bg-process-pill>
 							`)}
 							${this.gitStatus || this.gitStatusLoading ? html`<git-status-widget
+								.sessionId=${this.session?.sessionId ?? ''}
+								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}
 								.primaryBranch=${this.gitStatus?.primaryBranch ?? 'master'}
 								.isOnPrimary=${this.gitStatus?.isOnPrimary ?? true}
