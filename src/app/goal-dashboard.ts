@@ -69,6 +69,12 @@ interface GoalGitStatus {
 	aheadOfPrimary: number;
 	behindPrimary: number;
 	mergedIntoPrimary: boolean;
+	hasUpstream?: boolean;
+	ahead?: number;
+	behind?: number;
+	unpushed?: boolean;
+	status?: Array<{ file: string; status: string }>;
+	summary?: string;
 }
 let gitStatus: GoalGitStatus | null = null;
 
@@ -1079,18 +1085,21 @@ function renderMetaRows(goal: Goal): TemplateResult {
 			${branch || gs ? html`
 				<div class="meta-row dashboard-git-row">
 					<git-status-widget
+						.goalId=${goal.id}
+						.token=${localStorage.getItem("gateway.token") || ""}
 						.branch=${gs?.branch ?? branch}
 						.primaryBranch=${gs?.primaryBranch ?? "master"}
 						.isOnPrimary=${gs?.isOnPrimary ?? false}
+						.summary=${gs?.summary ?? ''}
 						.clean=${gs?.clean ?? true}
-						.hasUpstream=${true}
-						.ahead=${0}
-						.behind=${0}
+						.hasUpstream=${gs?.hasUpstream ?? true}
+						.ahead=${gs?.ahead ?? 0}
+						.behind=${gs?.behind ?? 0}
 						.aheadOfPrimary=${gs?.aheadOfPrimary ?? 0}
 						.behindPrimary=${gs?.behindPrimary ?? 0}
 						.mergedIntoPrimary=${gs?.mergedIntoPrimary ?? false}
-						.unpushed=${false}
-						.statusFiles=${[]}
+						.unpushed=${gs?.unpushed ?? false}
+						.statusFiles=${gs?.status ?? []}
 						.loading=${!gs && !!branch}
 						.prState=${prStatus?.state}
 						.prUrl=${prStatus?.url}

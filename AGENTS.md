@@ -73,7 +73,9 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 
 ## Common tasks
 
-**Add a new REST endpoint**: Edit `src/server/server.ts` `handleApiRoute()`.
+**Add a new REST endpoint**: Edit `src/server/server.ts` `handleApiRoute()`. Git-related endpoints follow this pattern — see the `git-diff` and `git-status` handlers for sessions and goals, which use `execFileAsync` (no shell) with path sanitization and a 5s timeout.
+
+**View file diffs in the UI**: The `GitStatusWidget` (`src/ui/components/GitStatusWidget.ts`) shows clickable file entries that fetch unified diffs via `GET /api/sessions/:id/git-diff?file=<path>` or `GET /api/goals/:id/git-diff?file=<path>` and render them inline using the `<diff-block>` component. The widget receives `sessionId`/`goalId` and `token` props from `AgentInterface.ts` or `goal-dashboard.ts` to know which endpoint to call.
 
 **Add a new WebSocket command**: Add to `ClientMessage` union in `src/server/ws/protocol.ts`, handle in `src/server/ws/handler.ts` switch, add convenience method on `RpcBridge` if it maps to an agent command. Existing examples of this pattern: `set_model` and `set_thinking_level`.
 
@@ -225,6 +227,8 @@ Cross-links on the Skills page and Tools page ("Manage scan directories →") na
 **Debug renderApp performance**: `renderApp()` in `src/app/state.ts` is debounced via `requestAnimationFrame` — multiple calls within the same frame collapse into a single `doRenderApp()` execution. If you need synchronous DOM updates before layout measurement, use `renderAppSync()` from `state.ts` instead. To debug render frequency, add a temporary counter in the rAF callback in `state.ts` and log how many `doRenderApp()` calls occur per frame.
 
 **Debug gates**: Gate state is stored in `GateStore` (`.bobbit/state/gates.json`). Gate dependencies are enforced — if a signal fails, check gate status via `GET /api/goals/:id/gates`.
+
+**Debug git diff viewer**: The `GitStatusWidget` fetches diffs on file click via REST (`/api/sessions/:id/git-diff` or `/api/goals/:id/git-diff`). The dropdown renders into a portal (`document.body`) so diffs aren't clipped by overflow. A `_currentDiffFile` guard prevents stale responses from overwriting when the user clicks a different file before the first fetch completes. If diffs don't appear, check: (1) the widget has `sessionId` or `goalId` and `token` set, (2) the server's path sanitization isn't rejecting the file path (it rejects `..` and absolute paths), (3) the git command isn't timing out (5s limit, 500KB response cap).
 
 **Debug gate re-signal cancellation**: When a gate is re-signaled, `cancelStaleVerifications()` in `verification-harness.ts` terminates reviewer sessions from the prior signal and marks the old `ActiveVerification` as cancelled. The cancelled flag is checked after `Promise.all` resolves to suppress stale results. If reviewer sessions aren't being cancelled, check that `sessionManager` and `teamManager` are passed to the `VerificationHarness` constructor. Active verifications are tracked in `activeVerifications` map, keyed by signal ID — use `GET /api/goals/:goalId/verifications/active` to inspect in-flight state.
 

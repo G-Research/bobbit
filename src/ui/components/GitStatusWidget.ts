@@ -1,5 +1,6 @@
 import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import './DiffBlock.js';
 
 @customElement('git-status-widget')
 export class GitStatusWidget extends LitElement {
@@ -18,6 +19,10 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Array }) statusFiles: Array<{ file: string; status: string }> = [];
     @property({ type: Boolean }) loading = false;
 
+    @property() sessionId = '';
+    @property() goalId = '';
+    @property() token = '';
+
     // PR status properties
     @property() prState?: string; // "OPEN" | "MERGED" | "CLOSED"
     @property() prUrl?: string;
@@ -26,6 +31,11 @@ export class GitStatusWidget extends LitElement {
     @property() prMergeable?: string;
     @property({ type: Boolean }) viewerIsAdmin = false;
     @property() reviewDecision?: string; // "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null
+
+    @state() private _expandedFile: string | null = null;
+    @state() private _loadingDiff: string | null = null;
+    @state() private _diffContent: string | null = null;
+    @state() private _diffError: string | null = null;
 
     @state() private expanded = false;
     @state() private merging = false;
@@ -359,6 +369,66 @@ export class GitStatusWidget extends LitElement {
         }));
     }
 
+    private async _toggleFileDiff(file: string) {
+        if (this._expandedFile === file) {
+            this._expandedFile = null;
+            this._diffContent = null;
+            this._diffError = null;
+            this._reRenderDropdown();
+            return;
+        }
+        this._expandedFile = file;
+        this._loadingDiff = file;
+        this._diffContent = null;
+        this._diffError = null;
+        this._reRenderDropdown();
+
+        const base = this.sessionId
+            ? `/api/sessions/${this.sessionId}/git-diff`
+            : `/api/goals/${this.goalId}/git-diff`;
+        const url = `${base}?file=${encodeURIComponent(file)}`;
+        try {
+            const headers: Record<string, string> = {};
+            if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+            const resp = await fetch(url, { headers });
+            if (this._expandedFile !== file) return; // user switched to another file
+            if (!resp.ok) {
+                const body = await resp.json().catch(() => ({}));
+                this._diffError = (body as Record<string, string>).error || `HTTP ${resp.status}`;
+            } else {
+                const body = await resp.json();
+                this._diffContent = (body as Record<string, string>).diff;
+            }
+        } catch (err) {
+            if (this._expandedFile !== file) return; // user switched to another file
+            this._diffError = String(err);
+        }
+        this._loadingDiff = null;
+        this._reRenderDropdown();
+    }
+
+    private _renderInlineDiff() {
+        if (this._loadingDiff === this._expandedFile) {
+            return html`<div class="pl-6 py-2 text-muted-foreground text-[11px]">
+                <span style="display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>
+                Loading diff\u2026
+            </div>`;
+        }
+        if (this._diffError) {
+            return html`<div class="pl-6 py-1 text-[11px]" style="color:var(--destructive)">${this._diffError}</div>`;
+        }
+        if (this._diffContent) {
+            return html`<div class="mt-1 mb-2 border border-border rounded overflow-hidden" style="max-height:400px;overflow-y:auto"><diff-block .content=${this._diffContent}></diff-block></div>`;
+        }
+        return nothing;
+    }
+
+    private _reRenderDropdown() {
+        if (this._dropdownEl) {
+            render(this._renderDropdownContent(), this._dropdownEl);
+        }
+    }
+
     /** Render the dropdown content into the portaled element */
     private _renderDropdownContent() {
         return html`
@@ -383,19 +453,24 @@ export class GitStatusWidget extends LitElement {
                 ? html`
                       <div class="border-t border-border pt-2 mt-2">
                           <div class="text-muted-foreground mb-1 font-medium">Changes</div>
-                          <div class="flex flex-col gap-0.5 max-h-[200px] overflow-y-auto">
+                          <div class="flex flex-col gap-0.5 overflow-y-auto" style="max-height:${this._expandedFile ? '60vh' : '200px'}">
                               ${this.statusFiles.map(
                                   (f) => html`
-                                      <div class="flex items-center gap-2 py-0.5 min-w-0">
-                                          <span
-                                              class="${this._statusColor(f.status)} font-mono w-[70px] shrink-0 text-right"
-                                              title=${this._statusLabel(f.status)}
-                                          >
-                                              ${this._statusLabel(f.status)}
-                                          </span>
-                                          <span class="text-foreground truncate" title=${f.file}>
-                                              ${f.file}
-                                          </span>
+                                      <div>
+                                          <div class="flex items-center gap-2 py-0.5 min-w-0 rounded px-1 -mx-1 ${(this.sessionId || this.goalId) ? 'cursor-pointer hover:bg-muted/50' : ''}"
+                                               @click=${() => (this.sessionId || this.goalId) ? this._toggleFileDiff(f.file) : undefined}>
+                                              ${(this.sessionId || this.goalId) ? html`<span class="shrink-0 text-muted-foreground" style="font-size:10px">${this._expandedFile === f.file ? '\u25BC' : '\u25B6'}</span>` : nothing}
+                                              <span
+                                                  class="${this._statusColor(f.status)} font-mono w-[70px] shrink-0 text-right"
+                                                  title=${this._statusLabel(f.status)}
+                                              >
+                                                  ${this._statusLabel(f.status)}
+                                              </span>
+                                              <span class="text-foreground truncate" title=${f.file}>
+                                                  ${f.file}
+                                              </span>
+                                          </div>
+                                          ${this._expandedFile === f.file ? this._renderInlineDiff() : nothing}
                                       </div>
                                   `
                               )}
