@@ -17,4 +17,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # on the host, matching typical developer user IDs.
 USER node
 
+# Configure git for Windows host compatibility (CRLF line endings).
+# Commit identity comes from the mounted repo's .git/config (the human developer).
+RUN git config --global core.autocrlf true
+
 WORKDIR /workspace
