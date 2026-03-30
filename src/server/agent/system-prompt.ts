@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 
 const PROMPTS_DIR = path.join(bobbitStateDir(), "session-prompts");
 
@@ -67,6 +68,36 @@ export function readAgentsMd(cwd: string): string {
 	}
 }
 
+/**
+ * Read all agent markdown files from configured locations.
+ * Collects entries with type "agents" from getAllConfigDirectories(),
+ * reads each existing file, resolves @refs, and concatenates.
+ * Falls back to readAgentsMd() if no projectConfigStore is provided.
+ */
+export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfigReader): string {
+	if (!projectConfigStore) {
+		return readAgentsMd(cwd);
+	}
+
+	const dirs = getAllConfigDirectories(cwd, projectConfigStore);
+	const agentEntries = dirs.filter(d => d.types.includes("agents") && d.exists);
+
+	const parts: string[] = [];
+	for (const entry of agentEntries) {
+		try {
+			const content = fs.readFileSync(entry.path, "utf-8");
+			const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
+			if (resolved.trim()) {
+				parts.push(resolved.trim());
+			}
+		} catch (err) {
+			console.warn(`[system-prompt] Failed to read agent file ${entry.path}, skipping:`, err);
+		}
+	}
+
+	return parts.join("\n\n");
+}
+
 export interface PromptParts {
 	/** Path to the global system prompt file (config/system-prompt.md) */
 	baseSystemPromptPath?: string;
@@ -100,6 +131,8 @@ export interface PromptParts {
 	allowedTools?: string[];
 	/** Pre-formatted upstream gate context from workflow dependencies */
 	workflowContext?: string;
+	/** Project config store for multi-file agent discovery */
+	projectConfigStore?: ProjectConfigReader;
 }
 
 export interface PromptSection {
@@ -128,8 +161,8 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 		if (base) sections.push(base);
 	}
 
-	// 2. AGENTS.md from working directory
-	const agentsMd = readAgentsMd(parts.cwd);
+	// 2. Agent files from working directory and custom locations
+	const agentsMd = readAllAgentFiles(parts.cwd, parts.projectConfigStore);
 	if (agentsMd.trim()) {
 		sections.push("# Project Context\n\n" + agentsMd.trim());
 	}
@@ -213,8 +246,8 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		if (base) sections.push({ label: "System Prompt", source: "config/system-prompt.md", content: base });
 	}
 
-	// 2. AGENTS.md
-	const agentsMd = readAgentsMd(parts.cwd);
+	// 2. Agent files
+	const agentsMd = readAllAgentFiles(parts.cwd, parts.projectConfigStore);
 	if (agentsMd.trim()) sections.push({ label: "Project Context", source: "AGENTS.md", content: agentsMd.trim() });
 
 	// 3. Goal spec (separate from role)

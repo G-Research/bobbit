@@ -279,6 +279,7 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: session.allowedTools,
+				projectConfigStore: this.projectConfigStore,
 			};
 		} else {
 			const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
@@ -314,6 +315,7 @@ export class SessionManager {
 				toolRestrictions: toolRestrictionsText,
 				personalities: resolvedPersonalities,
 				allowedTools: session.allowedTools,
+				projectConfigStore: this.projectConfigStore,
 			};
 		}
 
@@ -900,6 +902,7 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: restoredAllowedTools,
+				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
@@ -939,6 +942,7 @@ export class SessionManager {
 				toolRestrictions: toolRestrictionsText,
 				personalities: resolvedPersonalities,
 				allowedTools: restoredAllowedTools,
+				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
@@ -1136,6 +1140,7 @@ export class SessionManager {
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
 				allowedTools: effectiveAllowedTools,
+				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
@@ -1185,6 +1190,7 @@ export class SessionManager {
 				personalities: opts?.personalities,
 				allowedTools: effectiveAllowedTools,
 				workflowContext: opts?.workflowContext,
+				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
@@ -1370,6 +1376,7 @@ export class SessionManager {
 			personalities: opts?.personalities,
 			allowedTools: effectiveAllowedTools,
 			workflowContext: opts?.workflowContext,
+			projectConfigStore: this.projectConfigStore,
 		});
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 
@@ -1450,6 +1457,7 @@ export class SessionManager {
 			goalSpec: taskSpec,
 			goalTitle: "Delegate Task",
 			goalState: "active",
+			projectConfigStore: this.projectConfigStore,
 		});
 
 		const bridgeOptions: RpcBridgeOptions = { cwd: opts.cwd, env: { BOBBIT_SESSION_ID: id, BOBBIT_DELEGATE_OF: parentSessionId } };
@@ -2003,6 +2011,7 @@ export class SessionManager {
 			toolRestrictions: toolRestrictionsText,
 			personalities: resolvedPersonalities,
 			allowedTools: role.allowedTools.length > 0 ? role.allowedTools : undefined,
+			projectConfigStore: this.projectConfigStore,
 		});
 
 		// Respawn with new system prompt
@@ -2140,6 +2149,7 @@ export class SessionManager {
 			toolRestrictions: toolRestrictionsText,
 			personalities: resolvedPersonalities,
 			allowedTools: roleAllowedTools,
+			projectConfigStore: this.projectConfigStore,
 		});
 
 		// Respawn with new system prompt

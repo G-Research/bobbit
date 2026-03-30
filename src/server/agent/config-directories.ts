@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export type ConfigType = "skills" | "mcp" | "tools";
+export type ConfigType = "skills" | "mcp" | "tools" | "agents";
 
 export interface ConfigDirectory {
 	path: string;
@@ -92,7 +92,7 @@ export function parseCustomDirectories(
 						const resolved = expandPath(entry.path);
 						const types = entry.types.filter(
 							(t: unknown): t is ConfigType =>
-								t === "skills" || t === "mcp" || t === "tools",
+								t === "skills" || t === "mcp" || t === "tools" || t === "agents",
 						);
 						if (types.length > 0) {
 							byPath.set(resolved, { path: resolved, types });
@@ -163,6 +163,20 @@ export function getAllConfigDirectories(
 		types: ["tools"],
 		scope: "project",
 		exists: fs.existsSync(toolsDir),
+		isRemovable: false,
+	});
+
+	// ── Agents (1 built-in — file path, not directory) ──
+	const agentsMdPath = path.resolve(path.join(cwd, "AGENTS.md"));
+	const claudeMdPath = path.resolve(path.join(cwd, "CLAUDE.md"));
+	const agentsMdExists = fs.existsSync(agentsMdPath);
+	const claudeMdExists = !agentsMdExists && fs.existsSync(claudeMdPath);
+	const builtinAgentPath = agentsMdExists ? agentsMdPath : claudeMdExists ? claudeMdPath : agentsMdPath;
+	dirs.push({
+		path: builtinAgentPath,
+		types: ["agents"],
+		scope: "project",
+		exists: agentsMdExists || claudeMdExists,
 		isRemovable: false,
 	});
 

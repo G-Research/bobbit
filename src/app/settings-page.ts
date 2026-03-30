@@ -1204,7 +1204,7 @@ let configDirsSaveStatus: "" | "saving" | "saved" | "error" = "";
 
 // Add-directory form state
 let newDirPath = "";
-let newDirTypes: { skills: boolean; mcp: boolean; tools: boolean } = { skills: false, mcp: false, tools: false };
+let newDirTypes: { skills: boolean; mcp: boolean; tools: boolean; agents: boolean } = { skills: false, mcp: false, tools: false, agents: false };
 
 function loadConfigDirs(): void {
 	if (configDirsLoaded || configDirsLoading || configDirsError) return;
@@ -1248,6 +1248,7 @@ async function addCustomDir(): Promise<void> {
 	if (newDirTypes.skills) selectedTypes.push("skills");
 	if (newDirTypes.mcp) selectedTypes.push("mcp");
 	if (newDirTypes.tools) selectedTypes.push("tools");
+	if (newDirTypes.agents) selectedTypes.push("agents");
 	if (selectedTypes.length === 0) return;
 
 	const currentCustom = configDirs
@@ -1257,7 +1258,7 @@ async function addCustomDir(): Promise<void> {
 	await saveConfigDirs(currentCustom);
 	if (configDirsSaveStatus !== "error") {
 		newDirPath = "";
-		newDirTypes = { skills: false, mcp: false, tools: false };
+		newDirTypes = { skills: false, mcp: false, tools: false, agents: false };
 	}
 }
 
@@ -1348,8 +1349,9 @@ function renderDirectoriesTab() {
 	const skillsDirs = configDirs.filter((d) => d.types.includes("skills"));
 	const mcpDirs = configDirs.filter((d) => d.types.includes("mcp"));
 	const toolsDirs = configDirs.filter((d) => d.types.includes("tools"));
+	const agentsDirs = configDirs.filter((d) => d.types.includes("agents"));
 
-	const hasAtLeastOneType = newDirTypes.skills || newDirTypes.mcp || newDirTypes.tools;
+	const hasAtLeastOneType = newDirTypes.skills || newDirTypes.mcp || newDirTypes.tools || newDirTypes.agents;
 
 	return html`
 		<div class="flex flex-col gap-5">
@@ -1381,6 +1383,14 @@ function renderDirectoriesTab() {
 				</div>
 			</div>
 
+			<!-- Agents -->
+			<div class="flex flex-col gap-1">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium px-1">Agents</div>
+				<div class="flex flex-col gap-0.5">
+					${agentsDirs.length > 0 ? agentsDirs.map(renderDirRow) : html`<div class="text-xs text-muted-foreground italic px-2">No agent files.</div>`}
+				</div>
+			</div>
+
 			<!-- Add directory form -->
 			<div class="flex flex-col gap-2 pt-3 border-t border-border">
 				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Add Custom Directory</div>
@@ -1389,7 +1399,7 @@ function renderDirectoriesTab() {
 						type="text"
 						class="flex-1 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
 							focus:outline-none focus:ring-2 focus:ring-ring"
-						placeholder="~/my-config or /absolute/path"
+						placeholder="~/my-config or /path/to/AGENTS.md"
 						.value=${newDirPath}
 						@input=${(e: Event) => { newDirPath = (e.target as HTMLInputElement).value; renderApp(); }}
 						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newDirPath.trim() && hasAtLeastOneType) addCustomDir(); }}
@@ -1410,6 +1420,11 @@ function renderDirectoriesTab() {
 						<input type="checkbox" class="accent-primary" .checked=${newDirTypes.tools}
 							@change=${(e: Event) => { newDirTypes.tools = (e.target as HTMLInputElement).checked; renderApp(); }} />
 						Tools
+					</label>
+					<label class="flex items-center gap-1.5 text-xs cursor-pointer">
+						<input type="checkbox" class="accent-primary" .checked=${newDirTypes.agents}
+							@change=${(e: Event) => { newDirTypes.agents = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						Agents
 					</label>
 					<button
 						class="ml-auto px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground
