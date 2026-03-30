@@ -20,6 +20,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, resolveGrantPolicy } from "./tool-activation.js";
 import type { GrantPolicy } from "./role-store.js";
+import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import { McpManager } from "../mcp/mcp-manager.js";
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
@@ -119,6 +120,8 @@ export interface SessionManagerOptions {
 	roleManager?: RoleManager;
 	/** Tool manager for generating tool documentation in system prompts */
 	toolManager?: ToolManager;
+	/** Group policy store for resolving group-level default tool grant policies */
+	groupPolicyStore?: ToolGroupPolicyStore;
 	/** Workflow store for injecting into GoalManager */
 	workflowStore?: import("./workflow-store.js").WorkflowStore;
 	/** Preferences store for aigw auto-model detection */
@@ -137,6 +140,7 @@ export class SessionManager {
 	private personalityManager?: PersonalityManager;
 	private roleManager?: RoleManager;
 	private toolManager?: ToolManager;
+	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
@@ -157,6 +161,7 @@ export class SessionManager {
 		this.personalityManager = options?.personalityManager;
 		this.roleManager = options?.roleManager;
 		this.toolManager = options?.toolManager;
+		this.groupPolicyStore = options?.groupPolicyStore;
 		this.preferencesStore = options?.preferencesStore;
 		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
@@ -228,8 +233,8 @@ export class SessionManager {
 				const notAllowed = !allowedTools.some(a => a.toLowerCase() === t.name.toLowerCase());
 				if (!notAllowed) return false;
 				// When role is provided, hide tools with explicit never-ask policy
-				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager);
-				return policy !== 'never-ask';
+				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
+				return policy !== 'never-ask' && policy !== 'never';
 			});
 			if (ungrantedMcp.length > 0) {
 				const ungrantedList = ungrantedMcp.map(t => `- **${t.name}**: ${t.description}`).join("\n");
@@ -528,9 +533,9 @@ export class SessionManager {
 					const role = this.roleManager?.getRole(roleName);
 
 					// Resolve grant policy for this tool
-					const policy = resolveGrantPolicy(deniedToolName, mcpTool.group, role, this.toolManager);
+					const policy = resolveGrantPolicy(deniedToolName, mcpTool.group, role, this.toolManager, this.groupPolicyStore);
 
-					if (policy === 'never-ask') {
+					if (policy === 'never-ask' || policy === 'never') {
 						// Guard: should not happen (stubs shouldn't exist for never-ask tools)
 						console.warn(`[session-manager] Unexpected denial for never-ask tool "${deniedToolName}" in session ${session.id}`);
 					} else {
@@ -701,8 +706,8 @@ export class SessionManager {
 		if (this.toolManager || this.mcpManager) {
 			const filtered = newTools.filter(t => {
 				const mcpInfo = this.mcpManager?.getToolInfos().find(i => i.name === t);
-				const policy = resolveGrantPolicy(t, mcpInfo?.group, role, this.toolManager!);
-				return policy !== 'never-ask';
+				const policy = resolveGrantPolicy(t, mcpInfo?.group, role, this.toolManager!, this.groupPolicyStore);
+				return policy !== 'never-ask' && policy !== 'never';
 			});
 			if (filtered.length === 0) {
 				console.warn(`[session-manager] Grant rejected: all requested tools have never-ask policy`);
@@ -713,13 +718,13 @@ export class SessionManager {
 
 			// Override mode based on server-resolved policy for the primary tool
 			const primaryInfo = this.mcpManager?.getToolInfos().find(i => i.name === toolName);
-			const primaryPolicy = resolveGrantPolicy(toolName, primaryInfo?.group, role, this.toolManager ?? undefined);
+			const primaryPolicy = resolveGrantPolicy(toolName, primaryInfo?.group, role, this.toolManager ?? undefined, this.groupPolicyStore);
 			if (primaryPolicy === 'always-ask') {
 				mode = 'one-time';
 			} else if (primaryPolicy === 'ask-once') {
 				mode = 'session-only';
 			}
-			// null (no explicit policy) → keep client mode (defaults to persistent)
+			// 'always-allow' → keep client mode (defaults to persistent)
 		}
 
 		if (mode === "one-time") {
@@ -736,10 +741,15 @@ export class SessionManager {
 			return session.allowedTools;
 
 		} else {
-			// Persistent grant (default, backward compatible): update role YAML + session memory
-			const updatedTools = [...role.allowedTools, ...newTools];
-			this.roleManager.updateRole(role.name, { allowedTools: updatedTools });
-			session.allowedTools = updatedTools;
+			// Persistent grant (default): update toolPolicies on role YAML (allowedTools is derived automatically)
+			const updatedPolicies = { ...role.toolPolicies };
+			for (const t of newTools) {
+				updatedPolicies[t] = 'always-allow' as GrantPolicy;
+			}
+			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
+			// Re-read role to get updated derived allowedTools
+			const updatedRole = this.roleManager.getRole(role.name);
+			session.allowedTools = updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
 			await this._restartSessionWithUpdatedRole(session);
 
 			// Note: prompt replay after grant is handled client-side. The
