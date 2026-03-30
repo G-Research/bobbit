@@ -130,14 +130,14 @@ describe("parseCustomDirectories", () => {
 // ── getAllConfigDirectories ──────────────────────────────────────────
 
 describe("getAllConfigDirectories", () => {
-	it("returns 12 built-in directories", () => {
+	it("returns 13 built-in directories", () => {
 		const store = mockStore();
 		const cwd = "/fake/project";
 		const result = getAllConfigDirectories(cwd, store);
 
 		// Filter to only built-in (not custom)
 		const builtIn = result.filter(d => d.scope !== "custom");
-		assert.equal(builtIn.length, 12, `Expected 12 built-in dirs, got ${builtIn.length}`);
+		assert.equal(builtIn.length, 13, `Expected 13 built-in dirs, got ${builtIn.length}`);
 
 		// All built-ins are not removable
 		for (const d of builtIn) {
@@ -159,6 +159,14 @@ describe("getAllConfigDirectories", () => {
 		const result = getAllConfigDirectories(cwd, store);
 		const mcpDirs = result.filter(d => d.types.includes("mcp") && d.scope !== "custom");
 		assert.equal(mcpDirs.length, 6);
+	});
+
+	it("includes correct agents directory (1)", () => {
+		const store = mockStore();
+		const cwd = "/fake/project";
+		const result = getAllConfigDirectories(cwd, store);
+		const agentsDirs = result.filter(d => d.types.includes("agents") && d.scope !== "custom");
+		assert.equal(agentsDirs.length, 1);
 	});
 
 	it("includes correct tools directory (1)", () => {

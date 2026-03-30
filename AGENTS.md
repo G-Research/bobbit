@@ -87,7 +87,7 @@ If you only changed UI code (`src/ui/`, `src/app/`), unit tests are sufficient. 
 config_directories: '[{"path":"~/my-team-skills","types":["skills"]},{"path":"/shared/skills","types":["skills"]}]'
 ```
 
-The value is a JSON-encoded array of `{"path": "...", "types": [...]}` objects where types can include `"skills"`, `"mcp"`, and/or `"tools"`. Paths support `~` expansion. Custom directories are additive — the default directories (`.claude/skills/`, `.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `.claude/commands/`) are always scanned. Skills from custom directories get source label `"custom"` and have lower priority than built-in directories (built-in skills with the same name win).
+The value is a JSON-encoded array of `{"path": "...", "types": [...]}` objects where types can include `"skills"`, `"mcp"`, `"tools"`, and/or `"agents"`. Paths support `~` expansion. Custom directories are additive — the default directories (`.claude/skills/`, `.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `.claude/commands/`) are always scanned. Skills from custom directories get source label `"custom"` and have lower priority than built-in directories (built-in skills with the same name win).
 
 The legacy `skill_directories` key still works for backward compatibility but `config_directories` is preferred. When saving from the Config Directories UI, `skill_directories` is migrated to `config_directories` automatically.
 
@@ -131,7 +131,38 @@ Supported transports: **stdio** (spawn child process, most common) and **HTTP** 
 
 REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-servers/:name/restart` (reconnect a server, also triggers re-discovery), `POST /api/internal/mcp-call` (internal proxy for tool execution).
 
-**Manage config scan directories**: Bobbit scans multiple directories for skills, MCP servers, and tools. View all scanned directories and add custom ones via Settings → Config Directories tab (`#/settings`, Directories tab) or by editing `config_directories` in `.bobbit/config/project.yaml`. See "Config scan directories" section below for details. REST API: `GET /api/config-directories` returns all directories with path, types, scope, exists status, and whether they're removable.
+### Tool grant policies
+
+MCP tools can have a **grant policy** that controls what happens when an agent tries to use a tool not in its role's `allowedTools`. This only applies to MCP tools — non-MCP tools are controlled by `allowedTools` alone.
+
+**Policies:**
+
+| Policy | Behavior |
+|---|---|
+| `always-ask` | Permission prompt every time. Grant is one-time (revoked after the agent's turn). |
+| `ask-once` | Prompt on first use per session. Grant persists for the session lifetime (in memory, not written to disk). |
+| `never-ask` | Tool is invisible to the agent. No prompt, no stub generated. |
+| *(no policy)* | Current default behavior — stub generated, grant card shown, and approval persists to role YAML. |
+
+**Configure per tool** in `.bobbit/config/tools/<group>/*.yaml`:
+
+```yaml
+grantPolicy: ask-once  # "always-ask" | "ask-once" | "never-ask"
+```
+
+**Configure per role** in `.bobbit/config/roles/*.yaml` via `toolPolicies` — supports both individual tool names and group-level prefixes:
+
+```yaml
+toolPolicies:
+  mcp__playwright__browser_snapshot: always-ask
+  mcp__playwright: ask-once  # applies to all tools in this MCP server
+```
+
+**Policy resolution order:** role tool-specific → role group → tool YAML default → null (current behavior). Existing setups require no changes — behavior is preserved when no policy is set.
+
+**REST API:** `PUT /api/roles/:name` accepts `toolPolicies`, `PUT /api/tools/:name` accepts `grantPolicy`.
+
+**Manage config scan directories**: Bobbit scans multiple directories for skills, MCP servers, tools, and agent files. View all scanned directories and add custom ones via Settings → Config Directories tab (`#/settings`, Directories tab) or by editing `config_directories` in `.bobbit/config/project.yaml`. See "Config scan directories" section below for details. Note: `"agents"` entries point at **individual files** (e.g. `~/my-team/AGENTS.md`), not directories — unlike the other config types. REST API: `GET /api/config-directories` returns all directories with path, types, scope, exists status, and whether they're removable.
 
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
 
@@ -152,15 +183,15 @@ Thinking token budgets per level (hardcoded in `src/app/remote-agent.ts`, not cu
 
 ### Config scan directories
 
-The Settings → Config Directories tab shows every directory Bobbit scans for configuration, organized by type (Skills, MCP, Tools). Each entry shows its path, scope (built-in/user/project/custom), and whether the directory exists on disk. Custom directories can be added or removed; built-in directories are read-only.
+The Settings → Config Directories tab shows every directory Bobbit scans for configuration, organized by type (Skills, MCP, Tools, Agents). Each entry shows its path, scope (built-in/user/project/custom), and whether the directory exists on disk. Custom directories can be added or removed; built-in directories are read-only.
 
 Storage uses `config_directories` in `.bobbit/config/project.yaml`:
 
 ```yaml
-config_directories: '[{"path":"~/my-team-config","types":["skills","mcp"]},{"path":"/shared/tools","types":["tools"]}]'
+config_directories: '[{"path":"~/my-team-config","types":["skills","mcp"]},{"path":"/shared/tools","types":["tools"]},{"path":"~/my-team/AGENTS.md","types":["agents"]}]'
 ```
 
-Each entry specifies a `path` (supports `~` expansion) and `types` array (`"skills"`, `"mcp"`, `"tools"`). Custom directories are additive — built-in directories are always scanned and have higher priority.
+Each entry specifies a `path` (supports `~` expansion) and `types` array (`"skills"`, `"mcp"`, `"tools"`, `"agents"`). Custom directories are additive — built-in directories are always scanned and have higher priority.
 
 **Built-in directories:**
 
@@ -169,6 +200,9 @@ Each entry specifies a `path` (supports `~` expansion) and `types` array (`"skil
 | Skills | `<project>/.claude/skills/`, `<project>/.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `<project>/.claude/commands/` |
 | MCP | `~/.claude.json` (global + per-project), `~/.claude/.mcp.json`, `~/.bobbit/.mcp.json`, `<project>/.mcp.json`, `<project>/.claude/.mcp.json`, `<project>/.bobbit/config/mcp.json` |
 | Tools | `<project>/.bobbit/config/tools/` |
+| Agents | `<cwd>/AGENTS.md` (falls back to `<cwd>/CLAUDE.md` if `AGENTS.md` doesn't exist) |
+
+**Agents type**: Unlike other config types, `"agents"` entries point at **individual files** (not directories). All discovered agent files are concatenated into the system prompt — the built-in file first, then custom files in the order they appear in `config_directories`. Each file's `@ref` references are resolved relative to that file's parent directory. If `AGENTS.md` exists in cwd, `CLAUDE.md` in cwd is not also read (to avoid duplication, since `CLAUDE.md` often just contains `@AGENTS.md`).
 
 Cross-links on the Skills page and Tools page ("Manage scan directories →") navigate directly to this tab. Server-side logic is in `src/server/agent/config-directories.ts`.
 

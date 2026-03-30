@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 300">
+  <!-- Blue background -->
+  <rect width="500" height="300" fill="#005EB8"/>
+  <!-- White saltire (St Andrew's Cross) -->
+  <line x1="0" y1="0" x2="500" y2="300" stroke="white" stroke-width="40"/>
+  <line x1="500" y1="0" x2="0" y2="300" stroke="white" stroke-width="40"/>
+</svg>
