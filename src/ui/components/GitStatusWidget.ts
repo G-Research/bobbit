@@ -32,10 +32,12 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Boolean }) viewerIsAdmin = false;
     @property() reviewDecision?: string; // "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null
 
-    @state() private _expandedFile: string | null = null;
+    @state() private _modalFile: string | null = null;
     @state() private _loadingDiff: string | null = null;
     @state() private _diffContent: string | null = null;
     @state() private _diffError: string | null = null;
+
+    private _modalEl: HTMLElement | null = null;
 
     @state() private expanded = false;
     @state() private merging = false;
@@ -68,6 +70,7 @@ export class GitStatusWidget extends LitElement {
         super.disconnectedCallback();
         document.removeEventListener('click', this._onDocumentClick, true);
         this._removeDropdown();
+        this._removeModal();
     }
 
     private _removeDropdown() {
@@ -369,19 +372,12 @@ export class GitStatusWidget extends LitElement {
         }));
     }
 
-    private async _toggleFileDiff(file: string) {
-        if (this._expandedFile === file) {
-            this._expandedFile = null;
-            this._diffContent = null;
-            this._diffError = null;
-            this._reRenderDropdown();
-            return;
-        }
-        this._expandedFile = file;
+    private async _openDiffModal(file: string) {
+        this._modalFile = file;
         this._loadingDiff = file;
         this._diffContent = null;
         this._diffError = null;
-        this._reRenderDropdown();
+        this._showModal();
 
         const base = this.sessionId
             ? `/api/sessions/${this.sessionId}/git-diff`
@@ -391,7 +387,7 @@ export class GitStatusWidget extends LitElement {
             const headers: Record<string, string> = {};
             if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
             const resp = await fetch(url, { headers });
-            if (this._expandedFile !== file) return; // user switched to another file
+            if (this._modalFile !== file) return;
             if (!resp.ok) {
                 const body = await resp.json().catch(() => ({}));
                 this._diffError = (body as Record<string, string>).error || `HTTP ${resp.status}`;
@@ -400,32 +396,69 @@ export class GitStatusWidget extends LitElement {
                 this._diffContent = (body as Record<string, string>).diff;
             }
         } catch (err) {
-            if (this._expandedFile !== file) return; // user switched to another file
+            if (this._modalFile !== file) return;
             this._diffError = String(err);
         }
         this._loadingDiff = null;
-        this._reRenderDropdown();
+        this._renderModal();
     }
 
-    private _renderInlineDiff() {
-        if (this._loadingDiff === this._expandedFile) {
-            return html`<div class="pl-6 py-2 text-muted-foreground text-[11px]">
-                <span style="display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>
+    private _showModal() {
+        this._removeModal();
+        this._modalEl = document.createElement('div');
+        this._modalEl.id = 'git-diff-modal';
+        document.body.appendChild(this._modalEl);
+        this._renderModal();
+    }
+
+    private _renderModal() {
+        if (!this._modalEl || !this._modalFile) return;
+
+        let body;
+        if (this._loadingDiff === this._modalFile) {
+            body = html`<div class="flex items-center gap-2 text-muted-foreground p-8">
+                <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>
                 Loading diff\u2026
             </div>`;
+        } else if (this._diffError) {
+            body = html`<div class="p-8" style="color:var(--destructive)">${this._diffError}</div>`;
+        } else if (this._diffContent) {
+            body = html`<diff-block .content=${this._diffContent}></diff-block>`;
+        } else {
+            body = html`<div class="p-8 text-muted-foreground">No diff available</div>`;
         }
-        if (this._diffError) {
-            return html`<div class="pl-6 py-1 text-[11px]" style="color:var(--destructive)">${this._diffError}</div>`;
-        }
-        if (this._diffContent) {
-            return html`<div class="mt-1 mb-2 border border-border rounded overflow-hidden" style="max-height:400px;overflow-y:auto"><diff-block .content=${this._diffContent}></diff-block></div>`;
-        }
-        return nothing;
+
+        render(html`
+            <div style="position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;padding:24px"
+                 @click=${(e: MouseEvent) => { if (e.target === e.currentTarget) this._closeModal(); }}>
+                <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeModal()}></div>
+                <div style="position:relative;width:100%;max-width:calc(100vw - 48px);height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
+                    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
+                        <span class="font-mono text-sm text-foreground truncate" title=${this._modalFile}>${this._modalFile}</span>
+                        <button
+                            style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
+                            class="hover:text-foreground hover:bg-muted/50"
+                            @click=${() => this._closeModal()}
+                            title="Close"
+                        >&times;</button>
+                    </div>
+                    <div style="flex:1;overflow:auto">${body}</div>
+                </div>
+            </div>
+        `, this._modalEl);
     }
 
-    private _reRenderDropdown() {
-        if (this._dropdownEl) {
-            render(this._renderDropdownContent(), this._dropdownEl);
+    private _closeModal() {
+        this._modalFile = null;
+        this._diffContent = null;
+        this._diffError = null;
+        this._removeModal();
+    }
+
+    private _removeModal() {
+        if (this._modalEl) {
+            this._modalEl.remove();
+            this._modalEl = null;
         }
     }
 
@@ -453,24 +486,20 @@ export class GitStatusWidget extends LitElement {
                 ? html`
                       <div class="border-t border-border pt-2 mt-2">
                           <div class="text-muted-foreground mb-1 font-medium">Changes</div>
-                          <div class="flex flex-col gap-0.5 overflow-y-auto" style="max-height:${this._expandedFile ? '60vh' : '200px'}">
+                          <div class="flex flex-col gap-0.5 overflow-y-auto" style="max-height:200px">
                               ${this.statusFiles.map(
                                   (f) => html`
-                                      <div>
-                                          <div class="flex items-center gap-2 py-0.5 min-w-0 rounded px-1 -mx-1 ${(this.sessionId || this.goalId) ? 'cursor-pointer hover:bg-muted/50' : ''}"
-                                               @click=${() => (this.sessionId || this.goalId) ? this._toggleFileDiff(f.file) : undefined}>
-                                              ${(this.sessionId || this.goalId) ? html`<span class="shrink-0 text-muted-foreground" style="font-size:10px">${this._expandedFile === f.file ? '\u25BC' : '\u25B6'}</span>` : nothing}
-                                              <span
-                                                  class="${this._statusColor(f.status)} font-mono w-[70px] shrink-0 text-right"
-                                                  title=${this._statusLabel(f.status)}
-                                              >
-                                                  ${this._statusLabel(f.status)}
-                                              </span>
-                                              <span class="text-foreground truncate" title=${f.file}>
-                                                  ${f.file}
-                                              </span>
-                                          </div>
-                                          ${this._expandedFile === f.file ? this._renderInlineDiff() : nothing}
+                                      <div class="flex items-center gap-2 py-0.5 min-w-0 rounded px-1 -mx-1 ${(this.sessionId || this.goalId) ? 'cursor-pointer hover:bg-muted/50' : ''}"
+                                           @click=${() => (this.sessionId || this.goalId) ? this._openDiffModal(f.file) : undefined}>
+                                          <span
+                                              class="${this._statusColor(f.status)} font-mono w-[70px] shrink-0 text-right"
+                                              title=${this._statusLabel(f.status)}
+                                          >
+                                              ${this._statusLabel(f.status)}
+                                          </span>
+                                          <span class="text-foreground truncate" title=${f.file}>
+                                              ${f.file}
+                                          </span>
                                       </div>
                                   `
                               )}
