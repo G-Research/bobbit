@@ -63,6 +63,10 @@ let sandboxStatusLoaded = false;
 let sandboxCredEntries: { key: string; value: string }[] = [];
 let sandboxMountEntries: string[] = [];
 
+// ── Container Pool status ──
+let poolStatus: { enabled: boolean; total?: number; idle?: number; claimed?: number; warming?: number } | null = null;
+let poolStatusLoaded = false;
+
 function resetRebindState(): void {
 	rebindingId = null;
 	rebindingIndex = null;
@@ -972,6 +976,22 @@ function loadSandboxStatus(): void {
 	});
 }
 
+function loadPoolStatus(): void {
+	if (poolStatusLoaded) return;
+	poolStatusLoaded = true;
+	gatewayFetch("/api/sandbox-pool").then(async (res) => {
+		if (res.ok) {
+			poolStatus = await res.json();
+		} else {
+			poolStatus = { enabled: false };
+		}
+		renderApp();
+	}).catch(() => {
+		poolStatus = { enabled: false };
+		renderApp();
+	});
+}
+
 function syncSandboxEntriesFromConfig(): void {
 	// Parse credentials from project config
 	try {
@@ -1198,6 +1218,81 @@ function renderSandboxSection(inputClass: string) {
 					>${icon(Plus, "xs")} Add mount</button>
 				</div>
 			</div>
+
+			<!-- Container Pool -->
+			${sandboxMode === "docker" ? html`
+				<div class="border-t border-border pt-2 mt-1 flex flex-col gap-2">
+					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Container Pool</div>
+					<p class="text-xs text-muted-foreground -mt-1">
+						Pre-warmed containers reduce sandbox startup time. Changes take effect on gateway restart.
+					</p>
+
+					<!-- Pool Size -->
+					<div class="flex items-center gap-3">
+						<span class="${labelClass}">Pool Size</span>
+						<input
+							type="number"
+							min="0"
+							class="${inputClass} max-w-32"
+							placeholder=${projectDefaults.sandbox_pool_size || "2"}
+							.value=${projectConfig.sandbox_pool_size || ""}
+							@input=${(e: Event) => {
+								projectConfig.sandbox_pool_size = (e.target as HTMLInputElement).value;
+								projectSaveStatus = "";
+								renderApp();
+							}}
+						/>
+						<span class="text-xs text-muted-foreground">Pre-warmed containers (0 = disable)</span>
+					</div>
+
+					<!-- Max Idle Time -->
+					<div class="flex items-center gap-3">
+						<span class="${labelClass}">Max Idle Time</span>
+						<input
+							type="number"
+							min="0"
+							class="${inputClass} max-w-32"
+							placeholder=${projectDefaults.sandbox_pool_max_idle || "300"}
+							.value=${projectConfig.sandbox_pool_max_idle || ""}
+							@input=${(e: Event) => {
+								projectConfig.sandbox_pool_max_idle = (e.target as HTMLInputElement).value;
+								projectSaveStatus = "";
+								renderApp();
+							}}
+						/>
+						<span class="text-xs text-muted-foreground">Seconds before excess containers culled</span>
+					</div>
+
+					<!-- Pool Status -->
+					<div class="flex items-center gap-3">
+						<span class="${labelClass}">Pool Status</span>
+						<div class="flex items-center gap-2 text-sm">
+							${(() => {
+								loadPoolStatus();
+								if (poolStatus === null) {
+									return html`<span class="text-muted-foreground">Loading...</span>`;
+								}
+								if (!poolStatus.enabled) {
+									return html`<span class="text-muted-foreground">Pool disabled</span>`;
+								}
+								return html`
+									<span class="text-xs font-mono flex items-center gap-3">
+										<span>Total: <span class="text-foreground font-medium">${poolStatus.total}</span></span>
+										<span>Idle: <span class="text-foreground font-medium">${poolStatus.idle}</span></span>
+										<span>Claimed: <span class="text-foreground font-medium">${poolStatus.claimed}</span></span>
+										<span>Warming: <span class="text-foreground font-medium">${poolStatus.warming}</span></span>
+									</span>
+								`;
+							})()}
+							<button
+								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
+								title="Refresh pool status"
+								@click=${() => { poolStatusLoaded = false; poolStatus = null; loadPoolStatus(); }}
+							>${icon(RotateCcw, "xs")}</button>
+						</div>
+					</div>
+				</div>
+			` : ""}
 		</div>
 	`;
 }
