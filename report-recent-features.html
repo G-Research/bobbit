@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bobbit — Last 5 Sizable Features</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-hover: #1c2128;
+    --border: #30363d;
+    --fg: #e6edf3;
+    --fg-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f6feb;
+    --green: #3fb950;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --orange: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 2rem;
+    line-height: 1.5;
+  }
+  .header {
+    text-align: center;
+    margin-bottom: 2.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .header h1 {
+    font-size: 1.75rem;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .header .subtitle {
+    color: var(--fg-muted);
+    font-size: 0.9rem;
+  }
+
+  .timeline {
+    max-width: 900px;
+    margin: 0 auto;
+    position: relative;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 24px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+
+  .feature {
+    position: relative;
+    margin-bottom: 2rem;
+    padding-left: 60px;
+  }
+  .feature .dot {
+    position: absolute;
+    left: 16px;
+    top: 6px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    border: 2px solid var(--accent);
+  }
+  .feature:nth-child(2) .dot { background: #2ea04370; border-color: var(--green); }
+  .feature:nth-child(3) .dot { background: #bc8cff30; border-color: var(--purple); }
+  .feature:nth-child(4) .dot { background: #d2992230; border-color: var(--orange); }
+  .feature:nth-child(5) .dot { background: #f8514930; border-color: var(--red); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    transition: border-color 0.2s;
+  }
+  .card:hover { border-color: var(--fg-muted); }
+
+  .card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+  }
+  .card-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .pr-badge {
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .meta {
+    display: flex;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+  }
+  .meta span { display: flex; align-items: center; gap: 4px; }
+
+  .description {
+    font-size: 0.9rem;
+    color: var(--fg-muted);
+    margin-bottom: 1rem;
+    line-height: 1.6;
+  }
+
+  .stats-bar {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .stat {
+    font-size: 0.78rem;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat.files    { background: #30363d; color: var(--fg-muted); }
+  .stat.added    { background: #12261e; color: var(--green); }
+  .stat.removed  { background: #2a1215; color: var(--red); }
+
+  .highlights {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+  .highlights ul {
+    list-style: none;
+    padding: 0;
+  }
+  .highlights li {
+    font-size: 0.82rem;
+    color: var(--fg-muted);
+    padding: 2px 0;
+    padding-left: 1rem;
+    position: relative;
+  }
+  .highlights li::before {
+    content: '›';
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-weight: bold;
+  }
+
+  .summary-grid {
+    max-width: 900px;
+    margin: 0 auto 2rem;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+  }
+  .summary-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    text-align: center;
+  }
+  .summary-card .num {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 0.1rem;
+  }
+  .summary-card .label {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+  }
+  .num.green { color: var(--green); }
+  .num.red { color: var(--red); }
+  .num.blue { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Bobbit — Recent Feature Report</h1>
+  <div class="subtitle">Last 5 sizable features &middot; March 29–30, 2026</div>
+</div>
+
+<div class="summary-grid">
+  <div class="summary-card">
+    <div class="num blue">72</div>
+    <div class="label">Files Changed</div>
+  </div>
+  <div class="summary-card">
+    <div class="num green">+3,762</div>
+    <div class="label">Lines Added</div>
+  </div>
+  <div class="summary-card">
+    <div class="num red">-874</div>
+    <div class="label">Lines Removed</div>
+  </div>
+</div>
+
+<div class="timeline">
+
+  <!-- 1. Tool Access Policy -->
+  <div class="feature">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Tool Access Policy: Per-tool/group grant behavior</div>
+        <span class="pr-badge">#128</span>
+      </div>
+      <div class="meta">
+        <span>&#128197; March 30, 2026</span>
+        <span>&#128100; Joshua Subramaniam + Bobbit</span>
+        <span>&#128273; 371eff4</span>
+      </div>
+      <div class="description">
+        Introduces a grant policy system for MCP tools — <code>always-ask</code>, <code>ask-once</code>, and <code>never-ask</code> — configurable per-tool and per-role. Includes policy-aware permission cards, server-side enforcement, session persistence across restarts, and REST API support.
+      </div>
+      <div class="stats-bar">
+        <span class="stat files">19 files</span>
+        <span class="stat added">+1,350</span>
+        <span class="stat removed">-110</span>
+      </div>
+      <div class="highlights">
+        <ul>
+          <li>Policy-aware UI: different buttons for always-ask vs ask-once vs default</li>
+          <li>Server-side enforcement prevents circumventing <code>never-ask</code> tools</li>
+          <li>Session allowedTools persist across server restart</li>
+          <li>Role-level <code>toolPolicies</code> with group prefix support</li>
+          <li>Unit tests for <code>resolveGrantPolicy()</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Gate Re-signal Cancellation -->
+  <div class="feature">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Cancel stale gate verification reviewers on re-signal</div>
+        <span class="pr-badge">#112</span>
+      </div>
+      <div class="meta">
+        <span>&#128197; March 29, 2026</span>
+        <span>&#128100; Joshua Subramaniam + Bobbit</span>
+        <span>&#128273; 09a5126</span>
+      </div>
+      <div class="description">
+        When a workflow gate is re-signaled, stale reviewer sessions from the prior signal are now automatically terminated and their results suppressed. Also enriches failure notifications and reverts an earlier reactive state management change.
+      </div>
+      <div class="stats-bar">
+        <span class="stat files">24 files</span>
+        <span class="stat added">+1,005</span>
+        <span class="stat removed">-502</span>
+      </div>
+      <div class="highlights">
+        <ul>
+          <li><code>cancelStaleVerifications()</code> terminates old reviewer sessions</li>
+          <li>Cancelled flag checked after <code>Promise.all</code> to suppress stale results</li>
+          <li>Active verifications tracked by signal ID for inspection</li>
+          <li>280-line E2E test covering the full re-signal lifecycle</li>
+          <li>Reverted broken reactive state management (#111)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Config Directories -->
+  <div class="feature">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Config Directories settings tab — unified directory management</div>
+        <span class="pr-badge">#124</span>
+      </div>
+      <div class="meta">
+        <span>&#128197; March 29, 2026</span>
+        <span>&#128100; Joshua Subramaniam + Bobbit</span>
+        <span>&#128273; 119d30e</span>
+      </div>
+      <div class="description">
+        A new Settings tab showing every directory Bobbit scans for skills, MCP servers, and tools — organized by type with scope badges and existence indicators. Custom directories can be added/removed; built-in ones are read-only. Includes cross-links from Skills and Tools pages.
+      </div>
+      <div class="stats-bar">
+        <span class="stat files">15 files</span>
+        <span class="stat added">+826</span>
+        <span class="stat removed">-68</span>
+      </div>
+      <div class="highlights">
+        <ul>
+          <li>New <code>config-directories.ts</code> server module with parse/get/save API</li>
+          <li>Grouped listing by type (Skills / MCP / Tools) with scope badges</li>
+          <li>Auto-migrates legacy <code>skill_directories</code> to <code>config_directories</code></li>
+          <li>MCP error diagnostics: full stack traces and defensive content handling</li>
+          <li>240-line unit test suite; fixed Windows path quoting bug</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Setup Wizard Redesign -->
+  <div class="feature">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Redesign setup wizard: form-based preview with XML proposals</div>
+        <span class="pr-badge" style="background:#d2992230;color:var(--orange);">direct</span>
+      </div>
+      <div class="meta">
+        <span>&#128197; March 29, 2026</span>
+        <span>&#128100; Josh S. + Bobbit</span>
+        <span>&#128273; bd8b34c</span>
+      </div>
+      <div class="description">
+        Replaces the old step-tracking progress panel with a live editable form populated via structured <code>&lt;setup_proposal&gt;</code> XML blocks. Detects stack, commands, system prompt, and model preferences — all editable before saving.
+      </div>
+      <div class="stats-bar">
+        <span class="stat files">9 files</span>
+        <span class="stat added">+337</span>
+        <span class="stat removed">-173</span>
+      </div>
+      <div class="highlights">
+        <ul>
+          <li>Structured XML proposals replace freeform text parsing</li>
+          <li>Live preview panel: stack badges, command fields, system prompt editor</li>
+          <li>User can edit all fields before committing</li>
+          <li>New <code>GET/PUT /api/system-prompt-context</code> endpoints</li>
+          <li>Rewritten assistant prompt for reliable structured output</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Git Diff Viewer -->
+  <div class="feature">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Git diff viewer — clickable inline diffs in file status</div>
+        <span class="pr-badge" style="background:#f8514930;color:var(--red);">#130</span>
+      </div>
+      <div class="meta">
+        <span>&#128197; March 30, 2026</span>
+        <span>&#128100; Joshua Subramaniam + Bobbit</span>
+        <span>&#128273; 30f21e4</span>
+      </div>
+      <div class="description">
+        Makes file entries in the <code>GitStatusWidget</code> clickable — fetching unified diffs via REST and rendering them inline with the <code>&lt;diff-block&gt;</code> component. Adds git-diff endpoints for both sessions and goals with path sanitization and size caps.
+      </div>
+      <div class="stats-bar">
+        <span class="stat files">5 files</span>
+        <span class="stat added">+244</span>
+        <span class="stat removed">-21</span>
+      </div>
+      <div class="highlights">
+        <ul>
+          <li>Click any file to expand its unified diff inline</li>
+          <li>REST endpoints: <code>/api/sessions/:id/git-diff</code> and <code>/api/goals/:id/git-diff</code></li>
+          <li>Path sanitization rejects <code>..</code> and absolute paths</li>
+          <li>5s timeout, 500KB response cap, untracked file support</li>
+          <li>Race condition guard prevents stale diffs on rapid clicks</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

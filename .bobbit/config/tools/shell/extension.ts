@@ -91,8 +91,8 @@ function injectCoAuthorTrailer(command: string, sessionId: string | undefined): 
 	// Don't intercept merge commits, reverts, or cherry-picks (mechanical operations)
 	if (/\bgit\s+(merge|revert|cherry-pick)\b/.test(command)) return command;
 
-	// Build the trailer value
-	const modelName = getModelName(sessionId);
+	// Build the trailer value — strip provider suffix like " (anthropic)" to keep it clean
+	const modelName = getModelName(sessionId).replace(/\s*\([^)]*\)\s*$/, '');
 	const author = modelName ? `Bobbit (${modelName})` : 'Bobbit';
 	const trailer = `--trailer "Co-Authored-By: ${author} <noreply@bobbit.dev>"`;
 

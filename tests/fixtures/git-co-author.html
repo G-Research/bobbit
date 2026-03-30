@@ -11,7 +11,9 @@ function injectCoAuthorTrailer(command, modelName) {
   // Don't intercept merge/revert/cherry-pick
   if (/\bgit\s+(merge|revert|cherry-pick)\b/.test(command)) return command;
 
-  const author = modelName ? `Bobbit (${modelName})` : 'Bobbit';
+  // Strip provider suffix like " (anthropic)" to keep it clean
+  const cleanModel = modelName ? modelName.replace(/\s*\([^)]*\)\s*$/, '') : '';
+  const author = cleanModel ? `Bobbit (${cleanModel})` : 'Bobbit';
   const trailer = `--trailer "Co-Authored-By: ${author} <noreply@bobbit.dev>"`;
 
   return command.replace(

@@ -29,7 +29,7 @@ test.describe("injectCoAuthorTrailer", () => {
 	test("appends trailer to simple git commit", async ({ page }) => {
 		const result = await inject(page, 'git commit -m "msg"');
 		expect(result).toContain(
-			'--trailer "Co-Authored-By: Bobbit (Claude Sonnet 4.6 (aws)) <noreply@bobbit.dev>"',
+			'--trailer "Co-Authored-By: Bobbit (Claude Sonnet 4.6) <noreply@bobbit.dev>"',
 		);
 	});
 
