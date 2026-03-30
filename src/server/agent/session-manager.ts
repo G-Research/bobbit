@@ -1381,11 +1381,11 @@ export class SessionManager {
 					return true;
 				});
 
-				// Start/reuse sandbox proxy if allowlist is non-empty
-				let proxyPort: number | undefined;
-				if (networkAllowlist.length > 0) {
-					proxyPort = await this.ensureSandboxProxy(networkAllowlist);
-				}
+				// Always start sandbox proxy — it controls outbound network access.
+				// With empty allowlist: blocks all outbound (equivalent to --network=none
+				// but still allows gateway callbacks via no_proxy).
+				// With entries: allows only those hosts through.
+				const proxyPort = await this.ensureSandboxProxy(networkAllowlist);
 
 				// Read gateway URL and token for the container
 				let gatewayUrl: string;
@@ -1403,7 +1403,7 @@ export class SessionManager {
 				bridgeOptions.sandboxMounts = validatedMounts;
 				bridgeOptions.gatewayUrl = gatewayUrl;
 				bridgeOptions.gatewayToken = gatewayToken;
-				if (proxyPort) bridgeOptions.sandboxProxyPort = proxyPort;
+				bridgeOptions.sandboxProxyPort = proxyPort;
 			}
 		}
 

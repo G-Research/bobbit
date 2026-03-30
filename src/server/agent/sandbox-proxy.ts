@@ -97,11 +97,13 @@ export class SandboxProxy {
 
 		console.log(`[sandbox-proxy] CONNECT ${target}`);
 
+		let tunnelEstablished = false;
 		const serverSocket = net.connect(port, hostname, () => {
 			clientSocket.write(
 				"HTTP/1.1 200 Connection Established\r\n" +
 				"\r\n",
 			);
+			tunnelEstablished = true;
 			if (head.length > 0) {
 				serverSocket.write(head);
 			}
@@ -111,13 +113,18 @@ export class SandboxProxy {
 
 		serverSocket.on("error", (err) => {
 			console.error(`[sandbox-proxy] CONNECT error to ${target}:`, err.message);
-			clientSocket.write(
-				"HTTP/1.1 502 Bad Gateway\r\n" +
-				"Content-Type: text/plain\r\n" +
-				"\r\n" +
-				`Proxy connection error: ${err.message}\r\n`,
-			);
-			clientSocket.end();
+			if (!tunnelEstablished) {
+				clientSocket.write(
+					"HTTP/1.1 502 Bad Gateway\r\n" +
+					"Content-Type: text/plain\r\n" +
+					"\r\n" +
+					`Proxy connection error: ${err.message}\r\n`,
+				);
+				clientSocket.end();
+			} else {
+				// Tunnel already established — can't write HTTP headers, just destroy
+				clientSocket.destroy();
+			}
 		});
 
 		clientSocket.on("error", (err) => {

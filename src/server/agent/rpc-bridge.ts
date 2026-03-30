@@ -201,10 +201,9 @@ export class RpcBridge {
 
 		const dockerArgs: string[] = ["run", "--rm", "-i", "--add-host=host.docker.internal:host-gateway"];
 
-		// Network: --network=none unless proxy is active
-		if (!this.options.sandboxProxyPort) {
-			dockerArgs.push("--network=none");
-		}
+		// Network: always use default bridge (never --network=none) so the container
+		// can reach the gateway via host.docker.internal. Outbound internet is blocked
+		// by the proxy (empty allowlist = deny all) or restricted to allowlisted hosts.
 
 		// Bind mounts
 		dockerArgs.push("-v", `${toDockerPath(projectDir)}:/workspace`);
@@ -222,9 +221,15 @@ export class RpcBridge {
 			}
 		}
 
-		// Environment variables
+		// Rewrite gateway URL to use host.docker.internal so it's reachable from
+		// inside the container and bypasses the proxy via no_proxy.
 		if (this.options.gatewayUrl) {
-			dockerArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
+			let containerGatewayUrl = this.options.gatewayUrl;
+			try {
+				const parsed = new URL(this.options.gatewayUrl);
+				containerGatewayUrl = `${parsed.protocol}//host.docker.internal:${parsed.port || (parsed.protocol === "https:" ? "443" : "80")}`;
+			} catch { /* keep original if URL parsing fails */ }
+			dockerArgs.push("-e", `BOBBIT_GATEWAY_URL=${containerGatewayUrl}`);
 		}
 		if (this.options.gatewayToken) {
 			dockerArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
@@ -249,7 +254,9 @@ export class RpcBridge {
 			}
 		}
 
-		// Proxy env vars when allowlist proxy is active
+		// Always set proxy env vars — the sandbox proxy controls outbound access.
+		// With empty allowlist it blocks everything; with entries it allows only those hosts.
+		// no_proxy ensures gateway callbacks bypass the proxy.
 		if (this.options.sandboxProxyPort) {
 			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
 			dockerArgs.push("-e", `http_proxy=${proxyUrl}`);
