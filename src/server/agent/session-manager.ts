@@ -1343,15 +1343,76 @@ export class SessionManager {
 				try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
 
 				// Validate mounts
-				const validatedMounts = mounts.filter(m => {
-					const src = m.split(":")[0];
-					if (src.includes("..")) { console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`); return false; }
-					if (src.startsWith("~") || src.startsWith("$HOME")) { console.warn(`[session-manager] Rejecting sandbox mount with home dir: ${m}`); return false; }
-					const sensitivePatterns = ["/.ssh", "/.aws", "/.gnupg", "/.config"];
-					const normalizedSrc = src.replace(/\\/g, "/");
-					for (const pat of sensitivePatterns) {
-						if (normalizedSrc.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
+				const validatedMounts = mounts.filter((m: string) => {
+					const parts = m.split(":");
+					if (parts.length < 2) {
+						console.warn(`[session-manager] Rejecting invalid sandbox mount format: ${m}`);
+						return false;
 					}
+					const src = parts[0];
+					const normalizedSrc = src.replace(/\\/g, "/").toLowerCase();
+
+					// Must be absolute path
+					if (!path.isAbsolute(src)) {
+						console.warn(`[session-manager] Rejecting non-absolute sandbox mount: ${m}`);
+						return false;
+					}
+
+					// Block path traversal
+					if (src.includes("..")) {
+						console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`);
+						return false;
+					}
+
+					// Block home directory shortcuts and variable expansion
+					if (src.startsWith("~") || src.startsWith("$HOME") || src.startsWith("$")) {
+						console.warn(`[session-manager] Rejecting sandbox mount with variable/home dir: ${m}`);
+						return false;
+					}
+
+					// Block system-critical paths (normalized, case-insensitive for Windows)
+					const blockedPaths = [
+						// Docker/container runtime sockets
+						"/var/run/docker.sock", "/run/docker.sock",
+						"/var/run/containerd", "/run/containerd",
+						// System directories
+						"/proc", "/sys", "/dev",
+						"/etc", "/boot", "/sbin", "/bin", "/lib", "/lib64",
+						"/usr/sbin", "/usr/bin", "/usr/lib",
+						// Root and home directories
+						"/root",
+						"/home",
+					];
+
+					const sensitiveSubstrings = [
+						"/.ssh", "/.aws", "/.gnupg", "/.config",
+						"/.kube", "/.docker", "/.npmrc", "/.netrc",
+						"/.git-credentials", "/.env",
+						"/docker.sock",
+					];
+
+					// Check exact prefix match against blocked paths
+					for (const blocked of blockedPaths) {
+						if (normalizedSrc === blocked || normalizedSrc.startsWith(blocked + "/")) {
+							console.warn(`[session-manager] Rejecting sandbox mount to system path: ${m}`);
+							return false;
+						}
+					}
+
+					// Check substring match against sensitive patterns
+					for (const pat of sensitiveSubstrings) {
+						if (normalizedSrc.includes(pat)) {
+							console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`);
+							return false;
+						}
+					}
+
+					// On Windows, also block drive root mounts like C:/ or D:/
+					if (/^[a-z]:\/?\s*$/i.test(src.replace(/\\/g, "/"))) {
+						console.warn(`[session-manager] Rejecting sandbox mount of drive root: ${m}`);
+						return false;
+					}
+
 					return true;
 				});
 
