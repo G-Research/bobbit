@@ -203,6 +203,13 @@ export async function loadToolPageData(): Promise<void> {
 	const [t, r] = await Promise.all([fetchTools(), fetchRoles()]);
 	tools = t;
 	roles = r;
+	// Start with all groups collapsed
+	collapsedGroups = new Set(TOOL_GROUPS);
+	// Also collapse any groups not in TOOL_GROUPS
+	for (const tool of tools) {
+		const g = tool.group || "Other";
+		collapsedGroups.add(g);
+	}
 	loading = false;
 	renderApp();
 }
