@@ -22,3 +22,28 @@ allowedTools:
   - preview_close
   - workflow
   - bash_bg
+toolPolicies:
+  read: always-allow
+  write: always-allow
+  edit: always-allow
+  bash: always-allow
+  grep: always-allow
+  find: always-allow
+  ls: always-allow
+  web_search: always-allow
+  web_fetch: always-allow
+  delegate: always-allow
+  browser_navigate: always-allow
+  browser_screenshot: always-allow
+  browser_click: always-allow
+  browser_type: always-allow
+  browser_eval: always-allow
+  browser_wait: always-allow
+  preview_open: always-allow
+  preview_close: always-allow
+  workflow: always-allow
+  bash_bg: always-allow
+_policyMigrated: true
+createdAt: 0
+updatedAt: 0
+promptTemplate: ""

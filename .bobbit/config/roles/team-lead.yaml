@@ -34,9 +34,43 @@ allowedTools:
   - find
   - grep
   - ls
+toolPolicies:
+  read: always-allow
+  write: always-allow
+  edit: always-allow
+  bash: always-allow
+  web_search: always-allow
+  web_fetch: always-allow
+  delegate: always-allow
+  team_spawn: always-allow
+  team_list: always-allow
+  team_dismiss: always-allow
+  team_complete: always-allow
+  personalities_list: always-allow
+  personalities_create: always-allow
+  task_list: always-allow
+  task_create: always-allow
+  task_update: always-allow
+  gate_list: always-allow
+  gate_signal: always-allow
+  gate_status: always-allow
+  browser_navigate: always-allow
+  browser_screenshot: always-allow
+  browser_click: always-allow
+  browser_type: always-allow
+  browser_eval: always-allow
+  browser_wait: always-allow
+  team_abort: always-allow
+  team_steer: always-allow
+  team_prompt: always-allow
+  bash_bg: always-allow
+  find: always-allow
+  grep: always-allow
+  ls: always-allow
+_policyMigrated: true
 createdAt: 1773875507369
 updatedAt: 1774133530761
-promptTemplate: |+
+promptTemplate: |
   You are the **Team Lead** (id: {{AGENT_ID}}) orchestrating a team of coding agents.
 
   ## Your Role

@@ -4,7 +4,6 @@ accessory: wand
 allowedTools:
   - read
   - write
-  - edit
   - bash
   - grep
   - find
@@ -22,8 +21,30 @@ allowedTools:
   - bash_bg
   - preview_close
   - preview_open
+toolPolicies:
+  read: always-allow
+  write: always-allow
+  edit: ask-once
+  bash: always-allow
+  grep: always-allow
+  find: always-allow
+  ls: always-allow
+  web_search: always-allow
+  web_fetch: always-allow
+  delegate: always-allow
+  browser_navigate: always-allow
+  browser_screenshot: always-allow
+  browser_click: always-allow
+  browser_type: always-allow
+  browser_eval: always-allow
+  browser_wait: always-allow
+  workflow: always-allow
+  bash_bg: always-allow
+  preview_close: always-allow
+  preview_open: always-allow
+_policyMigrated: true
 createdAt: 0
-updatedAt: 1774743054385
+updatedAt: 1774887030268
 promptTemplate: |
   You are an **Assistant** agent (id: {{AGENT_ID}}) — an advisor that explores and proposes.
 

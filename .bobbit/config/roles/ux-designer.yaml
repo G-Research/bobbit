@@ -31,6 +31,37 @@ allowedTools:
   - find
   - grep
   - ls
+toolPolicies:
+  Bash: always-allow
+  Edit: always-allow
+  Read: always-allow
+  Write: always-allow
+  gate_signal: always-allow
+  gate_status: always-allow
+  gate_list: always-allow
+  delegate: always-allow
+  task_create: always-allow
+  task_list: always-allow
+  task_update: always-allow
+  team_list: always-allow
+  web_fetch: always-allow
+  web_search: always-allow
+  read: always-allow
+  write: always-allow
+  edit: always-allow
+  bash: always-allow
+  browser_navigate: always-allow
+  browser_screenshot: always-allow
+  browser_click: always-allow
+  browser_type: always-allow
+  browser_eval: always-allow
+  browser_wait: always-allow
+  preview_open: always-allow
+  preview_close: always-allow
+  find: always-allow
+  grep: always-allow
+  ls: always-allow
+_policyMigrated: true
 createdAt: 1773914573962
 updatedAt: 1774134283464
 promptTemplate: |-
