@@ -869,6 +869,7 @@ export interface RoleData {
 	label: string;
 	promptTemplate: string;
 	allowedTools: string[];
+	toolPolicies?: Record<string, string>;
 	accessory: string;
 	createdAt: number;
 	updatedAt: number;
@@ -930,6 +931,7 @@ export interface ToolInfo {
 	detail_docs?: string;
 	hasRenderer?: boolean;
 	rendererFile?: string;
+	grantPolicy?: string;
 }
 
 export async function fetchTools(): Promise<ToolInfo[]> {
@@ -959,7 +961,7 @@ export async function fetchToolDetail(name: string): Promise<ToolInfo | null> {
 	}
 }
 
-export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string }): Promise<boolean> {
+export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string | null }): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`, {
 			method: "PUT",
@@ -974,6 +976,27 @@ export async function updateTool(name: string, updates: { description?: string; 
 		showConnectionError("Failed to update tool", err instanceof Error ? err.message : String(err));
 		return false;
 	}
+}
+
+// ============================================================================
+// TOOL GROUP POLICY API
+// ============================================================================
+
+export async function fetchGroupPolicies(): Promise<Record<string, string>> {
+	try {
+		const res = await gatewayFetch("/api/tool-group-policies");
+		if (!res.ok) return {};
+		return await res.json();
+	} catch {
+		return {};
+	}
+}
+
+export async function updateGroupPolicy(group: string, policy: string | null): Promise<void> {
+	await gatewayFetch(`/api/tool-group-policies/${encodeURIComponent(group)}`, {
+		method: "PUT",
+		body: JSON.stringify({ policy }),
+	});
 }
 
 export async function createRole(role: {
@@ -999,7 +1022,7 @@ export async function createRole(role: {
 	}
 }
 
-export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "allowedTools" | "accessory">>): Promise<boolean> {
+export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "allowedTools" | "toolPolicies" | "accessory">>): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/roles/${encodeURIComponent(name)}`, {
 			method: "PUT",
