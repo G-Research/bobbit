@@ -127,30 +127,51 @@ Configuration format matches Claude Code's `.mcp.json`:
 }
 ```
 
-MCP tools are exposed with `mcp__<server>__<tool>` naming (double underscore separator). They appear in the Tools UI (`#/tools`), system prompts, and respect role-based access control via `allowedTools`. Environment variables in config `env` values (`${VAR}`) are expanded from `process.env`, matching Claude Code behavior.
+MCP tools are exposed with `mcp__<server>__<tool>` naming (double underscore separator). They appear in the Tools UI (`#/tools`), system prompts, and respect role-based access control via tool access policies (see "Tool access policies" below). Environment variables in config `env` values (`${VAR}`) are expanded from `process.env`, matching Claude Code behavior.
 
 Supported transports: **stdio** (spawn child process, most common) and **HTTP** (POST JSON-RPC to URL). The gateway connects to MCP servers at startup and routes tool calls via generated proxy extensions.
 
 REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-servers/:name/restart` (reconnect a server, also triggers re-discovery), `POST /api/internal/mcp-call` (internal proxy for tool execution).
 
-### Tool grant policies
+### Tool access policies
 
-MCP tools can have a **grant policy** that controls what happens when an agent tries to use a tool not in its role's `allowedTools`. This only applies to MCP tools — non-MCP tools are controlled by `allowedTools` alone.
+All tool access control uses a single **grant policy** system. Every tool resolves to one of four policy values — there is no separate whitelist. The `allowedTools` field on roles is derived from resolved policies (tools with `always-allow` policy), not stored independently.
 
-**Policies:**
+**Policy values:**
 
 | Policy | Behavior |
 |---|---|
+| `always-allow` | Tool works without prompting. |
+| `ask-once` | Permission prompt on first use per session. Grant persists in memory for the session lifetime. |
 | `always-ask` | Permission prompt every time. Grant is one-time (revoked after the agent's turn). |
-| `ask-once` | Prompt on first use per session. Grant persists for the session lifetime (in memory, not written to disk). |
-| `never-ask` | Tool is invisible to the agent. No prompt, no stub generated. |
-| *(no policy)* | Current default behavior — stub generated, grant card shown, and approval persists to role YAML. |
+| `never` / `never-ask` | Tool is invisible to the agent. No stub generated, no prompt shown. (`never` and `never-ask` are synonymous.) |
+
+**Policy resolution order** (first non-null wins):
+
+1. **Role + tool override**: `role.toolPolicies["mcp__playwright__browser_click"]`
+2. **Role + group override**: `role.toolPolicies["mcp__playwright"]` or `role.toolPolicies["Browser"]`
+3. **Tool default**: `tool.grantPolicy` from tool YAML
+4. **Group default**: per-group policy from `.bobbit/config/tool-group-policies.yaml`
+5. **System fallback**: `always-allow`
+
+The resolution always returns a concrete policy value — it never returns null.
 
 **Configure per tool** in `.bobbit/config/tools/<group>/*.yaml`:
 
 ```yaml
-grantPolicy: ask-once  # "always-ask" | "ask-once" | "never-ask"
+grantPolicy: ask-once  # "always-allow" | "always-ask" | "ask-once" | "never" | "never-ask"
 ```
+
+**Configure per group** in `.bobbit/config/tool-group-policies.yaml`:
+
+```yaml
+# Maps group name → default grant policy
+Browser: ask-once
+Agent: always-allow
+mcp__playwright: ask-once
+```
+
+Group defaults apply to all tools in that group unless overridden at the tool or role level. Managed server-side by `ToolGroupPolicyStore` in `src/server/agent/tool-group-policy-store.ts`.
 
 **Configure per role** in `.bobbit/config/roles/*.yaml` via `toolPolicies` — supports both individual tool names and group-level prefixes:
 
@@ -160,9 +181,20 @@ toolPolicies:
   mcp__playwright: ask-once  # applies to all tools in this MCP server
 ```
 
-**Policy resolution order:** role tool-specific → role group → tool YAML default → null (current behavior). Existing setups require no changes — behavior is preserved when no policy is set.
+**Migration from `allowedTools`**: On first startup after upgrade, each role's `allowedTools` entries are automatically migrated into `toolPolicies` as `always-allow` entries. The migration is idempotent (guarded by a `_policyMigrated` flag in the role YAML) and non-destructive — `allowedTools` continues to be written to YAML for backward compatibility with older Bobbit versions, but `toolPolicies` is the single source of truth. After migration, `allowedTools` is a computed getter that returns tools whose resolved policy is `always-allow`.
 
-**REST API:** `PUT /api/roles/:name` accepts `toolPolicies`, `PUT /api/tools/:name` accepts `grantPolicy`.
+**REST API:**
+- `PUT /api/roles/:name` accepts `toolPolicies`
+- `PUT /api/tools/:name` accepts `grantPolicy`
+- `GET /api/tool-group-policies` → returns all group policies as `Record<string, GrantPolicy>`
+- `PUT /api/tool-group-policies/:group` → set or clear a group default (`{ policy: GrantPolicy | null }`, null clears)
+
+**UI for managing policies:**
+- **Tool edit page** (`#/tools/:name`): "Default Grant Policy" dropdown sets the tool-level default. "Role Access" section shows per-role policy dropdowns with resolved effective policy hints.
+- **Tool list page** (`#/tools`): group headers show a policy badge/dropdown for editing the group default directly.
+- **Role edit page** (`#/settings/roles/:name`): "Tool Policy Overrides" section shows only explicit overrides in `toolPolicies`, with add/remove controls.
+
+When a user approves a tool via the permission card, the persistent grant writes `toolPolicies[tool] = "always-allow"` on the role (not `allowedTools` directly).
 
 **Manage config scan directories**: Bobbit scans multiple directories for skills, MCP servers, tools, and agent files. View all scanned directories and add custom ones via Settings → Config Directories tab (`#/settings`, Directories tab) or by editing `config_directories` in `.bobbit/config/project.yaml`. See "Config scan directories" section below for details. Note: `"agents"` entries point at **individual files** (e.g. `~/my-team/AGENTS.md`), not directories — unlike the other config types. REST API: `GET /api/config-directories` returns all directories with path, types, scope, exists status, and whether they're removable.
 
@@ -294,6 +326,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `tools/<group>/*.yaml` | `ToolManager` | Tool definitions and extension code (name, description, docs, provider, renderer, extension.ts) |
 | `project.yaml` | `ProjectConfigStore` | Project settings (build/test/typecheck commands, worktree setup, default thinking level, config_directories, custom config) |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompt definitions (goal, role, tool, personality, staff, setup) |
+| `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Per-group default grant policies for tool access control |
 | `mcp.json` | `McpManager` | MCP server overrides (Bobbit-specific additions to `.mcp.json`) |
 
 

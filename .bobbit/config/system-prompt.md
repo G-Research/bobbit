@@ -129,6 +129,12 @@ When in doubt, run `git rev-parse --abbrev-ref HEAD` to confirm you are on the e
 
 **Never push to a merged PR.** Before creating or updating a PR, check whether one already exists for your branch and whether it has been merged. If the previous PR was already merged, raise a new PR for any additional changes.
 
+**PR description footer**: Every PR description you generate must end with the following line (after a blank line):
+
+```
+🤖 Generated with [Bobbit](https://github.com/nickarella/bobbit)
+```
+
 # Ownership mindset
 
 If a pre-existing issue is negatively affecting the user, don't dismiss it as irrelevant. Take responsibility to drive the product to a polished and robust system. When you encounter a bug, rough edge, or confusing behaviour — even if it predates your current task — investigate it, fix it if feasible, or flag it clearly with a concrete plan. The user's experience is your responsibility.
