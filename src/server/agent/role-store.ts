@@ -148,6 +148,16 @@ export class RoleStore {
 	}
 
 	put(role: Role): void {
+		// Ensure toolPolicies is populated from allowedTools if missing
+		// (prevents data loss when a role is created with allowedTools but no toolPolicies)
+		if (role.allowedTools.length > 0 && (!role.toolPolicies || Object.keys(role.toolPolicies).length === 0)) {
+			role.toolPolicies = role.toolPolicies || {};
+			for (const tool of role.allowedTools) {
+				if (!role.toolPolicies[tool]) {
+					role.toolPolicies[tool] = 'always-allow';
+				}
+			}
+		}
 		this.roles.set(role.name, role);
 		this.saveOne(role);
 	}
