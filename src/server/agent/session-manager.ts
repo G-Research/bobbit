@@ -483,23 +483,41 @@ export class SessionManager {
 			session.lastTurnErrored = event.message.stopReason === "error";
 		}
 
-		// Detect failed tool executions for MCP tools that exist but aren't
-		// in the session's role allowedTools — prompt the user to grant permission.
-		// Uses tool_execution_end (structured fields) rather than parsing error text.
-		if (event.type === "tool_execution_end" && event.isError && event.toolName && session.role && this.mcpManager) {
-			const toolName: string = event.toolName;
-			const mcpInfos = this.mcpManager.getToolInfos();
-			const mcpTool = mcpInfos.find(t => t.name === toolName);
-			if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === toolName.toLowerCase())) {
-				const role = this.roleManager?.getRole(session.role);
-				if (role) {
-					broadcast(session.clients, {
-						type: "tool_permission_needed",
-						toolName: mcpTool.name,
-						group: mcpTool.group,
-						roleName: role.name,
-						roleLabel: role.label,
-					});
+		// Detect MCP tool permission errors and prompt the user to grant access.
+		// Two detection paths:
+		// 1. tool_execution_end with isError (if the runtime propagates it)
+		// 2. message_end with toolResult containing our sentinel error text
+		if (session.role && this.mcpManager) {
+			let deniedToolName: string | undefined;
+
+			if (event.type === "tool_execution_end" && event.isError && event.toolName) {
+				deniedToolName = event.toolName;
+			}
+
+			if (event.type === "message_end" && event.message?.role === "toolResult") {
+				const text = Array.isArray(event.message.content)
+					? event.message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")
+					: typeof event.message.content === "string" ? event.message.content : "";
+				const match = text.match(/^Error: Tool (\S+) is not allowed for your current role\./);
+				if (match) {
+					deniedToolName = match[1];
+				}
+			}
+
+			if (deniedToolName) {
+				const mcpInfos = this.mcpManager.getToolInfos();
+				const mcpTool = mcpInfos.find(t => t.name === deniedToolName);
+				if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === deniedToolName!.toLowerCase())) {
+					const role = this.roleManager?.getRole(session.role);
+					if (role) {
+						broadcast(session.clients, {
+							type: "tool_permission_needed",
+							toolName: mcpTool.name,
+							group: mcpTool.group,
+							roleName: role.name,
+							roleLabel: role.label,
+						});
+					}
 				}
 			}
 		}
