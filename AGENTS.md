@@ -131,6 +131,37 @@ Supported transports: **stdio** (spawn child process, most common) and **HTTP** 
 
 REST API: `GET /api/mcp-servers` (list servers and status), `POST /api/mcp-servers/:name/restart` (reconnect a server, also triggers re-discovery), `POST /api/internal/mcp-call` (internal proxy for tool execution).
 
+### Tool grant policies
+
+MCP tools can have a **grant policy** that controls what happens when an agent tries to use a tool not in its role's `allowedTools`. This only applies to MCP tools — non-MCP tools are controlled by `allowedTools` alone.
+
+**Policies:**
+
+| Policy | Behavior |
+|---|---|
+| `always-ask` | Permission prompt every time. Grant is one-time (revoked after the agent's turn). |
+| `ask-once` | Prompt on first use per session. Grant persists for the session lifetime (in memory, not written to disk). |
+| `never-ask` | Tool is invisible to the agent. No prompt, no stub generated. |
+| *(no policy)* | Current default behavior — stub generated, grant card shown, and approval persists to role YAML. |
+
+**Configure per tool** in `.bobbit/config/tools/<group>/*.yaml`:
+
+```yaml
+grantPolicy: ask-once  # "always-ask" | "ask-once" | "never-ask"
+```
+
+**Configure per role** in `.bobbit/config/roles/*.yaml` via `toolPolicies` — supports both individual tool names and group-level prefixes:
+
+```yaml
+toolPolicies:
+  mcp__playwright__browser_snapshot: always-ask
+  mcp__playwright: ask-once  # applies to all tools in this MCP server
+```
+
+**Policy resolution order:** role tool-specific → role group → tool YAML default → null (current behavior). Existing setups require no changes — behavior is preserved when no policy is set.
+
+**REST API:** `PUT /api/roles/:name` accepts `toolPolicies`, `PUT /api/tools/:name` accepts `grantPolicy`.
+
 **Manage config scan directories**: Bobbit scans multiple directories for skills, MCP servers, tools, and agent files. View all scanned directories and add custom ones via Settings → Config Directories tab (`#/settings`, Directories tab) or by editing `config_directories` in `.bobbit/config/project.yaml`. See "Config scan directories" section below for details. Note: `"agents"` entries point at **individual files** (e.g. `~/my-team/AGENTS.md`), not directories — unlike the other config types. REST API: `GET /api/config-directories` returns all directories with path, types, scope, exists status, and whether they're removable.
 
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
