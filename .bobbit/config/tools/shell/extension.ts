@@ -115,17 +115,24 @@ export default function (pi: ExtensionAPI) {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	let token: string;
 	let baseUrl: string;
-	try {
-		const stateDir = process.env.BOBBIT_DIR
-			? path.join(process.env.BOBBIT_DIR, "state")
-			: path.join(homedir(), ".pi");
-		const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-		token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
-		baseUrl = fs.readFileSync(path.join(stateDir, "gateway-url"), "utf-8").trim().replace(/\/+$/, "");
-	} catch {
-		console.error("[bash-tool] Cannot read gateway credentials");
-		token = "";
-		baseUrl = "";
+	const envToken = process.env.BOBBIT_TOKEN;
+	const envUrl = process.env.BOBBIT_GATEWAY_URL;
+	if (envToken && envUrl) {
+		token = envToken;
+		baseUrl = envUrl.replace(/\/+$/, "");
+	} else {
+		try {
+			const stateDir = process.env.BOBBIT_DIR
+				? path.join(process.env.BOBBIT_DIR, "state")
+				: path.join(homedir(), ".pi");
+			const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
+			token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
+			baseUrl = fs.readFileSync(path.join(stateDir, "gateway-url"), "utf-8").trim().replace(/\/+$/, "");
+		} catch {
+			console.error("[bash-tool] Cannot read gateway credentials");
+			token = "";
+			baseUrl = "";
+		}
 	}
 
 	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {

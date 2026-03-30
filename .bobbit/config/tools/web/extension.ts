@@ -13,8 +13,38 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 const execAsync = promisify(exec);
+
+// ── Gateway API helpers (for proxy mode in Docker sandbox) ──
+
+function getGatewayUrl(): string {
+	if (process.env.BOBBIT_GATEWAY_URL) return process.env.BOBBIT_GATEWAY_URL.replace(/\/+$/, "");
+	const stateDir = process.env.BOBBIT_DIR
+		? path.join(process.env.BOBBIT_DIR, "state")
+		: path.join(os.homedir(), ".pi");
+	const urlPath = path.join(stateDir, "gateway-url");
+	if (fs.existsSync(urlPath)) {
+		return fs.readFileSync(urlPath, "utf-8").trim().replace(/\/+$/, "");
+	}
+	throw new Error(`Gateway URL not found at ${urlPath}`);
+}
+
+function getGatewayToken(): string {
+	if (process.env.BOBBIT_TOKEN) return process.env.BOBBIT_TOKEN;
+	const stateDir = process.env.BOBBIT_DIR
+		? path.join(process.env.BOBBIT_DIR, "state")
+		: path.join(os.homedir(), ".pi");
+	const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
+	const tokenPath = path.join(stateDir, tokenFile);
+	if (fs.existsSync(tokenPath)) {
+		return fs.readFileSync(tokenPath, "utf-8").trim();
+	}
+	throw new Error(`Gateway token not found at ${tokenPath}`);
+}
 
 const USER_AGENT =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -137,6 +167,54 @@ const extension: ExtensionFactory = (pi) => {
 		async execute(_toolCallId, params, signal) {
 			const max = params.maxResults ?? 10;
 
+			// Gateway proxy mode: route through gateway API when BOBBIT_GATEWAY_URL is set
+			// (works in Docker sandbox with --network=none)
+			if (process.env.BOBBIT_GATEWAY_URL) {
+				try {
+					process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+					const gwUrl = getGatewayUrl();
+					const gwToken = getGatewayToken();
+					const resp = await fetch(`${gwUrl}/api/web-proxy/search`, {
+						method: "POST",
+						headers: {
+							"Authorization": `Bearer ${gwToken}`,
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({ query: params.query, maxResults: max }),
+						signal: signal || undefined,
+					});
+					if (!resp.ok) {
+						const errText = await resp.text();
+						return {
+							content: [{ type: "text" as const, text: `Search failed (gateway proxy): ${resp.status} ${errText}` }],
+							details: { query: params.query, resultCount: 0 },
+							isError: true,
+						} as any;
+					}
+					const data = await resp.json() as any;
+					const results = (data.results || []).slice(0, max);
+					if (results.length === 0) {
+						return {
+							content: [{ type: "text" as const, text: "No results found." }],
+							details: { query: params.query, resultCount: 0 },
+						};
+					}
+					const formatted = results
+						.map((r: any, i: number) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+						.join("\n\n");
+					return {
+						content: [{ type: "text" as const, text: formatted }],
+						details: { query: params.query, resultCount: results.length },
+					};
+				} catch (e: any) {
+					return {
+						content: [{ type: "text" as const, text: `Search failed (gateway proxy): ${e.message}` }],
+						details: { query: params.query, resultCount: 0 },
+						isError: true,
+					} as any;
+				}
+			}
+
 			const url = "https://html.duckduckgo.com/html/";
 			const body = `q=${encodeURIComponent(params.query)}`;
 
@@ -219,6 +297,51 @@ const extension: ExtensionFactory = (pi) => {
 					details: { url: params.url, length: 0 },
 					isError: true,
 				} as any;
+			}
+
+			// Gateway proxy mode: route through gateway API when BOBBIT_GATEWAY_URL is set
+			// (works in Docker sandbox with --network=none)
+			if (process.env.BOBBIT_GATEWAY_URL) {
+				try {
+					process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+					const gwUrl = getGatewayUrl();
+					const gwToken = getGatewayToken();
+					const resp = await fetch(`${gwUrl}/api/web-proxy/fetch`, {
+						method: "POST",
+						headers: {
+							"Authorization": `Bearer ${gwToken}`,
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({ url: parsedUrl.href, maxLength: maxLen }),
+						signal: signal || undefined,
+					});
+					if (!resp.ok) {
+						const errText = await resp.text();
+						return {
+							content: [{ type: "text" as const, text: `Fetch failed (gateway proxy): ${resp.status} ${errText}` }],
+							details: { url: parsedUrl.href, length: 0 },
+							isError: true,
+						} as any;
+					}
+					const data = await resp.json() as any;
+					const text = data.text || "";
+					if (!text.trim()) {
+						return {
+							content: [{ type: "text" as const, text: "Page returned no extractable text (may require JavaScript rendering)." }],
+							details: { url: parsedUrl.href, length: 0 },
+						};
+					}
+					return {
+						content: [{ type: "text" as const, text }],
+						details: { url: parsedUrl.href, length: data.length || text.length },
+					};
+				} catch (e: any) {
+					return {
+						content: [{ type: "text" as const, text: `Fetch failed (gateway proxy): ${e.message}` }],
+						details: { url: parsedUrl.href, length: 0 },
+						isError: true,
+					} as any;
+				}
 			}
 
 			let raw: string;

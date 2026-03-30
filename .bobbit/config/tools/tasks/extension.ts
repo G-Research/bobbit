@@ -27,17 +27,24 @@ export default function (pi: ExtensionAPI) {
 
 	let token: string;
 	let baseUrl: string;
-	try {
-		const stateDir = process.env.BOBBIT_DIR
-			? path.join(process.env.BOBBIT_DIR, "state")
-			: path.join(homedir(), ".pi");
-		const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-		const urlFile = process.env.BOBBIT_DIR ? "gateway-url" : "gateway-url";
-		token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
-		baseUrl = fs.readFileSync(path.join(stateDir, urlFile), "utf-8").trim().replace(/\/+$/, "");
-	} catch {
-		console.error("[goal-tools] Cannot read gateway credentials — tools not registered");
-		return;
+	const envToken = process.env.BOBBIT_TOKEN;
+	const envUrl = process.env.BOBBIT_GATEWAY_URL;
+	if (envToken && envUrl) {
+		token = envToken;
+		baseUrl = envUrl.replace(/\/+$/, "");
+	} else {
+		try {
+			const stateDir = process.env.BOBBIT_DIR
+				? path.join(process.env.BOBBIT_DIR, "state")
+				: path.join(homedir(), ".pi");
+			const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
+			const urlFile = process.env.BOBBIT_DIR ? "gateway-url" : "gateway-url";
+			token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
+			baseUrl = fs.readFileSync(path.join(stateDir, urlFile), "utf-8").trim().replace(/\/+$/, "");
+		} catch {
+			console.error("[goal-tools] Cannot read gateway credentials — tools not registered");
+			return;
+		}
 	}
 
 	// ── HTTP helper ───────────────────────────────────────────────────
