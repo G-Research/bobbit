@@ -19,8 +19,34 @@ import path from "node:path";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
+import type { GrantPolicy, Role } from "./role-store.js";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
+
+/**
+ * Resolve the effective grant policy for a tool.
+ * Priority: role tool-specific > role group-level > tool YAML default > null.
+ * Returns null when no explicit policy is configured (preserves current behavior).
+ */
+export function resolveGrantPolicy(
+	toolName: string,
+	toolGroup: string | undefined,
+	role: Role | undefined,
+	toolManager: ToolManager | undefined,
+): GrantPolicy | null {
+	// 1. Role-level tool-specific override
+	if (role?.toolPolicies?.[toolName]) return role.toolPolicies[toolName];
+
+	// 2. Role-level group override (e.g. "mcp__playwright" matches "mcp__playwright__snap")
+	if (toolGroup && role?.toolPolicies?.[toolGroup]) return role.toolPolicies[toolGroup];
+
+	// 3. Tool definition default from YAML
+	const toolDef = toolManager?.getToolByName(toolName);
+	if (toolDef?.grantPolicy) return toolDef.grantPolicy;
+
+	// 4. No explicit policy — return null (preserve current behavior)
+	return null;
+}
 
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--tools", "read,bash", "--no-extensions", "--extension", "/path/to/ext"]) */
@@ -178,7 +204,7 @@ ${toolRegistrations}
  * the ones in its allowedTools list. Filtered extensions are written to
  * a hash-based subdirectory to avoid conflicts with other sessions.
  */
-export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[]): string[] {
+export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[], role?: Role, toolManager?: ToolManager): string[] {
 	const infos = mcpManager.getToolInfos();
 
 	// Determine if we're filtering
@@ -193,7 +219,17 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 	if (filtering) {
 		// Collect only the MCP tool names from allowedTools for the hash
 		const mcpAllowed = allowedTools!.filter(t => t.toLowerCase().startsWith("mcp__")).sort();
-		const hashInput = mcpAllowed.join(",").toLowerCase();
+		let hashInput = mcpAllowed.join(",").toLowerCase();
+		// Include explicitly hidden tools in hash (never-ask changes the extension set)
+		if (role || toolManager) {
+			const hiddenTools = infos
+				.filter(i => !allowedSet?.has(i.name.toLowerCase()) && resolveGrantPolicy(i.name, i.group, role, toolManager) === 'never-ask')
+				.map(i => i.name.toLowerCase())
+				.sort();
+			if (hiddenTools.length > 0) {
+				hashInput += '|hidden:' + hiddenTools.join(',');
+			}
+		}
 		const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
 		extDir = path.join(baseExtDir, hash);
 	} else {
@@ -208,9 +244,19 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 	const disallowedByServer = new Map<string, typeof infos>();
 	for (const info of infos) {
 		const isAllowed = !allowedSet || allowedSet.has(info.name.toLowerCase());
-		const target = isAllowed ? allowedByServer : disallowedByServer;
-		if (!target.has(info.serverName)) target.set(info.serverName, []);
-		target.get(info.serverName)!.push(info);
+		if (isAllowed) {
+			if (!allowedByServer.has(info.serverName)) allowedByServer.set(info.serverName, []);
+			allowedByServer.get(info.serverName)!.push(info);
+		} else {
+			// Check grant policy — only explicit 'never-ask' hides the tool (no stub)
+			const policy = resolveGrantPolicy(info.name, info.group, role, toolManager);
+			if (policy === 'never-ask') {
+				continue; // Explicitly hidden — no stub, tool invisible to agent
+			}
+			// null, 'always-ask', or 'ask-once' — generate stub (null preserves current behavior)
+			if (!disallowedByServer.has(info.serverName)) disallowedByServer.set(info.serverName, []);
+			disallowedByServer.get(info.serverName)!.push(info);
+		}
 	}
 
 	// Write full proxy extensions for allowed tools
