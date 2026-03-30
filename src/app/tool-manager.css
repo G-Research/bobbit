@@ -416,11 +416,30 @@
 	text-decoration: none;
 	color: inherit;
 }
+.tools-role-row--policy {
+	cursor: default;
+}
 .tools-role-row + .tools-role-row {
 	border-top: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
 }
 .tools-role-row:hover {
 	background: color-mix(in oklch, var(--secondary) 50%, transparent);
+}
+.tools-info-icon {
+	color: var(--muted-foreground);
+	cursor: help;
+	display: inline-flex;
+	opacity: 0.6;
+	transition: opacity 150ms;
+}
+.tools-info-icon:hover {
+	opacity: 1;
+}
+.tools-select--sm {
+	padding: 4px 8px;
+	font-size: 11px;
+	padding-right: 26px;
+	background-position: right 6px center;
 }
 
 .tools-role-name {

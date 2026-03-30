@@ -2,8 +2,8 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Pencil, Plus, Wrench } from "lucide";
-import { fetchTools, fetchToolDetail, updateTool, fetchRoles, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
+import { ArrowLeft, Info, Pencil, Plus, Wrench } from "lucide";
+import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
@@ -187,6 +187,7 @@ let editDescription = "";
 let editGroup = "";
 let editDocs = "";
 let editDetailDocs = "";
+let editGrantPolicy = "";
 let saving = false;
 let collapsedGroups = new Set<string>();
 
@@ -238,6 +239,7 @@ function showEdit(tool: ToolInfo): void {
 	editGroup = tool.group;
 	editDocs = tool.docs || "";
 	editDetailDocs = tool.detail_docs || "";
+	editGrantPolicy = tool.grantPolicy || "";
 	saving = false;
 	setHashRoute("tool-edit", tool.name);
 }
@@ -253,6 +255,7 @@ export function navigateToToolEdit(toolName: string): void {
 		editGroup = tool.group;
 		editDocs = tool.docs || "";
 		editDetailDocs = tool.detail_docs || "";
+		editGrantPolicy = tool.grantPolicy || "";
 		saving = false;
 		renderApp();
 		// Also fetch full detail (may have docs)
@@ -279,6 +282,7 @@ export function navigateToToolEdit(toolName: string): void {
 				editGroup = detail.group;
 				editDocs = detail.docs || "";
 				editDetailDocs = detail.detail_docs || "";
+				editGrantPolicy = detail.grantPolicy || "";
 				saving = false;
 			} else {
 				currentView = "list";
@@ -326,6 +330,7 @@ async function handleSave(): Promise<void> {
 		group: editGroup,
 		docs: editDocs,
 		detail_docs: editDetailDocs,
+		grantPolicy: editGrantPolicy,
 	});
 
 	if (ok) {
@@ -369,7 +374,8 @@ function renderNavBar(): TemplateResult {
 			editDescription !== selectedTool.description ||
 			editGroup !== selectedTool.group ||
 			editDocs !== (selectedTool.docs || "") ||
-			editDetailDocs !== (selectedTool.detail_docs || "")
+			editDetailDocs !== (selectedTool.detail_docs || "") ||
+			editGrantPolicy !== (selectedTool.grantPolicy || "")
 		);
 		return html`
 			<div class="tools-nav">
@@ -384,6 +390,12 @@ function renderNavBar(): TemplateResult {
 					</div>
 				</div>
 				<div class="tools-nav-right">
+					${Button({
+						variant: "ghost" as any,
+						size: "sm",
+						onClick: createToolAssistantSession,
+						children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} Tool Assistant</span>`,
+					})}
 					${Button({
 						variant: "default",
 						size: "sm",
@@ -569,6 +581,85 @@ function renderEditView(): TemplateResult {
 
 			<!-- Right sidebar -->
 			<div class="tools-sidebar">
+				<!-- Default Grant Policy -->
+				<div class="tools-section">
+					<h2 class="tools-section-title" style="display:flex;align-items:center;gap:6px">
+						Default Grant Policy
+						<span class="tools-info-icon" title="Controls what happens when an agent uses this tool without explicit role access. Can be overridden per role below.">${icon(Info, "sm")}</span>
+					</h2>
+					<select class="tools-select"
+						.value=${editGrantPolicy}
+						@change=${(e: Event) => { editGrantPolicy = (e.target as HTMLSelectElement).value; renderApp(); }}>
+						<option value="" ?selected=${editGrantPolicy === ""}>Always</option>
+						<option value="ask-once" ?selected=${editGrantPolicy === "ask-once"}>Ask once per session</option>
+						<option value="always-ask" ?selected=${editGrantPolicy === "always-ask"}>Ask every time</option>
+						<option value="never-ask" ?selected=${editGrantPolicy === "never-ask"}>Never (hidden)</option>
+					</select>
+				</div>
+
+				<!-- Role access & per-role policy -->
+				<div class="tools-section">
+					<h2 class="tools-section-title">Role Access</h2>
+					<p class="tools-note">Per-role access level for this tool.</p>
+					${roleAccess.length > 0 ? html`
+						<div class="tools-role-list">
+							${roleAccess.map(({ role, allowed }) => {
+								const policyOverride = role.toolPolicies?.[selectedTool!.name] || "";
+								// Compute effective value for the unified dropdown
+								const effectiveValue = allowed ? "allowed" : policyOverride || "default";
+								return html`
+									<div class="tools-role-row tools-role-row--policy">
+										<span class="tools-role-name">${role.label}</span>
+										<select class="tools-select tools-select--sm"
+											.value=${effectiveValue}
+											@click=${(e: Event) => e.stopPropagation()}
+											@change=${(e: Event) => {
+												const value = (e.target as HTMLSelectElement).value;
+												const toolName = selectedTool!.name;
+												const newAllowed = [...role.allowedTools];
+												const policies = { ...(role.toolPolicies || {}) };
+
+												if (value === "allowed") {
+													// Add to allowedTools, clear policy override
+													if (!newAllowed.includes(toolName)) newAllowed.push(toolName);
+													delete policies[toolName];
+												} else {
+													// Remove from allowedTools
+													const idx = newAllowed.indexOf(toolName);
+													if (idx >= 0) newAllowed.splice(idx, 1);
+													// Set or clear policy override
+													if (value === "default") {
+														delete policies[toolName];
+													} else {
+														policies[toolName] = value;
+													}
+												}
+
+												const updates: Parameters<typeof updateRole>[1] = {
+													allowedTools: newAllowed,
+													toolPolicies: Object.keys(policies).length > 0 ? policies : undefined,
+												};
+												updateRole(role.name, updates).then((ok) => {
+													if (ok) {
+														role.allowedTools = newAllowed;
+														role.toolPolicies = Object.keys(policies).length > 0 ? policies : undefined;
+														renderApp();
+													}
+												});
+											}}>
+											<option value="allowed" ?selected=${effectiveValue === "allowed"}>Always allow</option>
+											<option value="default" ?selected=${effectiveValue === "default"}>Use default</option>
+											<option value="ask-once" ?selected=${effectiveValue === "ask-once"}>Ask once per session</option>
+											<option value="always-ask" ?selected=${effectiveValue === "always-ask"}>Ask every time</option>
+											<option value="never-ask" ?selected=${effectiveValue === "never-ask"}>Never (hidden)</option>
+										</select>
+									</div>
+								`;
+							})}
+						</div>
+					` : html`<p class="tools-note">No roles defined yet.</p>`}
+				</div>
+
 				<!-- Renderer info -->
 				<div class="tools-section">
 					<h2 class="tools-section-title">Renderer</h2>
@@ -584,35 +675,6 @@ function renderEditView(): TemplateResult {
 					${renderRendererPreview(selectedTool.name)}
 				</div>
 
-				<!-- Role access -->
-				<div class="tools-section">
-					<h2 class="tools-section-title">Role Access</h2>
-					<p class="tools-note">Which roles can use this tool.</p>
-					${roleAccess.length > 0 ? html`
-						<div class="tools-role-list">
-							${roleAccess.map(({ role, allowed }) => html`
-								<div class="tools-role-row"
-									@click=${() => setHashRoute("role-edit", role.name)}>
-									<span class="tools-role-name">${role.label}</span>
-									<span class="tools-role-badge ${allowed ? "tools-role-badge--allowed" : "tools-role-badge--restricted"}">
-										${allowed ? "Allowed" : "Restricted"}
-									</span>
-								</div>
-							`)}
-						</div>
-					` : html`<p class="tools-note">No roles defined yet.</p>`}
-				</div>
-
-				<!-- Tool Assistant shortcut -->
-				<div class="tools-section">
-					<h2 class="tools-section-title">Actions</h2>
-					${Button({
-						variant: "ghost" as any,
-						size: "sm",
-						onClick: createToolAssistantSession,
-						children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} Open Tool Assistant</span>`,
-					})}
-				</div>
 			</div>
 		</div>
 	`;

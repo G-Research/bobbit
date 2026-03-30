@@ -870,6 +870,7 @@ export interface RoleData {
 	promptTemplate: string;
 	allowedTools: string[];
 	accessory: string;
+	toolPolicies?: Record<string, string>;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -930,6 +931,7 @@ export interface ToolInfo {
 	detail_docs?: string;
 	hasRenderer?: boolean;
 	rendererFile?: string;
+	grantPolicy?: string;
 }
 
 export async function fetchTools(): Promise<ToolInfo[]> {
@@ -959,7 +961,7 @@ export async function fetchToolDetail(name: string): Promise<ToolInfo | null> {
 	}
 }
 
-export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string }): Promise<boolean> {
+export async function updateTool(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string }): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`, {
 			method: "PUT",
@@ -999,7 +1001,7 @@ export async function createRole(role: {
 	}
 }
 
-export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "allowedTools" | "accessory">>): Promise<boolean> {
+export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "allowedTools" | "accessory" | "toolPolicies">>): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/roles/${encodeURIComponent(name)}`, {
 			method: "PUT",
