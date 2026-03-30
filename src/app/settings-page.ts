@@ -20,7 +20,7 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
-import { gatewayFetch } from "./api.js";
+import { gatewayFetch, fetchSandboxStatus } from "./api.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
 type SettingsTab = SettingsTabId;
@@ -56,6 +56,12 @@ let projectDefaults: Record<string, string> = {};
 let projectConfigLoaded = false;
 let projectSaveStatus: "" | "saving" | "saved" | "error" = "";
 let projectNewEntries: { key: string; value: string }[] = [];
+
+// ── Docker Sandbox section state ──
+let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean } | null = null;
+let sandboxStatusLoaded = false;
+let sandboxCredEntries: { key: string; value: string }[] = [];
+let sandboxMountEntries: string[] = [];
 
 function resetRebindState(): void {
 	rebindingId = null;
@@ -889,6 +895,7 @@ function loadProjectConfig(): void {
 				// Pre-populate all values including defaults so the user sees what workflows will use
 				projectConfig = { ...merged };
 				projectNewEntries = [];
+				syncSandboxEntriesFromConfig();
 			}
 		} catch {}
 		renderApp();
@@ -955,6 +962,246 @@ function projectKeyLabel(key: string): string {
 	return PROJECT_KEY_LABELS[key] || key;
 }
 
+function loadSandboxStatus(): void {
+	if (sandboxStatusLoaded) return;
+	sandboxStatusLoaded = true;
+	fetchSandboxStatus().then(s => {
+		sandboxStatusLocal = s;
+		state.sandboxStatus = s;
+		renderApp();
+	});
+}
+
+function syncSandboxEntriesFromConfig(): void {
+	// Parse credentials from project config
+	try {
+		const raw = projectConfig.sandbox_credentials || "";
+		if (raw) {
+			const obj = JSON.parse(raw);
+			if (typeof obj === "object" && obj !== null && !Array.isArray(obj)) {
+				sandboxCredEntries = Object.entries(obj).map(([key, value]) => ({ key, value: String(value) }));
+			}
+		} else {
+			sandboxCredEntries = [];
+		}
+	} catch { sandboxCredEntries = []; }
+
+	// Parse mounts from project config
+	try {
+		const raw = projectConfig.sandbox_mounts || "";
+		if (raw) {
+			const arr = JSON.parse(raw);
+			if (Array.isArray(arr)) sandboxMountEntries = arr;
+		} else {
+			sandboxMountEntries = [];
+		}
+	} catch { sandboxMountEntries = []; }
+}
+
+function renderSandboxSection(inputClass: string) {
+	loadSandboxStatus();
+
+	const sandboxMode = projectConfig.sandbox || projectDefaults.sandbox || "none";
+	const imageName = projectConfig.sandbox_image || projectDefaults.sandbox_image || "bobbit-agent";
+	const allowlistRaw = projectConfig.sandbox_network_allowlist || "";
+	let allowlistDisplay = "";
+	try {
+		const arr = JSON.parse(allowlistRaw);
+		if (Array.isArray(arr)) allowlistDisplay = arr.join(", ");
+	} catch { allowlistDisplay = allowlistRaw; }
+
+	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
+
+	return html`
+		<div class="flex flex-col gap-2">
+			<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Docker Sandbox</div>
+			<p class="text-xs text-muted-foreground -mt-1">
+				Run agent sessions in isolated Docker containers with restricted filesystem and network access.
+			</p>
+
+			<!-- Sandbox Mode -->
+			<div class="flex items-center gap-3">
+				<span class="${labelClass}">Sandbox Mode</span>
+				<select
+					class="${inputClass} max-w-48"
+					.value=${sandboxMode}
+					@change=${(e: Event) => {
+						projectConfig.sandbox = (e.target as HTMLSelectElement).value;
+						projectSaveStatus = "";
+						renderApp();
+					}}
+				>
+					<option value="none">none</option>
+					<option value="docker">docker</option>
+				</select>
+			</div>
+
+			<!-- Docker Status -->
+			<div class="flex items-center gap-3">
+				<span class="${labelClass}">Docker Status</span>
+				<div class="flex items-center gap-2 text-sm">
+					${sandboxStatusLocal === null
+						? html`<span class="text-muted-foreground">Checking...</span>`
+						: sandboxStatusLocal.available
+							? html`
+								<span class="w-2 h-2 rounded-full bg-green-500"></span>
+								<span class="text-foreground">Available${sandboxStatusLocal.dockerVersion ? ` (v${sandboxStatusLocal.dockerVersion})` : ""}</span>
+								${sandboxStatusLocal.imageExists !== undefined
+									? sandboxStatusLocal.imageExists
+										? html`<span class="text-xs text-muted-foreground ml-2">Image "${imageName}": found</span>`
+										: html`<span class="text-xs text-orange-500 ml-2">Image "${imageName}": not found</span>`
+									: ""}
+							`
+							: html`
+								<span class="w-2 h-2 rounded-full bg-red-500"></span>
+								<span class="text-muted-foreground">Not available${sandboxStatusLocal.error ? ` — ${sandboxStatusLocal.error}` : ""}</span>
+							`}
+					<button
+						class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
+						title="Refresh Docker status"
+						@click=${() => { sandboxStatusLoaded = false; loadSandboxStatus(); }}
+					>${icon(RotateCcw, "xs")}</button>
+				</div>
+			</div>
+
+			<!-- Image Name -->
+			<div class="flex items-center gap-3">
+				<span class="${labelClass}">Image Name</span>
+				<input
+					type="text"
+					class="${inputClass} max-w-64"
+					placeholder=${projectDefaults.sandbox_image || "bobbit-agent"}
+					.value=${projectConfig.sandbox_image || ""}
+					@input=${(e: Event) => {
+						projectConfig.sandbox_image = (e.target as HTMLInputElement).value;
+						projectSaveStatus = "";
+						renderApp();
+					}}
+				/>
+			</div>
+
+			<!-- Network Allowlist -->
+			<div class="flex items-start gap-3">
+				<span class="${labelClass} pt-1.5">Network Allowlist</span>
+				<div class="flex-1 min-w-0 flex flex-col gap-1">
+					<input
+						type="text"
+						class="${inputClass}"
+						placeholder="github.com, api.github.com"
+						.value=${allowlistDisplay}
+						@input=${(e: Event) => {
+							const v = (e.target as HTMLInputElement).value;
+							const hosts = v.split(",").map(h => h.trim()).filter(Boolean);
+							projectConfig.sandbox_network_allowlist = hosts.length > 0 ? JSON.stringify(hosts) : "";
+							projectSaveStatus = "";
+							renderApp();
+						}}
+					/>
+					<span class="text-[10px] text-muted-foreground">Comma-separated hostnames allowed through the network proxy.</span>
+				</div>
+			</div>
+
+			<!-- Credentials -->
+			<div class="flex items-start gap-3">
+				<span class="${labelClass} pt-1.5">Credentials</span>
+				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
+					${sandboxCredEntries.map((entry, i) => html`
+						<div class="flex items-center gap-2">
+							<input
+								type="text"
+								class="w-36 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
+									focus:outline-none focus:ring-2 focus:ring-ring"
+								placeholder="ENV_VAR"
+								.value=${entry.key}
+								@input=${(e: Event) => {
+									sandboxCredEntries[i].key = (e.target as HTMLInputElement).value;
+									const obj: Record<string, string> = {};
+									for (const e2 of sandboxCredEntries) { if (e2.key) obj[e2.key] = e2.value; }
+									projectConfig.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
+									projectSaveStatus = "";
+									renderApp();
+								}}
+							/>
+							<span class="text-muted-foreground text-xs">=</span>
+							<input
+								type="text"
+								class="${inputClass}"
+								placeholder="value"
+								.value=${entry.value}
+								@input=${(e: Event) => {
+									sandboxCredEntries[i].value = (e.target as HTMLInputElement).value;
+									const obj: Record<string, string> = {};
+									for (const e2 of sandboxCredEntries) { if (e2.key) obj[e2.key] = e2.value; }
+									projectConfig.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
+									projectSaveStatus = "";
+									renderApp();
+								}}
+							/>
+							<button
+								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+								title="Remove"
+								@click=${() => {
+									sandboxCredEntries.splice(i, 1);
+									const obj: Record<string, string> = {};
+									for (const e2 of sandboxCredEntries) { if (e2.key) obj[e2.key] = e2.value; }
+									projectConfig.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
+									projectSaveStatus = "";
+									renderApp();
+								}}
+							>${icon(X, "xs")}</button>
+						</div>
+					`)}
+					<button
+						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
+							hover:bg-muted rounded-md transition-colors self-start"
+						@click=${() => { sandboxCredEntries.push({ key: "", value: "" }); renderApp(); }}
+					>${icon(Plus, "xs")} Add credential</button>
+				</div>
+			</div>
+
+			<!-- Additional Mounts -->
+			<div class="flex items-start gap-3">
+				<span class="${labelClass} pt-1.5">Additional Mounts</span>
+				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
+					${sandboxMountEntries.map((mount, i) => html`
+						<div class="flex items-center gap-2">
+							<input
+								type="text"
+								class="${inputClass}"
+								placeholder="/host/path:/container/path:ro"
+								.value=${mount}
+								@input=${(e: Event) => {
+									sandboxMountEntries[i] = (e.target as HTMLInputElement).value;
+									const filtered = sandboxMountEntries.filter(Boolean);
+									projectConfig.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
+									projectSaveStatus = "";
+									renderApp();
+								}}
+							/>
+							<button
+								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+								title="Remove"
+								@click=${() => {
+									sandboxMountEntries.splice(i, 1);
+									const filtered = sandboxMountEntries.filter(Boolean);
+									projectConfig.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
+									projectSaveStatus = "";
+									renderApp();
+								}}
+							>${icon(X, "xs")}</button>
+						</div>
+					`)}
+					<button
+						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
+							hover:bg-muted rounded-md transition-colors self-start"
+						@click=${() => { sandboxMountEntries.push(""); renderApp(); }}
+					>${icon(Plus, "xs")} Add mount</button>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
 function renderProjectTab() {
 	loadProjectConfig();
 
@@ -993,6 +1240,11 @@ function renderProjectTab() {
 					</div>
 				`)}
 			</div>
+
+			<hr class="border-border" />
+
+			<!-- Docker Sandbox -->
+			${renderSandboxSection(inputClass)}
 
 			<hr class="border-border" />
 

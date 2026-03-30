@@ -37,6 +37,7 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
+import { checkDockerAvailability } from "./agent/sandbox-status.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -233,7 +234,38 @@ export function createGateway(config: GatewayConfig) {
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
-	const cleanupInterval = setInterval(() => rateLimiter.cleanup(), 60_000);
+
+	// Rate limiting for web proxy endpoints (10 req/min per client IP)
+	const webProxyRequests = new Map<string, number[]>();
+	const WEB_PROXY_RATE_LIMIT = 10;
+	const WEB_PROXY_WINDOW_MS = 60_000;
+
+	function checkWebProxyRateLimit(clientIp: string): boolean {
+		const now = Date.now();
+		const timestamps = webProxyRequests.get(clientIp) || [];
+		const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
+		if (recent.length >= WEB_PROXY_RATE_LIMIT) {
+			webProxyRequests.set(clientIp, recent);
+			return false;
+		}
+		recent.push(now);
+		webProxyRequests.set(clientIp, recent);
+		return true;
+	}
+
+	const cleanupInterval = setInterval(() => {
+		rateLimiter.cleanup();
+		// Clean stale web proxy rate limit entries
+		const now = Date.now();
+		for (const [ip, timestamps] of webProxyRequests) {
+			const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
+			if (recent.length === 0) {
+				webProxyRequests.delete(ip);
+			} else {
+				webProxyRequests.set(ip, recent);
+			}
+		}
+	}, 60_000);
 
 	// Verification harness — assigned after wss is created (closure captures the reference)
 	let verificationHarness: VerificationHarness;
@@ -589,6 +621,114 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/sandbox-status
+	if (url.pathname === "/api/sandbox-status" && req.method === "GET") {
+		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
+		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+		const configured = sandboxConfig === "docker";
+		const status = await checkDockerAvailability(configured ? imageName : undefined);
+		json({ ...status, configured });
+		return;
+	}
+
+	// POST /api/web-proxy/search
+	if (url.pathname === "/api/web-proxy/search" && req.method === "POST") {
+		const clientIp = req.socket.remoteAddress || "unknown";
+		if (!checkWebProxyRateLimit(clientIp)) {
+			json({ error: "Rate limit exceeded: max 10 web proxy requests per minute" }, 429);
+			return;
+		}
+		const body = await readBody(req);
+		const query = body?.query;
+		if (!query || typeof query !== "string") {
+			json({ error: "Missing query" }, 400);
+			return;
+		}
+		const maxResults = Math.min(Math.max(1, body?.maxResults || 10), 20);
+		try {
+			const encoded = encodeURIComponent(query);
+			const { stdout } = await execFileAsync(
+				"curl", ["-sL", `https://lite.duckduckgo.com/lite/?q=${encoded}`, "-H", "User-Agent: Mozilla/5.0"],
+				{ timeout: 15000, maxBuffer: 1024 * 1024 },
+			);
+			// Parse DuckDuckGo lite HTML for results
+			const results: Array<{ title: string; url: string; snippet: string }> = [];
+			const linkRegex = /<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>([^<]*)<\/a>/gi;
+			const snippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
+			const links: Array<{ url: string; title: string }> = [];
+			let match;
+			while ((match = linkRegex.exec(stdout)) !== null) {
+				const href = match[1];
+				const title = match[2].replace(/<[^>]+>/g, "").trim();
+				if (href && title && !href.includes("duckduckgo.com")) {
+					links.push({ url: href, title });
+				}
+			}
+			const snippets: string[] = [];
+			while ((match = snippetRegex.exec(stdout)) !== null) {
+				snippets.push(match[1].replace(/<[^>]+>/g, "").trim());
+			}
+			for (let i = 0; i < Math.min(links.length, maxResults); i++) {
+				results.push({
+					title: links[i].title,
+					url: links[i].url,
+					snippet: snippets[i] || "",
+				});
+			}
+			json({ results });
+		} catch (err) {
+			json({ error: `Search failed: ${err}` }, 502);
+		}
+		return;
+	}
+
+	// POST /api/web-proxy/fetch
+	if (url.pathname === "/api/web-proxy/fetch" && req.method === "POST") {
+		const clientIp = req.socket.remoteAddress || "unknown";
+		if (!checkWebProxyRateLimit(clientIp)) {
+			json({ error: "Rate limit exceeded: max 10 web proxy requests per minute" }, 429);
+			return;
+		}
+		const body = await readBody(req);
+		const targetUrl = body?.url;
+		if (!targetUrl || typeof targetUrl !== "string") {
+			json({ error: "Missing url" }, 400);
+			return;
+		}
+		// Validate URL scheme
+		try {
+			const parsed = new URL(targetUrl);
+			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+				json({ error: "URL must use http or https" }, 400);
+				return;
+			}
+		} catch {
+			json({ error: "Invalid URL" }, 400);
+			return;
+		}
+		const maxLength = Math.min(body?.maxLength || 20000, 100000);
+		try {
+			const { stdout } = await execFileAsync(
+				"curl", ["-sL", "--max-time", "30", targetUrl],
+				{ timeout: 35000, maxBuffer: 5 * 1024 * 1024 },
+			);
+			// Strip HTML tags for a basic text extraction
+			let text = stdout
+				.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+				.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+				.replace(/<[^>]+>/g, " ")
+				.replace(/\s+/g, " ")
+				.trim();
+			if (text.length > maxLength) {
+				text = text.substring(0, maxLength);
+			}
+			json({ text, length: text.length });
+		} catch (err) {
+			json({ error: `Fetch failed: ${err}` }, 502);
+		}
+		return;
+	}
+
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
 		const currentGen = sessionManager.getSessionStore().getGeneration();
@@ -798,8 +938,23 @@ async function handleApiRoute(
 		// ── Re-attempt support ──
 		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
 
+		// ── Sandbox validation ──
+		const sandboxed = body?.sandboxed === true;
+		if (sandboxed) {
+			const sandboxConfig = projectConfigStore.get("sandbox") || "none";
+			if (sandboxConfig !== "docker") {
+				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
+				return;
+			}
+			const dockerStatus = await checkDockerAvailability();
+			if (!dockerStatus.available) {
+				json({ error: `Docker is not available: ${dockerStatus.error || "Docker not detected"}` }, 503);
+				return;
+			}
+		}
+
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId });
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed });
 
 			// Set role metadata if a role was specified
 			if (roleForMeta) {

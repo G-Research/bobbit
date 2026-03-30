@@ -14,6 +14,7 @@ import * as path from "node:path";
 // ── Gateway API helpers (copied from agent/extension.ts) ──
 
 function getGatewayUrl(): string {
+	if (process.env.BOBBIT_GATEWAY_URL) return process.env.BOBBIT_GATEWAY_URL.replace(/\/+$/, "");
 	const stateDir = process.env.BOBBIT_DIR
 		? path.join(process.env.BOBBIT_DIR, "state")
 		: path.join(os.homedir(), ".pi");
@@ -25,6 +26,7 @@ function getGatewayUrl(): string {
 }
 
 function getGatewayToken(): string {
+	if (process.env.BOBBIT_TOKEN) return process.env.BOBBIT_TOKEN;
 	const stateDir = process.env.BOBBIT_DIR
 		? path.join(process.env.BOBBIT_DIR, "state")
 		: path.join(os.homedir(), ".pi");
