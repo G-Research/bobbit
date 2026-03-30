@@ -899,6 +899,38 @@ export class SessionManager {
 				console.warn(`[session-manager] Session "${ps.title}" (${ps.id}) has worktreePath "${ps.worktreePath}" but directory does not exist`);
 			}
 		}
+
+		// Clean up orphaned non-interactive sessions (e.g. reviewer sessions from
+		// a prior server run whose verification harness tracking was lost on restart).
+		// These sessions would otherwise sit idle forever since nothing is watching them.
+		await this.cleanupOrphanedNonInteractiveSessions();
+	}
+
+	/**
+	 * Terminate any non-interactive sessions (e.g. verification reviewers) that
+	 * survived a server restart. Their in-memory verification tracking is gone,
+	 * so they'll never be cleaned up by the verification harness.
+	 */
+	private async cleanupOrphanedNonInteractiveSessions(): Promise<void> {
+		const orphans: string[] = [];
+		for (const ps of this.store.getLive()) {
+			if (ps.nonInteractive) {
+				orphans.push(ps.id);
+			}
+		}
+		if (orphans.length === 0) return;
+
+		console.log(`[session-manager] Cleaning up ${orphans.length} orphaned non-interactive session(s)...`);
+		for (const id of orphans) {
+			try {
+				await this.terminateSession(id);
+				console.log(`[session-manager] Terminated orphaned non-interactive session ${id}`);
+			} catch (err) {
+				// If terminate fails (e.g. session wasn't fully restored), archive directly
+				console.warn(`[session-manager] Failed to terminate orphan ${id}, archiving:`, err);
+				this.store.archive(id);
+			}
+		}
 	}
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {

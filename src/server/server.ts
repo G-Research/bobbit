@@ -1105,6 +1105,14 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
+			// Cancel any in-flight gate verifications (terminates reviewer sessions)
+			for (const active of verificationHarness.getActiveVerifications(id)) {
+				try {
+					await verificationHarness.cancelStaleVerifications(id, active.gateId);
+				} catch (err) {
+					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
+				}
+			}
 			// Tear down any active team first (dismisses agents, cleans up their worktrees)
 			const teamState = teamManager.getTeamState(id);
 			if (teamState) {
