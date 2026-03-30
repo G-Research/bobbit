@@ -17,4 +17,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # on the host, matching typical developer user IDs.
 USER node
 
+# Configure git for Windows host compatibility (CRLF line endings)
+# and provide default identity for commits inside the container.
+RUN git config --global core.autocrlf true \
+    && git config --global user.email "bobbit-agent@bobbit.ai" \
+    && git config --global user.name "Bobbit Agent"
+
 WORKDIR /workspace
