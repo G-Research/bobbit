@@ -607,8 +607,8 @@ async function handleApiRoute(
 		const maxResults = Math.min(Math.max(1, body?.maxResults || 10), 20);
 		try {
 			const encoded = encodeURIComponent(query);
-			const { stdout } = await execAsync(
-				`curl -sL "https://lite.duckduckgo.com/lite/?q=${encoded}" -H "User-Agent: Mozilla/5.0"`,
+			const { stdout } = await execFileAsync(
+				"curl", ["-sL", `https://lite.duckduckgo.com/lite/?q=${encoded}`, "-H", "User-Agent: Mozilla/5.0"],
 				{ timeout: 15000, maxBuffer: 1024 * 1024 },
 			);
 			// Parse DuckDuckGo lite HTML for results
@@ -663,8 +663,8 @@ async function handleApiRoute(
 		}
 		const maxLength = Math.min(body?.maxLength || 20000, 100000);
 		try {
-			const { stdout } = await execAsync(
-				`curl -sL --max-time 30 ${JSON.stringify(targetUrl)}`,
+			const { stdout } = await execFileAsync(
+				"curl", ["-sL", "--max-time", "30", targetUrl],
 				{ timeout: 35000, maxBuffer: 5 * 1024 * 1024 },
 			);
 			// Strip HTML tags for a basic text extraction

@@ -171,7 +171,6 @@ const extension: ExtensionFactory = (pi) => {
 			// (works in Docker sandbox with --network=none)
 			if (process.env.BOBBIT_GATEWAY_URL) {
 				try {
-					process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 					const gwUrl = getGatewayUrl();
 					const gwToken = getGatewayToken();
 					const resp = await fetch(`${gwUrl}/api/web-proxy/search`, {
@@ -303,7 +302,6 @@ const extension: ExtensionFactory = (pi) => {
 			// (works in Docker sandbox with --network=none)
 			if (process.env.BOBBIT_GATEWAY_URL) {
 				try {
-					process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 					const gwUrl = getGatewayUrl();
 					const gwToken = getGatewayToken();
 					const resp = await fetch(`${gwUrl}/api/web-proxy/fetch`, {

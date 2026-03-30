@@ -12,19 +12,26 @@ import net from "node:net";
  */
 export class SandboxProxy {
 	private server: http.Server | null = null;
-	private allowlist: Set<string>;
+	private _allowlist: string[];
 	private _port = 0;
 
+	private _allowlistSet: Set<string>;
+
 	constructor(allowlist: string[]) {
-		this.allowlist = new Set(allowlist.map((h) => h.toLowerCase()));
+		this._allowlist = allowlist;
+		this._allowlistSet = new Set(allowlist.map((h) => h.toLowerCase()));
 	}
 
 	get port(): number {
 		return this._port;
 	}
 
+	get allowlist(): string[] {
+		return this._allowlist;
+	}
+
 	private isAllowed(hostname: string): boolean {
-		return this.allowlist.has(hostname.toLowerCase());
+		return this._allowlistSet.has(hostname.toLowerCase());
 	}
 
 	async start(): Promise<number> {
@@ -42,11 +49,11 @@ export class SandboxProxy {
 				reject(err);
 			});
 
-			server.listen(0, "127.0.0.1", () => {
+			server.listen(0, "0.0.0.0", () => {
 				const addr = server.address();
 				if (addr && typeof addr === "object") {
 					this._port = addr.port;
-					console.log(`[sandbox-proxy] Listening on 127.0.0.1:${this._port} (allowlist: ${[...this.allowlist].join(", ") || "none"})`);
+					console.log(`[sandbox-proxy] Listening on 0.0.0.0:${this._port} (allowlist: ${this._allowlist.join(", ") || "none"})`);
 					resolve(this._port);
 				} else {
 					reject(new Error("Failed to get server address"));
@@ -165,7 +172,9 @@ export class SandboxProxy {
 
 		proxyReq.on("error", (err) => {
 			console.error(`[sandbox-proxy] Proxy request error for ${reqUrl}:`, err.message);
-			res.writeHead(502, { "Content-Type": "text/plain" });
+			if (!res.headersSent) {
+				res.writeHead(502, { "Content-Type": "text/plain" });
+			}
 			res.end(`Proxy error: ${err.message}`);
 		});
 
