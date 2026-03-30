@@ -3181,16 +3181,24 @@ async function handleApiRoute(
 				return;
 			}
 
-			// Enforce allowedTools for the calling session
+			// Enforce allowedTools for the calling session.
+			// This endpoint is internal — only MCP proxy extensions should call it.
+			// Require session ID header to prevent direct curl bypass.
 			const mcpSessionId = req.headers["x-bobbit-session-id"] as string | undefined;
-			if (mcpSessionId) {
-				const mcpSession = sessionManager.getSession(mcpSessionId);
-				if (mcpSession?.allowedTools && mcpSession.allowedTools.length > 0) {
-					const toolLower = (tool as string).toLowerCase();
-					if (!mcpSession.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
-						json({ error: `Tool "${tool}" is not allowed for this session` }, 403);
-						return;
-					}
+			if (!mcpSessionId) {
+				json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
+				return;
+			}
+			const mcpSession = sessionManager.getSession(mcpSessionId);
+			if (!mcpSession) {
+				json({ error: `Session "${mcpSessionId}" not found` }, 403);
+				return;
+			}
+			if (mcpSession.allowedTools && mcpSession.allowedTools.length > 0) {
+				const toolLower = (tool as string).toLowerCase();
+				if (!mcpSession.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
+					json({ error: `Tool "${tool}" is not allowed for this session` }, 403);
+					return;
 				}
 			}
 
