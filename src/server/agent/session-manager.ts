@@ -168,8 +168,11 @@ export class SessionManager {
 
 	/** Ensure a SandboxProxy is running with the given allowlist. Returns the port. */
 	private async ensureSandboxProxy(allowlist: string[]): Promise<number> {
+		const newKey = [...allowlist].sort().join(",").toLowerCase();
 		if (this.sandboxProxy && this.sandboxProxy.port > 0) {
-			return this.sandboxProxy.port;
+			const oldKey = [...this.sandboxProxy.allowlist].sort().join(",").toLowerCase();
+			if (oldKey === newKey) return this.sandboxProxy.port;
+			this.sandboxProxy.stop();
 		}
 		this.sandboxProxy = new SandboxProxy(allowlist);
 		return this.sandboxProxy.start();
@@ -1335,8 +1338,9 @@ export class SessionManager {
 					if (src.includes("..")) { console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`); return false; }
 					if (src.startsWith("~") || src.startsWith("$HOME")) { console.warn(`[session-manager] Rejecting sandbox mount with home dir: ${m}`); return false; }
 					const sensitivePatterns = ["/.ssh", "/.aws", "/.gnupg", "/.config"];
+					const normalizedSrc = src.replace(/\\/g, "/");
 					for (const pat of sensitivePatterns) {
-						if (src.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
+						if (normalizedSrc.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
 					}
 					return true;
 				});
@@ -1348,8 +1352,14 @@ export class SessionManager {
 				}
 
 				// Read gateway URL and token for the container
-				const gatewayUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-				const gatewayToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				let gatewayUrl: string;
+				let gatewayToken: string;
+				try {
+					gatewayUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+					gatewayToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				} catch (err) {
+					throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
+				}
 
 				bridgeOptions.sandboxed = true;
 				bridgeOptions.sandboxImage = sandboxImage;

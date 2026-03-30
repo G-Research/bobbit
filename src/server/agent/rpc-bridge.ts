@@ -214,7 +214,11 @@ export class RpcBridge {
 		// Additional user-configured mounts
 		if (this.options.sandboxMounts) {
 			for (const mount of this.options.sandboxMounts) {
-				dockerArgs.push("-v", mount);
+				const parts = mount.split(":");
+				if (parts.length >= 2) {
+					parts[0] = toDockerPath(parts[0]);
+					dockerArgs.push("-v", parts.join(":"));
+				}
 			}
 		}
 
