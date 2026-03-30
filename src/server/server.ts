@@ -420,12 +420,20 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 
+			// Wire verification harness before session restore so orphan cleanup can skip resuming sessions
+			sessionManager.setVerificationHarness(verificationHarness);
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 			sessionManager.startPurgeSchedule();
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
 			teamManager.resubscribeTeamEvents();
+
+			// Resume any verifications that were interrupted by a server restart (fire-and-forget)
+			verificationHarness.resumeInterruptedVerifications().catch(err => {
+				console.error("[verification] Error resuming interrupted verifications:", err);
+			});
 
 			const maxPort = config.portExplicit !== false ? config.port : config.port + 9;
 			let port = config.port;

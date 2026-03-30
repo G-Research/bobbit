@@ -61,11 +61,219 @@ export interface ActiveVerification {
 export class VerificationHarness {
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
 	private activeVerifications = new Map<string, ActiveVerification>();
+	private readonly _persistPath: string;
 
 	/** Get all active (in-flight) verifications, optionally filtered by goalId */
 	getActiveVerifications(goalId?: string): ActiveVerification[] {
 		const all = [...this.activeVerifications.values()];
 		return goalId ? all.filter(v => v.goalId === goalId) : all;
+	}
+
+	/**
+	 * Return session IDs from persisted active verifications that are still running.
+	 * Used by SessionManager to skip orphan cleanup for sessions that will be resumed.
+	 */
+	getResumingSessionIds(): Set<string> {
+		const ids = new Set<string>();
+		const persisted = this._loadActive();
+		for (const v of persisted) {
+			if (v.overallStatus !== "running") continue;
+			for (const step of v.steps) {
+				if (step.sessionId && step.status === "running") {
+					ids.add(step.sessionId);
+				}
+			}
+		}
+		return ids;
+	}
+
+	/** Persist active verifications to disk. */
+	private _persistActive(): void {
+		try {
+			const data = { verifications: [...this.activeVerifications.values()] };
+			fs.writeFileSync(this._persistPath, JSON.stringify(data, null, 2));
+		} catch (err) {
+			console.error("[verification] Failed to persist active verifications:", err);
+		}
+	}
+
+	/** Load persisted active verifications from disk. */
+	private _loadActive(): ActiveVerification[] {
+		try {
+			if (!fs.existsSync(this._persistPath)) return [];
+			const raw = fs.readFileSync(this._persistPath, "utf-8");
+			const data = JSON.parse(raw);
+			return Array.isArray(data.verifications) ? data.verifications : [];
+		} catch (err) {
+			console.error("[verification] Failed to load persisted active verifications:", err);
+			return [];
+		}
+	}
+
+	/**
+	 * Resume verifications that were interrupted by a server restart.
+	 * For running steps with sessionIds, attempts to extract or obtain a verdict
+	 * from the restored reviewer session. Fire-and-forget from the caller.
+	 */
+	async resumeInterruptedVerifications(): Promise<void> {
+		const persisted = this._loadActive();
+		if (persisted.length === 0) return;
+
+		const running = persisted.filter(v => v.overallStatus === "running");
+		if (running.length === 0) {
+			// Clean up stale file
+			try { fs.unlinkSync(this._persistPath); } catch {}
+			return;
+		}
+
+		console.log(`[verification] Resuming ${running.length} interrupted verification(s)...`);
+
+		for (const v of running) {
+			try {
+				await this._resumeOneVerification(v);
+			} catch (err) {
+				console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
+				// Mark as failed and update gate
+				this.gateStore.updateSignalVerification(v.signalId, {
+					status: "failed",
+					steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 }],
+				});
+				this.gateStore.updateGateStatus(v.goalId, v.gateId, "failed");
+				this.broadcastFn(v.goalId, {
+					type: "gate_verification_complete",
+					goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
+				});
+				this.broadcastFn(v.goalId, {
+					type: "gate_status_changed",
+					goalId: v.goalId, gateId: v.gateId, status: "failed",
+				});
+				this.notifyTeamLead(v.goalId, v.gateId, "failed");
+			}
+		}
+
+		// Clear persisted file after all verifications finalized
+		try { fs.unlinkSync(this._persistPath); } catch {}
+		console.log("[verification] Finished resuming interrupted verifications.");
+	}
+
+	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
+		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; output: string; duration_ms: number }> = [];
+
+		for (const step of v.steps) {
+			if (step.status !== "running") {
+				// Already completed before restart — keep result
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: step.status === "passed",
+					output: step.output || "",
+					duration_ms: step.durationMs || 0,
+				});
+				continue;
+			}
+
+			// Step was running — try to resume
+			if (!step.sessionId) {
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: false,
+					output: "Step was running but had no session ID — cannot resume after restart.",
+					duration_ms: Date.now() - step.startedAt,
+				});
+				continue;
+			}
+
+			const session = this.sessionManager?.getSession(step.sessionId);
+			if (!session) {
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: false,
+					output: "Session lost during server restart.",
+					duration_ms: Date.now() - step.startedAt,
+				});
+				continue;
+			}
+
+			// Session exists — try to extract verdict from existing output
+			let output = "";
+			try {
+				output = await this.sessionManager!.getSessionOutput(step.sessionId);
+			} catch {
+				// Fall through to follow-up
+			}
+
+			let verdict = parseVerdict(output);
+			if (verdict === null) {
+				// No verdict yet — send follow-up prompt
+				console.log(`[verification] No verdict in restored session ${step.sessionId}, sending follow-up...`);
+				try {
+					await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
+					await this.sessionManager!.waitForIdle(step.sessionId, 120_000);
+					output = await this.sessionManager!.getSessionOutput(step.sessionId);
+					verdict = parseVerdict(output);
+				} catch (err) {
+					output = output || `Follow-up failed: ${(err as Error).message}`;
+				}
+			}
+
+			if (verdict === null) {
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: false,
+					output: output || "No <verdict> tag found after server restart and follow-up.",
+					duration_ms: Date.now() - step.startedAt,
+				});
+			} else {
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: verdict,
+					output,
+					duration_ms: Date.now() - step.startedAt,
+				});
+			}
+
+			// Terminate and unregister reviewer session
+			try {
+				await this.sessionManager!.terminateSession(step.sessionId);
+			} catch { /* ignore */ }
+			if (this.teamManager) {
+				try {
+					await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId);
+				} catch { /* ignore */ }
+			}
+		}
+
+		// Compute overall result
+		const allPassed = resolvedSteps.every(r => r.passed);
+		const status = allPassed ? "passed" as const : "failed" as const;
+
+		this.gateStore.updateSignalVerification(v.signalId, {
+			status,
+			steps: resolvedSteps.map(r => ({
+				name: r.name,
+				type: r.type as "command" | "llm-review",
+				passed: r.passed,
+				output: r.output,
+				duration_ms: r.duration_ms,
+			})),
+		});
+		this.gateStore.updateGateStatus(v.goalId, v.gateId, status);
+
+		this.broadcastFn(v.goalId, {
+			type: "gate_verification_complete",
+			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status,
+		});
+		this.broadcastFn(v.goalId, {
+			type: "gate_status_changed",
+			goalId: v.goalId, gateId: v.gateId, status,
+		});
+		this.notifyTeamLead(v.goalId, v.gateId, status);
+
+		console.log(`[verification] Resumed verification ${v.signalId}: ${status}`);
 	}
 
 	constructor(
@@ -76,7 +284,15 @@ export class VerificationHarness {
 		private sessionManager?: import("./session-manager.js").SessionManager,
 		private teamManager?: import("./team-manager.js").TeamManager,
 		private projectConfigStore?: ProjectConfigStore,
-	) {}
+	) {
+		this._persistPath = path.join(bobbitStateDir(), "active-verifications.json");
+		// Load any persisted active verifications from a prior run into memory
+		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
+		const persisted = this._loadActive();
+		for (const v of persisted) {
+			this.activeVerifications.set(v.signalId, v);
+		}
+	}
 
 	/** Register a callback to notify the team lead agent when verification completes. */
 	setTeamLeadNotifier(fn: (goalId: string, message: string) => void): void {
@@ -110,6 +326,7 @@ export class VerificationHarness {
 
 				// Remove from active verifications
 				this.activeVerifications.delete(signalId);
+				this._persistActive();
 
 				// Broadcast cancellation
 				this.broadcastFn(goalId, {
@@ -185,6 +402,7 @@ export class VerificationHarness {
 			startedAt: verificationStartedAt,
 		};
 		this.activeVerifications.set(signal.id, active);
+		this._persistActive();
 
 		try {
 			const builtinVars: Record<string, string> = {
@@ -236,6 +454,7 @@ export class VerificationHarness {
 				this.gateStore.updateSignalVerification(signal.id, { status, steps: results });
 				this.gateStore.updateGateStatus(signal.goalId, signal.gateId, status);
 				this.activeVerifications.delete(signal.id);
+				this._persistActive();
 				// Broadcast step completions and overall result
 				results.forEach((r, index) => {
 					this.broadcastFn(signal.goalId, {
@@ -278,6 +497,7 @@ export class VerificationHarness {
 						const av = this.activeVerifications.get(signal.id);
 						if (av && av.steps[index]) {
 							av.steps[index] = { ...av.steps[index], status: cachedResult.passed ? "passed" : "failed", durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
+							this._persistActive();
 						}
 						return { index, stepResult: cachedResult };
 					}
@@ -303,6 +523,7 @@ export class VerificationHarness {
 						const av = this.activeVerifications.get(signal.id);
 						if (av && av.steps[index]) {
 							av.steps[index].sessionId = stepSessionId;
+							this._persistActive();
 						}
 					}
 
@@ -384,6 +605,7 @@ export class VerificationHarness {
 					const av = this.activeVerifications.get(signal.id);
 					if (av && av.steps[index]) {
 						av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
+						this._persistActive();
 					}
 					return {
 						index,
@@ -402,6 +624,7 @@ export class VerificationHarness {
 			// If cancelled while steps were running, skip result processing
 			if (active.cancelled) {
 				this.activeVerifications.delete(signal.id);
+				this._persistActive();
 				return;
 			}
 
@@ -416,6 +639,7 @@ export class VerificationHarness {
 			this.gateStore.updateSignalVerification(signal.id, { status, steps: results });
 			this.gateStore.updateGateStatus(signal.goalId, signal.gateId, status);
 			this.activeVerifications.delete(signal.id);
+			this._persistActive();
 
 			this.broadcastFn(signal.goalId, {
 				type: "gate_verification_complete",
@@ -434,6 +658,7 @@ export class VerificationHarness {
 		} catch (err: any) {
 			if (active.cancelled) {
 				this.activeVerifications.delete(signal.id);
+				this._persistActive();
 				return;
 			}
 			this.gateStore.updateSignalVerification(signal.id, {
@@ -442,6 +667,7 @@ export class VerificationHarness {
 			});
 			this.gateStore.updateGateStatus(signal.goalId, signal.gateId, "failed");
 			this.activeVerifications.delete(signal.id);
+			this._persistActive();
 
 			this.broadcastFn(signal.goalId, {
 				type: "gate_verification_complete",

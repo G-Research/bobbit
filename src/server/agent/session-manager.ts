@@ -148,12 +148,17 @@ export class SessionManager {
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
+	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
 
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
 		this._onPrCreationDetected = cb;
+	}
+
+	setVerificationHarness(harness: import("./verification-harness.js").VerificationHarness): void {
+		this._verificationHarness = harness;
 	}
 
 	constructor(options?: SessionManagerOptions) {
@@ -912,9 +917,12 @@ export class SessionManager {
 	 * so they'll never be cleaned up by the verification harness.
 	 */
 	private async cleanupOrphanedNonInteractiveSessions(): Promise<void> {
+		// Get session IDs that the verification harness will resume — skip those
+		const resumingIds = this._verificationHarness?.getResumingSessionIds() ?? new Set<string>();
+
 		const orphans: string[] = [];
 		for (const ps of this.store.getLive()) {
-			if (ps.nonInteractive) {
+			if (ps.nonInteractive && !resumingIds.has(ps.id)) {
 				orphans.push(ps.id);
 			}
 		}
