@@ -387,7 +387,8 @@ function startGatePolling(goalId: string): void {
 					const passed = newGates.filter((g: any) => g.status === "passed").length;
 					const total = goal.workflow.gates.length;
 					const verifying = newGates.some((g: any) => g.signals?.some((s: any) => s.verification?.status === "running"));
-					state.gateStatusCache.set(goalId, { passed, total, verifying });
+					const verifyingCount = newGates.filter((g: any) => g.status !== "passed" && g.signals?.some((s: any) => s.verification?.status === "running")).length;
+					state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
 				}
 				renderApp();
 			}
