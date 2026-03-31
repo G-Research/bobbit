@@ -73,6 +73,10 @@ export class ProjectRegistry {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
     }
 
+    if (!fs.existsSync(rootPath)) {
+      throw new Error("Project root path does not exist: " + rootPath);
+    }
+
     // Check for duplicate rootPath
     const existing = this.getByPath(rootPath);
     if (existing) {

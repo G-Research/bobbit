@@ -343,7 +343,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, sandboxScope, sandboxTokenStore, projectRegistry);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, projectRegistry, sandboxScope, sandboxTokenStore);
 
 			return;
 		}
@@ -659,9 +659,9 @@ async function handleApiRoute(
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
 	sandboxPool: SandboxPool | null,
+	projectRegistry: ProjectRegistry,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
-	projectRegistry?: ProjectRegistry,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -897,19 +897,19 @@ async function handleApiRoute(
 
 	// GET /api/projects
 	if (url.pathname === "/api/projects" && req.method === "GET") {
-		json(projectRegistry?.list() ?? []);
+		json(projectRegistry.list());
 		return;
 	}
 
 	// POST /api/projects
 	if (url.pathname === "/api/projects" && req.method === "POST") {
 		const body = await readBody(req);
-		if (!body?.name || !body?.rootPath) {
+		if (typeof body?.name !== "string" || typeof body?.rootPath !== "string") {
 			json({ error: "Missing name or rootPath" }, 400);
 			return;
 		}
 		try {
-			const project = projectRegistry!.register(body.name, body.rootPath, body.color);
+			const project = projectRegistry.register(body.name, body.rootPath, body.color);
 			json(project, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
@@ -920,7 +920,7 @@ async function handleApiRoute(
 	// GET /api/projects/:id
 	const projectGetMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
 	if (projectGetMatch && req.method === "GET") {
-		const project = projectRegistry?.get(projectGetMatch[1]);
+		const project = projectRegistry.get(projectGetMatch[1]);
 		if (!project) { json({ error: "Project not found" }, 404); return; }
 		json(project);
 		return;
@@ -930,7 +930,7 @@ async function handleApiRoute(
 	if (projectGetMatch && req.method === "PUT") {
 		const body = await readBody(req);
 		try {
-			const updated = projectRegistry!.update(projectGetMatch[1], body || {});
+			const updated = projectRegistry.update(projectGetMatch[1], body || {});
 			json(updated);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
@@ -941,7 +941,7 @@ async function handleApiRoute(
 	// DELETE /api/projects/:id
 	if (projectGetMatch && req.method === "DELETE") {
 		try {
-			projectRegistry!.remove(projectGetMatch[1]);
+			projectRegistry.remove(projectGetMatch[1]);
 			json({ ok: true });
 		} catch (err: any) {
 			json({ error: err.message }, 400);

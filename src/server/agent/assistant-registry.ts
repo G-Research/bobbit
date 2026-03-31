@@ -140,8 +140,9 @@ function buildRegistry(): Record<string, AssistantDef> {
 	return registry;
 }
 
-// Initialize on first import
-export let ASSISTANT_REGISTRY: Record<string, AssistantDef> = buildRegistry();
+// Initialize with fallback defaults (safe at import time — no disk access needed).
+// initAssistantRegistry() rebuilds from disk when the server starts.
+export let ASSISTANT_REGISTRY: Record<string, AssistantDef> = { ...FALLBACK_DEFAULTS };
 
 export function getAssistantDef(type: string): AssistantDef | undefined {
 	return ASSISTANT_REGISTRY[type];
