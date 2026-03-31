@@ -98,6 +98,8 @@ export interface SessionInfo {
 	permissionBroadcastSent?: boolean;
 	/** Tools granted via "one-time" mode — revoked on agent_end */
 	oneTimeGrantedTools?: string[];
+	/** Whether post-start setup (model, thinking, metadata) has completed */
+	setupComplete?: boolean;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
 }
@@ -150,7 +152,7 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
-	private containerPool: ContainerPool | null = null;
+	containerPool: ContainerPool | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	goalManager: GoalManager;
@@ -630,6 +632,16 @@ export class SessionManager {
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
 				this.drainQueue(session);
+			}
+
+			// Trigger deferred setup after the first agent turn completes.
+			// This runs model selection, thinking level, and metadata persistence
+			// without blocking the user's first prompt.
+			if (!session.setupComplete) {
+				session.setupComplete = true;
+				this._finishSessionSetup(session).catch((err) => {
+					console.error(`[session-manager] Deferred setup error for session ${session.id}:`, err);
+				});
 			}
 		} else if (event.type === "auto_compaction_start") {
 			session.isCompacting = true;
@@ -1566,15 +1578,14 @@ export class SessionManager {
 		session.unsubscribe = unsub;
 
 		await rpcClient.start();
+		session.status = "idle";
 
 		this.sessions.set(id, session);
 
-		// Run setup async — session stays in "starting" until done.
-		// Prompts arriving via WS during this window are queued and drained
-		// when the session transitions to idle.
-		this._finishSessionSetup(session).catch((err) => {
-			console.error(`[session-manager] Post-start config error for session ${id}:`, err);
-		});
+		// Setup (model, thinking level, metadata) is deferred until after the
+		// first agent turn completes.  This keeps the agent's sequential RPC
+		// pipeline clear so the user's first prompt is processed immediately
+		// without waiting behind setModel (HTTP round-trip) and other commands.
 
 		return session;
 	}
@@ -1724,11 +1735,12 @@ export class SessionManager {
 		const eventBuffer = session.eventBuffer;
 
 		await rpcClient.start();
+		session.status = "idle";
 
-		// Run setup async — session stays in "starting" until done.
-		// The worktree path already has clients connected (from "preparing"),
-		// so we broadcast idle + drain queued prompts when setup completes.
-		this._finishSessionSetup(session).catch(() => {});
+		// Notify connected clients that the session is ready
+		broadcast(session.clients, { type: "session_status", status: "idle" });
+
+		// Setup deferred until after the first agent turn (same as createSession).
 	}
 
 	/**
@@ -1923,9 +1935,9 @@ export class SessionManager {
 	 * Auto-select a model for a new session. Uses `default.sessionModel`
 	 * preference (format: "provider/modelId") if set. Falls back to aigw
 	 * Run post-start setup (model, thinking level, metadata) then transition
-	 * the session to idle.  The session stays in "starting" during this window
-	 * so that any user prompts arriving via WebSocket are queued rather than
-	 * racing with the setup commands on the agent's sequential RPC pipeline.
+	 * Runs model selection, thinking level, and metadata persistence.
+	 * Called after the first agent turn completes so these RPC commands
+	 * don't block the user's first prompt on the agent's sequential pipeline.
 	 */
 	private async _finishSessionSetup(session: SessionInfo): Promise<void> {
 		try {
@@ -1936,14 +1948,6 @@ export class SessionManager {
 			]);
 		} catch (err) {
 			console.error(`[session-manager] Setup error for session ${session.id}:`, err);
-		}
-
-		session.status = "idle";
-		broadcast(session.clients, { type: "session_status", status: "idle" });
-
-		// Drain any prompts that arrived while setup was running
-		if (!session.promptQueue.isEmpty) {
-			this.drainQueue(session);
 		}
 	}
 

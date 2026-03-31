@@ -48,6 +48,9 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFileCb);
 
+/** Cached Docker availability result to avoid running `docker info` per session creation */
+let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null = null;
+
 // ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
@@ -1079,10 +1082,18 @@ async function handleApiRoute(
 				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
 				return;
 			}
-			const dockerStatus = await checkDockerAvailability();
-			if (!dockerStatus.available) {
-				json({ error: `Docker is not available: ${dockerStatus.error || "Docker not detected"}` }, 503);
-				return;
+			// Skip Docker check if container pool has idle containers (Docker is obviously working).
+			// Otherwise use a cached result to avoid running `docker info` on every session creation.
+			const poolIdle = sessionManager.containerPool?.getStats().idle ?? 0;
+			if (poolIdle === 0) {
+				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
+					const dockerStatus = await checkDockerAvailability();
+					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
+				}
+				if (!_dockerAvailCache.available) {
+					json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
+					return;
+				}
 			}
 		}
 
