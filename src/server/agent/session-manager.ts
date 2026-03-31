@@ -1375,6 +1375,7 @@ export class SessionManager {
 				branch,
 				taskId: opts?.taskId,
 				personalities: opts?.personalityNames,
+				sandboxed: opts?.sandboxed,
 			});
 
 			// Fire-and-forget: create worktree then launch agent
@@ -2271,7 +2272,7 @@ export class SessionManager {
 			preview: s.preview,
 			personalities: s.personalities,
 			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
-			sandboxed: this.store.get(s.id)?.sandboxed,
+			sandboxed: this.store.get(s.id)?.sandboxed || (s as any)._sandboxed,
 		}));
 	}
 
@@ -2356,6 +2357,7 @@ export class SessionManager {
 				createdAt: session.createdAt,
 				lastActivity: session.lastActivity,
 				goalId: session.goalId,
+				sandboxed: (session as any)._sandboxed,
 			});
 		}
 		return true;
