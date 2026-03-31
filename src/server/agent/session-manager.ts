@@ -187,6 +187,11 @@ export class SessionManager {
 		this.taskManager = new TaskManager();
 	}
 
+	/** Whether Docker sandbox mode is enabled in project config. */
+	get isSandboxEnabled(): boolean {
+		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
+	}
+
 	/** Ensure a SandboxProxy is running with the given allowlist. Returns the port. */
 	private async ensureSandboxProxy(allowlist: string[]): Promise<number> {
 		const newKey = [...allowlist].sort().join(",").toLowerCase();

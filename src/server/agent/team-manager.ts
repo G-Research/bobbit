@@ -408,6 +408,7 @@ export class TeamManager {
 				rolePrompt: teamLeadPrompt,
 				env: { BOBBIT_GOAL_ID: goalId },
 				allowedTools: storedRole.allowedTools,
+				sandboxed: this.sessionManager.isSandboxEnabled,
 			},
 		);
 
@@ -634,7 +635,7 @@ export class TeamManager {
 				undefined,
 				goalId,
 				undefined,
-				{ rolePrompt, roleName: role, allowedTools, personalities: resolvedPersonalities, personalityNames, workflowContext },
+				{ rolePrompt, roleName: role, allowedTools, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: this.sessionManager.isSandboxEnabled },
 			);
 
 			// Assign a unique color and title
