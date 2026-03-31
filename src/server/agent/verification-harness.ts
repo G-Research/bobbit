@@ -880,16 +880,17 @@ export class VerificationHarness {
 				}
 			}
 
-			// Apply review thinking level if set
-			if (this.preferencesStore) {
-				const reviewThinking = this.preferencesStore.get("default.reviewThinkingLevel") as string | undefined;
-				if (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking)) {
-					try {
-						await session.rpcClient.setThinkingLevel(reviewThinking);
-						console.log(`[verification] Set review thinking level "${reviewThinking}" for ${sessionId}`);
-					} catch (err) {
-						console.warn(`[verification] Failed to set review thinking level:`, err);
-					}
+			// Apply review thinking level (defaults to "off" when not configured,
+			// matching the Settings page display default for review agents)
+			{
+				const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+				const level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+					? reviewThinking : "off";
+				try {
+					await session.rpcClient.setThinkingLevel(level);
+					console.log(`[verification] Set review thinking level "${level}" for ${sessionId}`);
+				} catch (err) {
+					console.warn(`[verification] Failed to set review thinking level:`, err);
 				}
 			}
 
@@ -1003,16 +1004,17 @@ export class VerificationHarness {
 				}
 			}
 
-			// Apply review thinking level if set
-			if (this.preferencesStore) {
-				const reviewThinking = this.preferencesStore.get("default.reviewThinkingLevel") as string | undefined;
-				if (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking)) {
-					try {
-						await rpc.setThinkingLevel(reviewThinking);
-						console.log(`[verification] Set review thinking level "${reviewThinking}" for ${subSessionId}`);
-					} catch (err) {
-						console.warn(`[verification] Failed to set review thinking level:`, err);
-					}
+			// Apply review thinking level (defaults to "off" when not configured,
+			// matching the Settings page display default for review agents)
+			{
+				const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+				const level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+					? reviewThinking : "off";
+				try {
+					await rpc.setThinkingLevel(level);
+					console.log(`[verification] Set review thinking level "${level}" for ${subSessionId}`);
+				} catch (err) {
+					console.warn(`[verification] Failed to set review thinking level:`, err);
 				}
 			}
 
