@@ -82,6 +82,7 @@ See @docs/debugging.md for scannable checklists covering all subsystems.
 
 Quick pointers for the most common issues:
 
+- **Streaming sluggishness**: `AgentInterface` must NOT call `requestUpdate()` in the `message_update` handler — only `StreamingMessageContainer.setMessage()` updates during streaming (rAF-batched). See @docs/debugging.md#streaming-performance for full checklist.
 - **Duplicate messages**: Check `flushDeferredMessage()` in `remote-agent.ts` — `MessageList` and `StreamingMessageContainer` must never overlap.
 - **Session persistence**: Check `.bobbit/state/sessions.json`. Missing `.jsonl` = session skipped on restore.
 - **Sandbox**: `GET /api/sandbox-status` for Docker state. Proxy logs prefixed `[sandbox-proxy]`.
