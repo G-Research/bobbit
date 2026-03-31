@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 
 export type TaskState = "todo" | "in-progress" | "blocked" | "complete" | "skipped";
 
@@ -25,24 +24,25 @@ export interface PersistedTask {
 	inputGateIds?: string[];
 }
 
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "tasks.json");
-
 /**
  * Simple JSON file store for tasks.
  * Tasks persist across server restarts.
  */
 export class TaskStore {
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 	private tasks: Map<string, PersistedTask> = new Map();
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "tasks.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const t of data) {
 						if (t.id && t.goalId && t.title && t.type && t.state) {
@@ -67,11 +67,11 @@ export class TaskStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) {
-				fs.mkdirSync(STORE_DIR, { recursive: true });
+			if (!fs.existsSync(this.storeDir)) {
+				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data = Array.from(this.tasks.values());
-			fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[task-store] Failed to save tasks:", err);
 		}

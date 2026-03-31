@@ -23,7 +23,7 @@ import { ToolManager } from "./agent/tool-manager.js";
 import { PersonalityStore } from "./agent/personality-store.js";
 import { PersonalityManager } from "./agent/personality-manager.js";
 
-import { getPromptSections } from "./agent/system-prompt.js";
+import { getPromptSections, initPromptDirs } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { GateStore } from "./agent/gate-store.js";
@@ -45,6 +45,8 @@ import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
+import { ProjectRegistry } from "./agent/project-registry.js";
+import { initAssistantRegistry } from "./agent/assistant-registry.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -199,23 +201,33 @@ export interface GatewayConfig {
 }
 
 export function createGateway(config: GatewayConfig) {
-	const colorStore = new ColorStore();
-	const prStatusStore = new PrStatusStore();
-	const preferencesStore = new PreferencesStore();
-	const projectConfigStore = new ProjectConfigStore();
+	const stateDir = bobbitStateDir();
+	const configDir = bobbitConfigDir();
+	fs.mkdirSync(stateDir, { recursive: true });
+
+	// Initialize module-level caches for parameterized modules
+	initPromptDirs(stateDir);
+	initAssistantRegistry(configDir);
+
+	// Project registry — persisted at server level
+	const projectRegistry = new ProjectRegistry(stateDir);
+
+	const colorStore = new ColorStore(stateDir);
+	const prStatusStore = new PrStatusStore(stateDir);
+	const preferencesStore = new PreferencesStore(stateDir);
+	const projectConfigStore = new ProjectConfigStore(configDir);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
 	}
-	const personalityStore = new PersonalityStore();
+	const personalityStore = new PersonalityStore(configDir);
 	const personalityManager = new PersonalityManager(personalityStore);
-	fs.mkdirSync(bobbitStateDir(), { recursive: true });
-	const roleStore = new RoleStore();
+	const roleStore = new RoleStore(configDir);
 	const roleManager = new RoleManager(roleStore);
-	const toolManager = new ToolManager();
-	const groupPolicyStore = new ToolGroupPolicyStore();
-	const gateStore = new GateStore();
-	const workflowStore = new WorkflowStore();
+	const toolManager = new ToolManager(configDir);
+	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
+	const gateStore = new GateStore(stateDir);
+	const workflowStore = new WorkflowStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
@@ -331,7 +343,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, sandboxScope, sandboxTokenStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, sandboxScope, sandboxTokenStore, projectRegistry);
 
 			return;
 		}
@@ -400,7 +412,7 @@ export function createGateway(config: GatewayConfig) {
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
-	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore);
+	verificationHarness = new VerificationHarness(stateDir, gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -649,6 +661,7 @@ async function handleApiRoute(
 	sandboxPool: SandboxPool | null,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
+	projectRegistry?: ProjectRegistry,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -880,6 +893,62 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Project CRUD ──────────────────────────────────────────────────
+
+	// GET /api/projects
+	if (url.pathname === "/api/projects" && req.method === "GET") {
+		json(projectRegistry?.list() ?? []);
+		return;
+	}
+
+	// POST /api/projects
+	if (url.pathname === "/api/projects" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.name || !body?.rootPath) {
+			json({ error: "Missing name or rootPath" }, 400);
+			return;
+		}
+		try {
+			const project = projectRegistry!.register(body.name, body.rootPath, body.color);
+			json(project, 201);
+		} catch (err: any) {
+			json({ error: err.message }, 400);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id
+	const projectGetMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
+	if (projectGetMatch && req.method === "GET") {
+		const project = projectRegistry?.get(projectGetMatch[1]);
+		if (!project) { json({ error: "Project not found" }, 404); return; }
+		json(project);
+		return;
+	}
+
+	// PUT /api/projects/:id
+	if (projectGetMatch && req.method === "PUT") {
+		const body = await readBody(req);
+		try {
+			const updated = projectRegistry!.update(projectGetMatch[1], body || {});
+			json(updated);
+		} catch (err: any) {
+			json({ error: err.message }, 400);
+		}
+		return;
+	}
+
+	// DELETE /api/projects/:id
+	if (projectGetMatch && req.method === "DELETE") {
+		try {
+			projectRegistry!.remove(projectGetMatch[1]);
+			json({ ok: true });
+		} catch (err: any) {
+			json({ error: err.message }, 400);
+		}
+		return;
+	}
+
 	// GET /api/search
 	if (url.pathname === "/api/search" && req.method === "GET") {
 		const q = url.searchParams.get("q");
@@ -893,7 +962,8 @@ async function handleApiRoute(
 		const validTypes = new Set(["all", "goals", "sessions", "messages", "staff"]);
 		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" | "staff" : "all";
 		try {
-			const results = sessionManager.searchIndex.search(q, { type, limit, offset });
+			const projectId = url.searchParams.get("projectId") || undefined;
+			const results = sessionManager.searchIndex.search(q, { type, limit, offset, projectId });
 			json(results);
 		} catch (err) {
 			json({ error: `Search failed: ${err}` }, 500);
@@ -912,10 +982,14 @@ async function handleApiRoute(
 				return;
 			}
 		}
-		const sessions = sessionManager.listSessions().map((s) => ({
+		const filterProjectId = url.searchParams.get("projectId") || undefined;
+		let sessions = sessionManager.listSessions().map((s) => ({
 			...s,
 			colorIndex: colorStore.get(s.id),
 		}));
+		if (filterProjectId) {
+			sessions = sessions.filter(s => s.projectId === filterProjectId);
+		}
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
 			const limitParam = url.searchParams.get("limit");
@@ -1182,6 +1256,11 @@ async function handleApiRoute(
 				sessionManager.getSessionStore().update(session.id, { reattemptGoalId });
 			}
 
+			// Store projectId on the session if provided
+			if (body?.projectId && typeof body.projectId === "string") {
+				sessionManager.getSessionStore().update(session.id, { projectId: body.projectId });
+			}
+
 			json({
 				id: session.id,
 				cwd: session.cwd,
@@ -1227,7 +1306,12 @@ async function handleApiRoute(
 				return;
 			}
 		}
-		json({ generation: currentGen, goals: sessionManager.goalManager.listGoals() });
+		const filterProjectId = url.searchParams.get("projectId") || undefined;
+		let goals = sessionManager.goalManager.listGoals();
+		if (filterProjectId) {
+			goals = goals.filter(g => g.projectId === filterProjectId);
+		}
+		json({ generation: currentGen, goals });
 		return;
 	}
 
@@ -1250,6 +1334,11 @@ async function handleApiRoute(
 				workflowStore: workflowManager.store,
 				sandboxed,
 			});
+			// Set projectId if provided
+			if (body.projectId && typeof body.projectId === "string") {
+				sessionManager.goalManager.updateGoal(goal.id, { projectId: body.projectId });
+				goal.projectId = body.projectId;
+			}
 			// Set reattemptOf if provided
 			if (body.reattemptOf && typeof body.reattemptOf === "string") {
 				sessionManager.goalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });

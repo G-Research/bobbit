@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 import type { Workflow } from "./workflow-store.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
@@ -44,28 +43,31 @@ export interface PersistedGoal {
 	archivedAt?: number;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
+	/** Which project this goal belongs to */
+	projectId?: string;
 }
-
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "goals.json");
 
 /**
  * Simple JSON file store for goals.
  * Goals persist across server restarts.
  */
 export class GoalStore {
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 	private goals: Map<string, PersistedGoal> = new Map();
 	/** Monotonically increasing counter — bumped on every mutation. Resets to 0 on server restart. */
 	private generation = 0;
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "goals.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const g of data) {
 						if (g.id) {
@@ -95,11 +97,11 @@ export class GoalStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) {
-				fs.mkdirSync(STORE_DIR, { recursive: true });
+			if (!fs.existsSync(this.storeDir)) {
+				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data = Array.from(this.goals.values());
-			fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[goal-store] Failed to save goals:", err);
 		}

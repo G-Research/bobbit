@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 import type { WorkflowStore } from "./workflow-store.js";
 
 /**
@@ -18,12 +19,13 @@ function toBranchName(title: string): string {
 
 
 export class GoalManager {
-	private store = new GoalStore();
+	private store: GoalStore;
 	private workflowStore?: WorkflowStore;
 	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
 	private _setupsInFlight = new Set<string>();
 
-	constructor(workflowStore?: WorkflowStore) {
+	constructor(workflowStore?: WorkflowStore, stateDir?: string) {
+		this.store = new GoalStore(stateDir ?? bobbitStateDir());
 		this.workflowStore = workflowStore;
 		// Mark any goals stuck in "preparing" from a previous run as error
 		this._recoverStuckSetups();
@@ -210,7 +212,7 @@ export class GoalManager {
 		return this.store.getAll();
 	}
 
-	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string; prUrl?: string; reattemptOf?: string }): Promise<boolean> {
+	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string; prUrl?: string; reattemptOf?: string; projectId?: string }): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
 
