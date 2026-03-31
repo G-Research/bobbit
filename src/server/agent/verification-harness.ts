@@ -870,7 +870,7 @@ export class VerificationHarness {
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				allowedTools: role.allowedTools,
-				sandboxed: this.sessionManager!.isSandboxEnabled,
+				sandboxed: (goalId ? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed : undefined) ?? this.sessionManager!.isSandboxEnabled,
 			});
 			sessionId = session.id;
 

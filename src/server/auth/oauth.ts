@@ -8,6 +8,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { globalAuthPath } from "../bobbit-dir.js";
+import { clearOAuthCache } from "../agent/model-registry.js";
 
 // Anthropic OAuth constants (same as in @mariozechner/pi-ai)
 const CLIENT_ID = Buffer.from("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", "base64").toString();
@@ -151,6 +152,9 @@ export async function oauthComplete(
 			// chmod may fail on Windows, that's OK
 		}
 
+		// Invalidate any cached auth reads so subsequent calls pick up new tokens immediately
+		clearOAuthCache();
+
 		return { success: true };
 	} catch (err) {
 		return { success: false, error: String(err) };
@@ -245,6 +249,7 @@ export async function refreshOAuthToken(): Promise<string | null> {
 		writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
 		try { chmodSync(authPath, 0o600); } catch {}
 
+		clearOAuthCache();
 		console.log("[oauth] Token refreshed successfully");
 		return tokenData.access_token;
 	} catch (err) {

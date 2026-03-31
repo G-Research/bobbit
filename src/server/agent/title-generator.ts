@@ -253,11 +253,21 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
 	console.log(`[title-gen] Requesting title via ${DEFAULT_TITLE_MODEL}…`);
 
 	try {
-		const response = await fetch(ANTHROPIC_API_URL, {
+		let response = await fetch(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
+
+		// On auth errors, try refreshing the token and retrying once
+		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
+			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh…`);
+			const newToken = await refreshOAuthToken();
+			if (newToken) {
+				headers["Authorization"] = `Bearer ${newToken}`;
+				response = await fetch(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+			}
+		}
 
 		if (!response.ok) {
 			const errText = await response.text();
@@ -409,11 +419,21 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<strin
 	console.log(`[title-gen] Requesting goal summary via ${DEFAULT_TITLE_MODEL}…`);
 
 	try {
-		const response = await fetch(ANTHROPIC_API_URL, {
+		let response = await fetch(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
+
+		// On auth errors, try refreshing the token and retrying once
+		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
+			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh…`);
+			const newToken = await refreshOAuthToken();
+			if (newToken) {
+				headers["Authorization"] = `Bearer ${newToken}`;
+				response = await fetch(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+			}
+		}
 
 		if (!response.ok) {
 			const errText = await response.text();

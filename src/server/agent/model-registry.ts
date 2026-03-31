@@ -187,6 +187,11 @@ function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean 
 let oauthCache: { data: any; expiry: number } | null = null;
 const OAUTH_CACHE_TTL = 10_000; // 10 seconds
 
+/** Invalidate the cached auth.json data so the next read picks up fresh credentials. */
+export function clearOAuthCache(): void {
+	oauthCache = null;
+}
+
 function readAuthJson(): any {
 	const now = Date.now();
 	if (oauthCache && now < oauthCache.expiry) {
