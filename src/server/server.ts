@@ -3830,19 +3830,20 @@ async function handleApiRoute(
 				json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
 				return;
 			}
-			// Check live session first, then persisted session store
+			// Verify the session exists (live or persisted).
 			const mcpSession = sessionManager.getSession(mcpSessionId);
 			const persistedSession = mcpSession ? null : sessionManager.getSessionStore().get(mcpSessionId);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
 				return;
 			}
-			// Enforce tool allowlist from the live session (persisted sessions
-			// don't have allowedTools — they haven't been activated yet, so
-			// allow all tools for them)
-			if (mcpSession?.allowedTools && mcpSession.allowedTools.length > 0) {
-				const toolLower = (tool as string).toLowerCase();
-				if (!mcpSession.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
+			// Enforce allowedTools for non-MCP tools on live sessions.
+			// MCP tools (mcp__*) are dynamically discovered and governed by the
+			// grant policy system — they may not appear in the session's static
+			// allowedTools list, so we skip the check for them.
+			const toolStr = tool as string;
+			if (!toolStr.startsWith("mcp__") && mcpSession?.allowedTools && mcpSession.allowedTools.length > 0) {
+				if (!mcpSession.allowedTools.some((t: string) => t.toLowerCase() === toolStr.toLowerCase())) {
 					json({ error: `Tool "${tool}" is not allowed for this session` }, 403);
 					return;
 				}
