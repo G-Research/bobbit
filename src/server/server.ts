@@ -401,6 +401,7 @@ export function createGateway(config: GatewayConfig) {
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
 	verificationHarness = new VerificationHarness(gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore);
+	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
 		if (!team?.teamLeadSessionId) return;
