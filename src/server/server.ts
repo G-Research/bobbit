@@ -117,6 +117,26 @@ async function execGitSafe(cmd: string, cwd: string, fallback = ""): Promise<str
 }
 
 // ── Git diff helper (shared between session and goal endpoints) ──
+// ── Filter phantom status entries (line-ending or mode-only changes) ──
+// A single `git diff HEAD --name-only` call returns files with real content diffs.
+// Any file in `git status` but not in `git diff HEAD` is a phantom (CRLF/mode noise).
+async function filterPhantomStatus(
+	status: { file: string; status: string }[],
+	cwd: string,
+): Promise<{ file: string; status: string }[]> {
+	if (status.length === 0) return status;
+	// Only filter tracked modifications — untracked (?), added (A), etc. are always real
+	const tracked = status.filter(e => e.status === 'M');
+	if (tracked.length === 0) return status;
+	try {
+		const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--name-only"], { cwd, encoding: "utf-8", timeout: 5000 });
+		const reallyChanged = new Set(stdout.trim().split("\n").filter(Boolean));
+		return status.filter(e => e.status !== 'M' || reallyChanged.has(e.file));
+	} catch {
+		return status; // on error, return unfiltered
+	}
+}
+
 const DIFF_MAX_BYTES = 500 * 1024; // 500KB
 
 async function getGitDiff(cwd: string, file?: string): Promise<string> {
@@ -2310,10 +2330,10 @@ async function handleApiRoute(
 				statusRaw = stdout.replace(/\s+$/, '');
 			} catch {}
 			const statusLines = statusRaw ? statusRaw.split("\n") : [];
-			const status = statusLines.map(line => {
+			const status = await filterPhantomStatus(statusLines.map(line => {
 				const l = line.endsWith("\r") ? line.slice(0, -1) : line;
 				return { file: l.substring(3), status: l.substring(0, 2).trim() };
-			});
+			}), cwd);
 
 			let hasUpstream = false;
 			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch { /* no upstream */ }
@@ -2324,12 +2344,12 @@ async function handleApiRoute(
 				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0'), 10) || 0;
 			}
 
-			const clean = statusLines.length === 0;
+			const clean = status.length === 0;
 			let summary = 'clean';
 			if (!clean) {
 				const counts: Record<string, number> = {};
-				for (const line of statusLines) {
-					const code = line.substring(0, 2).trim();
+				for (const entry of status) {
+					const code = entry.status;
 					let key: string;
 					if (code.includes('?')) key = '?';
 					else if (code.includes('M')) key = 'M';
@@ -2990,10 +3010,10 @@ async function handleApiRoute(
 				statusRaw = stdout.replace(/\s+$/, '');
 			} catch {}
 			const statusLines = statusRaw ? statusRaw.split("\n") : [];
-			const status = statusLines.map(line => {
+			const status = await filterPhantomStatus(statusLines.map(line => {
 				const l = line.endsWith("\r") ? line.slice(0, -1) : line;
 				return { file: l.substring(3), status: l.substring(0, 2).trim() };
-			});
+			}), cwd);
 
 			let hasUpstream = false;
 			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch { /* no upstream */ }
@@ -3013,12 +3033,12 @@ async function handleApiRoute(
 				mergedIntoPrimary = aheadOfPrimary === 0;
 			}
 
-			const clean = statusLines.length === 0;
+			const clean = status.length === 0;
 			let summary = 'clean';
 			if (!clean) {
 				const counts: Record<string, number> = {};
-				for (const line of statusLines) {
-					const code = line.substring(0, 2).trim();
+				for (const entry of status) {
+					const code = entry.status;
 					let key: string;
 					if (code.includes('?')) key = '?';
 					else if (code.includes('M')) key = 'M';
