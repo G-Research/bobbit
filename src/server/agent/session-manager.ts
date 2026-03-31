@@ -8,6 +8,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { RpcBridge, type RpcBridgeOptions, containerToHostSessionPath, hostToContainerSessionPath } from "./rpc-bridge.js";
+import { validateSandboxMounts } from "./sandbox-mounts.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -243,46 +244,7 @@ export class SessionManager {
 		}
 
 		// Validate mounts unless skipped (e.g. during restore — already validated at creation)
-		let validatedMounts = mounts;
-		if (!opts?.skipMountValidation) {
-			const blockedPaths = [
-				"/var/run/docker.sock", "/run/docker.sock",
-				"/var/run/containerd", "/run/containerd",
-				"/proc", "/sys", "/dev",
-				"/etc", "/boot", "/sbin", "/bin", "/lib", "/lib64",
-				"/usr/sbin", "/usr/bin", "/usr/lib",
-				"/root", "/home",
-			];
-			const sensitiveSubstrings = [
-				"/.ssh", "/.aws", "/.gnupg", "/.config",
-				"/.kube", "/.docker", "/.npmrc", "/.netrc",
-				"/.git-credentials", "/.env",
-				"/docker.sock",
-			];
-			validatedMounts = mounts.filter((m: string) => {
-				const parts = m.split(":");
-				if (parts.length < 2) { console.warn(`[session-manager] Rejecting invalid sandbox mount format: ${m}`); return false; }
-				const src = parts[0];
-				if (!path.isAbsolute(src)) { console.warn(`[session-manager] Rejecting non-absolute sandbox mount: ${m}`); return false; }
-				if (src.includes("..")) { console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`); return false; }
-				if (src.startsWith("~") || src.startsWith("$")) { console.warn(`[session-manager] Rejecting sandbox mount with variable/home dir: ${m}`); return false; }
-				const normalizedSrc = src.replace(/\\/g, "/").toLowerCase();
-				for (const blocked of blockedPaths) {
-					if (normalizedSrc === blocked || normalizedSrc.startsWith(blocked + "/")) {
-						console.warn(`[session-manager] Rejecting sandbox mount to system path: ${m}`);
-						return false;
-					}
-				}
-				for (const pat of sensitiveSubstrings) {
-					if (normalizedSrc.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
-				}
-				if (/^[a-z]:\/?$/i.test(src.replace(/\\/g, "/"))) {
-					console.warn(`[session-manager] Rejecting sandbox mount of drive root: ${m}`);
-					return false;
-				}
-				return true;
-			});
-		}
+		const validatedMounts = opts?.skipMountValidation ? mounts : validateSandboxMounts(mounts, "[session-manager]");
 
 		const proxyPort = await this.ensureSandboxProxy(networkAllowlist);
 
