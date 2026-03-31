@@ -572,6 +572,15 @@ export function createGateway(config: GatewayConfig) {
 						});
 						await sandboxPool.init();
 						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
+
+						// Disable old container pool when sandbox pool is active —
+						// all sandboxed sessions should use the sandbox pool.
+						if (containerPool) {
+							console.log("[container-pool] Shutting down — replaced by sandbox pool");
+							await containerPool.shutdown();
+							containerPool = null;
+							sessionManager.setContainerPool(null);
+						}
 					} else {
 						console.log("[sandbox-pool] Not a git repo — sandbox pool disabled (worktrees require git)");
 					}

@@ -375,8 +375,9 @@ function goalPreviewPanel() {
 								clearTimeout((state as any)._goalTitleDebounceTimer);
 							}
 							const trimmedTitle = (e.target as HTMLInputElement).value.trim();
-							if (trimmedTitle.length >= 3 && state.remoteAgent) {
+							if (trimmedTitle.length >= 3 && trimmedTitle !== (state as any)._lastSummarizedGoalTitle && state.remoteAgent) {
 								(state as any)._goalTitleDebounceTimer = setTimeout(() => {
+									(state as any)._lastSummarizedGoalTitle = trimmedTitle;
 									state.remoteAgent?.summarizeGoalTitle(trimmedTitle);
 									(state as any)._goalTitleDebounceTimer = null;
 								}, 1000);

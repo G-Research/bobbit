@@ -1,0 +1,524 @@
+import Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
+import { extractTextFromMessage } from "./message-extractor.js";
+import type { PersistedGoal, GoalStore } from "../agent/goal-store.js";
+import type { PersistedSession, SessionStore } from "../agent/session-store.js";
+
+const SCHEMA_VERSION = 1;
+
+// ── Public interfaces ────────────────────────────────────────────────
+
+export interface SearchResult {
+	type: "goal" | "session" | "message";
+	/** goalId for goals, sessionId for sessions, FTS5 rowid string for messages */
+	id: string;
+	title: string;
+	/** FTS5 snippet() with <b> match highlighting */
+	snippet: string;
+	timestamp: number;
+	archived: boolean;
+	goalId?: string;
+	sessionId?: string;
+	sessionTitle?: string;
+}
+
+export interface SearchResults {
+	results: SearchResult[];
+	total: number;
+}
+
+// ── SearchIndex ──────────────────────────────────────────────────────
+
+export class SearchIndex {
+	private db: Database.Database | null = null;
+	private readonly dbPath: string;
+
+	// Prepared statements (lazily created after open)
+	private stmts: {
+		deleteGoal: Database.Statement;
+		insertGoal: Database.Statement;
+		deleteSession: Database.Statement;
+		insertSession: Database.Statement;
+		insertMessage: Database.Statement;
+		deleteMessagesBySession: Database.Statement;
+	} | null = null;
+
+	constructor(dbPath: string) {
+		this.dbPath = dbPath;
+	}
+
+	// ── Lifecycle ──────────────────────────────────────────────────
+
+	open(): void {
+		const dir = path.dirname(this.dbPath);
+		if (!fs.existsSync(dir)) {
+			fs.mkdirSync(dir, { recursive: true });
+		}
+
+		this.db = new Database(this.dbPath);
+		this.db.pragma("journal_mode = WAL");
+		this.db.pragma("synchronous = NORMAL");
+
+		this.ensureSchema();
+		this.prepareStatements();
+	}
+
+	close(): void {
+		this.stmts = null;
+		if (this.db) {
+			this.db.close();
+			this.db = null;
+		}
+	}
+
+	/**
+	 * Returns true if the index needs a full rebuild —
+	 * either the schema_version table is missing or the version doesn't match.
+	 */
+	needsRebuild(): boolean {
+		if (!this.db) return true;
+		try {
+			const row = this.db
+				.prepare("SELECT version FROM schema_version LIMIT 1")
+				.get() as { version: number } | undefined;
+			return !row || row.version !== SCHEMA_VERSION;
+		} catch {
+			// Table doesn't exist
+			return true;
+		}
+	}
+
+	// ── Goal indexing ──────────────────────────────────────────────
+
+	indexGoal(goal: PersistedGoal): void {
+		if (!this.stmts) return;
+		this.stmts.deleteGoal.run(goal.id);
+		this.stmts.insertGoal.run(
+			goal.id,
+			goal.title || "",
+			goal.spec || "",
+			goal.state || "",
+			goal.archived ? "1" : "0",
+			goal.createdAt ?? 0,
+			goal.archivedAt ?? 0,
+		);
+	}
+
+	removeGoal(goalId: string): void {
+		this.stmts?.deleteGoal.run(goalId);
+	}
+
+	// ── Session indexing ───────────────────────────────────────────
+
+	indexSession(session: PersistedSession, goalTitle?: string): void {
+		if (!this.stmts) return;
+		this.stmts.deleteSession.run(session.id);
+		this.stmts.insertSession.run(
+			session.id,
+			session.title || "",
+			session.role || "",
+			session.goalId || "",
+			goalTitle || "",
+			session.archived ? "1" : "0",
+			session.createdAt ?? 0,
+			session.archivedAt ?? 0,
+		);
+	}
+
+	removeSession(sessionId: string): void {
+		this.stmts?.deleteSession.run(sessionId);
+	}
+
+	// ── Message indexing ───────────────────────────────────────────
+
+	indexMessage(
+		sessionId: string,
+		sessionTitle: string,
+		text: string,
+		toolNames: string[],
+		timestamp: number,
+	): void {
+		if (!this.stmts || !text.trim()) return;
+		this.stmts.insertMessage.run(
+			sessionId,
+			sessionTitle,
+			text,
+			toolNames.join(" "),
+			timestamp,
+		);
+	}
+
+	removeMessagesForSession(sessionId: string): void {
+		this.stmts?.deleteMessagesBySession.run(sessionId);
+	}
+
+	// ── Full rebuild ───────────────────────────────────────────────
+
+	rebuildFromStores(
+		goalStore: GoalStore,
+		sessionStore: SessionStore,
+		_sessionsDir?: string,
+	): void {
+		if (!this.db) return;
+
+		// Build a goalId → title map for session indexing
+		const goals = goalStore.getAll();
+		const goalTitleMap = new Map<string, string>();
+		for (const g of goals) {
+			goalTitleMap.set(g.id, g.title);
+		}
+
+		const sessions = sessionStore.getAll();
+		let messageCount = 0;
+
+		console.log(
+			`[search] Rebuilding index: ${goals.length} goals, ${sessions.length} sessions...`,
+		);
+
+		const rebuild = this.db.transaction(() => {
+			// Clear everything
+			this.db!.exec("DELETE FROM goals_fts");
+			this.db!.exec("DELETE FROM sessions_fts");
+			this.db!.exec("DELETE FROM messages_fts");
+
+			// Index goals
+			for (const goal of goals) {
+				this.indexGoal(goal);
+			}
+
+			// Index sessions
+			for (const session of sessions) {
+				const goalTitle = session.goalId
+					? goalTitleMap.get(session.goalId) || ""
+					: "";
+				this.indexSession(session, goalTitle);
+			}
+
+			// Index messages from .jsonl files
+			for (const session of sessions) {
+				if (!session.agentSessionFile) continue;
+				const jsonlPath = session.agentSessionFile;
+				if (!fs.existsSync(jsonlPath)) continue;
+
+				try {
+					const content = fs.readFileSync(jsonlPath, "utf-8");
+					const lines = content.split("\n");
+					for (const line of lines) {
+						if (!line.trim()) continue;
+						try {
+							const entry = JSON.parse(line);
+							// Agent session files contain message objects
+							const msg = entry.message || entry;
+							const { text, toolNames } = extractTextFromMessage(msg);
+							if (text.trim()) {
+								this.indexMessage(
+									session.id,
+									session.title || "",
+									text,
+									toolNames,
+									msg.timestamp || session.lastActivity || 0,
+								);
+								messageCount++;
+							}
+						} catch {
+							// Skip unparseable lines
+						}
+					}
+				} catch {
+					// Skip unreadable files
+				}
+			}
+		});
+
+		rebuild();
+		console.log(
+			`[search] Index rebuilt: ${goals.length} goals, ${sessions.length} sessions, ${messageCount} messages`,
+		);
+	}
+
+	// ── Search ─────────────────────────────────────────────────────
+
+	search(
+		query: string,
+		opts: {
+			type?: "all" | "goals" | "sessions" | "messages";
+			limit?: number;
+			offset?: number;
+		} = {},
+	): SearchResults {
+		if (!this.db || !query.trim()) {
+			return { results: [], total: 0 };
+		}
+
+		const type = opts.type || "all";
+		const limit = opts.limit ?? 20;
+		const offset = opts.offset ?? 0;
+
+		// Sanitise the query for FTS5: escape double quotes, wrap terms
+		const ftsQuery = sanitiseFtsQuery(query);
+		if (!ftsQuery) {
+			return { results: [], total: 0 };
+		}
+
+		const results: SearchResult[] = [];
+		let total = 0;
+
+		if (type === "all" || type === "goals") {
+			const { rows, count } = this.searchGoals(ftsQuery, type === "goals" ? limit : 10, type === "goals" ? offset : 0);
+			results.push(...rows);
+			total += count;
+		}
+
+		if (type === "all" || type === "sessions") {
+			const { rows, count } = this.searchSessions(ftsQuery, type === "sessions" ? limit : 10, type === "sessions" ? offset : 0);
+			results.push(...rows);
+			total += count;
+		}
+
+		if (type === "all" || type === "messages") {
+			const { rows, count } = this.searchMessages(ftsQuery, type === "messages" ? limit : 10, type === "messages" ? offset : 0);
+			results.push(...rows);
+			total += count;
+		}
+
+		// For type-specific queries, apply limit/offset at the top level
+		if (type !== "all") {
+			return { results, total };
+		}
+
+		// For "all", we already limited each type to 10
+		return { results, total };
+	}
+
+	// ── Private helpers ────────────────────────────────────────────
+
+	private ensureSchema(): void {
+		if (!this.db) return;
+
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS schema_version (version INTEGER);
+
+			CREATE VIRTUAL TABLE IF NOT EXISTS goals_fts USING fts5(
+				goal_id UNINDEXED, title, spec,
+				state UNINDEXED, archived UNINDEXED,
+				created_at UNINDEXED, archived_at UNINDEXED
+			);
+
+			CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+				session_id UNINDEXED, title, role,
+				goal_id UNINDEXED, goal_title,
+				archived UNINDEXED, created_at UNINDEXED, archived_at UNINDEXED
+			);
+
+			CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+				session_id UNINDEXED, session_title UNINDEXED,
+				text_content, tool_names,
+				timestamp UNINDEXED
+			);
+		`);
+
+		// Set version if not present
+		const row = this.db
+			.prepare("SELECT version FROM schema_version LIMIT 1")
+			.get() as { version: number } | undefined;
+		if (!row) {
+			this.db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
+		} else if (row.version !== SCHEMA_VERSION) {
+			// Version mismatch — drop and recreate
+			this.db.exec("DROP TABLE IF EXISTS goals_fts");
+			this.db.exec("DROP TABLE IF EXISTS sessions_fts");
+			this.db.exec("DROP TABLE IF EXISTS messages_fts");
+			this.db.exec("DROP TABLE IF EXISTS schema_version");
+			// Recurse to recreate
+			this.ensureSchema();
+		}
+	}
+
+	private prepareStatements(): void {
+		if (!this.db) return;
+
+		this.stmts = {
+			deleteGoal: this.db.prepare(
+				"DELETE FROM goals_fts WHERE goal_id = ?",
+			),
+			insertGoal: this.db.prepare(
+				"INSERT INTO goals_fts (goal_id, title, spec, state, archived, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			),
+			deleteSession: this.db.prepare(
+				"DELETE FROM sessions_fts WHERE session_id = ?",
+			),
+			insertSession: this.db.prepare(
+				"INSERT INTO sessions_fts (session_id, title, role, goal_id, goal_title, archived, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			),
+			insertMessage: this.db.prepare(
+				"INSERT INTO messages_fts (session_id, session_title, text_content, tool_names, timestamp) VALUES (?, ?, ?, ?, ?)",
+			),
+			deleteMessagesBySession: this.db.prepare(
+				"DELETE FROM messages_fts WHERE session_id = ?",
+			),
+		};
+	}
+
+	private searchGoals(
+		ftsQuery: string,
+		limit: number,
+		offset: number,
+	): { rows: SearchResult[]; count: number } {
+		if (!this.db) return { rows: [], count: 0 };
+
+		try {
+			const countRow = this.db
+				.prepare("SELECT count(*) as cnt FROM goals_fts WHERE goals_fts MATCH ?")
+				.get(ftsQuery) as { cnt: number };
+			const count = countRow?.cnt ?? 0;
+
+			const rows = this.db
+				.prepare(
+					`SELECT goal_id, title, snippet(goals_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+						state, archived, created_at, archived_at
+					 FROM goals_fts WHERE goals_fts MATCH ?
+					 ORDER BY rank
+					 LIMIT ? OFFSET ?`,
+				)
+				.all(ftsQuery, limit, offset) as Array<{
+				goal_id: string;
+				title: string;
+				snippet: string;
+				state: string;
+				archived: string;
+				created_at: number;
+				archived_at: number;
+			}>;
+
+			return {
+				count,
+				rows: rows.map((r) => ({
+					type: "goal" as const,
+					id: r.goal_id,
+					title: r.title,
+					snippet: r.snippet,
+					timestamp: Number(r.created_at) || 0,
+					archived: r.archived === "1",
+				})),
+			};
+		} catch {
+			return { rows: [], count: 0 };
+		}
+	}
+
+	private searchSessions(
+		ftsQuery: string,
+		limit: number,
+		offset: number,
+	): { rows: SearchResult[]; count: number } {
+		if (!this.db) return { rows: [], count: 0 };
+
+		try {
+			const countRow = this.db
+				.prepare("SELECT count(*) as cnt FROM sessions_fts WHERE sessions_fts MATCH ?")
+				.get(ftsQuery) as { cnt: number };
+			const count = countRow?.cnt ?? 0;
+
+			const rows = this.db
+				.prepare(
+					`SELECT session_id, title, snippet(sessions_fts, 1, '<b>', '</b>', '...', 40) as snippet,
+						goal_id, archived, created_at, archived_at
+					 FROM sessions_fts WHERE sessions_fts MATCH ?
+					 ORDER BY rank
+					 LIMIT ? OFFSET ?`,
+				)
+				.all(ftsQuery, limit, offset) as Array<{
+				session_id: string;
+				title: string;
+				snippet: string;
+				goal_id: string;
+				archived: string;
+				created_at: number;
+				archived_at: number;
+			}>;
+
+			return {
+				count,
+				rows: rows.map((r) => ({
+					type: "session" as const,
+					id: r.session_id,
+					title: r.title,
+					snippet: r.snippet,
+					timestamp: Number(r.created_at) || 0,
+					archived: r.archived === "1",
+					goalId: r.goal_id || undefined,
+				})),
+			};
+		} catch {
+			return { rows: [], count: 0 };
+		}
+	}
+
+	private searchMessages(
+		ftsQuery: string,
+		limit: number,
+		offset: number,
+	): { rows: SearchResult[]; count: number } {
+		if (!this.db) return { rows: [], count: 0 };
+
+		try {
+			const countRow = this.db
+				.prepare("SELECT count(*) as cnt FROM messages_fts WHERE messages_fts MATCH ?")
+				.get(ftsQuery) as { cnt: number };
+			const count = countRow?.cnt ?? 0;
+
+			const rows = this.db
+				.prepare(
+					`SELECT rowid, session_id, session_title,
+						snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+						timestamp
+					 FROM messages_fts WHERE messages_fts MATCH ?
+					 ORDER BY rank
+					 LIMIT ? OFFSET ?`,
+				)
+				.all(ftsQuery, limit, offset) as Array<{
+				rowid: number;
+				session_id: string;
+				session_title: string;
+				snippet: string;
+				timestamp: number;
+			}>;
+
+			return {
+				count,
+				rows: rows.map((r) => ({
+					type: "message" as const,
+					id: String(r.rowid),
+					title: r.session_title || "Untitled session",
+					snippet: r.snippet,
+					timestamp: Number(r.timestamp) || 0,
+					archived: false,
+					sessionId: r.session_id,
+					sessionTitle: r.session_title || undefined,
+				})),
+			};
+		} catch {
+			return { rows: [], count: 0 };
+		}
+	}
+}
+
+// ── FTS5 query sanitiser ─────────────────────────────────────────────
+
+/**
+ * Sanitise a user query string for FTS5 MATCH.
+ * Wraps each token in double quotes to prevent FTS5 syntax errors
+ * from special characters (colons, hyphens, etc.).
+ */
+function sanitiseFtsQuery(raw: string): string {
+	// Strip characters that break FTS5 even inside quotes
+	const cleaned = raw.replace(/[""]/g, " ").trim();
+	if (!cleaned) return "";
+
+	// Split into tokens and wrap each in double quotes
+	const tokens = cleaned.split(/\s+/).filter(Boolean);
+	if (tokens.length === 0) return "";
+
+	return tokens.map((t) => `"${t}"`).join(" ");
+}

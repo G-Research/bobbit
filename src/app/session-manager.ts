@@ -616,14 +616,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (state.assistantTab === "chat" && !isDesktop()) {
 					state.assistantTab = "preview";
 				}
-				// Summarize goal title for sidebar display
-				if (proposal.title.trim().length >= 3) {
+				// Summarize goal title for sidebar display (deduplicate — streaming fires this many times)
+				const trimmedProposalTitle = proposal.title.trim();
+				if (trimmedProposalTitle.length >= 3 && trimmedProposalTitle !== (state as any)._lastSummarizedGoalTitle) {
+					(state as any)._lastSummarizedGoalTitle = trimmedProposalTitle;
 					// Cancel any pending debounced title summarization from hand-edits
 					if ((state as any)._goalTitleDebounceTimer) {
 						clearTimeout((state as any)._goalTitleDebounceTimer);
 						(state as any)._goalTitleDebounceTimer = null;
 					}
-					remote.summarizeGoalTitle(proposal.title);
+					remote.summarizeGoalTitle(trimmedProposalTitle);
 				}
 				// Persist draft to IndexedDB
 				saveGoalDraft(sessionId);

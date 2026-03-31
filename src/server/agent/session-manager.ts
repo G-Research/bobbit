@@ -316,8 +316,8 @@ export class SessionManager {
 		bridgeOptions.sandboxProxyPort = proxyPort;
 
 		// Claim a pre-warmed slot from the sandbox pool (preferred) or container pool (legacy)
-		if (this.sandboxPool && opts?.sandboxClaim) {
-			const result = await this.sandboxPool.claim(sessionId, opts.sandboxClaim);
+		if (this.sandboxPool) {
+			const result = await this.sandboxPool.claim(sessionId, opts?.sandboxClaim);
 			if (result) {
 				bridgeOptions.containerId = result.containerId;
 				// Override CWD to the pool slot's worktree
