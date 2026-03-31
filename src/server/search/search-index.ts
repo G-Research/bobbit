@@ -7,7 +7,7 @@ import type { PersistedSession, SessionStore } from "../agent/session-store.js";
 import type { PersistedStaff } from "../agent/staff-store.js";
 import type { StaffStore } from "../agent/staff-store.js";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // ── Public interfaces ────────────────────────────────────────────────
 
@@ -23,6 +23,10 @@ export interface SearchResult {
 	goalId?: string;
 	sessionId?: string;
 	sessionTitle?: string;
+	/** Project ID this result belongs to */
+	projectId?: string;
+	/** Project display name */
+	projectName?: string;
 }
 
 export interface SearchResults {
@@ -116,7 +120,7 @@ export class SearchIndex {
 
 	// ── Goal indexing ──────────────────────────────────────────────
 
-	indexGoal(goal: PersistedGoal): void {
+	indexGoal(goal: PersistedGoal, projectId = ""): void {
 		if (!this.stmts) return;
 		this.stmts.deleteGoal.run(goal.id);
 		this.stmts.insertGoal.run(
@@ -127,6 +131,7 @@ export class SearchIndex {
 			goal.archived ? "1" : "0",
 			goal.createdAt ?? 0,
 			goal.archivedAt ?? 0,
+			projectId,
 		);
 	}
 
@@ -136,7 +141,7 @@ export class SearchIndex {
 
 	// ── Session indexing ───────────────────────────────────────────
 
-	indexSession(session: PersistedSession, goalTitle?: string): void {
+	indexSession(session: PersistedSession, goalTitle?: string, projectId = ""): void {
 		if (!this.stmts) return;
 		this.stmts.deleteSession.run(session.id);
 		this.stmts.insertSession.run(
@@ -148,6 +153,7 @@ export class SearchIndex {
 			session.archived ? "1" : "0",
 			session.createdAt ?? 0,
 			session.archivedAt ?? 0,
+			projectId,
 		);
 	}
 
@@ -163,6 +169,7 @@ export class SearchIndex {
 		text: string,
 		toolNames: string[],
 		timestamp: number,
+		projectId = "",
 	): void {
 		if (!this.stmts || !text.trim()) return;
 		this.stmts.insertMessage.run(
@@ -171,6 +178,7 @@ export class SearchIndex {
 			text,
 			toolNames.join(" "),
 			timestamp,
+			projectId,
 		);
 	}
 
@@ -180,10 +188,10 @@ export class SearchIndex {
 
 	// ── Staff indexing ─────────────────────────────────────────────
 
-	indexStaff(staff: PersistedStaff): void {
+	indexStaff(staff: PersistedStaff, projectId = ""): void {
 		if (!this.stmts) return;
 		this.stmts.deleteStaff.run(staff.id);
-		this.stmts.insertStaff.run(staff.id, staff.name || "", staff.description || "", staff.state || "", staff.createdAt ?? 0);
+		this.stmts.insertStaff.run(staff.id, staff.name || "", staff.description || "", staff.state || "", staff.createdAt ?? 0, projectId);
 	}
 
 	removeStaff(staffId: string): void {
@@ -294,6 +302,7 @@ export class SearchIndex {
 			type?: "all" | "goals" | "sessions" | "messages" | "staff";
 			limit?: number;
 			offset?: number;
+			projectId?: string;
 		} = {},
 	): SearchResults {
 		if (!this.db || !query.trim()) {
@@ -357,24 +366,28 @@ export class SearchIndex {
 			CREATE VIRTUAL TABLE IF NOT EXISTS goals_fts USING fts5(
 				goal_id UNINDEXED, title, spec,
 				state UNINDEXED, archived UNINDEXED,
-				created_at UNINDEXED, archived_at UNINDEXED
+				created_at UNINDEXED, archived_at UNINDEXED,
+				project_id UNINDEXED
 			);
 
 			CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 				session_id UNINDEXED, title, role,
 				goal_id UNINDEXED, goal_title,
-				archived UNINDEXED, created_at UNINDEXED, archived_at UNINDEXED
+				archived UNINDEXED, created_at UNINDEXED, archived_at UNINDEXED,
+				project_id UNINDEXED
 			);
 
 			CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 				session_id UNINDEXED, session_title UNINDEXED,
 				text_content, tool_names,
-				timestamp UNINDEXED
+				timestamp UNINDEXED,
+				project_id UNINDEXED
 			);
 
 			CREATE VIRTUAL TABLE IF NOT EXISTS staff_fts USING fts5(
 				staff_id UNINDEXED, name, description,
-				state UNINDEXED, created_at UNINDEXED
+				state UNINDEXED, created_at UNINDEXED,
+				project_id UNINDEXED
 			);
 		`);
 
@@ -404,16 +417,16 @@ export class SearchIndex {
 				"DELETE FROM goals_fts WHERE goal_id = ?",
 			),
 			insertGoal: this.db.prepare(
-				"INSERT INTO goals_fts (goal_id, title, spec, state, archived, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO goals_fts (goal_id, title, spec, state, archived, created_at, archived_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			),
 			deleteSession: this.db.prepare(
 				"DELETE FROM sessions_fts WHERE session_id = ?",
 			),
 			insertSession: this.db.prepare(
-				"INSERT INTO sessions_fts (session_id, title, role, goal_id, goal_title, archived, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO sessions_fts (session_id, title, role, goal_id, goal_title, archived, created_at, archived_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			),
 			insertMessage: this.db.prepare(
-				"INSERT INTO messages_fts (session_id, session_title, text_content, tool_names, timestamp) VALUES (?, ?, ?, ?, ?)",
+				"INSERT INTO messages_fts (session_id, session_title, text_content, tool_names, timestamp, project_id) VALUES (?, ?, ?, ?, ?, ?)",
 			),
 			deleteMessagesBySession: this.db.prepare(
 				"DELETE FROM messages_fts WHERE session_id = ?",
@@ -422,7 +435,7 @@ export class SearchIndex {
 				"DELETE FROM staff_fts WHERE staff_id = ?",
 			),
 			insertStaff: this.db.prepare(
-				"INSERT INTO staff_fts (staff_id, name, description, state, created_at) VALUES (?, ?, ?, ?, ?)",
+				"INSERT INTO staff_fts (staff_id, name, description, state, created_at, project_id) VALUES (?, ?, ?, ?, ?, ?)",
 			),
 			// Read statements for search queries
 			countGoals: this.db.prepare(
