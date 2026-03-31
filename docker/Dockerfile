@@ -2,7 +2,7 @@ FROM node:20-slim
 
 # Install build tools, git, curl, gh CLI
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates build-essential python3 ripgrep \
+    git curl ca-certificates build-essential python3 ripgrep fd-find \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # gh CLI
