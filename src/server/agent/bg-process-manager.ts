@@ -5,9 +5,9 @@
  * (output, exit) to connected WebSocket clients.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
+import { getShellConfig } from "./shell-util.js";
 
 export interface LogEntry {
 	ts: number;
@@ -43,17 +43,7 @@ const MAX_LOG_BYTES = 512 * 1024; // 512KB per process
 
 let nextId = 1;
 
-function getShellConfig(): { shell: string; args: string[] } {
-	if (process.platform === "win32") {
-		// Use Git Bash on Windows if available, else cmd
-		const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
-		if (existsSync(gitBash)) {
-			return { shell: gitBash, args: ["-c"] };
-		}
-		return { shell: "cmd.exe", args: ["/c"] };
-	}
-	return { shell: "/bin/bash", args: ["-c"] };
-}
+// Shell config is provided by the shared shell-util module
 
 export class BgProcessManager {
 	/** sessionId → Map<bgId, BgProcess> */

@@ -1,6 +1,6 @@
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import fs, { statSync } from "node:fs";
+import fs from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
@@ -10,33 +10,7 @@ import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import type { WorkflowGate } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
-
-/** Resolve Git Bash path on Windows for commands needing Unix tools. */
-function findGitBash(): string | null {
-	if (process.platform !== "win32") return null;
-	const candidates = [
-		"C:/Program Files/Git/bin/bash.exe",
-		"C:/Program Files/Git/usr/bin/bash.exe",
-		"C:/Program Files (x86)/Git/bin/bash.exe",
-	];
-	try {
-		const gitExe = execSync("where.exe git", { encoding: "utf-8", shell: process.env.ComSpec || "cmd.exe" }).split("\n")[0].trim();
-		if (gitExe) {
-			let dir = path.dirname(gitExe);
-			for (let i = 0; i < 4; i++) {
-				candidates.unshift(path.join(dir, "bin", "bash.exe").replace(/\\/g, "/"));
-				candidates.unshift(path.join(dir, "usr", "bin", "bash.exe").replace(/\\/g, "/"));
-				dir = path.dirname(dir);
-			}
-		}
-	} catch {}
-	for (const c of candidates) {
-		try { statSync(c); return c; } catch {}
-	}
-	return null;
-}
-
-const GIT_BASH = findGitBash();
+import { GIT_BASH, getShellConfig } from "./shell-util.js";
 
 /** Extract pass/fail verdict from sub-agent output. Exported for unit testing. */
 export function parseVerdict(output: string): boolean | null {
@@ -1181,32 +1155,17 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
-			// On Windows, always use Git Bash so that bash syntax (pipes, redirects like
-			// 2>/dev/null, $(), etc.) works reliably. Falling back to cmd.exe only if
-			// Git Bash is unavailable.
-			let child;
-			if (process.platform === "win32" && GIT_BASH) {
-				child = spawn(GIT_BASH, ["--login", "-c", command], {
-					cwd: normalizedCwd,
-					timeout: timeoutSec * 1000,
-					stdio: ["ignore", "pipe", "pipe"],
-					windowsHide: true,
-				});
-			} else if (process.platform === "win32") {
-				const shell = process.env.ComSpec || "cmd.exe";
-				child = spawn(shell, ["/d", "/s", "/c", command], {
-					cwd: normalizedCwd,
-					timeout: timeoutSec * 1000,
-					stdio: ["ignore", "pipe", "pipe"],
-					windowsHide: true,
-				});
-			} else {
-				child = spawn("/bin/sh", ["-c", command], {
-					cwd: normalizedCwd,
-					timeout: timeoutSec * 1000,
-					stdio: ["ignore", "pipe", "pipe"],
-				});
-			}
+			// Use the shared shell config — prefers Git Bash on Windows (login shell
+			// for full PATH) so bash syntax works, falls back to cmd.exe / /bin/sh.
+			const { shell: shellBin, args: shellArgs } = process.platform === "win32" && GIT_BASH
+				? { shell: GIT_BASH, args: ["--login", "-c"] }
+				: getShellConfig();
+			const child = spawn(shellBin, [...shellArgs, command], {
+				cwd: normalizedCwd,
+				timeout: timeoutSec * 1000,
+				stdio: ["ignore", "pipe", "pipe"],
+				...(process.platform === "win32" ? { windowsHide: true } : {}),
+			});
 			let stdout = "";
 			let stderr = "";
 			child.stdout.on("data", (d: Buffer) => {

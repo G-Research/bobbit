@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 import { bobbitConfigDir } from "../bobbit-dir.js";
+import { resolveShell } from "../agent/shell-util.js";
 
 const execFile = promisify(execFileCb);
 
@@ -103,7 +104,7 @@ async function setupWorktreeDeps(repoPath: string, worktreePath: string, setupCo
 	if (!setupCommand) return;
 	try {
 		console.log(`[git] Running worktree setup command: ${setupCommand}`);
-		await execFile("sh", ["-c", setupCommand],
+		await execFile(resolveShell(), ["-c", setupCommand],
 			{
 				cwd: worktreePath,
 				timeout: 120_000,

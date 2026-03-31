@@ -231,6 +231,14 @@ export class ContainerPool {
 		fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
 		args.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.pi/agent`);
 
+		// Persistent named volume for node_modules cache — survives container restarts
+		// and is shared across pool containers. On cross-platform setups (Windows host,
+		// Linux container), this cache stores Linux-native node_modules indexed by
+		// package-lock.json hash, so only the first container pays the npm ci cost.
+		args.push("-v", `bobbit-nm-cache-${this.label}:/home/node/.node_modules_cache`);
+		// Also persist npm download cache for faster installs
+		args.push("-v", `bobbit-npm-cache-${this.label}:/home/node/.npm-cache`);
+
 		// Session prompts directory (read-write, live bind mount)
 		const sessionPromptsDir = path.join(bobbitDir(), "state", "session-prompts");
 		fs.mkdirSync(sessionPromptsDir, { recursive: true });

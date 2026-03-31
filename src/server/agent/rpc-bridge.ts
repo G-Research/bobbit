@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -259,6 +260,13 @@ export class RpcBridge {
 		const hostAgentDir = path.join(os.homedir(), ".pi", "agent");
 		fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
 		dockerArgs.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.pi/agent`);
+
+		// Persistent named volumes for node_modules cache — on cross-platform setups
+		// (Windows host, Linux container), the entrypoint installs Linux-native
+		// node_modules cached by package-lock.json hash.
+		const projectDirHash = crypto.createHash("sha256").update(projectDir).digest("hex").substring(0, 12);
+		dockerArgs.push("-v", `bobbit-nm-cache-${projectDirHash}:/home/node/.node_modules_cache`);
+		dockerArgs.push("-v", `bobbit-npm-cache-${projectDirHash}:/home/node/.npm-cache`);
 
 		// Additional user-configured mounts
 		if (this.options.sandboxMounts) {
