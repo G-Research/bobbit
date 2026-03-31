@@ -1582,10 +1582,13 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
-		// Setup (model, thinking level, metadata) is deferred until after the
-		// first agent turn completes.  This keeps the agent's sequential RPC
-		// pipeline clear so the user's first prompt is processed immediately
-		// without waiting behind setModel (HTTP round-trip) and other commands.
+		// Fire model + thinking level setup immediately (non-blocking).
+		// These are fast stdin writes — the agent processes set_model and
+		// set_thinking_level in microseconds.  We don't await the responses
+		// so the user's prompt (arriving shortly after) isn't blocked.
+		// Metadata persistence (getState) is deferred to after the first turn
+		// since it's not needed until a server restart.
+		this._fireEarlySetup(session);
 
 		return session;
 	}
@@ -1740,7 +1743,8 @@ export class SessionManager {
 		// Notify connected clients that the session is ready
 		broadcast(session.clients, { type: "session_status", status: "idle" });
 
-		// Setup deferred until after the first agent turn (same as createSession).
+		// Fire model + thinking level immediately (non-blocking, same as createSession)
+		this._fireEarlySetup(session);
 	}
 
 	/**
@@ -1933,19 +1937,36 @@ export class SessionManager {
 	 */
 	/**
 	 * Auto-select a model for a new session. Uses `default.sessionModel`
-	 * preference (format: "provider/modelId") if set. Falls back to aigw
-	 * Run post-start setup (model, thinking level, metadata) then transition
-	 * Runs model selection, thinking level, and metadata persistence.
-	 * Called after the first agent turn completes so these RPC commands
-	 * don't block the user's first prompt on the agent's sequential pipeline.
+	 * Fire model selection and thinking level as non-blocking RPC commands
+	 * immediately after the agent process starts.  These are fast stdin writes
+	 * that the agent processes in microseconds — they won't meaningfully delay
+	 * the user's prompt which arrives shortly after via WebSocket.
+	 *
+	 * We intentionally don't await the responses.  If model selection fails
+	 * (e.g. aigw cache miss), the deferred setup in _finishSessionSetup will
+	 * retry after the first turn.
+	 */
+	private _fireEarlySetup(session: SessionInfo): void {
+		// Model selection — fast path only (preference or cached aigw list).
+		// If this requires an HTTP discovery, it returns without sending set_model
+		// and the deferred _finishSessionSetup handles it after the first turn.
+		this.tryAutoSelectModel(session).catch((err) => {
+			console.warn(`[session-manager] Early model selection failed for ${session.id}:`, err);
+		});
+
+		// Thinking level — always fast (just a preference lookup + stdin write)
+		this.tryApplyDefaultThinkingLevel(session).catch((err) => {
+			console.warn(`[session-manager] Early thinking level failed for ${session.id}:`, err);
+		});
+	}
+
+	/**
+	 * Runs metadata persistence (and retries model/thinking if early setup missed).
+	 * Called after the first agent turn completes.
 	 */
 	private async _finishSessionSetup(session: SessionInfo): Promise<void> {
 		try {
-			await Promise.all([
-				this.tryAutoSelectModel(session),
-				this.tryApplyDefaultThinkingLevel(session),
-				this.persistSessionMetadata(session),
-			]);
+			await this.persistSessionMetadata(session);
 		} catch (err) {
 			console.error(`[session-manager] Setup error for session ${session.id}:`, err);
 		}
