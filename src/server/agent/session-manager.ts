@@ -297,6 +297,7 @@ export class SessionManager {
 			const containerId = this.containerPool.claim(sessionId);
 			if (containerId) {
 				bridgeOptions.containerId = containerId;
+				bridgeOptions.poolProjectDir = this.containerPool.options.projectDir;
 			} else {
 				console.warn("[session-manager] Container pool exhausted, falling back to cold docker run");
 			}

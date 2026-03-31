@@ -49,7 +49,7 @@ export class ContainerPool {
 	private _shutdownRequested = false;
 	private readonly label: string;
 
-	constructor(private options: ContainerPoolOptions) {
+	constructor(readonly options: ContainerPoolOptions) {
 		this.label = projectHash(options.projectDir);
 	}
 
@@ -224,6 +224,12 @@ export class ContainerPool {
 		args.push("-v", `${toDockerPath(projectDir)}:/workspace`);
 		args.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
+
+		// Mount the worktree root so goal worktrees are accessible inside pool containers.
+		// Worktrees live at <projectDir>-wt/ (sibling of the project dir).
+		const wtRoot = projectDir.replace(/\\/g, "/").replace(/\/$/, "") + "-wt";
+		fs.mkdirSync(wtRoot, { recursive: true });
+		args.push("-v", `${toDockerPath(wtRoot)}:/worktrees`);
 
 		// Host agent dir (~/.bobbit/agent/ or legacy ~/.pi/agent/)
 		const hostAgentDir = globalAgentDir();

@@ -63,6 +63,8 @@ export interface RpcBridgeOptions {
 	sandboxProxyPort?: number;
 	/** Container ID to use with docker exec (pool mode) */
 	containerId?: string;
+	/** The pool's project directory (needed to remap worktree CWDs in pool mode) */
+	poolProjectDir?: string;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -413,7 +415,20 @@ export class RpcBridge {
 		for (let i = 0; i < agentArgs.length; i++) {
 			const arg = agentArgs[i];
 			if (arg === "--cwd") {
-				remappedArgs.push("--cwd", "/workspace");
+				const hostCwd = (agentArgs[i + 1] || "").replace(/\\/g, "/");
+				// Pool containers mount: projectDir → /workspace, projectDir-wt/ → /worktrees
+				if (isPoolMode && this.options.poolProjectDir) {
+					const poolDir = this.options.poolProjectDir.replace(/\\/g, "/").replace(/\/$/, "");
+					const wtRoot = poolDir + "-wt";
+					if (hostCwd.startsWith(wtRoot + "/") || hostCwd === wtRoot) {
+						const relative = hostCwd.substring(wtRoot.length); // includes leading /
+						remappedArgs.push("--cwd", `/worktrees${relative || "/"}`);
+					} else {
+						remappedArgs.push("--cwd", "/workspace");
+					}
+				} else {
+					remappedArgs.push("--cwd", "/workspace");
+				}
 				i++; // skip the next arg (the host cwd path)
 			} else if (arg === "--system-prompt") {
 				if (isPoolMode) {
