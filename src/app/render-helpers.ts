@@ -15,6 +15,7 @@ import {
 	type GatewaySession,
 	type Goal,
 	type GoalState,
+	type Project,
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
@@ -28,6 +29,16 @@ import { startTeam, teardownTeam, refreshSessions, deleteGoal } from "./api.js";
 
 export function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** Render a small colored chip showing a project name. Used in search results. */
+export function renderProjectBadge(project: Project) {
+	const bg = project.color || '#6b7280';
+	return html`<span
+		class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium leading-none"
+		style="background: ${bg}20; color: ${bg}; border: 1px solid ${bg}30;"
+		title="Project: ${project.name}"
+	>${project.name}</span>`;
 }
 
 export function shortenPath(fullPath: string): string {
