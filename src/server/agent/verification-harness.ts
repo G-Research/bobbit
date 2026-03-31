@@ -419,6 +419,7 @@ export class VerificationHarness {
 				master: primaryBranch || "master",
 				cwd,
 				goal_spec: goalSpec || "",
+				commit: signal.commitSha || "HEAD",
 			};
 
 			// Project config — resolved via {{project.key}}
@@ -727,6 +728,8 @@ export class VerificationHarness {
 		const kickoff = [
 			`Perform a code review for the gate verification step: "${step.name}".`,
 			"",
+			`Your working directory is already on branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`. Do NOT run git checkout/pull/fetch. Just read files and diffs directly.`,
+			"",
 			step.prompt || "",
 			"",
 			"## Required Output Format",
@@ -816,8 +819,22 @@ export class VerificationHarness {
 		}
 
 		const contextLines: string[] = [
-			"\n## Signal Context",
+			"\n## Working Directory & Branch Setup",
+			"",
+			"**Your working directory is already set up correctly.** It is the goal's worktree,",
+			`checked out on branch \`${builtinVars.branch || "HEAD"}\` at commit \`${builtinVars.commit || "HEAD"}\`.`,
+			"",
+			"**Do NOT run `git checkout`, `git pull`, `git fetch`, or any command that modifies the working tree.**",
+			"Other reviewers may be reading from this directory concurrently. Mutating it causes stale reads.",
+			"",
+			"To see what changed (read-only, safe for concurrent use):",
+			`- \`git diff ${builtinVars.master || "master"}...HEAD -- . ':!package-lock.json'\` — branch diff vs ${builtinVars.master || "master"}`,
+			`- \`git log --oneline ${builtinVars.master || "master"}..HEAD\` — commits on this branch`,
+			"- Use `read` to view files directly — they are already at the correct version",
+			"",
+			"## Signal Context",
 			`- Branch: ${builtinVars.branch || "HEAD"}`,
+			`- Commit: ${builtinVars.commit || "HEAD"}`,
 			`- Primary branch: ${builtinVars.master || "master"}`,
 			`- Working directory: ${cwd}`,
 		];
