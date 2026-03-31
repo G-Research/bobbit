@@ -385,7 +385,20 @@ function goalPreviewPanel() {
 					})}
 				</div>
 				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
+					<div class="flex items-center justify-between mb-1.5">
+						<label class="text-xs text-muted-foreground font-medium">Working Directory</label>
+						${state.sandboxStatus?.configured ? html`
+							<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}"
+								title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+									? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+									: "Run team agents in isolated Docker containers"}>
+								<span class="text-[11px] text-muted-foreground">Sandbox</span>
+								<input type="checkbox" class="toggle-switch" .checked=${_goalSandboxed}
+									?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+									@change=${(e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
+							</label>
+						` : ""}
+					</div>
 					${cwdCombobox({
 						value: state.previewCwd,
 						onInput: (v) => {
@@ -421,20 +434,6 @@ function goalPreviewPanel() {
 								<option value=${wf.id} ?selected=${_selectedWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
 							`)}
 						</select>
-					</div>
-				` : ""}
-				${state.sandboxStatus?.configured ? html`
-					<div class="flex items-center gap-2">
-						<label class="flex items-center gap-2 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-50 pointer-events-none" : ""}">
-							<input type="checkbox" .checked=${_goalSandboxed}
-								?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
-								@change=${(e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
-							<span class="text-xs text-foreground/70">Sandbox</span>
-							<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
-								? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-								: "Run team agents in isolated Docker containers"}
-								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-						</label>
 					</div>
 				` : ""}
 				<div class="flex-1 flex flex-col min-h-0">
@@ -1598,7 +1597,20 @@ function goalProposalPanel() {
 				})}
 			</div>
 			<div>
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
+				<div class="flex items-center justify-between mb-1.5">
+					<label class="text-xs text-muted-foreground font-medium">Working Directory</label>
+					${state.sandboxStatus?.configured ? html`
+						<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}"
+							title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+								? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+								: "Run team agents in isolated Docker containers"}>
+							<span class="text-[11px] text-muted-foreground">Sandbox</span>
+							<input type="checkbox" class="toggle-switch" .checked=${_proposalSandboxed}
+								?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+								@change=${(e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						</label>
+					` : ""}
+				</div>
 				${cwdCombobox({
 					value: _proposalCwd,
 					onInput: (v) => { _proposalCwd = v; renderApp(); },
@@ -1622,20 +1634,6 @@ function goalProposalPanel() {
 							<option value=${wf.id} ?selected=${_proposalWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
 						`)}
 					</select>
-				</div>
-			` : ""}
-			${state.sandboxStatus?.configured ? html`
-				<div class="flex items-center gap-2">
-					<label class="flex items-center gap-2 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-50 pointer-events-none" : ""}">
-						<input type="checkbox" .checked=${_proposalSandboxed}
-							?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
-							@change=${(e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
-						<span class="text-xs text-foreground/70">Sandbox</span>
-						<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
-							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-							: "Run team agents in isolated Docker containers"}
-							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-					</label>
 				</div>
 			` : ""}
 			<div class="flex-1 flex flex-col min-h-0">
