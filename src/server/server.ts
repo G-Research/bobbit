@@ -988,7 +988,7 @@ async function handleApiRoute(
 			colorIndex: colorStore.get(s.id),
 		}));
 		if (filterProjectId) {
-			sessions = sessions.filter(s => (s as any).projectId === filterProjectId);
+			sessions = sessions.filter(s => s.projectId === filterProjectId);
 		}
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
@@ -1256,6 +1256,11 @@ async function handleApiRoute(
 				sessionManager.getSessionStore().update(session.id, { reattemptGoalId });
 			}
 
+			// Store projectId on the session if provided
+			if (body?.projectId && typeof body.projectId === "string") {
+				sessionManager.getSessionStore().update(session.id, { projectId: body.projectId });
+			}
+
 			json({
 				id: session.id,
 				cwd: session.cwd,
@@ -1304,7 +1309,7 @@ async function handleApiRoute(
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
 		let goals = sessionManager.goalManager.listGoals();
 		if (filterProjectId) {
-			goals = goals.filter((g: any) => g.projectId === filterProjectId);
+			goals = goals.filter(g => g.projectId === filterProjectId);
 		}
 		json({ generation: currentGen, goals });
 		return;
@@ -1331,8 +1336,8 @@ async function handleApiRoute(
 			});
 			// Set projectId if provided
 			if (body.projectId && typeof body.projectId === "string") {
-				sessionManager.goalManager.updateGoal(goal.id, { projectId: body.projectId } as any);
-				(goal as any).projectId = body.projectId;
+				sessionManager.goalManager.updateGoal(goal.id, { projectId: body.projectId });
+				goal.projectId = body.projectId;
 			}
 			// Set reattemptOf if provided
 			if (body.reattemptOf && typeof body.reattemptOf === "string") {

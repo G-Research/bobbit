@@ -1922,6 +1922,7 @@ export class SessionManager {
 		personalities?: string[];
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
+		projectId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => ({
 			id: s.id,
@@ -1951,6 +1952,7 @@ export class SessionManager {
 			personalities: s.personalities,
 			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
 			sandboxed: this.store.get(s.id)?.sandboxed || s.sandboxed,
+			projectId: this.store.get(s.id)?.projectId,
 		}));
 	}
 
