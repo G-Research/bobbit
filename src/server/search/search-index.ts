@@ -633,5 +633,14 @@ function sanitiseFtsQuery(raw: string): string {
 	const tokens = cleaned.split(/\s+/).filter(Boolean);
 	if (tokens.length === 0) return "";
 
-	return tokens.map((t) => `"${t}"`).join(" ");
+	// Last token gets prefix matching (unquoted with *) so partial words work
+	// e.g. "sandb" → matches "sandbox". Earlier tokens are exact-quoted.
+	// Strip FTS5 special chars from the prefix token since it's unquoted.
+	return tokens.map((t, i) => {
+		if (i === tokens.length - 1) {
+			const safe = t.replace(/[^a-zA-Z0-9_]/g, "");
+			return safe ? `${safe}*` : `"${t}"`;
+		}
+		return `"${t}"`;
+	}).join(" ");
 }
