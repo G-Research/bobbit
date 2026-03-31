@@ -37,7 +37,7 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
 import { ContainerPool } from "./agent/container-pool.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
@@ -436,6 +436,15 @@ export function createGateway(config: GatewayConfig) {
 					const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
 					const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
 					const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+
+					// Auto-build image if missing and Dockerfile exists
+					const imageStatus = await checkDockerAvailability(imageName);
+					if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
+						const buildResult = await buildSandboxImage(imageName, config.defaultCwd);
+						if (!buildResult.success) {
+							console.error(`[sandbox] Auto-build failed, continuing without container pool`);
+						}
+					}
 					const mountsRaw = projectConfigStore.get("sandbox_mounts") || "";
 					const credentialsRaw = projectConfigStore.get("sandbox_credentials") || "";
 					let mounts: string[] = [];
@@ -731,6 +740,26 @@ async function handleApiRoute(
 		const configured = sandboxConfig === "docker";
 		const status = await checkDockerAvailability(configured ? imageName : undefined);
 		json({ ...status, configured });
+		return;
+	}
+
+	// POST /api/sandbox-image/build
+	if (url.pathname === "/api/sandbox-image/build" && req.method === "POST") {
+		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+		if (!fs.existsSync(path.join(config.defaultCwd, "docker", "Dockerfile"))) {
+			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
+			return;
+		}
+		if (isBuildingImage()) {
+			json({ error: "Build already in progress" }, 409);
+			return;
+		}
+		const result = await buildSandboxImage(imageName, config.defaultCwd);
+		if (result.success) {
+			json({ success: true });
+		} else {
+			json({ success: false, error: result.error }, 500);
+		}
 		return;
 	}
 

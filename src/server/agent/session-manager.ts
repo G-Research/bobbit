@@ -1561,19 +1561,28 @@ export class SessionManager {
 		session.unsubscribe = unsub;
 
 		await rpcClient.start();
-		session.status = "idle";
 
 		this.sessions.set(id, session);
 
-		// Auto-select model, apply thinking level, and persist metadata — all in parallel.
-		// None of these block the session from being usable; they're fire-and-forget config.
-		Promise.all([
-			this.tryAutoSelectModel(session),
-			this.tryApplyDefaultThinkingLevel(session),
-			this.persistSessionMetadata(session),
-		]).catch((err) => {
+		// Await setup before marking idle — the agent processes RPC commands
+		// sequentially, so any user prompt sent while these are in-flight would
+		// be queued behind them, making the session appear unresponsive.
+		try {
+			await Promise.all([
+				this.tryAutoSelectModel(session),
+				this.tryApplyDefaultThinkingLevel(session),
+				this.persistSessionMetadata(session),
+			]);
+		} catch (err) {
 			console.error(`[session-manager] Post-start config error for session ${id}:`, err);
-		});
+		}
+
+		session.status = "idle";
+
+		// Drain any prompts that arrived while the session was still starting
+		if (!session.promptQueue.isEmpty) {
+			this.drainQueue(session);
+		}
 
 		return session;
 	}
@@ -1723,17 +1732,27 @@ export class SessionManager {
 		const eventBuffer = session.eventBuffer;
 
 		await rpcClient.start();
-		session.status = "idle";
 
-		// Auto-select model, apply thinking level, and persist — all in parallel, non-blocking.
-		Promise.all([
-			this.tryAutoSelectModel(session),
-			this.tryApplyDefaultThinkingLevel(session),
-			this.persistSessionMetadata(session),
-		]).catch(() => {});
+		// Await setup before marking idle — the agent processes RPC commands
+		// sequentially, so any user prompt sent while these are in-flight would
+		// be queued behind them, making the session appear unresponsive.
+		try {
+			await Promise.all([
+				this.tryAutoSelectModel(session),
+				this.tryApplyDefaultThinkingLevel(session),
+				this.persistSessionMetadata(session),
+			]);
+		} catch { /* logged inside each method */ }
+
+		session.status = "idle";
 
 		// Notify connected clients that the session is ready
 		broadcast(session.clients, { type: "session_status", status: "idle" });
+
+		// Drain any prompts that arrived while the session was still starting
+		if (!session.promptQueue.isEmpty) {
+			this.drainQueue(session);
+		}
 	}
 
 	/**

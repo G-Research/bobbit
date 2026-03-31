@@ -406,6 +406,8 @@ Build the image from `docker/Dockerfile`:
 docker build -t bobbit-agent docker/
 ```
 
+**Auto-build on startup**: If the configured image is missing but `docker/Dockerfile` exists in the project directory, the gateway automatically builds it on startup before initializing the container pool. The build has a 120-second timeout and fails gracefully — a failed build disables the container pool but does not crash the server. You can also trigger a manual build from Settings → Project tab → Docker Sandbox section via the "Build Image" button, or by calling `POST /api/sandbox-image/build`.
+
 The image includes Node.js 20, git, curl, gh CLI, and build-essential. The agent CLI itself is **not baked in** — it is bind-mounted from the host at runtime so sandboxed sessions always use the same agent version as the gateway. See `docker/README.md` for customization instructions.
 
 ### How it works
@@ -457,14 +459,15 @@ Containers always run on the default Docker bridge network — they are **not** 
 
 ### UI
 
-- **Sandbox checkbox**: In the session creation popover, a "Sandbox" checkbox appears below the "Create worktree" option when `sandbox: "docker"` is configured. The checkbox is disabled with a tooltip when Docker is unavailable or the sandbox image is missing.
-- **Settings page**: Settings → Project tab has a "Docker Sandbox" section showing sandbox mode, Docker status, image name, network allowlist, credentials, and additional mounts.
+- **Sandbox checkbox**: In the session creation popover, a "Sandbox" checkbox appears below the "Create worktree" option when `sandbox: "docker"` is configured. The checkbox is disabled with a tooltip when Docker is unavailable or the sandbox image is missing — the tooltip includes the `docker build` command when the Dockerfile exists.
+- **Settings page**: Settings → Project tab has a "Docker Sandbox" section showing sandbox mode, Docker status, image name, network allowlist, credentials, and additional mounts. When the image is missing and the Dockerfile exists, it shows a copyable build command and a "Build Image" button that triggers a build via the API.
 
 ### REST API
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/sandbox-status` | GET | Docker availability, image status, and whether sandbox is configured. Returns `{ available, configured, dockerVersion?, imageExists?, error? }` |
+| `/api/sandbox-status` | GET | Docker availability, image status, and whether sandbox is configured. Returns `{ available, configured, dockerVersion?, imageExists?, dockerfileExists?, buildCommand?, error? }` |
+| `/api/sandbox-image/build` | POST | Trigger a Docker image build from `docker/Dockerfile`. Returns 404 if no Dockerfile, 409 if build already in progress, 200 on success, 500 on failure |
 | `/api/web-proxy/search` | POST | Gateway-mediated web search for sandboxed agents. Body: `{ query, maxResults? }`. Rate-limited to 10 req/min per client IP |
 | `/api/web-proxy/fetch` | POST | Gateway-mediated URL fetch for sandboxed agents. Body: `{ url, maxLength? }`. Rate-limited to 10 req/min per client IP |
 | `/api/sessions` | POST | Accepts `sandboxed: true` in body. Returns 400 if sandbox is not configured |
@@ -486,7 +489,7 @@ Containers always run on the default Docker bridge network — they are **not** 
 | `docker/Dockerfile` | Agent sandbox image definition |
 | `docker/README.md` | Image build instructions and customization guide |
 | `src/server/agent/sandbox-proxy.ts` | HTTP/HTTPS forward proxy with hostname allowlist |
-| `src/server/agent/sandbox-status.ts` | Docker availability check (`docker info` + image inspect) |
+| `src/server/agent/sandbox-status.ts` | Docker availability check (`docker info` + image inspect), image auto-build (`buildSandboxImage()`) |
 | `src/server/agent/container-pool.ts` | Container pool lifecycle: create, claim, release, replenish, health check, shutdown, re-adopt |
 
 The sandbox also required changes to: `rpc-bridge.ts` (Docker spawn path, path remapping helpers for sandbox session persistence), `session-manager.ts` (sandbox wiring, mount validation, and session path remapping on persist/restore), `session-store.ts` (`sandboxed` field on `PersistedSession`), `server.ts` (REST endpoints), `sidebar.ts` (sandbox checkbox), `settings-page.ts` (Docker Sandbox config section), and all tool extensions (env var fallback for gateway credentials).
