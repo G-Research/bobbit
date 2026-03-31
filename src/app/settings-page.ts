@@ -1084,9 +1084,8 @@ function renderSandboxSection(inputClass: string) {
 																sandboxBuildError = "";
 																renderApp();
 																try {
-																	const resp = await fetch("/api/sandbox-image/build", {
-																		method: "POST",
-																		headers: { "Authorization": "Bearer " + state.token }
+																	const resp = await gatewayFetch("/api/sandbox-image/build", {
+																		method: "POST"
 																	});
 																	let result: any = {};
 																	try { result = await resp.json(); } catch (_e) { /* non-JSON response */ }
