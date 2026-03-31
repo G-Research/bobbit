@@ -1132,7 +1132,11 @@ export class SessionManager {
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
-			const effectiveAllowed = overrideAllowedTools ?? (role ? role.allowedTools : []);
+			let effectiveAllowed = overrideAllowedTools ?? (role ? role.allowedTools : []);
+			// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
+			if (ps.sandboxed && effectiveAllowed.length > 0) {
+				effectiveAllowed = effectiveAllowed.filter(t => t !== "bash_bg");
+			}
 			if (effectiveAllowed.length > 0) {
 				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowed, role, this.toolManager, this.groupPolicyStore) : undefined;
 				const activation = computeToolActivationArgs(effectiveAllowed, this.toolManager, ps.cwd, mcpExtPaths);

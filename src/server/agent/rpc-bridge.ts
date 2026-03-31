@@ -6,6 +6,17 @@ import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import { buildDockerRunArgs } from "./docker-args.js";
 
+/** Redact sensitive env vars (-e KEY=VALUE) from Docker arg arrays for logging. */
+function redactDockerArgs(args: string[]): string {
+	const sensitiveKeys = /^(BOBBIT_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|AWS_SECRET)/i;
+	return args.map((a, i) => {
+		if (i > 0 && args[i - 1] === "-e" && sensitiveKeys.test(a)) {
+			return a.replace(/=.*/, "=<REDACTED>");
+		}
+		return a;
+	}).join(" ");
+}
+
 /** Container home directory for the Docker sandbox (node:20-slim, USER node) */
 export const CONTAINER_HOME = "/home/node";
 /** Container-side agent directory prefix (always forward slashes) */
@@ -296,7 +307,7 @@ export class RpcBridge {
 		// Remap agent args: replace host paths with container paths
 		dockerArgs.push(...this.remapArgsForContainer(agentArgs, false));
 
-		console.log(`[rpc-bridge] Docker sandbox args: ${dockerArgs.join(" ")}`);
+		console.log(`[rpc-bridge] Docker sandbox args: ${redactDockerArgs(dockerArgs)}`);
 
 		return spawn("docker", dockerArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
@@ -339,7 +350,7 @@ export class RpcBridge {
 			...this.remapArgsForContainer(agentArgs, true),
 		);
 
-		console.log(`[rpc-bridge] Docker exec args: ${execArgs.join(" ")}`);
+		console.log(`[rpc-bridge] Docker exec args: ${redactDockerArgs(execArgs)}`);
 
 		return spawn("docker", execArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
