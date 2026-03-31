@@ -228,16 +228,85 @@ export function clearArchivedSessionsState(): void {
 	state.archivedSessions = [];
 }
 
-/** Fetch archived sessions from the API. */
+/** Fetch archived sessions from the API (paginated). */
 export async function fetchArchivedSessions(): Promise<void> {
 	_archivedSessionsLoaded = true;
+	// Reset pagination state and load first page
+	state.archivedSessions = [];
+	state.archivedSessionsCursor = null;
+	state.archivedSessionsHasMore = false;
+	state.archivedSessionsTotal = 0;
+	await fetchArchivedSessionsPaginated();
+}
+
+// ============================================================================
+// SEARCH API
+// ============================================================================
+
+export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<{ results: any[]; total: number }> {
 	try {
-		const res = await gatewayFetch("/api/sessions?include=archived");
+		const params = new URLSearchParams({ q: query });
+		if (type && type !== "all") params.set("type", type);
+		if (limit !== undefined) params.set("limit", String(limit));
+		if (offset !== undefined) params.set("offset", String(offset));
+		const res = await gatewayFetch(`/api/search?${params}`);
+		if (!res.ok) return { results: [], total: 0 };
+		return await res.json();
+	} catch {
+		return { results: [], total: 0 };
+	}
+}
+
+// ============================================================================
+// PAGINATED ARCHIVES
+// ============================================================================
+
+export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	try {
+		const params = new URLSearchParams({ archived: "true", limit: String(limit) });
+		if (afterCursor !== undefined) params.set("after", String(afterCursor));
+		const res = await gatewayFetch(`/api/goals?${params}`);
 		if (!res.ok) return;
 		const data = await res.json();
-		const sessions: GatewaySession[] = data.sessions || [];
-		// Filter to only archived ones
-		state.archivedSessions = sessions.filter((s: any) => s.archived === true);
+		const goals: Goal[] = data.goals || [];
+		if (afterCursor !== undefined) {
+			// Append to existing
+			const existingIds = new Set(state.goals.filter(g => g.archived).map(g => g.id));
+			const newGoals = goals.filter(g => !existingIds.has(g.id));
+			state.goals = [...state.goals, ...newGoals];
+		} else {
+			// First page — replace archived goals, keep live goals
+			const liveGoals = state.goals.filter(g => !g.archived);
+			state.goals = [...liveGoals, ...goals];
+		}
+		state.archivedGoalsTotal = data.total ?? goals.length;
+		state.archivedGoalsHasMore = data.hasMore ?? false;
+		state.archivedGoalsCursor = data.nextCursor ?? null;
+		renderApp();
+	} catch {
+		// Silently fail
+	}
+}
+
+export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	try {
+		const params = new URLSearchParams({ include: "archived", limit: String(limit) });
+		if (afterCursor !== undefined) params.set("after", String(afterCursor));
+		const res = await gatewayFetch(`/api/sessions?${params}`);
+		if (!res.ok) return;
+		const data = await res.json();
+		const sessions: GatewaySession[] = (data.sessions || []).filter((s: any) => s.archived === true);
+		if (afterCursor !== undefined) {
+			// Append
+			const existingIds = new Set(state.archivedSessions.map(s => s.id));
+			const newSessions = sessions.filter(s => !existingIds.has(s.id));
+			state.archivedSessions = [...state.archivedSessions, ...newSessions];
+		} else {
+			state.archivedSessions = sessions;
+		}
+		state.archivedSessionsTotal = data.total ?? sessions.length;
+		state.archivedSessionsHasMore = data.hasMore ?? false;
+		state.archivedSessionsCursor = data.nextCursor ?? null;
 		renderApp();
 	} catch {
 		// Silently fail

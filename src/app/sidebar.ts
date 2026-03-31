@@ -1,6 +1,9 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
 import { Archive, Bot, ChevronDown, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
+// Register search web components (self-registering via @customElement)
+import "../ui/components/SearchBox.js";
+import "../ui/components/SearchResults.js";
 import {
 	state,
 	renderApp,
@@ -19,7 +22,7 @@ import {
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog } from "./dialogs.js";
-import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, type PersonalityData } from "./api.js";
+import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -656,6 +659,51 @@ export function renderSetupBanner(mobile = false) {
 // RENDER SIDEBAR
 // ============================================================================
 
+// ============================================================================
+// SEARCH HANDLERS
+// ============================================================================
+
+async function _handleSearchInput(query: string): Promise<void> {
+	state.searchQuery = query;
+	if (!query.trim()) {
+		state.searchResults = null;
+		state.searchLoading = false;
+		renderApp();
+		return;
+	}
+	state.searchLoading = true;
+	renderApp();
+	const data = await searchApi(query);
+	// Guard against stale responses
+	if (state.searchQuery !== query) return;
+	state.searchResults = data.results;
+	state.searchLoading = false;
+	renderApp();
+}
+
+function _handleSearchClear(): void {
+	state.searchQuery = "";
+	state.searchResults = null;
+	state.searchLoading = false;
+	renderApp();
+}
+
+function _handleResultClick(detail: { type: string; id: string; sessionId?: string; goalId?: string }): void {
+	// Clear search state
+	state.searchQuery = "";
+	state.searchResults = null;
+	state.searchLoading = false;
+
+	if (detail.type === "goal" && detail.id) {
+		import("./routing.js").then(m => m.setHashRoute("goal-dashboard", detail.id, true));
+	} else if (detail.type === "session" && detail.id) {
+		connectToSession(detail.id, true);
+	} else if (detail.type === "message" && detail.sessionId) {
+		connectToSession(detail.sessionId, true);
+	}
+	renderApp();
+}
+
 export function renderSidebar() {
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
 	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
@@ -730,6 +778,22 @@ export function renderSidebar() {
 				</div>
 			</div>
 			${renderSetupBanner()}
+			<search-box
+				.query=${state.searchQuery}
+				.loading=${state.searchLoading}
+				@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
+				@search-clear=${() => { _handleSearchClear(); }}
+			></search-box>
+			${state.searchQuery ? html`
+				<div class="flex-1 overflow-y-auto">
+					<search-results
+						.results=${state.searchResults || []}
+						.loading=${state.searchLoading}
+						.query=${state.searchQuery}
+						@result-click=${(e: CustomEvent) => { _handleResultClick(e.detail); }}
+					></search-results>
+				</div>
+			` : html`
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground text-xs">Loading…</div>`
@@ -833,13 +897,16 @@ export function renderSidebar() {
 										>
 											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.showArchived ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
-											<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
+											<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived${(state.archivedGoalsTotal + state.archivedSessionsTotal) > 0 ? ` (${state.archivedGoalsTotal + state.archivedSessionsTotal})` : ""}</span>
 										</button>
 										${state.showArchived ? html`
 											${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
 												${archivedGoals.map(goal => renderGoalGroup(goal))}
 											</div>
+											${state.archivedGoalsHasMore ? html`
+												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more goals…</button>
+											` : ""}
 											${archivedGoals.length > 0 && standaloneArchived.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 												${standaloneArchived.map(s => html`
@@ -847,6 +914,9 @@ export function renderSidebar() {
 													${renderArchivedDelegates(s.id)}
 												`)}
 											</div>
+											${state.archivedSessionsHasMore ? html`
+												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more sessions…</button>
+											` : ""}
 										` : ""}
 									</div>
 								`;
@@ -854,6 +924,7 @@ export function renderSidebar() {
 						`
 				}
 			</div>
+			`}
 			<div class="flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
 					class="flex items-center gap-1.5 px-3 py-2 text-xs transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
