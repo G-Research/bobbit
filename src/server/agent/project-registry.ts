@@ -138,7 +138,7 @@ export class ProjectRegistry {
     const existing = this.getByPath(serverCwd);
     if (existing) return existing;
 
-    const projectName = name ?? path.basename(serverCwd) || "default";
+    const projectName = name ?? (path.basename(serverCwd) || "default");
     return this.register(projectName, serverCwd);
   }
 }

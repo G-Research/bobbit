@@ -3,13 +3,18 @@ import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } f
 import type { SessionManager } from "./session-manager.js";
 import type { SearchIndex } from "../search/search-index.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 
 function sanitiseBranchName(name: string): string {
 	return name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 }
 
 export class StaffManager {
-	private store = new StaffStore();
+	private store: StaffStore;
+
+	constructor(stateDir?: string) {
+		this.store = new StaffStore(stateDir ?? bobbitStateDir());
+	}
 	searchIndex?: SearchIndex;
 
 	getStore(): StaffStore {
