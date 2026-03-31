@@ -45,8 +45,6 @@ export interface PersistedGoal {
 	archivedAt?: number;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
-	/** Which project this goal belongs to */
-	projectId?: string;
 }
 
 /**

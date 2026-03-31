@@ -70,8 +70,6 @@ export interface PersistedSession {
 	modelId?: string;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
-	/** Which project this session belongs to */
-	projectId?: string;
 }
 
 /**
