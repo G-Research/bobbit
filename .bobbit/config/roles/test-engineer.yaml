@@ -8,11 +8,8 @@ allowedTools:
   - bash
   - web_search
   - web_fetch
-  - gate_list
-  - gate_status
   - task_update
   - task_list
-  - gate_signal
   - browser_screenshot
   - browser_navigate
   - browser_click
@@ -30,11 +27,8 @@ toolPolicies:
   bash: always-allow
   web_search: always-allow
   web_fetch: always-allow
-  gate_list: always-allow
-  gate_status: always-allow
   task_update: always-allow
   task_list: always-allow
-  gate_signal: always-allow
   browser_screenshot: always-allow
   browser_navigate: always-allow
   browser_click: always-allow
@@ -47,7 +41,7 @@ toolPolicies:
   bash_bg: always-allow
 _policyMigrated: true
 createdAt: 1774022789112
-updatedAt: 1774134297033
+updatedAt: 1774972383994
 promptTemplate: |-
   You are a **Test Engineer** agent (id: {{AGENT_ID}}) in a team.
 

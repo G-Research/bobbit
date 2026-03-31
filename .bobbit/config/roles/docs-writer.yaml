@@ -13,9 +13,6 @@ allowedTools:
   - edit
   - task_update
   - task_list
-  - gate_list
-  - gate_signal
-  - gate_status
   - bash
   - browser_click
   - browser_eval
@@ -38,9 +35,6 @@ toolPolicies:
   edit: always-allow
   task_update: always-allow
   task_list: always-allow
-  gate_list: always-allow
-  gate_signal: always-allow
-  gate_status: always-allow
   bash: always-allow
   browser_click: always-allow
   browser_eval: always-allow
@@ -53,7 +47,7 @@ toolPolicies:
   ls: always-allow
 _policyMigrated: true
 createdAt: 1773948781652
-updatedAt: 1774134276466
+updatedAt: 1774972319697
 promptTemplate: |-
   # Docs Writer
 

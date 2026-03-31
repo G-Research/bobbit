@@ -39,7 +39,9 @@ toolPolicies:
   browser_wait: always-allow
   preview_open: always-allow
   bash_bg: always-allow
+  gate_signal: ask-once
+  gate_status: ask-once
 _policyMigrated: true
 createdAt: 0
-updatedAt: 0
+updatedAt: 1774972400778
 promptTemplate: ""

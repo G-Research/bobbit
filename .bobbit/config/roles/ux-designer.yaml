@@ -6,9 +6,6 @@ allowedTools:
   - Edit
   - Read
   - Write
-  - gate_signal
-  - gate_status
-  - gate_list
   - delegate
   - task_create
   - task_list
@@ -35,9 +32,6 @@ toolPolicies:
   Edit: always-allow
   Read: always-allow
   Write: always-allow
-  gate_signal: always-allow
-  gate_status: always-allow
-  gate_list: always-allow
   delegate: always-allow
   task_create: always-allow
   task_list: always-allow
@@ -61,7 +55,7 @@ toolPolicies:
   ls: always-allow
 _policyMigrated: true
 createdAt: 1773914573962
-updatedAt: 1774134283464
+updatedAt: 1774972386910
 promptTemplate: |-
   You are an expert UX Designer with deep knowledge of human-centred design, visual aesthetics, interaction design, and design systems. You bring together art, psychology, and engineering to create interfaces that feel natural, seamless, and beautiful.
 

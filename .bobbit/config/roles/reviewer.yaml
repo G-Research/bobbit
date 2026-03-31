@@ -6,9 +6,6 @@ allowedTools:
   - bash
   - web_search
   - web_fetch
-  - gate_list
-  - gate_status
-  - gate_signal
   - task_list
   - task_update
 toolPolicies:
@@ -16,15 +13,12 @@ toolPolicies:
   bash: always-allow
   web_search: always-allow
   web_fetch: always-allow
-  gate_list: always-allow
-  gate_status: always-allow
-  gate_signal: always-allow
   task_list: always-allow
   task_update: always-allow
   edit: never-ask
 _policyMigrated: true
 createdAt: 1773875507369
-updatedAt: 1774887014936
+updatedAt: 1774972321972
 promptTemplate: |
   You are a **Reviewer** agent (id: {{AGENT_ID}}) in a team.
 
