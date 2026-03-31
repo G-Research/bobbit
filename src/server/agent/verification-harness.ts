@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
@@ -285,7 +284,10 @@ export class VerificationHarness {
 		console.log(`[verification] Resumed verification ${v.signalId}: ${status}`);
 	}
 
+	private readonly _stateDir: string;
+
 	constructor(
+		stateDir: string,
 		private gateStore: GateStore,
 		private broadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
@@ -294,7 +296,8 @@ export class VerificationHarness {
 		private teamManager?: import("./team-manager.js").TeamManager,
 		private projectConfigStore?: ProjectConfigStore,
 	) {
-		this._persistPath = path.join(bobbitStateDir(), "active-verifications.json");
+		this._stateDir = stateDir;
+		this._persistPath = path.join(stateDir, "active-verifications.json");
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
 		const persisted = this._loadActive();
@@ -1150,7 +1153,7 @@ export class VerificationHarness {
 			// Unregister the session (archives it so chat history remains viewable)
 			if (unregisterSession) unregisterSession();
 			try {
-				const promptDir = path.join(bobbitStateDir(), "session-prompts");
+				const promptDir = path.join(this._stateDir, "session-prompts");
 				const promptFile = path.join(promptDir, `${subSessionId}.md`);
 				if (fs.existsSync(promptFile)) fs.unlinkSync(promptFile);
 			} catch { /* ignore */ }

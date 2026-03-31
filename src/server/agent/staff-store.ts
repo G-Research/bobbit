@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 
 export type StaffState = "active" | "paused" | "retired";
 export type TriggerType = "schedule" | "git" | "manual";
@@ -41,24 +40,25 @@ export interface PersistedStaff {
 	branch?: string;
 }
 
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "staff.json");
-
 /**
  * Simple JSON file store for staff agents.
  * Staff persist across server restarts.
  */
 export class StaffStore {
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 	private staff: Map<string, PersistedStaff> = new Map();
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "staff.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const s of data) {
 						if (s.id) {
@@ -74,11 +74,11 @@ export class StaffStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) {
-				fs.mkdirSync(STORE_DIR, { recursive: true });
+			if (!fs.existsSync(this.storeDir)) {
+				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data = Array.from(this.staff.values());
-			fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[staff-store] Failed to save staff:", err);
 		}

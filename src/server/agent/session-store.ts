@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { QueuedMessage } from "../ws/protocol.js";
-import { bobbitStateDir } from "../bobbit-dir.js";
 
 /** Persisted metadata for a single gateway session */
 export interface PersistedSession {
@@ -69,30 +68,33 @@ export interface PersistedSession {
 	modelId?: string;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
+	/** Which project this session belongs to */
+	projectId?: string;
 }
-
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "sessions.json");
 
 /**
  * Simple JSON file store for gateway session metadata.
  * Allows sessions to survive server restarts.
  */
 export class SessionStore {
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 	private sessions: Map<string, PersistedSession> = new Map();
 	private saveTimer: ReturnType<typeof setTimeout> | null = null;
 	private static SAVE_DEBOUNCE_MS = 1000;
 	/** Monotonically increasing counter — bumped on every mutation. Resets to 0 on server restart. */
 	private generation = 0;
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "sessions.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const s of data) {
 						if (s.id) {
@@ -120,11 +122,11 @@ export class SessionStore {
 	/** Write sessions to disk immediately (synchronous). */
 	private saveNow(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) {
-				fs.mkdirSync(STORE_DIR, { recursive: true });
+			if (!fs.existsSync(this.storeDir)) {
+				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data = Array.from(this.sessions.values());
-			fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[session-store] Failed to save sessions:", err);
 		}
@@ -169,7 +171,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "sandboxed">>): void {
+	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "sandboxed" | "projectId">>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		this.generation++;
