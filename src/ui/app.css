@@ -3036,3 +3036,9 @@ html {
 		font-size: 15px;
 	}
 }
+
+/* Skip layout/paint for off-screen messages to improve streaming performance */
+message-list > .flex > * {
+	content-visibility: auto;
+	contain-intrinsic-size: auto 100px;
+}
