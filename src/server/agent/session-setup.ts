@@ -489,12 +489,6 @@ export async function executeWorktreeAsync(
 		() => rpcClient.start(),
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
-
-	// Wait for sandbox agent to finish initializing (extension loading, model discovery)
-	if (plan.bridgeOptions.sandboxed) {
-		await rpcClient.waitForReady();
-	}
-
 	session.status = "idle";
 
 	// Notify connected clients that the session is ready
@@ -571,12 +565,6 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		() => rpcClient.start(),
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
-
-	// Wait for sandbox agent to finish initializing (extension loading, model discovery)
-	if (plan.bridgeOptions.sandboxed) {
-		await rpcClient.waitForReady();
-	}
-
 	session.status = "idle";
 
 	ctx.sessions.set(session.id, session);
