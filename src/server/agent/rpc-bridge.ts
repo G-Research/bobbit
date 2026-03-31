@@ -305,6 +305,8 @@ export class RpcBridge {
 			dockerArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}
 		dockerArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
+		// Tell the agent CLI to use .bobbit/agent instead of .pi/agent
+		dockerArgs.push("-e", "PI_CODING_AGENT_DIR=/home/node/.bobbit/agent");
 
 		// Sandbox credentials (explicitly configured env vars)
 		if (this.options.sandboxCredentials) {

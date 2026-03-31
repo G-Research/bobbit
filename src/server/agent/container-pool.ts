@@ -273,6 +273,8 @@ export class ContainerPool {
 			args.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
 		}
 		args.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
+		// Tell the agent CLI to use .bobbit/agent instead of .pi/agent
+		args.push("-e", "PI_CODING_AGENT_DIR=/home/node/.bobbit/agent");
 
 		// Sandbox credentials
 		if (this.options.sandboxCredentials) {
