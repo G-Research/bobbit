@@ -91,11 +91,10 @@ export class SearchBox extends LitElement {
 		this.dispatchEvent(new CustomEvent("search-clear", { bubbles: true, composed: true }));
 	}
 
-	private _toggleContentMode(e: Event) {
-		const checked = (e.target as HTMLInputElement).checked;
+	private _toggleContentMode() {
 		this.dispatchEvent(new CustomEvent("search-mode-change", {
 			bubbles: true, composed: true,
-			detail: { contentSearch: checked },
+			detail: { contentSearch: !this.contentMode },
 		}));
 	}
 
@@ -143,10 +142,18 @@ export class SearchBox extends LitElement {
 				</div>
 				<div class="overflow-hidden transition-all duration-200 ease-in-out" style="max-height: ${this.showControls ? "28px" : "0"}; opacity: ${this.showControls ? "1" : "0"}">
 					<div class="flex items-center justify-between px-2 py-0.5 text-[11px]">
-						<label class="flex items-center gap-1 text-muted-foreground hover:text-foreground cursor-pointer select-none transition-colors">
-							<input type="checkbox" .checked=${this.contentMode} @change=${this._toggleContentMode} class="w-3 h-3 accent-primary" />
-							Search Content
-						</label>
+						<button
+							class="flex items-center gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer select-none transition-colors"
+							@click=${this._toggleContentMode}
+							title="Search message content (slower)"
+						>
+							<span class="relative inline-flex items-center shrink-0 rounded-full transition-colors duration-200"
+								style="width:26px; height:14px; background: ${this.contentMode ? "var(--primary)" : "var(--muted)"};">
+								<span class="inline-block rounded-full bg-white shadow transition-transform duration-200"
+									style="width:10px; height:10px; margin:2px; transform: translateX(${this.contentMode ? "12px" : "0"});"></span>
+							</span>
+							<span>Content</span>
+						</button>
 						<button class="text-primary hover:text-primary/80 hover:underline transition-colors" @click=${this._fullSearch}>
 							Full Search
 						</button>

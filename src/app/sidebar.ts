@@ -683,6 +683,10 @@ async function _handleSearchInput(query: string): Promise<void> {
 	// Content search mode — use FTS API
 	state.searchLoading = true;
 	renderApp();
+	// Ensure archived data is loaded so sidebar can filter it
+	if (state.archivedSessions.length === 0) {
+		import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
+	}
 	const data = await searchApi(query);
 	// Guard against stale responses
 	if (state.searchQuery !== query) return;
@@ -696,7 +700,9 @@ async function _handleSearchInput(query: string): Promise<void> {
 		else if (r.type === "message" && r.sessionId) {
 			ids.add(r.sessionId);
 			// Also include the parent goal so goal group is visible
-			const session = state.gatewaySessions.find(s => s.id === r.sessionId);
+			// Check both live and archived sessions
+			const session = state.gatewaySessions.find(s => s.id === r.sessionId)
+				|| state.archivedSessions.find(s => s.id === r.sessionId);
 			if (session?.goalId) ids.add(session.goalId);
 			if (session?.teamGoalId) ids.add(session.teamGoalId);
 		}
@@ -929,7 +935,37 @@ export function renderSidebar() {
 								// Archived section: archived goals + standalone archived sessions
 								// Goal-affiliated archived sessions render inside their goal groups.
 								// Delegates render nested under their parent (live or archived).
-								const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+								const allStandaloneArchived = state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf);
+
+								// Apply search filtering to archived items
+								let filteredArchivedGoals = archivedGoals;
+								let filteredStandaloneArchived = allStandaloneArchived;
+								if (state.searchQuery) {
+									const q = state.searchQuery.toLowerCase();
+									if (!state.searchContentMode) {
+										// Title filter
+										filteredArchivedGoals = archivedGoals.filter(goal => {
+											if (goal.title.toLowerCase().includes(q)) return true;
+											const goalSessions = [...state.gatewaySessions, ...state.archivedSessions].filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+											return goalSessions.some(s => s.title?.toLowerCase().includes(q));
+										});
+										filteredStandaloneArchived = allStandaloneArchived.filter(s => s.title?.toLowerCase().includes(q));
+									} else if (state.searchMatchIds) {
+										// FTS content filter
+										const ids = state.searchMatchIds;
+										filteredArchivedGoals = archivedGoals.filter(goal => {
+											if (ids.has(goal.id)) return true;
+											const goalSessions = [...state.gatewaySessions, ...state.archivedSessions].filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+											return goalSessions.some(s => ids.has(s.id));
+										});
+										filteredStandaloneArchived = allStandaloneArchived.filter(s => ids.has(s.id));
+									}
+								}
+
+								// Auto-expand archived when search has matches there
+								const hasArchivedMatches = state.searchQuery && (filteredArchivedGoals.length > 0 || filteredStandaloneArchived.length > 0);
+								const showArchivedContent = state.showArchived || hasArchivedMatches;
+								const standaloneArchived = showArchivedContent ? filteredStandaloneArchived : [];
 
 								return html`
 									<div class="border-t border-border/30 my-1 mx-2"></div>
@@ -949,26 +985,26 @@ export function renderSidebar() {
 												renderApp();
 											}}
 										>
-											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${state.showArchived ? "▾" : "▸"}</span>
+											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${showArchivedContent ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
 											<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived${(state.archivedGoalsTotal + state.archivedSessionsTotal) > 0 ? ` (${state.archivedGoalsTotal + state.archivedSessionsTotal})` : ""}</span>
 										</button>
-										${state.showArchived ? html`
-											${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+										${showArchivedContent ? html`
+											${filteredArchivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
-												${archivedGoals.map(goal => renderGoalGroup(goal))}
+												${filteredArchivedGoals.map(goal => renderGoalGroup(goal))}
 											</div>
-											${state.archivedGoalsHasMore ? html`
+											${!state.searchQuery && state.archivedGoalsHasMore ? html`
 												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more goals…</button>
 											` : ""}
-											${archivedGoals.length > 0 && standaloneArchived.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+											${filteredArchivedGoals.length > 0 && standaloneArchived.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 												${standaloneArchived.map(s => html`
 													${renderArchivedSessionRow(s)}
 													${renderArchivedDelegates(s.id)}
 												`)}
 											</div>
-											${state.archivedSessionsHasMore ? html`
+											${!state.searchQuery && state.archivedSessionsHasMore ? html`
 												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more sessions…</button>
 											` : ""}
 										` : ""}
