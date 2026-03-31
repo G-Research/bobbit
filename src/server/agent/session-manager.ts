@@ -1488,6 +1488,11 @@ export class SessionManager {
 			const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
 			const goalSpec = goal?.spec;
 
+			// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
+			if (opts?.sandboxed && effectiveAllowedTools) {
+				effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
+			}
+
 			// Build tool restrictions text if allowedTools is specified and non-empty
 			let toolRestrictionsText: string | undefined;
 			if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
@@ -1551,10 +1556,6 @@ export class SessionManager {
 
 		// ── Docker sandbox wiring ──
 		if (opts?.sandboxed) {
-			// Exclude bash_bg — BgProcessManager spawns on host, bypassing the container
-			if (effectiveAllowedTools) {
-				effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
-			}
 			const applied = await this.applySandboxWiring(bridgeOptions, id, { sandboxClaim: opts.sandboxClaim });
 			if (!applied) {
 				throw new Error("Sandbox is not configured as docker");
