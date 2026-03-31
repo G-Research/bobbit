@@ -919,7 +919,7 @@ export class SessionManager {
 
 		// Delegate sessions: dormant entries only — restored on-demand via addClient()
 		for (const ps of delegates) {
-			if (!fs.existsSync(ps.agentSessionFile)) {
+			if (!ps.agentSessionFile || !fs.existsSync(ps.agentSessionFile)) {
 				this.store.remove(ps.id);
 				continue;
 			}
@@ -970,6 +970,13 @@ export class SessionManager {
 	}
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
+		if (!ps.agentSessionFile) {
+			// Session was persisted before the agent session file was obtained
+			// (e.g. server restarted during session creation). Remove it.
+			console.log(`[session-manager] Removing ${ps.id} — no agent session file recorded (session was mid-creation)`);
+			this.store.remove(ps.id);
+			return;
+		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
 			console.log(`[session-manager] Removing ${ps.id} — agent session file missing: ${ps.agentSessionFile}`);
 			this.store.remove(ps.id);
@@ -1280,8 +1287,23 @@ export class SessionManager {
 			};
 
 			this.sessions.set(id, session);
-			this.store.update(id, { repoPath, branch, worktreePath });
-			this.persistSessionMetadata(session).catch(() => {});
+			// Persist immediately with what we know — agentSessionFile will be
+			// empty until the agent starts, but this ensures the session appears
+			// in the store and survives a restart (as a removable placeholder).
+			this.store.put({
+				id,
+				title: session.title,
+				cwd: session.cwd,
+				agentSessionFile: "",
+				createdAt: session.createdAt,
+				lastActivity: session.lastActivity,
+				goalId,
+				worktreePath,
+				repoPath,
+				branch,
+				taskId: opts?.taskId,
+				personalities: opts?.personalityNames,
+			});
 
 			// Fire-and-forget: create worktree then launch agent
 			this._setupWorktreeAndLaunchAgent(session, repoPath, branch, cwd, agentArgs, goalId, opts).catch((err) => {
@@ -1582,12 +1604,17 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
+		// Persist session metadata immediately so it survives server restarts.
+		// This is fire-and-forget to avoid blocking session creation — getState()
+		// is a fast RPC call but we don't need to wait for disk flush.
+		this.persistSessionMetadata(session).catch((err) => {
+			console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
+		});
+
 		// Fire model + thinking level setup immediately (non-blocking).
 		// These are fast stdin writes — the agent processes set_model and
 		// set_thinking_level in microseconds.  We don't await the responses
 		// so the user's prompt (arriving shortly after) isn't blocked.
-		// Metadata persistence (getState) is deferred to after the first turn
-		// since it's not needed until a server restart.
 		this._fireEarlySetup(session);
 
 		return session;
@@ -1739,6 +1766,12 @@ export class SessionManager {
 
 		await rpcClient.start();
 		session.status = "idle";
+
+		// Persist session metadata now that the agent is running and has a session file.
+		// Fire-and-forget to avoid blocking the worktree session launch.
+		this.persistSessionMetadata(session).catch((err) => {
+			console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
+		});
 
 		// Notify connected clients that the session is ready
 		broadcast(session.clients, { type: "session_status", status: "idle" });

@@ -95,7 +95,7 @@ export class SessionStore {
 				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const s of data) {
-						if (s.id && s.agentSessionFile) {
+						if (s.id) {
 							// Migrate legacy 'swarmGoalId' field to 'teamGoalId'
 							if (s.swarmGoalId !== undefined && s.teamGoalId === undefined) {
 								s.teamGoalId = s.swarmGoalId;

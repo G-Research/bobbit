@@ -266,7 +266,7 @@ describe("SessionStore", () => {
 			assert.equal(store.getAll().length, 0);
 		});
 
-		it("skips sessions without id or agentSessionFile", () => {
+		it("skips sessions without id but loads sessions without agentSessionFile", () => {
 			const data = [
 				{ id: "good", title: "Good", cwd: "/", agentSessionFile: "/a.jsonl", createdAt: 0, lastActivity: 0 },
 				{ title: "No ID", cwd: "/", agentSessionFile: "/b.jsonl", createdAt: 0, lastActivity: 0 },
@@ -274,8 +274,11 @@ describe("SessionStore", () => {
 			];
 			fs.writeFileSync(STORE_FILE, JSON.stringify(data), "utf-8");
 			const store = freshStore();
-			assert.equal(store.getAll().length, 1);
+			// Sessions without id are skipped, but sessions without agentSessionFile
+			// are loaded (they represent sessions that were mid-creation when the server restarted)
+			assert.equal(store.getAll().length, 2);
 			assert.equal(store.get("good")!.title, "Good");
+			assert.equal(store.get("no-file")!.title, "No File");
 		});
 	});
 
