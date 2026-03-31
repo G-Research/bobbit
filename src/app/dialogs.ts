@@ -314,12 +314,45 @@ export function openGatewayDialog(): void {
 		error = "";
 		renderDialog();
 
+		const url = urlValue.trim();
+		const token = tokenValue.trim();
+
 		try {
 			const { authenticateGateway } = await import("./session-manager.js");
-			await authenticateGateway(urlValue.trim(), tokenValue.trim());
+			await authenticateGateway(url, token);
 			cleanup();
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			const msg = err instanceof Error ? err.message : String(err);
+			// Auth failures are permanent
+			if (msg.includes("Invalid auth token")) {
+				error = msg;
+				connecting = false;
+				renderDialog();
+				return;
+			}
+			// Gateway not ready — poll until it responds
+			error = "Waiting for server to start…";
+			renderDialog();
+			const POLL_INTERVAL = 1500;
+			const MAX_WAIT = 60_000;
+			const start = Date.now();
+			while (Date.now() - start < MAX_WAIT) {
+				await new Promise(r => setTimeout(r, POLL_INTERVAL));
+				try {
+					const { authenticateGateway: auth } = await import("./session-manager.js");
+					await auth(url, token);
+					cleanup();
+					return;
+				} catch (retryErr: any) {
+					if (retryErr?.message?.includes("Invalid auth token")) {
+						error = retryErr.message;
+						connecting = false;
+						renderDialog();
+						return;
+					}
+				}
+			}
+			error = "Server did not respond. Check the gateway URL and try again.";
 			connecting = false;
 			renderDialog();
 		}
