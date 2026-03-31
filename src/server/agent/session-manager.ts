@@ -30,6 +30,7 @@ import { createWorktree } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { SandboxProxy } from "./sandbox-proxy.js";
 import type { ContainerPool } from "./container-pool.js";
+import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -153,6 +154,7 @@ export class SessionManager {
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
 	containerPool: ContainerPool | null = null;
+	sandboxPool: SandboxPool | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	goalManager: GoalManager;
@@ -172,6 +174,10 @@ export class SessionManager {
 
 	setContainerPool(pool: ContainerPool | null): void {
 		this.containerPool = pool;
+	}
+
+	setSandboxPool(pool: SandboxPool | null): void {
+		this.sandboxPool = pool;
 	}
 
 	constructor(options?: SessionManagerOptions) {
@@ -214,7 +220,7 @@ export class SessionManager {
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
-		opts?: { skipMountValidation?: boolean }
+		opts?: { skipMountValidation?: boolean; sandboxClaim?: ClaimOptions }
 	): Promise<boolean> {
 		if (!this.projectConfigStore) return false;
 		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
@@ -292,8 +298,17 @@ export class SessionManager {
 		bridgeOptions.sandboxMounts = validatedMounts;
 		bridgeOptions.sandboxProxyPort = proxyPort;
 
-		// Claim a pre-warmed container from the pool if available
-		if (this.containerPool) {
+		// Claim a pre-warmed slot from the sandbox pool (preferred) or container pool (legacy)
+		if (this.sandboxPool && opts?.sandboxClaim) {
+			const result = await this.sandboxPool.claim(sessionId, opts.sandboxClaim);
+			if (result) {
+				bridgeOptions.containerId = result.containerId;
+				// Override CWD to the pool slot's worktree
+				bridgeOptions.cwd = result.worktreePath;
+			} else {
+				console.warn("[session-manager] Sandbox pool exhausted, falling back to cold docker run");
+			}
+		} else if (this.containerPool) {
 			const containerId = this.containerPool.claim(sessionId);
 			if (containerId) {
 				bridgeOptions.containerId = containerId;
@@ -1323,7 +1338,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions }): Promise<SessionInfo> {
 		const id = randomUUID();
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
@@ -1524,7 +1539,7 @@ export class SessionManager {
 
 		// ── Docker sandbox wiring ──
 		if (opts?.sandboxed) {
-			const applied = await this.applySandboxWiring(bridgeOptions, id);
+			const applied = await this.applySandboxWiring(bridgeOptions, id, { sandboxClaim: opts.sandboxClaim });
 			if (!applied) {
 				throw new Error("Sandbox is not configured as docker");
 			}
@@ -1534,10 +1549,13 @@ export class SessionManager {
 		const eventBuffer = new EventBuffer();
 
 		const now = Date.now();
+		// If the sandbox pool overrode the CWD (pool slot worktree), use that
+		const effectiveCwd = bridgeOptions.cwd || cwd;
+
 		const session: SessionInfo = {
 			id,
 			title: assistantDef?.title ?? "New session",
-			cwd,
+			cwd: effectiveCwd,
 			status: "starting",
 			createdAt: now,
 			lastActivity: now,
@@ -2788,7 +2806,11 @@ export class SessionManager {
 		session.status = "terminated";
 
 		// Release pooled container back to the pool
-		if (session.containerId && this.containerPool) {
+		if (session.containerId && this.sandboxPool) {
+			this.sandboxPool.release(session.id, session.containerId).catch(err => {
+				console.warn(`[session-manager] Sandbox pool release failed for ${session.id}:`, err);
+			});
+		} else if (session.containerId && this.containerPool) {
 			this.containerPool.release(session.id, session.containerId);
 		}
 

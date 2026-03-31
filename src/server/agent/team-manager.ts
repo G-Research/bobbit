@@ -399,6 +399,12 @@ export class TeamManager {
 
 		// Create the team lead session with the team tools extension.
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.
+		// When sandboxed, claim a pool slot and checkout the goal branch.
+		const sandboxed = this.sessionManager.isSandboxEnabled;
+		const sandboxClaim = sandboxed && goal.branch
+			? { branch: goal.branch }
+			: undefined;
+
 		const session = await this.sessionManager.createSession(
 			cwd,
 			["--extension", TEAM_LEAD_EXTENSION_PATH],
@@ -408,7 +414,8 @@ export class TeamManager {
 				rolePrompt: teamLeadPrompt,
 				env: { BOBBIT_GOAL_ID: goalId },
 				allowedTools: storedRole.allowedTools,
-				sandboxed: this.sessionManager.isSandboxEnabled,
+				sandboxed,
+				sandboxClaim,
 			},
 		);
 
@@ -593,12 +600,21 @@ export class TeamManager {
 		let worktreeResult: { worktreePath: string; branchName: string } | undefined;
 		let branchName: string | undefined;
 		let agentCwd: string;
+		const memberSandboxed = this.sessionManager.isSandboxEnabled;
 
 		if (useWorktree) {
 			const goalSlug = (goal.branch || goalId.slice(0, 8)).replace(/\//g, '-');
 			branchName = `goal-${goalSlug}-${role}-${shortId}`;
-			worktreeResult = await createWorktree(goal.repoPath!, branchName);
-			agentCwd = worktreeResult.worktreePath;
+
+			if (memberSandboxed && this.sessionManager.sandboxPool) {
+				// Sandboxed: let the pool handle worktree — skip manual creation.
+				// The pool slot's worktree will be checked out to branchName on claim.
+				agentCwd = goal.cwd; // placeholder — pool claim overrides this
+			} else {
+				// Non-sandboxed: create worktree the traditional way
+				worktreeResult = await createWorktree(goal.repoPath!, branchName);
+				agentCwd = worktreeResult.worktreePath;
+			}
 		} else {
 			agentCwd = goal.cwd;
 		}
@@ -629,13 +645,18 @@ export class TeamManager {
 				if (ctx) workflowContext = ctx;
 			}
 
-			// Create the session with the role agent's cwd
+			// Create the session with the role agent's cwd.
+			// For sandboxed members, claim a pool slot and checkout their branch from the goal branch.
+			const memberSandboxClaim = memberSandboxed && branchName && goal.branch
+				? { branch: branchName, from: `origin/${goal.branch}` }
+				: undefined;
+
 			const session = await this.sessionManager.createSession(
 				agentCwd,
 				undefined,
 				goalId,
 				undefined,
-				{ rolePrompt, roleName: role, allowedTools, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: this.sessionManager.isSandboxEnabled },
+				{ rolePrompt, roleName: role, allowedTools, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: memberSandboxed, sandboxClaim: memberSandboxClaim },
 			);
 
 			// Assign a unique color and title
@@ -645,10 +666,12 @@ export class TeamManager {
 			this.sessionManager.setTitle(session.id, `${roleLabel}: ${roleName}`);
 			session.titleGenerated = true;
 			const roleAccessory = storedRoleDef.accessory;
+			// For sandboxed pool sessions, the actual worktree is session.cwd (set by pool claim)
+			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxClaim ? session.cwd : undefined);
 			this.sessionManager.updateSessionMeta(session.id, {
 				role,
 				teamGoalId: goalId,
-				worktreePath: worktreeResult?.worktreePath,
+				worktreePath: actualWorktreePath,
 				accessory: roleAccessory,
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
 			});
@@ -657,7 +680,7 @@ export class TeamManager {
 			const agent: TeamAgent = {
 				sessionId: session.id,
 				role,
-				worktreePath: worktreeResult?.worktreePath,
+				worktreePath: actualWorktreePath,
 				branch: branchName,
 				task,
 				createdAt: Date.now(),

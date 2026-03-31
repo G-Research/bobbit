@@ -39,6 +39,7 @@ import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
 import { ContainerPool } from "./agent/container-pool.js";
+import { SandboxPool } from "./agent/sandbox-pool.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -263,6 +264,7 @@ export function createGateway(config: GatewayConfig) {
 
 	// Container pool — assigned in start() when sandbox=docker and pool_size>0
 	let containerPool: ContainerPool | null = null;
+	let sandboxPool: SandboxPool | null = null;
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
@@ -304,7 +306,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, containerPool);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, containerPool, sandboxPool);
 
 			return;
 		}
@@ -521,6 +523,42 @@ export function createGateway(config: GatewayConfig) {
 			}
 			sessionManager.setContainerPool(containerPool);
 
+			// Initialize the new SandboxPool (worktree + container pairs)
+			if (sandboxCfg === "docker" && poolSize > 0) {
+				try {
+					const { getRepoRoot, isGitRepo } = await import("./skills/git.js");
+					const isRepo = await isGitRepo(config.defaultCwd);
+					if (isRepo) {
+						const repoPath = await getRepoRoot(config.defaultCwd);
+						const spGwToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+						const spGwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+						const spImageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
+						const spMaxIdle = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
+						const setupCmd = projectConfigStore.get("worktree_setup_command") || "";
+
+						sandboxPool = new SandboxPool({
+							poolSize,
+							maxIdleSeconds: spMaxIdle,
+							image: spImageName,
+							projectDir: config.defaultCwd,
+							repoPath,
+							healthCheckIntervalMs: 30_000,
+							worktreeSetupCommand: setupCmd,
+							gatewayUrl: spGwUrl,
+							gatewayToken: spGwToken,
+						});
+						await sandboxPool.init();
+						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
+					} else {
+						console.log("[sandbox-pool] Not a git repo — sandbox pool disabled (worktrees require git)");
+					}
+				} catch (err) {
+					console.error("[sandbox-pool] Failed to initialize:", err);
+					sandboxPool = null;
+				}
+			}
+			sessionManager.setSandboxPool(sandboxPool);
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 			sessionManager.startPurgeSchedule();
@@ -565,6 +603,9 @@ export function createGateway(config: GatewayConfig) {
 			triggerEngine.stop();
 			wss.close();
 			await sessionManager.shutdown();
+			if (sandboxPool) {
+				await sandboxPool.shutdown();
+			}
 			if (containerPool) {
 				await containerPool.shutdown();
 			}
@@ -639,6 +680,7 @@ async function handleApiRoute(
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
 	containerPool: ContainerPool | null,
+	sandboxPool: SandboxPool | null,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -733,10 +775,13 @@ async function handleApiRoute(
 
 	// GET /api/sandbox-pool
 	if (url.pathname === "/api/sandbox-pool" && req.method === "GET") {
-		if (!containerPool) {
-			json({ enabled: false });
+		if (sandboxPool) {
+			const stats = sandboxPool.getStats();
+			json({ ...stats, type: "sandbox" });
+		} else if (containerPool) {
+			json({ enabled: true, type: "container", ...containerPool.getStats() });
 		} else {
-			json({ enabled: true, ...containerPool.getStats() });
+			json({ enabled: false });
 		}
 		return;
 	}
