@@ -167,8 +167,8 @@ import * as os from "node:os";
 
 export default function(pi) {
   const bobbitDir = process.env.BOBBIT_DIR || path.join(os.homedir(), ".bobbit");
-  const gwUrl = fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8").trim();
-  const token = fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8").trim();
+  const gwUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8").trim();
+  const token = process.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8").trim();
 ${toolRegistrations}
 }
 `;

@@ -102,6 +102,16 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	fs.mkdirSync(hostSessionsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`);
 
+	// Mount models.json (read-only) so the agent can discover available models.
+	const hostModelsJson = path.join(hostAgentDir, "models.json");
+	try {
+		if (fs.statSync(hostModelsJson).isFile()) {
+			args.push("-v", `${toDockerPath(hostModelsJson)}:/home/node/.bobbit/agent/models.json:ro`);
+		}
+	} catch {
+		// models.json doesn't exist — agent will rely on env vars for model discovery
+	}
+
 	// Persistent named volumes for caches
 	if (label) {
 		args.push("-v", `bobbit-nm-cache-${label}:/home/node/.node_modules_cache`);
