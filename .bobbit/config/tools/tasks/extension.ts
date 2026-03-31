@@ -14,9 +14,6 @@ import path from "node:path";
 import { homedir } from "node:os";
 
 export default function (pi: ExtensionAPI) {
-	// Self-signed TLS
-	process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
 	// ── Config ────────────────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const goalId = process.env.BOBBIT_GOAL_ID;

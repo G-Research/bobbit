@@ -70,9 +70,6 @@ async function gatewayFetch(endpoint: string, options: RequestInit = {}): Promis
 	const url = getGatewayUrl();
 	const token = getGatewayToken();
 
-	// Disable TLS verification for self-signed certs
-	process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
 	return fetch(`${url}${endpoint}`, {
 		...options,
 		headers: {

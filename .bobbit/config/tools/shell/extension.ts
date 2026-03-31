@@ -108,9 +108,6 @@ function injectCoAuthorTrailer(command: string, sessionId: string | undefined): 
 }
 
 export default function (pi: ExtensionAPI) {
-	// Self-signed TLS
-	process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
 	// ── Gateway config ────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	let token: string;

@@ -120,7 +120,7 @@ export class RpcBridge {
 			this.process = spawn("node", [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
-				env: { ...process.env, BOBBIT_DIR: bobbitDir(), ...this.options.env },
+				env: { ...process.env, BOBBIT_DIR: bobbitDir(), NODE_TLS_REJECT_UNAUTHORIZED: "0", ...this.options.env },
 			});
 		}
 
