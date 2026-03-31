@@ -115,6 +115,8 @@ export { CalculateRenderer } from "./tools/renderers/CalculateRenderer.js";
 // Tool renderers
 export { DefaultRenderer } from "./tools/renderers/DefaultRenderer.js";
 export { GetCurrentTimeRenderer } from "./tools/renderers/GetCurrentTimeRenderer.js";
+export { SearchBox } from "./components/SearchBox.js";
+export { SearchResults, type SearchResult } from "./components/SearchResults.js";
 export { VerificationOutputModal } from "./components/VerificationOutputModal.js";
 export type { ToolRenderer, ToolRenderResult } from "./tools/types.js";
 export type { Attachment } from "./utils/attachment-utils.js";

@@ -146,6 +146,19 @@ export const state = {
 	/** Archived sessions (loaded on demand) */
 	archivedSessions: [] as GatewaySession[],
 
+	// Search state
+	searchQuery: "",
+	searchResults: null as any[] | null,
+	searchLoading: false,
+
+	// Pagination for archived items
+	archivedGoalsCursor: null as number | null,
+	archivedGoalsHasMore: false,
+	archivedGoalsTotal: 0,
+	archivedSessionsCursor: null as number | null,
+	archivedSessionsHasMore: false,
+	archivedSessionsTotal: 0,
+
 	/** Active goal proposal from a goal-assistant session */
 	activeGoalProposal: null as { title: string; spec: string; cwd?: string; workflow?: string } | null,
 

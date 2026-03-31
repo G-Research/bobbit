@@ -873,6 +873,27 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/search
+	if (url.pathname === "/api/search" && req.method === "GET") {
+		const q = url.searchParams.get("q");
+		if (!q) {
+			json({ error: "Missing query parameter 'q'" }, 400);
+			return;
+		}
+		const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10) || 20), 100);
+		const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
+		const typeParam = url.searchParams.get("type") || "all";
+		const validTypes = new Set(["all", "goals", "sessions", "messages"]);
+		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" : "all";
+		try {
+			const results = sessionManager.searchIndex.search(q, { type, limit, offset });
+			json(results);
+		} catch (err) {
+			json({ error: `Search failed: ${err}` }, 500);
+		}
+		return;
+	}
+
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
 		const currentGen = sessionManager.getSessionStore().getGeneration();
@@ -890,11 +911,27 @@ async function handleApiRoute(
 		}));
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
-			const archived = sessionManager.listArchivedSessions().map((s) => ({
-				...s,
-				colorIndex: colorStore.get(s.id),
-			}));
-			json({ generation: currentGen, sessions: [...sessions, ...archived] });
+			const limitParam = url.searchParams.get("limit");
+			const afterParam = url.searchParams.get("after");
+			if (limitParam) {
+				// Paginated archived sessions
+				const limit = Math.min(Math.max(1, parseInt(limitParam, 10) || 50), 200);
+				const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
+				const page = sessionManager.getSessionStore().listArchivedSessionsPaginated(limit, afterCursor);
+				const archivedSessions = page.sessions.map((s) => ({
+					...s,
+					colorIndex: colorStore.get(s.id),
+					status: "archived",
+				}));
+				json({ generation: currentGen, sessions: [...sessions, ...archivedSessions], total: page.total, hasMore: page.hasMore, nextCursor: page.nextCursor });
+			} else {
+				// Backward compatible: return all archived sessions
+				const archived = sessionManager.listArchivedSessions().map((s) => ({
+					...s,
+					colorIndex: colorStore.get(s.id),
+				}));
+				json({ generation: currentGen, sessions: [...sessions, ...archived] });
+			}
 		} else {
 			json({ generation: currentGen, sessions });
 		}
@@ -1155,6 +1192,17 @@ async function handleApiRoute(
 
 	// GET /api/goals
 	if (url.pathname === "/api/goals" && req.method === "GET") {
+		// Paginated archived goals
+		if (url.searchParams.get("archived") === "true") {
+			const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10) || 50), 200);
+			const afterParam = url.searchParams.get("after");
+			const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
+			const goalStore = (sessionManager.goalManager as any).store as import("./agent/goal-store.js").GoalStore;
+			const page = goalStore.listArchivedGoalsPaginated(limit, afterCursor);
+			json({ goals: page.goals, total: page.total, hasMore: page.hasMore, nextCursor: page.nextCursor });
+			return;
+		}
+
 		const currentGen = sessionManager.goalManager.getGoalGeneration();
 		const sinceParam = url.searchParams.get("since");
 		if (sinceParam !== null) {
