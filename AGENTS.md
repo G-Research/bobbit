@@ -85,7 +85,7 @@ Quick pointers for the most common issues:
 - **Duplicate messages**: Check `flushDeferredMessage()` in `remote-agent.ts` — `MessageList` and `StreamingMessageContainer` must never overlap.
 - **Session persistence**: Check `.bobbit/state/sessions.json`. Missing `.jsonl` = session skipped on restore.
 - **Sandbox**: `GET /api/sandbox-status` for Docker state. Proxy logs prefixed `[sandbox-proxy]`.
-- **Search**: Delete `.bobbit/state/search.db` and restart to rebuild index.
+- **Search**: Delete `.bobbit/state/search.db` and restart to rebuild index. Schema version 2 includes staff in the index. See @docs/debugging.md#search-index for full checklist.
 - **Gates**: Check `GET /api/goals/:id/gates` for dependency state.
 
 ## Git conventions

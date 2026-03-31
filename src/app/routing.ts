@@ -2,14 +2,19 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "skills" | "settings";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
 
 export type SettingsTabId = "shortcuts" | "general" | "project" | "models" | "palette" | "directories" | "account";
 
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "models", "palette", "directories", "account"]);
 
-export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string; settingsTab?: SettingsTabId } {
+export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
 	const hash = window.location.hash || "";
+	if (hash === "#/search" || hash.startsWith("#/search?")) {
+		const qIdx = hash.indexOf("?");
+		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
+		return { view: "search", searchQuery: params?.get("q") || undefined };
+	}
 	const sessionMatch = hash.match(/^#\/session\/([a-f0-9-]+)$/i);
 	if (sessionMatch) {
 		return { view: "session", sessionId: sessionMatch[1] };
@@ -92,6 +97,8 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = `#/personalities/${id}`;
 	} else if (view === "personalities") {
 		newHash = "#/personalities";
+	} else if (view === "search") {
+		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
 	} else if (view === "settings") {
 		newHash = id ? `#/settings/${id}` : "#/settings";
 	} else {
@@ -116,6 +123,7 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 const CONFIG_VIEWS: Set<RouteView> = new Set([
 	"roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
 	"personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
+	"search",
 ]);
 
 /** Returns true if the current hash route is a config page (not a session or landing). */

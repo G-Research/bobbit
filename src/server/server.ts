@@ -232,6 +232,9 @@ export function createGateway(config: GatewayConfig) {
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
+	// Wire staff into search index for indexing and rebuilds
+	sessionManager.searchIndex.staffStore = staffManager.getStore();
+	staffManager.searchIndex = sessionManager.searchIndex;
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
 	const teamManager = new TeamManager(sessionManager, {
@@ -884,8 +887,8 @@ async function handleApiRoute(
 		const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10) || 20), 100);
 		const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
 		const typeParam = url.searchParams.get("type") || "all";
-		const validTypes = new Set(["all", "goals", "sessions", "messages"]);
-		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" : "all";
+		const validTypes = new Set(["all", "goals", "sessions", "messages", "staff"]);
+		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" | "staff" : "all";
 		try {
 			const results = sessionManager.searchIndex.search(q, { type, limit, offset });
 			json(results);

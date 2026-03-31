@@ -19,6 +19,7 @@ import {
 	isTeamLeadExpanded,
 	getSidebarData,
 	type Goal,
+	setSearchContentMode,
 } from "./state.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
@@ -527,9 +528,9 @@ async function handleStaffClick(agent: typeof state.staffList[0]): Promise<void>
 	}
 }
 
-export function renderStaffSidebarSection() {
+export function renderStaffSidebarSection(filteredList?: typeof state.staffList) {
 	ensureStaffLoaded();
-	const list = state.staffList.filter((s) => s.state !== "retired");
+	const list = filteredList ?? state.staffList.filter((s) => s.state !== "retired");
 	const mobile = !isDesktop();
 	// Always show the Staff section so users can create their first staff agent
 
@@ -668,16 +669,39 @@ async function _handleSearchInput(query: string): Promise<void> {
 	state.searchQuery = query;
 	if (!query.trim()) {
 		state.searchResults = null;
+		state.searchMatchIds = null;
 		state.searchLoading = false;
 		renderApp();
 		return;
 	}
+	if (!state.searchContentMode) {
+		// Client-side title filter — no API call needed
+		state.searchLoading = false;
+		renderApp();
+		return;
+	}
+	// Content search mode — use FTS API
 	state.searchLoading = true;
 	renderApp();
 	const data = await searchApi(query);
 	// Guard against stale responses
 	if (state.searchQuery !== query) return;
 	state.searchResults = data.results;
+	// Build a Set of matching IDs for sidebar filtering
+	const ids = new Set<string>();
+	for (const r of data.results) {
+		if (r.type === "goal" && r.id) ids.add(r.id);
+		else if (r.type === "session" && r.id) ids.add(r.id);
+		else if (r.type === "staff" && r.id) ids.add(r.id);
+		else if (r.type === "message" && r.sessionId) {
+			ids.add(r.sessionId);
+			// Also include the parent goal so goal group is visible
+			const session = state.gatewaySessions.find(s => s.id === r.sessionId);
+			if (session?.goalId) ids.add(session.goalId);
+			if (session?.teamGoalId) ids.add(session.teamGoalId);
+		}
+	}
+	state.searchMatchIds = ids;
 	state.searchLoading = false;
 	renderApp();
 }
@@ -685,24 +709,29 @@ async function _handleSearchInput(query: string): Promise<void> {
 function _handleSearchClear(): void {
 	state.searchQuery = "";
 	state.searchResults = null;
+	state.searchMatchIds = null;
 	state.searchLoading = false;
 	renderApp();
 }
 
-function _handleResultClick(detail: { type: string; id: string; sessionId?: string; goalId?: string }): void {
-	// Clear search state
-	state.searchQuery = "";
-	state.searchResults = null;
-	state.searchLoading = false;
-
-	if (detail.type === "goal" && detail.id) {
-		import("./routing.js").then(m => m.setHashRoute("goal-dashboard", detail.id, true));
-	} else if (detail.type === "session" && detail.id) {
-		connectToSession(detail.id, true);
-	} else if (detail.type === "message" && detail.sessionId) {
-		connectToSession(detail.sessionId, true);
+function _handleSearchModeChange(contentSearch: boolean): void {
+	setSearchContentMode(contentSearch);
+	// If switching modes with an active query, re-run the search
+	if (state.searchQuery) {
+		if (contentSearch) {
+			_handleSearchInput(state.searchQuery); // triggers API search
+		} else {
+			state.searchResults = null;
+			state.searchMatchIds = null;
+			state.searchLoading = false;
+			renderApp(); // will use client-side filter
+		}
 	}
-	renderApp();
+}
+
+function _handleFullSearchClick(query: string): void {
+	// Navigate to #/search?q=query — uses hash directly since route may not be registered yet
+	window.location.hash = query ? `#/search?q=${encodeURIComponent(query)}` : "#/search";
 }
 
 export function renderSidebar() {
@@ -778,19 +807,13 @@ export function renderSidebar() {
 			<search-box
 				.query=${state.searchQuery}
 				.loading=${state.searchLoading}
+				.contentMode=${state.searchContentMode}
+				.showControls=${!!state.searchQuery}
 				@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
 				@search-clear=${() => { _handleSearchClear(); }}
+				@search-mode-change=${(e: CustomEvent) => { _handleSearchModeChange(e.detail.contentSearch); }}
+				@full-search-click=${(e: CustomEvent) => { _handleFullSearchClick(e.detail.query); }}
 			></search-box>
-			${state.searchQuery ? html`
-				<div class="flex-1 overflow-y-auto">
-					<search-results
-						.results=${state.searchResults || []}
-						.loading=${state.searchLoading}
-						.query=${state.searchQuery}
-						@result-click=${(e: CustomEvent) => { _handleResultClick(e.detail); }}
-					></search-results>
-				</div>
-			` : html`
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground text-xs">Loading…</div>`
@@ -799,12 +822,46 @@ export function renderSidebar() {
 								<p class="text-xs text-red-500 mb-2">${state.sessionsError}</p>
 								<button class="text-xs text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${refreshSessions}>Retry</button>
 							</div>`
-						: html`
-							${liveGoals.map((goal, i) => html`
+						: (() => {
+							// Apply search filtering
+							const staffList = state.staffList || [];
+							let filteredGoals = liveGoals;
+							let filteredUngrouped = ungroupedSessions;
+							let filteredStaff = staffList.filter(s => s.state !== "retired");
+
+							if (state.searchQuery) {
+								const q = state.searchQuery.toLowerCase();
+								if (!state.searchContentMode) {
+									// Client-side title filter
+									filteredGoals = liveGoals.map(goal => {
+										const goalMatches = goal.title.toLowerCase().includes(q);
+										const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+										const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q));
+										if (!goalMatches && !hasMatchingSession) return null as unknown as Goal;
+										return goal;
+									}).filter(Boolean);
+									filteredUngrouped = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q));
+									filteredStaff = filteredStaff.filter(s => s.name?.toLowerCase().includes(q));
+								} else if (state.searchMatchIds) {
+									// FTS content filter
+									const ids = state.searchMatchIds;
+									filteredGoals = liveGoals.map(goal => {
+										const goalMatches = ids.has(goal.id);
+										const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+										const hasMatchingSession = goalSessions.some(s => ids.has(s.id));
+										if (!goalMatches && !hasMatchingSession) return null as unknown as Goal;
+										return goal;
+									}).filter(Boolean);
+									filteredUngrouped = ungroupedSessions.filter(s => ids.has(s.id));
+									filteredStaff = filteredStaff.filter(s => ids.has(s.id));
+								}
+							}
+							return html`
+							${filteredGoals.map((goal, i) => html`
 								${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 								${renderGoalGroup(goal)}
 							`)}
-							${liveGoals.length > 0 ? html`
+							${filteredGoals.length > 0 ? html`
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5">
 									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
@@ -832,7 +889,7 @@ export function renderSidebar() {
 											${renderRolePickerDropdown()}
 										</div>
 									</div>
-									${ungroupedExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${ungroupedSessions.map(renderSessionRow)}</div>` : ""}
+									${ungroupedExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${filteredUngrouped.map(renderSessionRow)}</div>` : ""}
 								</div>
 							` : html`
 								<div class="flex flex-col gap-0.5">
@@ -858,16 +915,16 @@ export function renderSidebar() {
 										</div>
 									</div>
 									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-									${ungroupedSessions.length === 0
+									${filteredUngrouped.length === 0
 										? html`<div class="text-center py-6">
 												<p class="text-xs text-muted-foreground mb-2">No sessions</p>
 												<button class="text-xs text-primary hover:underline" title="Create a new session" @click=${() => createAndConnectSession()}>Create one</button>
 											</div>`
-										: ungroupedSessions.map(renderSessionRow)}
+										: filteredUngrouped.map(renderSessionRow)}
 								</div>
 								</div>
 							`}
-							${renderStaffSidebarSection()}
+							${state.searchQuery ? renderStaffSidebarSection(filteredStaff) : renderStaffSidebarSection()}
 							${(() => {
 								// Archived section: archived goals + standalone archived sessions
 								// Goal-affiliated archived sessions render inside their goal groups.
@@ -918,10 +975,8 @@ export function renderSidebar() {
 									</div>
 								`;
 							})()}
-						`
-				}
+						`; })()}
 			</div>
-			`}
 			<div class="flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
 					class="flex items-center gap-1.5 px-3 py-2 text-xs transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
