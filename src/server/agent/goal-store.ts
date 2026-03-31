@@ -110,10 +110,14 @@ export class GoalStore {
 		return this.generation;
 	}
 
+	/** Optional callback invoked after any goal mutation (put/update/archive). */
+	onIndexUpdate?: (goal: PersistedGoal) => void;
+
 	put(goal: PersistedGoal): void {
 		this.generation++;
 		this.goals.set(goal.id, goal);
 		this.save();
+		this.onIndexUpdate?.(goal);
 	}
 
 	get(id: string): PersistedGoal | undefined {
@@ -137,6 +141,7 @@ export class GoalStore {
 		existing.archived = true;
 		existing.archivedAt = Date.now();
 		this.save();
+		this.onIndexUpdate?.(existing);
 		return true;
 	}
 
@@ -159,6 +164,24 @@ export class GoalStore {
 		}
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
 		this.save();
+		this.onIndexUpdate?.(existing);
 		return true;
+	}
+
+	/**
+	 * Paginated listing of archived goals, sorted by archivedAt DESC.
+	 * @param limit Max items per page
+	 * @param afterCursor archivedAt timestamp — return items with archivedAt < cursor
+	 */
+	listArchivedGoalsPaginated(limit: number, afterCursor?: number): { goals: PersistedGoal[]; total: number; hasMore: boolean; nextCursor?: number } {
+		let archived = this.getArchived().sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
+		const total = archived.length;
+		if (afterCursor !== undefined) {
+			archived = archived.filter(g => (g.archivedAt ?? 0) < afterCursor);
+		}
+		const page = archived.slice(0, limit);
+		const hasMore = archived.length > limit;
+		const nextCursor = page.length > 0 ? page[page.length - 1].archivedAt : undefined;
+		return { goals: page, total, hasMore, nextCursor };
 	}
 }

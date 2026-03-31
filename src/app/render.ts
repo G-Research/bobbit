@@ -21,6 +21,10 @@ import { clearSessionModel } from "./routing.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive } from "./sidebar.js";
+import { searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+// Register search web components
+import "../ui/components/SearchBox.js";
+import "../ui/components/SearchResults.js";
 
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT } from "./render-helpers.js";
 
@@ -63,6 +67,46 @@ import { renderSettingsPage } from "./settings-page.js";
 // ============================================================================
 
 /** Compact session row for mobile — mirrors sidebar row with always-visible buttons */
+
+// Mobile search handlers (shared logic with sidebar but separate scope)
+async function _handleMobileSearchInput(query: string): Promise<void> {
+	state.searchQuery = query;
+	if (!query.trim()) {
+		state.searchResults = null;
+		state.searchLoading = false;
+		renderApp();
+		return;
+	}
+	state.searchLoading = true;
+	renderApp();
+	const data = await searchApi(query);
+	if (state.searchQuery !== query) return;
+	state.searchResults = data.results;
+	state.searchLoading = false;
+	renderApp();
+}
+
+function _handleMobileSearchClear(): void {
+	state.searchQuery = "";
+	state.searchResults = null;
+	state.searchLoading = false;
+	renderApp();
+}
+
+function _handleMobileResultClick(detail: { type: string; id: string; sessionId?: string; goalId?: string }): void {
+	state.searchQuery = "";
+	state.searchResults = null;
+	state.searchLoading = false;
+	if (detail.type === "goal" && detail.id) {
+		import("./routing.js").then(m => m.setHashRoute("goal-dashboard", detail.id, true));
+	} else if (detail.type === "session" && detail.id) {
+		import("./session-manager.js").then(m => m.connectToSession(detail.id, true));
+	} else if (detail.type === "message" && detail.sessionId) {
+		const sid = detail.sessionId;
+		import("./session-manager.js").then(m => m.connectToSession(sid, true));
+	}
+	renderApp();
+}
 
 function renderMobileLanding() {
 	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
@@ -121,7 +165,20 @@ function renderMobileLanding() {
 					})()}
 				</div>
 				${renderSetupBanner(true)}
-				${state.sessionsLoading
+				<search-box
+					.query=${state.searchQuery}
+					.loading=${state.searchLoading}
+					@search-input=${(e: CustomEvent) => { _handleMobileSearchInput(e.detail.query); }}
+					@search-clear=${() => { _handleMobileSearchClear(); }}
+				></search-box>
+				${state.searchQuery ? html`
+					<search-results
+						.results=${state.searchResults || []}
+						.loading=${state.searchLoading}
+						.query=${state.searchQuery}
+						@result-click=${(e: CustomEvent) => { _handleMobileResultClick(e.detail); }}
+					></search-results>
+				` : state.sessionsLoading
 					? html`<div class="text-center py-12 text-muted-foreground text-xs">Loading…</div>`
 					: state.sessionsError
 						? html`<div class="text-center py-12">
@@ -220,7 +277,7 @@ function renderMobileLanding() {
 										<div class="flex flex-col gap-0.5">
 											<div class="flex items-center gap-1.5 pl-1 pr-2 py-1.5">
 												<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "sm")}</span>
-												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
+												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived${(state.archivedGoalsTotal + state.archivedSessionsTotal) > 0 ? ` (${state.archivedGoalsTotal + state.archivedSessionsTotal})` : ""}</span>
 											</div>
 											${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
@@ -228,6 +285,9 @@ function renderMobileLanding() {
 													<div class="opacity-60">${renderGoalGroup(goal)}</div>
 												`)}
 											</div>
+											${state.archivedGoalsHasMore ? html`
+												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more goals…</button>
+											` : ""}
 											${archivedGoals.length > 0 && standaloneArchived.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 												${standaloneArchived.map(s => html`
@@ -235,6 +295,9 @@ function renderMobileLanding() {
 													${renderArchivedDelegates(s.id)}
 												`)}
 											</div>
+											${state.archivedSessionsHasMore ? html`
+												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more sessions…</button>
+											` : ""}
 										</div>
 									` : "";
 								})()}
@@ -253,7 +316,7 @@ function renderMobileLanding() {
 					state.showArchived = !state.showArchived;
 					localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 					if (state.showArchived) {
-						import("./api.js").then(m => m.fetchArchivedSessions());
+						import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
 					} else {
 						resetArchivedExpandState();
 						import("./api.js").then(m => m.clearArchivedSessionsState());
