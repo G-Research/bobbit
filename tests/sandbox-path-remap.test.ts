@@ -33,10 +33,28 @@ describe('sandbox session path remapping', () => {
 		assert.strictEqual(roundTripped, containerPath);
 	});
 
+	it('should produce exact expected host path', () => {
+		const containerPath = '/home/node/.bobbit/agent/sessions/--workspace--/abc.jsonl';
+		const hostPath = containerToHostSessionPath(containerPath, TEST_HOME);
+		assert.strictEqual(hostPath, '/home/testuser/.bobbit/agent/sessions/--workspace--/abc.jsonl');
+	});
+
 	it('should not remap non-container paths', () => {
 		const normalPath = '/some/other/path/file.jsonl';
 		const result = containerToHostSessionPath(normalPath, TEST_HOME);
 		assert.strictEqual(result, normalPath, 'non-container paths should pass through unchanged');
+	});
+
+	it('should pass through non-matching host paths in hostToContainerSessionPath', () => {
+		const otherPath = '/some/random/path.jsonl';
+		const result = hostToContainerSessionPath(otherPath, TEST_HOME);
+		assert.strictEqual(result, otherPath, 'non-matching host paths should pass through unchanged');
+	});
+
+	it('should handle Windows-style backslash paths in hostToContainerSessionPath', () => {
+		const winPath = '/home/testuser\\.bobbit\\agent\\sessions\\--workspace--\\abc.jsonl';
+		const result = hostToContainerSessionPath(winPath, TEST_HOME);
+		assert.strictEqual(result, '/home/node/.bobbit/agent/sessions/--workspace--/abc.jsonl');
 	});
 
 	it('should export CONTAINER_AGENT_DIR constant', () => {

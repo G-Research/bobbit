@@ -2122,13 +2122,28 @@ export class SessionManager {
 		// Preserve fields that may have been set via store.update() before this async call
 		const existing = this.store.get(session.id);
 
+		const isSandboxed = existing?.sandboxed || (session as any)._sandboxed;
+		const agentSessionFile = isSandboxed
+			? containerToHostSessionPath(stateResp.data.sessionFile)
+			: stateResp.data.sessionFile;
+
+		// Validate the remapped path actually exists on the host — catch remapping
+		// bugs immediately rather than discovering lost sessions on next restart.
+		if (!fs.existsSync(agentSessionFile)) {
+			console.error(
+				`[session-manager] CRITICAL: Session file does not exist after path remapping for ${session.id}!\n` +
+				`  Agent reported: ${stateResp.data.sessionFile}\n` +
+				`  Remapped to:   ${agentSessionFile}\n` +
+				`  Sandboxed:     ${!!isSandboxed}\n` +
+				`  This session will NOT survive a server restart.`,
+			);
+		}
+
 		this.store.put({
 			id: session.id,
 			title: session.title,
 			cwd: session.cwd,
-			agentSessionFile: (existing?.sandboxed || (session as any)._sandboxed)
-				? containerToHostSessionPath(stateResp.data.sessionFile)
-				: stateResp.data.sessionFile,
+			agentSessionFile,
 			createdAt: session.createdAt,
 			lastActivity: session.lastActivity,
 			goalId: session.goalId,
