@@ -268,7 +268,7 @@ export const state = {
 	rolePickerOpen: false,
 
 	/** Docker sandbox status (fetched on demand) */
-	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean } | null,
+	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
 };
 
 // ============================================================================
