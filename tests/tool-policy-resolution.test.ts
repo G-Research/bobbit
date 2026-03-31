@@ -159,24 +159,28 @@ describe("ToolGroupPolicyStore", () => {
 	});
 
 	it("getAll returns empty object when no file exists", () => {
-		const store = new ToolGroupPolicyStore();
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
 		const all = store.getAll();
 		assert.deepEqual(all, {});
 	});
 
 	it("setGroupPolicy creates file and stores policy", () => {
-		const store = new ToolGroupPolicyStore();
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
 		store.setGroupPolicy("Browser", "ask-once");
 		assert.equal(store.getGroupPolicy("Browser"), "ask-once");
 	});
 
 	it("getGroupPolicy returns null for unknown group", () => {
-		const store = new ToolGroupPolicyStore();
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
 		assert.equal(store.getGroupPolicy("nonexistent"), null);
 	});
 
 	it("setGroupPolicy with null removes the entry", () => {
-		const store = new ToolGroupPolicyStore();
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
 		store.setGroupPolicy("Browser", "ask-once");
 		assert.equal(store.getGroupPolicy("Browser"), "ask-once");
 		store.setGroupPolicy("Browser", null);
@@ -184,7 +188,8 @@ describe("ToolGroupPolicyStore", () => {
 	});
 
 	it("getAll returns all stored policies", () => {
-		const store = new ToolGroupPolicyStore();
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
 		store.setGroupPolicy("Agent", "always-allow");
 		store.setGroupPolicy("mcp__playwright", "always-ask");
 		const all = store.getAll();
@@ -193,11 +198,12 @@ describe("ToolGroupPolicyStore", () => {
 	});
 
 	it("persists to disk — new instance reads same data", () => {
-		const store1 = new ToolGroupPolicyStore();
+		const configDir = path.join(tmpDir, "config");
+		const store1 = new ToolGroupPolicyStore(configDir);
 		store1.setGroupPolicy("Shell", "never-ask");
 
 		// Create a new instance — should read from disk
-		const store2 = new ToolGroupPolicyStore();
+		const store2 = new ToolGroupPolicyStore(configDir);
 		assert.equal(store2.getGroupPolicy("Shell"), "never-ask");
 	});
 
@@ -206,7 +212,8 @@ describe("ToolGroupPolicyStore", () => {
 		const filePath = path.join(tmpDir, "config", "tool-group-policies.yaml");
 		fs.writeFileSync(filePath, "Browser: ask-once\nInvalid: not-a-policy\nAgent: always-allow\n");
 
-		const store = new ToolGroupPolicyStore();
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
 		const all = store.getAll();
 		assert.equal(all["Browser"], "ask-once");
 		assert.equal(all["Agent"], "always-allow");
