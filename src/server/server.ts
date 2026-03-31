@@ -39,6 +39,7 @@ import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
 import { SandboxPool } from "./agent/sandbox-pool.js";
+import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
@@ -483,6 +484,19 @@ export function createGateway(config: GatewayConfig) {
 						const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
 						const setupCmd = projectConfigStore.get("worktree_setup_command") || "";
 
+						// Parse and validate mounts/credentials for pool containers
+						let poolMounts: string[] = [];
+						try {
+							const mountsRaw = projectConfigStore.get("sandbox_mounts") || "";
+							poolMounts = mountsRaw ? validateSandboxMounts(JSON.parse(mountsRaw), "[sandbox-pool]") : [];
+						} catch (err) { console.warn(`[sandbox-pool] Invalid sandbox_mounts JSON, ignoring: ${err}`); }
+
+						let poolCredentials: Record<string, string> = {};
+						try {
+							const credsRaw = projectConfigStore.get("sandbox_credentials") || "";
+							poolCredentials = credsRaw ? JSON.parse(credsRaw) : {};
+						} catch (err) { console.warn(`[sandbox-pool] Invalid sandbox_credentials JSON, ignoring: ${err}`); }
+
 						sandboxPool = new SandboxPool({
 							poolSize,
 							maxIdleSeconds,
@@ -493,6 +507,8 @@ export function createGateway(config: GatewayConfig) {
 							worktreeSetupCommand: setupCmd,
 							gatewayUrl: gwUrl,
 							gatewayToken: gwToken,
+							sandboxMounts: poolMounts,
+							sandboxCredentials: poolCredentials,
 						});
 						await sandboxPool.init();
 						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
@@ -1080,7 +1096,7 @@ async function handleApiRoute(
 				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
 				return;
 			}
-			// Skip Docker check if container pool has idle containers (Docker is obviously working).
+			// Skip Docker check if sandbox pool has idle containers (Docker is obviously working).
 			// Otherwise use a cached result to avoid running `docker info` on every session creation.
 			const poolIdle = sessionManager.sandboxPool?.getStats().idle ?? 0;
 			if (poolIdle === 0) {
@@ -3814,12 +3830,17 @@ async function handleApiRoute(
 				json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
 				return;
 			}
+			// Check live session first, then persisted session store
 			const mcpSession = sessionManager.getSession(mcpSessionId);
-			if (!mcpSession) {
+			const persistedSession = mcpSession ? null : sessionManager.getSessionStore().get(mcpSessionId);
+			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
 				return;
 			}
-			if (mcpSession.allowedTools && mcpSession.allowedTools.length > 0) {
+			// Enforce tool allowlist from the live session (persisted sessions
+			// don't have allowedTools — they haven't been activated yet, so
+			// allow all tools for them)
+			if (mcpSession?.allowedTools && mcpSession.allowedTools.length > 0) {
 				const toolLower = (tool as string).toLowerCase();
 				if (!mcpSession.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
 					json({ error: `Tool "${tool}" is not allowed for this session` }, 403);
