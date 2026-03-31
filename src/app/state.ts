@@ -454,3 +454,33 @@ export const GOAL_STATE_COLORS: Record<GoalState, string> = {
 	"complete": "text-green-600 dark:text-green-400",
 	"shelved": "text-muted-foreground opacity-60",
 };
+
+// ============================================================================
+// MEMOIZED SIDEBAR DATA
+// ============================================================================
+
+export interface SidebarData {
+	staffSessionIds: Set<string>;
+	ungroupedSessions: GatewaySession[];
+	liveGoals: Goal[];
+	archivedGoals: Goal[];
+}
+
+let _sidebarDataCache: SidebarData | null = null;
+let _sidebarCacheKey: string = "";
+
+/** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
+export function getSidebarData(): SidebarData {
+	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.goals.map(g => g.id + g.archived).join(",")}:${state.gatewaySessions.map(s => s.id + s.goalId + s.teamGoalId + s.delegateOf).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}`;
+	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
+
+	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
+	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
+	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
+	const liveGoals = sortedGoals.filter(g => !g.archived);
+	const archivedGoals = sortedGoals.filter(g => g.archived);
+
+	_sidebarDataCache = { staffSessionIds, ungroupedSessions, liveGoals, archivedGoals };
+	_sidebarCacheKey = key;
+	return _sidebarDataCache;
+}

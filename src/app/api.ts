@@ -178,15 +178,20 @@ export async function refreshSessions(): Promise<void> {
 		}
 	}
 
-	// Fetch gate + PR status for sidebar badges (fire-and-forget, updates on completion).
-	// These call renderApp() only if data actually changed, avoiding redundant re-renders.
+	// Fetch gate + PR status for sidebar badges — batched into a single renderApp().
+	const badgePromises: Promise<boolean>[] = [];
 	if (goalsChanged || isInitial) {
-		refreshGateStatusCache();
+		badgePromises.push(refreshGateStatusCache(true));
 	}
 	const now = Date.now();
 	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS && document.visibilityState === "visible") {
 		_lastPrRefresh = now;
-		refreshPrStatusCache();
+		badgePromises.push(refreshPrStatusCache(true));
+	}
+	if (badgePromises.length > 0) {
+		Promise.all(badgePromises).then(results => {
+			if (results.some(Boolean)) renderApp();
+		});
 	}
 
 	// One-time hydration of PR status from disk cache (instant badge rendering)
@@ -314,10 +319,11 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 	}
 }
 
-/** Fetch gate statuses for all goals with workflows and update the cache. */
-async function refreshGateStatusCache() {
+/** Fetch gate statuses for all goals with workflows and update the cache.
+ *  Returns true if any data changed. When skipRender is true, the caller is responsible for renderApp(). */
+async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 	const goalsWithWorkflow = state.goals.filter(g => g.workflow && g.workflow.gates.length > 0);
-	if (goalsWithWorkflow.length === 0) return;
+	if (goalsWithWorkflow.length === 0) return false;
 
 	const results = await Promise.all(
 		goalsWithWorkflow.map(async (g) => {
@@ -337,7 +343,8 @@ async function refreshGateStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) renderApp();
+	if (changed && !skipRender) renderApp();
+	return changed;
 }
 
 /** Refresh gate status cache for a single goal (called from WS event handlers). */
@@ -355,16 +362,16 @@ export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
 	}
 }
 
-/** Fetch PR status for all goals with branches and update the cache. */
+/** Fetch PR status for all goals with branches and update the cache.
+ *  Returns true if any data changed. When skipRender is true, the caller is responsible for renderApp(). */
 let _prRefreshInFlight = false;
-export async function refreshPrStatusCache() {
-	if (_prRefreshInFlight) return;
+export async function refreshPrStatusCache(skipRender = false): Promise<boolean> {
+	if (_prRefreshInFlight) return false;
 	_prRefreshInFlight = true;
 	try {
 	// Only poll active goals — completed/archived goals keep their cached PR status
-	// Only poll active goals — completed/archived goals keep their cached PR status
 	const goalsWithBranch = state.goals.filter(g => g.branch && g.state !== 'complete' && !g.archived && state.prStatusCache.get(g.id)?.state !== 'MERGED');
-	if (goalsWithBranch.length === 0) return;
+	if (goalsWithBranch.length === 0) return false;
 
 	const results = await Promise.all(
 		goalsWithBranch.map(async (g) => {
@@ -394,7 +401,8 @@ export async function refreshPrStatusCache() {
 			changed = true;
 		}
 	}
-	if (changed) renderApp();
+	if (changed && !skipRender) renderApp();
+	return changed;
 	} finally {
 		_prRefreshInFlight = false;
 	}

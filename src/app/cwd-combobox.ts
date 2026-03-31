@@ -69,6 +69,21 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 		});
 	};
 
+	/** Update highlight styling directly in the DOM — avoids a full renderApp() round-trip. */
+	const updateHighlightDOM = (input: HTMLElement, newIndex: number) => {
+		const listbox = input.closest('.cwd-combobox')?.querySelector('#cwd-listbox');
+		if (!listbox) return;
+		listbox.querySelectorAll('.cwd-combobox-item').forEach((el, i) => {
+			if (i === newIndex) {
+				el.setAttribute('data-highlighted', '');
+				el.setAttribute('aria-selected', 'true');
+			} else {
+				el.removeAttribute('data-highlighted');
+				el.setAttribute('aria-selected', 'false');
+			}
+		});
+	};
+
 	const handleKeyDown = (e: KeyboardEvent) => {
 		if (!opts.dropdownOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
 			e.preventDefault();
@@ -82,10 +97,14 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 
 		if (e.key === "ArrowDown") {
 			e.preventDefault();
-			opts.onHighlight?.(Math.min(idx + 1, items.length - 1));
+			const next = Math.min(idx + 1, items.length - 1);
+			updateHighlightDOM(e.target as HTMLElement, next);
+			opts.onHighlight?.(next);
 		} else if (e.key === "ArrowUp") {
 			e.preventDefault();
-			opts.onHighlight?.(Math.max(idx - 1, 0));
+			const next = Math.max(idx - 1, 0);
+			updateHighlightDOM(e.target as HTMLElement, next);
+			opts.onHighlight?.(next);
 		} else if (e.key === "Enter" && idx >= 0 && idx < items.length) {
 			e.preventDefault();
 			selectItem(items[idx].path);

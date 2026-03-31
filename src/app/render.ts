@@ -15,6 +15,7 @@ import {
 	setUngroupedExpanded,
 
 	resetArchivedExpandState,
+	getSidebarData,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
@@ -109,11 +110,7 @@ function _handleMobileResultClick(detail: { type: string; id: string; sessionId?
 }
 
 function renderMobileLanding() {
-	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
-	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
-	const liveGoals = sortedGoals.filter(g => !g.archived);
-	const archivedGoals = sortedGoals.filter(g => g.archived);
+	const { ungroupedSessions, liveGoals, archivedGoals } = getSidebarData();
 	const isUngroupedExpanded = ungroupedExpanded;
 
 	return html`
@@ -483,7 +480,7 @@ function goalPreviewPanel() {
 						dropdownOpen: state.cwdDropdownOpen,
 						onToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
 						highlightedIndex: state.cwdHighlightIndex,
-						onHighlight: (i) => { state.cwdHighlightIndex = i; renderApp(); },
+						onHighlight: (i) => { state.cwdHighlightIndex = i; },
 					})}
 					<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(state.previewCwd, state.previewTitle)}</code></p>
 					</div>
@@ -1684,7 +1681,7 @@ function goalProposalPanel() {
 					dropdownOpen: _proposalCwdDropdownOpen,
 					onToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
 					highlightedIndex: _proposalCwdHighlightIndex,
-					onHighlight: (i) => { _proposalCwdHighlightIndex = i; renderApp(); },
+					onHighlight: (i) => { _proposalCwdHighlightIndex = i; },
 				})}
 				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(_proposalCwd, _proposalTitle)}</code></p>
 				</div>

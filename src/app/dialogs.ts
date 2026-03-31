@@ -915,7 +915,7 @@ function showGoalEditDialog(existingGoal: Goal): void {
 										dropdownOpen: cwdDropdownOpenEdit,
 										onToggle: (open) => { cwdDropdownOpenEdit = open; renderDialog(); },
 										highlightedIndex: cwdHighlightIndexEdit,
-										onHighlight: (i) => { cwdHighlightIndexEdit = i; renderDialog(); },
+										onHighlight: (i) => { cwdHighlightIndexEdit = i; },
 									})}
 								</div>
 								<div>

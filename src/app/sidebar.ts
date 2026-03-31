@@ -17,6 +17,7 @@ import {
 	saveExpandedGoals,
 	toggleTeamLeadExpanded,
 	isTeamLeadExpanded,
+	getSidebarData,
 	type Goal,
 } from "./state.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
@@ -211,7 +212,7 @@ export function renderRolePickerDropdown() {
 					dropdownOpen: _pickerCwdDropdownOpen,
 					onToggle: (open: boolean) => { _pickerCwdDropdownOpen = open; renderApp(); },
 					highlightedIndex: _pickerCwdHighlightIndex,
-					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; renderApp(); },
+					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; },
 				})}
 			</div>
 			<!-- Worktree checkbox -->
@@ -705,11 +706,7 @@ function _handleResultClick(detail: { type: string; id: string; sessionId?: stri
 }
 
 export function renderSidebar() {
-	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
-	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
-	const liveGoals = sortedGoals.filter(g => !g.archived);
-	const archivedGoals = sortedGoals.filter(g => g.archived);
+	const { ungroupedSessions, liveGoals, archivedGoals } = getSidebarData();
 
 	if (state.sidebarCollapsed) {
 		return renderCollapsedSidebar(liveGoals, ungroupedSessions, archivedGoals);
@@ -973,8 +970,7 @@ export function renderSidebar() {
 
 function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: GatewaySession[], archivedGoals: Goal[] = []) {
 	const allSessions = state.gatewaySessions;
-	const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-	const ungrouped = allSessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
+	const { ungroupedSessions: ungrouped } = getSidebarData();
 
 	const renderCollapsedSession = (s: GatewaySession) => {
 		const active = activeSessionId() === s.id;
