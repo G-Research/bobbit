@@ -1564,12 +1564,32 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
+<<<<<<< HEAD
 		// Run setup async — session stays in "starting" until done.
 		// Prompts arriving via WS during this window are queued and drained
 		// when the session transitions to idle.
 		this._finishSessionSetup(session).catch((err) => {
+=======
+		// Await setup before marking idle — the agent processes RPC commands
+		// sequentially, so any user prompt sent while these are in-flight would
+		// be queued behind them, making the session appear unresponsive.
+		try {
+			await Promise.all([
+				this.tryAutoSelectModel(session),
+				this.tryApplyDefaultThinkingLevel(session),
+				this.persistSessionMetadata(session),
+			]);
+		} catch (err) {
+>>>>>>> 367b79b2e0768daf399d59e97bf4610b7fa2f993
 			console.error(`[session-manager] Post-start config error for session ${id}:`, err);
-		});
+		}
+
+		session.status = "idle";
+
+		// Drain any prompts that arrived while the session was still starting
+		if (!session.promptQueue.isEmpty) {
+			this.drainQueue(session);
+		}
 
 		return session;
 	}
@@ -1720,10 +1740,33 @@ export class SessionManager {
 
 		await rpcClient.start();
 
+<<<<<<< HEAD
 		// Run setup async — session stays in "starting" until done.
 		// The worktree path already has clients connected (from "preparing"),
 		// so we broadcast idle + drain queued prompts when setup completes.
 		this._finishSessionSetup(session).catch(() => {});
+=======
+		// Await setup before marking idle — the agent processes RPC commands
+		// sequentially, so any user prompt sent while these are in-flight would
+		// be queued behind them, making the session appear unresponsive.
+		try {
+			await Promise.all([
+				this.tryAutoSelectModel(session),
+				this.tryApplyDefaultThinkingLevel(session),
+				this.persistSessionMetadata(session),
+			]);
+		} catch { /* logged inside each method */ }
+
+		session.status = "idle";
+
+		// Notify connected clients that the session is ready
+		broadcast(session.clients, { type: "session_status", status: "idle" });
+
+		// Drain any prompts that arrived while the session was still starting
+		if (!session.promptQueue.isEmpty) {
+			this.drainQueue(session);
+		}
+>>>>>>> 367b79b2e0768daf399d59e97bf4610b7fa2f993
 	}
 
 	/**
