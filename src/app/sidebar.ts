@@ -225,14 +225,22 @@ export function renderRolePickerDropdown() {
 			${state.sandboxStatus?.configured ? html`
 			<div class="border-t border-border/50 px-3 py-1.5 shrink-0">
 				<label class="flex items-center gap-2 cursor-pointer">
+					${(() => {
+						const sandboxDisabled = !state.sandboxStatus?.available || (state.sandboxStatus?.available === true && state.sandboxStatus?.imageExists === false);
+						const tooltip = !state.sandboxStatus?.available
+							? `Docker unavailable: ${state.sandboxStatus?.error || "not detected"}`
+							: state.sandboxStatus?.imageExists === false
+								? `Sandbox image not found. Run: ${state.sandboxStatus?.buildCommand || "docker build -t bobbit-agent docker/"}`
+								: "Run agent in an isolated Docker container";
+						return html`
 					<input type="checkbox" .checked=${_pickerSandbox}
 						@change=${(e: Event) => { _pickerSandbox = (e.target as HTMLInputElement).checked; renderApp(); }}
-						?disabled=${!state.sandboxStatus?.available} />
-					<span class="text-[11px] text-foreground/70 ${!state.sandboxStatus?.available ? 'opacity-50' : ''}">Sandbox (Docker)</span>
-					<span title=${state.sandboxStatus?.available
-						? "Run agent in an isolated Docker container"
-						: `Docker unavailable: ${state.sandboxStatus?.error || "not detected"}`}
+						?disabled=${sandboxDisabled} />
+					<span class="text-[11px] text-foreground/70 ${sandboxDisabled ? 'opacity-50' : ''}">Sandbox (Docker)</span>
+					<span title=${tooltip}
 						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+						`;
+					})()}
 				</label>
 			</div>
 			` : ""}
