@@ -153,7 +153,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	}
 
 	args.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
-	args.push("-e", "NODE_OPTIONS=--disable-warning=DEP0123");
+	args.push("-e", "NODE_OPTIONS=--no-warnings");
 	args.push("-e", "PI_CODING_AGENT_DIR=/home/node/.bobbit/agent");
 
 	// Sandbox credentials

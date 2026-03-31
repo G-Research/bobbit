@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
+import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import { buildDockerRunArgs } from "./docker-args.js";
 
@@ -117,10 +118,15 @@ export class RpcBridge {
 		} else if (this.options.sandboxed) {
 			this.process = this.spawnDocker(cliPath, args);
 		} else {
-			this.process = spawn("node", ["--disable-warning=DEP0123", cliPath, ...args], {
+			// Trust our self-signed CA cert if available; fall back to disabling TLS verification
+			const caCertPath = path.join(bobbitStateDir(), "tls", "ca.crt");
+			const tlsEnv = fs.existsSync(caCertPath)
+				? { NODE_EXTRA_CA_CERTS: caCertPath }
+				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
+			this.process = spawn("node", [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
-				env: { ...process.env, BOBBIT_DIR: bobbitDir(), NODE_TLS_REJECT_UNAUTHORIZED: "0", ...this.options.env },
+				env: { ...process.env, BOBBIT_DIR: bobbitDir(), ...tlsEnv, ...this.options.env },
 			});
 		}
 
@@ -363,6 +369,7 @@ export class RpcBridge {
 			execArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
 		}
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
+		execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
 
 		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
 		if (this.options.sandboxCredentials) {
