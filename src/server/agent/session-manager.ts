@@ -1731,10 +1731,13 @@ export class SessionManager {
 		const parentMeta = this.store.get(parentSessionId);
 		let delegateSandboxed = false;
 		if (parentMeta?.sandboxed) {
-			// Remap container-internal /workspace path to host-side project dir
-			if (opts.cwd.startsWith('/workspace')) {
-				opts.cwd = parentMeta.cwd;
-			}
+			// Always use the parent's validated host-side cwd — never trust the
+			// cwd from the container.  The agent sends process.cwd() which is a
+			// container-internal path (typically /workspace or a subdir).  Using
+			// it directly would either fail (path doesn't exist on host) or, worse,
+			// allow a malicious agent to mount an arbitrary host path into the
+			// delegate container.
+			opts.cwd = parentMeta.cwd;
 		}
 
 		// Build the task spec: instructions + optional context
@@ -1763,7 +1766,10 @@ export class SessionManager {
 		// Apply sandbox wiring if parent was sandboxed
 		if (parentMeta?.sandboxed) {
 			const applied = await this.applySandboxWiring(bridgeOptions, id);
-			if (applied) delegateSandboxed = true;
+			if (!applied) {
+				throw new Error("Cannot create delegate: parent is sandboxed but sandbox is not configured as docker");
+			}
+			delegateSandboxed = true;
 		}
 
 		const rpcClient = new RpcBridge(bridgeOptions);
