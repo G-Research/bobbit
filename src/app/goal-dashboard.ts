@@ -292,6 +292,11 @@ export async function refreshDashboardGoal(): Promise<void> {
 		const res = await gatewayFetch(`/api/goals/${currentGoalId}`);
 		if (res.ok) {
 			currentGoal = await res.json();
+			// Propagate setupStatus to sidebar's goal list so it stays in sync
+			const idx = state.goals.findIndex((g) => g.id === currentGoalId);
+			if (idx >= 0 && currentGoal!.setupStatus !== state.goals[idx].setupStatus) {
+				state.goals[idx] = { ...state.goals[idx], setupStatus: currentGoal!.setupStatus, setupError: currentGoal!.setupError };
+			}
 			renderApp();
 		}
 	} catch { /* ignore — polling will catch up */ }
