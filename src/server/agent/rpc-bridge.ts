@@ -77,6 +77,8 @@ export class RpcBridge {
 	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<typeof setTimeout> }>();
 	private eventListeners: RpcEventListener[] = [];
 	private lineBuffer = "";
+	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
+	private stderrTail: string[] = [];
 
 	constructor(private options: RpcBridgeOptions = {}) {}
 
@@ -117,15 +119,36 @@ export class RpcBridge {
 
 		this.process.stderr!.on("data", (chunk: Buffer) => {
 			process.stderr.write(chunk);
+			// Keep last 20 lines of stderr for diagnostics on unexpected exit
+			const lines = chunk.toString("utf-8").split("\n").filter(l => l.trim());
+			this.stderrTail.push(...lines);
+			if (this.stderrTail.length > 20) {
+				this.stderrTail = this.stderrTail.slice(-20);
+			}
 		});
 
-		this.process.on("exit", (code) => {
+		this.process.on("exit", (code, signal) => {
+			const reason = signal ? `signal ${signal}` : `code ${code}`;
+			const stderrContext = this.stderrTail.length > 0
+				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
+				: "";
+			console.warn(`[rpc-bridge] Agent process exited (${reason})${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}${stderrContext}`);
+
 			for (const [, p] of this.pending) {
 				clearTimeout(p.timeout);
-				p.reject(new Error(`Agent process exited with code ${code}`));
+				p.reject(new Error(`Agent process exited with ${reason}`));
 			}
 			this.pending.clear();
+			this.stderrTail = [];
 			this.process = null;
+
+			// Notify event listeners so waitForIdle() and other watchers
+			// can detect the unexpected exit instead of hanging until timeout.
+			for (const listener of this.eventListeners) {
+				try {
+					listener({ type: "process_exit", code, signal });
+				} catch { /* listener errors are non-fatal */ }
+			}
 		});
 
 		// Brief pause for process initialization.
