@@ -166,17 +166,28 @@ export class McpClient {
       }, CONNECTION_TIMEOUT_MS);
 
       try {
-        // On Windows with shell: true, Node concatenates command + args without quoting.
-        // A path like "C:\Program Files\nodejs\node.exe" breaks into two tokens.
-        const cmd = (process.platform === 'win32' && command!.includes(' '))
-          ? `"${command!}"`
-          : command!;
-        this._process = spawn(cmd, args, {
+        // On Windows we need shell: true so commands like `npx` resolve.
+        // But passing args separately with shell: true triggers DEP0190, so
+        // we join everything into a single shell string with no args array.
+        const useShell = process.platform === 'win32';
+        let spawnCmd: string;
+        let spawnArgs: string[];
+        if (useShell) {
+          // Quote the command if it contains spaces, then append quoted args
+          const quotedCmd = command!.includes(' ') ? `"${command!}"` : command!;
+          const quotedArgs = args.map(a => a.includes(' ') ? `"${a}"` : a);
+          spawnCmd = [quotedCmd, ...quotedArgs].join(' ');
+          spawnArgs = [];
+        } else {
+          spawnCmd = command!;
+          spawnArgs = args;
+        }
+        this._process = spawn(spawnCmd, spawnArgs, {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: childEnv,
           cwd: cwd || undefined,
           windowsHide: true,
-          shell: process.platform === 'win32',
+          shell: useShell,
         });
       } catch (err) {
         clearTimeout(timeout);
