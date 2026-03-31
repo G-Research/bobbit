@@ -11,6 +11,7 @@ import { TOOLS_DIR } from "./tool-manager.js";
 import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
+import type { VerificationHarness } from "./verification-harness.js";
 
 
 /**
@@ -120,6 +121,7 @@ export class TeamManager {
 	private store: TeamStore;
 	/** Timers for the idle-nudge mechanism (goalId → timer). */
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
+	private verificationHarness?: VerificationHarness;
 	/** Delay before nudging the idle team lead (ms). */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
 
@@ -137,6 +139,11 @@ export class TeamManager {
 	/** Set the broadcastToGoal function (called after WebSocket server is created). */
 	setBroadcastToGoal(fn: (goalId: string, event: any) => void): void {
 		this.config.broadcastToGoal = fn;
+	}
+
+	/** Wire in the verification harness so nudge logic can check for active verifications. */
+	setVerificationHarness(harness: VerificationHarness): void {
+		this.verificationHarness = harness;
 	}
 
 	/** Pick a palette index (0-19) not already used by any session, with randomisation. */
@@ -299,8 +306,14 @@ export class TeamManager {
 				return; // Skip this tick — team lead busy or gone
 			}
 
+			// Skip nudge while gate verifications are in-flight — reviewer agents are managed by the harness
+			if (this.verificationHarness?.getActiveVerifications(goalId).length) {
+				return;
+			}
+
 			// Collect active workers
 			const activeWorkers = entry.agents.filter((a) => {
+				if (a.role === 'reviewer') return false; // managed by verification harness
 				const s = this.sessionManager.getSession(a.sessionId);
 				return s && s.status !== "terminated";
 			});
