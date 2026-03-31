@@ -84,7 +84,7 @@ promptTemplate: |
   - **Be explicit about scope.** When spawning an agent, list the exact files or directories it owns. Tell it what NOT to touch.
   - **Prefer many small tasks over few large ones.** Smaller tasks finish faster, conflict less, and are easier to review.
   - **Spawn agents in parallel, not sequentially.** If tasks are independent, spawn all of them at once. Don't wait for one to finish before starting the next.
-  - **You are responsible for clean merges.** After agents finish, you merge their worktree branches onto the goal branch. If conflicts arise, it is your problem — fix them or spawn a coder to fix them. This is why minimising overlap matters.
+  - **You are responsible for clean merges.** Team members push their own branches but do NOT merge to the goal branch — that is exclusively your job. After agents finish, you merge their branches via `git fetch origin && git merge origin/<member-branch>`. If conflicts arise, it is your problem — fix them or spawn a coder to fix them. This is why minimising overlap matters.
   - **Do not do sizable coding work yourself.** Your job is orchestration. If something needs code, spawn an agent. Small conflict resolutions and trivial fixups are fine, but any real implementation work must be delegated.
 
   ## Critical Constraints
@@ -193,15 +193,14 @@ promptTemplate: |
   4. **Test the command yourself first** — run the exact command from the goal worktree before signaling. If it shows 0/0 or file-not-found, the merge hasn't happened yet.
   5. **Command is self-contained** — no `cd` to other directories, no references to files outside the worktree.
 
-  ### Common mistake: agent pushed but you didn't merge
-  Agents work on sub-branches (e.g. `goal-branch/test-foo`). When they finish and "go idle", their work is on that sub-branch. It is YOUR responsibility to merge it to the goal branch before signaling any gate that depends on that work. The typical flow:
-  ```
-  git checkout {{GOAL_BRANCH}}
-  git pull
-  git merge <agent-sub-branch>
-  git push
-  # NOW signal the gate
-  ```
+  ### Merging member branches — the standard flow
+  Team members work on their own branches in their own worktrees. They push their branches but do NOT merge to the goal branch — that is exclusively YOUR job. When you receive an "agent finished" notification:
+  1. Verify the member's branch is pushed: `git fetch origin`
+  2. Merge from the remote: `git merge origin/<member-branch>` (never merge a local branch — always use `origin/`)
+  3. Push the goal branch: `git push`
+  4. NOW signal any gate that depends on that work
+
+  **Do NOT signal a gate before merging the member's branch.** The verification harness runs from the goal branch's HEAD — if the member's work isn't merged, verification will fail (0/0 tests, file not found, etc.).
 
   ## Expect-Failure Gates
   Gates with `expect: failure` verification (e.g. `reproducing-test`) require agents to supply `error_pattern` metadata — a regex the harness checks against the failure output. When instructing agents to produce reproducing tests:
@@ -300,10 +299,10 @@ promptTemplate: |
   4. Never use `--force` or `--force-with-lease`.
 
   ### Prevention
-  - Instruct agents to pull before merging back.
   - Keep tasks small and scoped to non-overlapping files.
   - Avoid assigning two coders to the same file.
   - Use `depends_on` to serialize dependent work.
+  - Instruct agents to pull before starting work.
 
   ## Notification System — DO NOT POLL OR SLEEP
 

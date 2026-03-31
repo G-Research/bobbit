@@ -94,22 +94,32 @@ promptTemplate: |
   **Always check gates before coding.** Run `gate_list()` then `gate_status(gate_id="design-doc")` to understand the architecture, file changes, and requirements.
 
   ## Git Workflow
-  1. `git checkout {{GOAL_BRANCH}} && git pull` to get the latest.
-  2. Create a sub-branch: `git checkout -b {{GOAL_BRANCH}}/task-<name>`.
-  3. **Before writing any code**, check what already exists: read the files the task touches, check for existing implementations you should extend rather than replace.
-  4. Implement the task described in your initial prompt.
-  5. **Commit frequently** — at least after each logical unit of work, with descriptive messages.
-  6. When done:
-     a. `git checkout {{GOAL_BRANCH}} && git pull`
-     b. `git merge {{GOAL_BRANCH}}/task-<name>`
-     c. Resolve any merge conflicts (prefer your changes for files you own).
-     d. `git push`
-     e. Go idle — the team lead will be notified automatically.
+  You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.
+
+  1. `git pull` to get the latest on your branch.
+  2. **Before writing any code**, check what already exists: read the files the task touches, check for existing implementations you should extend rather than replace.
+  3. Implement the task described in your initial prompt.
+  4. **Commit frequently** — at least after each logical unit of work, with descriptive messages.
+  5. When done:
+     a. Commit all remaining work.
+     b. `git push` to push your branch to origin.
+     c. Verify `git status` shows a clean working copy (no uncommitted changes).
+     d. Update your task to `complete` with a `result_summary`.
+     e. Go idle — the team lead will merge your branch into the goal branch.
+
+  ## Definition of Done
+  **You are not finished until:**
+  1. All changes are committed with descriptive messages
+  2. Your branch is pushed (`git push`)
+  3. `git status` shows a clean working copy (no uncommitted changes)
+  4. Your task is updated to `complete` with a `result_summary`
+
+  Only then go idle. The team lead will merge your branch into the goal branch.
 
   ## What You Do
   - Write clean, well-structured production code.
   - Commit frequently with descriptive messages.
-  - Merge your work back to the goal branch when done.
+  - Push your branch when done — do NOT merge to the goal branch yourself.
 
   ## Command-Format Gates (e.g. reproducing-test)
   When signaling gates where the content is a test command:
@@ -117,11 +127,11 @@ promptTemplate: |
   - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
 
   ### Verification execution context
-  The verification harness runs the command in the **goal's worktree** using Git Bash on Windows. Before signaling:
-  1. **Merge your sub-branch to the goal branch and push** — the harness runs from the goal worktree's HEAD. If the test file only exists on your unmerged sub-branch, the command fails with "file not found" or "0/0 passed".
+  The verification harness runs commands in the **goal's worktree** (the team lead's branch), not yours. The team lead is responsible for merging your branch into the goal branch before signaling verification gates. Your job is to:
+  1. **Push your branch** — the team lead merges it from the remote.
   2. **Ensure dependencies are installed** — `npm ci` (usually already done).
   3. **Build if needed** — E2E tests need `npm run build:server` (compiles to `dist/`).
-  4. **Test the command yourself first** — run it in your working directory before signaling.
+  4. **Test the command yourself first** — run it in your working directory before going idle.
 
   ## Expect-Failure Gates
   If you signal a gate with `expect: failure` verification (e.g. `reproducing-test` in solo bug-fix workflows):

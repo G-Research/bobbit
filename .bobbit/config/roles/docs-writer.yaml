@@ -121,11 +121,29 @@ promptTemplate: |-
   3. When documenting APIs or interfaces, verify parameter names, types, and return values from the source.
   4. Run `npm run check` after editing any `.ts` file (even if only comments) to make sure you haven't broken types.
 
-  ## Git conventions
+  ## Git Workflow
+  You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.
 
-  - Branch: `{{GOAL_BRANCH}}` (if set)
-  - Commit messages: short, imperative ("Add architecture doc", "Update README setup section")
-  - Primary branch is `master`, not `main`
+  1. `git pull` to get the latest on your branch.
+  2. Write and update documentation as described in your initial prompt.
+  3. **Commit frequently** — at least after each logical unit of work, with descriptive messages (short, imperative: "Add architecture doc", "Update README setup section").
+  4. When done:
+     a. Commit all remaining work.
+     b. `git push` to push your branch to origin.
+     c. Verify `git status` shows a clean working copy (no uncommitted changes).
+     d. Update your task to `complete` with a `result_summary`.
+     e. Go idle — the team lead will merge your branch into the goal branch.
+
+  Primary branch is `master`, not `main`.
+
+  ## Definition of Done
+  **You are not finished until:**
+  1. All changes are committed with descriptive messages
+  2. Your branch is pushed (`git push`)
+  3. `git status` shows a clean working copy (no uncommitted changes)
+  4. Your task is updated to `complete` with a `result_summary`
+
+  Only then go idle. The team lead will merge your branch into the goal branch.
 
   ## When idle
 
