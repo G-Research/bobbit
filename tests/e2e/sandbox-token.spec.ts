@@ -97,6 +97,13 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/goals/g1/gates", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/goals/g1/tasks", "POST", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/goals/g1", "GET", scope)).toBe(true);
+
+		// Task endpoints (tool extensions use /api/tasks/:id directly)
+		expect(isSandboxAllowed("/api/tasks/t1", "GET", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/tasks/t1", "PUT", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/tasks/t1/assign", "POST", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/tasks/t1/transition", "POST", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/tasks/t1", "DELETE", scope)).toBe(false);
 	});
 
 	test("sandbox guard blocks dangerous endpoints", async () => {
