@@ -16,7 +16,7 @@ import "./Messages.js"; // Import for side effects to register the custom elemen
 import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
-import type { Agent, AgentEvent } from "@mariozechner/pi-agent-core";
+import type { Agent, AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
@@ -95,6 +95,8 @@ export class AgentInterface extends LitElement {
 	private _unsubscribeSession?: () => void;
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
+	private _cachedToolResults?: Map<string, ToolResultMessage>;
+	private _cachedMessagesRef?: AgentMessage[];
 
 	public setInput(text: string, attachments?: Attachment[]) {
 		const update = () => {
@@ -340,7 +342,6 @@ export class AgentInterface extends LitElement {
 						this._streamingContainer.turnStartTime = (this.session?.state as any).turnStartTime ?? null;
 						this._streamingContainer.setMessage(ev.message, !isStreaming);
 					}
-					this.requestUpdate();
 					break;
 			}
 		});
@@ -474,6 +475,22 @@ export class AgentInterface extends LitElement {
 
 
 
+	private _getToolResultsById(): Map<string, ToolResultMessage> {
+		const msgs = this.session?.state.messages;
+		if (msgs === this._cachedMessagesRef && this._cachedToolResults) {
+			return this._cachedToolResults;
+		}
+		this._cachedMessagesRef = msgs;
+		const map = new Map<string, ToolResultMessage>();
+		if (msgs) {
+			for (const m of msgs) {
+				if (m.role === "toolResult") map.set(m.toolCallId, m);
+			}
+		}
+		this._cachedToolResults = map;
+		return map;
+	}
+
 	private renderMessages() {
 		if (!this.session)
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
@@ -490,12 +507,7 @@ export class AgentInterface extends LitElement {
 			`;
 		}
 		// Build a map of tool results to allow inline rendering in assistant messages
-		const toolResultsById = new Map<string, ToolResultMessage<any>>();
-		for (const message of state.messages) {
-			if (message.role === "toolResult") {
-				toolResultsById.set(message.toolCallId, message);
-			}
-		}
+		const toolResultsById = this._getToolResultsById();
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
