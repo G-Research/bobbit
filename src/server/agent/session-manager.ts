@@ -2479,8 +2479,14 @@ export class SessionManager {
 		session.clients.clear();
 
 		this.sessions.delete(id);
-		// Archive instead of delete — keep metadata for 7 days
-		this.store.archive(id);
+		// Archive the session — keep metadata for 7 days.
+		// But sessions with no agentSessionFile are unrestorable, so just remove them.
+		const persisted = this.store.get(id);
+		if (persisted?.agentSessionFile) {
+			this.store.archive(id);
+		} else {
+			this.store.remove(id);
+		}
 		// Don't remove color or session prompt — they're needed for archived view
 		return true;
 	}
