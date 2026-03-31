@@ -21,6 +21,25 @@ export function parseVerdict(output: string): boolean | null {
 
 const VERDICT_FOLLOWUP_PROMPT = "Your review is complete but you did not include the required <verdict> tag. Based on your review findings above, respond with ONLY a <verdict>pass</verdict> or <verdict>fail</verdict> tag. Use <verdict>fail</verdict> if you found any critical or high severity issues, otherwise <verdict>pass</verdict>.";
 
+/** Patterns that indicate a transient/infrastructure failure worth retrying. */
+const TRANSIENT_ERROR_PATTERNS = [
+	"timed out",
+	"no <verdict> tag",
+	"Agent process not running",
+	"process exited",
+	"Session lost during server restart",
+	"ECONNRESET",
+	"EPIPE",
+	"spawn UNKNOWN",
+	"socket hang up",
+	"connect ECONNREFUSED",
+];
+
+/** Check if an LLM review error output matches a transient failure pattern. */
+export function isTransientReviewError(output: string): boolean {
+	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
+}
+
 /** In-flight verification state for REST bootstrapping */
 export interface ActiveVerification {
 	goalId: string;
@@ -543,7 +562,7 @@ export class VerificationHarness {
 							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 						} else {
 							const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-							const maxAttempts = 2;
+							const maxAttempts = 3;
 							for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 								result = await this.runLlmReviewStep(
 									{ name: step.name, prompt, timeout: step.timeout },
@@ -556,9 +575,12 @@ export class VerificationHarness {
 									signal.goalId,
 									stepSessionId,
 								);
-								const isTransient = result.output.includes("timed out") || result.output.includes("no <verdict> tag");
+								const isTransient = isTransientReviewError(result.output);
 								if (result.passed || !isTransient || attempt === maxAttempts) break;
-								console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying...`);
+								// Exponential backoff: 2s, 4s before retries
+								const delayMs = 2000 * Math.pow(2, attempt - 1);
+								console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+								await new Promise(r => setTimeout(r, delayMs));
 							}
 						}
 					}
@@ -895,9 +917,13 @@ export class VerificationHarness {
 			return { passed: verdict, output, sessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
+			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
 				: `LLM review failed: ${err.message}`;
+			if (isProcessDeath) {
+				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${err.message}`);
+			}
 			return { passed: false, output: errOutput, sessionId };
 		} finally {
 			// Always terminate and unregister, even on error/timeout
@@ -1075,9 +1101,13 @@ export class VerificationHarness {
 			return { passed: verdict, output, sessionId: subSessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out");
+			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
 				: `LLM review failed: ${err.message}`;
+			if (isProcessDeath) {
+				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${subSessionId}): ${err.message}`);
+			}
 			return { passed: false, output: errOutput, sessionId: subSessionId };
 		} finally {
 			await rpc.stop().catch(() => {});

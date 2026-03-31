@@ -1926,6 +1926,12 @@ export class SessionManager {
 					unsub();
 					resolve();
 				}
+				if (event.type === "process_exit") {
+					clearTimeout(timer);
+					unsub();
+					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+					reject(new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`));
+				}
 			});
 		});
 	}

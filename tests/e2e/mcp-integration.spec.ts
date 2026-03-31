@@ -28,8 +28,6 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 // Resolve paths for the mock MCP server
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
-const MCP_CONFIG_DIR = join(bobbitDir(), "config");
-const MCP_CONFIG_PATH = join(MCP_CONFIG_DIR, "mcp.json");
 
 /** The MCP config that points to our mock server */
 const mcpConfig = {
@@ -41,15 +39,21 @@ const mcpConfig = {
 	},
 };
 
+// Resolve paths lazily — bobbitDir() depends on BOBBIT_DIR env which is set
+// by the worker-scoped gateway fixture *after* module-level code runs.
+let mcpConfigPath = "";
+
 // Write MCP config before tests, clean up after
 test.beforeAll(() => {
-	mkdirSync(MCP_CONFIG_DIR, { recursive: true });
-	writeFileSync(MCP_CONFIG_PATH, JSON.stringify(mcpConfig, null, 2), "utf-8");
+	const configDir = join(bobbitDir(), "config");
+	mcpConfigPath = join(configDir, "mcp.json");
+	mkdirSync(configDir, { recursive: true });
+	writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), "utf-8");
 });
 
 test.afterAll(() => {
-	if (existsSync(MCP_CONFIG_PATH)) {
-		try { unlinkSync(MCP_CONFIG_PATH); } catch { /* ignore */ }
+	if (mcpConfigPath && existsSync(mcpConfigPath)) {
+		try { unlinkSync(mcpConfigPath); } catch { /* ignore */ }
 	}
 });
 
