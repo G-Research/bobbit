@@ -131,20 +131,22 @@ export class SandboxPool {
 		// Re-adopt running containers from a previous gateway
 		await this._readopt();
 
-		// Pre-warm to target size
-		const idleCount = this._countByState("idle");
-		const needed = Math.max(0, this.options.poolSize - idleCount);
-		if (needed > 0) {
-			console.log(`[sandbox-pool] Pre-warming ${needed} slot(s)...`);
-			await Promise.all(Array.from({ length: needed }, () => this._createSlot()));
-		}
-
 		// Start periodic health checks
 		this._healthCheckTimer = setInterval(() => {
 			this._healthCheck().catch(err => console.warn("[sandbox-pool] Health check error:", err));
 		}, this.options.healthCheckIntervalMs);
 
-		console.log(`[sandbox-pool] Ready — ${this._statsString()}`);
+		// Pre-warm to target size (background — don't block server startup)
+		const idleCount = this._countByState("idle");
+		const needed = Math.max(0, this.options.poolSize - idleCount);
+		if (needed > 0) {
+			console.log(`[sandbox-pool] Pre-warming ${needed} slot(s) in background...`);
+			Promise.all(Array.from({ length: needed }, () => this._createSlot()))
+				.then(() => console.log(`[sandbox-pool] Ready — ${this._statsString()}`))
+				.catch(err => console.error("[sandbox-pool] Pre-warming failed:", err));
+		} else {
+			console.log(`[sandbox-pool] Ready — ${this._statsString()}`);
+		}
 	}
 
 	/**
