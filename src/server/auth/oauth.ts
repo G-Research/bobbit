@@ -2,7 +2,7 @@
  * Server-side OAuth handler for the gateway.
  * Generates PKCE server-side, returns auth URL to the client,
  * then exchanges the authorization code for tokens.
- * Stores credentials in ~/.pi/agent/auth.json for the coding agent.
+ * Stores credentials in ~/.bobbit/agent/auth.json for the coding agent.
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -73,7 +73,7 @@ export async function oauthStart(): Promise<{ flowId: string; url: string }> {
 
 /**
  * Complete an OAuth flow. Exchanges the authorization code for tokens
- * and stores them in ~/.pi/agent/auth.json.
+ * and stores them in ~/.bobbit/agent/auth.json.
  */
 export async function oauthComplete(
 	flowId: string,
@@ -121,7 +121,7 @@ export async function oauthComplete(
 			expires_in: number;
 		};
 
-		// Store in ~/.pi/agent/auth.json
+		// Store in ~/.bobbit/agent/auth.json
 		const authPath = getAuthJsonPath();
 		const dir = dirname(authPath);
 		if (!existsSync(dir)) {
@@ -182,7 +182,7 @@ export function oauthStatus(): { authenticated: boolean; expires?: number } {
 
 /**
  * Refresh the OAuth access token using the stored refresh token.
- * Updates ~/.pi/agent/auth.json with the new credentials.
+ * Updates ~/.bobbit/agent/auth.json with the new credentials.
  * Returns the new access token, or null if refresh fails.
  */
 export async function refreshOAuthToken(): Promise<string | null> {

@@ -366,7 +366,7 @@ Tool YAML definitions and extension code, organized by group (agent, browser, fi
 
 | File | Owner | Purpose |
 |---|---|---|
-| `~/.pi/agent/auth.json` | `oauth.ts` | API auth credentials — global, not per-project |
+| `~/.bobbit/agent/auth.json` | `oauth.ts` | API auth credentials — global, not per-project |
 
 ## Docker sandbox mode
 
@@ -423,7 +423,7 @@ When a session is created with `sandboxed: true`:
      - Project directory mounted at `/workspace` (read-write)
      - Agent modules at `/agent-modules` (read-only)
      - Tool extensions at `/tools` (read-only)
-     - Agent sessions directory at `/home/node/.pi/agent/sessions` (read-write, for session persistence across restarts)
+     - Agent sessions directory at `/home/node/.bobbit/agent/sessions` (read-write, for session persistence across restarts)
      - `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` as env vars (no `.bobbit/` mount)
 3. **Tool extensions** read gateway credentials from env vars (falling back to file reads for non-sandboxed sessions)
 4. **Sandbox proxy** controls all outbound HTTP/HTTPS from the container
@@ -479,7 +479,7 @@ Containers always run on the default Docker bridge network — they are **not** 
 
 ### Security
 
-- **Filesystem isolation**: The container only sees `/workspace` (project dir), `/agent-modules` (read-only), `/tools` (read-only), and `~/.pi/agent/sessions/` (read-write, for session persistence). Only the `sessions/` subdirectory of `~/.pi/agent/` is mounted — `auth.json` and other files in `~/.pi/agent/` remain inaccessible. Host directories like `~/.ssh`, `~/.aws`, `~/.config` are not accessible. `BOBBIT_DIR` is never mounted — the agent communicates with the gateway via env-var-based auth.
+- **Filesystem isolation**: The container only sees `/workspace` (project dir), `/agent-modules` (read-only), `/tools` (read-only), and `~/.bobbit/agent/sessions/` (read-write, for session persistence). Only the `sessions/` subdirectory of `~/.bobbit/agent/` is mounted — `auth.json` and other files in `~/.bobbit/agent/` remain inaccessible. Host directories like `~/.ssh`, `~/.aws`, `~/.config` are not accessible. `BOBBIT_DIR` is never mounted — the agent communicates with the gateway via env-var-based auth.
 - **Non-root execution**: Containers run as the `node` user (uid=1000), not root.
 - **Network control**: All outbound HTTP/HTTPS is routed through the sandbox proxy. With an empty allowlist, the container cannot make any outbound connections (except to the gateway).
 - **Mount validation**: `sandbox_mounts` are validated against a blocklist of system paths (`/proc`, `/sys`, `/dev`, `/etc`, `/root`, `/home`, etc.) and sensitive path substrings (`/.ssh`, `/.aws`, `/.gnupg`, `/.docker`, etc.). Relative paths, paths with `..`, home dir expansion (`~`), and drive roots are rejected.

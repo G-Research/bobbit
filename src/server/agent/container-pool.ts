@@ -2,9 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { bobbitDir } from "../bobbit-dir.js";
+import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import { toDockerPath, resolveAgentModulesDir } from "./rpc-bridge.js";
 
@@ -226,10 +225,10 @@ export class ContainerPool {
 		args.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
-		// Host agent dir
-		const hostAgentDir = path.join(os.homedir(), ".pi", "agent");
+		// Host agent dir (~/.bobbit/agent/ or legacy ~/.pi/agent/)
+		const hostAgentDir = globalAgentDir();
 		fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
-		args.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.pi/agent`);
+		args.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.bobbit/agent`);
 
 		// Persistent named volume for node_modules cache — survives container restarts
 		// and is shared across pool containers. On cross-platform setups (Windows host,

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -34,7 +35,36 @@ export function bobbitStateDir(projectRoot?: string): string {
   return path.join(bobbitDir(projectRoot), "state");
 }
 
-/** Returns the global auth.json path (~/.pi/agent/auth.json). API keys are global, not per-project. */
+/**
+ * Returns the global agent directory (~/.bobbit/agent/ or ~/.pi/agent/ for legacy installs).
+ * Priority: BOBBIT_AGENT_DIR env > PI_CODING_AGENT_DIR env > filesystem auto-detect.
+ * Auto-detect: if ~/.bobbit/agent/ exists, use it. Else if ~/.pi/agent/ exists, use it.
+ * Otherwise use ~/.bobbit/agent/ (new installs).
+ */
+export function globalAgentDir(): string {
+  // Check env vars first
+  const bobbitEnv = process.env.BOBBIT_AGENT_DIR;
+  if (bobbitEnv) {
+    if (bobbitEnv === "~") return os.homedir();
+    if (bobbitEnv.startsWith("~/")) return os.homedir() + bobbitEnv.slice(1);
+    return bobbitEnv;
+  }
+  const piEnv = process.env.PI_CODING_AGENT_DIR;
+  if (piEnv) {
+    if (piEnv === "~") return os.homedir();
+    if (piEnv.startsWith("~/")) return os.homedir() + piEnv.slice(1);
+    return piEnv;
+  }
+
+  // Filesystem auto-detect with fallback
+  const newDir = path.join(os.homedir(), ".bobbit", "agent");
+  const legacyDir = path.join(os.homedir(), ".pi", "agent");
+  if (fs.existsSync(newDir)) return newDir;
+  if (fs.existsSync(legacyDir)) return legacyDir;
+  return newDir; // new installs
+}
+
+/** Returns the global auth.json path. API keys are global, not per-project. */
 export function globalAuthPath(): string {
-  return path.join(os.homedir(), ".pi", "agent", "auth.json");
+  return path.join(globalAgentDir(), "auth.json");
 }

@@ -147,6 +147,7 @@ async function main() {
 		console.warn(
 			`\n⚠  Found legacy state in ~/.pi/ but no .bobbit/ folder.\n` +
 			`   Bobbit now stores state in <project-root>/.bobbit/state/.\n` +
+			`   Global agent data has moved from ~/.pi/agent/ to ~/.bobbit/agent/.\n` +
 			`   Your existing sessions/goals will not be visible until migrated.\n` +
 			`   Copy files manually from ~/.pi/ to .bobbit/state/, or start fresh.\n`
 		);

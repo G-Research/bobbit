@@ -4,7 +4,7 @@
  *
  * When the user configures an aigw URL in preferences:
  * 1. Server fetches available models from the gateway's /v1/models endpoint
- * 2. Server writes/merges an "aigw" provider into ~/.pi/agent/models.json
+ * 2. Server writes/merges an "aigw" provider into ~/.bobbit/agent/models.json
  *    so agent subprocesses can use `set_model` with provider="aigw"
  * 3. Browser discovers models via server proxy (the aigw hostname may not
  *    resolve from the browser)
@@ -16,8 +16,8 @@ import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { globalAgentDir } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -143,16 +143,7 @@ export function deriveName(modelId: string): string {
 // ── models.json management ─────────────────────────────────────────
 
 function getModelsJsonPath(): string {
-	const envDir = process.env.PI_CODING_AGENT_DIR;
-	let agentDir: string;
-	if (envDir) {
-		if (envDir === "~") agentDir = os.homedir();
-		else if (envDir.startsWith("~/")) agentDir = os.homedir() + envDir.slice(1);
-		else agentDir = envDir;
-	} else {
-		agentDir = path.join(os.homedir(), ".pi", "agent");
-	}
-	return path.join(agentDir, "models.json");
+	return path.join(globalAgentDir(), "models.json");
 }
 
 function readModelsJson(): Record<string, any> {
@@ -266,7 +257,7 @@ export function writeContextWindowOverrides(): void {
 }
 
 /**
- * Write aigw models into ~/.pi/agent/models.json, merging with existing
+ * Write aigw models into ~/.bobbit/agent/models.json, merging with existing
  * providers (preserving non-aigw entries).
  */
 /**

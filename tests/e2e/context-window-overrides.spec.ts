@@ -13,17 +13,21 @@ import { homedir } from "node:os";
 
 /**
  * Resolve the models.json path the same way aigw-manager does:
- * PI_CODING_AGENT_DIR env → ~/.pi/agent
+ * BOBBIT_AGENT_DIR / PI_CODING_AGENT_DIR env → ~/.bobbit/agent (fallback ~/.pi/agent)
  */
 function getModelsJsonPath(): string {
-	const envDir = process.env.PI_CODING_AGENT_DIR;
+	const envDir = process.env.BOBBIT_AGENT_DIR || process.env.PI_CODING_AGENT_DIR;
 	let agentDir: string;
 	if (envDir) {
 		if (envDir === "~") agentDir = homedir();
 		else if (envDir.startsWith("~/")) agentDir = homedir() + envDir.slice(1);
 		else agentDir = envDir;
 	} else {
-		agentDir = join(homedir(), ".pi", "agent");
+		// Prefer ~/.bobbit/agent, fall back to ~/.pi/agent for legacy installs
+		const bobbitDir = join(homedir(), ".bobbit", "agent");
+		const piDir = join(homedir(), ".pi", "agent");
+		const { existsSync } = require("node:fs");
+		agentDir = existsSync(bobbitDir) ? bobbitDir : existsSync(piDir) ? piDir : bobbitDir;
 	}
 	return join(agentDir, "models.json");
 }

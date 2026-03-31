@@ -1,27 +1,27 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bobbitDir } from "../bobbit-dir.js";
+import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 
 /** Container home directory for the Docker sandbox (node:20-slim, USER node) */
 export const CONTAINER_HOME = "/home/node";
 /** Container-side agent directory prefix (always forward slashes) */
-export const CONTAINER_AGENT_DIR = "/home/node/.pi/agent/";
+export const CONTAINER_AGENT_DIR = "/home/node/.bobbit/agent/";
 
 /**
  * Remap a container-internal path to the equivalent host path.
- * e.g. /home/node/.pi/agent/sessions/x/y.jsonl → <homedir>/.pi/agent/sessions/x/y.jsonl
+ * e.g. /home/node/.bobbit/agent/sessions/x/y.jsonl → <agentDir>/sessions/x/y.jsonl
  * Non-matching paths pass through unchanged.
  * @param homeDir - override os.homedir() for testing
  */
 export function containerToHostSessionPath(containerPath: string, homeDir?: string): string {
 	if (!containerPath.startsWith(CONTAINER_AGENT_DIR)) return containerPath;
 	const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
-	return path.join(homeDir ?? os.homedir(), ".pi", "agent", relative).replace(/\\/g, "/");
+	const agentDir = homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir();
+	return path.join(agentDir, relative).replace(/\\/g, "/");
 }
 
 /**
@@ -29,7 +29,7 @@ export function containerToHostSessionPath(containerPath: string, homeDir?: stri
  * @param homeDir - override os.homedir() for testing
  */
 export function hostToContainerSessionPath(hostPath: string, homeDir?: string): string {
-	const hostAgentDir = path.join(homeDir ?? os.homedir(), ".pi", "agent").replace(/\\/g, "/") + "/";
+	const hostAgentDir = (homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir()).replace(/\\/g, "/") + "/";
 	const normalized = hostPath.replace(/\\/g, "/");
 	if (!normalized.startsWith(hostAgentDir)) return hostPath;
 	const relative = normalized.substring(hostAgentDir.length);
@@ -257,13 +257,13 @@ export class RpcBridge {
 		dockerArgs.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		dockerArgs.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
-		// Mount the host's ~/.pi/agent directory into the container.
-		// Contains auth.json (OAuth tokens), models.json (model registry),
-		// and sessions/ (agent conversation logs). All read-write so OAuth
-		// token refresh and session persistence work.
-		const hostAgentDir = path.join(os.homedir(), ".pi", "agent");
+		// Mount the host's agent directory (~/.bobbit/agent/ or legacy ~/.pi/agent/)
+		// into the container. Contains auth.json (OAuth tokens), models.json
+		// (model registry), and sessions/ (agent conversation logs). All read-write
+		// so OAuth token refresh and session persistence work.
+		const hostAgentDir = globalAgentDir();
 		fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
-		dockerArgs.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.pi/agent`);
+		dockerArgs.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.bobbit/agent`);
 
 		// Persistent named volumes for node_modules cache — on cross-platform setups
 		// (Windows host, Linux container), the entrypoint installs Linux-native
