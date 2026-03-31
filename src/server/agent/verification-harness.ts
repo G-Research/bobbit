@@ -917,9 +917,13 @@ export class VerificationHarness {
 			return { passed: verdict, output, sessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
+			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
 				: `LLM review failed: ${err.message}`;
+			if (isProcessDeath) {
+				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${err.message}`);
+			}
 			return { passed: false, output: errOutput, sessionId };
 		} finally {
 			// Always terminate and unregister, even on error/timeout
@@ -1097,9 +1101,13 @@ export class VerificationHarness {
 			return { passed: verdict, output, sessionId: subSessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out");
+			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
 				: `LLM review failed: ${err.message}`;
+			if (isProcessDeath) {
+				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${subSessionId}): ${err.message}`);
+			}
 			return { passed: false, output: errOutput, sessionId: subSessionId };
 		} finally {
 			await rpc.stop().catch(() => {});

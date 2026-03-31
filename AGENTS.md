@@ -200,6 +200,43 @@ When a user approves a tool via the permission card, the persistent grant writes
 
 **Change how messages render**: `src/ui/components/Messages.ts` for standard roles, `src/ui/components/message-renderer-registry.ts` for custom types.
 
+### Full-text search & paginated archives
+
+Bobbit includes full-text search across goals, sessions, and chat message history, powered by SQLite FTS5 via `better-sqlite3`. The search index lives at `.bobbit/state/search.db` — it's a rebuildable cache, not a source of truth.
+
+**Key files:**
+
+| File | Purpose |
+|---|---|
+| `src/server/search/search-index.ts` | `SearchIndex` — FTS5 schema, indexing, querying, rebuild logic |
+| `src/server/search/message-extractor.ts` | Extracts indexable text from message content blocks |
+| `src/ui/components/SearchBox.ts` | Sidebar search input with keyboard shortcut |
+| `src/ui/components/SearchResults.ts` | Grouped search results display |
+
+**What gets indexed:**
+- **Goals**: title, spec text
+- **Sessions**: title, role name
+- **Messages**: text content blocks and tool call names. Thinking blocks, tool results, and binary content are skipped.
+
+**Indexing pipeline:**
+- **Incremental**: `GoalStore` and `SessionStore` update the index on `put/update/archive`. `RpcBridge` indexes message text as it streams through.
+- **Startup rebuild**: On first run (no `search.db`) or schema version mismatch, a full rebuild scans all `.jsonl` session files. This is a one-time cost logged to console.
+- **Purge sync**: When `purgeOneSession()` deletes a session, its messages are removed from the index.
+
+**Search API:**
+- `GET /api/search?q=<query>&limit=20&offset=0&type=all|goals|sessions|messages` — returns ranked results grouped by type, with snippet excerpts (FTS5 `snippet()` function). Each result includes type, id, title, snippet, timestamp, archived status, and goalId.
+
+**Paginated archives:**
+- `GET /api/goals?archived=true&limit=50&after=<cursor>` — paginated archived goals sorted by `archivedAt` descending. Cursor is the `archivedAt` timestamp of the last item.
+- `GET /api/sessions?include=archived&limit=50&after=<cursor>` — same pattern for archived sessions.
+- Live (non-archived) goals and sessions continue to use generation-based polling (`?since=N`). Archived pagination is stateless.
+
+**Sidebar search box:**
+- Always visible at the top of the sidebar, below the config buttons row.
+- `Ctrl+K` / `⌘K` focuses the input. `Escape` clears and restores normal sidebar view.
+- 200ms debounced input calls `GET /api/search`. Results replace normal sidebar content, grouped into Goals / Sessions / Messages sections with snippet excerpts.
+- Clicking a result navigates to the goal dashboard or connects to the session. The `×` button clears the search.
+
 ### Thinking level configuration
 
 The default thinking level for new sessions is configurable via `default_thinking_level` in `.bobbit/config/project.yaml` or the Settings page Project tab. Valid values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, or `""` (empty string = use the agent's built-in default of `"medium"`).
@@ -267,6 +304,10 @@ Cross-links on the Skills page and Tools page ("Manage scan directories →") na
 Sandboxed delegates inherit sandbox config from their parent session. If a delegate fails to start, check that the parent session has `sandboxed: true` in `sessions.json` and that sandbox is still configured as `"docker"` in `project.yaml`. The delegate's cwd is always overridden to the parent's host-side cwd — container-internal paths like `/workspace` are never passed through.
 
 **Debug container pool**: Check `GET /api/sandbox-pool` for pool stats (`enabled`, `total`, `idle`, `claimed`, `warming`). Pool containers are labeled `bobbit-pool=<project-hash>` — use `docker ps --filter label=bobbit-pool` to see them directly. Health checks run periodically via `docker inspect`; dead containers are removed and replacements started automatically. On gateway shutdown, agents receive SIGTERM first (graceful flush), then containers are stopped. If containers aren't being re-adopted after a gateway restart, verify the project hash in the label matches (it's derived from the project directory path). If sessions fall back to cold `docker run` unexpectedly, check that the pool has idle containers available — pool exhaustion is logged as a warning.
+
+**Debug search index**: The search index at `.bobbit/state/search.db` is a rebuildable cache. If search returns stale or missing results, delete `search.db` and restart the server — it rebuilds automatically from `.jsonl` session files and store data. Check that `better-sqlite3` loaded correctly (native addon). FTS5 queries on 10K documents complete in <10ms, so slow searches indicate a different bottleneck (network, JSON serialization). If incremental indexing isn't working, verify the hooks in `GoalStore`, `SessionStore`, and `RpcBridge` are calling `SearchIndex` methods. If purged sessions still appear in search results, check that `purgeOneSession()` calls the index cleanup.
+
+**Debug paginated archives**: Archived pagination uses cursor-based paging keyed on `archivedAt` timestamps. If items appear to be missing, check that `archivedAt` is set on the goal/session (older items archived before this feature may lack the field). The sidebar "Archived" section loads 50 items per page with a "Load more" button. If the count badge shows a different number than expected, verify the total comes from the paginated response metadata.
 
 **Debug gate re-signal cancellation**: When a gate is re-signaled, `cancelStaleVerifications()` in `verification-harness.ts` terminates reviewer sessions from the prior signal and marks the old `ActiveVerification` as cancelled. The cancelled flag is checked after `Promise.all` resolves to suppress stale results. If reviewer sessions aren't being cancelled, check that `sessionManager` and `teamManager` are passed to the `VerificationHarness` constructor. Active verifications are tracked in `activeVerifications` map, keyed by signal ID — use `GET /api/goals/:goalId/verifications/active` to inspect in-flight state.
 
@@ -357,6 +398,7 @@ All per-project state lives under `<project-root>/.bobbit/`:
 | `desec.json` | `desec.ts` | deSEC dynDNS config (domain + API token) |
 | `rpc-debug.log` | `rpc-bridge.ts` | Debug log of all RPC events |
 | `mcp-extensions/` | `tool-activation.ts` | Generated proxy extension files for MCP tool calls |
+| `search.db` | `SearchIndex` | SQLite FTS5 full-text search index (rebuildable from .jsonl files) |
 
 ### `.bobbit/config/tools/<group>/` — tool definitions and extensions
 
