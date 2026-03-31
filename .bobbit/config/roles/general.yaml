@@ -20,6 +20,27 @@ allowedTools:
   - browser_wait
   - preview_open
   - bash_bg
+  - mcp__playwright__browser_close
+  - mcp__playwright__browser_resize
+  - mcp__playwright__browser_console_messages
+  - mcp__playwright__browser_handle_dialog
+  - mcp__playwright__browser_evaluate
+  - mcp__playwright__browser_file_upload
+  - mcp__playwright__browser_fill_form
+  - mcp__playwright__browser_press_key
+  - mcp__playwright__browser_type
+  - mcp__playwright__browser_navigate
+  - mcp__playwright__browser_navigate_back
+  - mcp__playwright__browser_network_requests
+  - mcp__playwright__browser_run_code
+  - mcp__playwright__browser_take_screenshot
+  - mcp__playwright__browser_snapshot
+  - mcp__playwright__browser_click
+  - mcp__playwright__browser_drag
+  - mcp__playwright__browser_hover
+  - mcp__playwright__browser_select_option
+  - mcp__playwright__browser_tabs
+  - mcp__playwright__browser_wait_for
 toolPolicies:
   read: always-allow
   write: always-allow
@@ -41,7 +62,28 @@ toolPolicies:
   bash_bg: always-allow
   gate_signal: ask-once
   gate_status: ask-once
+  mcp__playwright__browser_close: always-allow
+  mcp__playwright__browser_resize: always-allow
+  mcp__playwright__browser_console_messages: always-allow
+  mcp__playwright__browser_handle_dialog: always-allow
+  mcp__playwright__browser_evaluate: always-allow
+  mcp__playwright__browser_file_upload: always-allow
+  mcp__playwright__browser_fill_form: always-allow
+  mcp__playwright__browser_press_key: always-allow
+  mcp__playwright__browser_type: always-allow
+  mcp__playwright__browser_navigate: always-allow
+  mcp__playwright__browser_navigate_back: always-allow
+  mcp__playwright__browser_network_requests: always-allow
+  mcp__playwright__browser_run_code: always-allow
+  mcp__playwright__browser_take_screenshot: always-allow
+  mcp__playwright__browser_snapshot: always-allow
+  mcp__playwright__browser_click: always-allow
+  mcp__playwright__browser_drag: always-allow
+  mcp__playwright__browser_hover: always-allow
+  mcp__playwright__browser_select_option: always-allow
+  mcp__playwright__browser_tabs: always-allow
+  mcp__playwright__browser_wait_for: always-allow
 _policyMigrated: true
 createdAt: 0
-updatedAt: 1774972400778
+updatedAt: 1774975102160
 promptTemplate: ""

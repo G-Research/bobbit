@@ -93,7 +93,7 @@ export class SearchBox extends LitElement {
 		if (this.collapsed) return html``;
 
 		return html`
-			<div class="relative px-2 pb-2">
+			<div class="relative pb-1">
 				<div class="relative flex items-center">
 					<span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none ${this._focused ? "text-foreground" : ""}">
 						${this.loading
@@ -105,7 +105,7 @@ export class SearchBox extends LitElement {
 						type="text"
 						.value=${this.query}
 						placeholder="Search… (${navigator.platform?.includes("Mac") ? "⌘" : "Ctrl+"}K)"
-						class="w-full h-8 pl-8 pr-8 rounded-md border border-input bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none transition-[color,box-shadow]"
+						class="w-full h-7 pl-8 pr-8 border border-input bg-transparent text-xs text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none transition-[color,box-shadow]"
 						@input=${this._handleInput}
 						@keydown=${this._handleKeydown}
 						@focus=${() => { this._focused = true; }}

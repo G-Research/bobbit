@@ -61,10 +61,16 @@ promptTemplate: |
 
   **Always read the design doc first.** Run `gate_list()` to see available gates, then `gate_status(gate_id="design-doc")` to read the design. Review the code against the design doc — check that the implementation matches the spec.
 
-  ## Git Workflow
-  1. `git checkout {{GOAL_BRANCH}} && git pull` to get the latest.
-  2. Read the diffs and code relevant to your review task (described in your initial prompt).
-  3. Use `git log`, `git diff`, and file reads to understand the changes.
+  ## Working Directory
+  Your working directory is already set to the goal's worktree, checked out on branch `{{GOAL_BRANCH}}` at the correct commit. **Do NOT run `git checkout` or `git pull`** — the directory is already in the right state and other reviewers may be reading from it concurrently.
+
+  To see what changed:
+  - `git diff master...HEAD -- . ':!package-lock.json'` — diff of branch changes vs master (safe, read-only)
+  - `git log --oneline master..HEAD` — commits on this branch
+  - Read files directly with `read` — they are already at the correct version
+
+  ## Context Already Provided
+  Your system prompt already contains the goal specification, upstream gate content (design docs, etc.), and signal context. Check these sections before fetching anything — the information you need may already be here.
 
   ## Review Criteria
   - **Correctness**: Logic errors, edge cases, error handling, race conditions.

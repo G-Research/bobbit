@@ -21,6 +21,7 @@ import {
 import { renderApp, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { gatewayFetch, fetchSandboxStatus } from "./api.js";
+import { openOAuthDialog } from "./dialogs.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
 type SettingsTab = SettingsTabId;
@@ -1849,6 +1850,95 @@ function renderDirectoriesTab() {
 	`;
 }
 
+// ── Account tab state ──
+
+let accountStatus: { authenticated: boolean; expires?: number } | null = null;
+let accountLoading = false;
+let accountReauthing = false;
+
+function loadAccountStatus(): void {
+	if (accountLoading) return;
+	accountLoading = true;
+	(async () => {
+		try {
+			const res = await gatewayFetch("/api/oauth/status");
+			if (res.ok) accountStatus = await res.json();
+			else accountStatus = { authenticated: false };
+		} catch {
+			accountStatus = { authenticated: false };
+		} finally {
+			accountLoading = false;
+			renderApp();
+		}
+	})();
+}
+
+async function handleReauthenticate(): Promise<void> {
+	accountReauthing = true;
+	renderApp();
+	try {
+		const success = await openOAuthDialog();
+		if (success) {
+			// Refresh status after successful re-auth
+			accountStatus = null;
+			loadAccountStatus();
+		}
+	} finally {
+		accountReauthing = false;
+		renderApp();
+	}
+}
+
+function renderAccountTab() {
+	if (!accountStatus && !accountLoading) loadAccountStatus();
+
+	if (accountLoading && !accountStatus) {
+		return html`<p class="text-sm text-muted-foreground">Loading...</p>`;
+	}
+
+	const authenticated = accountStatus?.authenticated ?? false;
+	const expires = accountStatus?.expires;
+	const expiresDate = expires ? new Date(expires) : null;
+	const isExpired = expires ? Date.now() > expires : false;
+
+	return html`
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-1.5">
+				<h3 class="text-sm font-semibold text-foreground">Anthropic OAuth</h3>
+				<p class="text-xs text-muted-foreground">
+					OAuth credentials used by agent sessions to access the Anthropic API.
+					Re-authenticate to refresh expired tokens or switch accounts.
+				</p>
+			</div>
+
+			<div class="flex flex-col gap-2 rounded-md border border-border p-3">
+				<div class="flex items-center gap-2">
+					<span class="text-sm font-medium text-foreground">Status:</span>
+					${authenticated
+						? html`<span class="text-sm text-green-600 dark:text-green-400">Authenticated</span>`
+						: html`<span class="text-sm text-destructive">${isExpired ? "Expired" : "Not authenticated"}</span>`}
+				</div>
+				${expiresDate
+					? html`<div class="flex items-center gap-2">
+						<span class="text-sm font-medium text-foreground">Expires:</span>
+						<span class="text-sm ${isExpired ? "text-destructive" : "text-muted-foreground"}">${expiresDate.toLocaleString()}</span>
+					</div>`
+					: ""}
+			</div>
+
+			<div>
+				${Button({
+					variant: authenticated ? "outline" : "default",
+					size: "sm",
+					disabled: accountReauthing,
+					onClick: handleReauthenticate,
+					children: accountReauthing ? "Authenticating..." : authenticated ? "Re-authenticate" : "Log in",
+				})}
+			</div>
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
@@ -1863,6 +1953,7 @@ export function renderSettingsPage() {
 		{ id: "models", label: "Models" },
 		{ id: "directories", label: "Config Directories" },
 		{ id: "palette", label: "Color Palette" },
+		{ id: "account", label: "Account" },
 	];
 
 	return html`
@@ -1899,6 +1990,7 @@ export function renderSettingsPage() {
 					${currentTab === "shortcuts" ? renderShortcutsTab() : ""}
 					${currentTab === "palette" ? renderPaletteTab() : ""}
 					${currentTab === "directories" ? renderDirectoriesTab() : ""}
+					${currentTab === "account" ? renderAccountTab() : ""}
 				</div>
 			 </div>
 			</div>
