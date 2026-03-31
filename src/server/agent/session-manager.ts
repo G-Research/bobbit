@@ -29,10 +29,20 @@ import { McpManager } from "../mcp/mcp-manager.js";
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
-import { createWorktree } from "../skills/git.js";
+// createWorktree is used in session-setup.ts pipeline
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { SandboxProxy } from "./sandbox-proxy.js";
 import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
+import {
+	type SessionSetupPlan,
+	type PipelineContext,
+	executePlan,
+	executeWorktreeAsync,
+	persistOnce,
+	handleSetupFailure,
+	sendDelegatePrompt,
+	DELEGATE_SPAWN_TIMEOUT_MS,
+} from "./session-setup.js";
 
 
 /** Goal tools extension — task + gate management for any goal session. */
@@ -77,6 +87,8 @@ export interface SessionInfo {
 	staffId?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory?: string;
+	/** Whether this session runs inside a Docker sandbox */
+	sandboxed?: boolean;
 	/** Container ID if using a pooled Docker container */
 	containerId?: string;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
@@ -199,6 +211,37 @@ export class SessionManager {
 	/** Whether Docker sandbox mode is enabled in project config. */
 	get isSandboxEnabled(): boolean {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
+	}
+
+	/** Build a PipelineContext from this manager's fields. */
+	buildPipelineContext(): PipelineContext {
+		return {
+			agentCliPath: this.agentCliPath,
+			systemPromptPath: this.systemPromptPath,
+			roleManager: this.roleManager ?? null,
+			toolManager: this.toolManager ?? null,
+			mcpManager: this.mcpManager,
+			goalManager: this.goalManager,
+			taskManager: this.taskManager,
+			personalityManager: this.personalityManager ?? null,
+			projectConfigStore: this.projectConfigStore ?? null,
+			sandboxPool: this.sandboxPool,
+			sandboxTokenStore: this.sandboxTokenStore,
+			groupPolicyStore: this.groupPolicyStore ?? null,
+			costTracker: this.costTracker,
+			store: this.store,
+			searchIndex: this.searchIndex,
+			sessions: this.sessions,
+			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
+			buildToolRestrictionsText: (tools, role) => this.buildToolRestrictionsText(tools, role),
+			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
+			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
+			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
+			broadcast: (clients, msg) => broadcast(clients, msg),
+			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
+			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
+			buildWorkflowList: () => this._buildWorkflowList(),
+		};
 	}
 
 	/** Ensure a SandboxProxy is running with the given allowlist. Returns the port. */
@@ -1105,10 +1148,18 @@ export class SessionManager {
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
 		if (!ps.agentSessionFile) {
-			// Session was persisted before the agent session file was obtained
-			// (e.g. server restarted during session creation). Remove it.
-			console.log(`[session-manager] Removing ${ps.id} — no agent session file recorded (session was mid-creation)`);
-			this.store.remove(ps.id);
+			if (ps.worktreePath && ps.branch) {
+				// Code may be recoverable — the branch exists in git
+				console.warn(
+					`[session-manager] Session ${ps.id} has no agentSessionFile but has worktree ` +
+					`(branch: ${ps.branch}, path: ${ps.worktreePath}). ` +
+					`Code may be recoverable. Archiving session — branch "${ps.branch}" preserved in git.`,
+				);
+				this.store.archive(ps.id);
+			} else {
+				console.log(`[session-manager] Removing ${ps.id} — no agent session file and no worktree`);
+				this.store.remove(ps.id);
+			}
 			return;
 		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
@@ -1363,6 +1414,7 @@ export class SessionManager {
 
 	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions }): Promise<SessionInfo> {
 		const id = randomUUID();
+		const ctx = this.buildPipelineContext();
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
@@ -1398,421 +1450,78 @@ export class SessionManager {
 			};
 
 			this.sessions.set(id, session);
-			// Persist immediately with what we know — agentSessionFile will be
-			// empty until the agent starts, but this ensures the session appears
-			// in the store and survives a restart (as a removable placeholder).
-			this.store.put({
+
+			// Build the plan for the worktree pipeline
+			const plan: SessionSetupPlan = {
 				id,
-				title: session.title,
-				cwd: session.cwd,
-				agentSessionFile: "",
-				createdAt: session.createdAt,
-				lastActivity: session.lastActivity,
+				mode: "worktree",
+				title: "New session",
+				cwd,
 				goalId,
+				taskId: opts?.taskId,
 				worktreePath,
 				repoPath,
 				branch,
-				taskId: opts?.taskId,
-				personalities: opts?.personalityNames,
 				sandboxed: opts?.sandboxed,
-			});
+				personalities: opts?.personalityNames,
+				agentArgs,
+				env: opts?.env,
+				rolePrompt: opts?.rolePrompt,
+				roleName: opts?.roleName,
+				personalityFragments: opts?.personalities,
+				workflowContext: opts?.workflowContext,
+				effectiveAllowedTools: opts?.allowedTools,
+				sandboxClaim: opts?.sandboxClaim,
+				bridgeOptions: { cwd },
+			};
 
-			// Fire-and-forget: create worktree then launch agent
-			this._setupWorktreeAndLaunchAgent(session, repoPath, branch, cwd, agentArgs, goalId, opts).catch((err) => {
-				console.error(`[session-manager] Worktree session setup failed for ${id}:`, err);
-				session.status = "terminated";
-				broadcast(session.clients, { type: "session_status", status: "terminated" });
+			// Persist immediately with all known structural fields
+			persistOnce(session, plan, this.store);
+
+			// Fire-and-forget: create worktree then complete pipeline
+			executeWorktreeAsync(plan, session, ctx).then(() => {
+				// Persist session metadata now that the agent is running
+				this.persistSessionMetadata(session).catch((err) => {
+					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
+				});
+			}).catch((err) => {
+				handleSetupFailure(session, plan, err, ctx);
 			});
 
 			return session;
 		}
 
-		const bridgeOptions: RpcBridgeOptions = {
-			cwd,
-			args: agentArgs ? [...agentArgs] : [],
-			env: { BOBBIT_SESSION_ID: id, ...opts?.env },
-		};
-		if (this.agentCliPath) {
-			bridgeOptions.cliPath = this.agentCliPath;
-		}
-
-		// Auto-load goal tools extension for any goal-associated session
-		// (unless it's a goal/role assistant, or already has an extension —
-		// tool-activation handles loading both tasks + team extensions via YAML providers)
-		if (goalId && !assistantType) {
-			const alreadyHasExtension = bridgeOptions.args?.includes("--extension");
-			if (!alreadyHasExtension) {
-				bridgeOptions.args = bridgeOptions.args || [];
-				bridgeOptions.args.push("--extension", GOAL_TOOLS_EXTENSION_PATH);
-			}
-			// Ensure BOBBIT_GOAL_ID is set for the extension to read
-			bridgeOptions.env = { ...bridgeOptions.env, BOBBIT_GOAL_ID: goalId };
-		}
-
-		// Determine tool restrictions: explicit role tools > General role > no restriction
-		let effectiveAllowedTools = opts?.allowedTools;
-		if (!effectiveAllowedTools && this.roleManager) {
-			const generalRole = this.roleManager.getRole("general");
-			if (generalRole && generalRole.allowedTools.length > 0) {
-				effectiveAllowedTools = generalRole.allowedTools;
-			}
-		}
-
-		const assistantDef = assistantType ? getAssistantDef(assistantType) : undefined;
-		if (assistantDef) {
-			// Combine assistant role's shared prompt with per-type specialized prompt
-			const assistantRole = this.roleManager?.getRole("assistant");
-			let assistantGoalSpec = "";
-			if (assistantRole?.promptTemplate) {
-				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(goalId || id).slice(0, 8)}`);
-				assistantGoalSpec += "\n\n---\n\n";
-			}
-			assistantGoalSpec += assistantDef.prompt;
-			if (assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
-				// Inject re-attempt context if this is a re-attempt session
-				if (opts?.reattemptGoalId) {
-					const origGoal = this.goalManager.getGoal(opts.reattemptGoalId);
-					if (origGoal) {
-						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
-					}
-				}
-			}
-
-			// Use assistant role's tool restrictions (before assemblePrompt so tool docs are filtered correctly)
-			if (assistantRole && assistantRole.allowedTools.length > 0) {
-				effectiveAllowedTools = assistantRole.allowedTools;
-			}
-
-			const promptPath = this.assemblePrompt(id, {
-				baseSystemPromptPath: undefined,
-				cwd,
-				goalSpec: assistantGoalSpec,
-				goalTitle: assistantDef.promptTitle,
-				goalState: "active",
-				allowedTools: effectiveAllowedTools,
-				projectConfigStore: this.projectConfigStore,
-			});
-			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		} else {
-			// Normal sessions: global base + AGENTS.md from cwd + goal spec
-			const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
-			const goalSpec = goal?.spec;
-
-			// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
-			if (opts?.sandboxed && effectiveAllowedTools) {
-				effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
-			}
-
-			// Build tool restrictions text if allowedTools is specified and non-empty
-			let toolRestrictionsText: string | undefined;
-			if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-				const effectiveRole = (opts?.roleName && this.roleManager) ? this.roleManager.getRole(opts.roleName) : undefined;
-				toolRestrictionsText = this.buildToolRestrictionsText(effectiveAllowedTools, effectiveRole ?? undefined);
-			}
-
-			// Build task context if taskId is provided
-			let taskTitle: string | undefined;
-			let taskType: string | undefined;
-			let taskSpec: string | undefined;
-			let taskDependsOn: string[] | undefined;
-			if (opts?.taskId) {
-				const task = this.taskManager.getTask(opts.taskId);
-				if (task) {
-					taskTitle = task.title;
-					taskType = task.type;
-					taskSpec = task.spec;
-					if (task.dependsOn && task.dependsOn.length > 0) {
-						taskDependsOn = task.dependsOn.map(depId => {
-							const dep = this.taskManager.getTask(depId);
-							return dep?.title || depId;
-						});
-					}
-				}
-			}
-
-			const promptPath = this.assemblePrompt(id, {
-				baseSystemPromptPath: this.systemPromptPath,
-				cwd,
-				goalTitle: goal?.title,
-				goalState: goal?.state,
-				goalSpec,
-				rolePrompt: opts?.rolePrompt,
-				roleName: opts?.roleName,
-				toolRestrictions: toolRestrictionsText,
-				taskTitle,
-				taskType,
-				taskSpec,
-				taskDependsOn,
-				personalities: opts?.personalities,
-				allowedTools: effectiveAllowedTools,
-				workflowContext: opts?.workflowContext,
-				projectConfigStore: this.projectConfigStore,
-			});
-			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		}
-
-		// Apply tool activation args based on allowedTools (controls --tools and --extension flags)
-		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const effectiveRole = (opts?.roleName && this.roleManager) ? this.roleManager.getRole(opts.roleName) : undefined;
-			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowedTools, effectiveRole ?? undefined, this.toolManager, this.groupPolicyStore) : undefined;
-			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
-			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
-		} else if (this.mcpManager) {
-			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
-			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
-			}
-		}
-
-		// ── Docker sandbox wiring ──
-		if (opts?.sandboxed) {
-			const applied = await this.applySandboxWiring(bridgeOptions, id, { sandboxClaim: opts.sandboxClaim });
-			if (!applied) {
-				throw new Error("Sandbox is not configured as docker");
-			}
-		}
-
-		const rpcClient = new RpcBridge(bridgeOptions);
-		const eventBuffer = new EventBuffer();
-
-		const now = Date.now();
-		// If the sandbox pool overrode the CWD (pool slot worktree), use that
-		const effectiveCwd = bridgeOptions.cwd || cwd;
-
-		const session: SessionInfo = {
+		// ── Normal session: build plan and execute full pipeline ──
+		const plan: SessionSetupPlan = {
 			id,
-			title: assistantDef?.title ?? "New session",
-			cwd: effectiveCwd,
-			status: "starting",
-			createdAt: now,
-			lastActivity: now,
-			clients: new Set(),
-			rpcClient,
-			eventBuffer,
-			unsubscribe: () => {},
-			isCompacting: false,
-			titleGenerated: !!assistantDef,
+			mode: "normal",
+			title: "New session",
+			cwd,
 			goalId,
 			assistantType,
 			taskId: opts?.taskId,
+			sandboxed: opts?.sandboxed,
 			personalities: opts?.personalityNames,
-			allowedTools: effectiveAllowedTools ?? opts?.allowedTools,
-			promptQueue: new PromptQueue(),
+			agentArgs,
+			env: opts?.env,
+			rolePrompt: opts?.rolePrompt,
+			roleName: opts?.roleName,
+			personalityFragments: opts?.personalities,
+			workflowContext: opts?.workflowContext,
+			reattemptGoalId: opts?.reattemptGoalId,
+			effectiveAllowedTools: opts?.allowedTools,
+			sandboxClaim: opts?.sandboxClaim,
+			bridgeOptions: { cwd },
 		};
 
-		// Mark session as sandboxed (persisted later in store.put() via _sandboxed flag)
-		if (opts?.sandboxed) {
-			(session as any)._sandboxed = true;
-		}
+		const session = await executePlan(plan, ctx);
 
-		// Store container ID from pool claim
-		if (bridgeOptions.containerId) {
-			session.containerId = bridgeOptions.containerId;
-		}
-
-		// Auto-assign task to this session
-		if (opts?.taskId) {
-			try {
-				this.taskManager.assignTask(opts.taskId, id);
-			} catch (err) {
-				console.error(`[session-manager] Failed to assign task ${opts.taskId} to session ${id}:`, err);
-			}
-		}
-
-		// Subscribe to agent events — broadcast to all connected clients
-		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
-			this.store.update(id, { lastActivity: session.lastActivity });
-
-			this.handleAgentLifecycle(session, event);
-
-			eventBuffer.push(event);
-			broadcast(session.clients, { type: "event", data: event });
-			this.trackCostFromEvent(session, event);
-		});
-
-		session.unsubscribe = unsub;
-
-		await rpcClient.start();
-		session.status = "idle";
-
-		this.sessions.set(id, session);
-
-		// Persist session metadata immediately so it survives server restarts.
-		// This is fire-and-forget to avoid blocking session creation — getState()
-		// is a fast RPC call but we don't need to wait for disk flush.
+		// Persist session metadata (fire-and-forget)
 		this.persistSessionMetadata(session).catch((err) => {
 			console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
 		});
 
-		// Fire model + thinking level setup immediately (non-blocking).
-		// These are fast stdin writes — the agent processes set_model and
-		// set_thinking_level in microseconds.  We don't await the responses
-		// so the user's prompt (arriving shortly after) isn't blocked.
-		this._fireEarlySetup(session);
-
 		return session;
-	}
-
-	/**
-	 * Async worktree setup + agent launch for sessions created with worktreeOpts.
-	 * Creates the worktree, then launches the agent in it.
-	 */
-	private async _setupWorktreeAndLaunchAgent(
-		session: SessionInfo,
-		repoPath: string,
-		branch: string,
-		_originalCwd: string,
-		agentArgs?: string[],
-		goalId?: string,
-		opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string } },
-	): Promise<void> {
-		// Create worktree with one retry
-		let worktreeCwd: string;
-		try {
-			const result = await createWorktree(repoPath, branch);
-			worktreeCwd = result.worktreePath;
-		} catch (err) {
-			await new Promise(resolve => setTimeout(resolve, 1000));
-			const result = await createWorktree(repoPath, branch);
-			worktreeCwd = result.worktreePath;
-		}
-
-		// Update session metadata
-		session.cwd = worktreeCwd;
-		session.worktreePath = worktreeCwd;
-		this.store.update(session.id, { cwd: worktreeCwd, worktreePath: worktreeCwd });
-		console.log(`[session-manager] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${branch})`);
-
-		// Now launch the agent (mirrors the non-worktree path in createSession)
-		const cwd = worktreeCwd;
-		const id = session.id;
-
-		const bridgeOptions: RpcBridgeOptions = {
-			cwd,
-			args: agentArgs ? [...agentArgs] : [],
-			env: { BOBBIT_SESSION_ID: id, ...opts?.env },
-		};
-		if (this.agentCliPath) {
-			bridgeOptions.cliPath = this.agentCliPath;
-		}
-
-		if (goalId) {
-			const alreadyHasExtension = bridgeOptions.args?.includes("--extension");
-			if (!alreadyHasExtension) {
-				bridgeOptions.args = bridgeOptions.args || [];
-				bridgeOptions.args.push("--extension", GOAL_TOOLS_EXTENSION_PATH);
-			}
-			bridgeOptions.env = { ...bridgeOptions.env, BOBBIT_GOAL_ID: goalId };
-		}
-
-		let effectiveAllowedTools = opts?.allowedTools;
-		if (!effectiveAllowedTools && this.roleManager) {
-			const generalRole = this.roleManager.getRole("general");
-			if (generalRole && generalRole.allowedTools.length > 0) {
-				effectiveAllowedTools = generalRole.allowedTools;
-			}
-		}
-
-		// Build system prompt
-		const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
-		let toolRestrictionsText: string | undefined;
-		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const effectiveRole = (opts?.roleName && this.roleManager) ? this.roleManager.getRole(opts.roleName) : undefined;
-			toolRestrictionsText = this.buildToolRestrictionsText(effectiveAllowedTools, effectiveRole ?? undefined);
-		}
-
-		let taskTitle: string | undefined;
-		let taskType: string | undefined;
-		let taskSpec: string | undefined;
-		let taskDependsOn: string[] | undefined;
-		if (opts?.taskId) {
-			const task = this.taskManager.getTask(opts.taskId);
-			if (task) {
-				taskTitle = task.title;
-				taskType = task.type;
-				taskSpec = task.spec;
-				if (task.dependsOn && task.dependsOn.length > 0) {
-					taskDependsOn = task.dependsOn.map(depId => {
-						const dep = this.taskManager.getTask(depId);
-						return dep?.title || depId;
-					});
-				}
-			}
-		}
-
-		const promptPath = this.assemblePrompt(id, {
-			baseSystemPromptPath: this.systemPromptPath,
-			cwd,
-			goalTitle: goal?.title,
-			goalState: goal?.state,
-			goalSpec: goal?.spec,
-			rolePrompt: opts?.rolePrompt,
-			roleName: opts?.roleName,
-			toolRestrictions: toolRestrictionsText,
-			taskTitle,
-			taskType,
-			taskSpec,
-			taskDependsOn,
-			personalities: opts?.personalities,
-			allowedTools: effectiveAllowedTools,
-			workflowContext: opts?.workflowContext,
-			projectConfigStore: this.projectConfigStore,
-		});
-		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-
-		if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
-			const effectiveRole = (opts?.roleName && this.roleManager) ? this.roleManager.getRole(opts.roleName) : undefined;
-			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowedTools, effectiveRole ?? undefined, this.toolManager, this.groupPolicyStore) : undefined;
-			const activation = computeToolActivationArgs(effectiveAllowedTools, this.toolManager, cwd, mcpExtPaths);
-			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
-		} else if (this.mcpManager) {
-			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
-			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
-			}
-		}
-
-		// Replace the placeholder rpcClient with a real one
-		const rpcClient = new RpcBridge(bridgeOptions);
-		session.rpcClient = rpcClient;
-		session.allowedTools = effectiveAllowedTools ?? opts?.allowedTools;
-
-		if (opts?.taskId) {
-			try {
-				this.taskManager.assignTask(opts.taskId, id);
-			} catch (err) {
-				console.error(`[session-manager] Failed to assign task ${opts.taskId} to session ${id}:`, err);
-			}
-		}
-
-		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
-			this.store.update(id, { lastActivity: session.lastActivity });
-			this.handleAgentLifecycle(session, event);
-			eventBuffer.push(event);
-			broadcast(session.clients, { type: "event", data: event });
-			this.trackCostFromEvent(session, event);
-		});
-		session.unsubscribe = unsub;
-
-		const eventBuffer = session.eventBuffer;
-
-		await rpcClient.start();
-		session.status = "idle";
-
-		// Persist session metadata now that the agent is running and has a session file.
-		// Fire-and-forget to avoid blocking the worktree session launch.
-		this.persistSessionMetadata(session).catch((err) => {
-			console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
-		});
-
-		// Notify connected clients that the session is ready
-		broadcast(session.clients, { type: "session_status", status: "idle" });
-
-		// Fire model + thinking level immediately (non-blocking, same as createSession)
-		this._fireEarlySetup(session);
 	}
 
 	/**
@@ -1828,6 +1537,7 @@ export class SessionManager {
 		context?: Record<string, string>;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
+		const ctx = this.buildPipelineContext();
 
 		// ── Sandbox propagation from parent ──
 		const parentMeta = this.store.get(parentSessionId);
@@ -1840,114 +1550,32 @@ export class SessionManager {
 			// allow a malicious agent to mount an arbitrary host path into the
 			// delegate container.
 			opts.cwd = parentMeta.cwd;
-		}
-
-		// Build the task spec: instructions + optional context
-		let taskSpec = opts.instructions;
-		if (opts.context && Object.keys(opts.context).length > 0) {
-			taskSpec += "\n\n## Context";
-			for (const [key, value] of Object.entries(opts.context)) {
-				taskSpec += `\n- **${key}**: ${value}`;
-			}
-		}
-
-		// assembleSystemPrompt handles AGENTS.md from cwd automatically
-		const promptPath = this.assemblePrompt(id, {
-			baseSystemPromptPath: undefined, // No global prompt — delegate gets AGENTS.md only
-			cwd: opts.cwd,
-			goalSpec: taskSpec,
-			goalTitle: "Delegate Task",
-			goalState: "active",
-			projectConfigStore: this.projectConfigStore,
-		});
-
-		const bridgeOptions: RpcBridgeOptions = { cwd: opts.cwd, env: { BOBBIT_SESSION_ID: id, BOBBIT_DELEGATE_OF: parentSessionId } };
-		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
-		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-
-		// Apply sandbox wiring if parent was sandboxed
-		if (parentMeta?.sandboxed) {
-			const applied = await this.applySandboxWiring(bridgeOptions, id);
-			if (!applied) {
-				throw new Error("Cannot create delegate: parent is sandboxed but sandbox is not configured as docker");
-			}
 			delegateSandboxed = true;
 		}
 
-		const rpcClient = new RpcBridge(bridgeOptions);
-		const eventBuffer = new EventBuffer();
-		const now = Date.now();
-
 		const titleSummary = opts.title || opts.instructions.split("\n")[0].slice(0, 60) || "Delegate";
-		const session: SessionInfo = {
+
+		const plan: SessionSetupPlan = {
 			id,
-			title: `⚡${titleSummary}`,
+			mode: "delegate",
+			title: titleSummary,
 			cwd: opts.cwd,
-			status: "starting",
-			createdAt: now,
-			lastActivity: now,
-			clients: new Set(),
-			rpcClient,
-			eventBuffer,
-			unsubscribe: () => {},
-			isCompacting: false,
-			titleGenerated: true,
 			delegateOf: parentSessionId,
-			promptQueue: new PromptQueue(),
+			sandboxed: delegateSandboxed || undefined,
+			instructions: opts.instructions,
+			context: opts.context,
+			bridgeOptions: { cwd: opts.cwd },
 		};
 
-		if (delegateSandboxed) {
-			(session as any)._sandboxed = true;
-		}
-		if (bridgeOptions.containerId) {
-			session.containerId = bridgeOptions.containerId;
-		}
+		const session = await executePlan(plan, ctx);
 
-		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
-			this.store.update(id, { lastActivity: session.lastActivity });
-
-			this.handleAgentLifecycle(session, event);
-
-			eventBuffer.push(event);
-			broadcast(session.clients, { type: "event", data: event });
-			this.trackCostFromEvent(session, event);
+		// Persist with all structural fields (delegateOf is in the initial put)
+		this.persistSessionMetadata(session).catch((err) => {
+			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		});
 
-		session.unsubscribe = unsub;
-		await rpcClient.start();
-		session.status = "idle";
-		this.sessions.set(id, session);
-
-		// Auto-select model and persist in parallel (delegate needs model before prompt)
-		await Promise.all([
-			this.tryAutoSelectModel(session),
-			this.tryApplyDefaultThinkingLevel(session),
-			this.persistSessionMetadata(session).then(() => {
-				this.store.update(id, { delegateOf: parentSessionId });
-			}).catch((err) => {
-				console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
-			}),
-		]);
-
-		// Send the task prompt and wait for the agent to start streaming
-		// so that waitForIdle() doesn't return immediately.
-		await rpcClient.prompt(
-			"Execute the task described in your system prompt. Follow the instructions carefully."
-		);
-
-		// Wait for agent_start event (so session.status becomes "streaming")
-		await new Promise<void>((resolve) => {
-			if (session.status === "streaming") { resolve(); return; }
-			const timeout = setTimeout(() => { unsub2(); resolve(); }, 10_000);
-			const unsub2 = rpcClient.onEvent((event: any) => {
-				if (event.type === "agent_start") {
-					clearTimeout(timeout);
-					unsub2();
-					resolve();
-				}
-			});
-		});
+		// Send delegate prompt with 30s timeout
+		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
 
 		console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
 		return session;
@@ -2030,37 +1658,6 @@ export class SessionManager {
 		} catch (err) {
 			console.error(`[session-manager] Failed to refresh after compaction for ${session.id}:`, err);
 		}
-	}
-
-	/**
-	 * If an AI Gateway is configured, automatically set the session model
-	 * to the first aigw model. Called on every new session — no internet
-	 * check here; the gateway's presence was validated at startup or by
-	 * the user via Settings.
-	 */
-	/**
-	 * Auto-select a model for a new session. Uses `default.sessionModel`
-	 * Fire model selection and thinking level as non-blocking RPC commands
-	 * immediately after the agent process starts.  These are fast stdin writes
-	 * that the agent processes in microseconds — they won't meaningfully delay
-	 * the user's prompt which arrives shortly after via WebSocket.
-	 *
-	 * We intentionally don't await the responses.  If model selection fails
-	 * (e.g. aigw cache miss), the deferred setup in _finishSessionSetup will
-	 * retry after the first turn.
-	 */
-	private _fireEarlySetup(session: SessionInfo): void {
-		// Model selection — fast path only (preference or cached aigw list).
-		// If this requires an HTTP discovery, it returns without sending set_model
-		// and the deferred _finishSessionSetup handles it after the first turn.
-		this.tryAutoSelectModel(session).catch((err) => {
-			console.warn(`[session-manager] Early model selection failed for ${session.id}:`, err);
-		});
-
-		// Thinking level — always fast (just a preference lookup + stdin write)
-		this.tryApplyDefaultThinkingLevel(session).catch((err) => {
-			console.warn(`[session-manager] Early thinking level failed for ${session.id}:`, err);
-		});
 	}
 
 	/**
@@ -2169,60 +1766,54 @@ export class SessionManager {
 	}
 
 	async persistSessionMetadata(session: SessionInfo): Promise<void> {
-		const stateResp = await session.rpcClient.getState();
-		if (!stateResp.success || !stateResp.data?.sessionFile) {
-			console.warn(`[session-manager] Could not get agent session file for ${session.id}`);
-			return;
+		const maxRetries = 3;
+		const delays = [500, 1000, 2000];
+
+		for (let attempt = 0; attempt <= maxRetries; attempt++) {
+			try {
+				const stateResp = await session.rpcClient.getState();
+				if (!stateResp.success || !stateResp.data?.sessionFile) {
+					if (attempt < maxRetries) {
+						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
+						await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+						continue;
+					}
+					console.error(
+						`[session-manager] CRITICAL: Could not get agent session file for ${session.id} after ${maxRetries + 1} attempts. ` +
+						`This session will NOT survive a server restart.`,
+					);
+					return;
+				}
+
+				const agentSessionFile = session.sandboxed
+					? containerToHostSessionPath(stateResp.data.sessionFile)
+					: stateResp.data.sessionFile;
+
+				// Validate the remapped path actually exists on the host
+				if (!fs.existsSync(agentSessionFile)) {
+					console.error(
+						`[session-manager] CRITICAL: Session file does not exist after path remapping for ${session.id}!\n` +
+						`  Agent reported: ${stateResp.data.sessionFile}\n` +
+						`  Remapped to:   ${agentSessionFile}\n` +
+						`  Sandboxed:     ${!!session.sandboxed}\n` +
+						`  This session will NOT survive a server restart.`,
+					);
+				}
+
+				this.store.update(session.id, { agentSessionFile });
+				return; // success
+			} catch (err) {
+				if (attempt < maxRetries) {
+					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
+					await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+				} else {
+					console.error(
+						`[session-manager] CRITICAL: persistSessionMetadata failed for ${session.id} after ${maxRetries + 1} attempts: ${err}\n` +
+						`  This session will NOT survive a server restart.`,
+					);
+				}
+			}
 		}
-
-		// Preserve fields that may have been set via store.update() before this async call
-		const existing = this.store.get(session.id);
-
-		const isSandboxed = existing?.sandboxed || (session as any)._sandboxed;
-		const agentSessionFile = isSandboxed
-			? containerToHostSessionPath(stateResp.data.sessionFile)
-			: stateResp.data.sessionFile;
-
-		// Validate the remapped path actually exists on the host — catch remapping
-		// bugs immediately rather than discovering lost sessions on next restart.
-		if (!fs.existsSync(agentSessionFile)) {
-			console.error(
-				`[session-manager] CRITICAL: Session file does not exist after path remapping for ${session.id}!\n` +
-				`  Agent reported: ${stateResp.data.sessionFile}\n` +
-				`  Remapped to:   ${agentSessionFile}\n` +
-				`  Sandboxed:     ${!!isSandboxed}\n` +
-				`  This session will NOT survive a server restart.`,
-			);
-		}
-
-		this.store.put({
-			id: session.id,
-			title: session.title,
-			cwd: session.cwd,
-			agentSessionFile,
-			createdAt: session.createdAt,
-			lastActivity: session.lastActivity,
-			goalId: session.goalId,
-			assistantType: session.assistantType,
-			role: session.role,
-			teamGoalId: session.teamGoalId,
-			worktreePath: session.worktreePath,
-			repoPath: existing?.repoPath,
-			branch: existing?.branch,
-			taskId: session.taskId,
-			staffId: session.staffId,
-			accessory: session.accessory,
-			nonInteractive: session.nonInteractive,
-			preview: session.preview,
-			personalities: session.personalities,
-			sandboxed: existing?.sandboxed || (session as any)._sandboxed,
-			// Preserve fields that may be set on the session object or via store.update()
-			delegateOf: session.delegateOf || existing?.delegateOf,
-			reattemptGoalId: existing?.reattemptGoalId,
-			teamLeadSessionId: existing?.teamLeadSessionId,
-			modelProvider: existing?.modelProvider,
-			modelId: existing?.modelId,
-		});
 	}
 
 	getSession(id: string): SessionInfo | undefined {
@@ -2274,6 +1865,22 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
+		// Initial persist — structural fields (store.put must precede persistSessionMetadata
+		// since persistSessionMetadata now only does store.update)
+		this.store.put({
+			id,
+			title: opts.title,
+			cwd: opts.cwd,
+			agentSessionFile: "",
+			createdAt: now,
+			lastActivity: now,
+			goalId: opts.goalId,
+			role: opts.role,
+			teamGoalId: opts.teamGoalId,
+			nonInteractive: true,
+		});
+
+		// Then update with agentSessionFile
 		this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist external session ${id}:`, err);
 		});
@@ -2349,7 +1956,7 @@ export class SessionManager {
 			preview: s.preview,
 			personalities: s.personalities,
 			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
-			sandboxed: this.store.get(s.id)?.sandboxed || (s as any)._sandboxed,
+			sandboxed: this.store.get(s.id)?.sandboxed || s.sandboxed,
 		}));
 	}
 
@@ -2439,7 +2046,7 @@ export class SessionManager {
 				createdAt: session.createdAt,
 				lastActivity: session.lastActivity,
 				goalId: session.goalId,
-				sandboxed: (session as any)._sandboxed,
+				sandboxed: session.sandboxed,
 			});
 		}
 		return true;
@@ -2875,8 +2482,14 @@ export class SessionManager {
 		session.clients.clear();
 
 		this.sessions.delete(id);
-		// Archive instead of delete — keep metadata for 7 days
-		this.store.archive(id);
+		// Archive the session — keep metadata for 7 days.
+		// But sessions with no agentSessionFile are unrestorable, so just remove them.
+		const persisted = this.store.get(id);
+		if (persisted?.agentSessionFile) {
+			this.store.archive(id);
+		} else {
+			this.store.remove(id);
+		}
 		// Don't remove color or session prompt — they're needed for archived view
 		return true;
 	}
