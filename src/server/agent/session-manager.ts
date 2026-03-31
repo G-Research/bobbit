@@ -29,7 +29,6 @@ import { buildAvailableRolesList } from "./team-manager.js";
 import { createWorktree } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { SandboxProxy } from "./sandbox-proxy.js";
-import type { ContainerPool } from "./container-pool.js";
 import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
 
 
@@ -153,7 +152,6 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
-	containerPool: ContainerPool | null = null;
 	sandboxPool: SandboxPool | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
@@ -171,10 +169,6 @@ export class SessionManager {
 
 	setVerificationHarness(harness: import("./verification-harness.js").VerificationHarness): void {
 		this._verificationHarness = harness;
-	}
-
-	setContainerPool(pool: ContainerPool | null): void {
-		this.containerPool = pool;
 	}
 
 	setSandboxPool(pool: SandboxPool | null): void {
@@ -233,11 +227,20 @@ export class SessionManager {
 		const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
 
 		let networkAllowlist: string[] = [];
-		try { networkAllowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch { /* ignore */ }
+		try { networkAllowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch (err) {
+			console.error(`[session-manager] Invalid sandbox_network_allowlist JSON — refusing to start sandbox with no restrictions: ${err}`);
+			throw new Error(`Invalid sandbox_network_allowlist config: ${allowlistRaw}`);
+		}
 		let credentials: Record<string, string> = {};
-		try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
+		try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch (err) {
+			console.error(`[session-manager] Invalid sandbox_credentials JSON: ${err}`);
+			throw new Error(`Invalid sandbox_credentials config: ${credentialsRaw}`);
+		}
 		let mounts: string[] = [];
-		try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
+		try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch (err) {
+			console.error(`[session-manager] Invalid sandbox_mounts JSON: ${err}`);
+			throw new Error(`Invalid sandbox_mounts config: ${mountsRaw}`);
+		}
 
 		// Validate mounts unless skipped (e.g. during restore — already validated at creation)
 		let validatedMounts = mounts;
@@ -315,7 +318,7 @@ export class SessionManager {
 		bridgeOptions.sandboxMounts = validatedMounts;
 		bridgeOptions.sandboxProxyPort = proxyPort;
 
-		// Claim a pre-warmed slot from the sandbox pool (preferred) or container pool (legacy)
+		// Claim a pre-warmed slot from the sandbox pool
 		if (this.sandboxPool) {
 			const result = await this.sandboxPool.claim(sessionId, opts?.sandboxClaim);
 			if (result) {
@@ -324,14 +327,6 @@ export class SessionManager {
 				bridgeOptions.cwd = result.worktreePath;
 			} else {
 				console.warn("[session-manager] Sandbox pool exhausted, falling back to cold docker run");
-			}
-		} else if (this.containerPool) {
-			const containerId = this.containerPool.claim(sessionId);
-			if (containerId) {
-				bridgeOptions.containerId = containerId;
-				bridgeOptions.poolProjectDir = this.containerPool.options.projectDir;
-			} else {
-				console.warn("[session-manager] Container pool exhausted, falling back to cold docker run");
 			}
 		}
 
@@ -2831,8 +2826,6 @@ export class SessionManager {
 			this.sandboxPool.release(session.id, session.containerId).catch(err => {
 				console.warn(`[session-manager] Sandbox pool release failed for ${session.id}:`, err);
 			});
-		} else if (session.containerId && this.containerPool) {
-			this.containerPool.release(session.id, session.containerId);
 		}
 
 		// Clean up background processes

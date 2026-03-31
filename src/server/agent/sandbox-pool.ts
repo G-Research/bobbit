@@ -17,9 +17,7 @@ import { promisify } from "node:util";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
-import { TOOLS_DIR } from "./tool-manager.js";
-import { toDockerPath, resolveAgentModulesDir } from "./rpc-bridge.js";
+import { buildDockerRunArgs } from "./docker-args.js";
 import { resolveShell } from "./shell-util.js";
 
 const execFileAsync = promisify(execFileCb);
@@ -325,88 +323,20 @@ export class SandboxPool {
 
 	/** Build docker run args for a pool container with a specific worktree. */
 	private _buildDockerArgs(worktreePath: string): string[] {
-		const { image } = this.options;
-		const agentModulesDir = resolveAgentModulesDir();
-		const toolsDir = TOOLS_DIR;
-
-		const args: string[] = [
-			"run", "-d",
-			"--add-host=host.docker.internal:host-gateway",
-			"--label", `bobbit-sandbox=${this.label}`,
-			"--label", "bobbit-sandbox-version=2",
-			"--label", `bobbit-sandbox-wt=${worktreePath}`,
-		];
-
-		// Mount THIS slot's worktree as /workspace (not the primary project dir)
-		args.push("-v", `${toDockerPath(worktreePath)}:/workspace`);
-		args.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
-		args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
-
-
-
-		// Host agent dir
-		const hostAgentDir = globalAgentDir();
-		fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
-		args.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.bobbit/agent`);
-
-		// Named volumes for caches
-		args.push("-v", `bobbit-nm-cache-${this.label}:/home/node/.node_modules_cache`);
-		args.push("-v", `bobbit-npm-cache-${this.label}:/home/node/.npm-cache`);
-
-		// Session prompts directory
-		const sessionPromptsDir = path.join(bobbitDir(), "state", "session-prompts");
-		fs.mkdirSync(sessionPromptsDir, { recursive: true });
-		args.push("-v", `${toDockerPath(sessionPromptsDir)}:/tmp/session-prompts`);
-
-		// User-configured mounts
-		if (this.options.sandboxMounts) {
-			for (const mount of this.options.sandboxMounts) {
-				const parts = mount.split(":");
-				if (parts.length >= 2) {
-					parts[0] = toDockerPath(parts[0]);
-					args.push("-v", parts.join(":"));
-				}
-			}
-		}
-
-		// Gateway URL — pass the real address (traffic routes through sandbox proxy)
-		if (this.options.gatewayUrl) {
-			args.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
-		}
-		if (this.options.gatewayToken) {
-			args.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
-		}
-		args.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
-		args.push("-e", "PI_CODING_AGENT_DIR=/home/node/.bobbit/agent");
-
-		// Sandbox credentials
-		if (this.options.sandboxCredentials) {
-			for (const [key, value] of Object.entries(this.options.sandboxCredentials)) {
-				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-				args.push("-e", `${key}=${value}`);
-			}
-		}
-
-		// Proxy
-		if (this.options.sandboxProxyPort) {
-			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
-			args.push("-e", `http_proxy=${proxyUrl}`);
-			args.push("-e", `https_proxy=${proxyUrl}`);
-			args.push("-e", "no_proxy=localhost,127.0.0.1");
-		}
-
-		// MCP extensions
-		const mcpExtDir = path.join(bobbitDir(), "state", "mcp-extensions");
-		try {
-			if (fs.statSync(mcpExtDir).isDirectory()) {
-				args.push("-v", `${toDockerPath(mcpExtDir)}:/mcp-extensions:ro`);
-			}
-		} catch { /* doesn't exist — skip */ }
-
-		// Image + command
-		args.push(image, "sleep", "infinity");
-
-		return args;
+		return buildDockerRunArgs({
+			mode: "pool",
+			image: this.options.image,
+			workspaceDir: worktreePath,
+			label: this.label,
+			labelPrefix: "bobbit-sandbox",
+			labelVersion: "2",
+			worktreePath,
+			sandboxMounts: this.options.sandboxMounts,
+			sandboxCredentials: this.options.sandboxCredentials,
+			gatewayUrl: this.options.gatewayUrl,
+			gatewayToken: this.options.gatewayToken,
+			sandboxProxyPort: this.options.sandboxProxyPort,
+		});
 	}
 
 	/** Checkout a branch in a slot's worktree. */
@@ -609,10 +539,7 @@ export class SandboxPool {
 			const needed = Math.max(0, this.options.poolSize - this._countByState("idle"));
 			if (needed > 0) {
 				console.log(`[sandbox-pool] Replenishing ${needed} slot(s)...`);
-				// Create sequentially to avoid overwhelming Docker
-				for (let i = 0; i < needed; i++) {
-					await this._createSlot();
-				}
+				await Promise.allSettled(Array.from({ length: needed }, () => this._createSlot()));
 			}
 		} finally {
 			this._replenishing = false;

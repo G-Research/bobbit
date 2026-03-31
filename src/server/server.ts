@@ -38,7 +38,6 @@ import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
-import { ContainerPool } from "./agent/container-pool.js";
 import { SandboxPool } from "./agent/sandbox-pool.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
@@ -267,7 +266,6 @@ export function createGateway(config: GatewayConfig) {
 	let verificationHarness: VerificationHarness;
 
 	// Container pool — assigned in start() when sandbox=docker and pool_size>0
-	let containerPool: ContainerPool | null = null;
 	let sandboxPool: SandboxPool | null = null;
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
@@ -329,7 +327,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, containerPool, sandboxPool, sandboxScope, sandboxTokenStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, sandboxScope, sandboxTokenStore);
 
 			return;
 		}
@@ -460,14 +458,11 @@ export function createGateway(config: GatewayConfig) {
 			// Wire verification harness before session restore so orphan cleanup can skip resuming sessions
 			sessionManager.setVerificationHarness(verificationHarness);
 
-			// ── Container pool initialization ──
+			// ── Sandbox pool initialization ──
 			const sandboxCfg = projectConfigStore.get("sandbox") || "none";
 			const poolSize = parseInt(projectConfigStore.get("sandbox_pool_size") || "2", 10);
 			if (sandboxCfg === "docker" && poolSize > 0) {
 				try {
-					const gwToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
-					const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-					const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
 					const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
 
 					// Auto-build image if missing and Dockerfile exists
@@ -475,112 +470,32 @@ export function createGateway(config: GatewayConfig) {
 					if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
 						const buildResult = await buildSandboxImage(imageName, config.defaultCwd);
 						if (!buildResult.success) {
-							console.error(`[sandbox] Auto-build failed, continuing without container pool`);
+							console.error(`[sandbox] Auto-build failed, continuing without sandbox pool`);
 						}
 					}
-					const mountsRaw = projectConfigStore.get("sandbox_mounts") || "";
-					const credentialsRaw = projectConfigStore.get("sandbox_credentials") || "";
-					let mounts: string[] = [];
-					try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
-					let credentials: Record<string, string> = {};
-					try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
 
-					// Validate mounts — same security checks as session-manager.ts
-					const blockedPaths = [
-						"/var/run/docker.sock", "/run/docker.sock",
-						"/var/run/containerd", "/run/containerd",
-						"/proc", "/sys", "/dev",
-						"/etc", "/boot", "/sbin", "/bin", "/lib", "/lib64",
-						"/usr/sbin", "/usr/bin", "/usr/lib",
-						"/root", "/home",
-					];
-					const sensitiveSubstrings = [
-						"/.ssh", "/.aws", "/.gnupg", "/.config",
-						"/.kube", "/.docker", "/.npmrc", "/.netrc",
-						"/.git-credentials", "/.env",
-						"/docker.sock",
-					];
-					if (Array.isArray(mounts)) {
-						mounts = mounts.filter((m: string) => {
-							const parts = m.split(":");
-							if (parts.length < 2) return false;
-							const src = parts[0];
-							if (!path.isAbsolute(src)) { console.warn(`[container-pool] Rejecting non-absolute mount: ${m}`); return false; }
-							if (src.includes("..")) { console.warn(`[container-pool] Rejecting mount with "..": ${m}`); return false; }
-							if (src.startsWith("~") || src.startsWith("$")) { console.warn(`[container-pool] Rejecting mount with variable/home dir: ${m}`); return false; }
-							const normalizedSrc = src.replace(/\\/g, "/").toLowerCase();
-							for (const blocked of blockedPaths) {
-								if (normalizedSrc === blocked || normalizedSrc.startsWith(blocked + "/")) {
-									console.warn(`[container-pool] Rejecting mount to system path: ${m}`);
-									return false;
-								}
-							}
-							for (const pat of sensitiveSubstrings) {
-								if (normalizedSrc.includes(pat)) { console.warn(`[container-pool] Rejecting mount with sensitive path: ${m}`); return false; }
-							}
-							if (/^[a-z]:\/?$/i.test(src.replace(/\\/g, "/"))) {
-								console.warn(`[container-pool] Rejecting mount of drive root: ${m}`);
-								return false;
-							}
-							return true;
-						});
-					}
-
-					containerPool = new ContainerPool({
-						poolSize,
-						maxIdleSeconds,
-						image: imageName,
-						projectDir: config.defaultCwd,
-						healthCheckIntervalMs: 30_000,
-						sandboxMounts: mounts,
-						sandboxCredentials: credentials,
-						gatewayUrl: gwUrl,
-						gatewayToken: gwToken,
-					});
-					await containerPool.init();
-					console.log(`[container-pool] Initialized with poolSize=${poolSize}`);
-				} catch (err) {
-					console.error("[container-pool] Failed to initialize:", err);
-					containerPool = null;
-				}
-			}
-			sessionManager.setContainerPool(containerPool);
-
-			// Initialize the new SandboxPool (worktree + container pairs)
-			if (sandboxCfg === "docker" && poolSize > 0) {
-				try {
 					const { getRepoRoot, isGitRepo } = await import("./skills/git.js");
 					const isRepo = await isGitRepo(config.defaultCwd);
 					if (isRepo) {
 						const repoPath = await getRepoRoot(config.defaultCwd);
-						const spGwToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
-						const spGwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-						const spImageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-						const spMaxIdle = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
+						const gwToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+						const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+						const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
 						const setupCmd = projectConfigStore.get("worktree_setup_command") || "";
 
 						sandboxPool = new SandboxPool({
 							poolSize,
-							maxIdleSeconds: spMaxIdle,
-							image: spImageName,
+							maxIdleSeconds,
+							image: imageName,
 							projectDir: config.defaultCwd,
 							repoPath,
 							healthCheckIntervalMs: 30_000,
 							worktreeSetupCommand: setupCmd,
-							gatewayUrl: spGwUrl,
-							gatewayToken: spGwToken,
+							gatewayUrl: gwUrl,
+							gatewayToken: gwToken,
 						});
 						await sandboxPool.init();
 						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
-
-						// Disable old container pool when sandbox pool is active —
-						// all sandboxed sessions should use the sandbox pool.
-						if (containerPool) {
-							console.log("[container-pool] Shutting down — replaced by sandbox pool");
-							await containerPool.shutdown();
-							containerPool = null;
-							sessionManager.setContainerPool(null);
-						}
 					} else {
 						console.log("[sandbox-pool] Not a git repo — sandbox pool disabled (worktrees require git)");
 					}
@@ -637,9 +552,6 @@ export function createGateway(config: GatewayConfig) {
 			await sessionManager.shutdown();
 			if (sandboxPool) {
 				await sandboxPool.shutdown();
-			}
-			if (containerPool) {
-				await containerPool.shutdown();
 			}
 			server.close();
 		},
@@ -711,7 +623,6 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
-	containerPool: ContainerPool | null,
 	sandboxPool: SandboxPool | null,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
@@ -812,8 +723,6 @@ async function handleApiRoute(
 		if (sandboxPool) {
 			const stats = sandboxPool.getStats();
 			json({ ...stats, type: "sandbox" });
-		} else if (containerPool) {
-			json({ enabled: true, type: "container", ...containerPool.getStats() });
 		} else {
 			json({ enabled: false });
 		}
@@ -1173,7 +1082,7 @@ async function handleApiRoute(
 			}
 			// Skip Docker check if container pool has idle containers (Docker is obviously working).
 			// Otherwise use a cached result to avoid running `docker info` on every session creation.
-			const poolIdle = sessionManager.containerPool?.getStats().idle ?? 0;
+			const poolIdle = sessionManager.sandboxPool?.getStats().idle ?? 0;
 			if (poolIdle === 0) {
 				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
 					const dockerStatus = await checkDockerAvailability();

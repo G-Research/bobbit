@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
+import { buildDockerRunArgs } from "./docker-args.js";
 
 /** Container home directory for the Docker sandbox (node:20-slim, USER node) */
 export const CONTAINER_HOME = "/home/node";
@@ -63,8 +63,6 @@ export interface RpcBridgeOptions {
 	sandboxProxyPort?: number;
 	/** Container ID to use with docker exec (pool mode) */
 	containerId?: string;
-	/** The pool's project directory (needed to remap worktree CWDs in pool mode) */
-	poolProjectDir?: string;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -241,107 +239,33 @@ export class RpcBridge {
 	 */
 	private spawnDocker(_cliPath: string, agentArgs: string[]): ChildProcess {
 		const projectDir = this.options.cwd || process.cwd();
-		const toolsDir = TOOLS_DIR;
-		const agentModulesDir = resolveAgentModulesDir();
 		const image = this.options.sandboxImage || "bobbit-agent";
 
-		const dockerArgs: string[] = ["run", "--rm", "-i", "--add-host=host.docker.internal:host-gateway"];
-
-		// Network: always use default bridge (never --network=none) so the container
-		// can reach the gateway via host.docker.internal. Outbound internet is blocked
-		// by the proxy (empty allowlist = deny all) or restricted to allowlisted hosts.
-
-		// Bind mounts
-		// Mount node_modules at /node_modules so ESM resolution works — Node walks up
-		// from the cli.js file looking for node_modules/ directories in ancestor paths.
-		// /node_modules is an ancestor of any path, so packages resolve correctly.
-		dockerArgs.push("-v", `${toDockerPath(projectDir)}:/workspace`);
-		dockerArgs.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
-		dockerArgs.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
-
-		// Mount the host's agent directory (~/.bobbit/agent/ or legacy ~/.pi/agent/)
-		// into the container. Contains auth.json (OAuth tokens), models.json
-		// (model registry), and sessions/ (agent conversation logs). All read-write
-		// so OAuth token refresh and session persistence work.
-		const hostAgentDir = globalAgentDir();
-		fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
-		dockerArgs.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.bobbit/agent`);
-
-		// Persistent named volumes for node_modules cache — on cross-platform setups
-		// (Windows host, Linux container), the entrypoint installs Linux-native
-		// node_modules cached by package-lock.json hash.
-		const projectDirHash = crypto.createHash("sha256").update(projectDir).digest("hex").substring(0, 12);
-		dockerArgs.push("-v", `bobbit-nm-cache-${projectDirHash}:/home/node/.node_modules_cache`);
-		dockerArgs.push("-v", `bobbit-npm-cache-${projectDirHash}:/home/node/.npm-cache`);
-
-		// Additional user-configured mounts
-		if (this.options.sandboxMounts) {
-			for (const mount of this.options.sandboxMounts) {
-				const parts = mount.split(":");
-				if (parts.length >= 2) {
-					parts[0] = toDockerPath(parts[0]);
-					dockerArgs.push("-v", parts.join(":"));
-				}
-			}
-		}
-
-		// Pass the real gateway URL — agent→gateway traffic routes through the
-		// sandbox proxy, which has the gateway hostname in its allowlist.
-		if (this.options.gatewayUrl) {
-			dockerArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
-		}
-		if (this.options.gatewayToken) {
-			dockerArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
-		}
+		// Build session-specific env vars
+		const sessionEnv: Record<string, string> = {};
 		if (this.options.env?.BOBBIT_SESSION_ID) {
-			dockerArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);
+			sessionEnv.BOBBIT_SESSION_ID = this.options.env.BOBBIT_SESSION_ID;
 		}
 		if (this.options.env?.BOBBIT_GOAL_ID) {
-			dockerArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
-		}
-		dockerArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
-		// Tell the agent CLI to use .bobbit/agent instead of .pi/agent
-		dockerArgs.push("-e", "PI_CODING_AGENT_DIR=/home/node/.bobbit/agent");
-
-		// Sandbox credentials (explicitly configured env vars)
-		if (this.options.sandboxCredentials) {
-			for (const [key, value] of Object.entries(this.options.sandboxCredentials)) {
-				// Validate env var name: alphanumeric + underscore, must not start with digit
-				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-					console.warn(`[rpc-bridge] Skipping invalid sandbox credential key: ${key}`);
-					continue;
-				}
-				dockerArgs.push("-e", `${key}=${value}`);
-			}
+			sessionEnv.BOBBIT_GOAL_ID = this.options.env.BOBBIT_GOAL_ID;
 		}
 
-		// All outbound traffic (including gateway) routes through the sandbox proxy.
-		// The gateway hostname is auto-added to the proxy allowlist by applySandboxWiring().
-		if (this.options.sandboxProxyPort) {
-			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
-			dockerArgs.push("-e", `http_proxy=${proxyUrl}`);
-			dockerArgs.push("-e", `https_proxy=${proxyUrl}`);
-			dockerArgs.push("-e", "no_proxy=localhost,127.0.0.1");
-		}
+		// Use a project-dir hash as label for named cache volumes
+		const projectDirHash = crypto.createHash("sha256").update(projectDir).digest("hex").substring(0, 12);
 
-		// Mount MCP proxy extensions directory if it exists
-		const mcpExtDir = path.join(bobbitDir(), "state", "mcp-extensions");
-		try {
-			const mcpStat = fs.statSync(mcpExtDir);
-			if (mcpStat.isDirectory()) {
-				dockerArgs.push("-v", `${toDockerPath(mcpExtDir)}:/mcp-extensions:ro`);
-			}
-		} catch {
-			// MCP extensions dir doesn't exist — skip
-		}
-
-		// Mount system prompt file if present (must be done before image arg)
-		if (this.options.systemPromptPath) {
-			dockerArgs.push("-v", `${toDockerPath(this.options.systemPromptPath)}:/tmp/system-prompt:ro`);
-		}
-
-		// Image name (must come after all -v/-e flags)
-		dockerArgs.push(image);
+		const dockerArgs = buildDockerRunArgs({
+			mode: "cold",
+			image,
+			workspaceDir: projectDir,
+			label: projectDirHash,
+			sandboxMounts: this.options.sandboxMounts,
+			sandboxCredentials: this.options.sandboxCredentials,
+			gatewayUrl: this.options.gatewayUrl,
+			gatewayToken: this.options.gatewayToken,
+			sandboxProxyPort: this.options.sandboxProxyPort,
+			sessionEnv,
+			systemPromptPath: this.options.systemPromptPath,
+		});
 
 		// Command: node + agent CLI path remapped to container
 		dockerArgs.push("node", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js");
@@ -411,20 +335,10 @@ export class RpcBridge {
 		for (let i = 0; i < agentArgs.length; i++) {
 			const arg = agentArgs[i];
 			if (arg === "--cwd") {
-				const hostCwd = (agentArgs[i + 1] || "").replace(/\\/g, "/");
-				// Pool containers mount: projectDir → /workspace, projectDir-wt/ → /worktrees
-				if (isPoolMode && this.options.poolProjectDir) {
-					const poolDir = this.options.poolProjectDir.replace(/\\/g, "/").replace(/\/$/, "");
-					const wtRoot = poolDir + "-wt";
-					if (hostCwd.startsWith(wtRoot + "/") || hostCwd === wtRoot) {
-						const relative = hostCwd.substring(wtRoot.length); // includes leading /
-						remappedArgs.push("--cwd", `/worktrees${relative || "/"}`);
-					} else {
-						remappedArgs.push("--cwd", "/workspace");
-					}
-				} else {
-					remappedArgs.push("--cwd", "/workspace");
-				}
+				// SandboxPool: each slot's worktree is mounted as /workspace.
+				// Cold docker run: project dir is mounted as /workspace.
+				// In both cases, CWD maps to /workspace.
+				remappedArgs.push("--cwd", "/workspace");
 				i++; // skip the next arg (the host cwd path)
 			} else if (arg === "--system-prompt") {
 				if (isPoolMode) {
