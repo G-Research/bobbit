@@ -261,13 +261,18 @@ export class SandboxPool {
 		const worktreePath = path.join(this._poolDir, slotName);
 
 		try {
-			// Create git worktree on a detached HEAD from the default branch
-			// Using detached HEAD avoids branch name conflicts between slots
-			await git(
-				["worktree", "add", "--detach", worktreePath, this._defaultBranch],
-				this.options.repoPath,
-				60_000,
-			);
+			// Clone the repo into the slot directory (not a worktree — avoids
+			// absolute path issues in Docker containers where worktree .git
+			// pointers don't resolve). Uses --local for speed (hard-links objects).
+			await execFileAsync("git", [
+				"clone", "--local", "--no-checkout",
+				this.options.repoPath, worktreePath,
+			], {
+				timeout: 60_000,
+				cwd: this.options.repoPath,
+			});
+			// Checkout the default branch
+			await git(["checkout", this._defaultBranch], worktreePath, 30_000);
 
 			// Run worktree setup command if configured
 			if (this.options.worktreeSetupCommand) {
@@ -296,6 +301,8 @@ export class SandboxPool {
 				await this._removeWorktree(worktreePath);
 				return;
 			}
+
+
 
 			const slot: PoolSlot = {
 				containerId,
@@ -334,6 +341,8 @@ export class SandboxPool {
 		args.push("-v", `${toDockerPath(worktreePath)}:/workspace`);
 		args.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
 		args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
+
+
 
 		// Host agent dir
 		const hostAgentDir = globalAgentDir();
@@ -431,17 +440,17 @@ export class SandboxPool {
 		}
 	}
 
-	/** Reset a slot's worktree back to the default branch and clean up. */
+	/** Reset a slot's clone back to the default branch and clean up. */
 	private async _resetSlot(slot: PoolSlot): Promise<void> {
 		const wt = slot.worktreePath;
 		try {
-			// Discard all changes and switch back to detached HEAD on default branch
-			await git(["checkout", "--detach", "--force"], wt, 15_000);
+			// Discard all changes and return to the default branch
+			await git(["checkout", "--force", this._defaultBranch], wt, 15_000);
 			await git(["clean", "-fdx"], wt, 30_000);
-			await git(["fetch", "origin", this._defaultBranch], wt, 30_000);
+			await git(["fetch", "origin"], wt, 30_000);
 			await git(["reset", "--hard", `origin/${this._defaultBranch}`], wt, 15_000);
 
-			// Delete the branch that was checked out (clean up refs)
+			// Delete the branch that was checked out (clean up local refs)
 			if (slot.branch && slot.branch !== this._defaultBranch) {
 				try {
 					await git(["branch", "-D", slot.branch], wt, 5_000);
@@ -469,23 +478,11 @@ export class SandboxPool {
 		await this._removeWorktree(slot.worktreePath);
 	}
 
-	/** Remove a git worktree from disk. */
+	/** Remove a pool slot's cloned repo from disk. */
 	private async _removeWorktree(worktreePath: string): Promise<void> {
 		try {
-			await execFileAsync("git", ["worktree", "remove", "--force", worktreePath], {
-				cwd: this.options.repoPath,
-				timeout: 15_000,
-			});
-		} catch {
-			// If git worktree remove fails, try manual cleanup
-			try {
-				fs.rmSync(worktreePath, { recursive: true, force: true });
-				await execFileAsync("git", ["worktree", "prune"], {
-					cwd: this.options.repoPath,
-					timeout: 10_000,
-				});
-			} catch { /* best effort */ }
-		}
+			fs.rmSync(worktreePath, { recursive: true, force: true });
+		} catch { /* best effort */ }
 	}
 
 	// ── Pool maintenance ───────────────────────────────────────────────────
