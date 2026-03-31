@@ -9,17 +9,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import { stringify, parse } from "yaml";
-import { bobbitConfigDir } from "../bobbit-dir.js";
 import type { GrantPolicy } from "./role-store.js";
-
-const POLICY_FILE = () => path.join(bobbitConfigDir(), "tool-group-policies.yaml");
 
 const VALID_POLICIES = new Set<string>(['always-ask', 'ask-once', 'never-ask', 'never', 'always-allow']);
 
 export class ToolGroupPolicyStore {
+	private readonly policyFile: string;
+
+	constructor(configDir: string) {
+		this.policyFile = path.join(configDir, "tool-group-policies.yaml");
+	}
+
 	/** Read all group policies from disk. */
 	getAll(): Record<string, GrantPolicy> {
-		const filePath = POLICY_FILE();
+		const filePath = this.policyFile;
 		try {
 			const raw = fs.readFileSync(filePath, "utf-8");
 			const data = parse(raw);
@@ -51,7 +54,7 @@ export class ToolGroupPolicyStore {
 		} else {
 			all[group] = policy;
 		}
-		const filePath = POLICY_FILE();
+		const filePath = this.policyFile;
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, stringify(all), "utf-8");
 	}

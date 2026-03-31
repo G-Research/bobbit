@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { stringify, parse } from "yaml";
-import { bobbitConfigDir } from "../bobbit-dir.js";
 
 /** Grant policy controlling what happens when an agent uses an ungranted MCP tool. */
 export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask' | 'always-allow' | 'never';
@@ -35,9 +34,6 @@ function deriveAllowedTools(toolPolicies?: Record<string, GrantPolicy>): string[
 		.map(([k]) => k);
 }
 
-/** roles/ directory in .bobbit/config — version controlled */
-const ROLES_DIR = path.join(bobbitConfigDir(), "roles");
-
 /**
  * File-backed role store. Each role is a YAML file in roles/<name>.yaml
  * at the repo root. Version controlled — edits via the UI write back
@@ -45,26 +41,28 @@ const ROLES_DIR = path.join(bobbitConfigDir(), "roles");
  */
 export class RoleStore {
 	private roles: Map<string, Role> = new Map();
+	private readonly rolesDir: string;
 
-	constructor() {
-		fs.mkdirSync(ROLES_DIR, { recursive: true });
+	constructor(configDir: string) {
+		this.rolesDir = path.join(configDir, "roles");
+		fs.mkdirSync(this.rolesDir, { recursive: true });
 		this.loadAll();
 	}
 
 	private roleFilePath(name: string): string {
-		return path.join(ROLES_DIR, `${name}.yaml`);
+		return path.join(this.rolesDir, `${name}.yaml`);
 	}
 
 	private loadAll(): void {
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(ROLES_DIR, { withFileTypes: true });
+			entries = fs.readdirSync(this.rolesDir, { withFileTypes: true });
 		} catch {
 			return;
 		}
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-			const filePath = path.join(ROLES_DIR, entry.name);
+			const filePath = path.join(this.rolesDir, entry.name);
 			try {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
