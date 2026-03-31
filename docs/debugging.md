@@ -92,9 +92,13 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 ## Search index
 
 - `.bobbit/state/search.db` is a rebuildable cache — delete and restart to rebuild
+- Schema version is 2 (includes `staff_fts` table). Version mismatch triggers automatic rebuild on next server start
 - Check `better-sqlite3` loaded correctly (native addon)
 - FTS5 on 10K docs < 10ms — slow search means network/serialization bottleneck
 - Purged sessions still showing? Check `purgeOneSession()` calls index cleanup
+- Staff not appearing in search? Verify `StaffManager` has `searchIndex` dependency and calls `indexStaff()` on create/update
+- Sidebar filter not working? Check `state.searchContentMode` — `false` = client-side title filter, `true` = FTS API call. Toggle state persisted in `localStorage`
+- Full search page (`#/search`) manages its own state — independent from sidebar search
 
 ## Paginated archives
 

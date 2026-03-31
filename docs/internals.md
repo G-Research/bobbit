@@ -37,13 +37,32 @@ All tool access uses a **grant policy** system. Every tool resolves to one of fo
 
 SQLite FTS5 via `better-sqlite3`. Index at `.bobbit/state/search.db` (rebuildable cache).
 
-**Key files:** `search-index.ts`, `message-extractor.ts`, `SearchBox.ts`, `SearchResults.ts`.
+**Key files:** `search-index.ts`, `message-extractor.ts`, `SearchBox.ts`, `SearchResults.ts`, `search-page.ts`.
 
-**Indexed:** Goals (title, spec), sessions (title, role), messages (text blocks, tool call names).
+**Indexed:** Goals (title, spec), sessions (title, role), messages (text blocks, tool call names), staff agents (name, description).
 
-**Indexing:** Incremental via store hooks + `RpcBridge`. Full rebuild on first run or schema version mismatch. Purge syncs on session delete.
+**FTS5 tables:** `goals_fts`, `sessions_fts`, `messages_fts`, `staff_fts`. Schema version is 2 (bumped from 1 when staff indexing was added). Version mismatch triggers automatic rebuild.
 
-**API:** `GET /api/search?q=<query>&limit=20&offset=0&type=all|goals|sessions|messages`
+**Indexing:** Incremental via store hooks + `RpcBridge`. Staff indexing hooks live in `StaffManager` — index on create/update, remove on delete. Full rebuild on first run or schema version mismatch; `rebuildFromStores()` accepts `StaffStore` to include staff in the rebuild.
+
+**API:** `GET /api/search?q=<query>&limit=20&offset=0&type=all|goals|sessions|messages|staff`
+
+### Dual-mode sidebar search
+
+The sidebar search box operates in two modes, controlled by a "Search Content" toggle that appears below the input when a query is active:
+
+- **Title-only (default):** Client-side instant filtering. Filters goals by title, sessions by title, and staff by name using case-insensitive substring matching. No API call. The sidebar structure (goal groups, ungrouped sessions, staff, archived) is preserved — non-matching entries are hidden.
+- **Content search:** Uses `GET /api/search` (FTS5) and maps results back to sidebar entries by ID. Message matches resolve to their parent session/goal. 200ms debounce on input.
+
+State field `searchContentMode` (persisted in `localStorage`) tracks which mode is active.
+
+### Full search page
+
+Route: `#/search` (with optional `?q=<query>` parameter). Accessible via the "Full Search" button in the sidebar controls row or directly by URL.
+
+Features: large auto-focused input, type filter toggles (Goals, Sessions, Staff, Messages), grouped results with snippets and `<b>` match highlighting, relative timestamps, archived badges, and "Load More" pagination. Clicking a result navigates to the relevant goal dashboard, session, or staff edit page.
+
+**Key file:** `search-page.ts` manages its own local state (query, results, type filters, pagination offset).
 
 **Paginated archives:**
 - `GET /api/goals?archived=true&limit=50&after=<cursor>` — cursor is `archivedAt` timestamp
