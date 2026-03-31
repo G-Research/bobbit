@@ -30,7 +30,7 @@ import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
-import { bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
 import { SandboxProxy } from "./sandbox-proxy.js";
 import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
 import {
@@ -324,7 +324,9 @@ export class SessionManager {
 
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.sandboxImage = sandboxImage;
-		bridgeOptions.sandboxCredentials = credentials;
+		// Auto-resolve API credentials from host auth system, then overlay manual overrides
+		const autoCredentials = resolveHostApiCredentials(this.preferencesStore);
+		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
 		bridgeOptions.sandboxMounts = validatedMounts;
 		bridgeOptions.sandboxProxyPort = proxyPort;
 
@@ -2889,4 +2891,91 @@ export class SessionManager {
 			console.error("[search] Failed to close search index:", err);
 		}
 	}
+}
+
+// ── Sandbox credential auto-resolution ─────────────────────────────
+
+/**
+ * Map of auth.json provider keys → env vars that pi-coding-agent checks.
+ * OAuth providers use their OAuth token env var; API-key providers use the standard key var.
+ */
+const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any) => string | undefined }> = {
+	anthropic: {
+		envVar: "ANTHROPIC_OAUTH_TOKEN",
+		extractKey: (cred) => cred?.type === "oauth" ? cred.access : cred?.type === "api_key" ? cred.key : undefined,
+	},
+	openai: {
+		envVar: "OPENAI_API_KEY",
+		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
+	},
+	google: {
+		envVar: "GEMINI_API_KEY",
+		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
+	},
+	xai: {
+		envVar: "XAI_API_KEY",
+		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
+	},
+	groq: {
+		envVar: "GROQ_API_KEY",
+		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
+	},
+	mistral: {
+		envVar: "MISTRAL_API_KEY",
+		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
+	},
+	openrouter: {
+		envVar: "OPENROUTER_API_KEY",
+		extractKey: (cred) => cred?.type === "api_key" ? cred.key : undefined,
+	},
+};
+
+/**
+ * Resolve API credentials from the host's auth.json + env vars + preferences store.
+ * Returns a map of env var names → values to inject into the sandbox container.
+ * Manual sandbox_credentials always take precedence (merged on top by caller).
+ */
+function resolveHostApiCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null): Record<string, string> {
+	const result: Record<string, string> = {};
+
+	// 1. Read auth.json
+	let authData: Record<string, any> | null = null;
+	try {
+		const authPath = globalAuthPath();
+		if (fs.existsSync(authPath)) {
+			authData = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+		}
+	} catch {
+		// Ignore read errors
+	}
+
+	for (const [provider, { envVar, extractKey }] of Object.entries(PROVIDER_ENV_MAP)) {
+		// Skip if the host env var is already set (will be inherited by docker)
+		// Actually docker exec doesn't inherit host env — we need to pass explicitly
+		// But check host env as a credential source
+		const hostEnvVal = process.env[envVar];
+		if (hostEnvVal) {
+			result[envVar] = hostEnvVal;
+			continue;
+		}
+
+		// Check preferences store (migrated provider keys from UI)
+		if (prefs) {
+			const storedKey = prefs.get(`providerKey.${provider}`) as string | undefined;
+			if (storedKey) {
+				result[envVar] = storedKey;
+				continue;
+			}
+		}
+
+		// Check auth.json
+		if (authData && authData[provider]) {
+			const key = extractKey(authData[provider]);
+			if (key) {
+				result[envVar] = key;
+			}
+		}
+	}
+
+	return result;
 }

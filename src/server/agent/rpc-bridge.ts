@@ -8,7 +8,7 @@ import { buildDockerRunArgs } from "./docker-args.js";
 
 /** Redact sensitive env vars (-e KEY=VALUE) from Docker arg arrays for logging. */
 function redactDockerArgs(args: string[]): string {
-	const sensitiveKeys = /^(BOBBIT_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|AWS_SECRET)/i;
+	const sensitiveKeys = /^(BOBBIT_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|AWS_SECRET|.*_API_KEY|.*_OAUTH_TOKEN|.*_ACCESS_KEY)/i;
 	return args.map((a, i) => {
 		if (i > 0 && args[i - 1] === "-e" && sensitiveKeys.test(a)) {
 			return a.replace(/=.*/, "=<REDACTED>");
@@ -343,6 +343,14 @@ export class RpcBridge {
 			execArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
 		}
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
+
+		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
+		if (this.options.sandboxCredentials) {
+			for (const [key, value] of Object.entries(this.options.sandboxCredentials)) {
+				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+				execArgs.push("-e", `${key}=${value}`);
+			}
+		}
 
 		execArgs.push(
 			containerId,
