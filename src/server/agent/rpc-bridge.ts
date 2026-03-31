@@ -522,10 +522,16 @@ export function resolveAgentModulesDir(): string {
 	const pkgRoot = path.resolve(path.dirname(mainPath), "..");
 	// We need the parent of @mariozechner (= node_modules dir)
 	// so that /node_modules/@mariozechner/pi-coding-agent/... works
-	return path.resolve(pkgRoot, "..", "..");
+	const nodeModulesDir = path.resolve(pkgRoot, "..", "..");
+
+	// Prefer .node_modules_host if it exists — avoids Docker bind-mount locking
+	// the dev node_modules on Windows, which blocks Vite and other host tools.
+	const hostCopy = path.join(path.dirname(nodeModulesDir), ".node_modules_host");
+	if (fs.existsSync(path.join(hostCopy, "@mariozechner", "pi-coding-agent"))) {
+		return hostCopy;
+	}
+	return nodeModulesDir;
 }
-
-
 
 /** Resolve the pi-coding-agent cli.js path from the installed package */
 function findAgentCli(): string {
