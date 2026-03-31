@@ -192,6 +192,24 @@ export class ContainerPool {
 				return;
 			}
 
+			// Copy agent modules into the named volume via docker cp.
+			// This avoids bind-mounting the host's node_modules (which locks it
+			// on Windows, breaking Vite and npm).
+			const agentModulesDir = resolveAgentModulesDir();
+			try {
+				await execFileAsync("docker", [
+					"cp", `${agentModulesDir}/.`, `${containerId}:/node_modules/`,
+				], {
+					timeout: 60_000,
+					env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+				});
+			} catch (cpErr) {
+				console.warn(`[container-pool] docker cp agent modules failed:`, cpErr);
+				// Kill the container — it's unusable without agent modules
+				try { await execFileAsync("docker", ["rm", "-f", containerId]); } catch {}
+				return;
+			}
+
 			const container: PoolContainer = {
 				id: containerId,
 				shortId: containerId.substring(0, 12),
@@ -210,7 +228,6 @@ export class ContainerPool {
 	/** Build docker run -d args for a pool container */
 	private _buildDockerArgs(): string[] {
 		const { projectDir, image } = this.options;
-		const agentModulesDir = resolveAgentModulesDir();
 		const toolsDir = TOOLS_DIR;
 
 		const args: string[] = [
@@ -220,9 +237,12 @@ export class ContainerPool {
 			"--label", "bobbit-pool-version=1",
 		];
 
-		// Bind mounts (identical to rpc-bridge spawnDocker)
+		// Bind mounts
 		args.push("-v", `${toDockerPath(projectDir)}:/workspace`);
-		args.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
+		// Agent modules: use a named volume instead of bind-mounting the host's
+		// node_modules, which locks it on Windows and breaks Vite/npm.
+		// The volume is populated via docker cp after container creation.
+		args.push("-v", `bobbit-agent-modules-${this.label}:/node_modules`);
 		args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
 		// Mount the worktree root so goal worktrees are accessible inside pool containers.
