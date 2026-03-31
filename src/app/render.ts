@@ -331,7 +331,7 @@ function goalPreviewPanel() {
 			spec: state.previewSpec,
 			workflowId,
 			reattemptOf: reattemptGoalId || undefined,
-			sandboxed: sandboxed || undefined,
+			sandboxed,
 		});
 
 		// If this is a re-attempt, archive the old goal and link the new one
@@ -1556,7 +1556,7 @@ function goalProposalPanel() {
 			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 				spec: _proposalSpec,
 				workflowId: _proposalWorkflowId || undefined,
-				sandboxed: sandboxed || undefined,
+				sandboxed,
 			});
 			state.activeGoalProposal = null;
 			_proposalInitializedFrom = null;

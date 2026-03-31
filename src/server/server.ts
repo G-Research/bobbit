@@ -40,6 +40,8 @@ import { getAllConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
 import { ContainerPool } from "./agent/container-pool.js";
 import { SandboxPool } from "./agent/sandbox-pool.js";
+import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
+import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -214,6 +216,7 @@ export function createGateway(config: GatewayConfig) {
 	const groupPolicyStore = new ToolGroupPolicyStore();
 	const gateStore = new GateStore();
 	const workflowStore = new WorkflowStore();
+	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
 		systemPromptPath: config.systemPromptPath,
@@ -226,6 +229,7 @@ export function createGateway(config: GatewayConfig) {
 		projectConfigStore,
 		groupPolicyStore,
 	});
+	sessionManager.sandboxTokenStore = sandboxTokenStore;
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
@@ -286,6 +290,7 @@ export function createGateway(config: GatewayConfig) {
 			}
 
 			// Auth check — skipped in localhost mode (only local processes can connect)
+			let sandboxScope: SandboxScope | undefined;
 			if (!isLocalhostMode) {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
@@ -298,15 +303,33 @@ export function createGateway(config: GatewayConfig) {
 					return;
 				}
 
-				if (!token || !validateToken(token, config.authToken)) {
-					if (token) rateLimiter.recordFailure(ip);
+				if (!token) {
 					res.writeHead(401, { "Content-Type": "application/json" });
 					res.end(JSON.stringify({ error: "Unauthorized" }));
 					return;
 				}
+
+				// Admin token first, then sandbox token
+				if (!validateToken(token, config.authToken)) {
+					const scope = sandboxTokenStore.lookup(token);
+					if (!scope) {
+						rateLimiter.recordFailure(ip);
+						res.writeHead(401, { "Content-Type": "application/json" });
+						res.end(JSON.stringify({ error: "Unauthorized" }));
+						return;
+					}
+					sandboxScope = scope;
+				}
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, containerPool, sandboxPool);
+			// Enforce sandbox route guard
+			if (sandboxScope && !isSandboxAllowed(url.pathname, req.method || "GET", sandboxScope)) {
+				res.writeHead(403, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "Forbidden: sandbox token cannot access this endpoint" }));
+				return;
+			}
+
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, containerPool, sandboxPool, sandboxScope, sandboxTokenStore);
 
 			return;
 		}
@@ -411,7 +434,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer);
+			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore);
 		});
 	});
 
@@ -681,6 +704,8 @@ async function handleApiRoute(
 	broadcastToAll: (event: any) => void,
 	containerPool: ContainerPool | null,
 	sandboxPool: SandboxPool | null,
+	sandboxScope?: SandboxScope,
+	sandboxTokenStore?: SandboxTokenStore,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -1027,6 +1052,10 @@ async function handleApiRoute(
 					title: body.title,
 					context: body.context,
 				});
+				// Register delegate as child in parent's sandbox scope
+				if (sandboxScope && sandboxTokenStore) {
+					sandboxTokenStore.addChild(sandboxScope.sessionId, session.id);
+				}
 				json({
 					id: session.id,
 					cwd: session.cwd,
@@ -1124,7 +1153,9 @@ async function handleApiRoute(
 		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
 
 		// ── Sandbox validation ──
-		const sandboxed = body?.sandboxed === true;
+		// Sandbox-scoped tokens MUST create sandboxed sessions — prevent escape
+		let sandboxed = body?.sandboxed === true;
+		if (sandboxScope) sandboxed = true;
 		if (sandboxed) {
 			const sandboxConfig = projectConfigStore.get("sandbox") || "none";
 			if (sandboxConfig !== "docker") {
@@ -1215,7 +1246,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const sandboxed = body.sandboxed === true ? true : undefined;
+			const sandboxed = body.sandboxed === true;
 			const goal = await sessionManager.goalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,

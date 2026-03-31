@@ -371,7 +371,7 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
 		if (reattemptOf) body.reattemptOf = reattemptOf;
-		if (sandboxed) body.sandboxed = true;
+		if (sandboxed !== undefined) body.sandboxed = !!sandboxed;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),
