@@ -51,6 +51,9 @@ function compositeKey(goalId: string, gateId: string): string {
 export class GateStore {
 	private gates: Map<string, GateState> = new Map();
 
+	/** Optional callback invoked when any gate status changes (for bumping goal generation). */
+	onStatusChange?: (goalId: string, gateId: string) => void;
+
 	constructor() {
 		this.load();
 	}
@@ -131,6 +134,7 @@ export class GateStore {
 		gate.status = status;
 		gate.updatedAt = Date.now();
 		this.save();
+		this.onStatusChange?.(goalId, gateId);
 	}
 
 	updateGateContent(goalId: string, gateId: string, content: string, version: number): void {

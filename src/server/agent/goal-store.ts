@@ -113,6 +113,11 @@ export class GoalStore {
 	/** Optional callback invoked after any goal mutation (put/update/archive). */
 	onIndexUpdate?: (goal: PersistedGoal) => void;
 
+	/** Bump generation without mutating goal data (e.g. when gate status changes). */
+	bumpGeneration(): void {
+		this.generation++;
+	}
+
 	put(goal: PersistedGoal): void {
 		this.generation++;
 		this.goals.set(goal.id, goal);

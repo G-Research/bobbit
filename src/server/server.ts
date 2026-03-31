@@ -230,6 +230,10 @@ export function createGateway(config: GatewayConfig) {
 		groupPolicyStore,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
+	// Wire gate status changes to bump goal generation so the UI polling detects them
+	gateStore.onStatusChange = () => {
+		sessionManager.goalManager.getGoalStore().bumpGeneration();
+	};
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager();
 	// Wire staff into search index for indexing and rebuilds
@@ -1212,8 +1216,7 @@ async function handleApiRoute(
 			const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10) || 50), 200);
 			const afterParam = url.searchParams.get("after");
 			const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
-			const goalStore = (sessionManager.goalManager as any).store as import("./agent/goal-store.js").GoalStore;
-			const page = goalStore.listArchivedGoalsPaginated(limit, afterCursor);
+			const page = sessionManager.goalManager.getGoalStore().listArchivedGoalsPaginated(limit, afterCursor);
 			json({ goals: page.goals, total: page.total, hasMore: page.hasMore, nextCursor: page.nextCursor });
 			return;
 		}

@@ -206,6 +206,11 @@ export class GoalManager {
 		return this.store.getGeneration();
 	}
 
+	/** Expose the underlying store for cross-cutting concerns (e.g. gate status bumping generation). */
+	getGoalStore(): GoalStore {
+		return this.store;
+	}
+
 	listGoals(): PersistedGoal[] {
 		return this.store.getAll();
 	}
