@@ -117,7 +117,7 @@ export class RpcBridge {
 		} else if (this.options.sandboxed) {
 			this.process = this.spawnDocker(cliPath, args);
 		} else {
-			this.process = spawn("node", [cliPath, ...args], {
+			this.process = spawn("node", ["--disable-warning=DEP0123", cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
 				env: { ...process.env, BOBBIT_DIR: bobbitDir(), NODE_TLS_REJECT_UNAUTHORIZED: "0", ...this.options.env },
@@ -225,6 +225,26 @@ export class RpcBridge {
 
 	getState() {
 		return this.sendCommand({ type: "get_state" });
+	}
+
+	/**
+	 * Wait for the agent process to become responsive.
+	 * Sends get_state pings with short timeouts until one succeeds.
+	 * Used after spawning Docker containers where initialization can take 30-60s.
+	 */
+	async waitForReady(overallTimeoutMs = 90_000): Promise<void> {
+		const start = Date.now();
+		const pingInterval = 2_000;
+		while (Date.now() - start < overallTimeoutMs) {
+			try {
+				await this.sendCommand({ type: "get_state" }, 5_000);
+				return; // Agent responded — it's ready
+			} catch {
+				if (!this.process) throw new Error("Agent process exited during initialization");
+				await new Promise((r) => setTimeout(r, pingInterval));
+			}
+		}
+		throw new Error(`Agent did not become ready within ${overallTimeoutMs}ms`);
 	}
 
 	setModel(provider: string, modelId: string) {
@@ -354,7 +374,7 @@ export class RpcBridge {
 
 		execArgs.push(
 			containerId,
-			"node", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+			"node", "--disable-warning=DEP0123", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
 			...this.remapArgsForContainer(agentArgs, true),
 		);
 
