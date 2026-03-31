@@ -76,28 +76,32 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
-async function _fetchPrStatus(cwd: string, branch?: string): Promise<any | null> {
+async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
-	try {
-		const branchArg = branch ? ` ${branch}` : "";
-		const { stdout } = await execAsync(`gh pr view${branchArg} --json state,url,number,title,mergeable,headRefName,reviewDecision`, {
-			cwd,
-			encoding: "utf-8",
-			timeout: 10000,
-		});
-		const pr = JSON.parse(stdout);
-		const viewerIsAdmin = await getViewerIsAdmin(cwd);
-		const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
-		const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
-		_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
-		return data;
-	} catch {
-		_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
-		return null;
+	const ghFields = "--json state,url,number,title,mergeable,headRefName,reviewDecision";
+	const branchArg = branch ? ` ${branch}` : "";
+	const cmd = `gh pr view${branchArg} ${ghFields}`;
+
+	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
+	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
+	for (const dir of cwdsToTry) {
+		try {
+			const { stdout } = await execAsync(cmd, { cwd: dir, encoding: "utf-8", timeout: 10000 });
+			const pr = JSON.parse(stdout);
+			const viewerIsAdmin = await getViewerIsAdmin(dir);
+			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
+			const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
+			_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
+			return data;
+		} catch {
+			// Try next cwd
+		}
 	}
+	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
+	return null;
 }
 
-async function getCachedPrStatus(cwd: string, branch?: string): Promise<any | null> {
+async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	const cached = _prCache.get(cacheKey);
 	if (cached && Date.now() - cached.ts < cached.ttl) return cached.data;
@@ -105,7 +109,7 @@ async function getCachedPrStatus(cwd: string, branch?: string): Promise<any | nu
 	const existing = _prInFlight.get(cacheKey);
 	if (existing) return existing;
 
-	const p = _fetchPrStatus(cwd, branch);
+	const p = _fetchPrStatus(cwd, branch, fallbackCwd);
 	_prInFlight.set(cacheKey, p);
 	try { return await p; } finally { _prInFlight.delete(cacheKey); }
 }
@@ -2429,7 +2433,9 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		const pr = await getCachedPrStatus(cwd, goal.branch);
+		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
+		// (e.g. pruned worktree), gh can still query by branch name from the main repo.
+		const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
 		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else { json({ error: "No PR found" }, 404); }
 		return;
 	}
@@ -3172,7 +3178,7 @@ async function handleApiRoute(
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged
 		const goalBranch = session.goalId ? sessionManager.goalManager.getGoal(session.goalId)?.branch : undefined;
-		const pr = await getCachedPrStatus(cwd, goalBranch);
+		const pr = await getCachedPrStatus(cwd, goalBranch, process.cwd());
 		if (pr) {
 			const goalId = session.goalId;
 			if (goalId) prStatusStore.set(goalId, pr);
