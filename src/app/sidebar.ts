@@ -665,15 +665,41 @@ export function renderSetupBanner(mobile = false) {
 // SEARCH HANDLERS
 // ============================================================================
 
+/** Tracks whether archived section was auto-opened by search (vs manual toggle). */
+let _archivedBySearch = false;
+
+/** Ensure archived data is loaded and the section is visible for search filtering. */
+function _ensureArchivedForSearch(): void {
+	if (!state.showArchived) {
+		state.showArchived = true;
+		_archivedBySearch = true;
+	}
+	if (state.archivedSessions.length === 0) {
+		import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
+	}
+}
+
+/** If archived was auto-opened by search, close it. */
+function _revertArchivedIfSearchOpened(): void {
+	if (_archivedBySearch) {
+		state.showArchived = false;
+		_archivedBySearch = false;
+		resetArchivedExpandState();
+		import("./api.js").then(m => m.clearArchivedSessionsState());
+	}
+}
+
 async function _handleSearchInput(query: string): Promise<void> {
 	state.searchQuery = query;
 	if (!query.trim()) {
 		state.searchResults = null;
 		state.searchMatchIds = null;
 		state.searchLoading = false;
+		_revertArchivedIfSearchOpened();
 		renderApp();
 		return;
 	}
+	_ensureArchivedForSearch();
 	if (!state.searchContentMode) {
 		// Client-side title filter — no API call needed
 		state.searchLoading = false;
@@ -683,10 +709,6 @@ async function _handleSearchInput(query: string): Promise<void> {
 	// Content search mode — use FTS API
 	state.searchLoading = true;
 	renderApp();
-	// Ensure archived data is loaded so sidebar can filter it
-	if (state.archivedSessions.length === 0) {
-		import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
-	}
 	const data = await searchApi(query);
 	// Guard against stale responses
 	if (state.searchQuery !== query) return;
@@ -717,6 +739,7 @@ function _handleSearchClear(): void {
 	state.searchResults = null;
 	state.searchMatchIds = null;
 	state.searchLoading = false;
+	_revertArchivedIfSearchOpened();
 	renderApp();
 }
 
@@ -962,9 +985,7 @@ export function renderSidebar() {
 									}
 								}
 
-								// Auto-expand archived when search has matches there
-								const hasArchivedMatches = state.searchQuery && (filteredArchivedGoals.length > 0 || filteredStandaloneArchived.length > 0);
-								const showArchivedContent = state.showArchived || hasArchivedMatches;
+								const showArchivedContent = state.showArchived;
 								const standaloneArchived = showArchivedContent ? filteredStandaloneArchived : [];
 
 								return html`
@@ -975,6 +996,7 @@ export function renderSidebar() {
 											style="padding-left:${HEADER_CHEVRON_W}px;"
 											@click=${() => {
 												state.showArchived = !state.showArchived;
+												_archivedBySearch = false; // manual toggle takes precedence
 												localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 												if (state.showArchived) {
 													import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
@@ -1026,12 +1048,11 @@ export function renderSidebar() {
 					class="flex items-center gap-1.5 px-2 py-2 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
 					@click=${() => {
 						state.showArchived = !state.showArchived;
+						_archivedBySearch = false; // manual toggle takes precedence
 						localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 						if (state.showArchived) {
-							state.showArchived = true;
-							import("./api.js").then(m => m.fetchArchivedSessions());
+							import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
 						} else {
-							state.showArchived = false;
 							resetArchivedExpandState();
 							import("./api.js").then(m => m.clearArchivedSessionsState());
 						}
