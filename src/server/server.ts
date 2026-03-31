@@ -37,7 +37,7 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
 import { SandboxPool } from "./agent/sandbox-pool.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
@@ -470,13 +470,16 @@ export function createGateway(config: GatewayConfig) {
 				try {
 					const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
 
-					// Auto-build image if missing and Dockerfile exists
+					// Auto-build or rebuild image if missing or stale
 					const imageStatus = await checkDockerAvailability(imageName);
 					if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
 						const buildResult = await buildSandboxImage(imageName, config.defaultCwd);
 						if (!buildResult.success) {
 							console.error(`[sandbox] Auto-build failed, continuing without sandbox pool`);
 						}
+					} else if (imageStatus.imageExists === true) {
+						// Ensure baked-in pi-coding-agent version matches host
+						await ensureImageAgentVersion(imageName, config.defaultCwd);
 					}
 
 					const { getRepoRoot, isGitRepo } = await import("./skills/git.js");

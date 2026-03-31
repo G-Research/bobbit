@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
-import { toDockerPath, resolveAgentModulesDir } from "./rpc-bridge.js";
+import { toDockerPath } from "./rpc-bridge.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -65,7 +65,6 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		sessionEnv, systemPromptPath,
 	} = config;
 
-	const agentModulesDir = resolveAgentModulesDir();
 	const toolsDir = TOOLS_DIR;
 
 	const args: string[] = mode === "pool"
@@ -85,7 +84,8 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	// ── Bind mounts ────────────────────────────────────────────────────
 	args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);
-	args.push("-v", `${toDockerPath(agentModulesDir)}:/node_modules:ro`);
+	// pi-coding-agent is baked into the Docker image (avoids 20x slower
+	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
 	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
 	// Mount sibling worktree root
