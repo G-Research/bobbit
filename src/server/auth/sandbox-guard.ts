@@ -62,6 +62,17 @@ export function isSandboxAllowed(
 		}
 	}
 
+	// ── Task endpoints (tool extensions use /api/tasks/:id directly) ──
+	const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(\/.*)?$/);
+	if (taskMatch) {
+		const subpath = taskMatch[2] || "";
+		if (m === "GET" && subpath === "") return true;        // task info read-back
+		if (m === "PUT" && subpath === "") return true;        // task_update fields
+		if (m === "POST" && subpath === "/assign") return true;     // task assignment
+		if (m === "POST" && subpath === "/transition") return true; // task state change
+		return false;
+	}
+
 	// ── Everything else: BLOCKED ──────────────────────────────────────
 	return false;
 }

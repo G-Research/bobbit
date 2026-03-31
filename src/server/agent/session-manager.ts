@@ -1177,7 +1177,11 @@ export class SessionManager {
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
-			const effectiveAllowed = overrideAllowedTools ?? (role ? role.allowedTools : []);
+			let effectiveAllowed = overrideAllowedTools ?? (role ? role.allowedTools : []);
+			// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
+			if (ps.sandboxed && effectiveAllowed.length > 0) {
+				effectiveAllowed = effectiveAllowed.filter(t => t !== "bash_bg");
+			}
 			if (effectiveAllowed.length > 0) {
 				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowed, role, this.toolManager, this.groupPolicyStore) : undefined;
 				const activation = computeToolActivationArgs(effectiveAllowed, this.toolManager, ps.cwd, mcpExtPaths);
@@ -1495,6 +1499,11 @@ export class SessionManager {
 			const goal = goalId ? this.goalManager.getGoal(goalId) : undefined;
 			const goalSpec = goal?.spec;
 
+			// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
+			if (opts?.sandboxed && effectiveAllowedTools) {
+				effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
+			}
+
 			// Build tool restrictions text if allowedTools is specified and non-empty
 			let toolRestrictionsText: string | undefined;
 			if (effectiveAllowedTools && effectiveAllowedTools.length > 0) {
@@ -1558,10 +1567,6 @@ export class SessionManager {
 
 		// ── Docker sandbox wiring ──
 		if (opts?.sandboxed) {
-			// Exclude bash_bg — BgProcessManager spawns on host, bypassing the container
-			if (effectiveAllowedTools) {
-				effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
-			}
 			const applied = await this.applySandboxWiring(bridgeOptions, id, { sandboxClaim: opts.sandboxClaim });
 			if (!applied) {
 				throw new Error("Sandbox is not configured as docker");
