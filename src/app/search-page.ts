@@ -4,7 +4,7 @@
 
 import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "@mariozechner/mini-lit";
-import { Search, Loader2, Archive, Goal as GoalIcon, MessagesSquare, MessageSquare, Users, Bot } from "lucide";
+import { Search, Loader2, Archive, Goal as GoalIcon, MessagesSquare, MessageSquare, Bot } from "lucide";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { searchApi } from "./api.js";
 import { renderApp } from "./state.js";
