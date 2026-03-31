@@ -58,8 +58,10 @@ let projectSaveStatus: "" | "saving" | "saved" | "error" = "";
 let projectNewEntries: { key: string; value: string }[] = [];
 
 // ── Docker Sandbox section state ──
-let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean } | null = null;
+let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; dockerfileExists?: boolean; buildCommand?: string; configured: boolean } | null = null;
 let sandboxStatusLoaded = false;
+let sandboxBuildInProgress = false;
+let sandboxBuildError = "";
 let sandboxCredEntries: { key: string; value: string }[] = [];
 let sandboxMountEntries: string[] = [];
 
@@ -1069,7 +1071,46 @@ function renderSandboxSection(inputClass: string) {
 								${sandboxStatusLocal.imageExists !== undefined
 									? sandboxStatusLocal.imageExists
 										? html`<span class="text-xs text-muted-foreground ml-2">Image "${imageName}": found</span>`
-										: html`<span class="text-xs text-orange-500 ml-2">Image "${imageName}": not found</span>`
+										: html`<span class="text-xs text-orange-500 ml-2">Image "${imageName}": not found</span>
+											${sandboxStatusLocal!.buildCommand ? html`
+												<div class="flex flex-col gap-1 ml-2">
+													<div class="flex items-center gap-2">
+														<code class="text-xs bg-secondary px-1.5 py-0.5 rounded font-mono">${sandboxStatusLocal!.buildCommand}</code>
+														<button
+															class="text-xs px-2 py-0.5 rounded border border-border hover:bg-secondary transition-colors disabled:opacity-50"
+															?disabled=${sandboxBuildInProgress}
+															@click=${async () => {
+																sandboxBuildInProgress = true;
+																sandboxBuildError = "";
+																renderApp();
+																try {
+																	const resp = await fetch("/api/sandbox-image/build", {
+																		method: "POST",
+																		headers: { "Authorization": "Bearer " + state.token }
+																	});
+																	let result: any = {};
+																	try { result = await resp.json(); } catch (_e) { /* non-JSON response */ }
+																	if (resp.ok && result.success) {
+																		sandboxBuildInProgress = false;
+																		sandboxStatusLoaded = false;
+																		loadSandboxStatus();
+																	} else {
+																		sandboxBuildInProgress = false;
+																		sandboxBuildError = result.error || "Build failed";
+																		renderApp();
+																	}
+																} catch (e: any) {
+																	sandboxBuildInProgress = false;
+																	sandboxBuildError = e.message || "Build failed";
+																	renderApp();
+																}
+															}}
+														>${sandboxBuildInProgress ? "Building..." : "Build Image"}</button>
+													</div>
+													<span class="text-xs text-muted-foreground">Server restart required after build for container pool.</span>
+													${sandboxBuildError ? html`<span class="text-xs text-red-500">${sandboxBuildError}</span>` : ""}
+												</div>
+											` : ""}`
 									: ""}
 							`
 							: html`
