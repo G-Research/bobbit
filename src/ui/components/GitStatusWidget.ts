@@ -37,11 +37,17 @@ export class GitStatusWidget extends LitElement {
     @state() private _diffContent: string | null = null;
     @state() private _diffError: string | null = null;
 
+    @state() private _commitsLoading = false;
+    @state() private _commits: Array<{sha:string;shortSha:string;message:string;author:string;timestamp:string;filesChanged:number;insertions:number;deletions:number}> = [];
+    @state() private _commitsError: string | null = null;
+
     private _modalEl: HTMLElement | null = null;
+    private _commitsModalEl: HTMLElement | null = null;
 
     private _onEscapeKey = (e: KeyboardEvent) => {
-        if (e.key === 'Escape' && this._modalEl) {
-            this._closeModal();
+        if (e.key === 'Escape') {
+            if (this._commitsModalEl) this._closeCommitsModal();
+            else if (this._modalEl) this._closeModal();
         }
     };
 
@@ -77,6 +83,7 @@ export class GitStatusWidget extends LitElement {
         document.removeEventListener('click', this._onDocumentClick, true);
         this._removeDropdown();
         this._removeModal();
+        this._removeCommitsModal();
     }
 
     private _removeDropdown() {
@@ -143,7 +150,7 @@ export class GitStatusWidget extends LitElement {
                 return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} ahead, ${this.behind} behind remote</span> ${this._renderPullButton()}`;
             }
             if (this.ahead > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
+                return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits(); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
             }
             if (this.behind > 0) {
                 return html`<span class="text-amber-600 dark:text-amber-400">${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span> ${this._renderPullButton()}`;
@@ -159,7 +166,7 @@ export class GitStatusWidget extends LitElement {
             return html`<span class="text-amber-600 dark:text-amber-400">local only — not pushed</span>`;
         }
         if (this.ahead > 0) {
-            return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
+            return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits(); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
         }
         return html`<span class="text-green-600 dark:text-green-400">pushed to remote branch</span>`;
     }
@@ -468,6 +475,126 @@ export class GitStatusWidget extends LitElement {
             this._modalEl.remove();
             this._modalEl = null;
         }
+    }
+
+    private async _fetchCommits() {
+        this._commitsLoading = true;
+        this._commits = [];
+        this._commitsError = null;
+        this._showCommitsModal();
+
+        const base = this.sessionId
+            ? `/api/sessions/${this.sessionId}/commits`
+            : `/api/goals/${this.goalId}/commits`;
+        try {
+            const headers: Record<string, string> = {};
+            if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+            const resp = await fetch(base, { headers });
+            if (!resp.ok) {
+                const body = await resp.json().catch(() => ({}));
+                this._commitsError = (body as Record<string, string>).error || `HTTP ${resp.status}`;
+            } else {
+                const body = await resp.json();
+                this._commits = (body as Record<string, unknown>).commits as typeof this._commits || [];
+            }
+        } catch (err) {
+            this._commitsError = String(err);
+        }
+        this._commitsLoading = false;
+        this._renderCommitsModal();
+    }
+
+    private _showCommitsModal() {
+        this._removeCommitsModal();
+        this._commitsModalEl = document.createElement('div');
+        this._commitsModalEl.id = 'git-commits-modal';
+        document.body.appendChild(this._commitsModalEl);
+        document.addEventListener('keydown', this._onEscapeKey);
+        this._renderCommitsModal();
+    }
+
+    private _renderCommitsModal() {
+        if (!this._commitsModalEl) return;
+
+        let body;
+        if (this._commitsLoading) {
+            body = html`<div class="flex items-center gap-2 text-muted-foreground p-8">
+                <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>
+                Loading commits\u2026
+            </div>`;
+        } else if (this._commitsError) {
+            body = html`<div class="p-8" style="color:var(--destructive)">${this._commitsError}</div>`;
+        } else if (this._commits.length === 0) {
+            body = html`<div class="p-8 text-muted-foreground">No unpushed commits</div>`;
+        } else {
+            body = html`<div class="flex flex-col">
+                ${this._commits.map(c => html`
+                    <div class="flex items-start gap-3 px-4 py-3 border-b border-border last:border-b-0 hover:bg-muted/30" style="min-width:0">
+                        <span class="font-mono text-[11px] text-muted-foreground shrink-0 pt-0.5" title=${c.sha}>${c.shortSha}</span>
+                        <div class="flex-1 min-w-0">
+                            <div class="text-sm text-foreground break-words">${c.message}</div>
+                            <div class="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground">
+                                <span>${c.author}</span>
+                                <span>${this._relativeTime(c.timestamp)}</span>
+                                ${c.filesChanged > 0 ? html`<span class="flex items-center gap-1.5">
+                                    <span>${c.filesChanged} file${c.filesChanged !== 1 ? 's' : ''}</span>
+                                    ${c.insertions > 0 ? html`<span class="text-green-600 dark:text-green-400">+${c.insertions}</span>` : nothing}
+                                    ${c.deletions > 0 ? html`<span class="text-red-600 dark:text-red-400">-${c.deletions}</span>` : nothing}
+                                </span>` : nothing}
+                            </div>
+                        </div>
+                    </div>
+                `)}
+            </div>`;
+        }
+
+        render(html`
+            <div style="position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;padding:24px"
+                 @click=${(e: MouseEvent) => { if (e.target === e.currentTarget) this._closeCommitsModal(); }}>
+                <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeCommitsModal()}></div>
+                <div style="position:relative;width:100%;max-width:600px;max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
+                    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
+                        <span class="text-sm font-medium text-foreground">${this._commits.length} Unpushed Commit${this._commits.length !== 1 ? 's' : ''}</span>
+                        <button
+                            style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
+                            class="hover:text-foreground hover:bg-muted/50"
+                            @click=${() => this._closeCommitsModal()}
+                            title="Close"
+                        >&times;</button>
+                    </div>
+                    <div style="flex:1;overflow:auto">${body}</div>
+                </div>
+            </div>
+        `, this._commitsModalEl);
+    }
+
+    private _closeCommitsModal() {
+        this._commits = [];
+        this._commitsError = null;
+        this._commitsLoading = false;
+        this._removeCommitsModal();
+    }
+
+    private _removeCommitsModal() {
+        if (this._commitsModalEl) {
+            document.removeEventListener('keydown', this._onEscapeKey);
+            this._commitsModalEl.remove();
+            this._commitsModalEl = null;
+        }
+    }
+
+    private _relativeTime(timestamp: string): string {
+        const now = Date.now();
+        const then = new Date(timestamp).getTime();
+        const seconds = Math.floor((now - then) / 1000);
+        if (seconds < 60) return 'just now';
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m ago`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.floor(hours / 24);
+        if (days < 30) return `${days}d ago`;
+        return new Date(timestamp).toLocaleDateString();
     }
 
     /** Render the dropdown content into the portaled element */

@@ -3101,6 +3101,57 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	// GET /api/sessions/:id/commits — unpushed commits for session
+	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/commits')) {
+		const id = url.pathname.split('/')[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: 'Session not found' }, 404); return; }
+		const cwd = session.cwd;
+		if (!fs.existsSync(cwd)) { json({ commits: [] }); return; }
+		try {
+			let branch = '';
+			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd); }
+			catch { json({ commits: [] }); return; }
+
+			let hasUpstream = false;
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch {}
+
+			const limit = 50;
+			const rangeSpec = hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
+
+			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" --shortstat ${rangeSpec}`, cwd, 10000);
+			const lines = out.split('\n');
+			const commits: Array<{sha: string; shortSha: string; message: string; author: string; timestamp: string; filesChanged: number; insertions: number; deletions: number}> = [];
+
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (!line.includes('|')) continue;
+				const parts = line.split('|');
+				if (parts.length < 5) continue;
+				const [sha, shortSha, message, author, timestamp] = parts;
+				// Next non-empty line should be the shortstat
+				let filesChanged = 0, insertions = 0, deletions = 0;
+				for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+					const statLine = lines[j].trim();
+					if (statLine.includes('file') && statLine.includes('changed')) {
+						const fm = statLine.match(/(\d+) file/);
+						const im = statLine.match(/(\d+) insertion/);
+						const dm = statLine.match(/(\d+) deletion/);
+						if (fm) filesChanged = parseInt(fm[1], 10);
+						if (im) insertions = parseInt(im[1], 10);
+						if (dm) deletions = parseInt(dm[1], 10);
+						break;
+					}
+				}
+				commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions });
+			}
+
+			json({ commits });
+		} catch (e: any) {
+			json({ error: 'Failed to read git log', detail: e.message }, 500);
+		}
+		return;
+	}
 	// GET /api/sessions/:id/pr-status — PR status for session's branch
 	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/pr-status')) {
 		const id = url.pathname.split('/')[3];
