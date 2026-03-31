@@ -2345,15 +2345,20 @@ export class SessionManager {
 	}
 
 	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory, teamLeadSessionId) and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string }): boolean {
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string }): boolean {
 		const session = this.sessions.get(id);
-		if (!session) return false;
+		if (!session) {
+			// Store-only session (dormant/delegate) — update store directly
+			this.store.update(id, updates);
+			return true;
+		}
 		if (updates.role !== undefined) session.role = updates.role;
 		if (updates.teamGoalId !== undefined) session.teamGoalId = updates.teamGoalId;
 		if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
 		if (updates.accessory !== undefined) session.accessory = updates.accessory;
 		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
 		if (updates.teamLeadSessionId !== undefined) session.teamLeadSessionId = updates.teamLeadSessionId;
+		if (updates.delegateOf !== undefined) session.delegateOf = updates.delegateOf;
 		this.store.update(id, updates);
 		return true;
 	}

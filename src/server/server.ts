@@ -2839,6 +2839,14 @@ async function handleApiRoute(
 			}
 		}
 
+		if (typeof body.delegateOf === "string") {
+			const session = sessionManager.getSession(id);
+			if (session) {
+				session.delegateOf = body.delegateOf || undefined;
+			}
+			sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
+		}
+
 		if (typeof body.teamLeadSessionId === "string") {
 			// Update teamLeadSessionId — works for both live and archived sessions
 			const session = sessionManager.getSession(id);
