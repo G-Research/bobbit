@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
+import type { SearchIndex } from "../search/search-index.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 
 function sanitiseBranchName(name: string): string {
@@ -9,6 +10,11 @@ function sanitiseBranchName(name: string): string {
 
 export class StaffManager {
 	private store = new StaffStore();
+	searchIndex?: SearchIndex;
+
+	getStore(): StaffStore {
+		return this.store;
+	}
 
 	async createStaff(
 		name: string,
@@ -48,6 +54,7 @@ export class StaffManager {
 		staff.branch = worktreeResult.branchName;
 
 		this.store.put(staff);
+		this.searchIndex?.indexStaff(staff);
 
 		// Create the permanent session for this staff agent
 		try {
@@ -74,6 +81,7 @@ export class StaffManager {
 				console.error(`[staff-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
 			}
 			this.store.remove(id);
+			this.searchIndex?.removeStaff(id);
 			throw err;
 		}
 
@@ -109,7 +117,12 @@ export class StaffManager {
 				id: t.id || randomUUID(),
 			}));
 		}
-		return this.store.update(id, updates);
+		const ok = this.store.update(id, updates);
+		if (ok && this.searchIndex) {
+			const staff = this.store.get(id);
+			if (staff) this.searchIndex.indexStaff(staff);
+		}
+		return ok;
 	}
 
 	async deleteStaff(id: string, sessionManager: SessionManager): Promise<boolean> {
@@ -135,6 +148,7 @@ export class StaffManager {
 		}
 
 		this.store.remove(id);
+		this.searchIndex?.removeStaff(id);
 		return true;
 	}
 

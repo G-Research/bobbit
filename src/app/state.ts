@@ -150,6 +150,8 @@ export const state = {
 	searchQuery: "",
 	searchResults: null as any[] | null,
 	searchLoading: false,
+	searchContentMode: localStorage.getItem("searchContentMode") === "true",
+	searchMatchIds: null as Set<string> | null,
 
 	// Pagination for archived items
 	archivedGoalsCursor: null as number | null,
@@ -397,6 +399,15 @@ export function renderApp(): void {
 export function renderAppSync(): void {
 	_renderScheduled = false;
 	_renderApp();
+}
+
+// ============================================================================
+// SEARCH CONTENT MODE
+// ============================================================================
+
+export function setSearchContentMode(val: boolean): void {
+	state.searchContentMode = val;
+	localStorage.setItem("searchContentMode", String(val));
 }
 
 // ============================================================================

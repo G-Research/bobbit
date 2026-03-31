@@ -4,13 +4,15 @@ import path from "node:path";
 import { extractTextFromMessage } from "./message-extractor.js";
 import type { PersistedGoal, GoalStore } from "../agent/goal-store.js";
 import type { PersistedSession, SessionStore } from "../agent/session-store.js";
+import type { PersistedStaff } from "../agent/staff-store.js";
+import type { StaffStore } from "../agent/staff-store.js";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 // ── Public interfaces ────────────────────────────────────────────────
 
 export interface SearchResult {
-	type: "goal" | "session" | "message";
+	type: "goal" | "session" | "message" | "staff";
 	/** goalId for goals, sessionId for sessions, FTS5 rowid string for messages */
 	id: string;
 	title: string;
@@ -35,6 +37,9 @@ export class SearchIndex {
 	private readonly dbPath: string;
 	private _needsRebuild = false;
 
+	/** Optional staff store — set before open()/rebuild to include staff in the index. */
+	staffStore?: StaffStore;
+
 	// Prepared statements (lazily created after open)
 	private stmts: {
 		deleteGoal: Database.Statement;
@@ -43,6 +48,8 @@ export class SearchIndex {
 		insertSession: Database.Statement;
 		insertMessage: Database.Statement;
 		deleteMessagesBySession: Database.Statement;
+		deleteStaff: Database.Statement;
+		insertStaff: Database.Statement;
 		// Read statements (cached for search queries)
 		countGoals: Database.Statement;
 		searchGoals: Database.Statement;
@@ -50,6 +57,8 @@ export class SearchIndex {
 		searchSessions: Database.Statement;
 		countMessages: Database.Statement;
 		searchMessages: Database.Statement;
+		countStaff: Database.Statement;
+		searchStaff: Database.Statement;
 	} | null = null;
 
 	constructor(dbPath: string) {
@@ -169,14 +178,30 @@ export class SearchIndex {
 		this.stmts?.deleteMessagesBySession.run(sessionId);
 	}
 
+	// ── Staff indexing ─────────────────────────────────────────────
+
+	indexStaff(staff: PersistedStaff): void {
+		if (!this.stmts) return;
+		this.stmts.deleteStaff.run(staff.id);
+		this.stmts.insertStaff.run(staff.id, staff.name || "", staff.description || "", staff.state || "", staff.createdAt ?? 0);
+	}
+
+	removeStaff(staffId: string): void {
+		this.stmts?.deleteStaff.run(staffId);
+	}
+
 	// ── Full rebuild ───────────────────────────────────────────────
 
 	rebuildFromStores(
 		goalStore: GoalStore,
 		sessionStore: SessionStore,
 		_sessionsDir?: string,
+		staffStore?: StaffStore,
 	): void {
 		if (!this.db) return;
+
+		// Use explicit param or fallback to instance property
+		const effectiveStaffStore = staffStore || this.staffStore;
 
 		// Build a goalId → title map for session indexing
 		const goals = goalStore.getAll();
@@ -186,10 +211,11 @@ export class SearchIndex {
 		}
 
 		const sessions = sessionStore.getAll();
+		const staffEntries = effectiveStaffStore ? effectiveStaffStore.getAll() : [];
 		let messageCount = 0;
 
 		console.log(
-			`[search] Rebuilding index: ${goals.length} goals, ${sessions.length} sessions...`,
+			`[search] Rebuilding index: ${goals.length} goals, ${sessions.length} sessions, ${staffEntries.length} staff...`,
 		);
 
 		const rebuild = this.db.transaction(() => {
@@ -197,6 +223,7 @@ export class SearchIndex {
 			this.db!.exec("DELETE FROM goals_fts");
 			this.db!.exec("DELETE FROM sessions_fts");
 			this.db!.exec("DELETE FROM messages_fts");
+			this.db!.exec("DELETE FROM staff_fts");
 
 			// Index goals
 			for (const goal of goals) {
@@ -245,12 +272,17 @@ export class SearchIndex {
 					// Skip unreadable files
 				}
 			}
+
+			// Index staff
+			for (const staff of staffEntries) {
+				this.indexStaff(staff);
+			}
 		});
 
 		rebuild();
 		this._needsRebuild = false;
 		console.log(
-			`[search] Index rebuilt: ${goals.length} goals, ${sessions.length} sessions, ${messageCount} messages`,
+			`[search] Index rebuilt: ${goals.length} goals, ${sessions.length} sessions, ${messageCount} messages, ${staffEntries.length} staff`,
 		);
 	}
 
@@ -259,7 +291,7 @@ export class SearchIndex {
 	search(
 		query: string,
 		opts: {
-			type?: "all" | "goals" | "sessions" | "messages";
+			type?: "all" | "goals" | "sessions" | "messages" | "staff";
 			limit?: number;
 			offset?: number;
 		} = {},
@@ -299,6 +331,12 @@ export class SearchIndex {
 			total += count;
 		}
 
+		if (type === "all" || type === "staff") {
+			const { rows, count } = this.searchStaffEntries(ftsQuery, type === "staff" ? limit : 10, type === "staff" ? offset : 0);
+			results.push(...rows);
+			total += count;
+		}
+
 		// For type-specific queries, apply limit/offset at the top level
 		if (type !== "all") {
 			return { results, total };
@@ -333,6 +371,11 @@ export class SearchIndex {
 				text_content, tool_names,
 				timestamp UNINDEXED
 			);
+
+			CREATE VIRTUAL TABLE IF NOT EXISTS staff_fts USING fts5(
+				staff_id UNINDEXED, name, description,
+				state UNINDEXED, created_at UNINDEXED
+			);
 		`);
 
 		// Set version if not present
@@ -346,6 +389,7 @@ export class SearchIndex {
 			this.db.exec("DROP TABLE IF EXISTS goals_fts");
 			this.db.exec("DROP TABLE IF EXISTS sessions_fts");
 			this.db.exec("DROP TABLE IF EXISTS messages_fts");
+			this.db.exec("DROP TABLE IF EXISTS staff_fts");
 			this.db.exec("DROP TABLE IF EXISTS schema_version");
 			// Recurse to recreate
 			this.ensureSchema();
@@ -373,6 +417,12 @@ export class SearchIndex {
 			),
 			deleteMessagesBySession: this.db.prepare(
 				"DELETE FROM messages_fts WHERE session_id = ?",
+			),
+			deleteStaff: this.db.prepare(
+				"DELETE FROM staff_fts WHERE staff_id = ?",
+			),
+			insertStaff: this.db.prepare(
+				"INSERT INTO staff_fts (staff_id, name, description, state, created_at) VALUES (?, ?, ?, ?, ?)",
 			),
 			// Read statements for search queries
 			countGoals: this.db.prepare(
@@ -403,6 +453,16 @@ export class SearchIndex {
 					snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet,
 					timestamp
 				 FROM messages_fts WHERE messages_fts MATCH ?
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			),
+			countStaff: this.db.prepare(
+				"SELECT count(*) as cnt FROM staff_fts WHERE staff_fts MATCH ?",
+			),
+			searchStaff: this.db.prepare(
+				`SELECT staff_id, name, snippet(staff_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+					state, created_at
+				 FROM staff_fts WHERE staff_fts MATCH ?
 				 ORDER BY rank
 				 LIMIT ? OFFSET ?`,
 			),
@@ -514,6 +574,41 @@ export class SearchIndex {
 					archived: false,
 					sessionId: r.session_id,
 					sessionTitle: r.session_title || undefined,
+				})),
+			};
+		} catch {
+			return { rows: [], count: 0 };
+		}
+	}
+
+	private searchStaffEntries(
+		ftsQuery: string,
+		limit: number,
+		offset: number,
+	): { rows: SearchResult[]; count: number } {
+		if (!this.stmts) return { rows: [], count: 0 };
+
+		try {
+			const countRow = this.stmts.countStaff.get(ftsQuery) as { cnt: number };
+			const count = countRow?.cnt ?? 0;
+
+			const rows = this.stmts.searchStaff.all(ftsQuery, limit, offset) as Array<{
+				staff_id: string;
+				name: string;
+				snippet: string;
+				state: string;
+				created_at: number;
+			}>;
+
+			return {
+				count,
+				rows: rows.map((r) => ({
+					type: "staff" as const,
+					id: r.staff_id,
+					title: r.name,
+					snippet: r.snippet,
+					timestamp: Number(r.created_at) || 0,
+					archived: false,
 				})),
 			};
 		} catch {

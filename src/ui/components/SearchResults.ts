@@ -6,7 +6,7 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 
 /** A single search result from the API. */
 export interface SearchResult {
-	type: "goal" | "session" | "message";
+	type: "goal" | "session" | "message" | "staff";
 	id: string;
 	title: string;
 	snippet: string;
