@@ -2160,6 +2160,12 @@ export class SessionManager {
 			preview: session.preview,
 			personalities: session.personalities,
 			sandboxed: existing?.sandboxed || (session as any)._sandboxed,
+			// Preserve fields that may be set on the session object or via store.update()
+			delegateOf: session.delegateOf || existing?.delegateOf,
+			reattemptGoalId: existing?.reattemptGoalId,
+			teamLeadSessionId: existing?.teamLeadSessionId,
+			modelProvider: existing?.modelProvider,
+			modelId: existing?.modelId,
 		});
 	}
 
