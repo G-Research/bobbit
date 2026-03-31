@@ -16,7 +16,7 @@ import {
 
 	resetArchivedExpandState,
 } from "./state.js";
-import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup } from "./api.js";
+import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog } from "./dialogs.js";
@@ -290,8 +290,16 @@ function ensureWorkflowsLoaded(): void {
 	fetchWorkflows().then((wfs) => { _cachedWorkflows = wfs; renderApp(); });
 }
 
+let _sandboxStatusFetching = false;
+function ensureSandboxStatusLoaded(): void {
+	if (state.sandboxStatus || _sandboxStatusFetching) return;
+	_sandboxStatusFetching = true;
+	fetchSandboxStatus().then(s => { _sandboxStatusFetching = false; if (s) { state.sandboxStatus = s; renderApp(); } });
+}
+
 function goalPreviewPanel() {
 	ensureWorkflowsLoaded();
+	ensureSandboxStatusLoaded();
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
@@ -1512,6 +1520,7 @@ let _proposalSpecEditMode = false;
 let _proposalCwdDropdownOpen = false;
 let _proposalCwdHighlightIndex = -1;
 let _proposalSaving = false;
+let _proposalSandboxed = false;
 let _proposalInitializedFrom: string | null = null;
 
 /** Sync module-level form state from the active goal proposal when it changes. */
@@ -1533,6 +1542,7 @@ function syncProposalFormState(): void {
 function goalProposalPanel() {
 	syncProposalFormState();
 	ensureWorkflowsLoaded();
+	ensureSandboxStatusLoaded();
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
@@ -1541,9 +1551,12 @@ function goalProposalPanel() {
 		renderApp();
 
 		try {
+			const sandboxed = _proposalSandboxed;
+			_proposalSandboxed = false;
 			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 				spec: _proposalSpec,
 				workflowId: _proposalWorkflowId || undefined,
+				sandboxed: sandboxed || undefined,
 			});
 			state.activeGoalProposal = null;
 			_proposalInitializedFrom = null;
@@ -1609,6 +1622,20 @@ function goalProposalPanel() {
 							<option value=${wf.id} ?selected=${_proposalWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
 						`)}
 					</select>
+				</div>
+			` : ""}
+			${state.sandboxStatus?.configured ? html`
+				<div class="flex items-center gap-2">
+					<label class="flex items-center gap-2 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-50 pointer-events-none" : ""}">
+						<input type="checkbox" .checked=${_proposalSandboxed}
+							?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+							@change=${(e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						<span class="text-xs text-foreground/70">Sandbox</span>
+						<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+							: "Run team agents in isolated Docker containers"}
+							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+					</label>
 				</div>
 			` : ""}
 			<div class="flex-1 flex flex-col min-h-0">
