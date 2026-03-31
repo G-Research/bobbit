@@ -1106,7 +1106,7 @@ function renderSandboxSection(inputClass: string) {
 															}}
 														>${sandboxBuildInProgress ? "Building..." : "Build Image"}</button>
 													</div>
-													<span class="text-xs text-muted-foreground">Server restart required after build for container pool.</span>
+													<span class="text-xs text-muted-foreground">Server restart required after build for sandbox pool.</span>
 													${sandboxBuildError ? html`<span class="text-xs text-red-500">${sandboxBuildError}</span>` : ""}
 												</div>
 											` : ""}`

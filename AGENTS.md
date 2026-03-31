@@ -418,7 +418,7 @@ When a session is created with `sandboxed: true`:
 
 1. **Session manager** reads sandbox config from `project.yaml`, validates mounts, and starts the sandbox proxy
 2. **RpcBridge** starts the agent process inside a Docker container. Two paths depending on whether pooling is enabled:
-   - **Pool mode** (`sandbox_pool_size > 0`): Claims a pre-warmed container from the `ContainerPool` and runs `docker exec -i <containerId> node ...cli.js <args>`. The container is already running with all bind mounts and env vars configured.
+   - **Pool mode** (`sandbox_pool_size > 0`): Claims a pre-warmed slot from the `SandboxPool` (each slot is a dedicated worktree + container pair) and runs `docker exec -i <containerId> node ...cli.js <args>`. The container is already running with all bind mounts and env vars configured.
    - **Non-pool mode** (`sandbox_pool_size == 0`): Spawns a fresh `docker run --rm` with:
      - Project directory mounted at `/workspace` (read-write)
      - Agent modules at `/agent-modules` (read-only)
@@ -437,7 +437,7 @@ Without pooling, every sandboxed session pays the cost of `docker run` — conta
 **Lifecycle:**
 
 1. **Pre-warm on startup**: When `sandbox: "docker"` is configured and `sandbox_pool_size > 0`, the gateway starts N idle containers at startup. Each runs `sleep infinity` with all bind mounts and env vars already configured, labeled with `bobbit-pool=<project-hash>` for identification.
-2. **Claim**: When a sandboxed session is created, `ContainerPool` provides an idle container. `RpcBridge` uses `docker exec -i <containerId> node ...cli.js` instead of `docker run` — same stdio pipe protocol, but inside an already-running container. Startup drops from ~5–10s to ~200ms.
+2. **Claim**: When a sandboxed session is created, `SandboxPool` provides an idle slot. `RpcBridge` uses `docker exec -i <containerId> node ...cli.js` instead of `docker run` — same stdio pipe protocol, but inside an already-running container. Startup drops from ~5–10s to ~200ms.
 3. **Multi-session**: A single container can host multiple agent processes via separate `docker exec` calls, each with its own PID and stdio pipes. The container returns to "idle" only when all sessions inside it have terminated.
 4. **Replenish**: When a container is claimed, the pool asynchronously starts a replacement in the background. The session does not wait for it.
 5. **Release**: When all sessions in a container terminate, it returns to the idle pool. Excess idle containers beyond `sandbox_pool_size` are culled after `sandbox_pool_max_idle` seconds.
@@ -537,7 +537,8 @@ Sandboxed agents receive **scoped tokens** instead of the admin auth token. Each
 | `docker/README.md` | Image build instructions and customization guide |
 | `src/server/agent/sandbox-proxy.ts` | HTTP/HTTPS forward proxy with hostname allowlist |
 | `src/server/agent/sandbox-status.ts` | Docker availability check (`docker info` + image inspect), image auto-build (`buildSandboxImage()`) |
-| `src/server/agent/container-pool.ts` | Container pool lifecycle: create, claim, release, replenish, health check, shutdown, re-adopt |
+| `src/server/agent/sandbox-pool.ts` | Sandbox pool lifecycle: create slots (worktree + container pairs), claim, release, replenish, health check, shutdown, re-adopt |
+| `src/server/agent/docker-args.ts` | Shared Docker argument builder — single source of truth for all container mount/env configuration |
 
 The sandbox also required changes to: `rpc-bridge.ts` (Docker spawn path, path remapping helpers for sandbox session persistence, network path fix — uses real gateway URL instead of rewriting to `host.docker.internal`), `session-manager.ts` (sandbox wiring via `applySandboxWiring()` helper — generates scoped tokens, auto-adds gateway to proxy allowlist, excludes `bash_bg` from sandboxed sessions), `session-store.ts` (`sandboxed` field on `PersistedSession`), `server.ts` (REST endpoints, auth layer for sandbox tokens, sandbox guard enforcement), `ws/handler.ts` (WebSocket auth for sandbox tokens), `sidebar.ts` (sandbox checkbox), `settings-page.ts` (Docker Sandbox config section), and all tool extensions (env var fallback for gateway credentials).
 
