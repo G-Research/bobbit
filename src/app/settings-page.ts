@@ -1340,10 +1340,24 @@ function renderSandboxSection(inputClass: string) {
 function renderProjectTab() {
 	loadProjectConfig();
 
-	// Known command keys (from defaults), excluding thinking level (handled in Models tab)
-	const commandKeys = Object.keys(projectDefaults).filter((k) => k !== "default_thinking_level");
-	// Custom keys not in defaults
-	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults) && k !== "default_thinking_level");
+	// Known command keys (from defaults), excluding keys that have dedicated UI sections
+	const HIDDEN_FROM_COMMANDS = new Set([
+		"default_thinking_level",       // Models tab
+		"sandbox",                      // Docker Sandbox section below
+		"sandbox_image",
+		"sandbox_network_allowlist",
+		"sandbox_credentials",
+		"sandbox_mounts",
+		"sandbox_pool_size",
+		"sandbox_pool_max_idle",
+	]);
+	const commandKeys = Object.keys(projectDefaults).filter((k) => !HIDDEN_FROM_COMMANDS.has(k));
+	// Custom keys not in defaults, also excluding keys with dedicated UI
+	const HIDDEN_CUSTOM_KEYS = new Set([
+		"config_directories",           // Directories tab
+		"skill_directories",            // Legacy, Directories tab
+	]);
+	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults) && !HIDDEN_FROM_COMMANDS.has(k) && !HIDDEN_CUSTOM_KEYS.has(k));
 
 	// Shared label width class for vertical alignment across all sections
 	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
