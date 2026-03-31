@@ -189,6 +189,22 @@ export class VerificationHarness {
 				continue;
 			}
 
+			// Re-register reviewer session in team store so team_list shows it
+			if (this.teamManager) {
+				try {
+					this.teamManager.registerReviewerSession(v.goalId, step.sessionId, step.name);
+				} catch { /* ignore — non-fatal */ }
+			}
+
+			// If the agent was mid-turn when the server died, it may have been
+			// re-prompted to continue by restoreSession(). Wait for it to finish
+			// its current turn before trying to read output.
+			try {
+				await this.sessionManager!.waitForIdle(step.sessionId, 180_000);
+			} catch (err) {
+				console.warn(`[verification] waitForIdle failed for resumed session ${step.sessionId}: ${(err as Error).message}`);
+			}
+
 			// Session exists — try to extract verdict from existing output
 			let output = "";
 			try {
