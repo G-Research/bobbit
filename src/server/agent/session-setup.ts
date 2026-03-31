@@ -1,0 +1,683 @@
+/**
+ * Session creation pipeline — plan/execute architecture.
+ *
+ * Extracts duplicated session-creation logic from SessionManager into composable
+ * pipeline steps.  Three creation paths (normal, worktree, delegate) share the
+ * same step functions but differ in *when* the steps execute:
+ *
+ *   normal   — await full pipeline, return ready session
+ *   worktree — return immediately with "preparing", pipeline runs async
+ *   delegate — await pipeline + first prompt + streaming confirmation
+ */
+
+import path from "node:path";
+import type { WebSocket } from "ws";
+import type { ServerMessage } from "../ws/protocol.js";
+import type { SessionInfo } from "./session-manager.js";
+import type { RpcBridgeOptions } from "./rpc-bridge.js";
+import { RpcBridge } from "./rpc-bridge.js";
+import { EventBuffer } from "./event-buffer.js";
+import { PromptQueue } from "./prompt-queue.js";
+import type { SessionStore } from "./session-store.js";
+import type { GoalManager } from "./goal-manager.js";
+import type { TaskManager } from "./task-manager.js";
+import type { SearchIndex } from "../search/search-index.js";
+import type { CostTracker } from "./cost-tracker.js";
+import type { PersonalityManager } from "./personality-manager.js";
+import type { RoleManager } from "./role-manager.js";
+import type { ToolManager } from "./tool-manager.js";
+import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
+import type { McpManager } from "../mcp/mcp-manager.js";
+import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
+import type { PromptParts } from "./system-prompt.js";
+import type { GrantPolicy } from "./role-store.js";
+import { getAssistantDef } from "./assistant-registry.js";
+import { buildReattemptContext } from "./goal-assistant.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions } from "./tool-activation.js";
+import { TOOLS_DIR } from "./tool-manager.js";
+import { createWorktree, cleanupWorktree } from "../skills/git.js";
+
+// ── Constants ──────────────────────────────────────────────────────────────
+
+/** Goal tools extension — task + gate management for any goal session. */
+const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
+
+/** Delegate spawn timeout (30 seconds). */
+export const DELEGATE_SPAWN_TIMEOUT_MS = 30_000;
+
+// ── Interfaces ─────────────────────────────────────────────────────────────
+
+export type SessionSetupMode = "normal" | "worktree" | "delegate";
+
+export interface SessionSetupPlan {
+	// Identity
+	id: string;
+	mode: SessionSetupMode;
+
+	// Structural fields (known at creation, persisted immediately)
+	title: string;
+	cwd: string;
+	goalId?: string;
+	assistantType?: string;
+	delegateOf?: string;
+	taskId?: string;
+	worktreePath?: string;
+	repoPath?: string;
+	branch?: string;
+	sandboxed?: boolean;
+	personalities?: string[];
+	role?: string;
+	staffId?: string;
+	accessory?: string;
+	nonInteractive?: boolean;
+
+	// Computed during planning
+	bridgeOptions: RpcBridgeOptions;
+	effectiveAllowedTools?: string[];
+	promptPath?: string;
+
+	// Options passed through from caller
+	agentArgs?: string[];
+	env?: Record<string, string>;
+	rolePrompt?: string;
+	roleName?: string;
+	personalityFragments?: Array<{ label: string; promptFragment: string }>;
+	workflowContext?: string;
+	reattemptGoalId?: string;
+	sandboxClaim?: ClaimOptions;
+
+	// Delegate-specific
+	instructions?: string;
+	context?: Record<string, string>;
+}
+
+/**
+ * Dependencies from SessionManager that pipeline steps need.
+ * Created via SessionManager.buildPipelineContext().
+ */
+export interface PipelineContext {
+	agentCliPath?: string;
+	systemPromptPath?: string;
+	roleManager: RoleManager | null;
+	toolManager: ToolManager | null;
+	mcpManager: McpManager | null;
+	goalManager: GoalManager;
+	taskManager: TaskManager;
+	personalityManager: PersonalityManager | null;
+	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
+	sandboxPool: SandboxPool | null;
+	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
+	groupPolicyStore: ToolGroupPolicyStore | null;
+	costTracker: CostTracker;
+	store: SessionStore;
+	searchIndex: SearchIndex;
+	sessions: Map<string, SessionInfo>;
+	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
+	buildToolRestrictionsText: (tools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }) => string;
+	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { skipMountValidation?: boolean; sandboxClaim?: ClaimOptions }) => Promise<boolean>;
+	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
+	trackCostFromEvent: (session: SessionInfo, event: any) => void;
+	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
+	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
+	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
+	buildWorkflowList: () => string;
+}
+
+// ── Retry helper ───────────────────────────────────────────────────────────
+
+export async function withRetry<T>(
+	fn: () => Promise<T>,
+	opts: { retries: number; delays: number[]; label: string; sessionId: string },
+): Promise<T> {
+	let lastError: Error | undefined;
+	for (let attempt = 0; attempt <= opts.retries; attempt++) {
+		try {
+			return await fn();
+		} catch (err) {
+			lastError = err as Error;
+			if (attempt < opts.retries) {
+				const delay = opts.delays[attempt] ?? opts.delays[opts.delays.length - 1];
+				console.warn(
+					`[session-setup] ${opts.label} failed for ${opts.sessionId} (attempt ${attempt + 1}/${opts.retries + 1}), ` +
+					`retrying in ${delay}ms: ${lastError.message}`,
+				);
+				await new Promise(resolve => setTimeout(resolve, delay));
+			}
+		}
+	}
+	throw lastError!;
+}
+
+// ── Pipeline steps ─────────────────────────────────────────────────────────
+
+/** Step 1: Construct RpcBridgeOptions base (cliPath, env, args). */
+export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	plan.bridgeOptions = {
+		cwd: plan.cwd,
+		args: plan.agentArgs ? [...plan.agentArgs] : [],
+		env: { BOBBIT_SESSION_ID: plan.id, ...plan.env },
+	};
+	if (ctx.agentCliPath) {
+		plan.bridgeOptions.cliPath = ctx.agentCliPath;
+	}
+
+	// Delegate-specific env
+	if (plan.delegateOf) {
+		plan.bridgeOptions.env = {
+			...plan.bridgeOptions.env,
+			BOBBIT_DELEGATE_OF: plan.delegateOf,
+		};
+	}
+}
+
+/** Step 2: Add goal/team extension paths to bridge args. */
+export function resolveGoalExtensions(plan: SessionSetupPlan, _ctx: PipelineContext): void {
+	if (plan.goalId && !plan.assistantType) {
+		const alreadyHasExtension = plan.bridgeOptions.args?.includes("--extension");
+		if (!alreadyHasExtension) {
+			plan.bridgeOptions.args = plan.bridgeOptions.args || [];
+			plan.bridgeOptions.args.push("--extension", GOAL_TOOLS_EXTENSION_PATH);
+		}
+		plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };
+	}
+}
+
+/** Step 3: Compute effectiveAllowedTools, filter bash_bg for sandbox. */
+export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	let effectiveAllowedTools = plan.effectiveAllowedTools;
+
+	if (!effectiveAllowedTools && ctx.roleManager) {
+		const generalRole = ctx.roleManager.getRole("general");
+		if (generalRole && generalRole.allowedTools.length > 0) {
+			effectiveAllowedTools = generalRole.allowedTools;
+		}
+	}
+
+	// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
+	if (plan.sandboxed && effectiveAllowedTools) {
+		effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
+	}
+
+	plan.effectiveAllowedTools = effectiveAllowedTools;
+}
+
+/** Step 4: Assemble system prompt (handles assistant, normal, delegate variants). */
+export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	const assistantDef = plan.assistantType ? getAssistantDef(plan.assistantType) : undefined;
+
+	if (assistantDef) {
+		// Assistant sessions (goal/role/tool assistants)
+		const assistantRole = ctx.roleManager?.getRole("assistant");
+		let assistantGoalSpec = "";
+		if (assistantRole?.promptTemplate) {
+			assistantGoalSpec = assistantRole.promptTemplate.replace(
+				/\{\{AGENT_ID\}\}/g,
+				`assistant-${(plan.goalId || plan.id).slice(0, 8)}`,
+			);
+			assistantGoalSpec += "\n\n---\n\n";
+		}
+		assistantGoalSpec += assistantDef.prompt;
+		if (plan.assistantType === "goal") {
+			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList());
+			if (plan.reattemptGoalId) {
+				const origGoal = ctx.goalManager.getGoal(plan.reattemptGoalId);
+				if (origGoal) {
+					assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+				}
+			}
+		}
+
+		// Use assistant role's tool restrictions
+		if (assistantRole && assistantRole.allowedTools.length > 0) {
+			plan.effectiveAllowedTools = assistantRole.allowedTools;
+		}
+
+		const promptPath = ctx.assemblePrompt(plan.id, {
+			baseSystemPromptPath: undefined,
+			cwd: plan.cwd,
+			goalSpec: assistantGoalSpec,
+			goalTitle: assistantDef.promptTitle,
+			goalState: "active",
+			allowedTools: plan.effectiveAllowedTools,
+			projectConfigStore: ctx.projectConfigStore ?? undefined,
+		});
+		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
+	} else if (plan.mode === "delegate") {
+		// Delegate sessions: AGENTS.md only + task spec
+		let taskSpec = plan.instructions || "";
+		if (plan.context && Object.keys(plan.context).length > 0) {
+			taskSpec += "\n\n## Context";
+			for (const [key, value] of Object.entries(plan.context)) {
+				taskSpec += `\n- **${key}**: ${value}`;
+			}
+		}
+
+		const promptPath = ctx.assemblePrompt(plan.id, {
+			baseSystemPromptPath: undefined,
+			cwd: plan.cwd,
+			goalSpec: taskSpec,
+			goalTitle: "Delegate Task",
+			goalState: "active",
+			projectConfigStore: ctx.projectConfigStore ?? undefined,
+		});
+		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
+	} else {
+		// Normal / worktree sessions: global base + AGENTS.md + goal spec
+		const goal = plan.goalId ? ctx.goalManager.getGoal(plan.goalId) : undefined;
+
+		// Build tool restrictions text
+		let toolRestrictionsText: string | undefined;
+		if (plan.effectiveAllowedTools && plan.effectiveAllowedTools.length > 0) {
+			const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
+			toolRestrictionsText = ctx.buildToolRestrictionsText(plan.effectiveAllowedTools, effectiveRole ?? undefined);
+		}
+
+		// Build task context
+		let taskTitle: string | undefined;
+		let taskType: string | undefined;
+		let taskSpec: string | undefined;
+		let taskDependsOn: string[] | undefined;
+		if (plan.taskId) {
+			const task = ctx.taskManager.getTask(plan.taskId);
+			if (task) {
+				taskTitle = task.title;
+				taskType = task.type;
+				taskSpec = task.spec;
+				if (task.dependsOn && task.dependsOn.length > 0) {
+					taskDependsOn = task.dependsOn.map(depId => {
+						const dep = ctx.taskManager.getTask(depId);
+						return dep?.title || depId;
+					});
+				}
+			}
+		}
+
+		const promptPath = ctx.assemblePrompt(plan.id, {
+			baseSystemPromptPath: ctx.systemPromptPath,
+			cwd: plan.cwd,
+			goalTitle: goal?.title,
+			goalState: goal?.state,
+			goalSpec: goal?.spec,
+			rolePrompt: plan.rolePrompt,
+			roleName: plan.roleName,
+			toolRestrictions: toolRestrictionsText,
+			taskTitle,
+			taskType,
+			taskSpec,
+			taskDependsOn,
+			personalities: plan.personalityFragments,
+			allowedTools: plan.effectiveAllowedTools,
+			workflowContext: plan.workflowContext,
+			projectConfigStore: ctx.projectConfigStore ?? undefined,
+		});
+		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
+	}
+}
+
+/** Step 5: computeToolActivationArgs + writeMcpProxyExtensions. */
+export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	if (plan.effectiveAllowedTools && plan.effectiveAllowedTools.length > 0) {
+		const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
+		const mcpExtPaths = ctx.mcpManager
+			? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
+			: undefined;
+		const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
+		plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
+	} else if (ctx.mcpManager) {
+		const mcpExtPaths = writeMcpProxyExtensions(ctx.mcpManager);
+		for (const extPath of mcpExtPaths) {
+			plan.bridgeOptions.args = [...(plan.bridgeOptions.args || []), "--extension", extPath];
+		}
+	}
+}
+
+// ── Event subscription ─────────────────────────────────────────────────────
+
+/** Shared event subscription, returns unsubscribe fn. */
+export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): () => void {
+	return session.rpcClient.onEvent((event: any) => {
+		session.lastActivity = Date.now();
+		ctx.store.update(session.id, { lastActivity: session.lastActivity });
+		ctx.handleAgentLifecycle(session, event);
+		session.eventBuffer.push(event);
+		ctx.broadcast(session.clients, { type: "event", data: event });
+		ctx.trackCostFromEvent(session, event);
+	});
+}
+
+// ── Persistence ────────────────────────────────────────────────────────────
+
+/** Single store.put() with ALL structural fields. Called exactly once per session. */
+export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store: SessionStore): void {
+	store.put({
+		id: session.id,
+		title: session.title,
+		cwd: session.cwd,
+		agentSessionFile: "",
+		createdAt: session.createdAt,
+		lastActivity: session.lastActivity,
+		goalId: plan.goalId,
+		assistantType: plan.assistantType,
+		role: plan.role,
+		worktreePath: plan.worktreePath,
+		repoPath: plan.repoPath,
+		branch: plan.branch,
+		taskId: plan.taskId,
+		staffId: plan.staffId,
+		accessory: plan.accessory,
+		nonInteractive: plan.nonInteractive,
+		personalities: plan.personalities,
+		sandboxed: plan.sandboxed,
+		delegateOf: plan.delegateOf,
+		reattemptGoalId: plan.reattemptGoalId,
+	});
+}
+
+// ── Executors ──────────────────────────────────────────────────────────────
+
+/**
+ * Run the full pipeline synchronously: resolve steps → spawn agent → persist → post-spawn.
+ * Used by normal and delegate session creation.
+ */
+export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	// Step 1-5: resolve all configuration
+	resolveBridgeOptions(plan, ctx);
+	resolveGoalExtensions(plan, ctx);
+	resolveTools(plan, ctx);
+	resolvePrompt(plan, ctx);
+	resolveToolActivation(plan, ctx);
+
+	// Step 6: sandbox wiring (needs final CWD)
+	if (plan.sandboxed) {
+		await withRetry(
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { sandboxClaim: plan.sandboxClaim }),
+			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
+		).then(applied => {
+			if (!applied) throw new Error("Sandbox is not configured as docker");
+		});
+	}
+
+	// Step 7: spawn agent
+	const session = await spawnAgent(plan, ctx);
+
+	// Step 8: persist once with all structural fields
+	persistOnce(session, plan, ctx.store);
+
+	// Step 9: post-spawn setup (model, thinking level)
+	await postSpawn(session, plan, ctx);
+
+	return session;
+}
+
+/**
+ * For worktree sessions: create worktree, then run remaining pipeline
+ * on the existing "preparing" session. Updates session in place.
+ */
+export async function executeWorktreeAsync(
+	plan: SessionSetupPlan,
+	session: SessionInfo,
+	ctx: PipelineContext,
+): Promise<void> {
+	// Create worktree with retry
+	const worktreeCwd = await withRetry(
+		async () => {
+			const result = await createWorktree(plan.repoPath!, plan.branch!);
+			return result.worktreePath;
+		},
+		{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
+	);
+
+	// Update session and plan with worktree CWD
+	session.cwd = worktreeCwd;
+	session.worktreePath = worktreeCwd;
+	plan.cwd = worktreeCwd;
+	ctx.store.update(session.id, { cwd: worktreeCwd, worktreePath: worktreeCwd });
+	console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
+
+	// Run remaining pipeline steps on the worktree CWD
+	resolveBridgeOptions(plan, ctx);
+	resolveGoalExtensions(plan, ctx);
+	resolveTools(plan, ctx);
+	resolvePrompt(plan, ctx);
+	resolveToolActivation(plan, ctx);
+
+	// Sandbox wiring (now with final CWD from worktree)
+	if (plan.sandboxed) {
+		await withRetry(
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { sandboxClaim: plan.sandboxClaim }),
+			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
+		).then(applied => {
+			if (!applied) throw new Error("Sandbox is not configured as docker");
+		});
+	}
+
+	// Create real RpcBridge (replacing placeholder)
+	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	session.rpcClient = rpcClient;
+	session.allowedTools = plan.effectiveAllowedTools;
+
+	// Store container ID from pool claim
+	if (plan.bridgeOptions.containerId) {
+		session.containerId = plan.bridgeOptions.containerId;
+	}
+
+	// Mark session as sandboxed
+	if (plan.sandboxed) {
+		session.sandboxed = true;
+	}
+
+	// If sandbox pool overrode CWD, update session
+	if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== plan.cwd) {
+		session.cwd = plan.bridgeOptions.cwd;
+		ctx.store.update(session.id, { cwd: session.cwd });
+	}
+
+	// Task assignment
+	if (plan.taskId) {
+		try {
+			ctx.taskManager.assignTask(plan.taskId, plan.id);
+		} catch (err) {
+			console.error(`[session-setup] Failed to assign task ${plan.taskId} to session ${plan.id}:`, err);
+		}
+	}
+
+	// Subscribe to events
+	session.unsubscribe = subscribeToEvents(session, ctx);
+
+	// Start agent with retry
+	await withRetry(
+		() => rpcClient.start(),
+		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+	);
+	session.status = "idle";
+
+	// Notify connected clients that the session is ready
+	ctx.broadcast(session.clients, { type: "session_status", status: "idle" });
+
+	// Fire model + thinking level immediately (non-blocking)
+	postSpawnFireAndForget(session, ctx);
+}
+
+// ── Internal helpers ───────────────────────────────────────────────────────
+
+/**
+ * Create RpcBridge, subscribe events, start the agent process.
+ * Returns the fully wired SessionInfo.
+ */
+async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	const eventBuffer = new EventBuffer();
+	const now = Date.now();
+
+	// If sandbox pool overrode CWD, use that
+	const effectiveCwd = plan.bridgeOptions.cwd || plan.cwd;
+
+	const assistantDef = plan.assistantType ? getAssistantDef(plan.assistantType) : undefined;
+
+	const session: SessionInfo = {
+		id: plan.id,
+		title: assistantDef?.title ?? (plan.mode === "delegate"
+			? `⚡${plan.title}`
+			: plan.title),
+		cwd: effectiveCwd,
+		status: "starting",
+		createdAt: now,
+		lastActivity: now,
+		clients: new Set(),
+		rpcClient,
+		eventBuffer,
+		unsubscribe: () => {},
+		isCompacting: false,
+		titleGenerated: !!assistantDef || plan.mode === "delegate",
+		goalId: plan.goalId,
+		assistantType: plan.assistantType,
+		taskId: plan.taskId,
+		delegateOf: plan.delegateOf,
+		personalities: plan.personalities,
+		allowedTools: plan.effectiveAllowedTools,
+		promptQueue: new PromptQueue(),
+	};
+
+	// Mark session as sandboxed (typed field)
+	if (plan.sandboxed) {
+		session.sandboxed = true;
+	}
+
+	// Store container ID from pool claim
+	if (plan.bridgeOptions.containerId) {
+		session.containerId = plan.bridgeOptions.containerId;
+	}
+
+	// Task assignment
+	if (plan.taskId) {
+		try {
+			ctx.taskManager.assignTask(plan.taskId, plan.id);
+		} catch (err) {
+			console.error(`[session-setup] Failed to assign task ${plan.taskId} to session ${plan.id}:`, err);
+		}
+	}
+
+	// Subscribe to events
+	session.unsubscribe = subscribeToEvents(session, ctx);
+
+	// Start agent with retry
+	await withRetry(
+		() => rpcClient.start(),
+		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+	);
+	session.status = "idle";
+
+	ctx.sessions.set(session.id, session);
+
+	return session;
+}
+
+/**
+ * Post-spawn setup for synchronous paths (normal, delegate):
+ * fire-and-forget metadata persist + model/thinking level.
+ */
+async function postSpawn(session: SessionInfo, plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
+	// For delegates, model + thinking level are awaited (delegate needs model before prompt)
+	if (plan.mode === "delegate") {
+		await Promise.all([
+			ctx.tryAutoSelectModel(session),
+			ctx.tryApplyDefaultThinkingLevel(session),
+		]);
+	} else {
+		// Normal sessions: fire-and-forget
+		postSpawnFireAndForget(session, ctx);
+	}
+}
+
+/** Fire model + thinking level setup as non-blocking (fire-and-forget). */
+function postSpawnFireAndForget(session: SessionInfo, ctx: PipelineContext): void {
+	ctx.tryAutoSelectModel(session).catch((err) => {
+		console.warn(`[session-setup] Early model selection failed for ${session.id}:`, err);
+	});
+	ctx.tryApplyDefaultThinkingLevel(session).catch((err) => {
+		console.warn(`[session-setup] Early thinking level failed for ${session.id}:`, err);
+	});
+}
+
+// ── Delegate prompt ────────────────────────────────────────────────────────
+
+/**
+ * Send the task prompt to a delegate session and wait for streaming to begin.
+ * Enforces a timeout — rejects if the agent doesn't start streaming in time.
+ */
+export async function sendDelegatePrompt(
+	session: SessionInfo,
+	_instructions: string,
+	timeoutMs: number,
+): Promise<void> {
+	await session.rpcClient.prompt(
+		"Execute the task described in your system prompt. Follow the instructions carefully.",
+	);
+
+	// Wait for agent_start event (session.status becomes "streaming")
+	await new Promise<void>((resolve, reject) => {
+		if (session.status === "streaming") { resolve(); return; }
+		const timeout = setTimeout(() => {
+			unsub();
+			reject(new Error(
+				`Delegate session ${session.id} did not start streaming within ${timeoutMs}ms. ` +
+				`The delegate may have failed to initialize.`,
+			));
+		}, timeoutMs);
+		const unsub = session.rpcClient.onEvent((event: any) => {
+			if (event.type === "agent_start") {
+				clearTimeout(timeout);
+				unsub();
+				resolve();
+			}
+		});
+	});
+}
+
+// ── Failure handling ───────────────────────────────────────────────────────
+
+/**
+ * Clean up after a failed session setup. Order:
+ * 1. Remove from in-memory map (fast — UI updates immediately)
+ * 2. Archive in store (preserves evidence for debugging)
+ * 3. Notify connected clients
+ * 4. Background worktree cleanup (slow, non-blocking)
+ * 5. Release sandbox pool slot if claimed
+ * 6. Clean up sandbox token
+ */
+export function handleSetupFailure(
+	session: SessionInfo,
+	plan: SessionSetupPlan,
+	error: Error,
+	ctx: PipelineContext,
+): void {
+	console.error(
+		`[session-setup] Session ${session.id} setup failed ` +
+		`(mode: ${plan.mode}, step: ${error.message}):`,
+		error,
+	);
+
+	// 1. Remove from in-memory map
+	ctx.sessions.delete(session.id);
+
+	// 2. Archive in store (preserves evidence)
+	ctx.store.archive(session.id);
+
+	// 3. Notify connected clients
+	ctx.broadcast(session.clients, { type: "session_status", status: "terminated" });
+
+	// 4. Background worktree cleanup (slow, non-blocking)
+	if (plan.worktreePath && plan.repoPath && plan.branch) {
+		cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});
+	}
+
+	// 5. Release sandbox pool slot if claimed
+	if (session.containerId && ctx.sandboxPool) {
+		ctx.sandboxPool.release(session.id, session.containerId).catch(() => {});
+	}
+
+	// 6. Clean up sandbox token
+	if (ctx.sandboxTokenStore) {
+		ctx.sandboxTokenStore.remove(session.id);
+	}
+}
