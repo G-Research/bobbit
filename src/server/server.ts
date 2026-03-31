@@ -129,7 +129,7 @@ async function filterPhantomStatus(
 	const tracked = status.filter(e => e.status === 'M');
 	if (tracked.length === 0) return status;
 	try {
-		const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--name-only"], { cwd, encoding: "utf-8", timeout: 5000 });
+		const { stdout } = await execFileAsync("git", ["-c", "core.filemode=false", "diff", "HEAD", "--name-only"], { cwd, encoding: "utf-8", timeout: 5000 });
 		const reallyChanged = new Set(stdout.trim().split("\n").filter(Boolean));
 		return status.filter(e => e.status !== 'M' || reallyChanged.has(e.file));
 	} catch {
