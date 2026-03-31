@@ -525,17 +525,27 @@ Sandboxed agents receive **scoped tokens** instead of the admin auth token. Each
 | `/api/sessions/:id` | GET, PATCH, DELETE | Own session + children only |
 | `/api/sessions/:id/wait` | POST | Own session + children only |
 | `/api/sessions/:id/bg-processes*` | ANY | **Blocked** (host escape vector) |
+| `/api/goals/:id` | GET | Own goal only |
 | `/api/goals/:id/team/*` | GET, POST | Own goal only |
 | `/api/goals/:id/gates/*` | GET, POST | Own goal only |
 | `/api/goals/:id/tasks/*` | GET, POST, PUT | Own goal only |
+| `/api/tasks/:id` | GET, PUT | Yes (task info and field updates) |
+| `/api/tasks/:id/assign` | POST | Yes (task assignment) |
+| `/api/tasks/:id/transition` | POST | Yes (task state changes) |
 | `/api/personalities` | GET, POST | Yes |
 | Everything else | ANY | **Blocked** |
 
+The `/api/tasks/:id` endpoints are allowed without goal-scoping because tool extensions call them directly by task ID (e.g. `task_update`). Goal-scoped task access via `/api/goals/:id/tasks/*` is also supported.
+
 **Delegate inheritance**: When a sandbox-scoped request creates a delegate (`POST /api/sessions` with `delegateOf`), the server forces `sandboxed: true` and registers the child session in the parent's scope. The child gets its own scoped token via `applySandboxWiring()`.
 
-**WebSocket guard** (`ws/handler.ts`): Sandbox tokens can only connect to their own session or registered child sessions.
+**Delegate escape prevention**: When a sandbox token creates a delegate, `server.ts` verifies that the `delegateOf` parent ID matches the token's own session or a registered child session. This prevents a sandboxed agent from attaching a delegate to an arbitrary unsandboxed session — which would otherwise let the delegate inherit the unsandboxed parent's config and escape the sandbox.
 
-**bash_bg blocking**: `bash_bg` is excluded from the tool list for sandboxed sessions (filtered from `effectiveAllowedTools`) and blocked at the API level (`/api/sessions/:id/bg-processes` returns 403 for sandbox tokens). `BgProcessManager` spawns directly on the host — until bg processes can run inside containers, this is a hard block.
+**WebSocket guard** (`ws/handler.ts`): Sandbox tokens can only connect to their own session or registered child sessions. Connection attempts to other sessions are rejected with close code 4003.
+
+**bash_bg blocking**: `bash_bg` is excluded from the tool list for sandboxed sessions and blocked at the API level (`/api/sessions/:id/bg-processes` returns 403 for sandbox tokens). The filtering happens in three places: (1) during session creation, before tool restrictions and activation args are computed; (2) during session restore, when rebuilding the tool list from the persisted role; (3) at the API level via the sandbox guard. `BgProcessManager` spawns directly on the host — until bg processes can run inside containers, this is a hard block.
+
+**Credential redaction**: Docker argument arrays are logged via `redactDockerArgs()` in `rpc-bridge.ts`, which replaces values of sensitive env vars (`BOBBIT_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`, `AWS_SECRET*`) with `<REDACTED>`. Both cold-mode `docker run` and pool-mode `docker exec` logs use this redaction.
 
 **Key files**:
 
