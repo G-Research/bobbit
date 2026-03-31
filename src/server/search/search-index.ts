@@ -33,6 +33,7 @@ export interface SearchResults {
 export class SearchIndex {
 	private db: Database.Database | null = null;
 	private readonly dbPath: string;
+	private _needsRebuild = false;
 
 	// Prepared statements (lazily created after open)
 	private stmts: {
@@ -42,6 +43,13 @@ export class SearchIndex {
 		insertSession: Database.Statement;
 		insertMessage: Database.Statement;
 		deleteMessagesBySession: Database.Statement;
+		// Read statements (cached for search queries)
+		countGoals: Database.Statement;
+		searchGoals: Database.Statement;
+		countSessions: Database.Statement;
+		searchSessions: Database.Statement;
+		countMessages: Database.Statement;
+		searchMessages: Database.Statement;
 	} | null = null;
 
 	constructor(dbPath: string) {
@@ -60,6 +68,9 @@ export class SearchIndex {
 		this.db.pragma("journal_mode = WAL");
 		this.db.pragma("synchronous = NORMAL");
 
+		// Check if rebuild is needed BEFORE ensureSchema creates tables
+		this._needsRebuild = this.checkNeedsRebuild();
+
 		this.ensureSchema();
 		this.prepareStatements();
 	}
@@ -73,10 +84,15 @@ export class SearchIndex {
 	}
 
 	/**
-	 * Returns true if the index needs a full rebuild —
-	 * either the schema_version table is missing or the version doesn't match.
+	 * Returns true if the index needs a full rebuild.
+	 * The flag is set during open() BEFORE ensureSchema() creates the tables.
 	 */
 	needsRebuild(): boolean {
+		return this._needsRebuild;
+	}
+
+	/** Pre-ensureSchema check: is the DB fresh or version mismatched? */
+	private checkNeedsRebuild(): boolean {
 		if (!this.db) return true;
 		try {
 			const row = this.db
@@ -232,6 +248,7 @@ export class SearchIndex {
 		});
 
 		rebuild();
+		this._needsRebuild = false;
 		console.log(
 			`[search] Index rebuilt: ${goals.length} goals, ${sessions.length} sessions, ${messageCount} messages`,
 		);
@@ -357,6 +374,38 @@ export class SearchIndex {
 			deleteMessagesBySession: this.db.prepare(
 				"DELETE FROM messages_fts WHERE session_id = ?",
 			),
+			// Read statements for search queries
+			countGoals: this.db.prepare(
+				"SELECT count(*) as cnt FROM goals_fts WHERE goals_fts MATCH ?",
+			),
+			searchGoals: this.db.prepare(
+				`SELECT goal_id, title, snippet(goals_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+					state, archived, created_at, archived_at
+				 FROM goals_fts WHERE goals_fts MATCH ?
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			),
+			countSessions: this.db.prepare(
+				"SELECT count(*) as cnt FROM sessions_fts WHERE sessions_fts MATCH ?",
+			),
+			searchSessions: this.db.prepare(
+				`SELECT session_id, title, snippet(sessions_fts, 1, '<b>', '</b>', '...', 40) as snippet,
+					goal_id, archived, created_at, archived_at
+				 FROM sessions_fts WHERE sessions_fts MATCH ?
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			),
+			countMessages: this.db.prepare(
+				"SELECT count(*) as cnt FROM messages_fts WHERE messages_fts MATCH ?",
+			),
+			searchMessages: this.db.prepare(
+				`SELECT rowid, session_id, session_title,
+					snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+					timestamp
+				 FROM messages_fts WHERE messages_fts MATCH ?
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			),
 		};
 	}
 
@@ -365,23 +414,13 @@ export class SearchIndex {
 		limit: number,
 		offset: number,
 	): { rows: SearchResult[]; count: number } {
-		if (!this.db) return { rows: [], count: 0 };
+		if (!this.stmts) return { rows: [], count: 0 };
 
 		try {
-			const countRow = this.db
-				.prepare("SELECT count(*) as cnt FROM goals_fts WHERE goals_fts MATCH ?")
-				.get(ftsQuery) as { cnt: number };
+			const countRow = this.stmts.countGoals.get(ftsQuery) as { cnt: number };
 			const count = countRow?.cnt ?? 0;
 
-			const rows = this.db
-				.prepare(
-					`SELECT goal_id, title, snippet(goals_fts, 2, '<b>', '</b>', '...', 40) as snippet,
-						state, archived, created_at, archived_at
-					 FROM goals_fts WHERE goals_fts MATCH ?
-					 ORDER BY rank
-					 LIMIT ? OFFSET ?`,
-				)
-				.all(ftsQuery, limit, offset) as Array<{
+			const rows = this.stmts.searchGoals.all(ftsQuery, limit, offset) as Array<{
 				goal_id: string;
 				title: string;
 				snippet: string;
@@ -412,23 +451,13 @@ export class SearchIndex {
 		limit: number,
 		offset: number,
 	): { rows: SearchResult[]; count: number } {
-		if (!this.db) return { rows: [], count: 0 };
+		if (!this.stmts) return { rows: [], count: 0 };
 
 		try {
-			const countRow = this.db
-				.prepare("SELECT count(*) as cnt FROM sessions_fts WHERE sessions_fts MATCH ?")
-				.get(ftsQuery) as { cnt: number };
+			const countRow = this.stmts.countSessions.get(ftsQuery) as { cnt: number };
 			const count = countRow?.cnt ?? 0;
 
-			const rows = this.db
-				.prepare(
-					`SELECT session_id, title, snippet(sessions_fts, 1, '<b>', '</b>', '...', 40) as snippet,
-						goal_id, archived, created_at, archived_at
-					 FROM sessions_fts WHERE sessions_fts MATCH ?
-					 ORDER BY rank
-					 LIMIT ? OFFSET ?`,
-				)
-				.all(ftsQuery, limit, offset) as Array<{
+			const rows = this.stmts.searchSessions.all(ftsQuery, limit, offset) as Array<{
 				session_id: string;
 				title: string;
 				snippet: string;
@@ -460,24 +489,13 @@ export class SearchIndex {
 		limit: number,
 		offset: number,
 	): { rows: SearchResult[]; count: number } {
-		if (!this.db) return { rows: [], count: 0 };
+		if (!this.stmts) return { rows: [], count: 0 };
 
 		try {
-			const countRow = this.db
-				.prepare("SELECT count(*) as cnt FROM messages_fts WHERE messages_fts MATCH ?")
-				.get(ftsQuery) as { cnt: number };
+			const countRow = this.stmts.countMessages.get(ftsQuery) as { cnt: number };
 			const count = countRow?.cnt ?? 0;
 
-			const rows = this.db
-				.prepare(
-					`SELECT rowid, session_id, session_title,
-						snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet,
-						timestamp
-					 FROM messages_fts WHERE messages_fts MATCH ?
-					 ORDER BY rank
-					 LIMIT ? OFFSET ?`,
-				)
-				.all(ftsQuery, limit, offset) as Array<{
+			const rows = this.stmts.searchMessages.all(ftsQuery, limit, offset) as Array<{
 				rowid: number;
 				session_id: string;
 				session_title: string;
@@ -513,7 +531,7 @@ export class SearchIndex {
  */
 function sanitiseFtsQuery(raw: string): string {
 	// Strip characters that break FTS5 even inside quotes
-	const cleaned = raw.replace(/[""]/g, " ").trim();
+	const cleaned = raw.replace(/["\u201C\u201D]/g, " ").trim();
 	if (!cleaned) return "";
 
 	// Split into tokens and wrap each in double quotes
