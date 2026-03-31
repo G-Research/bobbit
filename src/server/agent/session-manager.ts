@@ -155,6 +155,7 @@ export class SessionManager {
 	private sandboxProxy: SandboxProxy | null = null;
 	containerPool: ContainerPool | null = null;
 	sandboxPool: SandboxPool | null = null;
+	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	goalManager: GoalManager;
@@ -282,12 +283,28 @@ export class SessionManager {
 
 		const proxyPort = await this.ensureSandboxProxy(networkAllowlist);
 
-		// Read gateway URL and token for the container
+		// Read gateway URL and generate scoped token for the container
 		try {
 			const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-			const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
 			bridgeOptions.gatewayUrl = gwUrl;
-			bridgeOptions.gatewayToken = token;
+
+			// Generate a scoped sandbox token instead of using the admin token
+			if (this.sandboxTokenStore) {
+				const goalId = bridgeOptions.env?.BOBBIT_GOAL_ID;
+				const scopedToken = this.sandboxTokenStore.register(sessionId, goalId);
+				bridgeOptions.gatewayToken = scopedToken;
+			} else {
+				const adminToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				bridgeOptions.gatewayToken = adminToken;
+			}
+
+			// Auto-add the gateway hostname to the sandbox proxy allowlist
+			try {
+				const gwHostname = new URL(gwUrl).hostname;
+				if (this.sandboxProxy) {
+					this.sandboxProxy.addToAllowlist(gwHostname);
+				}
+			} catch { /* ignore URL parse errors */ }
 		} catch (err) {
 			throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
 		}
@@ -1539,6 +1556,10 @@ export class SessionManager {
 
 		// ── Docker sandbox wiring ──
 		if (opts?.sandboxed) {
+			// Exclude bash_bg — BgProcessManager spawns on host, bypassing the container
+			if (effectiveAllowedTools) {
+				effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
+			}
 			const applied = await this.applySandboxWiring(bridgeOptions, id, { sandboxClaim: opts.sandboxClaim });
 			if (!applied) {
 				throw new Error("Sandbox is not configured as docker");
@@ -2817,6 +2838,11 @@ export class SessionManager {
 		// Clean up background processes
 		if ((this as any).bgProcessManager) {
 			(this as any).bgProcessManager.cleanup(id);
+		}
+
+		// Clean up sandbox token
+		if (this.sandboxTokenStore) {
+			this.sandboxTokenStore.remove(id);
 		}
 
 		// Clean up model name file

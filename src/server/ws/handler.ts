@@ -4,6 +4,7 @@ import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
+import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
@@ -37,6 +38,7 @@ export function handleWebSocketConnection(
 	rateLimiter: RateLimiter,
 	projectConfigStore?: { get(key: string): string | undefined },
 	skipAuth = false,
+	sandboxTokenStore?: SandboxTokenStore,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -71,12 +73,23 @@ export function handleWebSocketConnection(
 					return;
 				}
 
+				// Admin token first, then sandbox token
 				if (!validateToken(msg.token, authToken)) {
-					rateLimiter.recordFailure(ip);
-					console.log(`[gateway] Auth failed from ${ip}`);
-					send(ws, { type: "auth_failed" });
-					ws.close(4004, "Invalid token");
-					return;
+					const scope = sandboxTokenStore?.lookup(msg.token);
+					if (!scope) {
+						rateLimiter.recordFailure(ip);
+						console.log(`[gateway] Auth failed from ${ip}`);
+						send(ws, { type: "auth_failed" });
+						ws.close(4004, "Invalid token");
+						return;
+					}
+					// Sandbox token must match the target session (own or child)
+					if (sessionId !== scope.sessionId && !scope.childSessionIds.has(sessionId)) {
+						console.log(`[gateway] Sandbox token denied for session ${sessionId} (scope: ${scope.sessionId})`);
+						send(ws, { type: "auth_failed" });
+						ws.close(4003, "Session not in sandbox scope");
+						return;
+					}
 				}
 			}
 

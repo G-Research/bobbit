@@ -285,15 +285,10 @@ export class RpcBridge {
 			}
 		}
 
-		// Rewrite gateway URL to use host.docker.internal so it's reachable from
-		// inside the container and bypasses the proxy via no_proxy.
+		// Pass the real gateway URL — agent→gateway traffic routes through the
+		// sandbox proxy, which has the gateway hostname in its allowlist.
 		if (this.options.gatewayUrl) {
-			let containerGatewayUrl = this.options.gatewayUrl;
-			try {
-				const parsed = new URL(this.options.gatewayUrl);
-				containerGatewayUrl = `${parsed.protocol}//host.docker.internal:${parsed.port || (parsed.protocol === "https:" ? "443" : "80")}`;
-			} catch { /* keep original if URL parsing fails */ }
-			dockerArgs.push("-e", `BOBBIT_GATEWAY_URL=${containerGatewayUrl}`);
+			dockerArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
 		}
 		if (this.options.gatewayToken) {
 			dockerArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
@@ -320,14 +315,13 @@ export class RpcBridge {
 			}
 		}
 
-		// Always set proxy env vars — the sandbox proxy controls outbound access.
-		// With empty allowlist it blocks everything; with entries it allows only those hosts.
-		// no_proxy ensures gateway callbacks bypass the proxy.
+		// All outbound traffic (including gateway) routes through the sandbox proxy.
+		// The gateway hostname is auto-added to the proxy allowlist by applySandboxWiring().
 		if (this.options.sandboxProxyPort) {
 			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
 			dockerArgs.push("-e", `http_proxy=${proxyUrl}`);
 			dockerArgs.push("-e", `https_proxy=${proxyUrl}`);
-			dockerArgs.push("-e", "no_proxy=host.docker.internal,localhost,127.0.0.1");
+			dockerArgs.push("-e", "no_proxy=localhost,127.0.0.1");
 		}
 
 		// Mount MCP proxy extensions directory if it exists
@@ -376,7 +370,7 @@ export class RpcBridge {
 			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
 			execArgs.push("-e", `http_proxy=${proxyUrl}`);
 			execArgs.push("-e", `https_proxy=${proxyUrl}`);
-			execArgs.push("-e", "no_proxy=host.docker.internal,localhost,127.0.0.1");
+			execArgs.push("-e", "no_proxy=localhost,127.0.0.1");
 		}
 		if (this.options.env?.BOBBIT_SESSION_ID) {
 			execArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);

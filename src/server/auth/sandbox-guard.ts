@@ -1,0 +1,67 @@
+import type { SandboxScope } from "./sandbox-token.js";
+
+/**
+ * Check if a sandbox-scoped token is allowed to access the given API route.
+ *
+ * Returns true if the request is allowed, false → 403.
+ * Everything not explicitly listed is blocked.
+ */
+export function isSandboxAllowed(
+	pathname: string,
+	method: string,
+	scope: SandboxScope,
+): boolean {
+	const m = method.toUpperCase();
+
+	// ── Always-allowed endpoints ───────────────────────────────────────
+	if (pathname === "/api/health" && m === "GET") return true;
+	if (pathname === "/api/web-proxy/search" && m === "POST") return true;
+	if (pathname === "/api/web-proxy/fetch" && m === "POST") return true;
+	if (pathname === "/api/internal/mcp-call" && m === "POST") return true;
+	if (pathname === "/api/preview" && m === "POST") return true;
+	if (pathname === "/api/personalities" && (m === "GET" || m === "POST")) return true;
+
+	// ── Session creation (delegates) ──────────────────────────────────
+	// POST /api/sessions — server.ts forces sandboxed:true for sandbox tokens
+	if (pathname === "/api/sessions" && m === "POST") return true;
+
+	// ── Session-scoped endpoints ──────────────────────────────────────
+	const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)(\/.*)?$/);
+	if (sessionMatch) {
+		const targetId = sessionMatch[1];
+		const subpath = sessionMatch[2] || "";
+		const isOwnOrChild = targetId === scope.sessionId || scope.childSessionIds.has(targetId);
+
+		// bg-processes: HARD BLOCK — BgProcessManager spawns on host, not in container
+		if (subpath.startsWith("/bg-processes")) return false;
+
+		if (!isOwnOrChild) return false;
+
+		if (m === "GET" && subpath === "") return true;       // session info
+		if (m === "PATCH" && subpath === "") return true;     // preview_open metadata
+		if (m === "DELETE" && subpath === "") return true;    // delegate cleanup
+		if (m === "POST" && subpath === "/wait") return true; // delegate wait
+
+		return false;
+	}
+
+	// ── Goal-scoped endpoints ─────────────────────────────────────────
+	if (scope.goalId) {
+		const goalMatch = pathname.match(/^\/api\/goals\/([^/]+)(\/.*)?$/);
+		if (goalMatch) {
+			const targetGoalId = goalMatch[1];
+			const subpath = goalMatch[2] || "";
+			if (targetGoalId !== scope.goalId) return false;
+
+			if (subpath.startsWith("/team")) return true;
+			if (subpath.startsWith("/gates")) return true;
+			if (subpath.startsWith("/tasks")) return true;
+			if (m === "GET" && subpath === "") return true;
+
+			return false;
+		}
+	}
+
+	// ── Everything else: BLOCKED ──────────────────────────────────────
+	return false;
+}

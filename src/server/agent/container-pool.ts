@@ -260,14 +260,9 @@ export class ContainerPool {
 			}
 		}
 
-		// Gateway URL — rewrite to host.docker.internal
+		// Gateway URL — pass the real address (traffic routes through sandbox proxy)
 		if (this.options.gatewayUrl) {
-			let containerGatewayUrl = this.options.gatewayUrl;
-			try {
-				const parsed = new URL(this.options.gatewayUrl);
-				containerGatewayUrl = `${parsed.protocol}//host.docker.internal:${parsed.port || (parsed.protocol === "https:" ? "443" : "80")}`;
-			} catch { /* keep original */ }
-			args.push("-e", `BOBBIT_GATEWAY_URL=${containerGatewayUrl}`);
+			args.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
 		}
 		if (this.options.gatewayToken) {
 			args.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
@@ -292,7 +287,7 @@ export class ContainerPool {
 			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
 			args.push("-e", `http_proxy=${proxyUrl}`);
 			args.push("-e", `https_proxy=${proxyUrl}`);
-			args.push("-e", "no_proxy=host.docker.internal,localhost,127.0.0.1");
+			args.push("-e", "no_proxy=localhost,127.0.0.1");
 		}
 
 		// MCP extensions directory

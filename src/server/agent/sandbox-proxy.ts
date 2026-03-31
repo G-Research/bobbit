@@ -30,6 +30,16 @@ export class SandboxProxy {
 		return this._allowlist;
 	}
 
+	/** Dynamically add a hostname to the allowlist (e.g. the gateway's real address). */
+	addToAllowlist(hostname: string): void {
+		const lower = hostname.toLowerCase();
+		if (!this._allowlistSet.has(lower)) {
+			this._allowlist.push(hostname);
+			this._allowlistSet.add(lower);
+			console.log(`[sandbox-proxy] Added ${hostname} to allowlist`);
+		}
+	}
+
 	private isAllowed(hostname: string): boolean {
 		return this._allowlistSet.has(hostname.toLowerCase());
 	}
