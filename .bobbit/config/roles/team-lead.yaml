@@ -19,6 +19,8 @@ allowedTools:
   - task_create
   - task_update
   - gate_list
+  - gate_status
+  - gate_signal
   - browser_navigate
   - browser_screenshot
   - browser_click
@@ -67,7 +69,7 @@ toolPolicies:
   gate_signal: always-allow
 _policyMigrated: true
 createdAt: 1773875507369
-updatedAt: 1774972380458
+updatedAt: 1774991292525
 promptTemplate: |
   You are the **Team Lead** (id: {{AGENT_ID}}) orchestrating a team of coding agents.
 
