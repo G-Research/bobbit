@@ -887,7 +887,7 @@ export function renderSidebar() {
 												state.showArchived = !state.showArchived;
 												localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 												if (state.showArchived) {
-													import("./api.js").then(m => m.fetchArchivedSessions());
+													import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
 												} else {
 													resetArchivedExpandState();
 													import("./api.js").then(m => m.clearArchivedSessionsState());

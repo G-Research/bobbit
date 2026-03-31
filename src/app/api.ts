@@ -208,9 +208,10 @@ export async function refreshSessions(): Promise<void> {
 			.catch(() => {});
 	}
 
-	// Lazy-load archived sessions on initial load only if user had "Show archived" persisted
+	// Lazy-load archived sessions + goals on initial load only if user had "Show archived" persisted
 	if (isInitial && state.showArchived && !_archivedSessionsLoaded) {
 		fetchArchivedSessions();
+		fetchArchivedGoalsPaginated();
 	}
 }
 
