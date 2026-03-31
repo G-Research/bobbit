@@ -20,6 +20,8 @@ export interface PersistedGoal {
 	branch?: string;
 	/** The original repo path (for worktree cleanup) */
 	repoPath?: string;
+	/** Which project this goal belongs to */
+	projectId?: string;
 	/** Whether this is a team goal with Team Lead orchestration */
 	team?: boolean;
 	/** Session ID of the Team Lead agent (for team goals) */

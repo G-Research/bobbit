@@ -20,6 +20,8 @@ export interface PersistedSession {
 	streamingStartedAt?: number;
 	/** If this session is a delegate, the parent session ID */
 	delegateOf?: string;
+	/** Which project this session belongs to */
+	projectId?: string;
 	/** Role in a team goal (e.g., 'coder', 'reviewer', 'tester') */
 	role?: string;
 	/** The team goal this agent belongs to */

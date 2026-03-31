@@ -93,6 +93,8 @@ export interface SessionInfo {
 	containerId?: string;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
+	/** Which project this session belongs to */
+	projectId?: string;
 	/** Personality names */
 	personalities?: string[];
 	/** Allowed tools for this session */
@@ -800,6 +802,7 @@ export class SessionManager {
 						text,
 						toolNames,
 						Date.now(),
+						session.projectId || "",
 					);
 				}
 			} catch {
@@ -1068,12 +1071,12 @@ export class SessionManager {
 			// Wire index update callbacks
 			const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
 			goalStore.onIndexUpdate = (goal) => {
-				try { this.searchIndex.indexGoal(goal); } catch (err) { console.error("[search] Failed to index goal:", err); }
+				try { this.searchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
 			};
 			this.store.onIndexUpdate = (session) => {
 				try {
 					const goalTitle = session.goalId ? this.goalManager.getGoal(session.goalId)?.title : undefined;
-					this.searchIndex.indexSession(session, goalTitle);
+					this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
 				} catch (err) { console.error("[search] Failed to index session:", err); }
 			};
 		} catch (err) {
