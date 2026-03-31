@@ -156,6 +156,9 @@ export class SessionManager {
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
+	/** Cached aigw model discovery result (url → { models, timestamp }) */
+	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
+	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
 
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
 		this._onPrCreationDetected = cb;
@@ -1562,15 +1565,14 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
-		// Auto-select aigw model when gateway is configured
-		await this.tryAutoSelectModel(session);
-
-		// Apply project-level default thinking level
-		await this.tryApplyDefaultThinkingLevel(session);
-
-		// Capture the agent's session file path and persist
-		this.persistSessionMetadata(session).catch((err) => {
-			console.error(`[session-manager] Failed to persist session ${id}:`, err);
+		// Auto-select model, apply thinking level, and persist metadata — all in parallel.
+		// None of these block the session from being usable; they're fire-and-forget config.
+		Promise.all([
+			this.tryAutoSelectModel(session),
+			this.tryApplyDefaultThinkingLevel(session),
+			this.persistSessionMetadata(session),
+		]).catch((err) => {
+			console.error(`[session-manager] Post-start config error for session ${id}:`, err);
 		});
 
 		return session;
@@ -1723,9 +1725,12 @@ export class SessionManager {
 		await rpcClient.start();
 		session.status = "idle";
 
-		await this.tryAutoSelectModel(session);
-		await this.tryApplyDefaultThinkingLevel(session);
-		this.persistSessionMetadata(session).catch(() => {});
+		// Auto-select model, apply thinking level, and persist — all in parallel, non-blocking.
+		Promise.all([
+			this.tryAutoSelectModel(session),
+			this.tryApplyDefaultThinkingLevel(session),
+			this.persistSessionMetadata(session),
+		]).catch(() => {});
 
 		// Notify connected clients that the session is ready
 		broadcast(session.clients, { type: "session_status", status: "idle" });
@@ -1806,15 +1811,16 @@ export class SessionManager {
 		session.status = "idle";
 		this.sessions.set(id, session);
 
-		// Auto-select aigw model when gateway is configured and internet is unavailable
-		await this.tryAutoSelectModel(session);
-
-		// Persist session metadata
-		this.persistSessionMetadata(session).then(() => {
-			this.store.update(id, { delegateOf: parentSessionId });
-		}).catch((err) => {
-			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
-		});
+		// Auto-select model and persist in parallel (delegate needs model before prompt)
+		await Promise.all([
+			this.tryAutoSelectModel(session),
+			this.tryApplyDefaultThinkingLevel(session),
+			this.persistSessionMetadata(session).then(() => {
+				this.store.update(id, { delegateOf: parentSessionId });
+			}).catch((err) => {
+				console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
+			}),
+		]);
 
 		// Send the task prompt and wait for the agent to start streaming
 		// so that waitForIdle() doesn't return immediately.
@@ -1958,7 +1964,14 @@ export class SessionManager {
 
 		let aigwModels;
 		try {
-			aigwModels = await discoverAigwModels(aigwUrl);
+			// Use cached model list if fresh (avoids HTTP round-trip per session)
+			if (this._aigwModelCache && this._aigwModelCache.url === aigwUrl &&
+				Date.now() - this._aigwModelCache.ts < SessionManager.AIGW_CACHE_TTL_MS) {
+				aigwModels = this._aigwModelCache.models;
+			} else {
+				aigwModels = await discoverAigwModels(aigwUrl);
+				this._aigwModelCache = { url: aigwUrl, models: aigwModels, ts: Date.now() };
+			}
 		} catch (err) {
 			console.warn(`[session-manager] Failed to discover aigw models for auto-selection:`, err);
 			return;
