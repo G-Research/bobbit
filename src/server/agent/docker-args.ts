@@ -95,10 +95,12 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		args.push("-v", `${toDockerPath(wtRoot)}:/worktrees`);
 	}
 
-	// Host agent dir (~/.bobbit/agent/)
+	// Host agent sessions dir (~/.bobbit/agent/sessions/) — mount ONLY sessions, not the
+	// full agent dir, to prevent sandboxed agents from accessing auth.json credentials.
 	const hostAgentDir = globalAgentDir();
-	fs.mkdirSync(path.join(hostAgentDir, "sessions"), { recursive: true });
-	args.push("-v", `${toDockerPath(hostAgentDir)}:/home/node/.bobbit/agent`);
+	const hostSessionsDir = path.join(hostAgentDir, "sessions");
+	fs.mkdirSync(hostSessionsDir, { recursive: true });
+	args.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`);
 
 	// Persistent named volumes for caches
 	if (label) {
