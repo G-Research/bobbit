@@ -62,6 +62,7 @@ import "./personality-manager.css";
 import { renderStaffPage } from "./staff-page.js";
 import { renderSkillsPage } from "./skills-page.js";
 import { renderSettingsPage } from "./settings-page.js";
+import { renderSearchPage, initSearchPage } from "./search-page.js";
 
 // ============================================================================
 // MOBILE LANDING PAGE
@@ -78,6 +79,14 @@ async function _handleMobileSearchInput(query: string): Promise<void> {
 		renderApp();
 		return;
 	}
+	// When content mode is off, just set the query for client-side title filtering
+	if (!(state as any).searchContentMode) {
+		state.searchResults = null;
+		state.searchLoading = false;
+		renderApp();
+		return;
+	}
+	// Content mode: use FTS API
 	state.searchLoading = true;
 	renderApp();
 	const data = await searchApi(query);
@@ -165,8 +174,17 @@ function renderMobileLanding() {
 				<search-box
 					.query=${state.searchQuery}
 					.loading=${state.searchLoading}
+					.contentMode=${(state as any).searchContentMode ?? false}
+					.showControls=${!!state.searchQuery}
 					@search-input=${(e: CustomEvent) => { _handleMobileSearchInput(e.detail.query); }}
 					@search-clear=${() => { _handleMobileSearchClear(); }}
+					@search-mode-change=${(e: CustomEvent) => {
+						(state as any).searchContentMode = e.detail.contentSearch;
+						localStorage.setItem("searchContentMode", String(e.detail.contentSearch));
+						// Re-trigger search with new mode
+						if (state.searchQuery) _handleMobileSearchInput(state.searchQuery);
+					}}
+					@full-search-click=${(e: CustomEvent) => { setHashRoute("search", e.detail.query); }}
 				></search-box>
 				${state.searchQuery ? html`
 					<search-results
@@ -2348,6 +2366,10 @@ export function doRenderApp(): void {
 		}
 		if (route.view === "settings") {
 			return renderSettingsPage();
+		}
+		if (route.view === "search") {
+			initSearchPage();
+			return renderSearchPage();
 		}
 
 		if (connected && state.assistantType) {
