@@ -141,7 +141,8 @@ async function getGitDiff(cwd: string, file?: string): Promise<string> {
 		// Try untracked if empty
 		if (!diff.trim()) {
 			try {
-				const { stdout } = await execFileAsync("git", ["diff", "--no-index", "/dev/null", "--", file], opts);
+				const devNull = process.platform === "win32" ? "NUL" : "/dev/null";
+				const { stdout } = await execFileAsync("git", ["diff", "--no-index", devNull, "--", file], opts);
 				diff = stdout;
 			} catch (e: any) {
 				// git diff --no-index exits 1 when there are differences

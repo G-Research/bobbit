@@ -1564,25 +1564,12 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
-		// Await setup before marking idle — the agent processes RPC commands
-		// sequentially, so any user prompt sent while these are in-flight would
-		// be queued behind them, making the session appear unresponsive.
-		try {
-			await Promise.all([
-				this.tryAutoSelectModel(session),
-				this.tryApplyDefaultThinkingLevel(session),
-				this.persistSessionMetadata(session),
-			]);
-		} catch (err) {
+		// Run setup async — session stays in "starting" until done.
+		// Prompts arriving via WS during this window are queued and drained
+		// when the session transitions to idle.
+		this._finishSessionSetup(session).catch((err) => {
 			console.error(`[session-manager] Post-start config error for session ${id}:`, err);
-		}
-
-		session.status = "idle";
-
-		// Drain any prompts that arrived while the session was still starting
-		if (!session.promptQueue.isEmpty) {
-			this.drainQueue(session);
-		}
+		});
 
 		return session;
 	}
@@ -1733,26 +1720,10 @@ export class SessionManager {
 
 		await rpcClient.start();
 
-		// Await setup before marking idle — the agent processes RPC commands
-		// sequentially, so any user prompt sent while these are in-flight would
-		// be queued behind them, making the session appear unresponsive.
-		try {
-			await Promise.all([
-				this.tryAutoSelectModel(session),
-				this.tryApplyDefaultThinkingLevel(session),
-				this.persistSessionMetadata(session),
-			]);
-		} catch { /* logged inside each method */ }
-
-		session.status = "idle";
-
-		// Notify connected clients that the session is ready
-		broadcast(session.clients, { type: "session_status", status: "idle" });
-
-		// Drain any prompts that arrived while the session was still starting
-		if (!session.promptQueue.isEmpty) {
-			this.drainQueue(session);
-		}
+		// Run setup async — session stays in "starting" until done.
+		// The worktree path already has clients connected (from "preparing"),
+		// so we broadcast idle + drain queued prompts when setup completes.
+		this._finishSessionSetup(session).catch(() => {});
 	}
 
 	/**
@@ -1946,6 +1917,32 @@ export class SessionManager {
 	/**
 	 * Auto-select a model for a new session. Uses `default.sessionModel`
 	 * preference (format: "provider/modelId") if set. Falls back to aigw
+	 * Run post-start setup (model, thinking level, metadata) then transition
+	 * the session to idle.  The session stays in "starting" during this window
+	 * so that any user prompts arriving via WebSocket are queued rather than
+	 * racing with the setup commands on the agent's sequential RPC pipeline.
+	 */
+	private async _finishSessionSetup(session: SessionInfo): Promise<void> {
+		try {
+			await Promise.all([
+				this.tryAutoSelectModel(session),
+				this.tryApplyDefaultThinkingLevel(session),
+				this.persistSessionMetadata(session),
+			]);
+		} catch (err) {
+			console.error(`[session-manager] Setup error for session ${session.id}:`, err);
+		}
+
+		session.status = "idle";
+		broadcast(session.clients, { type: "session_status", status: "idle" });
+
+		// Drain any prompts that arrived while setup was running
+		if (!session.promptQueue.isEmpty) {
+			this.drainQueue(session);
+		}
+	}
+
+	/**
 	 * best-ranked model when gateway is configured, otherwise does nothing
 	 * (pi-coding-agent uses its own built-in default).
 	 */

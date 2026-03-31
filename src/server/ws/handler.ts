@@ -114,8 +114,8 @@ export function handleWebSocketConnection(
 
 			// Send current agent state (don't block auth on this — fire async
 			// so the client gets auth_ok immediately and can start rendering).
-			// Skip for "preparing" sessions — agent isn't launched yet.
-			if (session.status !== "preparing") {
+			// Skip for "preparing"/"starting" sessions — agent isn't ready yet.
+			if (session.status !== "preparing" && session.status !== "starting") {
 				session.rpcClient.getState().then((stateResponse) => {
 					if (stateResponse.success) {
 						send(ws, { type: "state", data: stateResponse.data });

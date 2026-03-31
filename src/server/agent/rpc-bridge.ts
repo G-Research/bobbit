@@ -15,18 +15,20 @@ export const CONTAINER_AGENT_DIR = "/home/node/.pi/agent/";
  * Remap a container-internal path to the equivalent host path.
  * e.g. /home/node/.pi/agent/sessions/x/y.jsonl → <homedir>/.pi/agent/sessions/x/y.jsonl
  * Non-matching paths pass through unchanged.
+ * @param homeDir - override os.homedir() for testing
  */
-export function containerToHostSessionPath(containerPath: string): string {
+export function containerToHostSessionPath(containerPath: string, homeDir?: string): string {
 	if (!containerPath.startsWith(CONTAINER_AGENT_DIR)) return containerPath;
 	const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
-	return path.join(os.homedir(), ".pi", "agent", relative).replace(/\\/g, "/");
+	return path.join(homeDir ?? os.homedir(), ".pi", "agent", relative).replace(/\\/g, "/");
 }
 
 /**
  * Remap a host path back to the container-internal path. Inverse of containerToHostSessionPath.
+ * @param homeDir - override os.homedir() for testing
  */
-export function hostToContainerSessionPath(hostPath: string): string {
-	const hostAgentDir = path.join(os.homedir(), ".pi", "agent").replace(/\\/g, "/") + "/";
+export function hostToContainerSessionPath(hostPath: string, homeDir?: string): string {
+	const hostAgentDir = path.join(homeDir ?? os.homedir(), ".pi", "agent").replace(/\\/g, "/") + "/";
 	const normalized = hostPath.replace(/\\/g, "/");
 	if (!normalized.startsWith(hostAgentDir)) return hostPath;
 	const relative = normalized.substring(hostAgentDir.length);
