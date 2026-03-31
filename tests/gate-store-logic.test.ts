@@ -49,7 +49,7 @@ describe("GateStore", () => {
 
 	beforeEach(() => {
 		ensureStateDir();
-		store = new GateStore();
+		store = new GateStore(path.join(TEST_DIR, "state"));
 	});
 
 	afterEach(() => {
