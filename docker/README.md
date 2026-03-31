@@ -10,6 +10,8 @@ docker build -t bobbit-agent docker/
 
 The default image name `bobbit-agent` matches Bobbit's default `sandbox_image` config. To use a different name, update `sandbox_image` in your project settings.
 
+**Auto-build**: When `sandbox: "docker"` is configured and the image doesn't exist, the Bobbit gateway automatically builds it on startup from this Dockerfile (120s timeout). You can also trigger a build manually from Settings → Project tab → Docker Sandbox → "Build Image" button, or via `POST /api/sandbox-image/build`. A manual build is not normally needed — the auto-build handles the first-run case.
+
 ## What's Included
 
 - **Node.js 20** (slim base) — runtime for the agent process
@@ -85,7 +87,7 @@ After building a custom image, update `sandbox_image` in your Bobbit project set
 This image is used automatically by Bobbit when sandbox mode is enabled. You do not need to run `docker run` manually. Configure sandbox mode in your project settings:
 
 1. Set `sandbox` to `"docker"` in project config
-2. Build the image: `docker build -t bobbit-agent docker/`
+2. The image is built automatically on the next server startup if missing — or build manually: `docker build -t bobbit-agent docker/`
 3. Enable the "Sandbox" checkbox when creating a new session
 
 See the main Bobbit documentation for full sandbox configuration options including network allowlists, credentials, and additional mounts.

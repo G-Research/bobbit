@@ -175,9 +175,11 @@ export function handleWebSocketConnection(
 			return;
 		}
 
-		// Block commands while session is still preparing (worktree being created).
-		// Return safe responses for read-only commands; reject everything else.
-		if (session.status === "preparing") {
+		// Block commands while session is still preparing (worktree being created)
+		// or starting (agent process launched but setup commands still running).
+		// Return safe responses for read-only commands; let prompts through to
+		// be queued (they'll drain when the session becomes idle).
+		if (session.status === "preparing" || session.status === "starting") {
 			switch (msg.type) {
 				case "ping":
 					send(ws, { type: "pong" });
@@ -188,6 +190,10 @@ export function handleWebSocketConnection(
 				case "get_messages":
 					send(ws, { type: "messages", data: [] });
 					return;
+				case "prompt":
+				case "follow_up":
+					// Allow prompts — they'll be queued by enqueuePrompt since status != idle
+					break;
 				default:
 					send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
 					return;
