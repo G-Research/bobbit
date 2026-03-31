@@ -19,6 +19,8 @@ const DEFAULTS: Record<string, string> = {
 	sandbox_network_allowlist: "",      // JSON array: '["github.com","api.github.com"]'
 	sandbox_credentials: "",            // JSON object: '{"GITHUB_TOKEN":"ghp_xxx"}'
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
+	sandbox_pool_size: "2",             // Pre-warmed containers (0 = disable pooling)
+	sandbox_pool_max_idle: "300",       // Seconds before excess idle containers culled
 };
 
 /**

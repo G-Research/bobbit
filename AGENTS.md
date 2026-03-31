@@ -264,6 +264,8 @@ Cross-links on the Skills page and Tools page ("Manage scan directories →") na
 
 **Debug sandbox sessions**: Check `GET /api/sandbox-status` for Docker availability and image status. Session metadata in `sessions.json` includes `sandboxed: boolean`. The sandbox proxy logs to console with `[sandbox-proxy]` prefix — look for `BLOCKED` or `CONNECT` entries to diagnose network issues. Rate limiting on web proxy endpoints is 10 req/min per client IP (HTTP 429 when exceeded). If the container can't reach the gateway, verify `host.docker.internal` resolves (check `--add-host` in the `docker run` args logged by rpc-bridge). If tool extensions fail auth, check that `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` env vars are set inside the container. If sandboxed sessions don't survive restarts, check that `agentSessionFile` in `.bobbit/state/sessions.json` contains a host-native path (not starting with `/home/node/`). Path remapping between container and host paths is handled by `containerToHostSessionPath()` and `hostToContainerSessionPath()` in `rpc-bridge.ts`.
 
+**Debug container pool**: Check `GET /api/sandbox-pool` for pool stats (`enabled`, `total`, `idle`, `claimed`, `warming`). Pool containers are labeled `bobbit-pool=<project-hash>` — use `docker ps --filter label=bobbit-pool` to see them directly. Health checks run periodically via `docker inspect`; dead containers are removed and replacements started automatically. On gateway shutdown, agents receive SIGTERM first (graceful flush), then containers are stopped. If containers aren't being re-adopted after a gateway restart, verify the project hash in the label matches (it's derived from the project directory path). If sessions fall back to cold `docker run` unexpectedly, check that the pool has idle containers available — pool exhaustion is logged as a warning.
+
 **Debug gate re-signal cancellation**: When a gate is re-signaled, `cancelStaleVerifications()` in `verification-harness.ts` terminates reviewer sessions from the prior signal and marks the old `ActiveVerification` as cancelled. The cancelled flag is checked after `Promise.all` resolves to suppress stale results. If reviewer sessions aren't being cancelled, check that `sessionManager` and `teamManager` are passed to the `VerificationHarness` constructor. Active verifications are tracked in `activeVerifications` map, keyed by signal ID — use `GET /api/goals/:goalId/verifications/active` to inspect in-flight state.
 
 ## Git conventions
@@ -382,6 +384,8 @@ sandbox_image: "bobbit-agent"          # Docker image name (default: "bobbit-age
 sandbox_network_allowlist: '["github.com", "api.github.com"]'  # JSON array of hostnames
 sandbox_credentials: '{"GITHUB_TOKEN": "ghp_..."}'             # JSON object of env vars
 sandbox_mounts: '["/data/shared:/data:ro"]'                    # JSON array of bind mounts
+sandbox_pool_size: 2                   # Pre-warmed containers (default 2, 0 = disable pooling)
+sandbox_pool_max_idle: 300             # Seconds before excess idle containers are culled
 ```
 
 - **`sandbox`**: Set to `"docker"` to enable. When `"none"`, all sandbox options are ignored.
@@ -389,6 +393,10 @@ sandbox_mounts: '["/data/shared:/data:ro"]'                    # JSON array of b
 - **`sandbox_network_allowlist`**: JSON array of hostnames the agent is allowed to reach. Empty array (`[]`) blocks all outbound traffic. The gateway itself is always reachable (bypasses the proxy).
 - **`sandbox_credentials`**: JSON object of environment variables injected into the container. Keys must match `^[A-Za-z_][A-Za-z0-9_]*$` — invalid keys are silently skipped.
 - **`sandbox_mounts`**: JSON array of Docker bind-mount strings (`source:target[:options]`). Subject to comprehensive validation (see Security below).
+- **`sandbox_pool_size`**: Number of pre-warmed containers to keep ready in the pool (default 2). Set to 0 to disable pooling and use cold `docker run` for every session.
+- **`sandbox_pool_max_idle`**: Maximum seconds an excess idle container stays alive before being culled (default 300). Does not affect the minimum pool — only containers beyond `sandbox_pool_size` are culled.
+
+Pool configuration is read at gateway startup. Changes require a gateway restart to take effect. The Settings → Project tab → Docker Sandbox section provides Pool Size and Max Idle Time inputs, plus a live pool status display showing warm/claimed/total counts.
 
 ### Docker image
 
@@ -405,14 +413,34 @@ The image includes Node.js 20, git, curl, gh CLI, and build-essential. The agent
 When a session is created with `sandboxed: true`:
 
 1. **Session manager** reads sandbox config from `project.yaml`, validates mounts, and starts the sandbox proxy
-2. **RpcBridge** spawns `docker run` instead of bare `node`, with:
-   - Project directory mounted at `/workspace` (read-write)
-   - Agent modules at `/agent-modules` (read-only)
-   - Tool extensions at `/tools` (read-only)
-   - Agent sessions directory at `/home/node/.pi/agent/sessions` (read-write, for session persistence across restarts)
-   - `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` as env vars (no `.bobbit/` mount)
+2. **RpcBridge** starts the agent process inside a Docker container. Two paths depending on whether pooling is enabled:
+   - **Pool mode** (`sandbox_pool_size > 0`): Claims a pre-warmed container from the `ContainerPool` and runs `docker exec -i <containerId> node ...cli.js <args>`. The container is already running with all bind mounts and env vars configured.
+   - **Non-pool mode** (`sandbox_pool_size == 0`): Spawns a fresh `docker run --rm` with:
+     - Project directory mounted at `/workspace` (read-write)
+     - Agent modules at `/agent-modules` (read-only)
+     - Tool extensions at `/tools` (read-only)
+     - Agent sessions directory at `/home/node/.pi/agent/sessions` (read-write, for session persistence across restarts)
+     - `BOBBIT_GATEWAY_URL` and `BOBBIT_TOKEN` as env vars (no `.bobbit/` mount)
 3. **Tool extensions** read gateway credentials from env vars (falling back to file reads for non-sandboxed sessions)
 4. **Sandbox proxy** controls all outbound HTTP/HTTPS from the container
+
+### Container pool
+
+Without pooling, every sandboxed session pays the cost of `docker run` — container creation, filesystem setup, Node.js cold start, and agent CLI initialization. This takes 5–10s per session and compounds during team spawns when multiple agents start simultaneously. The container pool eliminates this overhead by keeping pre-warmed containers ready.
+
+**Lifecycle:**
+
+1. **Pre-warm on startup**: When `sandbox: "docker"` is configured and `sandbox_pool_size > 0`, the gateway starts N idle containers at startup. Each runs `sleep infinity` with all bind mounts and env vars already configured, labeled with `bobbit-pool=<project-hash>` for identification.
+2. **Claim**: When a sandboxed session is created, `ContainerPool` provides an idle container. `RpcBridge` uses `docker exec -i <containerId> node ...cli.js` instead of `docker run` — same stdio pipe protocol, but inside an already-running container. Startup drops from ~5–10s to ~200ms.
+3. **Multi-session**: A single container can host multiple agent processes via separate `docker exec` calls, each with its own PID and stdio pipes. The container returns to "idle" only when all sessions inside it have terminated.
+4. **Replenish**: When a container is claimed, the pool asynchronously starts a replacement in the background. The session does not wait for it.
+5. **Release**: When all sessions in a container terminate, it returns to the idle pool. Excess idle containers beyond `sandbox_pool_size` are culled after `sandbox_pool_max_idle` seconds.
+6. **Health monitoring**: Periodic liveness checks via `docker inspect` remove dead containers and start replacements.
+7. **Fallback**: If the pool is exhausted (all containers claimed, no idle available), the session falls back to a cold `docker run` — the current non-pool behavior. Sessions never fail due to pool exhaustion, they just start slower. A warning is logged.
+
+**Gateway restart resilience**: Pool containers are labeled (`bobbit-pool=<project-hash>`) so a restarted gateway re-adopts them via `docker ps --filter label=...` instead of orphaning them. On startup, stale containers from previously crashed gateways are also cleaned up.
+
+**Graceful shutdown**: On gateway shutdown, agent processes receive SIGTERM first, then containers are stopped. This two-phase approach gives agents time to flush state before the container is removed.
 
 ### Network architecture
 
@@ -440,6 +468,7 @@ Containers always run on the default Docker bridge network — they are **not** 
 | `/api/web-proxy/search` | POST | Gateway-mediated web search for sandboxed agents. Body: `{ query, maxResults? }`. Rate-limited to 10 req/min per client IP |
 | `/api/web-proxy/fetch` | POST | Gateway-mediated URL fetch for sandboxed agents. Body: `{ url, maxLength? }`. Rate-limited to 10 req/min per client IP |
 | `/api/sessions` | POST | Accepts `sandboxed: true` in body. Returns 400 if sandbox is not configured |
+| `/api/sandbox-pool` | GET | Container pool status. Returns `{ enabled, total, idle, claimed, warming }` |
 
 ### Security
 
@@ -458,6 +487,7 @@ Containers always run on the default Docker bridge network — they are **not** 
 | `docker/README.md` | Image build instructions and customization guide |
 | `src/server/agent/sandbox-proxy.ts` | HTTP/HTTPS forward proxy with hostname allowlist |
 | `src/server/agent/sandbox-status.ts` | Docker availability check (`docker info` + image inspect) |
+| `src/server/agent/container-pool.ts` | Container pool lifecycle: create, claim, release, replenish, health check, shutdown, re-adopt |
 
 The sandbox also required changes to: `rpc-bridge.ts` (Docker spawn path, path remapping helpers for sandbox session persistence), `session-manager.ts` (sandbox wiring, mount validation, and session path remapping on persist/restore), `session-store.ts` (`sandboxed` field on `PersistedSession`), `server.ts` (REST endpoints), `sidebar.ts` (sandbox checkbox), `settings-page.ts` (Docker Sandbox config section), and all tool extensions (env var fallback for gateway credentials).
 
