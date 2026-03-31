@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, Drama, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, Drama, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
@@ -19,17 +19,39 @@ import {
 	isTeamLeadExpanded,
 	getSidebarData,
 	type Goal,
+	type Project,
 	setSearchContentMode,
 } from "./state.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
-import { showGoalDialog } from "./dialogs.js";
+import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, toggleConfigPage } from "./routing.js";
+
+// ============================================================================
+// PROJECT EXPANSION STATE
+// ============================================================================
+
+const EXPANDED_PROJECTS_KEY = "bobbit-expanded-projects";
+const _expandedProjects: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(EXPANDED_PROJECTS_KEY) || "[]"),
+);
+
+function isProjectExpanded(projectId: string): boolean {
+	// Default to expanded if never toggled
+	return !_expandedProjects.has(`collapsed:${projectId}`);
+}
+
+function toggleProjectExpanded(projectId: string): void {
+	const key = `collapsed:${projectId}`;
+	if (_expandedProjects.has(key)) _expandedProjects.delete(key);
+	else _expandedProjects.add(key);
+	localStorage.setItem(EXPANDED_PROJECTS_KEY, JSON.stringify([..._expandedProjects]));
+}
 
 // ============================================================================
 // ROLE + PERSONALITY PICKER
@@ -763,6 +785,42 @@ function _handleFullSearchClick(query: string): void {
 	window.location.hash = query ? `#/search?q=${encodeURIComponent(query)}` : "#/search";
 }
 
+/** Render a collapsible project section header. */
+function renderProjectHeader(project: Project, expanded: boolean) {
+	const color = project.color || "var(--muted-foreground)";
+	return html`
+		<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+			style="padding-left:${HEADER_CHEVRON_W}px;"
+			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
+			<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${expanded ? "▾" : "▸"}</span>
+			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
+			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
+		</div>
+	`;
+}
+
+/** Render goals and sessions for a single project (used in multi-project mode). */
+function renderProjectContent(
+	_project: Project,
+	goals: Goal[],
+	sessions: GatewaySession[],
+) {
+	return html`
+		${goals.map((goal, i) => html`
+			${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+			${renderGoalGroup(goal)}
+		`)}
+		${sessions.length > 0 ? html`
+			<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+				${sessions.map(renderSessionRow)}
+			</div>
+		` : ""}
+		${goals.length === 0 && sessions.length === 0 ? html`
+			<div class="text-center py-2 text-[11px] text-muted-foreground">No sessions</div>
+		` : ""}
+	`;
+}
+
 export function renderSidebar() {
 	const { ungroupedSessions, liveGoals, archivedGoals } = getSidebarData();
 
@@ -885,11 +943,40 @@ export function renderSidebar() {
 									filteredStaff = filteredStaff.filter(s => ids.has(s.id));
 								}
 							}
+							const multiProject = state.projects.length > 1;
 							return html`
-							${filteredGoals.map((goal, i) => html`
+							${multiProject ? (() => {
+								// Group goals and sessions by project
+								const projectMap = new Map<string, { goals: Goal[]; sessions: GatewaySession[] }>();
+								for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [] });
+								// Fallback bucket for items without a projectId
+								const defaultId = state.projects[0]?.id || "";
+								for (const g of filteredGoals) {
+									const pid = g.projectId || defaultId;
+									const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+									bucket.goals.push(g);
+								}
+								for (const s of filteredUngrouped) {
+									const pid = s.projectId || defaultId;
+									const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+									bucket.sessions.push(s);
+								}
+								return html`${state.projects.map((project, i) => {
+									const data = projectMap.get(project.id);
+									if (!data || (data.goals.length === 0 && data.sessions.length === 0)) return "";
+									const expanded = isProjectExpanded(project.id);
+									return html`
+										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
+										${renderProjectHeader(project, expanded)}
+										${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+											${renderProjectContent(project, data.goals, data.sessions)}
+										</div>` : ""}
+									`;
+								})}`;
+							})() : html`${filteredGoals.map((goal, i) => html`
 								${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 								${renderGoalGroup(goal)}
-							`)}
+							`)}`}
 							${filteredGoals.length > 0 ? html`
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5">
@@ -1034,6 +1121,18 @@ export function renderSidebar() {
 								`;
 							})()}
 						`; })()}
+				${state.projects.length > 1 ? html`
+					<div class="border-t border-border/30 my-1 mx-2"></div>
+					<button
+						class="flex items-center gap-1 px-1 py-1 rounded-md text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full"
+						style="padding-left:${HEADER_CHEVRON_W}px;"
+						@click=${() => showProjectDialog()}
+						title="Register another project"
+					>
+						${icon(Plus, "xs")}
+						<span>Add Project</span>
+					</button>
+				` : ""}
 			</div>
 			<div class="flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button

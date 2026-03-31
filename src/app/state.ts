@@ -6,10 +6,18 @@ import { isConfigPageRoute } from "./routing.js";
 // TYPES
 // ============================================================================
 
+export interface Project {
+  id: string;
+  name: string;
+  rootPath: string;
+  color?: string;
+}
+
 export interface GatewaySession {
 	id: string;
 	title: string;
 	cwd: string;
+	projectId?: string;
 	status: string;
 	createdAt: number;
 	lastActivity: number;
@@ -60,6 +68,7 @@ export interface Goal {
 	id: string;
 	title: string;
 	cwd: string;
+	projectId?: string;
 	state: GoalState;
 	spec: string;
 	createdAt: number;
@@ -115,6 +124,8 @@ export const state = {
 
 	gatewaySessions: [] as GatewaySession[],
 	goals: [] as Goal[],
+	projects: [] as Project[],
+	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
 	sessionsGeneration: -1,
 	/** Server generation counter for goals — used to skip redundant refreshes */
@@ -475,6 +486,7 @@ export interface SidebarData {
 	ungroupedSessions: GatewaySession[];
 	liveGoals: Goal[];
 	archivedGoals: Goal[];
+	projects: Project[];
 }
 
 let _sidebarDataCache: SidebarData | null = null;
@@ -482,7 +494,7 @@ let _sidebarCacheKey: string = "";
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.goals.map(g => g.id + g.archived).join(",")}:${state.gatewaySessions.map(s => s.id + s.goalId + s.teamGoalId + s.delegateOf).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived).join(",")}:${state.gatewaySessions.map(s => s.id + s.goalId + s.teamGoalId + s.delegateOf).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
@@ -491,7 +503,7 @@ export function getSidebarData(): SidebarData {
 	const liveGoals = sortedGoals.filter(g => !g.archived);
 	const archivedGoals = sortedGoals.filter(g => g.archived);
 
-	_sidebarDataCache = { staffSessionIds, ungroupedSessions, liveGoals, archivedGoals };
+	_sidebarDataCache = { staffSessionIds, ungroupedSessions, liveGoals, archivedGoals, projects: state.projects };
 	_sidebarCacheKey = key;
 	return _sidebarDataCache;
 }

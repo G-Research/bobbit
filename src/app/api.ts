@@ -7,6 +7,7 @@ import {
 	GW_TOKEN_KEY,
 	type GatewaySession,
 	type Goal,
+	type Project,
 } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
@@ -194,6 +195,14 @@ export async function refreshSessions(): Promise<void> {
 		});
 	}
 
+	// Fetch projects on initial load
+	if (isInitial) {
+		fetchProjects().then(projects => {
+			state.projects = projects;
+			renderApp();
+		}).catch(() => {});
+	}
+
 	// One-time hydration of PR status from disk cache (instant badge rendering)
 	if (isInitial) {
 		gatewayFetch("/api/pr-status-cache")
@@ -261,6 +270,71 @@ export async function searchApi(query: string, type?: string, limit?: number, of
 	} catch {
 		return { results: [], total: 0 };
 	}
+}
+
+// ============================================================================
+// PROJECT API
+// ============================================================================
+
+export async function fetchProjects(): Promise<Project[]> {
+  try {
+    const res = await gatewayFetch("/api/projects");
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.projects || data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function registerProject(name: string, rootPath: string, color?: string): Promise<Project | null> {
+  try {
+    const body: Record<string, string> = { name, rootPath };
+    if (color) body.color = color;
+    const res = await gatewayFetch("/api/projects", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed: ${res.status}`);
+    }
+    return await res.json();
+  } catch (err) {
+    const { showConnectionError } = await import("./dialogs.js");
+    showConnectionError("Failed to register project", err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+export async function updateProject(id: string, updates: { name?: string; color?: string }): Promise<Project | null> {
+  try {
+    const res = await gatewayFetch(`/api/projects/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    });
+    if (!res.ok) throw new Error(`Failed: ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    const { showConnectionError } = await import("./dialogs.js");
+    showConnectionError("Failed to update project", err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+export async function removeProject(id: string): Promise<boolean> {
+  try {
+    const res = await gatewayFetch(`/api/projects/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed: ${res.status}`);
+    }
+    return true;
+  } catch (err) {
+    const { showConnectionError } = await import("./dialogs.js");
+    showConnectionError("Failed to remove project", err instanceof Error ? err.message : String(err));
+    return false;
+  }
 }
 
 // ============================================================================
