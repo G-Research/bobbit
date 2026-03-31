@@ -115,7 +115,7 @@ export class RemoteAgent {
 		this._state = {
 			systemPrompt: "",
 			model: getModel("anthropic", "claude-opus-4-6"),
-			thinkingLevel: "off",
+			thinkingLevel: "medium",
 			tools: [],
 			messages: [] as any[],
 			isStreaming: false,

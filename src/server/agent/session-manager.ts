@@ -2146,7 +2146,7 @@ export class SessionManager {
 
 	/** Apply default_thinking_level from preferences (per-model) or project config (legacy). */
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
-		// Prefer per-model thinking preference, fall back to project config
+		// Prefer per-model thinking preference, fall back to project config, then "medium"
 		let level: string | undefined;
 		if (this.preferencesStore) {
 			level = this.preferencesStore.get("default.sessionThinkingLevel") as string | undefined;
@@ -2154,7 +2154,10 @@ export class SessionManager {
 		if (!level && this.projectConfigStore) {
 			level = this.projectConfigStore.get("default_thinking_level");
 		}
-		if (!level) return;
+		// Default to "medium" when not configured — matches the Settings page
+		// display default and ensures team/delegate agents get an explicit level
+		// instead of relying on the agent's built-in default.
+		if (!level) level = "medium";
 		const valid = ["off", "minimal", "low", "medium", "high"];
 		if (!valid.includes(level)) return;
 		try {
