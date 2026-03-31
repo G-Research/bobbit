@@ -58,6 +58,7 @@ export class StaffManager {
 			const session = await sessionManager.createSession(worktreeResult.worktreePath, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: id },
+				sandboxed: sessionManager.isSandboxEnabled,
 			});
 			session.staffId = id;
 			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
@@ -184,6 +185,7 @@ export class StaffManager {
 			const session = await sessionManager.createSession(sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: staffId },
+				sandboxed: sessionManager.isSandboxEnabled,
 			});
 			session.staffId = staffId;
 			await sessionManager.persistSessionMetadata(session);

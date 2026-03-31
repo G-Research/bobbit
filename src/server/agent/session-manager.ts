@@ -98,6 +98,8 @@ export interface SessionInfo {
 	permissionBroadcastSent?: boolean;
 	/** Tools granted via "one-time" mode — revoked on agent_end */
 	oneTimeGrantedTools?: string[];
+	/** Whether post-start setup (model, thinking, metadata) has completed */
+	setupComplete?: boolean;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
 }
@@ -150,7 +152,7 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
-	private containerPool: ContainerPool | null = null;
+	containerPool: ContainerPool | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	goalManager: GoalManager;
@@ -185,6 +187,11 @@ export class SessionManager {
 		this.projectConfigStore = options?.projectConfigStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
+	}
+
+	/** Whether Docker sandbox mode is enabled in project config. */
+	get isSandboxEnabled(): boolean {
+		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
 	}
 
 	/** Ensure a SandboxProxy is running with the given allowlist. Returns the port. */
@@ -724,6 +731,16 @@ export class SessionManager {
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
 				this.drainQueue(session);
+			}
+
+			// Trigger deferred setup after the first agent turn completes.
+			// This runs model selection, thinking level, and metadata persistence
+			// without blocking the user's first prompt.
+			if (!session.setupComplete) {
+				session.setupComplete = true;
+				this._finishSessionSetup(session).catch((err) => {
+					console.error(`[session-manager] Deferred setup error for session ${session.id}:`, err);
+				});
 			}
 		} else if (event.type === "auto_compaction_start") {
 			session.isCompacting = true;
@@ -1548,15 +1565,17 @@ export class SessionManager {
 		session.unsubscribe = unsub;
 
 		await rpcClient.start();
+		session.status = "idle";
 
 		this.sessions.set(id, session);
 
-		// Run setup async — session stays in "starting" until done.
-		// Prompts arriving via WS during this window are queued and drained
-		// when the session transitions to idle.
-		this._finishSessionSetup(session).catch((err) => {
-			console.error(`[session-manager] Post-start config error for session ${id}:`, err);
-		});
+		// Fire model + thinking level setup immediately (non-blocking).
+		// These are fast stdin writes — the agent processes set_model and
+		// set_thinking_level in microseconds.  We don't await the responses
+		// so the user's prompt (arriving shortly after) isn't blocked.
+		// Metadata persistence (getState) is deferred to after the first turn
+		// since it's not needed until a server restart.
+		this._fireEarlySetup(session);
 
 		return session;
 	}
@@ -1706,11 +1725,13 @@ export class SessionManager {
 		const eventBuffer = session.eventBuffer;
 
 		await rpcClient.start();
+		session.status = "idle";
 
-		// Run setup async — session stays in "starting" until done.
-		// The worktree path already has clients connected (from "preparing"),
-		// so we broadcast idle + drain queued prompts when setup completes.
-		this._finishSessionSetup(session).catch(() => {});
+		// Notify connected clients that the session is ready
+		broadcast(session.clients, { type: "session_status", status: "idle" });
+
+		// Fire model + thinking level immediately (non-blocking, same as createSession)
+		this._fireEarlySetup(session);
 	}
 
 	/**
@@ -1932,29 +1953,38 @@ export class SessionManager {
 	 */
 	/**
 	 * Auto-select a model for a new session. Uses `default.sessionModel`
-	 * preference (format: "provider/modelId") if set. Falls back to aigw
-	 * Run post-start setup (model, thinking level, metadata) then transition
-	 * the session to idle.  The session stays in "starting" during this window
-	 * so that any user prompts arriving via WebSocket are queued rather than
-	 * racing with the setup commands on the agent's sequential RPC pipeline.
+	 * Fire model selection and thinking level as non-blocking RPC commands
+	 * immediately after the agent process starts.  These are fast stdin writes
+	 * that the agent processes in microseconds — they won't meaningfully delay
+	 * the user's prompt which arrives shortly after via WebSocket.
+	 *
+	 * We intentionally don't await the responses.  If model selection fails
+	 * (e.g. aigw cache miss), the deferred setup in _finishSessionSetup will
+	 * retry after the first turn.
+	 */
+	private _fireEarlySetup(session: SessionInfo): void {
+		// Model selection — fast path only (preference or cached aigw list).
+		// If this requires an HTTP discovery, it returns without sending set_model
+		// and the deferred _finishSessionSetup handles it after the first turn.
+		this.tryAutoSelectModel(session).catch((err) => {
+			console.warn(`[session-manager] Early model selection failed for ${session.id}:`, err);
+		});
+
+		// Thinking level — always fast (just a preference lookup + stdin write)
+		this.tryApplyDefaultThinkingLevel(session).catch((err) => {
+			console.warn(`[session-manager] Early thinking level failed for ${session.id}:`, err);
+		});
+	}
+
+	/**
+	 * Runs metadata persistence (and retries model/thinking if early setup missed).
+	 * Called after the first agent turn completes.
 	 */
 	private async _finishSessionSetup(session: SessionInfo): Promise<void> {
 		try {
-			await Promise.all([
-				this.tryAutoSelectModel(session),
-				this.tryApplyDefaultThinkingLevel(session),
-				this.persistSessionMetadata(session),
-			]);
+			await this.persistSessionMetadata(session);
 		} catch (err) {
 			console.error(`[session-manager] Setup error for session ${session.id}:`, err);
-		}
-
-		session.status = "idle";
-		broadcast(session.clients, { type: "session_status", status: "idle" });
-
-		// Drain any prompts that arrived while setup was running
-		if (!session.promptQueue.isEmpty) {
-			this.drainQueue(session);
 		}
 	}
 

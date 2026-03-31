@@ -129,10 +129,14 @@ export class RpcBridge {
 		});
 
 		// Brief pause for process initialization.
-		// Docker containers need longer — container startup + node init is ~2-3s.
-		// Pool mode (docker exec into pre-warmed container) is fast like bare node.
-		const startupDelay = this.options.containerId ? 200 : this.options.sandboxed ? 3000 : 200;
-		await new Promise((r) => setTimeout(r, startupDelay));
+		// Pool containers (containerId) are already running — stdin is buffered,
+		// so writes before the process reads are safe. No delay needed.
+		// Cold docker run needs time for container + node startup (~2-3s).
+		// Bare node processes need a brief init pause.
+		const startupDelay = this.options.containerId ? 0 : this.options.sandboxed ? 3000 : 200;
+		if (startupDelay > 0) {
+			await new Promise((r) => setTimeout(r, startupDelay));
+		}
 	}
 
 	/** Subscribe to agent events. Returns unsubscribe function. */
