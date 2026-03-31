@@ -416,18 +416,41 @@ export class SandboxPool {
 		// Fetch latest from origin
 		await git(["fetch", "origin"], wt, 30_000);
 
-		// Create and checkout the new branch
-		if (from) {
-			// Branch from a specific ref (e.g. origin/goal-branch for members)
-			await git(["checkout", "-b", branch, from], wt, 15_000);
-		} else {
-			// Branch from current HEAD (which is on the default branch)
-			await git(["checkout", "-b", branch], wt, 15_000);
+		// Try to checkout the branch. It may already exist on the remote
+		// (e.g. goal branches are created and pushed before team starts).
+		try {
+			if (from) {
+				// Branch from a specific ref (e.g. origin/goal-branch for members)
+				await git(["checkout", "-b", branch, from], wt, 15_000);
+			} else {
+				// Try creating a new branch from HEAD
+				await git(["checkout", "-b", branch], wt, 15_000);
+			}
+		} catch {
+			// Branch already exists — checkout the existing remote branch
+			try {
+				await git(["checkout", branch], wt, 15_000);
+			} catch {
+				// Branch exists locally but maybe diverged — force track remote
+				await git(["checkout", "-B", branch, `origin/${branch}`], wt, 15_000);
+			}
+		}
+
+		// Pull latest from remote (in case branch existed and has updates)
+		try {
+			await git(["pull", "--ff-only", "origin", branch], wt, 30_000);
+		} catch {
+			// Pull may fail if no upstream or diverged — non-fatal
 		}
 
 		slot.branch = branch;
 
-		// Push and set upstream (non-fatal)
+		// Set upstream tracking (non-fatal)
+		try {
+			await git(["branch", "--set-upstream-to", `origin/${branch}`], wt, 10_000);
+		} catch { /* may not exist on remote yet */ }
+
+		// Push if this is a new branch (non-fatal)
 		try {
 			await git(["push", "-u", "origin", branch], wt, 30_000);
 		} catch {
