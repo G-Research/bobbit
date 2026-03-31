@@ -325,6 +325,12 @@ export class RpcBridge {
 		if (this.options.env?.BOBBIT_GOAL_ID) {
 			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}
+		if (this.options.gatewayToken) {
+			execArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
+		}
+		if (this.options.gatewayUrl) {
+			execArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
+		}
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
 
 		execArgs.push(
