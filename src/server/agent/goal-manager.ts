@@ -49,8 +49,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; sandboxed?: boolean }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, sandboxed } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -88,6 +88,7 @@ export class GoalManager {
 			repoPath,
 			team,
 			setupStatus,
+			sandboxed,
 		};
 
 		// Snapshot workflow onto goal if workflowId is provided

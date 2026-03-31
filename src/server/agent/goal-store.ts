@@ -42,6 +42,8 @@ export interface PersistedGoal {
 	archived?: boolean;
 	/** Epoch ms when the goal was archived */
 	archivedAt?: number;
+	/** Whether team agents should run in Docker sandbox */
+	sandboxed?: boolean;
 }
 
 const STORE_DIR = bobbitStateDir();

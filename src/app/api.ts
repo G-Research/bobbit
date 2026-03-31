@@ -365,12 +365,13 @@ export async function fetchGitStatus(sessionId: string, opts?: { fetch?: boolean
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
 		if (reattemptOf) body.reattemptOf = reattemptOf;
+		if (sandboxed) body.sandboxed = true;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),

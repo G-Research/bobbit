@@ -277,6 +277,7 @@ import { fetchWorkflows, type Workflow } from "./api.js";
 let _cachedWorkflows: Workflow[] = [];
 let _workflowsLoaded = false;
 let _selectedWorkflowId = "general";
+let _goalSandboxed = false;
 
 /** Set the selected workflow ID from outside the render module (e.g. from a goal proposal). */
 export function setSelectedWorkflowId(id: string): void {
@@ -305,6 +306,8 @@ function goalPreviewPanel() {
 		state.activeGoalProposal = null;
 		const workflowId = _selectedWorkflowId || "general";
 		_selectedWorkflowId = "general";
+		const sandboxed = _goalSandboxed;
+		_goalSandboxed = false;
 		// Clean up persisted draft
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
@@ -320,6 +323,7 @@ function goalPreviewPanel() {
 			spec: state.previewSpec,
 			workflowId,
 			reattemptOf: reattemptGoalId || undefined,
+			sandboxed: sandboxed || undefined,
 		});
 
 		// If this is a re-attempt, archive the old goal and link the new one
@@ -409,6 +413,20 @@ function goalPreviewPanel() {
 								<option value=${wf.id} ?selected=${_selectedWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
 							`)}
 						</select>
+					</div>
+				` : ""}
+				${state.sandboxStatus?.configured ? html`
+					<div class="flex items-center gap-2">
+						<label class="flex items-center gap-2 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-50 pointer-events-none" : ""}">
+							<input type="checkbox" .checked=${_goalSandboxed}
+								?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+								@change=${(e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
+							<span class="text-xs text-foreground/70">Sandbox</span>
+							<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+								? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+								: "Run team agents in isolated Docker containers"}
+								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+						</label>
 					</div>
 				` : ""}
 				<div class="flex-1 flex flex-col min-h-0">

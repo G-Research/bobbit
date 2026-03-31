@@ -400,7 +400,7 @@ export class TeamManager {
 		// Create the team lead session with the team tools extension.
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.
 		// When sandboxed, claim a pool slot and checkout the goal branch.
-		const sandboxed = this.sessionManager.isSandboxEnabled;
+		const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 		const sandboxClaim = sandboxed && goal.branch
 			? { branch: goal.branch }
 			: undefined;
@@ -600,7 +600,7 @@ export class TeamManager {
 		let worktreeResult: { worktreePath: string; branchName: string } | undefined;
 		let branchName: string | undefined;
 		let agentCwd: string;
-		const memberSandboxed = this.sessionManager.isSandboxEnabled;
+		const memberSandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 
 		if (useWorktree) {
 			const goalSlug = (goal.branch || goalId.slice(0, 8)).replace(/\//g, '-');

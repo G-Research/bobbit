@@ -76,6 +76,8 @@ export interface Goal {
 	archivedAt?: number;
 	/** If this goal is a re-attempt of another goal, the original goal's ID */
 	reattemptOf?: string;
+	/** Whether team agents should run in Docker sandbox */
+	sandboxed?: boolean;
 	workflow?: {
 		id: string;
 		name: string;

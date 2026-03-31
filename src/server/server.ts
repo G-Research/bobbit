@@ -1215,10 +1215,12 @@ async function handleApiRoute(
 			return;
 		}
 		try {
+			const sandboxed = body.sandboxed === true ? true : undefined;
 			const goal = await sessionManager.goalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
 				workflowStore: workflowManager.store,
+				sandboxed,
 			});
 			// Set reattemptOf if provided
 			if (body.reattemptOf && typeof body.reattemptOf === "string") {
