@@ -1592,10 +1592,12 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
-		// Persist session metadata (including agentSessionFile) before returning.
-		// This must complete before the caller can use the session, otherwise a
-		// server restart would lose the session (no agentSessionFile recorded).
-		await this.persistSessionMetadata(session);
+		// Persist session metadata immediately so it survives server restarts.
+		// This is fire-and-forget to avoid blocking session creation — getState()
+		// is a fast RPC call but we don't need to wait for disk flush.
+		this.persistSessionMetadata(session).catch((err) => {
+			console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
+		});
 
 		// Fire model + thinking level setup immediately (non-blocking).
 		// These are fast stdin writes — the agent processes set_model and
