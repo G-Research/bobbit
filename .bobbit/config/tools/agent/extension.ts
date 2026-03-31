@@ -149,8 +149,8 @@ export async function runDelegateSession(
 
 		const result = await waitForDelegate(sessionId, timeoutMs, signal);
 
-		// Terminate the delegate session now that it's done — no reason to keep it alive
-		gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+		// Terminate and purge the delegate session now that it's done — no reason to keep it alive
+		try { await gatewayFetch(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" }); } catch { /* ignore */ }
 
 		return {
 			id: sessionId.slice(0, 12),
@@ -161,9 +161,9 @@ export async function runDelegateSession(
 		};
 	} catch (err: any) {
 		if (signal?.aborted) {
-			// Try to terminate the delegate session on abort
+			// Try to terminate and purge the delegate session on abort
 			if (sessionId) {
-				gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+				try { await gatewayFetch(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" }); } catch { /* ignore */ }
 			}
 			return {
 				id: sessionId?.slice(0, 12) || "unknown",
@@ -297,7 +297,7 @@ const extension: ExtensionFactory = (pi) => {
 				// Wait for all delegates in parallel
 				const promises = sessionIds.map((sid, i) => {
 					if (!sid) return Promise.resolve(); // already failed
-					return waitForDelegate(sid, timeoutMs, signal).then((result) => {
+					return waitForDelegate(sid, timeoutMs, signal).then(async (result) => {
 						completedResults.push({
 							id: sid.slice(0, 12),
 							sessionId: sid,
@@ -305,8 +305,10 @@ const extension: ExtensionFactory = (pi) => {
 							output: result.output,
 							durationMs: Date.now() - startTime,
 						});
+						// Terminate and purge the completed delegate session
+						try { await gatewayFetch(`/api/sessions/${sid}?purge=true`, { method: "DELETE" }); } catch { /* ignore */ }
 						if (onUpdate) onUpdate(buildProgressUpdate());
-					}).catch((err: any) => {
+					}).catch(async (err: any) => {
 						completedResults.push({
 							id: sid.slice(0, 12),
 							sessionId: sid,
@@ -315,6 +317,8 @@ const extension: ExtensionFactory = (pi) => {
 							durationMs: Date.now() - startTime,
 							error: err.message,
 						});
+						// Terminate and purge even failed delegate sessions
+						try { await gatewayFetch(`/api/sessions/${sid}?purge=true`, { method: "DELETE" }); } catch { /* ignore */ }
 						if (onUpdate) onUpdate(buildProgressUpdate());
 					});
 				});

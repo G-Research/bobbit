@@ -2705,6 +2705,7 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
+			const purge = url.searchParams.get("purge") === "true";
 			// Check if it's an archived session — purge immediately
 			const archivedSession = sessionManager.getArchivedSession(id);
 			if (archivedSession) {
@@ -2714,8 +2715,22 @@ async function handleApiRoute(
 			}
 			const terminated = await sessionManager.terminateSession(id);
 			if (!terminated) {
+				// Session not in memory — check if it's a dormant store entry (e.g. completed delegate)
+				if (purge) {
+					// Archive it first so purge can find it, then purge
+					sessionManager.storeArchive(id);
+					const purged = await sessionManager.purgeArchivedSession(id);
+					if (purged) {
+						json({ ok: true });
+						return;
+					}
+				}
 				json({ error: "Session not found" }, 404);
 				return;
+			}
+			// If purge requested, also purge the now-archived session immediately
+			if (purge) {
+				await sessionManager.purgeArchivedSession(id);
 			}
 			json({ ok: true });
 			return;
