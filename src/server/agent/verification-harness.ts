@@ -21,6 +21,25 @@ export function parseVerdict(output: string): boolean | null {
 
 const VERDICT_FOLLOWUP_PROMPT = "Your review is complete but you did not include the required <verdict> tag. Based on your review findings above, respond with ONLY a <verdict>pass</verdict> or <verdict>fail</verdict> tag. Use <verdict>fail</verdict> if you found any critical or high severity issues, otherwise <verdict>pass</verdict>.";
 
+/** Patterns that indicate a transient/infrastructure failure worth retrying. */
+const TRANSIENT_ERROR_PATTERNS = [
+	"timed out",
+	"no <verdict> tag",
+	"Agent process not running",
+	"process exited",
+	"Session lost during server restart",
+	"ECONNRESET",
+	"EPIPE",
+	"spawn UNKNOWN",
+	"socket hang up",
+	"connect ECONNREFUSED",
+];
+
+/** Check if an LLM review error output matches a transient failure pattern. */
+export function isTransientReviewError(output: string): boolean {
+	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
+}
+
 /** In-flight verification state for REST bootstrapping */
 export interface ActiveVerification {
 	goalId: string;
@@ -543,7 +562,7 @@ export class VerificationHarness {
 							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 						} else {
 							const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-							const maxAttempts = 2;
+							const maxAttempts = 3;
 							for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 								result = await this.runLlmReviewStep(
 									{ name: step.name, prompt, timeout: step.timeout },
@@ -556,9 +575,12 @@ export class VerificationHarness {
 									signal.goalId,
 									stepSessionId,
 								);
-								const isTransient = result.output.includes("timed out") || result.output.includes("no <verdict> tag");
+								const isTransient = isTransientReviewError(result.output);
 								if (result.passed || !isTransient || attempt === maxAttempts) break;
-								console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying...`);
+								// Exponential backoff: 2s, 4s before retries
+								const delayMs = 2000 * Math.pow(2, attempt - 1);
+								console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+								await new Promise(r => setTimeout(r, delayMs));
 							}
 						}
 					}
