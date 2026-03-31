@@ -20,11 +20,13 @@ export function findGitBash(): string | null {
 
 	const candidates: string[] = [
 		"C:/Program Files/Git/bin/bash.exe",
-		"C:/Program Files/Git/usr/bin/bash.exe",
 		"C:/Program Files (x86)/Git/bin/bash.exe",
 	];
 
-	// Derive additional paths from `where.exe git` output
+	// Derive additional paths from `where.exe git` output.
+	// Only use bin/bash.exe (the Git for Windows wrapper), never usr/bin/bash.exe
+	// (the raw MSYS2 binary) — the latter can trigger the WSL interop layer on
+	// systems with WSL installed, causing "execvpe(/bin/bash) failed" errors.
 	try {
 		const gitExe = execSync("where.exe git", {
 			encoding: "utf-8",
@@ -34,7 +36,6 @@ export function findGitBash(): string | null {
 			let dir = path.dirname(gitExe);
 			for (let i = 0; i < 4; i++) {
 				candidates.unshift(path.join(dir, "bin", "bash.exe").replace(/\\/g, "/"));
-				candidates.unshift(path.join(dir, "usr", "bin", "bash.exe").replace(/\\/g, "/"));
 				dir = path.dirname(dir);
 			}
 		}
