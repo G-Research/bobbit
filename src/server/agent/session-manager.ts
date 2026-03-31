@@ -199,6 +199,105 @@ export class SessionManager {
 		return this.sandboxProxy.start();
 	}
 
+	/**
+	 * Apply Docker sandbox wiring to bridge options.
+	 * Shared by createSession(), restoreSession(), and createDelegateSession().
+	 * Returns true if sandbox was applied, false if sandbox is not configured.
+	 */
+	private async applySandboxWiring(
+		bridgeOptions: RpcBridgeOptions,
+		sessionId: string,
+		opts?: { skipMountValidation?: boolean }
+	): Promise<boolean> {
+		if (!this.projectConfigStore) return false;
+		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
+		if (sandboxConfig !== "docker") return false;
+
+		const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
+		const allowlistRaw = this.projectConfigStore.get("sandbox_network_allowlist") || "";
+		const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
+		const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
+
+		let networkAllowlist: string[] = [];
+		try { networkAllowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch { /* ignore */ }
+		let credentials: Record<string, string> = {};
+		try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
+		let mounts: string[] = [];
+		try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
+
+		// Validate mounts unless skipped (e.g. during restore — already validated at creation)
+		let validatedMounts = mounts;
+		if (!opts?.skipMountValidation) {
+			const blockedPaths = [
+				"/var/run/docker.sock", "/run/docker.sock",
+				"/var/run/containerd", "/run/containerd",
+				"/proc", "/sys", "/dev",
+				"/etc", "/boot", "/sbin", "/bin", "/lib", "/lib64",
+				"/usr/sbin", "/usr/bin", "/usr/lib",
+				"/root", "/home",
+			];
+			const sensitiveSubstrings = [
+				"/.ssh", "/.aws", "/.gnupg", "/.config",
+				"/.kube", "/.docker", "/.npmrc", "/.netrc",
+				"/.git-credentials", "/.env",
+				"/docker.sock",
+			];
+			validatedMounts = mounts.filter((m: string) => {
+				const parts = m.split(":");
+				if (parts.length < 2) { console.warn(`[session-manager] Rejecting invalid sandbox mount format: ${m}`); return false; }
+				const src = parts[0];
+				if (!path.isAbsolute(src)) { console.warn(`[session-manager] Rejecting non-absolute sandbox mount: ${m}`); return false; }
+				if (src.includes("..")) { console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`); return false; }
+				if (src.startsWith("~") || src.startsWith("$")) { console.warn(`[session-manager] Rejecting sandbox mount with variable/home dir: ${m}`); return false; }
+				const normalizedSrc = src.replace(/\\/g, "/").toLowerCase();
+				for (const blocked of blockedPaths) {
+					if (normalizedSrc === blocked || normalizedSrc.startsWith(blocked + "/")) {
+						console.warn(`[session-manager] Rejecting sandbox mount to system path: ${m}`);
+						return false;
+					}
+				}
+				for (const pat of sensitiveSubstrings) {
+					if (normalizedSrc.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
+				}
+				if (/^[a-z]:\/?$/i.test(src.replace(/\\/g, "/"))) {
+					console.warn(`[session-manager] Rejecting sandbox mount of drive root: ${m}`);
+					return false;
+				}
+				return true;
+			});
+		}
+
+		const proxyPort = await this.ensureSandboxProxy(networkAllowlist);
+
+		// Read gateway URL and token for the container
+		try {
+			const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+			const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+			bridgeOptions.gatewayUrl = gwUrl;
+			bridgeOptions.gatewayToken = token;
+		} catch (err) {
+			throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
+		}
+
+		bridgeOptions.sandboxed = true;
+		bridgeOptions.sandboxImage = sandboxImage;
+		bridgeOptions.sandboxCredentials = credentials;
+		bridgeOptions.sandboxMounts = validatedMounts;
+		bridgeOptions.sandboxProxyPort = proxyPort;
+
+		// Claim a pre-warmed container from the pool if available
+		if (this.containerPool) {
+			const containerId = this.containerPool.claim(sessionId);
+			if (containerId) {
+				bridgeOptions.containerId = containerId;
+			} else {
+				console.warn("[session-manager] Container pool exhausted, falling back to cold docker run");
+			}
+		}
+
+		return true;
+	}
+
 	getCostTracker(): CostTracker {
 		return this.costTracker;
 	}
@@ -1001,35 +1100,8 @@ export class SessionManager {
 		}
 
 		// ── Restore Docker sandbox wiring ──
-		if (ps.sandboxed && this.projectConfigStore) {
-			const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
-			const allowlistRaw = this.projectConfigStore.get("sandbox_network_allowlist") || "";
-			const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
-			const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
-
-			let allowlist: string[] = [];
-			try { allowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch { /* empty */ }
-			let credentials: Record<string, string> = {};
-			try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* empty */ }
-			let mounts: string[] = [];
-			try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* empty */ }
-
-			const proxyPort = await this.ensureSandboxProxy(allowlist);
-
-			try {
-				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
-				const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-				bridgeOptions.gatewayUrl = gwUrl;
-				bridgeOptions.gatewayToken = token;
-			} catch (err) {
-				console.warn(`[session-manager] Could not read gateway credentials for sandbox restore: ${err}`);
-			}
-
-			bridgeOptions.sandboxed = true;
-			bridgeOptions.sandboxImage = sandboxImage;
-			bridgeOptions.sandboxCredentials = credentials;
-			bridgeOptions.sandboxMounts = mounts;
-			bridgeOptions.sandboxProxyPort = proxyPort;
+		if (ps.sandboxed) {
+			await this.applySandboxWiring(bridgeOptions, ps.id, { skipMountValidation: true });
 		}
 
 		// Restore extension args for goal/team sessions
@@ -1410,95 +1482,10 @@ export class SessionManager {
 		}
 
 		// ── Docker sandbox wiring ──
-		if (opts?.sandboxed && this.projectConfigStore) {
-			const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
-			if (sandboxConfig === "docker") {
-				const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
-				const allowlistRaw = this.projectConfigStore.get("sandbox_network_allowlist") || "";
-				const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
-				const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
-
-				let networkAllowlist: string[] = [];
-				try { networkAllowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch { /* ignore */ }
-
-				let credentials: Record<string, string> = {};
-				try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
-
-				let mounts: string[] = [];
-				try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch { /* ignore */ }
-
-				// Validate mounts — comprehensive security checks
-				const blockedPaths = [
-					"/var/run/docker.sock", "/run/docker.sock",
-					"/var/run/containerd", "/run/containerd",
-					"/proc", "/sys", "/dev",
-					"/etc", "/boot", "/sbin", "/bin", "/lib", "/lib64",
-					"/usr/sbin", "/usr/bin", "/usr/lib",
-					"/root", "/home",
-				];
-				const sensitiveSubstrings = [
-					"/.ssh", "/.aws", "/.gnupg", "/.config",
-					"/.kube", "/.docker", "/.npmrc", "/.netrc",
-					"/.git-credentials", "/.env",
-					"/docker.sock",
-				];
-				const validatedMounts = mounts.filter((m: string) => {
-					const parts = m.split(":");
-					if (parts.length < 2) { console.warn(`[session-manager] Rejecting invalid sandbox mount format: ${m}`); return false; }
-					const src = parts[0];
-					if (!path.isAbsolute(src)) { console.warn(`[session-manager] Rejecting non-absolute sandbox mount: ${m}`); return false; }
-					if (src.includes("..")) { console.warn(`[session-manager] Rejecting sandbox mount with "..": ${m}`); return false; }
-					if (src.startsWith("~") || src.startsWith("$")) { console.warn(`[session-manager] Rejecting sandbox mount with variable/home dir: ${m}`); return false; }
-					const normalizedSrc = src.replace(/\\/g, "/").toLowerCase();
-					for (const blocked of blockedPaths) {
-						if (normalizedSrc === blocked || normalizedSrc.startsWith(blocked + "/")) {
-							console.warn(`[session-manager] Rejecting sandbox mount to system path: ${m}`);
-							return false;
-						}
-					}
-					for (const pat of sensitiveSubstrings) {
-						if (normalizedSrc.includes(pat)) { console.warn(`[session-manager] Rejecting sandbox mount with sensitive path: ${m}`); return false; }
-					}
-					if (/^[a-z]:\/?$/i.test(src.replace(/\\/g, "/"))) {
-						console.warn(`[session-manager] Rejecting sandbox mount of drive root: ${m}`);
-						return false;
-					}
-					return true;
-				});
-
-				// Always start sandbox proxy — it controls outbound network access.
-				// With empty allowlist: blocks all outbound (equivalent to --network=none
-				// but still allows gateway callbacks via no_proxy).
-				// With entries: allows only those hosts through.
-				const proxyPort = await this.ensureSandboxProxy(networkAllowlist);
-
-				// Read gateway URL and token for the container
-				let gatewayUrl: string;
-				let gatewayToken: string;
-				try {
-					gatewayUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
-					gatewayToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
-				} catch (err) {
-					throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
-				}
-
-				bridgeOptions.sandboxed = true;
-				bridgeOptions.sandboxImage = sandboxImage;
-				bridgeOptions.sandboxCredentials = credentials;
-				bridgeOptions.sandboxMounts = validatedMounts;
-				bridgeOptions.gatewayUrl = gatewayUrl;
-				bridgeOptions.gatewayToken = gatewayToken;
-				bridgeOptions.sandboxProxyPort = proxyPort;
-			}
-		}
-
-		// ── Container pool: claim a pre-warmed container if available ──
-		if (bridgeOptions.sandboxed && this.containerPool) {
-			const containerId = this.containerPool.claim(id);
-			if (containerId) {
-				bridgeOptions.containerId = containerId;
-			} else {
-				console.warn("[session-manager] Container pool exhausted, falling back to cold docker run");
+		if (opts?.sandboxed) {
+			const applied = await this.applySandboxWiring(bridgeOptions, id);
+			if (!applied) {
+				throw new Error("Sandbox is not configured as docker");
 			}
 		}
 
@@ -1740,6 +1727,16 @@ export class SessionManager {
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 
+		// ── Sandbox propagation from parent ──
+		const parentMeta = this.store.get(parentSessionId);
+		let delegateSandboxed = false;
+		if (parentMeta?.sandboxed) {
+			// Remap container-internal /workspace path to host-side project dir
+			if (opts.cwd.startsWith('/workspace')) {
+				opts.cwd = parentMeta.cwd;
+			}
+		}
+
 		// Build the task spec: instructions + optional context
 		let taskSpec = opts.instructions;
 		if (opts.context && Object.keys(opts.context).length > 0) {
@@ -1763,6 +1760,12 @@ export class SessionManager {
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 
+		// Apply sandbox wiring if parent was sandboxed
+		if (parentMeta?.sandboxed) {
+			const applied = await this.applySandboxWiring(bridgeOptions, id);
+			if (applied) delegateSandboxed = true;
+		}
+
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 		const now = Date.now();
@@ -1784,6 +1787,13 @@ export class SessionManager {
 			delegateOf: parentSessionId,
 			promptQueue: new PromptQueue(),
 		};
+
+		if (delegateSandboxed) {
+			(session as any)._sandboxed = true;
+		}
+		if (bridgeOptions.containerId) {
+			session.containerId = bridgeOptions.containerId;
+		}
 
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = Date.now();
