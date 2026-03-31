@@ -753,6 +753,7 @@ export class VerificationHarness {
 			"- **<verdict>fail</verdict>** if any critical or high severity findings exist",
 			"- **<verdict>pass</verdict>** if no critical or high severity findings",
 			"- **You MUST include exactly one `<verdict>pass</verdict>` or `<verdict>fail</verdict>` tag — if you omit it, the review fails automatically regardless of your findings**",
+			"- **Do NOT call `gate_signal`.** The verification system handles gate signaling automatically based on your `<verdict>` tag. Just produce your review findings and verdict, then stop.",
 		].join("\n");
 
 		// ── Session-based path (visible in UI) ──
