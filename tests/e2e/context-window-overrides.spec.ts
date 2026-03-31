@@ -7,7 +7,7 @@
  */
 
 import { test, expect } from "./gateway-harness.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -26,7 +26,6 @@ function getModelsJsonPath(): string {
 		// Prefer ~/.bobbit/agent, fall back to ~/.pi/agent for legacy installs
 		const bobbitDir = join(homedir(), ".bobbit", "agent");
 		const piDir = join(homedir(), ".pi", "agent");
-		const { existsSync } = require("node:fs");
 		agentDir = existsSync(bobbitDir) ? bobbitDir : existsSync(piDir) ? piDir : bobbitDir;
 	}
 	return join(agentDir, "models.json");
