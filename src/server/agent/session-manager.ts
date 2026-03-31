@@ -1789,17 +1789,6 @@ export class SessionManager {
 					? containerToHostSessionPath(stateResp.data.sessionFile)
 					: stateResp.data.sessionFile;
 
-				// Validate the remapped path actually exists on the host
-				if (!fs.existsSync(agentSessionFile)) {
-					console.error(
-						`[session-manager] CRITICAL: Session file does not exist after path remapping for ${session.id}!\n` +
-						`  Agent reported: ${stateResp.data.sessionFile}\n` +
-						`  Remapped to:   ${agentSessionFile}\n` +
-						`  Sandboxed:     ${!!session.sandboxed}\n` +
-						`  This session will NOT survive a server restart.`,
-					);
-				}
-
 				this.store.update(session.id, { agentSessionFile });
 				return; // success
 			} catch (err) {
