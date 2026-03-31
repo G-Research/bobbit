@@ -308,7 +308,31 @@ async function initApp() {
 
 	if (savedUrl && savedToken) {
 		try {
-			await authenticateGateway(savedUrl, savedToken);
+			await authenticateGateway(savedUrl, savedToken).catch(async (err) => {
+				// If the gateway is simply not up yet (network error, 502, etc.),
+				// show a "starting" screen and poll until it responds.
+				const isNetworkError = !err?.message?.includes("Invalid auth token");
+				if (!isNetworkError) throw err;
+
+				state.appView = "gateway-starting";
+				renderApp();
+
+				// Poll until the gateway responds
+				const pollInterval = 2000;
+				const maxWait = 120_000;
+				const start = Date.now();
+				while (Date.now() - start < maxWait) {
+					await new Promise(r => setTimeout(r, pollInterval));
+					try {
+						await authenticateGateway(savedUrl!, savedToken!);
+						return; // success — authenticateGateway sets appView
+					} catch (retryErr: any) {
+						if (retryErr?.message?.includes("Invalid auth token")) throw retryErr;
+						// Still starting — keep polling
+					}
+				}
+				throw new Error("Gateway did not start within 2 minutes");
+			});
 
 			// Load saved preferences (palette, timestamps, AI gateway)
 			try {

@@ -101,7 +101,7 @@ export interface Goal {
 	};
 }
 
-export type AppView = "disconnected" | "authenticated";
+export type AppView = "disconnected" | "gateway-starting" | "authenticated";
 
 // ============================================================================
 // MUTABLE STATE
