@@ -63,7 +63,7 @@ import "./personality-manager.css";
 import { renderStaffPage } from "./staff-page.js";
 import { renderSkillsPage } from "./skills-page.js";
 import { renderSettingsPage } from "./settings-page.js";
-import { renderSearchPage, initSearchPage } from "./search-page.js";
+import { renderSearchPage, initSearchPage, resetSearchPage } from "./search-page.js";
 
 // ============================================================================
 // MOBILE LANDING PAGE
@@ -2385,6 +2385,8 @@ export function doRenderApp(): void {
 		if (route.view === "search") {
 			initSearchPage();
 			return renderSearchPage();
+		} else {
+			resetSearchPage();
 		}
 
 		if (connected && state.assistantType) {

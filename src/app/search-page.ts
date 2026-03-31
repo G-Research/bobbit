@@ -4,7 +4,7 @@
 
 import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "@mariozechner/mini-lit";
-import { Search, Loader2, Archive, Goal as GoalIcon, MessagesSquare, MessageSquare, Bot } from "lucide";
+import { ArrowLeft, Search, Loader2, Archive, Goal as GoalIcon, MessagesSquare, MessageSquare, Bot } from "lucide";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { searchApi } from "./api.js";
 import { renderApp } from "./state.js";
@@ -84,11 +84,16 @@ function _handleInput(e: Event): void {
 
 function _handleKeydown(e: KeyboardEvent): void {
 	if (e.key === "Escape") {
-		_query = "";
-		_results = [];
-		_total = 0;
-		_offset = 0;
-		renderApp();
+		if (_query) {
+			_query = "";
+			_results = [];
+			_total = 0;
+			_offset = 0;
+			renderApp();
+		} else {
+			_initialized = false;
+			history.back();
+		}
 	}
 }
 
@@ -176,20 +181,23 @@ function _iconForType(type: string) {
 // ============================================================================
 
 export function initSearchPage(): void {
+	if (_initialized) return;
 	const route = getRouteFromHash();
-	const routeQuery = route.searchQuery || "";
-	if (routeQuery !== _query || !_initialized) {
-		_query = routeQuery;
-		_offset = 0;
-		_initialized = true;
-		if (_query) {
-			_doSearch();
-		} else {
-			_results = [];
-			_total = 0;
-			_loading = false;
-		}
+	_query = route.searchQuery || "";
+	_offset = 0;
+	_initialized = true;
+	if (_query) {
+		_doSearch();
+	} else {
+		_results = [];
+		_total = 0;
+		_loading = false;
 	}
+}
+
+/** Reset init flag so the next initSearchPage() reads the URL again (called on hashchange away). */
+export function resetSearchPage(): void {
+	_initialized = false;
 }
 
 
@@ -323,21 +331,28 @@ export function renderSearchPage(): TemplateResult {
 		<div class="flex-1 flex flex-col h-full overflow-hidden" style="background: var(--sidebar);">
 			<div class="max-w-3xl w-full mx-auto px-4 py-6 flex flex-col gap-4 h-full overflow-y-auto">
 				<!-- Search input -->
-				<div class="relative">
-					<span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-						${_loading
-							? html`<span class="inline-block animate-spin">${icon(Loader2, "sm")}</span>`
-							: icon(Search, "sm")}
-					</span>
-					<input
-						type="text"
-						.value=${_query}
-						placeholder="Search everything..."
-						class="w-full h-11 pl-10 pr-4 rounded-lg border border-input bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
-						@input=${_handleInput}
-						@keydown=${_handleKeydown}
-						autofocus
-					/>
+				<div class="flex items-center gap-2">
+					<button
+						class="shrink-0 p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+						@click=${() => { _initialized = false; history.back(); }}
+						title="Back"
+					>${icon(ArrowLeft, "sm")}</button>
+					<div class="relative flex-1">
+						<span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
+							${_loading
+								? html`<span class="inline-block animate-spin">${icon(Loader2, "sm")}</span>`
+								: icon(Search, "sm")}
+						</span>
+						<input
+							type="text"
+							.value=${_query}
+							placeholder="Search everything..."
+							class="w-full h-11 pl-10 pr-4 rounded-lg border border-input bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
+							@input=${_handleInput}
+							@keydown=${_handleKeydown}
+							autofocus
+						/>
+					</div>
 				</div>
 
 				<!-- Type filter toggles -->
