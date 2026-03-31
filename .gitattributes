@@ -1,2 +1,7 @@
+# Normalize all text files to LF in the repo, native on checkout
+* text=auto
+
+# Force specific line endings where required
 run        text eol=lf
 run.cmd    text eol=crlf
+*.sh       text eol=lf
