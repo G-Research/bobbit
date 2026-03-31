@@ -169,6 +169,50 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 |---|---|---|
 | `GET` | `/api/pr-status-cache` | Bulk PR status from disk cache (startup hydration) |
 
+### System Prompt
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/system-prompt-context` | Read the project context section from system-prompt.md |
+| `PUT` | `/api/system-prompt-context` | Append/replace the project context section in system-prompt.md |
+
+### Custom Providers
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/custom-providers` | List all custom provider configs (Ollama, LM Studio, etc.) |
+| `POST` | `/api/custom-providers` | Add or update a custom provider (`{ id, name, baseUrl, type }`) |
+| `POST` | `/api/custom-providers/test` | Discover models from a URL without persisting (`{ url, type? }`) |
+| `DELETE` | `/api/custom-providers/:id` | Remove a custom provider config |
+
+### Provider Keys
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/provider-keys` | List providers that have API keys set (no key values returned) |
+| `POST` | `/api/provider-keys/:provider` | Store a provider API key (`{ key }`) |
+| `DELETE` | `/api/provider-keys/:provider` | Remove a provider API key |
+
+### Models
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/models` | Unified model list from all sources (built-in, AI gateway, custom providers). 5s TTL cache |
+
+### Docker Sandbox
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/sandbox-status` | Docker availability, image status, and whether sandbox is configured |
+| `GET` | `/api/sandbox-pool` | Container pool stats (enabled, total, idle, claimed, warming) |
+
+### Web Proxy
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/web-proxy/search` | Web search proxy for sandboxed sessions (rate limited: 10 req/min per IP) |
+| `POST` | `/api/web-proxy/fetch` | Web fetch proxy for sandboxed sessions (rate limited: 10 req/min per IP) |
+
 ### System
 
 | Method | Path | Description |

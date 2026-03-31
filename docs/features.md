@@ -95,8 +95,21 @@ A unified registry (`assistant-registry.ts`) maps assistant types to their promp
 - `personality` — Personality creation assistant
 - `staff` — Staff agent creation assistant
 - `setup` — Project setup wizard
+- `workflow` — Workflow creation assistant
 
 Sessions created with an `assistantType` get the corresponding system prompt automatically. Assistant prompts can be edited via their YAML files and are reloaded on change.
+
+## Docker Sandbox
+
+Agent sessions can optionally run inside Docker containers with restricted filesystem, network, and credential access. Configured via `sandbox: "docker"` in `project.yaml`.
+
+- **Isolation**: Agents can only access the project directory (bind-mounted). No access to `~/.ssh`, `~/.aws`, or other host paths.
+- **Network control**: An allowlist of permitted hostnames (e.g. `github.com`). All other traffic is blocked via an HTTP CONNECT proxy.
+- **Container pool**: Pre-warmed containers reduce cold-start latency. Pool size and idle timeout are configurable.
+- **Web proxy**: Sandboxed sessions use gateway-proxied web search and fetch endpoints since direct internet access is blocked.
+- **Persistence**: Sandboxed sessions survive server restarts — session file paths are remapped between container and host.
+
+See the Docker sandbox section in [AGENTS.md](../AGENTS.md) for full configuration reference.
 
 ## Compaction
 

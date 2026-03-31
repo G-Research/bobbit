@@ -15,6 +15,8 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `abort` | — | Abort the current agent turn |
 | `retry` | — | Retry the last failed turn |
 | `set_model` | `provider`, `modelId` | Switch the AI model |
+| `set_thinking_level` | `level` | Set thinking level (none, low, medium, high) |
+| `grant_tool_permission` | `tool`, `group?` | Grant an MCP tool permission for the current session's role |
 | `compact` | — | Trigger context compaction |
 | `get_state` | — | Request current agent state |
 | `get_messages` | — | Request full message history |
@@ -63,3 +65,4 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
 | `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |
 | `pr_status_changed` | `goalId?`, `sessionId?`, `status` | PR status changed for a goal or session |
+| `tool_permission_needed` | `tool`, `sessionId` | Agent needs permission to use an MCP tool not in its role |
