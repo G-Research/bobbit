@@ -10,6 +10,11 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 
 ## Session connection issues
 
+- Session creation logic lives in `session-setup.ts` (pipeline steps + executors) and `session-manager.ts` (thin wrappers)
+- `executePlan()` runs the full pipeline synchronously for normal/delegate sessions
+- `executeWorktreeAsync()` runs asynchronously for worktree sessions (fire-and-forget, returns immediately with `status: "preparing"`)
+- `handleSetupFailure()` in `session-setup.ts` handles cleanup on pipeline errors
+- `subscribeToEvents()` is the shared event subscription function across all session types
 - `connectToSession()` in `session-manager.ts` creates ChatPanel before `remote.connect()`
 - Model + WebSocket connect run in parallel via `Promise.all`
 - `switchGeneration` / `isStale()` invalidates in-flight work on rapid switches
@@ -30,6 +35,10 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 ## Session persistence
 
 - Check `.bobbit/state/sessions.json`
+- Initial persist happens via `persistOnce()` in `session-setup.ts` — a single `store.put()` with all structural fields at creation time
+- `persistSessionMetadata()` only calls `store.update()` (never `store.put()`) — updates `agentSessionFile` once the agent reports it
+- `persistSessionMetadata()` retries 3 times with backoff (500ms, 1s, 2s) on failure
+- `sandboxed` is a typed field on `SessionInfo` (no `(session as any)._sandboxed` hack)
 - `restoreSessions()` in `session-manager.ts` skips sessions with missing `.jsonl` files
 - Failed restores create dormant entries that revive on client connect
 
@@ -65,6 +74,7 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 ## Sandbox sessions
 
 - `GET /api/sandbox-status` for Docker availability
+- Worktree sessions now correctly call `applySandboxWiring()` via the pipeline (previously `_setupWorktreeAndLaunchAgent()` skipped sandbox wiring)
 - `sessions.json` has `sandboxed: boolean`
 - Proxy logs: `[sandbox-proxy]` prefix — look for `BLOCKED` / `CONNECT`
 - Container can't reach gateway? Check: (1) proxy allowlist has gateway hostname, (2) `BOBBIT_GATEWAY_URL` matches real address, (3) CONNECT forwarding in proxy logs
