@@ -48,8 +48,10 @@ async function _doSearch(append = false): Promise<void> {
 	}
 	_loading = true;
 	renderApp();
+	const querySnapshot = _query;
 	try {
 		const data = await searchApi(_query, "all", 50, append ? _offset : 0);
+		if (_query !== querySnapshot) return; // discard stale response
 		if (!append) {
 			_results = data.results;
 			_offset = data.results.length;
@@ -190,10 +192,6 @@ export function initSearchPage(): void {
 	}
 }
 
-/** Reset search page state (called when navigating away). */
-export function resetSearchPage(): void {
-	_initialized = false;
-}
 
 // ============================================================================
 // RENDER
