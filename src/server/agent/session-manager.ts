@@ -2813,6 +2813,11 @@ export class SessionManager {
 		return ps?.archived ? ps : undefined;
 	}
 
+	/** Archive a session directly in the store (for dormant/store-only sessions). */
+	storeArchive(id: string): boolean {
+		return this.store.archive(id);
+	}
+
 	/** Update metadata on an archived session (stored in the session store). */
 	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string }): boolean {
 		const ps = this.store.get(id);

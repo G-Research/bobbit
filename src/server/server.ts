@@ -2866,6 +2866,17 @@ async function handleApiRoute(
 			}
 		}
 
+		if (body.archived === true) {
+			// Try to terminate live session first (which archives it)
+			const session = sessionManager.getSession(id);
+			if (session) {
+				try { await sessionManager.terminateSession(id); } catch {}
+			} else {
+				// Dormant/store-only session — archive directly in the store
+				sessionManager.storeArchive(id);
+			}
+		}
+
 		json({ ok: true });
 		return;
 	}
