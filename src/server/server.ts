@@ -1015,6 +1015,14 @@ async function handleApiRoute(
 
 		// ── Delegate session creation ──
 		if (body?.delegateOf && body?.instructions) {
+			// Sandbox guard: delegate parent must be own session or registered child
+			if (sandboxScope) {
+				const parentId = body.delegateOf;
+				if (parentId !== sandboxScope.sessionId && !sandboxScope.childSessionIds.has(parentId)) {
+					json({ error: "Forbidden: delegate parent must be own session" }, 403);
+					return;
+				}
+			}
 			try {
 				const cwd = body.cwd || config.defaultCwd;
 				const session = await sessionManager.createDelegateSession(body.delegateOf, {
