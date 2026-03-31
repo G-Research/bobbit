@@ -331,15 +331,16 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 			const passed = gates.filter(gs => gs.status === "passed").length;
 			const total = g.workflow!.gates.length;
 			const verifying = gates.some(gs => gs.signals?.some(s => s.verification?.status === "running"));
-			return { goalId: g.id, passed, total, verifying };
+			const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some(s => s.verification?.status === "running")).length;
+			return { goalId: g.id, passed, total, verifying, verifyingCount };
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, passed, total, verifying } of results) {
+	for (const { goalId, passed, total, verifying, verifyingCount } of results) {
 		const prev = state.gateStatusCache.get(goalId);
-		if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying) {
-			state.gateStatusCache.set(goalId, { passed, total, verifying });
+		if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying || prev.verifyingCount !== verifyingCount) {
+			state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
 			changed = true;
 		}
 	}
@@ -355,9 +356,10 @@ export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
 	const passed = gates.filter(gs => gs.status === "passed").length;
 	const total = goal.workflow.gates.length;
 	const verifying = gates.some(gs => gs.signals?.some((s: any) => s.verification?.status === "running"));
+	const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some((s: any) => s.verification?.status === "running")).length;
 	const prev = state.gateStatusCache.get(goalId);
-	if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying) {
-		state.gateStatusCache.set(goalId, { passed, total, verifying });
+	if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying || prev.verifyingCount !== verifyingCount) {
+		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
 		renderApp();
 	}
 }

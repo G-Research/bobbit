@@ -120,7 +120,7 @@ export const state = {
 	/** Server generation counter for goals — used to skip redundant refreshes */
 	goalsGeneration: -1,
 	/** Gate status cache: goalId → { passed, total, verifying } */
-	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean }>(),
+	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean; verifyingCount: number }>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */
 	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string }>(),
 	sessionsLoading: false,

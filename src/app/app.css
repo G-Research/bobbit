@@ -501,14 +501,29 @@ theme-toggle button {
 	to { transform: rotate(360deg); }
 }
 
-/* Mexican-wave highlight on gate badge characters during verification */
+/* Mexican-wave highlight on gate counter characters until all gates pass */
 @keyframes gate-wave {
 	0%, 100% { opacity: 0.5; }
 	30% { opacity: 0.9; }
 }
+@keyframes gate-wave-subtle {
+	0%, 100% { opacity: 0.65; }
+	30% { opacity: 0.85; }
+}
 .gate-wave > span {
 	display: inline-block;
 	animation: gate-wave 1.6s ease-in-out infinite;
+}
+.gate-wave.gate-wave-subtle > span {
+	animation-name: gate-wave-subtle;
+}
+/* Blink animation on gate counter number during verification */
+@keyframes gate-blink {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.25; }
+}
+.gate-blink {
+	animation: gate-blink 1.2s ease-in-out infinite;
 }
 
 /* Rolling masked shadow on active session titles —
