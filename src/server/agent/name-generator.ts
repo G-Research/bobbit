@@ -112,11 +112,21 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 	console.log(`[name-gen] Generating names for role "${roleName}" via ${MODEL}…`);
 
 	try {
-		const response = await fetch(API_URL, {
+		let response = await fetch(API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
+
+		// On auth errors, try refreshing the token and retrying once
+		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
+			console.warn(`[name-gen] Auth error ${response.status}, attempting token refresh…`);
+			const newToken = await refreshOAuthToken();
+			if (newToken) {
+				headers["Authorization"] = `Bearer ${newToken}`;
+				response = await fetch(API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+			}
+		}
 
 		if (!response.ok) {
 			const errText = await response.text();
