@@ -7,6 +7,8 @@ import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
+import { SearchIndex } from "../search/search-index.js";
+import { extractTextFromMessage } from "../search/message-extractor.js";
 import { RpcBridge, type RpcBridgeOptions, containerToHostSessionPath, hostToContainerSessionPath } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -161,6 +163,8 @@ export class SessionManager {
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
+	/** Full-text search index (SQLite FTS5). */
+	searchIndex: SearchIndex;
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
@@ -194,6 +198,7 @@ export class SessionManager {
 		this.projectConfigStore = options?.projectConfigStore;
 		this.goalManager = new GoalManager(options?.workflowStore);
 		this.taskManager = new TaskManager();
+		this.searchIndex = new SearchIndex(path.join(bobbitStateDir(), "search.db"));
 	}
 
 	/** Whether Docker sandbox mode is enabled in project config. */
@@ -782,6 +787,24 @@ export class SessionManager {
 			if (!event.aborted) this.refreshAfterCompaction(session);
 		}
 
+		// Index completed assistant messages for search
+		if (event.type === "message_end" && event.message?.role === "assistant") {
+			try {
+				const { text, toolNames } = extractTextFromMessage(event.message);
+				if (text.trim()) {
+					this.searchIndex.indexMessage(
+						session.id,
+						session.title,
+						text,
+						toolNames,
+						Date.now(),
+					);
+				}
+			} catch {
+				// Non-critical — don't break message flow
+			}
+		}
+
 		// Detect PR creation in bash tool results
 		if (event.type === "message_end" && event.message && this._onPrCreationDetected) {
 			const content = event.message.content;
@@ -1033,6 +1056,28 @@ export class SessionManager {
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
 	async restoreSessions(): Promise<void> {
+		// Initialize search index
+		try {
+			this.searchIndex.open();
+			if (this.searchIndex.needsRebuild()) {
+				const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
+				this.searchIndex.rebuildFromStores(goalStore, this.store);
+			}
+			// Wire index update callbacks
+			const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
+			goalStore.onIndexUpdate = (goal) => {
+				try { this.searchIndex.indexGoal(goal); } catch (err) { console.error("[search] Failed to index goal:", err); }
+			};
+			this.store.onIndexUpdate = (session) => {
+				try {
+					const goalTitle = session.goalId ? this.goalManager.getGoal(session.goalId)?.title : undefined;
+					this.searchIndex.indexSession(session, goalTitle);
+				} catch (err) { console.error("[search] Failed to index session:", err); }
+			};
+		} catch (err) {
+			console.error("[search] Failed to initialize search index:", err);
+		}
+
 		const persisted = this.store.getLive();
 		if (persisted.length === 0) return;
 
@@ -2995,6 +3040,14 @@ export class SessionManager {
 
 	/** Internal: purge a single archived session — delete files, worktree, store entry. */
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
+		// Remove from search index
+		try {
+			this.searchIndex.removeMessagesForSession(ps.id);
+			this.searchIndex.removeSession(ps.id);
+		} catch (err) {
+			console.error(`[session-manager] Failed to remove session ${ps.id} from search index:`, err);
+		}
+
 		// Delete .jsonl file
 		try {
 			if (ps.agentSessionFile && fs.existsSync(ps.agentSessionFile)) {
@@ -3257,5 +3310,12 @@ export class SessionManager {
 
 		// Flush any debounced store writes before exit
 		this.store.flush();
+
+		// Close search index
+		try {
+			this.searchIndex.close();
+		} catch (err) {
+			console.error("[search] Failed to close search index:", err);
+		}
 	}
 }

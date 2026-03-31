@@ -144,10 +144,14 @@ export class SessionStore {
 		return this.generation;
 	}
 
+	/** Optional callback invoked after any session mutation (put/update/archive). */
+	onIndexUpdate?: (session: PersistedSession) => void;
+
 	put(session: PersistedSession): void {
 		this.generation++;
 		this.sessions.set(session.id, session);
 		this.saveNow(); // immediate — structural change
+		this.onIndexUpdate?.(session);
 	}
 
 	get(id: string): PersistedSession | undefined {
@@ -171,6 +175,10 @@ export class SessionStore {
 		this.generation++;
 		Object.assign(existing, updates);
 		this.save(); // debounced — frequent field updates
+		// Only notify on meaningful field changes (skip high-frequency activity updates)
+		if (updates.title !== undefined || updates.archived !== undefined || updates.role !== undefined || updates.goalId !== undefined) {
+			this.onIndexUpdate?.(existing);
+		}
 	}
 
 
@@ -214,12 +222,30 @@ export class SessionStore {
 		existing.archived = true;
 		existing.archivedAt = Date.now();
 		this.saveNow(); // immediate — structural change
+		this.onIndexUpdate?.(existing);
 		return true;
 	}
 
 	/** Get all archived sessions. */
 	getArchived(): PersistedSession[] {
 		return Array.from(this.sessions.values()).filter(s => s.archived === true);
+	}
+
+	/**
+	 * Paginated listing of archived sessions, sorted by archivedAt DESC.
+	 * @param limit Max items per page
+	 * @param afterCursor archivedAt timestamp — return items with archivedAt < cursor
+	 */
+	listArchivedSessionsPaginated(limit: number, afterCursor?: number): { sessions: PersistedSession[]; total: number; hasMore: boolean; nextCursor?: number } {
+		let archived = this.getArchived().sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
+		const total = archived.length;
+		if (afterCursor !== undefined) {
+			archived = archived.filter(s => (s.archivedAt ?? 0) < afterCursor);
+		}
+		const page = archived.slice(0, limit);
+		const hasMore = archived.length > limit;
+		const nextCursor = page.length > 0 ? page[page.length - 1].archivedAt : undefined;
+		return { sessions: page, total, hasMore, nextCursor };
 	}
 
 	/** Get all live (non-archived) sessions. */
