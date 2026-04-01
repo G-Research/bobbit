@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
-import type { GoalManager } from "./goal-manager.js";
+import { GoalManager } from "./goal-manager.js";
+import type { PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
@@ -228,7 +229,15 @@ export class TeamManager {
 	 * Event subscriptions are deferred to resubscribeTeamEvents().
 	 */
 	private restoreTeams(): void {
-		const persisted = this.store.getAll();
+		let persisted: PersistedTeamEntry[];
+		if (this.config.projectContextManager) {
+			persisted = [];
+			for (const ctx of this.config.projectContextManager.all()) {
+				persisted.push(...ctx.teamStore.getAll());
+			}
+		} else {
+			persisted = this.store.getAll();
+		}
 		for (const p of persisted) {
 			const entry: TeamEntry = {
 				goalId: p.goalId,
@@ -403,12 +412,30 @@ export class TeamManager {
 		return this.sessionManager.goalManager;
 	}
 
+	/** Resolve a goal across all project contexts. */
+	private resolveGoal(goalId: string): PersistedGoal | undefined {
+		if (this.config.projectContextManager) {
+			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.goalStore.get(goalId);
+		}
+		return this.goalManager.getGoal(goalId);
+	}
+
+	/** Get a GoalManager scoped to the project owning the given goal. */
+	private resolveGoalManager(goalId: string): GoalManager {
+		if (this.config.projectContextManager) {
+			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return new GoalManager(ctx.goalStore);
+		}
+		return this.goalManager;
+	}
+
 	/**
 	 * Start a team for the given goal.
 	 * Creates a Team Lead session and returns it.
 	 */
 	async startTeam(goalId: string): Promise<SessionInfo> {
-		const goal = this.goalManager.getGoal(goalId);
+		const goal = this.resolveGoal(goalId);
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
 		}
@@ -486,7 +513,7 @@ export class TeamManager {
 
 		// Transition goal to in-progress if needed
 		if (goal.state === "todo") {
-			await this.goalManager.updateGoal(goalId, { state: "in-progress" });
+			await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
 		}
 
 		// Kick off the team lead with an initial prompt (same pattern as delegate sessions)
@@ -510,7 +537,7 @@ export class TeamManager {
 	 * Otherwise, auto-resolves from the DAG's `dependsOn` for `workflowGateId`.
 	 */
 	buildDependencyContext(goalId: string, workflowGateId?: string, explicitInputIds?: string[]): string {
-		const goal = this.goalManager.getGoal(goalId);
+		const goal = this.resolveGoal(goalId);
 		const resolvedGateStore = this.resolveGateStore(goalId);
 		if (!goal?.workflow || !resolvedGateStore) return "";
 
@@ -564,7 +591,7 @@ export class TeamManager {
 		if (tagMatch) return tagMatch[1];
 
 		// Try to match against workflow gate names/IDs in the goal
-		const goal = this.goalManager.getGoal(goalId);
+		const goal = this.resolveGoal(goalId);
 		if (!goal?.workflow) return undefined;
 
 		const taskLower = task.toLowerCase();
@@ -605,7 +632,7 @@ export class TeamManager {
 			);
 		}
 
-		const goal = this.goalManager.getGoal(goalId);
+		const goal = this.resolveGoal(goalId);
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
 		}
@@ -870,7 +897,7 @@ export class TeamManager {
 		}
 
 		// Persist repoPath and branch before archiving so worktree can be cleaned up later
-		const goal = this.goalManager.getGoal(goalId);
+		const goal = this.resolveGoal(goalId);
 		if (goal?.repoPath && agent.worktreePath) {
 			this.sessionManager.updateSessionMeta(sessionId, {
 				worktreePath: agent.worktreePath,
@@ -986,7 +1013,7 @@ export class TeamManager {
 		// Enforce gate requirements before allowing completion
 		const completeGateStore = this.resolveGateStore(goalId);
 		if (completeGateStore) {
-			const goal = this.goalManager.getGoal(goalId);
+			const goal = this.resolveGoal(goalId);
 			const skipReqs = goal?.skipGateRequirements;
 
 			if (goal?.workflow && (!skipReqs || !skipReqs.includes("workflow"))) {
@@ -1017,7 +1044,7 @@ export class TeamManager {
 		// The team lead will await further instructions.
 
 		// Update goal state
-		await this.goalManager.updateGoal(goalId, { state: "complete" });
+		await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "complete" });
 
 		// Keep team tracking alive so the team lead can still be found
 		// but persist the updated state (agents cleared)
@@ -1052,7 +1079,7 @@ export class TeamManager {
 
 		// Terminate the team lead session — persist worktree info first so purge can clean up
 		if (entry.teamLeadSessionId) {
-			const goal = this.goalManager.getGoal(goalId);
+			const goal = this.resolveGoal(goalId);
 			if (goal?.repoPath) {
 				const store = (this.sessionManager as any).store;
 				if (store) {

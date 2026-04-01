@@ -25,6 +25,7 @@ import { PersonalityManager } from "./agent/personality-manager.js";
 
 import { getPromptSections, initPromptDirs } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
+import { TaskManager } from "./agent/task-manager.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 
 import { WorkflowStore } from "./agent/workflow-store.js";
@@ -713,6 +714,30 @@ async function handleApiRoute(
 		return new GoalManager(ctx.goalStore, workflowManager.store);
 	}
 
+	/** Get a TaskManager for the project that owns the given goal. Falls back to default. */
+	const taskManagerCache = new Map<string, TaskManager>();
+	function getTaskManagerForGoal(goalId: string): TaskManager {
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) return sessionManager.taskManager;
+		const projectId = ctx.project.id;
+		let tm = taskManagerCache.get(projectId);
+		if (!tm) {
+			tm = new TaskManager(ctx.taskStore);
+			taskManagerCache.set(projectId, tm);
+		}
+		return tm;
+	}
+
+	/** Get a TaskManager for a task by looking up which goal it belongs to. Falls back to default. */
+	function getTaskManagerForTask(taskId: string): TaskManager {
+		// Search all project contexts for the task
+		for (const ctx of projectContextManager.all()) {
+			const task = ctx.taskStore.get(taskId);
+			if (task) return getTaskManagerForGoal(task.goalId);
+		}
+		return sessionManager.taskManager;
+	}
+
 	// GET /api/health — unauthenticated so the client can probe localhost mode
 	if (url.pathname === "/api/health" && req.method === "GET") {
 		const isLocalhost = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
@@ -1100,26 +1125,39 @@ async function handleApiRoute(
 		}
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
+			// Collect archived sessions across all project contexts
+			const allArchived: typeof sessions = [];
+			for (const ctx of projectContextManager.all()) {
+				const store = ctx.sessionStore;
+				for (const s of store.getArchived()) {
+					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
+				}
+			}
+			// Sort by archivedAt descending
+			allArchived.sort((a: any, b: any) => ((b as any).archivedAt ?? 0) - ((a as any).archivedAt ?? 0));
+			// Apply projectId filter if present
+			const filteredArchived = filterProjectId
+				? allArchived.filter((s: any) => s.projectId === filterProjectId)
+				: allArchived;
+
 			const limitParam = url.searchParams.get("limit");
 			const afterParam = url.searchParams.get("after");
 			if (limitParam) {
 				// Paginated archived sessions
 				const limit = Math.min(Math.max(1, parseInt(limitParam, 10) || 50), 200);
 				const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
-				const page = sessionManager.getSessionStore().listArchivedSessionsPaginated(limit, afterCursor);
-				const archivedSessions = page.sessions.map((s) => ({
-					...s,
-					colorIndex: colorStore.get(s.id),
-					status: "archived",
-				}));
-				json({ generation: currentGen, sessions: [...sessions, ...archivedSessions], total: page.total, hasMore: page.hasMore, nextCursor: page.nextCursor });
+				let page = filteredArchived;
+				if (afterCursor !== undefined) {
+					page = page.filter((s: any) => ((s as any).archivedAt ?? 0) < afterCursor);
+				}
+				const total = filteredArchived.length;
+				const hasMore = page.length > limit;
+				const sliced = page.slice(0, limit);
+				const nextCursor = sliced.length > 0 ? (sliced[sliced.length - 1] as any).archivedAt : undefined;
+				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, hasMore, nextCursor });
 			} else {
 				// Backward compatible: return all archived sessions
-				const archived = sessionManager.listArchivedSessions().map((s) => ({
-					...s,
-					colorIndex: colorStore.get(s.id),
-				}));
-				json({ generation: currentGen, sessions: [...sessions, ...archived] });
+				json({ generation: currentGen, sessions: [...sessions, ...filteredArchived] });
 			}
 		} else {
 			json({ generation: currentGen, sessions });
@@ -2120,7 +2158,7 @@ async function handleApiRoute(
 	// GET /api/goals/:goalId/tasks — list tasks for a goal
 	const goalTasksMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tasks$/);
 	if (goalTasksMatch && req.method === "GET") {
-		const tasks = sessionManager.taskManager.getTasksForGoal(goalTasksMatch[1]);
+		const tasks = getTaskManagerForGoal(goalTasksMatch[1]).getTasksForGoal(goalTasksMatch[1]);
 		json({ tasks });
 		return;
 	}
@@ -2144,7 +2182,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const task = sessionManager.taskManager.createTask(goalId, title, type, {
+			const task = getTaskManagerForGoal(goalId).createTask(goalId, title, type, {
 				parentTaskId: body.parentTaskId,
 				spec: body.spec,
 				dependsOn: body.dependsOn,
@@ -2419,7 +2457,7 @@ async function handleApiRoute(
 
 		// GET /api/tasks/:id
 		if (req.method === "GET") {
-			const task = sessionManager.taskManager.getTask(id);
+			const task = getTaskManagerForTask(id).getTask(id);
 			if (!task) { json({ error: "Task not found" }, 404); return; }
 			json(task);
 			return;
@@ -2430,9 +2468,10 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			try {
-				const task = sessionManager.taskManager.getTask(id);
+				const tm = getTaskManagerForTask(id);
+				const task = tm.getTask(id);
 				const prevState = task?.state;
-				const ok = sessionManager.taskManager.updateTask(id, {
+				const ok = tm.updateTask(id, {
 					title: body.title,
 					spec: body.spec,
 					state: body.state,
@@ -2457,7 +2496,7 @@ async function handleApiRoute(
 
 		// DELETE /api/tasks/:id
 		if (req.method === "DELETE") {
-			const ok = sessionManager.taskManager.deleteTask(id);
+			const ok = getTaskManagerForTask(id).deleteTask(id);
 			if (!ok) { json({ error: "Task not found" }, 404); return; }
 			json({ ok: true });
 			return;
@@ -2474,7 +2513,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const ok = sessionManager.taskManager.assignTask(taskAssignMatch[1], sessionId);
+			const ok = getTaskManagerForTask(taskAssignMatch[1]).assignTask(taskAssignMatch[1], sessionId);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 			json({ ok: true });
 		} catch (err: any) {
@@ -2498,8 +2537,9 @@ async function handleApiRoute(
 		}
 		try {
 			const taskId = taskTransitionMatch[1];
-			const task = sessionManager.taskManager.getTask(taskId);
-			const ok = sessionManager.taskManager.transitionTask(taskId, state as TaskState);
+			const tm = getTaskManagerForTask(taskId);
+			const task = tm.getTask(taskId);
+			const ok = tm.transitionTask(taskId, state as TaskState);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 
 			// Notify team lead when a task reaches a terminal or blocked state
@@ -3782,7 +3822,7 @@ async function handleApiRoute(
 	const taskCostMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cost$/);
 	if (taskCostMatch && req.method === "GET") {
 		const taskId = taskCostMatch[1];
-		const task = sessionManager.taskManager.getTask(taskId);
+		const task = getTaskManagerForTask(taskId).getTask(taskId);
 		if (!task) {
 			json({ error: "Task not found" }, 404);
 			return;

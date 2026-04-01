@@ -31,7 +31,7 @@ import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
-import { GoalStore } from "./goal-store.js";
+import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
@@ -270,13 +270,24 @@ export class SessionManager {
 		return this.searchIndex;
 	}
 
+	/** Resolve a goal across all project contexts. */
+	private resolveGoal(goalId: string): PersistedGoal | undefined {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.goalStore.get(goalId);
+		}
+		return this.goalManager.getGoalStore().get(goalId);
+	}
+
 	/** Whether Docker sandbox mode is enabled in project config. */
 	get isSandboxEnabled(): boolean {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
 	}
 
 	/** Build a PipelineContext from this manager's fields. */
-	buildPipelineContext(): PipelineContext {
+	buildPipelineContext(projectId?: string): PipelineContext {
+		const resolvedStore = this.getSessionStore(projectId);
+		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
 		return {
 			agentCliPath: this.agentCliPath,
 			systemPromptPath: this.systemPromptPath,
@@ -291,8 +302,8 @@ export class SessionManager {
 			sandboxTokenStore: this.sandboxTokenStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			costTracker: this.costTracker,
-			store: this.store,
-			searchIndex: this.searchIndex,
+			store: resolvedStore,
+			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 			buildToolRestrictionsText: (tools, role) => this.buildToolRestrictionsText(tools, role),
@@ -516,7 +527,7 @@ export class SessionManager {
 				// Inject re-attempt context if this is a re-attempt session
 				const reattemptId = (this.store.get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
-					const origGoal = this.goalManager.getGoal(reattemptId);
+					const origGoal = this.resolveGoal(reattemptId);
 					if (origGoal) {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
@@ -532,7 +543,7 @@ export class SessionManager {
 				projectConfigStore: this.projectConfigStore,
 			};
 		} else {
-			const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
+			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 			const resolvedPersonalities = (session.personalities && session.personalities.length > 0 && this.personalityManager)
 				? this.personalityManager.resolvePersonalities(session.personalities)
 				: undefined;
@@ -1135,7 +1146,7 @@ export class SessionManager {
 				};
 				this.store.onIndexUpdate = (session) => {
 					try {
-						const goalTitle = session.goalId ? this.goalManager.getGoal(session.goalId)?.title : undefined;
+						const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
 						this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
 					} catch (err) { console.error("[search] Failed to index session:", err); }
 				};
@@ -1144,7 +1155,9 @@ export class SessionManager {
 			}
 		}
 
-		const persisted = this.store.getLive();
+		const persisted = this.projectContextManager
+			? [...this.projectContextManager.getAllLiveSessions()]
+			: this.store.getLive();
 		if (persisted.length === 0) return;
 
 		// Separate regular sessions from delegate sessions
@@ -1163,7 +1176,7 @@ export class SessionManager {
 		// Delegate sessions: dormant entries only — restored on-demand via addClient()
 		for (const ps of delegates) {
 			if (!ps.agentSessionFile || !fs.existsSync(ps.agentSessionFile)) {
-				this.store.remove(ps.id);
+				this.getSessionStore(ps.projectId).remove(ps.id);
 				continue;
 			}
 			this.addDormantSession(ps);
@@ -1213,6 +1226,7 @@ export class SessionManager {
 	}
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
+		const sessionStore = this.getSessionStore(ps.projectId);
 		if (!ps.agentSessionFile) {
 			if (ps.worktreePath && ps.branch) {
 				// Code may be recoverable — the branch exists in git
@@ -1221,16 +1235,16 @@ export class SessionManager {
 					`(branch: ${ps.branch}, path: ${ps.worktreePath}). ` +
 					`Code may be recoverable. Archiving session — branch "${ps.branch}" preserved in git.`,
 				);
-				this.store.archive(ps.id);
+				sessionStore.archive(ps.id);
 			} else {
 				console.log(`[session-manager] Removing ${ps.id} — no agent session file and no worktree`);
-				this.store.remove(ps.id);
+				sessionStore.remove(ps.id);
 			}
 			return;
 		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
 			console.log(`[session-manager] Removing ${ps.id} — agent session file missing: ${ps.agentSessionFile}`);
-			this.store.remove(ps.id);
+			sessionStore.remove(ps.id);
 			return;
 		}
 		try {
@@ -1337,7 +1351,7 @@ export class SessionManager {
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
-					const origGoal = this.goalManager.getGoal(ps.reattemptGoalId);
+					const origGoal = this.resolveGoal(ps.reattemptGoalId);
 					if (origGoal) {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
@@ -1355,7 +1369,7 @@ export class SessionManager {
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
-			const goal = ps.goalId ? this.goalManager.getGoal(ps.goalId) : undefined;
+			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
 			// Resolve persisted personality names to prompt fragments
 			const resolvedPersonalities = (ps.personalities && ps.personalities.length > 0 && this.personalityManager)
 				? this.personalityManager.resolvePersonalities(ps.personalities)
@@ -1478,9 +1492,11 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions; projectId?: string }): Promise<SessionInfo> {
 		const id = randomUUID();
-		const ctx = this.buildPipelineContext();
+		// Resolve projectId from opts or from the goal's project
+		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
+		const ctx = this.buildPipelineContext(projectId);
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
@@ -1603,10 +1619,14 @@ export class SessionManager {
 		context?: Record<string, string>;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
-		const ctx = this.buildPipelineContext();
+		// Resolve projectId from parent session
+		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
+			?? this.store.get(parentSessionId)?.projectId;
+		const ctx = this.buildPipelineContext(parentProjectId);
 
 		// ── Sandbox propagation from parent ──
-		const parentMeta = this.store.get(parentSessionId);
+		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId)
+			?? this.store.get(parentSessionId);
 		let delegateSandboxed = false;
 		if (parentMeta?.sandboxed) {
 			// Always use the parent's validated host-side cwd — never trust the
@@ -2152,7 +2172,7 @@ export class SessionManager {
 		await session.rpcClient.stop();
 
 		// Reassemble system prompt with role instructions as separate fields
-		const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
+		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
 		let toolRestrictionsText: string | undefined;
 		// Look up the full role (with toolPolicies) from roleManager if available
@@ -2283,7 +2303,7 @@ export class SessionManager {
 		await session.rpcClient.stop();
 
 		// Reassemble system prompt with new personalities (preserving role prompt if assigned)
-		const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
+		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
 
 		// If the session has a role, include its prompt template as separate fields
