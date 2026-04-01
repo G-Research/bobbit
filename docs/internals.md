@@ -63,6 +63,27 @@ The project assistant (`project-assistant.ts`) guides users through registering 
 
 Registered as assistant type `"project"` in the assistant registry.
 
+### Per-project config
+
+Each registered project can override system-level settings (from `project.yaml`). This allows different projects to use different build commands, default models, sandbox settings, etc., while inheriting everything they don't explicitly override.
+
+**Resolution cascade**: For each config key, `resolveScalarConfig()` checks project → server → global → built-in default. The first defined value wins. This reuses the same `config-resolver.ts` infrastructure described in [Config resolution](#config-resolution-3-tier-hierarchy) above.
+
+**Server-side caching**: The server lazily instantiates a `ProjectContext` per project via `getOrCreateProjectContext()` (cached in a `Map<string, ProjectContext>` in `server.ts`). This avoids creating stores for projects that are never accessed during a server lifetime.
+
+**REST API**:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/projects/:id/config` | Raw project-level overrides (only keys explicitly set) |
+| `GET` | `/api/projects/:id/config/defaults` | Built-in defaults for all config keys |
+| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. |
+| `GET` | `/api/projects/:id/config/resolved` | Fully resolved values — each key returns `{ value, source }` where source is `"project"`, `"server"`, or `"default"` |
+
+**Settings UI**: The settings page has a two-tier layout. The top scope row selects System or a specific project. Sub-tabs within each scope show the relevant settings. Per-project tabs show inherited system values as placeholders with an "(inherited)" badge; overrides show normal text with a "×" reset button. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID (backwards-compatible: `#/settings/shortcuts` maps to `#/settings/system/shortcuts`).
+
+**Sidebar shortcut**: Project headers in the sidebar show a gear icon on hover that navigates directly to `#/settings/<project-id>/project`.
+
 ### Session & goal scoping
 
 - `PersistedSession` and `PersistedGoal` carry an optional `projectId` field.
@@ -96,6 +117,10 @@ Single-project mode minimizes visual noise — no project headers shown.
 | `GET` | `/api/projects/:id` | Get a single project |
 | `PUT` | `/api/projects/:id` | Update name/color |
 | `DELETE` | `/api/projects/:id` | Unregister (blocked for default project) |
+| `GET` | `/api/projects/:id/config` | Raw project-level config overrides |
+| `GET` | `/api/projects/:id/config/defaults` | Built-in defaults |
+| `PUT` | `/api/projects/:id/config` | Set/clear project config fields |
+| `GET` | `/api/projects/:id/config/resolved` | Resolved values with `{ value, source }` |
 
 Session/goal/search endpoints accept optional `?projectId=` filter:
 - `GET /api/sessions?projectId=<id>`
