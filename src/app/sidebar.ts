@@ -71,6 +71,9 @@ let _pickerWorktree = false;
 let _pickerSandbox = false;
 /** Goal ID context for the picker (if launched from a goal). */
 let _pickerGoalId: string | undefined;
+/** Project context for the picker (if launched from a project section). */
+let _pickerProjectId: string | undefined;
+let _pickerProjectName: string | undefined;
 /** Anchor rect for positioning the popover near the button. */
 let _pickerAnchorRect: { top: number; right: number; bottom: number } | null = null;
 /** Keyboard focus index for popover navigation (-1 = none). */
@@ -85,7 +88,7 @@ function _buildPickerItems(): PickerItem[] {
 	const items: PickerItem[] = [];
 	for (const p of _cachedPersonalities) items.push({ type: "personality", id: p.name });
 	for (const r of state.roles) items.push({ type: "role", id: r.name });
-	items.push({ type: "cwd", id: "cwd" });
+	if (!_pickerProjectId) items.push({ type: "cwd", id: "cwd" });
 	items.push({ type: "worktree", id: "worktree" });
 	items.push({ type: "create", id: "create" });
 	return items;
@@ -98,7 +101,7 @@ async function ensurePersonalitiesLoaded(): Promise<void> {
 }
 
 /** Toggle role picker dropdown, fetching roles and personalities if needed. */
-export async function toggleRolePicker(e: Event, goalId?: string): Promise<void> {
+export async function toggleRolePicker(e: Event, goalId?: string, opts?: { projectId?: string; projectName?: string; projectCwd?: string }): Promise<void> {
 	e.stopPropagation();
 	if (state.rolePickerOpen) {
 		state.rolePickerOpen = false;
@@ -106,11 +109,13 @@ export async function toggleRolePicker(e: Event, goalId?: string): Promise<void>
 		return;
 	}
 	_pickerPersonalities = new Set();
-	_pickerCwd = "";
+	_pickerCwd = opts?.projectCwd || "";
 	_pickerCwdDropdownOpen = false;
 	_pickerCwdHighlightIndex = -1;
 	_pickerWorktree = false;
 	_pickerGoalId = goalId;
+	_pickerProjectId = opts?.projectId;
+	_pickerProjectName = opts?.projectName;
 	// Capture the button position for anchoring the popover
 	const btn = e.currentTarget as HTMLElement;
 	if (btn) {
@@ -151,10 +156,13 @@ export function renderRolePickerDropdown() {
 		const cwd = _pickerCwd || undefined;
 		const worktree = _pickerWorktree || undefined;
 		const sandboxed = _pickerSandbox || undefined;
+		const projectId = _pickerProjectId;
 		_pickerCwd = "";
 		_pickerCwdDropdownOpen = false;
 		_pickerSandbox = false;
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree, sandboxed);
+		_pickerProjectId = undefined;
+		_pickerProjectName = undefined;
+		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree, sandboxed, projectId);
 	};
 
 	// All roles including general (the server default)
@@ -183,7 +191,7 @@ export function renderRolePickerDropdown() {
 			style="background: var(--popover); border: 1px solid var(--border); width: ${popoverWidth}px; ${topStyle}; right: ${right}px; ${maxHStyle}; display: flex; flex-direction: column;"
 			@click=${(e: Event) => e.stopPropagation()}>
 			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
-				<span class="flex-1 text-xs font-semibold text-foreground">Create New Session</span>
+				<span class="flex-1 text-xs font-semibold text-foreground">Create New Session${_pickerProjectName ? html` <span class="text-muted-foreground font-normal">in ${_pickerProjectName}</span>` : ""}</span>
 				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
 				</button>
@@ -225,7 +233,8 @@ export function renderRolePickerDropdown() {
 					</div>`}
 			</div>
 			</div>
-			<!-- Working Directory (pinned at bottom) -->
+			<!-- Working Directory (pinned at bottom, hidden when project is set) -->
+			${!_pickerProjectId ? html`
 			<div class="border-t border-border/50 px-3 py-2 shrink-0" style="overflow: visible;">
 				<div class="text-[9px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
 				${cwdCombobox({
@@ -238,6 +247,7 @@ export function renderRolePickerDropdown() {
 					onHighlight: (i: number) => { _pickerCwdHighlightIndex = i; },
 				})}
 			</div>
+			` : ""}
 			<!-- Worktree checkbox -->
 			<div class="border-t border-border/50 px-3 py-1.5 shrink-0">
 				<label class="flex items-center gap-2 cursor-pointer ${isFocused("worktree", "worktree") ? "ring-2 ring-ring rounded" : ""}">
@@ -844,7 +854,7 @@ function renderProjectContent(
 					>${icon(Plus, "xs")}</button>
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e); }}
+						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 						title="New session with role"
 					>${icon(ChevronDown, "xs")}</button>
 					${renderRolePickerDropdown()}
