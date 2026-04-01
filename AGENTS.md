@@ -50,7 +50,9 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 ## Recipes
 
-**Add a REST endpoint**: Edit `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` handlers for pattern (`execFileAsync`, path sanitization, 5s timeout).
+**Add a REST endpoint**: Edit `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` handlers for pattern (`execFileAsync`, path sanitization, 5s timeout). For project-scoped CRUD, see the `/api/projects` endpoints for the pattern (JSON body parsing, type guards, registry calls).
+
+**Add a project**: Register via `POST /api/projects` (name + rootPath) or the "Add Project" button in the sidebar, which opens the project assistant. The assistant explores the directory and emits a `<project_proposal>` block. On acceptance, `.bobbit/config/` and `.bobbit/state/` are scaffolded in the project directory. See [docs/internals.md](docs/internals.md#multi-project-architecture) for the full architecture.
 
 **Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts` switch, add `RpcBridge` method if needed. Examples: `set_model`, `set_thinking_level`.
 
@@ -64,7 +66,9 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Add/use MCP servers**: Configure in `.mcp.json` (project), `.bobbit/config/mcp.json` (overrides), or any of 7 discovery locations. See @docs/internals.md#mcp-servers for full priority list.
 
-**Add a goal feature**: CRUD in `goal-manager.ts`/`goal-store.ts`. REST in `server.ts`. Assistant prompt in `goal-assistant.ts`. Proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`. Re-attempt: `buildReattemptContext()`, `startReattempt()`.
+**Add a goal feature**: CRUD in `goal-manager.ts`/`goal-store.ts`. REST in `server.ts`. Assistant prompt in `goal-assistant.ts`. Proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`. Re-attempt: `buildReattemptContext()`, `startReattempt()`. Goals carry an optional `projectId` linking them to a registered project.
+
+**Modify a store constructor**: All stores accept `stateDir` or `configDir` as a constructor parameter (not module-level globals). State stores (GoalStore, SessionStore, etc.) take `stateDir: string`; config stores (RoleStore, WorkflowStore, etc.) take `configDir: string`. When adding a new store, follow this pattern — never call `bobbitStateDir()` or `bobbitConfigDir()` at module level. See `ProjectContext` in `project-context.ts` for how stores are wired together.
 
 **Add/modify session creation logic**: Session creation uses a plan/execute pipeline in `session-setup.ts`. The three creation modes (normal, worktree, delegate) share composable pipeline steps (`resolveBridgeOptions`, `resolveGoalExtensions`, `resolveTools`, `resolvePrompt`, `resolveToolActivation`) with different executors (`executePlan` for normal/delegate, `executeWorktreeAsync` for worktree). `session-manager.ts` contains thin wrappers (`createSession`, `createDelegateSession`) that build a `SessionSetupPlan` and delegate to the pipeline. Persistence uses put-once-then-update: `persistOnce()` does a single `store.put()` at creation, then `persistSessionMetadata()` only calls `store.update()` for the `agentSessionFile` field.
 
@@ -86,8 +90,9 @@ Quick pointers for the most common issues:
 - **Duplicate messages**: Check `flushDeferredMessage()` in `remote-agent.ts` — `MessageList` and `StreamingMessageContainer` must never overlap.
 - **Session persistence**: Check `.bobbit/state/sessions.json`. Missing `.jsonl` = session skipped on restore.
 - **Sandbox**: `GET /api/sandbox-status` for Docker state. Proxy logs prefixed `[sandbox-proxy]`.
-- **Search**: Delete `.bobbit/state/search.db` and restart to rebuild index. Schema version 2 includes staff in the index. See @docs/debugging.md#search-index for full checklist.
+- **Search**: Delete `.bobbit/state/search.db` and restart to rebuild index. Schema version 3 adds `project_id` column for multi-project filtering. See @docs/debugging.md#search-index for full checklist.
 - **Gates**: Check `GET /api/goals/:id/gates` for dependency state.
+- **Multi-project**: Project registry at `.bobbit/state/projects.json`. Server CWD auto-registered as default project on startup. Check `GET /api/projects` for registered projects. Sessions/goals carry optional `projectId`; filter with `?projectId=` on list endpoints. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
 
 ## Git conventions
 
@@ -118,7 +123,7 @@ If not set, no setup runs (intentional — Bobbit doesn't assume your package ma
 
 ## Reference docs
 
-- @docs/internals.md — tool policies, search, MCP, sandbox, config directories, disk state, goals
+- @docs/internals.md — tool policies, search, MCP, sandbox, config directories, disk state, goals, multi-project architecture
 - @docs/debugging.md — scannable debugging checklists for all subsystems
 - [docs/dev-workflow.md](docs/dev-workflow.md) — running modes, restart workflow, safe change process
 - [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) — goal/workflow/gate data model and lifecycle

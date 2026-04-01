@@ -5,6 +5,7 @@ import type { GoalManager } from "./goal-manager.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 import type { PersistedTeamEntry } from "./team-store.js";
 import { generateTeamName } from "./team-names.js";
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -128,11 +129,11 @@ export class TeamManager {
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
 
-	constructor(sessionManager: SessionManager, config: TeamManagerConfig) {
+	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string) {
 		this.sessionManager = sessionManager;
 		this.config = config;
 		this.taskManager = config.taskManager;
-		this.store = new TeamStore();
+		this.store = new TeamStore(stateDir ?? bobbitStateDir());
 		this.restoreTeams();
 	}
 

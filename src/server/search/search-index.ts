@@ -7,7 +7,7 @@ import type { PersistedSession, SessionStore } from "../agent/session-store.js";
 import type { PersistedStaff } from "../agent/staff-store.js";
 import type { StaffStore } from "../agent/staff-store.js";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // ── Public interfaces ────────────────────────────────────────────────
 
@@ -23,6 +23,8 @@ export interface SearchResult {
 	goalId?: string;
 	sessionId?: string;
 	sessionTitle?: string;
+	projectId?: string;
+	projectName?: string;
 }
 
 export interface SearchResults {
@@ -50,15 +52,6 @@ export class SearchIndex {
 		deleteMessagesBySession: Database.Statement;
 		deleteStaff: Database.Statement;
 		insertStaff: Database.Statement;
-		// Read statements (cached for search queries)
-		countGoals: Database.Statement;
-		searchGoals: Database.Statement;
-		countSessions: Database.Statement;
-		searchSessions: Database.Statement;
-		countMessages: Database.Statement;
-		searchMessages: Database.Statement;
-		countStaff: Database.Statement;
-		searchStaff: Database.Statement;
 	} | null = null;
 
 	constructor(dbPath: string) {
@@ -116,7 +109,7 @@ export class SearchIndex {
 
 	// ── Goal indexing ──────────────────────────────────────────────
 
-	indexGoal(goal: PersistedGoal): void {
+	indexGoal(goal: PersistedGoal, projectId?: string): void {
 		if (!this.stmts) return;
 		this.stmts.deleteGoal.run(goal.id);
 		this.stmts.insertGoal.run(
@@ -127,6 +120,7 @@ export class SearchIndex {
 			goal.archived ? "1" : "0",
 			goal.createdAt ?? 0,
 			goal.archivedAt ?? 0,
+			projectId ?? goal.projectId ?? "",
 		);
 	}
 
@@ -136,7 +130,7 @@ export class SearchIndex {
 
 	// ── Session indexing ───────────────────────────────────────────
 
-	indexSession(session: PersistedSession, goalTitle?: string): void {
+	indexSession(session: PersistedSession, goalTitle?: string, projectId?: string): void {
 		if (!this.stmts) return;
 		this.stmts.deleteSession.run(session.id);
 		this.stmts.insertSession.run(
@@ -148,6 +142,7 @@ export class SearchIndex {
 			session.archived ? "1" : "0",
 			session.createdAt ?? 0,
 			session.archivedAt ?? 0,
+			projectId ?? session.projectId ?? "",
 		);
 	}
 
@@ -163,6 +158,7 @@ export class SearchIndex {
 		text: string,
 		toolNames: string[],
 		timestamp: number,
+		projectId?: string,
 	): void {
 		if (!this.stmts || !text.trim()) return;
 		this.stmts.insertMessage.run(
@@ -171,6 +167,7 @@ export class SearchIndex {
 			text,
 			toolNames.join(" "),
 			timestamp,
+			projectId ?? "",
 		);
 	}
 
@@ -180,10 +177,10 @@ export class SearchIndex {
 
 	// ── Staff indexing ─────────────────────────────────────────────
 
-	indexStaff(staff: PersistedStaff): void {
+	indexStaff(staff: PersistedStaff, projectId?: string): void {
 		if (!this.stmts) return;
 		this.stmts.deleteStaff.run(staff.id);
-		this.stmts.insertStaff.run(staff.id, staff.name || "", staff.description || "", staff.state || "", staff.createdAt ?? 0);
+		this.stmts.insertStaff.run(staff.id, staff.name || "", staff.description || "", staff.state || "", staff.createdAt ?? 0, projectId ?? "");
 	}
 
 	removeStaff(staffId: string): void {
@@ -227,7 +224,7 @@ export class SearchIndex {
 
 			// Index goals
 			for (const goal of goals) {
-				this.indexGoal(goal);
+				this.indexGoal(goal, goal.projectId ?? "");
 			}
 
 			// Index sessions
@@ -235,7 +232,7 @@ export class SearchIndex {
 				const goalTitle = session.goalId
 					? goalTitleMap.get(session.goalId) || ""
 					: "";
-				this.indexSession(session, goalTitle);
+				this.indexSession(session, goalTitle, session.projectId ?? "");
 			}
 
 			// Index messages from .jsonl files
@@ -261,6 +258,7 @@ export class SearchIndex {
 									text,
 									toolNames,
 									msg.timestamp || session.lastActivity || 0,
+									session.projectId ?? "",
 								);
 								messageCount++;
 							}
@@ -294,6 +292,8 @@ export class SearchIndex {
 			type?: "all" | "goals" | "sessions" | "messages" | "staff";
 			limit?: number;
 			offset?: number;
+			projectId?: string;
+			projectNames?: Map<string, string>;
 		} = {},
 	): SearchResults {
 		if (!this.db || !query.trim()) {
@@ -303,6 +303,8 @@ export class SearchIndex {
 		const type = opts.type || "all";
 		const limit = opts.limit ?? 20;
 		const offset = opts.offset ?? 0;
+		const projectId = opts.projectId;
+		const projectNames = opts.projectNames;
 
 		// Sanitise the query for FTS5: escape double quotes, wrap terms
 		const ftsQuery = sanitiseFtsQuery(query);
@@ -314,27 +316,36 @@ export class SearchIndex {
 		let total = 0;
 
 		if (type === "all" || type === "goals") {
-			const { rows, count } = this.searchGoals(ftsQuery, type === "goals" ? limit : 10, type === "goals" ? offset : 0);
+			const { rows, count } = this.searchGoals(ftsQuery, type === "goals" ? limit : 10, type === "goals" ? offset : 0, projectId);
 			results.push(...rows);
 			total += count;
 		}
 
 		if (type === "all" || type === "sessions") {
-			const { rows, count } = this.searchSessions(ftsQuery, type === "sessions" ? limit : 10, type === "sessions" ? offset : 0);
+			const { rows, count } = this.searchSessions(ftsQuery, type === "sessions" ? limit : 10, type === "sessions" ? offset : 0, projectId);
 			results.push(...rows);
 			total += count;
 		}
 
 		if (type === "all" || type === "messages") {
-			const { rows, count } = this.searchMessages(ftsQuery, type === "messages" ? limit : 10, type === "messages" ? offset : 0);
+			const { rows, count } = this.searchMessages(ftsQuery, type === "messages" ? limit : 10, type === "messages" ? offset : 0, projectId);
 			results.push(...rows);
 			total += count;
 		}
 
 		if (type === "all" || type === "staff") {
-			const { rows, count } = this.searchStaffEntries(ftsQuery, type === "staff" ? limit : 10, type === "staff" ? offset : 0);
+			const { rows, count } = this.searchStaffEntries(ftsQuery, type === "staff" ? limit : 10, type === "staff" ? offset : 0, projectId);
 			results.push(...rows);
 			total += count;
+		}
+
+		// Populate projectName from the names map
+		if (projectNames) {
+			for (const r of results) {
+				if (r.projectId) {
+					r.projectName = projectNames.get(r.projectId);
+				}
+			}
 		}
 
 		// For type-specific queries, apply limit/offset at the top level
@@ -357,24 +368,28 @@ export class SearchIndex {
 			CREATE VIRTUAL TABLE IF NOT EXISTS goals_fts USING fts5(
 				goal_id UNINDEXED, title, spec,
 				state UNINDEXED, archived UNINDEXED,
-				created_at UNINDEXED, archived_at UNINDEXED
+				created_at UNINDEXED, archived_at UNINDEXED,
+				project_id UNINDEXED
 			);
 
 			CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 				session_id UNINDEXED, title, role,
 				goal_id UNINDEXED, goal_title,
-				archived UNINDEXED, created_at UNINDEXED, archived_at UNINDEXED
+				archived UNINDEXED, created_at UNINDEXED, archived_at UNINDEXED,
+				project_id UNINDEXED
 			);
 
 			CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 				session_id UNINDEXED, session_title UNINDEXED,
 				text_content, tool_names,
-				timestamp UNINDEXED
+				timestamp UNINDEXED,
+				project_id UNINDEXED
 			);
 
 			CREATE VIRTUAL TABLE IF NOT EXISTS staff_fts USING fts5(
 				staff_id UNINDEXED, name, description,
-				state UNINDEXED, created_at UNINDEXED
+				state UNINDEXED, created_at UNINDEXED,
+				project_id UNINDEXED
 			);
 		`);
 
@@ -404,16 +419,16 @@ export class SearchIndex {
 				"DELETE FROM goals_fts WHERE goal_id = ?",
 			),
 			insertGoal: this.db.prepare(
-				"INSERT INTO goals_fts (goal_id, title, spec, state, archived, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO goals_fts (goal_id, title, spec, state, archived, created_at, archived_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			),
 			deleteSession: this.db.prepare(
 				"DELETE FROM sessions_fts WHERE session_id = ?",
 			),
 			insertSession: this.db.prepare(
-				"INSERT INTO sessions_fts (session_id, title, role, goal_id, goal_title, archived, created_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO sessions_fts (session_id, title, role, goal_id, goal_title, archived, created_at, archived_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			),
 			insertMessage: this.db.prepare(
-				"INSERT INTO messages_fts (session_id, session_title, text_content, tool_names, timestamp) VALUES (?, ?, ?, ?, ?)",
+				"INSERT INTO messages_fts (session_id, session_title, text_content, tool_names, timestamp, project_id) VALUES (?, ?, ?, ?, ?, ?)",
 			),
 			deleteMessagesBySession: this.db.prepare(
 				"DELETE FROM messages_fts WHERE session_id = ?",
@@ -422,49 +437,7 @@ export class SearchIndex {
 				"DELETE FROM staff_fts WHERE staff_id = ?",
 			),
 			insertStaff: this.db.prepare(
-				"INSERT INTO staff_fts (staff_id, name, description, state, created_at) VALUES (?, ?, ?, ?, ?)",
-			),
-			// Read statements for search queries
-			countGoals: this.db.prepare(
-				"SELECT count(*) as cnt FROM goals_fts WHERE goals_fts MATCH ?",
-			),
-			searchGoals: this.db.prepare(
-				`SELECT goal_id, title, snippet(goals_fts, 2, '<b>', '</b>', '...', 40) as snippet,
-					state, archived, created_at, archived_at
-				 FROM goals_fts WHERE goals_fts MATCH ?
-				 ORDER BY rank
-				 LIMIT ? OFFSET ?`,
-			),
-			countSessions: this.db.prepare(
-				"SELECT count(*) as cnt FROM sessions_fts WHERE sessions_fts MATCH ?",
-			),
-			searchSessions: this.db.prepare(
-				`SELECT session_id, title, snippet(sessions_fts, 1, '<b>', '</b>', '...', 40) as snippet,
-					goal_id, archived, created_at, archived_at
-				 FROM sessions_fts WHERE sessions_fts MATCH ?
-				 ORDER BY rank
-				 LIMIT ? OFFSET ?`,
-			),
-			countMessages: this.db.prepare(
-				"SELECT count(*) as cnt FROM messages_fts WHERE messages_fts MATCH ?",
-			),
-			searchMessages: this.db.prepare(
-				`SELECT rowid, session_id, session_title,
-					snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet,
-					timestamp
-				 FROM messages_fts WHERE messages_fts MATCH ?
-				 ORDER BY rank
-				 LIMIT ? OFFSET ?`,
-			),
-			countStaff: this.db.prepare(
-				"SELECT count(*) as cnt FROM staff_fts WHERE staff_fts MATCH ?",
-			),
-			searchStaff: this.db.prepare(
-				`SELECT staff_id, name, snippet(staff_fts, 2, '<b>', '</b>', '...', 40) as snippet,
-					state, created_at
-				 FROM staff_fts WHERE staff_fts MATCH ?
-				 ORDER BY rank
-				 LIMIT ? OFFSET ?`,
+				"INSERT INTO staff_fts (staff_id, name, description, state, created_at, project_id) VALUES (?, ?, ?, ?, ?, ?)",
 			),
 		};
 	}
@@ -473,14 +446,27 @@ export class SearchIndex {
 		ftsQuery: string,
 		limit: number,
 		offset: number,
+		projectId?: string,
 	): { rows: SearchResult[]; count: number } {
-		if (!this.stmts) return { rows: [], count: 0 };
+		if (!this.db) return { rows: [], count: 0 };
 
 		try {
-			const countRow = this.stmts.countGoals.get(ftsQuery) as { cnt: number };
+			const projectFilter = projectId ? " AND project_id = ?" : "";
+			const params: unknown[] = [ftsQuery];
+			if (projectId) params.push(projectId);
+
+			const countRow = this.db.prepare(
+				`SELECT count(*) as cnt FROM goals_fts WHERE goals_fts MATCH ?${projectFilter}`,
+			).get(...params) as { cnt: number };
 			const count = countRow?.cnt ?? 0;
 
-			const rows = this.stmts.searchGoals.all(ftsQuery, limit, offset) as Array<{
+			const rows = this.db.prepare(
+				`SELECT goal_id, title, snippet(goals_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+					state, archived, created_at, archived_at, project_id
+				 FROM goals_fts WHERE goals_fts MATCH ?${projectFilter}
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			).all(...params, limit, offset) as Array<{
 				goal_id: string;
 				title: string;
 				snippet: string;
@@ -488,6 +474,7 @@ export class SearchIndex {
 				archived: string;
 				created_at: number;
 				archived_at: number;
+				project_id: string;
 			}>;
 
 			return {
@@ -499,6 +486,7 @@ export class SearchIndex {
 					snippet: r.snippet,
 					timestamp: Number(r.created_at) || 0,
 					archived: r.archived === "1",
+					projectId: r.project_id || undefined,
 				})),
 			};
 		} catch {
@@ -510,14 +498,27 @@ export class SearchIndex {
 		ftsQuery: string,
 		limit: number,
 		offset: number,
+		projectId?: string,
 	): { rows: SearchResult[]; count: number } {
-		if (!this.stmts) return { rows: [], count: 0 };
+		if (!this.db) return { rows: [], count: 0 };
 
 		try {
-			const countRow = this.stmts.countSessions.get(ftsQuery) as { cnt: number };
+			const projectFilter = projectId ? " AND project_id = ?" : "";
+			const params: unknown[] = [ftsQuery];
+			if (projectId) params.push(projectId);
+
+			const countRow = this.db.prepare(
+				`SELECT count(*) as cnt FROM sessions_fts WHERE sessions_fts MATCH ?${projectFilter}`,
+			).get(...params) as { cnt: number };
 			const count = countRow?.cnt ?? 0;
 
-			const rows = this.stmts.searchSessions.all(ftsQuery, limit, offset) as Array<{
+			const rows = this.db.prepare(
+				`SELECT session_id, title, snippet(sessions_fts, 1, '<b>', '</b>', '...', 40) as snippet,
+					goal_id, archived, created_at, archived_at, project_id
+				 FROM sessions_fts WHERE sessions_fts MATCH ?${projectFilter}
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			).all(...params, limit, offset) as Array<{
 				session_id: string;
 				title: string;
 				snippet: string;
@@ -525,6 +526,7 @@ export class SearchIndex {
 				archived: string;
 				created_at: number;
 				archived_at: number;
+				project_id: string;
 			}>;
 
 			return {
@@ -537,6 +539,7 @@ export class SearchIndex {
 					timestamp: Number(r.created_at) || 0,
 					archived: r.archived === "1",
 					goalId: r.goal_id || undefined,
+					projectId: r.project_id || undefined,
 				})),
 			};
 		} catch {
@@ -548,19 +551,34 @@ export class SearchIndex {
 		ftsQuery: string,
 		limit: number,
 		offset: number,
+		projectId?: string,
 	): { rows: SearchResult[]; count: number } {
-		if (!this.stmts) return { rows: [], count: 0 };
+		if (!this.db) return { rows: [], count: 0 };
 
 		try {
-			const countRow = this.stmts.countMessages.get(ftsQuery) as { cnt: number };
+			const projectFilter = projectId ? " AND project_id = ?" : "";
+			const params: unknown[] = [ftsQuery];
+			if (projectId) params.push(projectId);
+
+			const countRow = this.db.prepare(
+				`SELECT count(*) as cnt FROM messages_fts WHERE messages_fts MATCH ?${projectFilter}`,
+			).get(...params) as { cnt: number };
 			const count = countRow?.cnt ?? 0;
 
-			const rows = this.stmts.searchMessages.all(ftsQuery, limit, offset) as Array<{
+			const rows = this.db.prepare(
+				`SELECT rowid, session_id, session_title,
+					snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+					timestamp, project_id
+				 FROM messages_fts WHERE messages_fts MATCH ?${projectFilter}
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			).all(...params, limit, offset) as Array<{
 				rowid: number;
 				session_id: string;
 				session_title: string;
 				snippet: string;
 				timestamp: number;
+				project_id: string;
 			}>;
 
 			return {
@@ -574,6 +592,7 @@ export class SearchIndex {
 					archived: false,
 					sessionId: r.session_id,
 					sessionTitle: r.session_title || undefined,
+					projectId: r.project_id || undefined,
 				})),
 			};
 		} catch {
@@ -585,19 +604,33 @@ export class SearchIndex {
 		ftsQuery: string,
 		limit: number,
 		offset: number,
+		projectId?: string,
 	): { rows: SearchResult[]; count: number } {
-		if (!this.stmts) return { rows: [], count: 0 };
+		if (!this.db) return { rows: [], count: 0 };
 
 		try {
-			const countRow = this.stmts.countStaff.get(ftsQuery) as { cnt: number };
+			const projectFilter = projectId ? " AND project_id = ?" : "";
+			const params: unknown[] = [ftsQuery];
+			if (projectId) params.push(projectId);
+
+			const countRow = this.db.prepare(
+				`SELECT count(*) as cnt FROM staff_fts WHERE staff_fts MATCH ?${projectFilter}`,
+			).get(...params) as { cnt: number };
 			const count = countRow?.cnt ?? 0;
 
-			const rows = this.stmts.searchStaff.all(ftsQuery, limit, offset) as Array<{
+			const rows = this.db.prepare(
+				`SELECT staff_id, name, snippet(staff_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+					state, created_at, project_id
+				 FROM staff_fts WHERE staff_fts MATCH ?${projectFilter}
+				 ORDER BY rank
+				 LIMIT ? OFFSET ?`,
+			).all(...params, limit, offset) as Array<{
 				staff_id: string;
 				name: string;
 				snippet: string;
 				state: string;
 				created_at: number;
+				project_id: string;
 			}>;
 
 			return {
@@ -609,6 +642,7 @@ export class SearchIndex {
 					snippet: r.snippet,
 					timestamp: Number(r.created_at) || 0,
 					archived: false,
+					projectId: r.project_id || undefined,
 				})),
 			};
 		} catch {

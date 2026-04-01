@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { stringify, parse } from "yaml";
-import { bobbitConfigDir } from "../bobbit-dir.js";
 
 export interface Personality {
 	/** Unique identifier — lowercase alphanumeric + hyphens */
@@ -16,9 +15,6 @@ export interface Personality {
 	updatedAt: number;
 }
 
-/** personalities/ directory in .bobbit/config — version controlled */
-const PERSONALITIES_DIR = path.join(bobbitConfigDir(), "personalities");
-
 /**
  * File-backed personality store. Each personality is a YAML file in personalities/<name>.yaml
  * at the repo root. Version controlled — edits via the UI write back
@@ -26,16 +22,18 @@ const PERSONALITIES_DIR = path.join(bobbitConfigDir(), "personalities");
  */
 export class PersonalityStore {
 	private personalities: Map<string, Personality> = new Map();
+	private readonly personalitiesDir: string;
 
-	constructor() {
-		fs.mkdirSync(PERSONALITIES_DIR, { recursive: true });
+	constructor(configDir: string) {
+		this.personalitiesDir = path.join(configDir, "personalities");
+		fs.mkdirSync(this.personalitiesDir, { recursive: true });
 		this.loadAll();
 	}
 
 	private personalityFilePath(name: string): string {
-		const filePath = path.join(PERSONALITIES_DIR, `${name}.yaml`);
+		const filePath = path.join(this.personalitiesDir, `${name}.yaml`);
 		const resolved = path.resolve(filePath);
-		if (!resolved.startsWith(path.resolve(PERSONALITIES_DIR))) {
+		if (!resolved.startsWith(path.resolve(this.personalitiesDir))) {
 			throw new Error(`Invalid personality name: path traversal detected`);
 		}
 		return filePath;
@@ -44,13 +42,13 @@ export class PersonalityStore {
 	private loadAll(): void {
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(PERSONALITIES_DIR, { withFileTypes: true });
+			entries = fs.readdirSync(this.personalitiesDir, { withFileTypes: true });
 		} catch {
 			return;
 		}
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-			const filePath = path.join(PERSONALITIES_DIR, entry.name);
+			const filePath = path.join(this.personalitiesDir, entry.name);
 			try {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);

@@ -1,8 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
-
-const STORE_FILE = path.join(bobbitStateDir(), "pr-status-cache.json");
 
 export interface PrStatusEntry {
 	state: string;
@@ -18,15 +15,19 @@ export interface PrStatusEntry {
 
 export class PrStatusStore {
 	private cache: Map<string, PrStatusEntry> = new Map();
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "pr-status-cache.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (data && typeof data === "object" && !Array.isArray(data)) {
 					for (const [id, entry] of Object.entries(data)) {
 						if (entry && typeof entry === "object") this.cache.set(id, entry as PrStatusEntry);
@@ -40,9 +41,8 @@ export class PrStatusStore {
 
 	private save(): void {
 		try {
-			const dir = bobbitStateDir();
-			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-			fs.writeFileSync(STORE_FILE, JSON.stringify(Object.fromEntries(this.cache), null, 2), "utf-8");
+			if (!fs.existsSync(this.storeDir)) fs.mkdirSync(this.storeDir, { recursive: true });
+			fs.writeFileSync(this.storeFile, JSON.stringify(Object.fromEntries(this.cache), null, 2), "utf-8");
 		} catch (err) {
 			console.error("[pr-status-store] Failed to save:", err);
 		}

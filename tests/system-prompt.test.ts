@@ -20,7 +20,11 @@ const {
 	readAgentsMd,
 	assembleSystemPrompt,
 	cleanupSessionPrompt,
+	initPromptDirs,
 } = await import("../src/server/agent/system-prompt.ts");
+
+// Initialize prompt dirs with the test stateDir (required after parameterization)
+initPromptDirs(stateDir);
 
 // Helpers
 let cwdDir: string;

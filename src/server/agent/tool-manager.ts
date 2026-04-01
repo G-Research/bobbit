@@ -44,29 +44,26 @@ export interface ToolInfo {
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
 
-/** Tool definitions directory — .bobbit/config/tools/ (YAML definitions AND extension code, scaffolded from defaults) */
-const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
-
-
-export { TOOLS_DIR };
+/** Tool definitions directory — .bobbit/config/tools/ (legacy export for callers that need the default path) */
+export const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
 
 /**
  * Scan the tools/ YAML directory and return all tool definitions.
  * Supports both grouped layout (tools/<group>/*.yaml) and flat layout (tools/*.yaml).
  * Called on every request so new/edited YAML files are picked up without restart.
  */
-function loadToolDefinitions(): BaseToolInfo[] {
+function loadToolDefinitions(toolsDir: string): BaseToolInfo[] {
 	const tools: BaseToolInfo[] = [];
 	const seen = new Set<string>();
 
 	try {
-		const entries = fs.readdirSync(TOOLS_DIR, { withFileTypes: true });
+		const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
 
 		// First pass: scan group subdirectories (tools/<group>/*.yaml)
 		for (const entry of entries) {
 			if (!entry.isDirectory()) continue;
 			const groupDir = entry.name;
-			const groupPath = path.join(TOOLS_DIR, groupDir);
+			const groupPath = path.join(toolsDir, groupDir);
 			try {
 				const files = fs.readdirSync(groupPath, { withFileTypes: true });
 				for (const file of files) {
@@ -104,7 +101,7 @@ function loadToolDefinitions(): BaseToolInfo[] {
 		// Second pass: scan flat files (tools/*.yaml) for backward compat
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-			const filePath = path.join(TOOLS_DIR, entry.name);
+			const filePath = path.join(toolsDir, entry.name);
 			try {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
@@ -142,8 +139,11 @@ function loadToolDefinitions(): BaseToolInfo[] {
  */
 export class ToolManager {
 	private externalTools = new Map<string, { name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>();
+	private readonly toolsDir: string;
 
-	constructor() {}
+	constructor(configDir: string) {
+		this.toolsDir = path.join(configDir, "tools");
+	}
 
 	/** Register tools from external sources (e.g. MCP servers). */
 	registerExternalTools(tools: Array<{ name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>): void {
@@ -161,7 +161,7 @@ export class ToolManager {
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */
 	getAvailableTools(): ToolInfo[] {
-		const tools = loadToolDefinitions();
+		const tools = loadToolDefinitions(this.toolsDir);
 		const result = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
@@ -196,7 +196,7 @@ export class ToolManager {
 				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined };
 			}
 		}
-		const tools = loadToolDefinitions();
+		const tools = loadToolDefinitions(this.toolsDir);
 		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
 		if (!base) return undefined;
 		return {
@@ -221,7 +221,7 @@ export class ToolManager {
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
 	getToolDocsForPrompt(toolNames?: string[]): string {
-		const tools = loadToolDefinitions();
+		const tools = loadToolDefinitions(this.toolsDir);
 
 		// Build grouped data: group → [{ name, summary, docs }]
 		const grouped = new Map<string, Array<{ name: string; summary: string; docs?: string }>>();
@@ -285,14 +285,14 @@ export class ToolManager {
 	getToolProvider(name: string): ToolProvider | undefined {
 		const ext = this.externalTools.get(name);
 		if (ext) return ext.provider;
-		const tools = loadToolDefinitions();
+		const tools = loadToolDefinitions(this.toolsDir);
 		const base = tools.find((t) => t.name === name);
 		return base?.provider;
 	}
 
 	/** Returns all tool providers with groupDir in a single YAML scan. */
 	getToolProviders(): Map<string, ToolProvider & { groupDir: string }> {
-		const tools = loadToolDefinitions();
+		const tools = loadToolDefinitions(this.toolsDir);
 		const map = new Map<string, ToolProvider & { groupDir: string }>();
 		for (const tool of tools) {
 			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir });
@@ -305,13 +305,13 @@ export class ToolManager {
 
 	/** Returns all tool names from YAML definitions. */
 	getAllToolNames(): string[] {
-		const yamlNames = loadToolDefinitions().map((t) => t.name);
+		const yamlNames = loadToolDefinitions(this.toolsDir).map((t) => t.name);
 		return [...yamlNames, ...this.externalTools.keys()];
 	}
 
 	/** Updates tool metadata (description, group, docs) by writing directly to the YAML file. */
 	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string }): boolean {
-		const tools = loadToolDefinitions();
+		const tools = loadToolDefinitions(this.toolsDir);
 		const base = tools.find((t) => t.name === name);
 		if (!base) return false;
 
