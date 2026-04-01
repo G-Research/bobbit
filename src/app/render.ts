@@ -1218,6 +1218,7 @@ function staffPreviewPanel() {
 			systemPrompt: state.staffPreviewPrompt,
 			cwd: state.staffPreviewCwd,
 			triggers,
+			projectId: state.activeProjectId || undefined,
 		});
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
