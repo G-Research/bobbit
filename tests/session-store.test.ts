@@ -33,7 +33,7 @@ function makeSession(overrides: Partial<PersistedSession> = {}): PersistedSessio
 }
 
 function freshStore(): InstanceType<typeof SessionStore> {
-	return new SessionStore();
+	return new SessionStore(stateDir);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "yaml";
-import { bobbitConfigDir } from "../bobbit-dir.js";
+
+/** Module-level cached configDir. Set once by initAssistantRegistry(). */
+let _configDir: string | undefined;
+
+/** Initialize the assistant registry with a config directory. Called by server startup. */
+export function initAssistantRegistry(configDir: string): void {
+	_configDir = configDir;
+	ASSISTANT_REGISTRY = buildRegistry();
+}
+
+function getConfigDir(): string {
+	if (!_configDir) throw new Error("assistant-registry: initAssistantRegistry() not called");
+	return _configDir;
+}
 
 // Hardcoded fallback defaults
 import { GOAL_ASSISTANT_PROMPT } from "./goal-assistant.js";
@@ -11,6 +24,7 @@ import { PERSONALITY_ASSISTANT_PROMPT } from "./personality-assistant.js";
 import { STAFF_ASSISTANT_PROMPT } from "./staff-assistant.js";
 import { SETUP_ASSISTANT_PROMPT } from "./setup-assistant.js";
 import { WORKFLOW_ASSISTANT_PROMPT } from "./workflow-assistant.js";
+import { PROJECT_ASSISTANT_PROMPT } from "./project-assistant.js";
 
 export interface AssistantDef {
 	type: string;
@@ -63,11 +77,17 @@ const FALLBACK_DEFAULTS: Record<string, AssistantDef> = {
 		promptTitle: "Workflow Creation Assistant",
 		prompt: WORKFLOW_ASSISTANT_PROMPT,
 	},
+	project: {
+		type: "project",
+		title: "Project Assistant",
+		promptTitle: "Project Registration Assistant",
+		prompt: PROJECT_ASSISTANT_PROMPT,
+	},
 };
 
 /** Returns the path to the assistant YAML config directory. */
 function assistantConfigDir(): string {
-	return path.join(bobbitConfigDir(), "roles", "assistant");
+	return path.join(getConfigDir(), "roles", "assistant");
 }
 
 /** Load a single assistant def from a YAML file, or return undefined. */
@@ -120,8 +140,9 @@ function buildRegistry(): Record<string, AssistantDef> {
 	return registry;
 }
 
-// Initialize on first import
-export let ASSISTANT_REGISTRY: Record<string, AssistantDef> = buildRegistry();
+// Initialize with fallback defaults (safe at import time — no disk access needed).
+// initAssistantRegistry() rebuilds from disk when the server starts.
+export let ASSISTANT_REGISTRY: Record<string, AssistantDef> = { ...FALLBACK_DEFAULTS };
 
 export function getAssistantDef(type: string): AssistantDef | undefined {
 	return ASSISTANT_REGISTRY[type];

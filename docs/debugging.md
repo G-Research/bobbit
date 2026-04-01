@@ -100,7 +100,7 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 ## Search index
 
 - `.bobbit/state/search.db` is a rebuildable cache — delete and restart to rebuild
-- Schema version is 2 (includes `staff_fts` table). Version mismatch triggers automatic rebuild on next server start
+- Schema version is 3 (added `project_id` column for multi-project filtering). Version mismatch triggers automatic rebuild on next server start
 - Check `better-sqlite3` loaded correctly (native addon)
 - FTS5 on 10K docs < 10ms — slow search means network/serialization bottleneck
 - Purged sessions still showing? Check `purgeOneSession()` calls index cleanup
@@ -113,6 +113,17 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - Cursor based on `archivedAt` timestamp
 - Missing items? Check `archivedAt` is set (older items may lack it)
 - Count mismatch? Verify total from paginated response metadata
+
+## Multi-project
+
+- Project registry at `.bobbit/state/projects.json` — check file exists and is valid JSON
+- Server CWD auto-registered as default project via `ensureDefaultProject()` on startup
+- `GET /api/projects` to list all registered projects
+- Sessions/goals not appearing? Check `projectId` field matches the expected project
+- Sidebar not grouping? Only groups when multiple projects are registered
+- Project registration failing? `rootPath` must be absolute and exist on disk; duplicate paths are rejected
+- Search not filtering by project? Verify `?projectId=` query param is passed; check `project_id` column exists in search.db (schema v3)
+- Config not cascading? Check all three `.bobbit/config/` directories (global, server, project) and verify `resolveScalarConfig()` / `resolveEntities()` return expected scope
 
 ## Gate re-signal cancellation
 

@@ -1,8 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
-
-const STORE_FILE = path.join(bobbitStateDir(), "preferences.json");
 
 /**
  * Simple key-value store persisted to .bobbit/state/preferences.json.
@@ -10,15 +7,17 @@ const STORE_FILE = path.join(bobbitStateDir(), "preferences.json");
  */
 export class PreferencesStore {
 	private data: Record<string, unknown> = {};
+	private readonly storeFile: string;
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeFile = path.join(stateDir, "preferences.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const raw = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 					this.data = raw as Record<string, unknown>;
 				}
@@ -30,11 +29,11 @@ export class PreferencesStore {
 
 	private save(): void {
 		try {
-			const dir = path.dirname(STORE_FILE);
+			const dir = path.dirname(this.storeFile);
 			if (!fs.existsSync(dir)) {
 				fs.mkdirSync(dir, { recursive: true });
 			}
-			fs.writeFileSync(STORE_FILE, JSON.stringify(this.data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(this.data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[preferences-store] Failed to save preferences:", err);
 		}

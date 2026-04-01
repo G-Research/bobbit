@@ -2,6 +2,117 @@
 
 Deep-dive documentation for subsystems. Agents: read this when working in the relevant area, not on every task.
 
+## Multi-project architecture
+
+A single Bobbit server manages N registered projects, each with its own `.bobbit/` directory, config, state, sessions, and goals. This enables teams to work across multiple codebases from one browser instance.
+
+### Why multi-project?
+
+Without multi-project support, running multiple Bobbit instances (one per project) means separate browser tabs, separate auth tokens, and no cross-project search. Multi-project lets a single server manage everything — sessions and goals are scoped per project, config cascades from global to project, and search works across all projects by default.
+
+### Project Registry
+
+`ProjectRegistry` (`project-registry.ts`) persists registered projects to `<server-cwd>/.bobbit/state/projects.json`. Each project is a `RegisteredProject`:
+
+```typescript
+interface RegisteredProject {
+  id: string;        // UUID
+  name: string;      // Display name (e.g. "my-api")
+  rootPath: string;  // Absolute path to project directory
+  createdAt: number; // Epoch ms
+  color?: string;    // Optional accent color for sidebar grouping
+}
+```
+
+Key behaviors:
+- The server CWD is always auto-registered as the "default" project on startup via `ensureDefaultProject()`.
+- `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed.
+- `remove()` only unregisters — it does not delete files. Callers guard against removing the default project.
+- Persistence is atomic (write to `.tmp` then rename).
+
+### ProjectContext (scoped stores)
+
+`ProjectContext` (`project-context.ts`) holds a complete set of stores scoped to one project. Every store constructor accepts a directory parameter (`stateDir` or `configDir`) instead of using module-level globals:
+
+- **State stores** (stateDir): GoalStore, SessionStore, GateStore, TaskStore, TeamStore, StaffStore, ColorStore
+- **Config stores** (configDir): RoleStore, PersonalityStore, WorkflowStore, ToolManager, ProjectConfigStore, ToolGroupPolicyStore
+
+Directories derive from the project's `rootPath`:
+- `stateDir` = `<rootPath>/.bobbit/state/`
+- `configDir` = `<rootPath>/.bobbit/config/`
+
+### Config resolution (3-tier hierarchy)
+
+`ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
+
+```
+~/.bobbit/         (global)    — lowest priority
+<server-cwd>/.bobbit/  (server)    — middle
+<project>/.bobbit/     (project)   — highest priority (wins)
+```
+
+Two resolution modes:
+
+**Entity resolution** (`resolveEntities`): For named entities (roles, personalities, tools, workflows), merge by name across tiers. A project-level entity with the same name fully overrides the server/global version — no field-level merge. Entities that only exist at a higher tier remain available in all projects.
+
+**Scalar resolution** (`resolveScalarConfig`): For `project.yaml` keys (build_command, test_command, default models, etc.), first defined value wins: project → server → global → built-in default. Returns both the resolved value and its source scope.
+
+### Project assistant
+
+The project assistant (`project-assistant.ts`) guides users through registering a new project directory. It explores the directory (package.json, build files, git config, CI config) and emits a `<project_proposal>` XML block with discovered settings: name, root_path, build_command, test_command, typecheck_command, and system_prompt_context.
+
+Registered as assistant type `"project"` in the assistant registry.
+
+### Session & goal scoping
+
+- `PersistedSession` and `PersistedGoal` carry an optional `projectId` field.
+- Session/goal list APIs accept `?projectId=` query parameter for filtering.
+- Worktrees for goals are created relative to the project's `rootPath`, not the server CWD.
+- Session CWD defaults to the project's `rootPath`.
+
+### Sidebar grouping
+
+When multiple projects are registered, the sidebar groups sessions and goals by project:
+
+```
+├── Project A (collapsible)
+│   ├── Goal 1
+│   │   ├── session...
+│   ├── Sessions (ungrouped)
+│       ├── session...
+├── Project B (collapsible)
+│   ├── ...
+├── [+ Add Project]
+```
+
+Single-project mode minimizes visual noise — no project headers shown.
+
+### REST API
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/projects` | List all registered projects |
+| `POST` | `/api/projects` | Register a project (body: `name`, `rootPath`, optional `color`) |
+| `GET` | `/api/projects/:id` | Get a single project |
+| `PUT` | `/api/projects/:id` | Update name/color |
+| `DELETE` | `/api/projects/:id` | Unregister (blocked for default project) |
+
+Session/goal/search endpoints accept optional `?projectId=` filter:
+- `GET /api/sessions?projectId=<id>`
+- `GET /api/goals?projectId=<id>`
+- `GET /api/search?projectId=<id>`
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `project-registry.ts` | Project CRUD and persistence |
+| `project-context.ts` | Scoped store container per project |
+| `config-resolver.ts` | 3-tier config cascade |
+| `project-assistant.ts` | Guided project registration |
+
+---
+
 ## Tool access policies
 
 All tool access uses a **grant policy** system. Every tool resolves to one of four values:
@@ -41,11 +152,11 @@ SQLite FTS5 via `better-sqlite3`. Index at `.bobbit/state/search.db` (rebuildabl
 
 **Indexed:** Goals (title, spec), sessions (title, role), messages (text blocks, tool call names), staff agents (name, description).
 
-**FTS5 tables:** `goals_fts`, `sessions_fts`, `messages_fts`, `staff_fts`. Schema version is 2 (bumped from 1 when staff indexing was added). Version mismatch triggers automatic rebuild.
+**FTS5 tables:** `goals_fts`, `sessions_fts`, `messages_fts`, `staff_fts`. Content tables include a `project_id` column for multi-project filtering. Schema version is 3 (bumped from 2 to add project_id). Version mismatch triggers automatic rebuild.
 
-**Indexing:** Incremental via store hooks + `RpcBridge`. Staff indexing hooks live in `StaffManager` — index on create/update, remove on delete. Full rebuild on first run or schema version mismatch; `rebuildFromStores()` accepts `StaffStore` to include staff in the rebuild.
+**Indexing:** Incremental via store hooks + `RpcBridge`. Staff indexing hooks live in `StaffManager` — index on create/update, remove on delete. Indexing methods (`indexGoal`, `indexSession`, `indexMessage`, `indexStaff`) accept a `projectId` parameter. Full rebuild on first run or schema version mismatch; `rebuildFromStores()` iterates all project contexts to re-index everything.
 
-**API:** `GET /api/search?q=<query>&limit=20&offset=0&type=all|goals|sessions|messages|staff`
+**API:** `GET /api/search?q=<query>&limit=20&offset=0&type=all|goals|sessions|messages|staff&projectId=<optional>` — when `projectId` is omitted, searches across all projects. Search results include `projectId` and `projectName` fields so the UI can show which project each result belongs to.
 
 ### Dual-mode sidebar search
 
@@ -261,6 +372,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 | File / Directory | Owner | Purpose |
 |---|---|---|
+| `projects.json` | `ProjectRegistry` | Registered project definitions |
 | `token` | `token.ts` | Auth token (0600) |
 | `sessions.json` | `SessionStore` | Session metadata |
 | `goals.json` | `GoalStore` | Goal definitions |
