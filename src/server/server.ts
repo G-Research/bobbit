@@ -468,7 +468,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore);
+			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager);
 		});
 	});
 
@@ -703,6 +703,15 @@ async function handleApiRoute(
 			return ctx ? ctx.goalStore.getLive() : [];
 		}
 		return projectContextManager.getAllLiveGoals();
+	}
+
+	/** Resolve per-project config store, falling back to the default. */
+	function resolveProjectConfigStore(pid: string | null): ProjectConfigStore {
+		if (pid && projectContextManager) {
+			const ctx = projectContextManager.getOrCreate(pid);
+			if (ctx) return ctx.projectConfigStore;
+		}
+		return projectConfigStore;
 	}
 
 	/** Get a GoalManager for the project that owns the given goal. Falls back to default. */
@@ -1770,7 +1779,12 @@ async function handleApiRoute(
 
 	// GET /api/config-directories — return all scanned config directories
 	if (url.pathname === "/api/config-directories" && req.method === "GET") {
-		json(getAllConfigDirectories(config.defaultCwd, projectConfigStore));
+		const projectId = url.searchParams.get("projectId");
+		const resolvedStore = resolveProjectConfigStore(projectId);
+		const resolvedCwd = projectId && projectContextManager
+			? projectContextManager.getOrCreate(projectId)?.project.rootPath ?? config.defaultCwd
+			: config.defaultCwd;
+		json(getAllConfigDirectories(resolvedCwd, resolvedStore));
 		return;
 	}
 
@@ -3652,7 +3666,9 @@ async function handleApiRoute(
 	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
 	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
 		const cwd = url.searchParams.get("cwd") || process.cwd();
-		const skills = discoverSlashSkills(cwd, projectConfigStore);
+		const projectId = url.searchParams.get("projectId");
+		const resolvedStore = resolveProjectConfigStore(projectId);
+		const skills = discoverSlashSkills(cwd, resolvedStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
 		return;
 	}
@@ -3660,8 +3676,10 @@ async function handleApiRoute(
 	// GET /api/slash-skills/details — full slash skill details including content and file paths
 	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
 		const cwd = url.searchParams.get("cwd") || process.cwd();
-		const skills = discoverSlashSkills(cwd, projectConfigStore);
-		const directories = getSkillDirectories(cwd, projectConfigStore);
+		const projectId = url.searchParams.get("projectId");
+		const resolvedStore = resolveProjectConfigStore(projectId);
+		const skills = discoverSlashSkills(cwd, resolvedStore);
+		const directories = getSkillDirectories(cwd, resolvedStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })), directories });
 		return;
 	}

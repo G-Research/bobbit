@@ -5,6 +5,7 @@ import type { SessionManager } from "../agent/session-manager.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
+import type { ProjectContextManager } from "../agent/project-context-manager.js";
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
@@ -40,6 +41,7 @@ export function handleWebSocketConnection(
 	projectConfigStore?: { get(key: string): string | undefined },
 	skipAuth = false,
 	sandboxTokenStore?: SandboxTokenStore,
+	projectContextManager?: ProjectContextManager,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -227,7 +229,13 @@ export function handleWebSocketConnection(
 					if (slashMatch) {
 						const skillName = slashMatch[1];
 						const skillArgs = slashMatch[2] || "";
-						const skill = getSlashSkill(session.cwd, skillName, projectConfigStore);
+						// Resolve per-project config store for skill lookup
+						let resolvedConfigStore = projectConfigStore;
+						if (session.projectId && projectContextManager) {
+							const ctx = projectContextManager.getOrCreate(session.projectId);
+							if (ctx) resolvedConfigStore = ctx.projectConfigStore;
+						}
+						const skill = getSlashSkill(session.cwd, skillName, resolvedConfigStore);
 						if (skill) {
 							promptText = buildSlashSkillPrompt(skill, skillArgs);
 							console.log(`[ws-handler] Slash skill "${skillName}" invoked for session ${sessionId}`);

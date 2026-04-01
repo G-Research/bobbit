@@ -1461,18 +1461,31 @@ let configDirsLoaded = false;
 let configDirsLoading = false;
 let configDirsError = "";
 let configDirsSaveStatus: "" | "saving" | "saved" | "error" = "";
+let configDirsLastScope = "";
 
 // Add-directory form state
 let newDirPath = "";
 let newDirTypes: { skills: boolean; mcp: boolean; tools: boolean; agents: boolean } = { skills: false, mcp: false, tools: false, agents: false };
 
 function loadConfigDirs(): void {
+	const currentScope = getActiveScope();
+	if (currentScope !== configDirsLastScope) {
+		configDirsLoaded = false;
+		configDirsLoading = false;
+		configDirsError = "";
+		configDirsLastScope = currentScope;
+	}
 	if (configDirsLoaded || configDirsLoading || configDirsError) return;
 	configDirsLoading = true;
 	configDirsError = "";
 	(async () => {
 		try {
-			const res = await gatewayFetch("/api/config-directories");
+			const dirParams = new URLSearchParams();
+			const scope = getActiveScope();
+			if (scope && scope !== "system") {
+				dirParams.set("projectId", scope);
+			}
+			const res = await gatewayFetch(`/api/config-directories${dirParams.toString() ? '?' + dirParams.toString() : ''}`);
 			if (res.ok) {
 				configDirs = await res.json();
 				configDirsLoaded = true;

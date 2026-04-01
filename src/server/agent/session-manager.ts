@@ -324,11 +324,13 @@ export class SessionManager {
 		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
 		let resolvedGoalManager = this.goalManager;
 		let resolvedTaskManager = this.taskManager;
+		let resolvedProjectConfigStore = this.projectConfigStore ?? null;
 		if (projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
 			if (ctx) {
 				resolvedGoalManager = ctx.goalManager;
 				resolvedTaskManager = new TaskManager(ctx.taskStore);
+				resolvedProjectConfigStore = ctx.projectConfigStore;
 			}
 		}
 		return {
@@ -340,7 +342,7 @@ export class SessionManager {
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			personalityManager: this.personalityManager ?? null,
-			projectConfigStore: this.projectConfigStore ?? null,
+			projectConfigStore: resolvedProjectConfigStore,
 			sandboxPool: this.sandboxPool,
 			sandboxTokenStore: this.sandboxTokenStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
@@ -474,6 +476,17 @@ export class SessionManager {
 	async initMcp(cwd: string): Promise<void> {
 		try {
 			const mgr = new McpManager(cwd, this.projectConfigStore);
+
+			// Register additional projects for multi-project MCP discovery
+			if (this.projectContextManager) {
+				const additionalProjects = Array.from(this.projectContextManager.all())
+					.filter(ctx => ctx.project.rootPath !== cwd)
+					.map(ctx => ({ cwd: ctx.project.rootPath, configStore: ctx.projectConfigStore }));
+				if (additionalProjects.length > 0) {
+					mgr.setAdditionalProjects(additionalProjects);
+				}
+			}
+
 			await mgr.connectAll();
 			this.mcpManager = mgr;
 
