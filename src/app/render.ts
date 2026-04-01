@@ -274,7 +274,7 @@ function renderMobileLanding() {
 													<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
-													<div class="flex items-center gap-0.5 shrink-0">
+													<div class="flex items-center gap-2 shrink-0">
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
 															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
