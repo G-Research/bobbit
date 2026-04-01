@@ -60,6 +60,13 @@ function respondToPrompt(text) {
 		const filePath = extractFilePath(text);
 		return { tool: "Edit", input: { path: filePath, oldText: "ORIGINAL_VALUE", newText: "EDITED_VALUE" }, output: "Edited successfully" };
 	}
+	// Goal proposal keyword — emit a goal_proposal block for goal assistant tests
+	if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
+		return {
+			tool: null,
+			text: `Here is a goal proposal:\n\n<goal_proposal>\n<title>E2E Test Goal</title>\n<workflow>general</workflow>\n<spec>\nThis is a test goal created via the assistant flow.\nIt validates the goal creation UI.\n</spec>\n</goal_proposal>`
+		};
+	}
 	// Default: just reply with text
 	return null;
 }
@@ -134,6 +141,14 @@ async function handlePrompt(requestId, text) {
 		const assistantMsg = {
 			role: "assistant",
 			content: [{ type: "text", text: `I tried to use ${deniedTool} but it is not allowed. Please grant permission.` }],
+		};
+		conversationMessages.push(assistantMsg);
+		emit({ type: "message_end", message: assistantMsg });
+	} else if (toolAction && toolAction.tool === null && toolAction.text) {
+		// Text-only response (e.g. goal proposal) — emit as assistant message
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: toolAction.text }],
 		};
 		conversationMessages.push(assistantMsg);
 		emit({ type: "message_end", message: assistantMsg });
