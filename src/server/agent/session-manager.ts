@@ -1577,6 +1577,7 @@ export class SessionManager {
 				personalities: opts?.personalityNames,
 				allowedTools: opts?.allowedTools,
 				worktreePath,
+				projectId,
 				promptQueue: new PromptQueue(),
 			};
 
@@ -1646,6 +1647,7 @@ export class SessionManager {
 		};
 
 		const session = await executePlan(plan, ctx);
+		if (projectId) session.projectId = projectId;
 
 		// Persist session metadata (fire-and-forget)
 		this.persistSessionMetadata(session).catch((err) => {
@@ -1707,6 +1709,8 @@ export class SessionManager {
 		this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		});
+
+		if (parentProjectId) session.projectId = parentProjectId;
 
 		// Send delegate prompt with 30s timeout
 		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
