@@ -8,7 +8,7 @@ export type SettingsTabId = "shortcuts" | "general" | "project" | "models" | "pa
 
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "models", "palette", "directories", "account"]);
 
-export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
+export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
@@ -61,10 +61,21 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	if (hash === "#/personalities") {
 		return { view: "personalities" };
 	}
-	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z]+))?$/);
+	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z0-9-]+))?(?:\/([a-z]+))?$/);
 	if (settingsMatch) {
-		const tab = settingsMatch[1] as SettingsTabId | undefined;
-		return { view: "settings", settingsTab: tab && SETTINGS_TABS.has(tab) ? tab : undefined };
+		const first = settingsMatch[1] as string | undefined;
+		const second = settingsMatch[2] as string | undefined;
+		if (!first) {
+			// #/settings — no scope, no tab
+			return { view: "settings" };
+		}
+		if (!second && SETTINGS_TABS.has(first as SettingsTabId)) {
+			// #/settings/shortcuts — backwards compat: known tab, treat as system scope
+			return { view: "settings", settingsScope: "system", settingsTab: first as SettingsTabId };
+		}
+		// #/settings/<scope>/<tab> or #/settings/<scope>
+		const tab = second as SettingsTabId | undefined;
+		return { view: "settings", settingsScope: first, settingsTab: tab && SETTINGS_TABS.has(tab) ? tab : undefined };
 	}
 	return { view: "landing" };
 }
@@ -100,7 +111,13 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 	} else if (view === "search") {
 		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
 	} else if (view === "settings") {
-		newHash = id ? `#/settings/${id}` : "#/settings";
+		if (id) {
+			// Compound id like "system/models" or "<uuid>/project" → emit as-is
+			// Single segment like "shortcuts" → emit as #/settings/<tab> (backwards compat)
+			newHash = `#/settings/${id}`;
+		} else {
+			newHash = "#/settings";
+		}
 	} else {
 		newHash = "#/";
 	}
