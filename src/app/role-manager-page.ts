@@ -26,7 +26,7 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 // ============================================================================
 
 const ROLE_POLICY_OPTIONS = [
-	{ value: "", label: "Use default" },
+	{ value: "", label: "Use tool default" },
 	{ value: "always-allow", label: "Always Allow" },
 	{ value: "ask-once", label: "Ask Once" },
 	{ value: "always-ask", label: "Always Ask" },
@@ -471,40 +471,63 @@ function renderToolAccessTab(): TemplateResult {
 		groups.set(g, list);
 	}
 
+	const chevronSvg = html`<svg class="roles-access-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+
 	return html`
 		<p class="roles-tools-note">Set per-tool access policies for this role. Tools left at "Use default" inherit from tool, group, or system defaults.</p>
 		<div class="roles-access-list">
 			${Array.from(groups.entries()).map(([groupName, tools]) => {
 				const isCollapsed = collapsedGroups.has(groupName);
-				const overrideCount = tools.filter(t => editToolPolicies[t.name]).length;
+
 				return html`
-					<div class="roles-access-group">
-						<button class="roles-access-group-header" @click=${() => toggleGroup(groupName)}>
-							<span class="roles-access-group-chevron ${isCollapsed ? "" : "expanded"}">&#x25B6;</span>
+					<div class="roles-access-group ${isCollapsed ? "collapsed" : ""}">
+						<div class="roles-access-group-header" @click=${() => toggleGroup(groupName)}>
+							${chevronSvg}
 							<span class="roles-access-group-name">${groupName}</span>
-							<span class="roles-access-group-count">${overrideCount ? `${overrideCount} override${overrideCount !== 1 ? "s" : ""}` : `${tools.length} tool${tools.length !== 1 ? "s" : ""}`}</span>
-						</button>
-						${isCollapsed ? nothing : tools.map(tool => {
-							const currentPolicy = editToolPolicies[tool.name] || "";
-							const effective = resolveEffectivePolicy(tool.name, groupName);
-							const effectiveLabel = POLICY_LABELS[effective] || effective;
-							const source = policySource(tool.name, groupName);
-							return html`
-								<div class="roles-access-row">
-									<span class="roles-access-row-label" title="${tool.description}">${tool.name}</span>
-									<select
-										class="roles-access-row-select"
-										.value=${currentPolicy}
-										@change=${(e: Event) => handleToolPolicyChange(tool.name, (e.target as HTMLSelectElement).value)}
-									>
-										${ROLE_POLICY_OPTIONS.map(opt => html`
-											<option value=${opt.value} ?selected=${currentPolicy === opt.value}>${opt.label}</option>
-										`)}
-									</select>
-									<span class="roles-access-row-hint">${!currentPolicy ? html`\u2192 ${effectiveLabel} (${source})` : nothing}</span>
-								</div>
-							`;
-						})}
+							<span class="roles-access-group-count">${tools.length} tool${tools.length !== 1 ? "s" : ""}</span>
+							<span class="roles-access-group-policy-label">Group Policy:</span>
+							<select class="roles-access-group-select"
+								.value=${editToolPolicies[groupName] || ""}
+								@click=${(e: Event) => e.stopPropagation()}
+								@change=${(e: Event) => { e.stopPropagation(); handleToolPolicyChange(groupName, (e.target as HTMLSelectElement).value); }}
+							>
+								<option value="" ?selected=${!editToolPolicies[groupName]}>Use tool default</option>
+								${ROLE_POLICY_OPTIONS.filter(opt => opt.value !== "").map(opt => html`
+									<option value=${opt.value} ?selected=${editToolPolicies[groupName] === opt.value}>${opt.label}</option>
+								`)}
+							</select>
+							<span class="roles-access-group-hint">${(() => {
+								const groupDefault = groupPolicies[groupName] || "always-allow";
+								const label = POLICY_LABELS[groupDefault] || groupDefault;
+								return html`\u2192 ${label} [system default]`;
+							})()}</span>
+						</div>
+						<div class="roles-access-group-items">
+							${tools.map(tool => {
+								const currentPolicy = editToolPolicies[tool.name] || "";
+								const hasGroupOverride = !!editToolPolicies[groupName];
+								const defaultLabel = hasGroupOverride ? "Use group role default" : "Use tool default";
+								const effective = resolveEffectivePolicy(tool.name, groupName);
+								const effectiveLabel = POLICY_LABELS[effective] || effective;
+								const source = policySource(tool.name, groupName);
+								return html`
+									<div class="roles-access-row">
+										<span class="roles-access-row-label" title="${tool.description}">${tool.name}</span>
+										<select
+											class="roles-access-row-select"
+											.value=${currentPolicy}
+											@change=${(e: Event) => handleToolPolicyChange(tool.name, (e.target as HTMLSelectElement).value)}
+										>
+											<option value="" ?selected=${!currentPolicy}>${defaultLabel}</option>
+											${ROLE_POLICY_OPTIONS.filter(opt => opt.value !== "").map(opt => html`
+												<option value=${opt.value} ?selected=${currentPolicy === opt.value}>${opt.label}</option>
+											`)}
+										</select>
+										<span class="roles-access-row-hint">\u2192 ${effectiveLabel} [${source}]</span>
+									</div>
+								`;
+							})}
+						</div>
 					</div>
 				`;
 			})}
@@ -591,9 +614,7 @@ function renderEditView(): TemplateResult {
 									@click=${() => { editAccessory = accId; renderApp(); }}
 								>
 									<span class="roles-accessory-preview">
-										${accId === "none"
-											? html`<span class="text-xs text-muted-foreground">\u2014</span>`
-											: idleBlob(accId, 42, i, i)}
+										${idleBlob(accId, 42, i, i)}
 									</span>
 									<span class="roles-accessory-label">${acc.label}</span>
 								</button>

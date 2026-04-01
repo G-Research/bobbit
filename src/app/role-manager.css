@@ -212,6 +212,8 @@
 	min-height: 0;
 	flex: 1;
 	max-width: 700px;
+	margin: 0 auto;
+	width: 100%;
 }
 
 .roles-edit-main {
@@ -219,6 +221,7 @@
 	display: flex;
 	flex-direction: column;
 	gap: 16px;
+	flex: 1;
 }
 
 .roles-edit-section {
@@ -316,7 +319,7 @@
 /* System prompt editor */
 .roles-prompt-editor {
 	width: 100%;
-	min-height: 200px;
+	min-height: 120px;
 	flex: 1;
 	padding: 12px;
 	border-radius: 6px;
@@ -327,7 +330,7 @@
 	font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
 	line-height: 1.6;
 	outline: none;
-	resize: vertical;
+	resize: none;
 	transition: border-color 150ms;
 }
 .roles-prompt-editor:focus {
@@ -339,16 +342,16 @@
 /* Accessory selector */
 .roles-accessory-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
-	gap: 6px;
+	grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+	gap: 4px;
 }
 
 .roles-accessory-option {
 	display: flex;
-	flex-direction: column;
+	flex-direction: row;
 	align-items: center;
-	gap: 2px;
-	padding: 6px 4px;
+	gap: 0;
+	padding: 3px 6px;
 	border-radius: 6px;
 	border: 1px solid transparent;
 	background: transparent;
@@ -364,9 +367,14 @@
 }
 
 .roles-accessory-preview {
-	height: 42px;
+	height: 28px;
+	width: 28px;
 	display: flex;
 	align-items: center;
+	justify-content: center;
+	transform: scale(0.55);
+	transform-origin: center;
+	flex-shrink: 0;
 }
 
 .roles-accessory-label {
@@ -565,37 +573,129 @@
     flex: 1;
 }
 
-/* ── Access list (per-tool policy rows) ── */
+/* ── Access list (per-tool policy rows) — mirrors tool-manager.css ── */
 
 .roles-access-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.roles-access-group {
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
 }
 
-.roles-access-row {
+.roles-access-group-header {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 6px 12px;
-    transition: background 120ms;
+    width: 100%;
+    padding: 10px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted-foreground);
+    background: color-mix(in oklch, var(--secondary) 40%, transparent);
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background 120ms, color 150ms;
 }
-.roles-access-row + .roles-access-row {
+.roles-access-group-header:hover {
+    background: var(--secondary);
+    color: var(--foreground);
+}
+
+.roles-access-group-chevron {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    transition: transform 200ms ease;
+    color: var(--muted-foreground);
+}
+
+.roles-access-group.collapsed .roles-access-group-chevron {
+    transform: rotate(-90deg);
+}
+
+.roles-access-group-name {
+    flex-shrink: 0;
+}
+
+.roles-access-group-count {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--muted-foreground);
+    font-variant-numeric: tabular-nums;
+    background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+    padding: 1px 6px;
+    border-radius: 9999px;
+    line-height: 1.4;
+}
+
+.roles-access-group-policy-label {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--muted-foreground);
+    margin-left: auto;
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+.roles-access-group-hint {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--muted-foreground);
+    text-transform: none;
+    letter-spacing: normal;
+    flex-shrink: 0;
+}
+
+.roles-access-group-select {
+    font-size: 11px;
+    padding: 2px 4px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--background);
+    color: var(--foreground);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.roles-access-group-items {
+    display: flex;
+    flex-direction: column;
+}
+
+.roles-access-group.collapsed .roles-access-group-items {
+    display: none;
+}
+
+.roles-access-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    transition: background 150ms;
     border-top: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
 }
+.roles-access-row:first-child {
+    border-top: 1px solid var(--border);
+}
 .roles-access-row:hover {
-    background: color-mix(in oklch, var(--secondary) 50%, transparent);
+    background: var(--accent);
 }
 
 .roles-access-row-label {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     font-family: var(--font-mono, monospace);
+    color: var(--foreground);
+    flex-shrink: 0;
+    min-width: 140px;
 }
 
 .roles-access-row-select {
@@ -611,57 +711,13 @@
 }
 
 .roles-access-row-hint {
-    font-size: 11px;
-    color: var(--muted-foreground);
-    font-style: italic;
-    white-space: nowrap;
-    flex-shrink: 0;
-}
-
-/* ── Tool group sections (collapsible) ── */
-
-.roles-access-group + .roles-access-group {
-    border-top: 1px solid var(--border);
-}
-
-.roles-access-group-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 7px 12px;
     font-size: 12px;
-    font-weight: 600;
-    color: var(--foreground);
-    background: color-mix(in oklch, var(--secondary) 40%, transparent);
-    border: none;
-    cursor: pointer;
-    text-align: left;
-    transition: background 120ms;
-}
-.roles-access-group-header:hover {
-    background: var(--secondary);
-}
-
-.roles-access-group-chevron {
-    font-size: 10px;
     color: var(--muted-foreground);
-    transition: transform 150ms;
-    flex-shrink: 0;
-}
-.roles-access-group-chevron.expanded {
-    transform: rotate(90deg);
-}
-
-.roles-access-group-name {
     flex: 1;
-}
-
-.roles-access-group-count {
-    font-size: 10px;
-    font-weight: 400;
-    color: var(--muted-foreground);
-    font-variant-numeric: tabular-nums;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .roles-tools-note {
