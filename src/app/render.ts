@@ -280,26 +280,28 @@ function renderMobileLanding() {
 														${gi > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
 													`)}
-													${data.goals.length > 0 && data.sessions.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+													${data.goals.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
-														<div class="flex items-center gap-1.5 pl-0 pr-2 py-1 rounded-md">
+														<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+															@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
+															<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${isUngroupedExpanded ? "▾" : "▸"}</span>
 															<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
 															<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 															<div class="flex items-center relative">
 																<button
 																	class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-																	@click=${() => createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id)}
+																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
 																>${icon(Plus, "sm")}</button>
 																<button
 																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-																	@click=${toggleRolePicker}
+																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e); }}
 																	title="New session with role"
 																>${icon(ChevronDown, "sm")}</button>
 																${renderRolePickerDropdown()}
 															</div>
 														</div>
-														${data.sessions.length > 0 ? html`
+														${isUngroupedExpanded && data.sessions.length > 0 ? html`
 															<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 																${data.sessions.map(renderSessionRow)}
 															</div>

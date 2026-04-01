@@ -812,25 +812,28 @@ function renderProjectContent(
 		`)}
 		${goals.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
-			<div class="flex items-center gap-1 pl-0 pr-1 py-0.5">
+			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+				style="padding-left:${HEADER_CHEVRON_W}px;"
+				@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
+				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 				<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 				<div class="flex items-center relative">
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
-						@click=${() => createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id)}
+						@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 						title="New session in ${project.name}"
 						?disabled=${state.creatingSession}
 					>${icon(Plus, "xs")}</button>
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-						@click=${toggleRolePicker}
+						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e); }}
 						title="New session with role"
 					>${icon(ChevronDown, "xs")}</button>
 					${renderRolePickerDropdown()}
 				</div>
 			</div>
-			${sessions.length > 0 ? html`
+			${ungroupedExpanded && sessions.length > 0 ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${sessions.map(renderSessionRow)}
 				</div>
