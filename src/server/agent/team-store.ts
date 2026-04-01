@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 
 export interface PersistedTeamEntry {
 	goalId: string;
@@ -16,22 +15,24 @@ export interface PersistedTeamEntry {
 	maxConcurrent: number;
 }
 
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "team-state.json");
-const LEGACY_STORE_FILE = path.join(STORE_DIR, "gateway-swarms.json");
-
 export class TeamStore {
+	private readonly storeDir: string;
+	private readonly storeFile: string;
+	private readonly legacyStoreFile: string;
 	private teams: Map<string, PersistedTeamEntry> = new Map();
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "team-state.json");
+		this.legacyStoreFile = path.join(stateDir, "gateway-swarms.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			let filePath = STORE_FILE;
-			if (!fs.existsSync(STORE_FILE) && fs.existsSync(LEGACY_STORE_FILE)) {
-				filePath = LEGACY_STORE_FILE;
+			let filePath = this.storeFile;
+			if (!fs.existsSync(this.storeFile) && fs.existsSync(this.legacyStoreFile)) {
+				filePath = this.legacyStoreFile;
 			}
 			if (fs.existsSync(filePath)) {
 				const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -48,8 +49,8 @@ export class TeamStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) fs.mkdirSync(STORE_DIR, { recursive: true });
-			fs.writeFileSync(STORE_FILE, JSON.stringify(Array.from(this.teams.values()), null, 2), "utf-8");
+			if (!fs.existsSync(this.storeDir)) fs.mkdirSync(this.storeDir, { recursive: true });
+			fs.writeFileSync(this.storeFile, JSON.stringify(Array.from(this.teams.values()), null, 2), "utf-8");
 		} catch (err) {
 			console.error("[team-store] Failed to save:", err);
 		}

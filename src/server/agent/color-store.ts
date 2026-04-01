@@ -1,9 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
-
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "session-colors.json");
 
 /**
  * Migration mappings between palette versions. Each maps old index → new index.
@@ -49,15 +45,19 @@ const PALETTE_VERSION = 4;
  */
 export class ColorStore {
 	private colors: Map<string, number> = new Map();
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "session-colors.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (data && typeof data === "object" && !Array.isArray(data)) {
 					for (const [id, idx] of Object.entries(data)) {
 						if (id.startsWith("_")) continue; // skip metadata keys
@@ -102,11 +102,11 @@ export class ColorStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) {
-				fs.mkdirSync(STORE_DIR, { recursive: true });
+			if (!fs.existsSync(this.storeDir)) {
+				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data: Record<string, number> = { _paletteVersion: PALETTE_VERSION, ...Object.fromEntries(this.colors) };
-			fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[color-store] Failed to save session colors:", err);
 		}

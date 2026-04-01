@@ -1091,3 +1091,141 @@ export async function showAssignRoleDialog(sessionId: string): Promise<void> {
 
 	renderDialog();
 }
+
+// ============================================================================
+// PROJECT REGISTRATION DIALOG
+// ============================================================================
+
+export function showProjectDialog(): void {
+	const container = document.createElement("div");
+	document.body.appendChild(container);
+
+	let nameValue = "";
+	let pathValue = "";
+	let colorValue = "";
+	let registering = false;
+	let error = "";
+
+	const cleanup = () => {
+		render(html``, container);
+		container.remove();
+	};
+
+	const doRegister = async () => {
+		const trimmedPath = pathValue.trim();
+		if (!trimmedPath) return;
+		registering = true;
+		error = "";
+		renderDialog();
+		try {
+			const { registerProject, fetchProjects } = await import("./api.js");
+			const project = await registerProject(
+				nameValue.trim() || trimmedPath.split(/[\\/]/).filter(Boolean).pop() || "project",
+				trimmedPath,
+				colorValue || undefined,
+			);
+			if (project) {
+				state.projects = await fetchProjects();
+				renderApp();
+				cleanup();
+			} else {
+				registering = false;
+				renderDialog();
+			}
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+			registering = false;
+			renderDialog();
+		}
+	};
+
+	const COLORS = [
+		"#3b82f6", "#22c55e", "#ef4444", "#f59e0b", "#8b5cf6",
+		"#ec4899", "#06b6d4", "#f97316",
+	];
+
+	const autoName = () => {
+		if (!nameValue && pathValue.trim()) {
+			nameValue = pathValue.trim().split(/[\\/]/).filter(Boolean).pop() || "";
+		}
+	};
+
+	const renderDialog = () => {
+		render(
+			Dialog({
+				isOpen: true,
+				onClose: cleanup,
+				width: "min(440px, 92vw)",
+				height: "auto",
+				backdropClassName: "bg-black/50 backdrop-blur-sm",
+				children: html`
+					${DialogContent({
+						children: html`
+							${DialogHeader({ title: "Register Project" })}
+							<div class="mt-4 flex flex-col gap-4">
+								<div>
+									<label class="text-xs text-muted-foreground mb-1 block">Project Directory</label>
+									${Input({
+										type: "text",
+										placeholder: "/path/to/project",
+										value: pathValue,
+										onInput: (e: Event) => { pathValue = (e.target as HTMLInputElement).value; },
+										onKeyDown: (e: KeyboardEvent) => {
+											if (e.key === "Enter") { e.preventDefault(); autoName(); doRegister(); }
+											if (e.key === "Escape") cleanup();
+											if (e.key === "Tab") autoName();
+										},
+									})}
+								</div>
+								<div>
+									<label class="text-xs text-muted-foreground mb-1 block">Project Name</label>
+									${Input({
+										type: "text",
+										placeholder: "Auto-fills from directory name",
+										value: nameValue,
+										onInput: (e: Event) => { nameValue = (e.target as HTMLInputElement).value; },
+									})}
+								</div>
+								<div>
+									<label class="text-xs text-muted-foreground mb-1.5 block">Color (optional)</label>
+									<div class="flex gap-2">
+										${COLORS.map(c => html`
+											<button
+												class="w-6 h-6 rounded-full border-2 transition-all ${colorValue === c ? "border-foreground scale-110" : "border-transparent hover:border-border"}"
+												style="background: ${c};"
+												@click=${() => { colorValue = colorValue === c ? "" : c; renderDialog(); }}
+											></button>
+										`)}
+									</div>
+								</div>
+								${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
+							</div>
+						`,
+					})}
+					${DialogFooter({
+						className: "px-6 pb-4",
+						children: html`
+							<div class="flex gap-2 justify-end">
+								${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
+								${Button({
+									variant: "default",
+									onClick: () => { autoName(); doRegister(); },
+									disabled: !pathValue.trim() || registering,
+									children: registering ? "Registering…" : "Register Project",
+								})}
+							</div>
+						`,
+					})}
+				`,
+			}),
+			container,
+		);
+
+		requestAnimationFrame(() => {
+			const input = container.querySelector("input");
+			if (input) input.focus();
+		});
+	};
+
+	renderDialog();
+}

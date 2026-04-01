@@ -1,13 +1,28 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 
-const PROMPTS_DIR = path.join(bobbitStateDir(), "session-prompts");
+/** Module-level cache of the prompts directory. Set once by ensurePromptsDir(). */
+let _promptsDir: string | undefined;
+let _stateDir: string | undefined;
 
-// Ensure prompts directory exists
-if (!fs.existsSync(PROMPTS_DIR)) {
-	fs.mkdirSync(PROMPTS_DIR, { recursive: true });
+/** Initialize the prompts directory from a stateDir. Called by server startup. */
+export function initPromptDirs(stateDir: string): void {
+	_stateDir = stateDir;
+	_promptsDir = path.join(stateDir, "session-prompts");
+	if (!fs.existsSync(_promptsDir)) {
+		fs.mkdirSync(_promptsDir, { recursive: true });
+	}
+}
+
+function getPromptsDir(): string {
+	if (!_promptsDir) throw new Error("system-prompt: initPromptDirs() not called");
+	return _promptsDir;
+}
+
+function getStateDir(): string {
+	if (!_stateDir) throw new Error("system-prompt: initPromptDirs() not called");
+	return _stateDir;
 }
 
 /**
@@ -229,7 +244,7 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 
 	const combined = sections.join("\n\n---\n\n") + "\n";
 
-	const promptPath = path.join(PROMPTS_DIR, `${sessionId}.md`);
+	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
 	fs.writeFileSync(promptPath, combined, "utf-8");
 	return promptPath;
 }
@@ -336,12 +351,12 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
  * Clean up a session's assembled prompt file.
  */
 export function cleanupSessionPrompt(sessionId: string): void {
-	const promptPath = path.join(PROMPTS_DIR, `${sessionId}.md`);
+	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
 	try {
 		if (fs.existsSync(promptPath)) fs.unlinkSync(promptPath);
 	} catch { /* ignore */ }
 	// Also clean up per-session preview file
-	const previewPath = path.join(bobbitStateDir(), `preview-${sessionId}.html`);
+	const previewPath = path.join(getStateDir(), `preview-${sessionId}.html`);
 	try {
 		if (fs.existsSync(previewPath)) fs.unlinkSync(previewPath);
 	} catch { /* ignore */ }

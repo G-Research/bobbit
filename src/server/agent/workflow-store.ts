@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { stringify, parse } from "yaml";
-import { bobbitConfigDir } from "../bobbit-dir.js";
 
 export interface VerifyStep {
 	name: string;
@@ -33,9 +32,6 @@ export interface Workflow {
 	hidden?: boolean;
 }
 
-/** workflows/ directory in .bobbit/config — version controlled */
-const WORKFLOWS_DIR = path.join(bobbitConfigDir(), "workflows");
-
 /**
  * File-backed workflow store. Each workflow is a YAML file in
  * workflows/<id>.yaml at the repo root. Version controlled —
@@ -43,9 +39,11 @@ const WORKFLOWS_DIR = path.join(bobbitConfigDir(), "workflows");
  */
 export class WorkflowStore {
 	private workflows: Map<string, Workflow> = new Map();
+	private readonly workflowsDir: string;
 
-	constructor() {
-		fs.mkdirSync(WORKFLOWS_DIR, { recursive: true });
+	constructor(configDir: string) {
+		this.workflowsDir = path.join(configDir, "workflows");
+		fs.mkdirSync(this.workflowsDir, { recursive: true });
 		this.loadAll();
 		// Seed defaults if directory is empty
 		if (this.workflows.size === 0) {
@@ -54,9 +52,9 @@ export class WorkflowStore {
 	}
 
 	private workflowFilePath(id: string): string {
-		const filePath = path.join(WORKFLOWS_DIR, `${id}.yaml`);
+		const filePath = path.join(this.workflowsDir, `${id}.yaml`);
 		const resolved = path.resolve(filePath);
-		if (!resolved.startsWith(path.resolve(WORKFLOWS_DIR))) {
+		if (!resolved.startsWith(path.resolve(this.workflowsDir))) {
 			throw new Error(`Invalid workflow id: path traversal detected`);
 		}
 		return filePath;
@@ -65,13 +63,13 @@ export class WorkflowStore {
 	private loadAll(): void {
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true });
+			entries = fs.readdirSync(this.workflowsDir, { withFileTypes: true });
 		} catch {
 			return;
 		}
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-			const filePath = path.join(WORKFLOWS_DIR, entry.name);
+			const filePath = path.join(this.workflowsDir, entry.name);
 			try {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
@@ -169,7 +167,7 @@ export class WorkflowStore {
 	}
 
 	private seedDefaults(): void {
-		const bugFixPath = path.join(WORKFLOWS_DIR, "bug-fix.yaml");
+		const bugFixPath = path.join(this.workflowsDir, "bug-fix.yaml");
 		if (fs.existsSync(bugFixPath)) {
 			this.loadAll();
 		} else {
