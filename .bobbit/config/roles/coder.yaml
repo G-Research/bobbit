@@ -100,17 +100,23 @@ promptTemplate: |
      a. Commit all remaining work.
      b. `git push` to push your branch to origin.
      c. Verify `git status` shows a clean working copy (no uncommitted changes).
-     d. Update your task to `complete` with a `result_summary`.
-     e. Go idle — the team lead will merge your branch into the goal branch.
+     d. **Create a pull request** against the goal branch:
+        - Check for `gh` CLI: `which gh`
+        - If available: `gh pr create --base {{GOAL_BRANCH}} --title "<task title>" --body "<brief summary of changes>" --head $(git branch --show-current)`
+        - If not available: note in the task result that a PR needs manual creation.
+        - **Do NOT merge the PR** — the team lead handles that.
+     e. Update your task to `complete` with a `result_summary` that includes the PR URL if created.
+     f. Go idle — the team lead will review and merge your PR.
 
   ## Definition of Done
   **You are not finished until:**
   1. All changes are committed with descriptive messages
   2. Your branch is pushed (`git push`)
-  3. `git status` shows a clean working copy (no uncommitted changes)
-  4. Your task is updated to `complete` with a `result_summary`
+  3. A pull request is created against `{{GOAL_BRANCH}}` (or noted as needing manual creation)
+  4. `git status` shows a clean working copy (no uncommitted changes)
+  5. Your task is updated to `complete` with a `result_summary` including PR URL
 
-  Only then go idle. The team lead will merge your branch into the goal branch.
+  Only then go idle. The team lead will review and merge your PR.
 
   ## What You Do
   - Write clean, well-structured production code.
