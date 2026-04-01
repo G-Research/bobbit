@@ -11,7 +11,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, refreshSessions } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession } from "./session-manager.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
@@ -81,6 +81,9 @@ async function handleHashChange(): Promise<void> {
 			}
 			state.selectedSessionId = null;
 			state.appView = "authenticated";
+			// Apply palette for the goal's project
+			const goalForPalette = state.goals.find(g => g.id === route.goalId);
+			applyProjectPalette(goalForPalette?.projectId);
 			await refreshSessions();
 			await loadDashboardData(route.goalId);
 		} else if (route.view === "session" && route.sessionId) {
@@ -114,6 +117,9 @@ async function handleHashChange(): Promise<void> {
 			}
 			state.selectedSessionId = null;
 			state.goalDashboardId = route.goalId;
+			// Apply palette for the goal's project
+			const gdGoal = state.goals.find(g => g.id === route.goalId);
+			applyProjectPalette(gdGoal?.projectId);
 			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
 			renderApp();
@@ -282,6 +288,7 @@ async function handleHashChange(): Promise<void> {
 			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
+			applyProjectPalette(); // Revert to global palette
 			renderApp();
 			await refreshSessions();
 		}

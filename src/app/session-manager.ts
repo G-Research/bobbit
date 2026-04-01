@@ -22,6 +22,27 @@ import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
 
 // ============================================================================
+// PER-PROJECT PALETTE SWITCHING
+// ============================================================================
+
+/** Apply the per-project palette (if any) or revert to the global default. */
+export function applyProjectPalette(projectId?: string): void {
+	const project = (state.projects || []).find((p: any) => p.id === projectId);
+	const palette = project?.palette;
+	if (palette) {
+		document.documentElement.dataset.palette = palette;
+	} else {
+		// Revert to global default
+		const globalPalette = localStorage.getItem('palette');
+		if (!globalPalette || globalPalette === 'forest') {
+			delete document.documentElement.dataset.palette;
+		} else {
+			document.documentElement.dataset.palette = globalPalette;
+		}
+	}
+}
+
+// ============================================================================
 // GOAL PROPOSAL DISMISS PERSISTENCE
 // ============================================================================
 
@@ -446,6 +467,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 	// Phase 1: synchronous select
 	selectSession(sessionId, replaceHistory);
+
+	// Apply per-project palette
+	const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
+	applyProjectPalette(sessionForPalette?.projectId);
 
 	// Phase 2: async hydrate
 	const gen = state.switchGeneration;
@@ -1203,6 +1228,7 @@ export function backToSessions(): void {
 	localStorage.removeItem(GW_SESSION_KEY);
 	state.appView = "authenticated";
 	teardownMobileScrollTracking();
+	applyProjectPalette(); // Revert to global palette
 	setHashRoute("landing");
 	renderApp();
 	refreshSessions();
@@ -1221,6 +1247,7 @@ export function disconnectGateway(): void {
 	state.appView = "disconnected";
 	localStorage.removeItem(GW_SESSION_KEY);
 	teardownMobileScrollTracking();
+	applyProjectPalette(); // Revert to global palette
 	setHashRoute("landing");
 	renderApp();
 }

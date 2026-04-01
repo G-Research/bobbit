@@ -28,7 +28,7 @@ import { searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated 
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
 
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT, getProjectAccentColor } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -266,7 +266,7 @@ function renderMobileLanding() {
 										return html`${state.projects.map((project, i) => {
 											const data = projectMap.get(project.id) || { goals: [], sessions: [] };
 											const expanded = isProjectExpanded(project.id);
-											const color = project.color || "var(--muted-foreground)";
+											const color = getProjectAccentColor(project);
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 												<div class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"

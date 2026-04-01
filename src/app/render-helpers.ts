@@ -31,9 +31,17 @@ export function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** Get the appropriate project accent color for the current theme mode. */
+export function getProjectAccentColor(project: Project): string {
+	const isDark = document.documentElement.classList.contains("dark");
+	return isDark
+		? (project.colorDark || project.color || "var(--muted-foreground)")
+		: (project.colorLight || project.color || "var(--muted-foreground)");
+}
+
 /** Render a small colored chip showing a project name. Used in search results. */
 export function renderProjectBadge(project: Project) {
-	const bg = project.color || '#6b7280';
+	const bg = getProjectAccentColor(project);
 	return html`<span
 		class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium leading-none"
 		style="background: ${bg}20; color: ${bg}; border: 1px solid ${bg}30;"
