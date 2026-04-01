@@ -196,6 +196,37 @@ export function getAllConfigDirectories(
 }
 
 /**
+ * Remove a built-in directory from scanning by adding it to the
+ * `disabled_config_directories` list in project config.
+ */
+export function removeBuiltinDirectory(
+	projectConfigStore: ProjectConfigWriter,
+	dirPath: string,
+): void {
+	const resolved = expandPath(dirPath);
+	const raw = projectConfigStore.get("disabled_config_directories");
+	let disabled: string[] = [];
+	if (raw) {
+		try { disabled = JSON.parse(raw); } catch { disabled = []; }
+	}
+	if (!disabled.includes(resolved)) {
+		disabled.push(resolved);
+	}
+	projectConfigStore.set("disabled_config_directories", JSON.stringify(disabled));
+}
+
+/**
+ * Reset config directories to defaults by clearing both custom and disabled lists.
+ */
+export function resetConfigDirectories(
+	projectConfigStore: ProjectConfigWriter,
+): void {
+	projectConfigStore.remove("config_directories");
+	projectConfigStore.remove("skill_directories");
+	projectConfigStore.remove("disabled_config_directories");
+}
+
+/**
  * Save custom directories to project config via the `config_directories` key.
  * Also removes the legacy `skill_directories` key to prevent stale entries
  * from reappearing on next read (migrate forward).

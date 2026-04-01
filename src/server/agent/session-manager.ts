@@ -374,21 +374,19 @@ export class SessionManager {
 	async ensureSandboxNetwork(): Promise<string> {
 		const name = SessionManager.SANDBOX_NETWORK;
 		try {
-			await execFileAsync("docker", ["network", "inspect", name], { timeout: 10_000 });
-			return name; // Already exists
-		} catch {
-			// Network doesn't exist — create it
-		}
-		try {
 			await execFileAsync("docker", [
 				"network", "create", name,
 				"--driver", "bridge",
 				"--opt", "com.docker.network.bridge.enable_icc=false",
 			], { timeout: 15_000 });
 			console.log(`[session-manager] Created Docker network "${name}"`);
-		} catch (err) {
-			console.error(`[session-manager] Failed to create Docker network "${name}":`, err);
-			throw err;
+		} catch (err: any) {
+			const msg = err.stderr || err.message || "";
+			if (!msg.includes("already exists")) {
+				console.error(`[session-manager] Failed to create Docker network "${name}":`, err);
+				throw err;
+			}
+			// Network was created concurrently — that's fine
 		}
 		return name;
 	}

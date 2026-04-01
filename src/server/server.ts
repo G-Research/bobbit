@@ -531,8 +531,12 @@ export function createGateway(config: GatewayConfig) {
 						try {
 							sandboxNetwork = await sessionManager.ensureSandboxNetwork();
 						} catch (err) {
-							console.warn("[sandbox-pool] Failed to create sandbox network, pool containers will use default network:", err);
+							console.error("[sandbox-pool] Cannot create sandbox network — pool disabled:", err);
 						}
+
+						if (!sandboxNetwork) {
+							console.warn("[sandbox-pool] Skipping pool initialization — no sandbox network available");
+						} else {
 
 						sandboxPool = new SandboxPool({
 							poolSize,
@@ -550,6 +554,7 @@ export function createGateway(config: GatewayConfig) {
 						});
 						await sandboxPool.init();
 						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
+						} // end if (sandboxNetwork)
 					} else {
 						console.log("[sandbox-pool] Not a git repo — sandbox pool disabled (worktrees require git)");
 					}
