@@ -988,7 +988,7 @@ export function renderSidebar() {
 									return html`
 										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 										${renderProjectHeader(project, expanded)}
-										${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+										${expanded ? html`<div class="flex flex-col gap-0.5">
 											${renderProjectContent(project, data.goals, data.sessions)}
 										</div>` : ""}
 									`;

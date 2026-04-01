@@ -275,7 +275,7 @@ function renderMobileLanding() {
 													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
 												</div>
-												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+												${expanded ? html`<div class="flex flex-col gap-0.5">
 													${data.goals.map((goal, gi) => html`
 														${gi > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
