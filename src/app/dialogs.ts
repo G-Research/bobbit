@@ -842,25 +842,33 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 // GOAL DIALOGS
 // ============================================================================
 
-export function showGoalDialog(existingGoal?: Goal): void {
+export function showGoalDialog(existingGoal?: Goal, projectId?: string): void {
 	if (existingGoal) {
 		showGoalEditDialog(existingGoal);
 	} else {
-		createGoalAssistantSession();
+		createGoalAssistantSession(projectId);
 	}
 }
 
-async function createGoalAssistantSession(): Promise<void> {
+async function createGoalAssistantSession(projectId?: string): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
 	try {
+		const bodyObj: Record<string, any> = { assistantType: "goal" };
+		if (projectId) bodyObj.projectId = projectId;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ assistantType: "goal" }),
+			body: JSON.stringify(bodyObj),
 		});
 		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
 		const { id } = await res.json();
+		// Pre-fill project context in state so the preview panel picks it up
+		if (projectId) {
+			const project = state.projects.find(p => p.id === projectId);
+			state.previewProjectId = projectId;
+			if (project && !state.previewCwdEdited) state.previewCwd = project.rootPath;
+		}
 		const { connectToSession } = await import("./session-manager.js");
 		await connectToSession(id, false, { assistantType: "goal" });
 	} catch (err) {

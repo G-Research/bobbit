@@ -794,6 +794,20 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
+			<button
+				class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
+				@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
+				title="New goal in ${project.name}"
+			>
+				<span class="relative inline-flex" style="width:14px;height:14px;">
+					${icon(GoalIcon, "xs")}
+					<svg viewBox="0 0 10 10" style="position:absolute;bottom:-1px;right:-2px;width:8px;height:8px;">
+						<circle cx="5" cy="5" r="5" fill="var(--background)"/>
+						<circle cx="5" cy="5" r="4" fill="#22c55e"/>
+						<path d="M5 2.5V7.5M2.5 5H7.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+					</svg>
+				</span>
+			</button>
 		</div>
 	`;
 }

@@ -188,6 +188,7 @@ export const state = {
 	previewCwdEdited: false,
 	previewSpecEdited: false,
 	hasReceivedProposal: false,
+	previewProjectId: "" as string,
 	previewSpecEditMode: false,
 	cwdDropdownOpen: false,
 	cwdHighlightIndex: -1,
