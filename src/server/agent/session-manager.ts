@@ -1,6 +1,8 @@
+import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import { EventBuffer } from "./event-buffer.js";
@@ -35,7 +37,7 @@ import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
-import { SandboxProxy } from "./sandbox-proxy.js";
+
 import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
 import {
 	type SessionSetupPlan,
@@ -48,6 +50,7 @@ import {
 	DELEGATE_SPAWN_TIMEOUT_MS,
 } from "./session-setup.js";
 
+const execFileAsync = promisify(execFileCb);
 
 /** Goal tools extension — task + gate management for any goal session. */
 const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
@@ -175,7 +178,6 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
-	private sandboxProxy: SandboxProxy | null = null;
 	sandboxPool: SandboxPool | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
@@ -362,16 +364,46 @@ export class SessionManager {
 		};
 	}
 
-	/** Ensure a SandboxProxy is running with the given allowlist. Returns the port. */
-	private async ensureSandboxProxy(allowlist: string[]): Promise<number> {
-		const newKey = [...allowlist].sort().join(",").toLowerCase();
-		if (this.sandboxProxy && this.sandboxProxy.port > 0) {
-			const oldKey = [...this.sandboxProxy.allowlist].sort().join(",").toLowerCase();
-			if (oldKey === newKey) return this.sandboxProxy.port;
-			this.sandboxProxy.stop();
+	/** Network name for sandbox containers. */
+	private static readonly SANDBOX_NETWORK = "bobbit-sandbox-net";
+
+	/**
+	 * Ensure the Docker bridge network for sandboxed containers exists.
+	 * Idempotent — checks with `docker network inspect` first.
+	 */
+	async ensureSandboxNetwork(): Promise<string> {
+		const name = SessionManager.SANDBOX_NETWORK;
+		try {
+			await execFileAsync("docker", ["network", "inspect", name], { timeout: 10_000 });
+			return name; // Already exists
+		} catch {
+			// Network doesn't exist — create it
 		}
-		this.sandboxProxy = new SandboxProxy(allowlist);
-		return this.sandboxProxy.start();
+		try {
+			await execFileAsync("docker", [
+				"network", "create", name,
+				"--driver", "bridge",
+				"--opt", "com.docker.network.bridge.enable_icc=false",
+			], { timeout: 15_000 });
+			console.log(`[session-manager] Created Docker network "${name}"`);
+		} catch (err) {
+			console.error(`[session-manager] Failed to create Docker network "${name}":`, err);
+			throw err;
+		}
+		return name;
+	}
+
+	/**
+	 * Remove the sandbox Docker network. Non-fatal if it doesn't exist
+	 * or has connected containers.
+	 */
+	async cleanupSandboxNetwork(): Promise<void> {
+		try {
+			await execFileAsync("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
+			console.log(`[session-manager] Removed Docker network "${SessionManager.SANDBOX_NETWORK}"`);
+		} catch {
+			// Non-fatal — network may not exist or may have connected containers
+		}
 	}
 
 	/**
@@ -389,15 +421,8 @@ export class SessionManager {
 		if (sandboxConfig !== "docker") return false;
 
 		const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
-		const allowlistRaw = this.projectConfigStore.get("sandbox_network_allowlist") || "";
 		const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
 		const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
-
-		let networkAllowlist: string[] = [];
-		try { networkAllowlist = allowlistRaw ? JSON.parse(allowlistRaw) : []; } catch (err) {
-			console.error(`[session-manager] Invalid sandbox_network_allowlist JSON — refusing to start sandbox with no restrictions: ${err}`);
-			throw new Error(`Invalid sandbox_network_allowlist config: ${allowlistRaw}`);
-		}
 		let credentials: Record<string, string> = {};
 		try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch (err) {
 			console.error(`[session-manager] Invalid sandbox_credentials JSON: ${err}`);
@@ -412,7 +437,8 @@ export class SessionManager {
 		// Validate mounts unless skipped (e.g. during restore — already validated at creation)
 		const validatedMounts = opts?.skipMountValidation ? mounts : validateSandboxMounts(mounts, "[session-manager]");
 
-		const proxyPort = await this.ensureSandboxProxy(networkAllowlist);
+		// Ensure the restricted Docker network exists
+		const sandboxNetwork = await this.ensureSandboxNetwork();
 
 		// Read gateway URL and generate scoped token for the container
 		try {
@@ -429,13 +455,6 @@ export class SessionManager {
 				bridgeOptions.gatewayToken = adminToken;
 			}
 
-			// Auto-add the gateway hostname to the sandbox proxy allowlist
-			try {
-				const gwHostname = new URL(gwUrl).hostname;
-				if (this.sandboxProxy) {
-					this.sandboxProxy.addToAllowlist(gwHostname);
-				}
-			} catch { /* ignore URL parse errors */ }
 		} catch (err) {
 			throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
 		}
@@ -446,7 +465,7 @@ export class SessionManager {
 		const autoCredentials = resolveHostApiCredentials(this.preferencesStore);
 		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
 		bridgeOptions.sandboxMounts = validatedMounts;
-		bridgeOptions.sandboxProxyPort = proxyPort;
+		bridgeOptions.sandboxNetwork = sandboxNetwork;
 
 		// Claim a pre-warmed slot from the sandbox pool
 		if (this.sandboxPool) {

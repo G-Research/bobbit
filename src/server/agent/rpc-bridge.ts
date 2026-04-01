@@ -71,8 +71,8 @@ export interface RpcBridgeOptions {
 	gatewayUrl?: string;
 	/** Auth token for the agent */
 	gatewayToken?: string;
-	/** Proxy port for network allowlist (set when SandboxProxy is active) */
-	sandboxProxyPort?: number;
+	/** Docker network to attach the container to (e.g. "bobbit-sandbox-net"). */
+	sandboxNetwork?: string;
 	/** Container ID to use with docker exec (pool mode) */
 	containerId?: string;
 }
@@ -322,7 +322,7 @@ export class RpcBridge {
 			sandboxCredentials: this.options.sandboxCredentials,
 			gatewayUrl: this.options.gatewayUrl,
 			gatewayToken: this.options.gatewayToken,
-			sandboxProxyPort: this.options.sandboxProxyPort,
+			sandboxNetwork: this.options.sandboxNetwork,
 			sessionEnv,
 			systemPromptPath: this.options.systemPromptPath,
 		});
@@ -350,12 +350,6 @@ export class RpcBridge {
 		const execArgs: string[] = ["exec", "-i"];
 
 		// Pass session-specific env vars via docker exec -e (overrides container env)
-		if (this.options.sandboxProxyPort) {
-			const proxyUrl = `http://host.docker.internal:${this.options.sandboxProxyPort}`;
-			execArgs.push("-e", `http_proxy=${proxyUrl}`);
-			execArgs.push("-e", `https_proxy=${proxyUrl}`);
-			execArgs.push("-e", "no_proxy=localhost,127.0.0.1");
-		}
 		if (this.options.env?.BOBBIT_SESSION_ID) {
 			execArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);
 		}
