@@ -17,6 +17,21 @@ const svgRenderer = new SvgRenderer();
 const htmlRenderer = new HtmlRenderer();
 
 export class WriteRenderer implements ToolRenderer<WriteParams, any> {
+	/** Throttled snapshot of code content for the code-block during streaming.
+	 *  Updated at most ~4x/sec so hljs.highlight() doesn't run every frame. */
+	private _throttledCode = "";
+	private _codeThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+
+	private _getThrottledCode(content: string): string {
+		if (!this._codeThrottleTimer) {
+			this._throttledCode = content;
+			this._codeThrottleTimer = setTimeout(() => {
+				this._codeThrottleTimer = null;
+			}, 250);
+		}
+		return this._throttledCode;
+	}
+
 	render(params: WriteParams | undefined, result: ToolResultMessage<any> | undefined, isStreaming?: boolean): ToolRenderResult {
 		// Delegate .svg files to the SVG renderer for inline preview
 		if (params?.path?.toLowerCase().endsWith(".svg")) {
@@ -83,7 +98,8 @@ export class WriteRenderer implements ToolRenderer<WriteParams, any> {
 			return { content: renderHeader(state, FileCode2, headerText), isCustom: false };
 		}
 
-		// Streaming — show content being written
+		// Streaming — throttled code preview (~4x/sec) to avoid running
+		// hljs.highlight() on every animation frame.
 		if (params?.content) {
 			const ext = params.path?.split(".").pop() || "";
 			const langMap: Record<string, string> = {
@@ -101,7 +117,7 @@ export class WriteRenderer implements ToolRenderer<WriteParams, any> {
 					<div>
 						${renderCollapsibleHeader(state, FileCode2, headerText, contentRef, chevronRef, false)}
 						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-							<code-block .code=${params.content} language="${language}"></code-block>
+							<code-block .code=${this._getThrottledCode(params.content)} language="${language}"></code-block>
 						</div>
 					</div>
 				`,

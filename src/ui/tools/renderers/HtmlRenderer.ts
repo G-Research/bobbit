@@ -28,6 +28,11 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 	private _lastAppliedContent: string | null = null;
 	private _iframeReady = false;
 
+	/** Throttled snapshot of code content for the code-block during streaming.
+	 *  Updated at most ~4x/sec so hljs.highlight() doesn't run every frame. */
+	private _throttledCode = "";
+	private _codeThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+
 	private _autoResize(iframe: HTMLIFrameElement) {
 		requestAnimationFrame(() => {
 			try {
@@ -71,15 +76,31 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 		}, 1500);
 	}
 
+	/** Throttle the code string for code-block (~4x/sec). */
+	private _getThrottledCode(content: string): string {
+		if (!this._codeThrottleTimer) {
+			this._throttledCode = content;
+			this._codeThrottleTimer = setTimeout(() => {
+				this._codeThrottleTimer = null;
+			}, 250);
+		}
+		return this._throttledCode;
+	}
+
 	/** Reset streaming state so the next tool call starts fresh. */
 	private _resetStreamingState() {
 		this._iframe = null;
 		this._lastAppliedContent = null;
 		this._pendingContent = null;
 		this._iframeReady = false;
+		this._throttledCode = "";
 		if (this._debounceTimer) {
 			clearTimeout(this._debounceTimer);
 			this._debounceTimer = null;
+		}
+		if (this._codeThrottleTimer) {
+			clearTimeout(this._codeThrottleTimer);
+			this._codeThrottleTimer = null;
 		}
 	}
 
@@ -216,7 +237,7 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 						</div>
 					</div>
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-						<code-block .code=${htmlContent} language="html"></code-block>
+						<code-block .code=${this._getThrottledCode(htmlContent)} language="html"></code-block>
 					</div>
 				</div>
 			`,
