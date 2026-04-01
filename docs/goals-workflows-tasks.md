@@ -6,7 +6,7 @@ This document explains how Bobbit's goal orchestration system works — how goal
 
 ### Goals
 
-A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Goals optionally create a dedicated git worktree for isolated work.
+A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Goals carry an optional `projectId` linking them to a registered project (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Goals optionally create a dedicated git worktree for isolated work — when project-scoped, worktrees are created relative to the project's `rootPath`.
 
 Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees.
 
@@ -281,7 +281,7 @@ Here's the typical flow for a team goal with a workflow:
 | Location | What |
 |---|---|
 | `.bobbit/config/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
-| `.bobbit/state/goals.json` | Goals with snapshotted workflows |
+| `.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
 | `.bobbit/state/gates.json` | Gate state and signal history |
 | `.bobbit/state/tasks.json` | Tasks with workflow gate links |
 
