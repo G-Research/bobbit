@@ -26,7 +26,7 @@ import { PersonalityManager } from "./agent/personality-manager.js";
 import { getPromptSections, initPromptDirs } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
-import { GateStore } from "./agent/gate-store.js";
+import type { GateStore } from "./agent/gate-store.js";
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot } from "./skills/git.js";
@@ -47,21 +47,10 @@ import { getAvailableModels, discoverModelsForConfig } from "./agent/model-regis
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContext } from "./agent/project-context.js";
+import { ProjectContextManager } from "./agent/project-context-manager.js";
+import { migrateToPerProjectState } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
-
-const projectContextCache = new Map<string, ProjectContext>();
-
-function getOrCreateProjectContext(projectId: string, projectRegistry: ProjectRegistry): ProjectContext | null {
-	const project = projectRegistry.get(projectId);
-	if (!project) return null;
-	let ctx = projectContextCache.get(projectId);
-	if (!ctx) {
-		ctx = new ProjectContext(project);
-		projectContextCache.set(projectId, ctx);
-	}
-	return ctx;
-}
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -228,6 +217,13 @@ export function createGateway(config: GatewayConfig) {
 	const projectRegistry = new ProjectRegistry(stateDir);
 	projectRegistry.ensureDefaultProject(getProjectRoot());
 
+	// Run one-time migration from centralized to per-project state
+	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
+
+	// Initialize per-project contexts
+	const projectContextManager = new ProjectContextManager(projectRegistry);
+	projectContextManager.initAll();
+
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
@@ -242,7 +238,6 @@ export function createGateway(config: GatewayConfig) {
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	const gateStore = new GateStore(stateDir);
 	const workflowStore = new WorkflowStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
@@ -256,14 +251,17 @@ export function createGateway(config: GatewayConfig) {
 		preferencesStore,
 		projectConfigStore,
 		groupPolicyStore,
+		projectContextManager,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
-	// Wire gate status changes to bump goal generation so the UI polling detects them
-	gateStore.onStatusChange = () => {
-		sessionManager.goalManager.getGoalStore().bumpGeneration();
-	};
+	// Wire gate status changes to bump goal generation for all project contexts
+	for (const ctx of projectContextManager.all()) {
+		ctx.gateStore.onStatusChange = () => {
+			ctx.goalStore.bumpGeneration();
+		};
+	}
 	const workflowManager = new WorkflowManager(workflowStore);
-	const staffManager = new StaffManager();
+	const staffManager = new StaffManager(projectContextManager.getDefault().staffStore);
 	// Wire staff into search index for indexing and rebuilds
 	sessionManager.searchIndex.staffStore = staffManager.getStore();
 	staffManager.searchIndex = sessionManager.searchIndex;
@@ -273,8 +271,9 @@ export function createGateway(config: GatewayConfig) {
 		colorStore,
 		taskManager: sessionManager.taskManager,
 		roleStore,
-		gateStore,
+		gateStore: projectContextManager.getDefault().gateStore,
 		personalityManager,
+		projectContextManager,
 	});
 	const bgProcessManager = new BgProcessManager((sessionId: string) => {
 		const session = sessionManager.getSession(sessionId);
@@ -363,7 +362,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, projectRegistry, sandboxScope, sandboxTokenStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, projectRegistry, sandboxScope, sandboxTokenStore);
 
 			return;
 		}
@@ -432,7 +431,7 @@ export function createGateway(config: GatewayConfig) {
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
-	verificationHarness = new VerificationHarness(stateDir, gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore);
+	verificationHarness = new VerificationHarness(stateDir, projectContextManager.getDefault().gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -667,7 +666,7 @@ async function handleApiRoute(
 	teamManager: TeamManager,
 	roleManager: RoleManager,
 	toolManager: ToolManager,
-	gateStore: GateStore,
+	projectContextManager: ProjectContextManager,
 	personalityManager: PersonalityManager,
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
@@ -983,7 +982,7 @@ async function handleApiRoute(
 	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
 	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
 	if (projectConfigMatch) {
-		const ctx = getOrCreateProjectContext(projectConfigMatch[1], projectRegistry);
+		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
 
@@ -1430,7 +1429,8 @@ async function handleApiRoute(
 			}
 			// Initialize gate states for the workflow
 			if (goal.workflow) {
-				gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
+				const goalCtx = projectContextManager.getContextForGoal(goal.id) ?? projectContextManager.getDefault();
+				goalCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
 			}
 			json(goal, 201);
 
@@ -2111,6 +2111,8 @@ async function handleApiRoute(
 		const goalId = goalGatesMatch[1];
 		const goal = sessionManager.goalManager.getGoal(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const gateCtx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
+		const gateStore = gateCtx.gateStore;
 		const gates = gateStore.getGatesForGoal(goalId);
 		// Enrich with workflow gate definitions
 		const enriched = gates.map(g => {
@@ -2125,6 +2127,7 @@ async function handleApiRoute(
 	const gateDetailMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)$/);
 	if (gateDetailMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateDetailMatch;
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		const goal = sessionManager.goalManager.getGoal(goalId);
@@ -2141,6 +2144,7 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
 
@@ -2310,6 +2314,7 @@ async function handleApiRoute(
 	const gateSignalsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signals$/);
 	if (gateSignalsMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateSignalsMatch;
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ signals: gate.signals });
@@ -2329,6 +2334,7 @@ async function handleApiRoute(
 	const gateContentMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/content$/);
 	if (gateContentMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateContentMatch;
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ content: gate.currentContent, version: gate.currentContentVersion });
@@ -2838,10 +2844,11 @@ async function handleApiRoute(
 		const inputIds = Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined;
 		if (wfGateId) {
 			const goal = sessionManager.goalManager.getGoal(goalId);
-			if (goal?.workflow && gateStore) {
+			const goalGateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+			if (goal?.workflow && goalGateStore) {
 				const wfGate = goal.workflow.gates.find((g: any) => g.id === wfGateId);
 				if (wfGate?.dependsOn?.length) {
-					const gateStates = gateStore.getGatesForGoal(goalId);
+					const gateStates = goalGateStore.getGatesForGoal(goalId);
 					const passedIds = new Set(gateStates.filter((g: any) => g.status === "passed").map((g: any) => g.gateId));
 					const notPassed = wfGate.dependsOn.filter((depId: string) => !passedIds.has(depId));
 					if (notPassed.length > 0) {
