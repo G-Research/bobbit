@@ -5,6 +5,7 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
+import dns from "node:dns";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
 import { WebSocketServer } from "ws";
@@ -37,7 +38,7 @@ import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
-import { getAllConfigDirectories } from "./agent/config-directories.js";
+import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
 import { SandboxPool } from "./agent/sandbox-pool.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
@@ -638,6 +639,67 @@ function isSetupComplete(): boolean {
 	}
 }
 
+// ── SSRF protection for web proxy ──────────────────────────────────────
+const dnsLookup = promisify(dns.lookup);
+
+/** Returns true if the IP address is private, loopback, or link-local. */
+function isPrivateIp(ip: string): boolean {
+	// IPv4-mapped IPv6 (::ffff:x.x.x.x) — extract the IPv4 part
+	const v4Mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+	const addr = v4Mapped ? v4Mapped[1] : ip;
+
+	// IPv6 loopback
+	if (addr === "::1") return true;
+	// IPv6 link-local
+	if (addr.toLowerCase().startsWith("fe80:")) return true;
+	// IPv6 unique local
+	if (/^f[cd]/i.test(addr)) return true;
+
+	const parts = addr.split(".").map(Number);
+	if (parts.length !== 4 || parts.some(n => isNaN(n))) return false; // not IPv4, allow
+
+	// 127.0.0.0/8 loopback
+	if (parts[0] === 127) return true;
+	// 10.0.0.0/8
+	if (parts[0] === 10) return true;
+	// 172.16.0.0/12
+	if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+	// 192.168.0.0/16
+	if (parts[0] === 192 && parts[1] === 168) return true;
+	// 169.254.0.0/16 link-local (AWS metadata etc.)
+	if (parts[0] === 169 && parts[1] === 254) return true;
+	// 0.0.0.0/8
+	if (parts[0] === 0) return true;
+
+	return false;
+}
+
+/**
+ * Resolve hostname and check that it doesn't point to a private IP.
+ * Returns an error string if blocked, or null if safe.
+ */
+async function checkSsrf(hostname: string): Promise<string | null> {
+	// Block obvious private hostnames
+	if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) {
+		return `Blocked: ${hostname} is a private hostname`;
+	}
+	// If it's already an IP literal, check directly
+	if (/^[\d.]+$/.test(hostname) || hostname.includes(":")) {
+		if (isPrivateIp(hostname)) return `Blocked: ${hostname} is a private IP`;
+		return null;
+	}
+	// DNS resolve and check
+	try {
+		const { address } = await dnsLookup(hostname);
+		if (isPrivateIp(address)) {
+			return `Blocked: ${hostname} resolves to private IP ${address}`;
+		}
+	} catch {
+		// DNS failure — let curl handle it (will fail with a network error)
+	}
+	return null;
+}
+
 // Rate limiting for web proxy endpoints (10 req/min per client IP)
 const webProxyRequests = new Map<string, number[]>();
 const WEB_PROXY_RATE_LIMIT = 10;
@@ -886,34 +948,33 @@ async function handleApiRoute(
 		}
 		const maxResults = Math.min(Math.max(1, body?.maxResults || 10), 20);
 		try {
-			const encoded = encodeURIComponent(query);
+			const formBody = `q=${encodeURIComponent(query)}`;
 			const { stdout } = await execFileAsync(
-				"curl", ["-sL", `https://lite.duckduckgo.com/lite/?q=${encoded}`, "-H", "User-Agent: Mozilla/5.0"],
+				"curl", [
+					"-sL", "https://html.duckduckgo.com/html/",
+					"-X", "POST",
+					"-d", formBody,
+					"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+				],
 				{ timeout: 15000, maxBuffer: 1024 * 1024 },
 			);
-			// Parse DuckDuckGo lite HTML for results
+			// Parse DuckDuckGo HTML results (class="result " blocks)
 			const results: Array<{ title: string; url: string; snippet: string }> = [];
-			const linkRegex = /<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>([^<]*)<\/a>/gi;
-			const snippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
-			const links: Array<{ url: string; title: string }> = [];
-			let match;
-			while ((match = linkRegex.exec(stdout)) !== null) {
-				const href = match[1];
-				const title = match[2].replace(/<[^>]+>/g, "").trim();
-				if (href && title && !href.includes("duckduckgo.com")) {
-					links.push({ url: href, title });
+			const resultBlocks = stdout.split(/class="result\s/g).slice(1);
+			for (const block of resultBlocks) {
+				const titleMatch = block.match(/class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/);
+				if (!titleMatch) continue;
+				let rawUrl = titleMatch[1];
+				const title = titleMatch[2].replace(/<[^>]+>/g, "").trim();
+				// DDG wraps URLs in a redirect: //duckduckgo.com/l/?uddg=<encoded>&rut=...
+				const uddgMatch = rawUrl.match(/[?&]uddg=([^&]+)/);
+				if (uddgMatch) rawUrl = decodeURIComponent(uddgMatch[1]);
+				const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|td|div)>/);
+				const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+				if (title && rawUrl.startsWith("http")) {
+					results.push({ title, url: rawUrl, snippet });
 				}
-			}
-			const snippets: string[] = [];
-			while ((match = snippetRegex.exec(stdout)) !== null) {
-				snippets.push(match[1].replace(/<[^>]+>/g, "").trim());
-			}
-			for (let i = 0; i < Math.min(links.length, maxResults); i++) {
-				results.push({
-					title: links[i].title,
-					url: links[i].url,
-					snippet: snippets[i] || "",
-				});
+				if (results.length >= maxResults) break;
 			}
 			json({ results });
 		} catch (err) {
@@ -935,10 +996,11 @@ async function handleApiRoute(
 			json({ error: "Missing url" }, 400);
 			return;
 		}
-		// Validate URL scheme
+		// Validate URL scheme and SSRF protection
+		let parsedTarget: URL;
 		try {
-			const parsed = new URL(targetUrl);
-			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+			parsedTarget = new URL(targetUrl);
+			if (parsedTarget.protocol !== "http:" && parsedTarget.protocol !== "https:") {
 				json({ error: "URL must use http or https" }, 400);
 				return;
 			}
@@ -946,10 +1008,15 @@ async function handleApiRoute(
 			json({ error: "Invalid URL" }, 400);
 			return;
 		}
+		const ssrfBlock = await checkSsrf(parsedTarget.hostname);
+		if (ssrfBlock) {
+			json({ error: ssrfBlock }, 403);
+			return;
+		}
 		const maxLength = Math.min(body?.maxLength || 20000, 100000);
 		try {
 			const { stdout } = await execFileAsync(
-				"curl", ["-sL", "--max-time", "30", targetUrl],
+				"curl", ["-sL", "--max-time", "30", parsedTarget.href],
 				{ timeout: 35000, maxBuffer: 5 * 1024 * 1024 },
 			);
 			// Strip HTML tags for a basic text extraction
@@ -1785,6 +1852,30 @@ async function handleApiRoute(
 			? projectContextManager.getOrCreate(projectId)?.project.rootPath ?? config.defaultCwd
 			: config.defaultCwd;
 		json(getAllConfigDirectories(resolvedCwd, resolvedStore));
+		return;
+	}
+
+	// DELETE /api/config-directories — remove a built-in directory from scanning
+	if (url.pathname === "/api/config-directories" && req.method === "DELETE") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || typeof (body as any).path !== "string") {
+			json({ error: "Missing 'path' in body" }, 400);
+			return;
+		}
+		const projectId = (body as any).projectId as string | null ?? null;
+		const resolvedStore = resolveProjectConfigStore(projectId);
+		removeBuiltinDirectory(resolvedStore, (body as any).path);
+		json({ ok: true });
+		return;
+	}
+
+	// POST /api/config-directories/reset — reset all config dirs to defaults
+	if (url.pathname === "/api/config-directories/reset" && req.method === "POST") {
+		const body = await readBody(req);
+		const projectId = body && typeof body === "object" ? ((body as any).projectId as string | null ?? null) : null;
+		const resolvedStore = resolveProjectConfigStore(projectId);
+		resetConfigDirectories(resolvedStore);
+		json({ ok: true });
 		return;
 	}
 
