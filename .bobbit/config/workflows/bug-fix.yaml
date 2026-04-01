@@ -15,6 +15,11 @@ gates:
           1. Reproduction steps are specific enough to follow mechanically
           2. Root cause references actual source files and lines
           3. Analysis distinguishes symptoms from underlying cause
+          4. **Test plan** — the analysis must describe what test will verify the fix.
+             A unit test or file:// fixture test is sufficient for most bug fixes.
+             E2E tests are only needed if the bug involves a multi-step user journey
+             that cannot be reproduced without a running server (e.g. WebSocket
+             interactions, cross-page navigation, session persistence across reload).
 
       - name: "Gap analysis"
         type: llm-review
@@ -87,6 +92,29 @@ gates:
           3. Error handling — missing try/catch, unhandled promise rejections
           4. Regression risk — could this break other things?
           5. Test coverage — is the fix adequately tested?
+
+      - name: "Regression test coverage"
+        type: llm-review
+        prompt: |
+          Verify that the bug fix includes a regression test that would catch reintroduction.
+
+          The goal spec is:
+          {{goal_spec}}
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see all changes.
+
+          Look for new or modified test files in:
+          - `tests/*.test.ts` or `tests/*.spec.ts` — unit tests and file:// fixture tests
+          - `tests/e2e/*.spec.ts` or `tests/e2e/ui/*.spec.ts` — E2E tests
+
+          Any test type is acceptable. A unit test or Playwright file:// fixture that
+          reproduces the bug scenario is ideal — these run in <1s and don't need a server.
+          Full E2E tests are only warranted when the bug involves multi-step server
+          interactions (WebSocket flows, cross-page navigation, session persistence).
+
+          **Verdict:**
+          - FAIL if no regression test was added at all
+          - PASS if at least one test (unit, fixture, or E2E) covers the fixed behavior
 
       - name: "Security review"
         type: llm-review

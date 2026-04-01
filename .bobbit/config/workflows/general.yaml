@@ -16,6 +16,14 @@ gates:
           2. File changes are listed with specific descriptions
           3. Acceptance criteria are specific and testable
           4. Edge cases and error handling are considered
+          5. **E2E test plan** — the design MUST include a section describing the
+             browser-based E2E tests that will validate the user journey end-to-end.
+             For UI features, this means fullstack tests (in tests/e2e/ui/) that
+             exercise the complete workflow through real browser interactions:
+             navigate to the feature, interact with it, verify state persists across
+             reload, verify cleanup/removal works. For API-only features, E2E tests
+             (in tests/e2e/) covering the request/response lifecycle are sufficient.
+             If no E2E test plan section is present, FAIL this review.
 
       - name: "Gap analysis"
         type: llm-review
@@ -76,6 +84,44 @@ gates:
           3. Edge cases — null/undefined, empty arrays, boundary values
           4. Code style — consistent naming, no dead code, clear intent
           5. Test coverage — are new behaviors tested?
+
+      - name: "E2E user journey coverage"
+        type: llm-review
+        prompt: |
+          Verify that the implementation includes browser-based E2E tests covering the
+          user journey for this feature.
+
+          The goal spec is:
+          {{goal_spec}}
+
+          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see all changes.
+
+          **Step 1 — Identify what the feature adds or changes:**
+          From the diff, determine the user-facing behavior: new UI views, settings tabs,
+          sidebar entries, dialogs, API endpoints, WebSocket commands, etc.
+
+          **Step 2 — Check for corresponding E2E tests:**
+          Look for new or modified test files in:
+          - `tests/e2e/ui/*.spec.ts` — fullstack browser tests (preferred for UI features)
+          - `tests/e2e/*.spec.ts` — API/WebSocket E2E tests
+
+          **Step 3 — Evaluate journey coverage:**
+          For each user-facing behavior, the E2E tests MUST cover:
+          1. **Navigation** — can the user reach the feature? (deep link, sidebar click, button)
+          2. **Happy path** — does the core interaction work? (create, edit, toggle, submit)
+          3. **Persistence** — do changes survive a page reload?
+          4. **Cleanup** — does removal/undo/delete work and reflect in the UI?
+          5. **Integration** — does the feature interact correctly with adjacent features?
+             (e.g. a new settings tab should be reachable from the settings page, its state
+             should be independent of other tabs)
+
+          If the feature is purely backend (no UI), API-level E2E tests covering the
+          request/response lifecycle are sufficient.
+
+          **Verdict criteria:**
+          - FAIL if no new E2E tests were added for a feature that changes user-facing behavior
+          - FAIL if tests only cover the happy path but skip persistence or cleanup
+          - PASS if tests cover navigation + happy path + persistence + cleanup
 
       - name: "Security review"
         type: llm-review
