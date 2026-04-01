@@ -30,6 +30,10 @@ import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
+import { ProjectContextManager } from "./project-context-manager.js";
+import { GoalStore } from "./goal-store.js";
+import { TaskStore } from "./task-store.js";
+import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
 import { SandboxProxy } from "./sandbox-proxy.js";
 import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
@@ -151,6 +155,8 @@ export interface SessionManagerOptions {
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	/** Project config store for reading project defaults (e.g. default_thinking_level) */
 	projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
+	/** Project context manager for per-project store resolution */
+	projectContextManager?: ProjectContextManager;
 }
 
 export class SessionManager {
@@ -167,6 +173,7 @@ export class SessionManager {
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
+	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
 	sandboxPool: SandboxPool | null = null;
@@ -195,7 +202,6 @@ export class SessionManager {
 	}
 
 	constructor(options?: SessionManagerOptions) {
-		const stateDir = bobbitStateDir();
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
 		this.colorStore = options?.colorStore;
@@ -206,11 +212,62 @@ export class SessionManager {
 		this.preferencesStore = options?.preferencesStore;
 		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
-		this.store = new SessionStore(stateDir);
-		this.costTracker = new CostTracker(stateDir);
-		this.goalManager = new GoalManager(options?.workflowStore, stateDir);
-		this.taskManager = new TaskManager(stateDir);
-		this.searchIndex = new SearchIndex(path.join(stateDir, "search.db"));
+		this.projectContextManager = options?.projectContextManager ?? null;
+		if (this.projectContextManager) {
+			const defaultCtx = this.projectContextManager.getDefault();
+			this.store = defaultCtx.sessionStore;
+			this.costTracker = defaultCtx.costTracker;
+			this.goalManager = new GoalManager(defaultCtx.goalStore, options?.workflowStore);
+			this.taskManager = new TaskManager(defaultCtx.taskStore);
+			this.searchIndex = defaultCtx.searchIndex;
+		} else {
+			const stateDir = bobbitStateDir();
+			this.store = new SessionStore(stateDir);
+			this.costTracker = new CostTracker(stateDir);
+			this.goalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
+			this.taskManager = new TaskManager(new TaskStore(stateDir));
+			this.searchIndex = new SearchIndex(path.join(stateDir, "search.db"));
+		}
+	}
+
+	getProjectContextManager(): ProjectContextManager | null {
+		return this.projectContextManager;
+	}
+
+	/** Resolve the SessionStore for a given project. */
+	getSessionStore(projectId?: string): SessionStore {
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.sessionStore;
+		}
+		return this.store;
+	}
+
+	/** Resolve the GoalStore for a given project. */
+	getGoalStoreForProject(projectId?: string): GoalStore {
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.goalStore;
+		}
+		return this.goalManager.getGoalStore();
+	}
+
+	/** Resolve the GateStore for a goal. */
+	getGateStoreForGoal(goalId: string): GateStore | null {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.gateStore;
+		}
+		return null;
+	}
+
+	/** Resolve SearchIndex for a project. */
+	getSearchIndexForProject(projectId?: string): SearchIndex {
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.searchIndex;
+		}
+		return this.searchIndex;
 	}
 
 	/** Whether Docker sandbox mode is enabled in project config. */
