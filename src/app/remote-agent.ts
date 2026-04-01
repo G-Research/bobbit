@@ -745,6 +745,10 @@ export class RemoteAgent {
 				break;
 			}
 
+			case "gate_signal_received":
+				refreshGateStatusForGoal((msg as any).goalId);
+				break;
+
 			case "gate_status_changed": {
 				const gateCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" \u2192 ${(msg as any).status}`, gateCat);
@@ -753,6 +757,9 @@ export class RemoteAgent {
 			}
 
 			case "gate_verification_started":
+				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				refreshGateStatusForGoal((msg as any).goalId);
+				break;
 			case "gate_verification_step_complete":
 			case "gate_verification_step_started":
 			case "gate_verification_step_output":
