@@ -293,6 +293,7 @@ export class SearchIndex {
 			limit?: number;
 			offset?: number;
 			projectId?: string;
+			projectNames?: Map<string, string>;
 		} = {},
 	): SearchResults {
 		if (!this.db || !query.trim()) {
@@ -303,6 +304,7 @@ export class SearchIndex {
 		const limit = opts.limit ?? 20;
 		const offset = opts.offset ?? 0;
 		const projectId = opts.projectId;
+		const projectNames = opts.projectNames;
 
 		// Sanitise the query for FTS5: escape double quotes, wrap terms
 		const ftsQuery = sanitiseFtsQuery(query);
@@ -335,6 +337,15 @@ export class SearchIndex {
 			const { rows, count } = this.searchStaffEntries(ftsQuery, type === "staff" ? limit : 10, type === "staff" ? offset : 0, projectId);
 			results.push(...rows);
 			total += count;
+		}
+
+		// Populate projectName from the names map
+		if (projectNames) {
+			for (const r of results) {
+				if (r.projectId) {
+					r.projectName = projectNames.get(r.projectId);
+				}
+			}
 		}
 
 		// For type-specific queries, apply limit/offset at the top level

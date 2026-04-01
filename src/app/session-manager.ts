@@ -781,6 +781,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		remote.onProjectProposal = async (fields: Record<string, string>) => {
+			const { registerProject } = await import("./api.js");
+			await registerProject(fields.name, fields.root_path, undefined);
+			renderApp();
+		};
+
 		if (isStale()) { remote.disconnect(); return; }
 
 		state.connectionStatus = "connected";

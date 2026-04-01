@@ -914,7 +914,8 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const project = projectRegistry.register(body.name, body.rootPath, body.color);
+			const color = typeof body.color === "string" ? body.color : undefined;
+			const project = projectRegistry.register(body.name, body.rootPath, color);
 			json(project, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
@@ -934,8 +935,11 @@ async function handleApiRoute(
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
 		const body = await readBody(req);
+		const updates: { name?: string; color?: string } = {};
+		if (typeof body?.name === "string") updates.name = body.name;
+		if (typeof body?.color === "string") updates.color = body.color;
 		try {
-			const updated = projectRegistry.update(projectGetMatch[1], body || {});
+			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
@@ -974,7 +978,8 @@ async function handleApiRoute(
 		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" | "staff" : "all";
 		try {
 			const projectId = url.searchParams.get("projectId") || undefined;
-			const results = sessionManager.searchIndex.search(q, { type, limit, offset, projectId });
+			const projectNames = new Map(projectRegistry.list().map(p => [p.id, p.name]));
+			const results = sessionManager.searchIndex.search(q, { type, limit, offset, projectId, projectNames });
 			json(results);
 		} catch (err) {
 			json({ error: `Search failed: ${err}` }, 500);

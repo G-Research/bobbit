@@ -1121,7 +1121,7 @@ export function renderSidebar() {
 								`;
 							})()}
 						`; })()}
-				${state.projects.length > 1 ? html`
+				${state.projects.length >= 1 ? html`
 					<div class="border-t border-border/30 my-1 mx-2"></div>
 					<button
 						class="flex items-center gap-1 px-1 py-1 rounded-md text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full"
