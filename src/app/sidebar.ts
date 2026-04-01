@@ -41,12 +41,12 @@ const _expandedProjects: Set<string> = new Set(
 	JSON.parse(localStorage.getItem(EXPANDED_PROJECTS_KEY) || "[]"),
 );
 
-function isProjectExpanded(projectId: string): boolean {
+export function isProjectExpanded(projectId: string): boolean {
 	// Default to expanded if never toggled
 	return !_expandedProjects.has(`collapsed:${projectId}`);
 }
 
-function toggleProjectExpanded(projectId: string): void {
+export function toggleProjectExpanded(projectId: string): void {
 	const key = `collapsed:${projectId}`;
 	if (_expandedProjects.has(key)) _expandedProjects.delete(key);
 	else _expandedProjects.add(key);
