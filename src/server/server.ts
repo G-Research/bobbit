@@ -1391,8 +1391,15 @@ async function handleApiRoute(
 			}
 		}
 
+		// Auto-detect projectId from cwd if not explicitly provided
+		let resolvedProjectId = body?.projectId as string | undefined;
+		if (!resolvedProjectId && cwd) {
+			const matched = projectRegistry.findByCwd(cwd);
+			if (matched) resolvedProjectId = matched.id;
+		}
+
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed });
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId });
 
 			// Set role metadata if a role was specified
 			if (roleForMeta) {
@@ -1410,9 +1417,9 @@ async function handleApiRoute(
 				sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
 			}
 
-			// Store projectId on the session if provided
-			if (body?.projectId && typeof body.projectId === "string") {
-				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: body.projectId });
+			// Store projectId on the session if resolved (explicit or auto-detected)
+			if (resolvedProjectId) {
+				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
 			}
 
 			json({
@@ -1497,8 +1504,13 @@ async function handleApiRoute(
 		}
 		try {
 			const sandboxed = body.sandboxed === true;
-			// Resolve target project context for goal creation
-			const targetProjectId = (body.projectId && typeof body.projectId === "string") ? body.projectId : projectContextManager.getDefaultProjectId();
+			// Resolve target project context for goal creation (explicit > cwd-match > default)
+			let targetProjectId = (body.projectId && typeof body.projectId === "string") ? body.projectId : undefined;
+			if (!targetProjectId && cwd) {
+				const matched = projectRegistry.findByCwd(cwd);
+				if (matched) targetProjectId = matched.id;
+			}
+			if (!targetProjectId) targetProjectId = projectContextManager.getDefaultProjectId();
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
@@ -1511,10 +1523,10 @@ async function handleApiRoute(
 				workflowStore: workflowManager.store,
 				sandboxed,
 			});
-			// Set projectId if provided
-			if (body.projectId && typeof body.projectId === "string") {
-				targetGoalManager.updateGoal(goal.id, { projectId: body.projectId });
-				goal.projectId = body.projectId;
+			// Set projectId (explicit or auto-detected from cwd)
+			if (targetProjectId) {
+				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
+				goal.projectId = targetProjectId;
 			}
 			// Set reattemptOf if provided
 			if (body.reattemptOf && typeof body.reattemptOf === "string") {
@@ -3145,6 +3157,19 @@ async function handleApiRoute(
 				return;
 			}
 			colorStore.set(id, body.colorIndex);
+		}
+
+		if (typeof body.projectId === "string") {
+			const session = sessionManager.getSession(id);
+			if (!session) { json({ error: "Session not found" }, 404); return; }
+			const oldProjectId = session.projectId;
+			const newProjectId = body.projectId || undefined;
+			session.projectId = newProjectId;
+			// Update in both old and new project stores to ensure consistency
+			sessionManager.getSessionStore(oldProjectId).update(id, { projectId: newProjectId });
+			if (newProjectId !== oldProjectId) {
+				sessionManager.getSessionStore(newProjectId).update(id, { projectId: newProjectId });
+			}
 		}
 
 		if (typeof body.preview === "boolean") {

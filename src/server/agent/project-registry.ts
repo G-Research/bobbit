@@ -80,6 +80,21 @@ export class ProjectRegistry {
     return undefined;
   }
 
+  /** Find the project whose rootPath contains the given cwd (longest match wins). */
+  findByCwd(cwd: string): RegisteredProject | undefined {
+    const normalized = path.resolve(cwd).replace(/\\/g, "/").toLowerCase();
+    let best: RegisteredProject | undefined;
+    let bestLen = 0;
+    for (const p of this.projects.values()) {
+      const root = path.resolve(p.rootPath).replace(/\\/g, "/").toLowerCase();
+      if ((normalized === root || normalized.startsWith(root + "/")) && root.length > bestLen) {
+        best = p;
+        bestLen = root.length;
+      }
+    }
+    return best;
+  }
+
   /**
    * Register a new project.
    * - Validates rootPath is absolute.
