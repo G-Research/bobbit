@@ -1,50 +1,11 @@
 name: general
 label: General
 accessory: none
-allowedTools:
-  - read
-  - write
-  - edit
-  - grep
-  - find
-  - ls
-  - web_search
-  - web_fetch
-  - delegate
-  - browser_navigate
-  - browser_screenshot
-  - browser_click
-  - browser_type
-  - browser_eval
-  - browser_wait
-  - preview_open
-  - bash_bg
-  - mcp__playwright__browser_close
-  - mcp__playwright__browser_resize
-  - mcp__playwright__browser_console_messages
-  - mcp__playwright__browser_handle_dialog
-  - mcp__playwright__browser_evaluate
-  - mcp__playwright__browser_file_upload
-  - mcp__playwright__browser_fill_form
-  - mcp__playwright__browser_press_key
-  - mcp__playwright__browser_type
-  - mcp__playwright__browser_navigate
-  - mcp__playwright__browser_navigate_back
-  - mcp__playwright__browser_network_requests
-  - mcp__playwright__browser_run_code
-  - mcp__playwright__browser_take_screenshot
-  - mcp__playwright__browser_snapshot
-  - mcp__playwright__browser_click
-  - mcp__playwright__browser_drag
-  - mcp__playwright__browser_hover
-  - mcp__playwright__browser_select_option
-  - mcp__playwright__browser_tabs
-  - mcp__playwright__browser_wait_for
+allowedTools: []
 toolPolicies:
-  bash: ask-once
   Gates: ask-once
   Tasks: ask-once
 _policyMigrated: true
 createdAt: 0
-updatedAt: 1775078898664
+updatedAt: 1775083871266
 promptTemplate: ""
