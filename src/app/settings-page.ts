@@ -245,13 +245,6 @@ function renderSandboxSection(
 
 	const sandboxMode = pendingChanges.sandbox ?? resolved.sandbox?.value ?? "none";
 	const imageName = pendingChanges.sandbox_image ?? resolved.sandbox_image?.value ?? "bobbit-agent";
-	const allowlistRaw = pendingChanges.sandbox_network_allowlist ?? resolved.sandbox_network_allowlist?.value ?? "";
-	let allowlistDisplay = "";
-	try {
-		const arr = JSON.parse(allowlistRaw);
-		if (Array.isArray(arr)) allowlistDisplay = arr.join(", ");
-	} catch { allowlistDisplay = allowlistRaw; }
-
 	const credEntries = _sandboxCredEntries.get(projectId)!;
 	const mountEntries = _sandboxMountEntries.get(projectId)!;
 
@@ -354,25 +347,6 @@ function renderSandboxSection(
 						pendingChanges.sandbox_image = (e.target as HTMLInputElement).value;
 					}}
 				/>
-			</div>
-
-			<!-- Network Allowlist -->
-			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Network Allowlist</span>
-				<div class="flex-1 min-w-0 flex flex-col gap-1">
-					<input
-						type="text"
-						class="${inputClass}"
-						placeholder="github.com, api.github.com"
-						.value=${allowlistDisplay}
-						@input=${(e: Event) => {
-							const v = (e.target as HTMLInputElement).value;
-							const hosts = v.split(",").map(h => h.trim()).filter(Boolean);
-							pendingChanges.sandbox_network_allowlist = hosts.length > 0 ? JSON.stringify(hosts) : "";
-						}}
-					/>
-					<span class="text-[10px] text-muted-foreground">Comma-separated hostnames allowed through the network proxy.</span>
-				</div>
 			</div>
 
 			<!-- Credentials -->
@@ -1862,7 +1836,7 @@ function renderProjectScopeTab(projectId: string) {
 
 	// Keys to show in the Commands & Sandbox tab
 	const HIDDEN_KEYS = new Set([
-		"default_thinking_level", "sandbox", "sandbox_image", "sandbox_network_allowlist",
+		"default_thinking_level", "sandbox", "sandbox_image",
 		"sandbox_credentials", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
 		"config_directories", "skill_directories",
 	]);
