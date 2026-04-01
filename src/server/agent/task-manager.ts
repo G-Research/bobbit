@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { TaskStore, type TaskState, type PersistedTask } from "./task-store.js";
-import { bobbitStateDir } from "../bobbit-dir.js";
 
 /** Valid state transitions. Terminal states (complete, skipped) have no outgoing transitions. */
 const VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
@@ -14,8 +13,8 @@ const VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
 export class TaskManager {
 	private store: TaskStore;
 
-	constructor(stateDir?: string) {
-		this.store = new TaskStore(stateDir ?? bobbitStateDir());
+	constructor(taskStore: TaskStore) {
+		this.store = taskStore;
 	}
 
 	/**

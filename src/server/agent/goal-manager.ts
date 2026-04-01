@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
-import { bobbitStateDir } from "../bobbit-dir.js";
 import type { WorkflowStore } from "./workflow-store.js";
 
 /**
@@ -24,8 +23,8 @@ export class GoalManager {
 	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
 	private _setupsInFlight = new Set<string>();
 
-	constructor(workflowStore?: WorkflowStore, stateDir?: string) {
-		this.store = new GoalStore(stateDir ?? bobbitStateDir());
+	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
+		this.store = goalStore;
 		this.workflowStore = workflowStore;
 		// Mark any goals stuck in "preparing" from a previous run as error
 		this._recoverStuckSetups();
