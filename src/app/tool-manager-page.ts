@@ -311,6 +311,7 @@ function renderAccessRow(label: string, selectValue: string, onChangeSelect: (va
 				${options.map(o => html`<option value=${o.value} ?selected=${selectValue === o.value}>${o.label}</option>`)}
 			</select>
 			<span class="tools-access-row-hint">${hint ? html`\u2192 ${hint}` : nothing}</span>
+
 		</div>
 	`;
 }
@@ -568,23 +569,22 @@ function renderListView(): TemplateResult {
 				const currentGroupPolicy = groupPolicies[groupName] || "";
 				return html`
 					<div class="tool-group ${isCollapsed ? "collapsed" : ""}">
-						<button class="tool-group-header" title="Toggle ${groupName} group" @click=${() => toggleGroup(groupName)}>
+						<div class="tool-group-header" title="Toggle ${groupName} group" @click=${() => toggleGroup(groupName)}>
 							${chevronSvg}
 							<span class="tool-group-name">${groupName}</span>
 							<span class="tool-group-count">${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}</span>
-						</button>
-						<div class="tool-group-policy" style="display:flex;align-items:center;gap:6px;padding:4px 12px 4px 36px;font-size:12px;color:var(--muted-foreground);">
-							<span>Group default policy:</span>
-							<select class="tools-select" style="font-size:12px;padding:1px 4px;width:auto;"
+							<span class="tool-group-policy-label">Group Policy:</span>
+							<select class="tool-group-select"
 								.value=${currentGroupPolicy}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${async (e: Event) => {
+									e.stopPropagation();
 									const val = (e.target as HTMLSelectElement).value;
 									await updateGroupPolicy(groupName, val || null);
 									groupPolicies = await fetchGroupPolicies();
 									renderApp();
 								}}>
-								<option value="" ?selected=${!currentGroupPolicy}>Always Allow (system default)</option>
+								<option value="" ?selected=${!currentGroupPolicy}>Always Allow (default)</option>
 								<option value="always-allow" ?selected=${currentGroupPolicy === "always-allow"}>Always Allow</option>
 								<option value="ask-once" ?selected=${currentGroupPolicy === "ask-once"}>Ask Once Per Session</option>
 								<option value="always-ask" ?selected=${currentGroupPolicy === "always-ask"}>Ask Every Time</option>
@@ -640,7 +640,7 @@ function renderAccessTab(): TemplateResult {
 					editGrantPolicy,
 					(val) => { editGrantPolicy = val; renderApp(); },
 					POLICY_OPTIONS,
-					!editGrantPolicy ? `${groupDefaultLabel} (from group)` : undefined,
+					!editGrantPolicy ? `${groupDefaultLabel} [from group]` : undefined,
 				)}
 			</div>
 		</div>
@@ -666,7 +666,7 @@ function renderAccessTab(): TemplateResult {
 								renderApp();
 							},
 							ROLE_POLICY_OPTIONS,
-							!rolePolicy ? `${effectiveLabel} (${source})` : undefined,
+							`${effectiveLabel} [${source}]`,
 						);
 					})}
 				</div>

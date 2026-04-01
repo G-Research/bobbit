@@ -1,5 +1,7 @@
+import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
 import type { PersistedGoal } from "./goal-store.js";
@@ -15,6 +17,8 @@ import type { GateStore } from "./gate-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+
+const execFile = promisify(execFileCb);
 
 
 /**
@@ -132,6 +136,9 @@ export class TeamManager {
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
+
+	/** Track last notification time per worker session to debounce rapid agent_end events. */
+	private lastNotifyTime = new Map<string, number>();
 
 	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string) {
 		this.sessionManager = sessionManager;
@@ -673,13 +680,18 @@ export class TeamManager {
 			const goalSlug = (goal.branch || goalId.slice(0, 8)).replace(/\//g, '-');
 			branchName = `goal-${goalSlug}-${role}-${shortId}`;
 
+			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point
+			try {
+				await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
+			} catch { /* fetch failure is non-fatal — worktree falls back to local HEAD */ }
+
 			if (memberSandboxed && this.sessionManager.sandboxPool) {
 				// Sandboxed: let the pool handle worktree — skip manual creation.
 				// The pool slot's worktree will be checked out to branchName on claim.
 				agentCwd = goal.cwd; // placeholder — pool claim overrides this
 			} else {
 				// Non-sandboxed: create worktree the traditional way
-				worktreeResult = await createWorktree(goal.repoPath!, branchName);
+				worktreeResult = await createWorktree(goal.repoPath!, branchName, { startPoint: goal.branch ? `origin/${goal.branch}` : undefined });
 				agentCwd = worktreeResult.worktreePath;
 			}
 		} else {
@@ -812,6 +824,21 @@ export class TeamManager {
 		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
 
+		// Debounce: skip if we notified about this worker in the last 30 seconds
+		const now = Date.now();
+		const lastNotify = this.lastNotifyTime.get(workerSessionId);
+		if (lastNotify && now - lastNotify < 30_000) {
+			console.log(`[team-manager] Debounced notification for ${agentId} (last: ${now - lastNotify}ms ago)`);
+			return;
+		}
+		this.lastNotifyTime.set(workerSessionId, now);
+
+		// Skip notification if team lead's last turn errored (API errors cause cascading agent_end events)
+		if (teamLeadSession.lastTurnErrored) {
+			console.log(`[team-manager] Suppressing notification for ${agentId} — team lead is in error state`);
+			return;
+		}
+
 		// Look up tasks assigned to the worker
 		const tasks = this.taskManager.getTasksForSession(workerSessionId);
 
@@ -922,6 +949,7 @@ export class TeamManager {
 		// Remove from tracking
 		entry.agents.splice(agentIndex, 1);
 		this.sessionToGoal.delete(sessionId);
+		this.lastNotifyTime.delete(sessionId);
 		this.persistEntry(goalId);
 
 		// If no workers remain, clear the idle-nudge timer

@@ -2,8 +2,8 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, Pencil, Plus, Trash2, X } from "lucide";
-import { fetchRoles, fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
+import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
+import { fetchRoles, fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
@@ -13,19 +13,32 @@ import { setHashRoute } from "./routing.js";
 // HELPERS
 // ============================================================================
 
-/** Render an idle in-chat blob with the given accessory in a self-contained box.
- *
- *  The blob's CSS assumes chat context: the sprite has margin 8px 18px 28px 18px,
- *  the blob container has margin-bottom:-24px and overflow:visible. To render it
- *  outside chat we use a CSS class (.bobbit-blob--inline) that resets these
- *  properties, added via role-manager.css.
- */
+/** Render an idle in-chat blob with the given accessory in a self-contained box. */
 function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): TemplateResult {
 	const accClass = accId && accId !== "none"
 		? `bobbit-${accId === "crown" ? "crowned" : accId}`
 		: "";
 	return renderIdleBlobCanvas({ accId, accClass, size, hueIndex, phaseIndex });
 }
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const ROLE_POLICY_OPTIONS = [
+	{ value: "", label: "Use tool default" },
+	{ value: "always-allow", label: "Always Allow" },
+	{ value: "ask-once", label: "Ask Once" },
+	{ value: "always-ask", label: "Always Ask" },
+	{ value: "never-ask", label: "Never" },
+];
+
+const POLICY_LABELS: Record<string, string> = {
+	"always-allow": "Always Allow",
+	"ask-once": "Ask Once Per Session",
+	"always-ask": "Ask Every Time",
+	"never-ask": "Never (Hidden)",
+};
 
 // ============================================================================
 // STATE
@@ -42,25 +55,64 @@ let loading = true;
 // Edit form state
 let editLabel = "";
 let editPrompt = "";
-let editTools: string[] = [];
 let editAccessory = "none";
 let editName = "";
-
 let editToolPolicies: Record<string, string> = {};
+let editTab: "prompt" | "tools" = "prompt";
 
 let saving = false;
 let deleting = false;
 
-// Add override form state
-let showAddOverride = false;
-let addOverrideSearch = "";
-let addOverridePolicy = "always-allow";
+// Group policies loaded from server
+let groupPolicies: Record<string, string> = {};
+
+// Collapsible group state for Tool Access tab (all expanded by default)
+let collapsedGroups = new Set<string>();
 
 // Assistant sub-prompt state
 let assistantPrompts: AssistantPromptInfo[] = [];
 let activePromptTab: string = "baseline"; // "baseline" or assistant type key
 let editedPrompts: Map<string, string> = new Map(); // type -> edited content
 let originalPrompts: Map<string, string> = new Map(); // type -> original content (for dirty detection)
+
+// ============================================================================
+// POLICY RESOLUTION
+// ============================================================================
+
+/** Resolve effective policy for a tool using the layered resolution order */
+function resolveEffectivePolicy(toolName: string, toolGroup: string): string {
+	// 1. Direct tool override
+	if (editToolPolicies[toolName]) return editToolPolicies[toolName];
+	// 2. Group-level override (MCP prefix or group name)
+	const parts = toolName.split("__");
+	if (parts.length >= 3) {
+		const serverPrefix = parts.slice(0, 2).join("__");
+		if (editToolPolicies[serverPrefix]) return editToolPolicies[serverPrefix];
+	}
+	if (editToolPolicies[toolGroup]) return editToolPolicies[toolGroup];
+	// 3. Tool's own default
+	const tool = availableTools.find(t => t.name === toolName);
+	if (tool?.grantPolicy) return tool.grantPolicy;
+	// 4. Group default from group-policies file
+	if (groupPolicies[toolGroup]) return groupPolicies[toolGroup];
+	// 5. System fallback
+	return "always-allow";
+}
+
+/** Describe where a resolved policy came from */
+function policySource(toolName: string, toolGroup: string): string {
+	if (editToolPolicies[toolName]) return "role override";
+	const parts = toolName.split("__");
+	if (parts.length >= 3) {
+		const serverPrefix = parts.slice(0, 2).join("__");
+		if (editToolPolicies[serverPrefix]) return `from ${serverPrefix}`;
+	}
+	if (editToolPolicies[toolGroup]) return `from ${toolGroup} role override`;
+	const tool = availableTools.find(t => t.name === toolName);
+	if (tool?.grantPolicy) return "tool default";
+	if (groupPolicies[toolGroup]) return "group default";
+	return "system default";
+}
 
 // ============================================================================
 // DATA LOADING
@@ -73,9 +125,10 @@ export async function loadRolePageData(): Promise<void> {
 	saving = false;
 	deleting = false;
 	renderApp();
-	const [r, t] = await Promise.all([fetchRoles(), fetchTools()]);
+	const [r, t, gp] = await Promise.all([fetchRoles(), fetchTools(), fetchGroupPolicies()]);
 	roles = r;
 	availableTools = t;
+	groupPolicies = gp;
 	loading = false;
 	renderApp();
 }
@@ -98,20 +151,18 @@ function showList(): void {
 	setHashRoute("roles");
 }
 
-function showEdit(role: RoleData): void {
+function initEditState(role: RoleData): void {
 	currentView = "edit";
 	selectedRole = role;
 	editLabel = role.label;
 	editPrompt = role.promptTemplate;
-	editTools = [...role.allowedTools];
 	editAccessory = role.accessory;
 	editName = role.name;
 	editToolPolicies = { ...(role.toolPolicies ?? {}) };
+	editTab = "prompt";
 	saving = false;
 	deleting = false;
-	showAddOverride = false;
-	addOverrideSearch = "";
-	addOverridePolicy = "always-allow";
+	collapsedGroups = new Set<string>();
 	activePromptTab = "baseline";
 	editedPrompts = new Map();
 	originalPrompts = new Map();
@@ -125,6 +176,10 @@ function showEdit(role: RoleData): void {
 	} else {
 		assistantPrompts = [];
 	}
+}
+
+function showEdit(role: RoleData): void {
+	initEditState(role);
 	setHashRoute("role-edit", role.name);
 }
 
@@ -132,32 +187,7 @@ function showEdit(role: RoleData): void {
 export function navigateToRoleEdit(roleName: string): void {
 	const role = roles.find((r) => r.name === roleName);
 	if (role) {
-		currentView = "edit";
-		selectedRole = role;
-		editLabel = role.label;
-		editPrompt = role.promptTemplate;
-		editTools = [...role.allowedTools];
-		editAccessory = role.accessory;
-		editName = role.name;
-		editToolPolicies = { ...(role.toolPolicies ?? {}) };
-		saving = false;
-		deleting = false;
-		showAddOverride = false;
-		addOverrideSearch = "";
-		addOverridePolicy = "always-allow";
-		activePromptTab = "baseline";
-		editedPrompts = new Map();
-		originalPrompts = new Map();
-		if (role.name === "assistant") {
-			fetchAssistantPrompts().then((prompts) => {
-				assistantPrompts = prompts;
-				editedPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
-				originalPrompts = new Map(prompts.map((p) => [p.type, p.prompt]));
-				renderApp();
-			});
-		} else {
-			assistantPrompts = [];
-		}
+		initEditState(role);
 	} else {
 		currentView = "list";
 		selectedRole = null;
@@ -197,10 +227,18 @@ async function handleSave(): Promise<void> {
 	renderApp();
 
 	if (selectedRole) {
+		// Derive allowedTools from toolPolicies for backward compatibility:
+		// any tool NOT explicitly set to "never-ask" is considered "allowed"
+		const allToolNames = availableTools.map(t => t.name);
+		const derivedAllowedTools = allToolNames.filter(name => {
+			const effective = resolveEffectivePolicy(name, availableTools.find(t => t.name === name)?.group || "Other");
+			return effective !== "never-ask";
+		});
+
 		const ok = await updateRole(selectedRole.name, {
 			label: editLabel,
 			promptTemplate: editPrompt,
-			allowedTools: editTools,
+			allowedTools: derivedAllowedTools,
 			accessory: editAccessory,
 			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : {},
 		});
@@ -252,28 +290,6 @@ async function handleDelete(): Promise<void> {
 	}
 }
 
-function toggleTool(tool: string): void {
-	const idx = editTools.indexOf(tool);
-	if (idx >= 0) {
-		editTools = editTools.filter((t) => t !== tool);
-	} else {
-		editTools = [...editTools, tool];
-	}
-	renderApp();
-}
-
-function toggleToolGroup(group: string): void {
-	const groupNames = availableTools.filter(t => t.group === group).map(t => t.name);
-	const allSelected = groupNames.every(n => editTools.includes(n));
-	if (allSelected) {
-		editTools = editTools.filter(t => !groupNames.includes(t));
-	} else {
-		const toAdd = groupNames.filter(n => !editTools.includes(n));
-		editTools = [...editTools, ...toAdd];
-	}
-	renderApp();
-}
-
 // ============================================================================
 // RENDER: NAV BAR
 // ============================================================================
@@ -287,12 +303,10 @@ function renderNavBar(): TemplateResult {
 		const hasChanges = selectedRole && (
 			editLabel !== selectedRole.label ||
 			editPrompt !== selectedRole.promptTemplate ||
-			JSON.stringify([...editTools].sort()) !== JSON.stringify([...selectedRole.allowedTools].sort()) ||
 			editAccessory !== selectedRole.accessory ||
 			toolPoliciesChanged ||
 			subPromptsDirty
 		);
-		// Edit view: back goes to roles list, breadcrumb shows hierarchy, actions on right
 		return html`
 			<div class="roles-nav">
 				<div class="roles-nav-left">
@@ -425,40 +439,92 @@ function renderListView(): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: TOOL GROUPS
+// RENDER: TOOL ACCESS TAB
 // ============================================================================
 
-function renderToolGroups(): TemplateResult {
+function handleToolPolicyChange(toolName: string, newPolicy: string): void {
+	if (newPolicy) {
+		editToolPolicies = { ...editToolPolicies, [toolName]: newPolicy };
+	} else {
+		const { [toolName]: _, ...rest } = editToolPolicies;
+		editToolPolicies = rest;
+	}
+	renderApp();
+}
+
+function toggleGroup(group: string): void {
+	if (collapsedGroups.has(group)) {
+		collapsedGroups.delete(group);
+	} else {
+		collapsedGroups.add(group);
+	}
+	renderApp();
+}
+
+function renderToolAccessTab(): TemplateResult {
+	// Group tools by group name
 	const groups = new Map<string, ToolInfo[]>();
 	for (const tool of availableTools) {
-		const list = groups.get(tool.group) || [];
+		const g = tool.group || "Other";
+		const list = groups.get(g) || [];
 		list.push(tool);
-		groups.set(tool.group, list);
+		groups.set(g, list);
 	}
 
+	const chevronSvg = html`<svg class="roles-access-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+
 	return html`
-		<div class="roles-tool-groups">
-			${Array.from(groups.entries()).map(([group, tools]) => {
-				const allSelected = tools.every(t => editTools.includes(t.name));
-				const someSelected = tools.some(t => editTools.includes(t.name));
+		<p class="roles-tools-note">Set per-tool access policies for this role. Tools left at "Use default" inherit from tool, group, or system defaults.</p>
+		<div class="roles-access-list">
+			${Array.from(groups.entries()).map(([groupName, tools]) => {
+				const isCollapsed = collapsedGroups.has(groupName);
+
 				return html`
-					<div class="roles-tool-group">
-						<button class="roles-tool-group-header" title="Toggle ${group} tools" @click=${() => toggleToolGroup(group)}>
-							<span class="roles-tool-group-check ${allSelected ? "checked" : someSelected ? "partial" : ""}">
-								${allSelected ? "\u2713" : someSelected ? "\u2013" : ""}
-							</span>
-							<span class="roles-tool-group-name">${group}</span>
-							<span class="roles-tool-group-count">${tools.filter(t => editTools.includes(t.name)).length}/${tools.length}</span>
-						</button>
-						<div class="roles-tool-group-items">
+					<div class="roles-access-group ${isCollapsed ? "collapsed" : ""}">
+						<div class="roles-access-group-header" @click=${() => toggleGroup(groupName)}>
+							${chevronSvg}
+							<span class="roles-access-group-name">${groupName}</span>
+							<span class="roles-access-group-count">${tools.length} tool${tools.length !== 1 ? "s" : ""}</span>
+							<span class="roles-access-group-policy-label">Group Policy:</span>
+							<select class="roles-access-group-select"
+								.value=${editToolPolicies[groupName] || ""}
+								@click=${(e: Event) => e.stopPropagation()}
+								@change=${(e: Event) => { e.stopPropagation(); handleToolPolicyChange(groupName, (e.target as HTMLSelectElement).value); }}
+							>
+								<option value="" ?selected=${!editToolPolicies[groupName]}>Use tool default</option>
+								${ROLE_POLICY_OPTIONS.filter(opt => opt.value !== "").map(opt => html`
+									<option value=${opt.value} ?selected=${editToolPolicies[groupName] === opt.value}>${opt.label}</option>
+								`)}
+							</select>
+							<span class="roles-access-group-hint">${(() => {
+								const groupDefault = groupPolicies[groupName] || "always-allow";
+								const label = POLICY_LABELS[groupDefault] || groupDefault;
+								return html`\u2192 ${label} [system default]`;
+							})()}</span>
+						</div>
+						<div class="roles-access-group-items">
 							${tools.map(tool => {
-								const active = editTools.includes(tool.name);
+								const currentPolicy = editToolPolicies[tool.name] || "";
+								const hasGroupOverride = !!editToolPolicies[groupName];
+								const defaultLabel = hasGroupOverride ? "Use group role default" : "Use tool default";
+								const effective = resolveEffectivePolicy(tool.name, groupName);
+								const effectiveLabel = POLICY_LABELS[effective] || effective;
+								const source = policySource(tool.name, groupName);
 								return html`
-									<button
-										class="roles-tool-chip ${active ? "roles-tool-chip--active" : ""}"
-										title="${tool.description}"
-										@click=${() => toggleTool(tool.name)}
-									>${tool.name}</button>
+									<div class="roles-access-row">
+										<span class="roles-access-row-label" title="${tool.description}">${tool.name}</span>
+										<select
+											class="roles-access-row-select"
+											.value=${currentPolicy}
+											@change=${(e: Event) => handleToolPolicyChange(tool.name, (e.target as HTMLSelectElement).value)}
+										>
+											<option value="" ?selected=${!currentPolicy}>${defaultLabel}</option>
+											${ROLE_POLICY_OPTIONS.filter(opt => opt.value !== "").map(opt => html`
+												<option value=${opt.value} ?selected=${currentPolicy === opt.value}>${opt.label}</option>
+											`)}
+										</select>
+										<span class="roles-access-row-hint">\u2192 ${effectiveLabel} [${source}]</span>
+									</div>
 								`;
 							})}
 						</div>
@@ -470,127 +536,40 @@ function renderToolGroups(): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: TOOL POLICY OVERRIDES
+// RENDER: PROMPT TAB
 // ============================================================================
 
-const POLICY_OPTIONS: { value: string; label: string }[] = [
-	{ value: "always-allow", label: "Always Allow" },
-	{ value: "ask-once", label: "Ask Once Per Session" },
-	{ value: "always-ask", label: "Ask Every Time" },
-	{ value: "never-ask", label: "Never (hidden)" },
-];
-
-function handleOverridePolicyChange(key: string, newPolicy: string): void {
-	editToolPolicies = { ...editToolPolicies, [key]: newPolicy };
-	renderApp();
-}
-
-function handleRemoveOverride(key: string): void {
-	const { [key]: _, ...rest } = editToolPolicies;
-	editToolPolicies = rest;
-	renderApp();
-}
-
-function handleAddOverride(): void {
-	const name = addOverrideSearch.trim();
-	if (!name || name in editToolPolicies) return;
-	editToolPolicies = { ...editToolPolicies, [name]: addOverridePolicy };
-	showAddOverride = false;
-	addOverrideSearch = "";
-	addOverridePolicy = "always-allow";
-	renderApp();
-}
-
-function getFilteredSuggestions(): string[] {
-	const query = addOverrideSearch.toLowerCase().trim();
-	// Collect tool names and unique group names
-	const toolNames = availableTools.map((t) => t.name);
-	const groupNames = [...new Set(availableTools.map((t) => t.group))];
-	const all = [...groupNames, ...toolNames];
-	// Filter out already-overridden and match query
-	return all
-		.filter((name) => !(name in editToolPolicies))
-		.filter((name) => !query || name.toLowerCase().includes(query))
-		.slice(0, 20);
-}
-
-function renderToolPolicyOverrides(): TemplateResult {
-	const entries = Object.entries(editToolPolicies);
+function renderPromptTab(): TemplateResult {
 	return html`
-		<div class="roles-edit-section">
-			<h2 class="roles-section-title">Tool Policy Overrides</h2>
-			<p class="roles-tools-note" style="margin-bottom:8px;">Explicit policy overrides for specific tools or groups. These take priority over tool and group defaults.</p>
-			${entries.length > 0 ? html`
-				<div class="roles-policy-overrides-list">
-					${entries.map(([key, policy]) => html`
-						<div class="roles-policy-override-row">
-							<span class="roles-policy-override-name" title="${key}">${key}</span>
-							<select
-								class="roles-policy-override-select"
-								.value=${policy}
-								@change=${(e: Event) => handleOverridePolicyChange(key, (e.target as HTMLSelectElement).value)}
-							>
-								${POLICY_OPTIONS.map((opt) => html`
-									<option value=${opt.value} ?selected=${policy === opt.value}>${opt.label}</option>
-								`)}
-							</select>
-							<button class="roles-policy-override-remove" title="Remove override" @click=${() => handleRemoveOverride(key)}>
-								${icon(X, "sm")}
-							</button>
-						</div>
-					`)}
-				</div>
-			` : html`
-				<p class="text-sm text-muted-foreground" style="margin-bottom:8px;">No overrides configured. Tools use their default or group policy.</p>
-			`}
-			${showAddOverride ? html`
-				<div class="roles-policy-add-form">
-					<div class="roles-policy-add-input-wrap">
-						<input
-							class="roles-policy-add-input"
-							type="text"
-							placeholder="Type tool or group name\u2026"
-							.value=${addOverrideSearch}
-							@input=${(e: Event) => { addOverrideSearch = (e.target as HTMLInputElement).value; renderApp(); }}
-							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") handleAddOverride(); if (e.key === "Escape") { showAddOverride = false; renderApp(); } }}
-						/>
-						${addOverrideSearch.trim() ? html`
-							<div class="roles-policy-suggestions">
-								${getFilteredSuggestions().map((name) => html`
-									<button class="roles-policy-suggestion" @click=${() => { addOverrideSearch = name; renderApp(); }}>${name}</button>
-								`)}
-							</div>
-						` : nothing}
-					</div>
-					<select
-						class="roles-policy-override-select"
-						.value=${addOverridePolicy}
-						@change=${(e: Event) => { addOverridePolicy = (e.target as HTMLSelectElement).value; }}
-					>
-						${POLICY_OPTIONS.map((opt) => html`
-							<option value=${opt.value} ?selected=${addOverridePolicy === opt.value}>${opt.label}</option>
-						`)}
-					</select>
-					${Button({
-						variant: "default",
-						size: "sm",
-						onClick: handleAddOverride,
-						disabled: !addOverrideSearch.trim() || addOverrideSearch.trim() in editToolPolicies,
-						children: "Add",
-					})}
-					${Button({
-						variant: "ghost" as any,
-						size: "sm",
-						onClick: () => { showAddOverride = false; addOverrideSearch = ""; renderApp(); },
-						children: "Cancel",
-					})}
-				</div>
-			` : html`
-				<button class="roles-policy-add-btn" @click=${() => { showAddOverride = true; renderApp(); }}>
-					${icon(Plus, "sm")} Add Override
-				</button>
-			`}
-		</div>
+		${editName === "assistant" && assistantPrompts.length > 0 ? html`
+			<div class="roles-prompt-tabs">
+				<button
+					class="roles-prompt-tab ${activePromptTab === "baseline" ? "roles-prompt-tab--active" : ""}"
+					@click=${() => { activePromptTab = "baseline"; renderApp(); }}
+				>Shared Baseline</button>
+				${assistantPrompts.map((p) => html`
+					<button
+						class="roles-prompt-tab ${activePromptTab === p.type ? "roles-prompt-tab--active" : ""}"
+						@click=${() => { activePromptTab = p.type; renderApp(); }}
+					>${p.title.replace(" Assistant", "").replace(" Wizard", "")}</button>
+				`)}
+			</div>
+		` : nothing}
+		${activePromptTab === "baseline" || editName !== "assistant" || assistantPrompts.length === 0 ? html`
+			<textarea
+				class="roles-prompt-editor"
+				.value=${editPrompt}
+				placeholder="Markdown system prompt template. Supports {{GOAL_BRANCH}} and {{AGENT_ID}} placeholders."
+				@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
+			></textarea>
+		` : html`
+			<p class="roles-prompt-hint">This prompt is appended after the shared baseline for ${assistantPrompts.find((p) => p.type === activePromptTab)?.title ?? activePromptTab} sessions.</p>
+			<textarea
+				class="roles-prompt-editor"
+				.value=${editedPrompts.get(activePromptTab) ?? ""}
+				@input=${(e: Event) => { editedPrompts.set(activePromptTab, (e.target as HTMLTextAreaElement).value); renderApp(); }}
+			></textarea>
+		`}
 	`;
 }
 
@@ -635,9 +614,7 @@ function renderEditView(): TemplateResult {
 									@click=${() => { editAccessory = accId; renderApp(); }}
 								>
 									<span class="roles-accessory-preview">
-										${accId === "none"
-											? html`<span class="text-xs text-muted-foreground">\u2014</span>`
-											: idleBlob(accId, 42, i, i)}
+										${idleBlob(accId, 42, i, i)}
 									</span>
 									<span class="roles-accessory-label">${acc.label}</span>
 								</button>
@@ -646,54 +623,18 @@ function renderEditView(): TemplateResult {
 					</div>
 				</div>
 
-				<!-- System prompt section -->
-				<div class="roles-edit-section">
-					<h2 class="roles-section-title">System Prompt</h2>
-					${editName === "assistant" && assistantPrompts.length > 0 ? html`
-						<div class="roles-prompt-tabs">
-							<button
-								class="roles-prompt-tab ${activePromptTab === "baseline" ? "roles-prompt-tab--active" : ""}"
-								@click=${() => { activePromptTab = "baseline"; renderApp(); }}
-							>Shared Baseline</button>
-							${assistantPrompts.map((p) => html`
-								<button
-									class="roles-prompt-tab ${activePromptTab === p.type ? "roles-prompt-tab--active" : ""}"
-									@click=${() => { activePromptTab = p.type; renderApp(); }}
-								>${p.title.replace(" Assistant", "").replace(" Wizard", "")}</button>
-							`)}
-						</div>
-					` : nothing}
-					${activePromptTab === "baseline" || editName !== "assistant" || assistantPrompts.length === 0 ? html`
-						<textarea
-							class="roles-prompt-editor"
-							.value=${editPrompt}
-							placeholder="Markdown system prompt template. Supports {{GOAL_BRANCH}} and {{AGENT_ID}} placeholders."
-							@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
-						></textarea>
-					` : html`
-						<p class="roles-prompt-hint">This prompt is appended after the shared baseline for ${assistantPrompts.find((p) => p.type === activePromptTab)?.title ?? activePromptTab} sessions.</p>
-						<textarea
-							class="roles-prompt-editor"
-							.value=${editedPrompts.get(activePromptTab) ?? ""}
-							@input=${(e: Event) => { editedPrompts.set(activePromptTab, (e.target as HTMLTextAreaElement).value); renderApp(); }}
-						></textarea>
-					`}
-				</div>
-			</div>
-
-			<!-- Right sidebar -->
-			<div class="roles-edit-sidebar">
-				<!-- Tools section -->
-				<div class="roles-edit-section">
-					<div class="roles-tools-top">
-						<h2 class="roles-section-title">Tool Access</h2>
-					</div>
-					<p class="roles-tools-note">${editTools.length} of ${availableTools.length} tools enabled</p>
-					${renderToolGroups()}
+				<!-- Tab bar -->
+				<div class="roles-tab-bar">
+					<button class="roles-tab ${editTab === "prompt" ? "roles-tab--active" : ""}"
+						@click=${() => { editTab = "prompt"; renderApp(); }}>Prompt</button>
+					<button class="roles-tab ${editTab === "tools" ? "roles-tab--active" : ""}"
+						@click=${() => { editTab = "tools"; renderApp(); }}>Tool Access</button>
 				</div>
 
-				<!-- Tool Policy Overrides section -->
-				${renderToolPolicyOverrides()}
+				<!-- Tab content -->
+				<div class="roles-tab-content">
+					${editTab === "prompt" ? renderPromptTab() : renderToolAccessTab()}
+				</div>
 			</div>
 		</div>
 	`;

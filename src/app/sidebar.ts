@@ -805,7 +805,8 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
 			<button
-				class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
+				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
+				style="padding:0;line-height:0;"
 				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
 				title="Project settings"
 			>${icon(Settings, "xs")}</button>

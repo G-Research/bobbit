@@ -60,8 +60,6 @@ toolPolicies:
   browser_wait: always-allow
   preview_open: always-allow
   bash_bg: always-allow
-  gate_signal: ask-once
-  gate_status: ask-once
   mcp__playwright__browser_close: always-allow
   mcp__playwright__browser_resize: always-allow
   mcp__playwright__browser_console_messages: always-allow
@@ -83,7 +81,9 @@ toolPolicies:
   mcp__playwright__browser_select_option: always-allow
   mcp__playwright__browser_tabs: always-allow
   mcp__playwright__browser_wait_for: always-allow
+  Gates: ask-once
+  Tasks: ask-once
 _policyMigrated: true
 createdAt: 0
-updatedAt: 1774975102160
+updatedAt: 1775043991585
 promptTemplate: ""
