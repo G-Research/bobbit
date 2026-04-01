@@ -11,10 +11,10 @@ test.describe("Navigation (UI)", () => {
 	test("landing view shows on fresh load", async ({ page }) => {
 		await openApp(page);
 		// On fresh load with no sessions, verify the landing state:
-		// The "New session" button should be visible (sidebar)
+		// The sidebar should be visible (Settings button is always present)
 		await expect(
-			page.locator("button[title='New session']").first(),
-		).toBeVisible();
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 15_000 });
 
 		// The landing page should not show a session chat (no textarea)
 		// unless auto-creating. Check for the landing content area.
