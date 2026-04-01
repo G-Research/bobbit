@@ -151,6 +151,16 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		currentGoal = await goalRes.json();
 
+		// Propagate goal metadata to sidebar's goal list so it stays in sync
+		// (e.g. setupStatus may have changed from "preparing" to "ready")
+		const sidebarIdx = state.goals.findIndex((g) => g.id === goalId);
+		if (sidebarIdx >= 0) {
+			const sidebarGoal = state.goals[sidebarIdx];
+			if (sidebarGoal.setupStatus !== currentGoal!.setupStatus || sidebarGoal.state !== currentGoal!.state) {
+				state.goals[sidebarIdx] = { ...sidebarGoal, setupStatus: currentGoal!.setupStatus, setupError: currentGoal!.setupError, state: currentGoal!.state };
+			}
+		}
+
 		if (tasksRes.ok) {
 			const data = await tasksRes.json();
 			tasks = data.tasks || [];

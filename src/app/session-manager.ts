@@ -553,6 +553,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		remote.onCompactionChange = (isCompacting: boolean) => {
+			const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
+			if (idx >= 0) {
+				state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], isCompacting };
+			}
+			renderApp();
+		};
+
 		remote.onWorkflowUpdate = () => renderApp();
 
 		remote.onGoalSetupEvent = async () => {

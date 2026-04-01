@@ -801,10 +801,8 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			>
 				<span class="relative inline-flex" style="width:14px;height:14px;">
 					${icon(GoalIcon, "xs")}
-					<svg viewBox="0 0 10 10" style="position:absolute;bottom:-1px;right:-2px;width:8px;height:8px;">
-						<circle cx="5" cy="5" r="5" fill="var(--background)"/>
-						<circle cx="5" cy="5" r="4" fill="#22c55e"/>
-						<path d="M5 2.5V7.5M2.5 5H7.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+					<svg viewBox="0 0 10 10" style="position:absolute;bottom:-2px;right:-3px;width:9px;height:9px;">
+						<path d="M5 1V9M1 5H9" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round"/>
 					</svg>
 				</span>
 			</button>
