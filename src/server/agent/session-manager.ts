@@ -1119,26 +1119,29 @@ export class SessionManager {
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
 	async restoreSessions(): Promise<void> {
-		// Initialize search index
-		try {
-			this.searchIndex.open();
-			if (this.searchIndex.needsRebuild()) {
-				const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
-				this.searchIndex.rebuildFromStores(goalStore, this.store);
+		// Initialize search index (skip when ProjectContextManager is active —
+		// ProjectContext.open() already opens the index and wires callbacks)
+		if (!this.projectContextManager) {
+			try {
+				this.searchIndex.open();
+				if (this.searchIndex.needsRebuild()) {
+					const goalStore = this.goalManager.getGoalStore();
+					this.searchIndex.rebuildFromStores(goalStore, this.store);
+				}
+				// Wire index update callbacks
+				const goalStore = this.goalManager.getGoalStore();
+				goalStore.onIndexUpdate = (goal) => {
+					try { this.searchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
+				};
+				this.store.onIndexUpdate = (session) => {
+					try {
+						const goalTitle = session.goalId ? this.goalManager.getGoal(session.goalId)?.title : undefined;
+						this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
+					} catch (err) { console.error("[search] Failed to index session:", err); }
+				};
+			} catch (err) {
+				console.error("[search] Failed to initialize search index:", err);
 			}
-			// Wire index update callbacks
-			const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
-			goalStore.onIndexUpdate = (goal) => {
-				try { this.searchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
-			};
-			this.store.onIndexUpdate = (session) => {
-				try {
-					const goalTitle = session.goalId ? this.goalManager.getGoal(session.goalId)?.title : undefined;
-					this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
-				} catch (err) { console.error("[search] Failed to index session:", err); }
-			};
-		} catch (err) {
-			console.error("[search] Failed to initialize search index:", err);
 		}
 
 		const persisted = this.store.getLive();

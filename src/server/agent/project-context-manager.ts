@@ -40,10 +40,7 @@ export class ProjectContextManager {
     if (!project) return null;
 
     ctx = new ProjectContext(project);
-    // Call open() if available (added by the ProjectContext lifecycle task)
-    if (typeof (ctx as any).open === "function") {
-      (ctx as any).open();
-    }
+    ctx.open();
     this.contexts.set(projectId, ctx);
 
     // Set as default if this is the first context
@@ -153,11 +150,9 @@ export class ProjectContextManager {
       // Filter by projectId if specified
       if (opts.projectId && ctx.project.id !== opts.projectId) continue;
 
-      // Only call search if context has a searchIndex (added by lifecycle task)
-      const searchIndex = (ctx as any).searchIndex;
-      if (!searchIndex || typeof searchIndex.search !== "function") continue;
+      if (!ctx.searchIndex) continue;
 
-      const { results, total } = searchIndex.search(query, {
+      const { results, total } = ctx.searchIndex.search(query, {
         type: opts.type as any,
         // Fetch enough results for cross-project merging
         limit: limit + offset,
@@ -203,9 +198,7 @@ export class ProjectContextManager {
   /** Close all contexts on shutdown. */
   closeAll(): void {
     for (const ctx of this.contexts.values()) {
-      if (typeof (ctx as any).close === "function") {
-        (ctx as any).close();
-      }
+      ctx.close();
     }
     this.contexts.clear();
   }
@@ -214,9 +207,7 @@ export class ProjectContextManager {
   remove(projectId: string): void {
     const ctx = this.contexts.get(projectId);
     if (ctx) {
-      if (typeof (ctx as any).close === "function") {
-        (ctx as any).close();
-      }
+      ctx.close();
       this.contexts.delete(projectId);
     }
   }
