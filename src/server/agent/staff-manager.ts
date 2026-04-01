@@ -75,7 +75,7 @@ export class StaffManager {
 
 		const resolvedProjectId = projectId || this.pcm.getDefaultProjectId();
 		const searchIndex = this.pcm.getOrCreate(resolvedProjectId)?.searchIndex;
-		searchIndex?.indexStaff(staff, projectId);
+		searchIndex?.indexStaff(staff, resolvedProjectId);
 
 		// Create the permanent session for this staff agent
 		try {

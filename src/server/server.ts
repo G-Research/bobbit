@@ -3999,6 +3999,7 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = body.cwd || config.defaultCwd;
+		const projectId = (typeof body.projectId === "string") ? body.projectId : undefined;
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,
@@ -4006,7 +4007,7 @@ async function handleApiRoute(
 				body.systemPrompt,
 				cwd,
 				sessionManager,
-				{ triggers: body.triggers, roleId: body.roleId, projectId: body.projectId },
+				{ triggers: body.triggers, roleId: body.roleId, projectId },
 			);
 			json(staff, 201);
 		} catch (err: any) {
