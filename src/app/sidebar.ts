@@ -801,7 +801,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 
 /** Render goals and sessions for a single project (used in multi-project mode). */
 function renderProjectContent(
-	_project: Project,
+	project: Project,
 	goals: Goal[],
 	sessions: GatewaySession[],
 ) {
@@ -810,14 +810,32 @@ function renderProjectContent(
 			${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 			${renderGoalGroup(goal)}
 		`)}
-		${sessions.length > 0 ? html`
-			<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-				${sessions.map(renderSessionRow)}
+		${goals.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+		<div class="flex flex-col gap-0.5">
+			<div class="flex items-center gap-1 pl-0 pr-1 py-0.5">
+				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
+				<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
+				<div class="flex items-center relative">
+					<button
+						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
+						@click=${() => createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id)}
+						title="New session in ${project.name}"
+						?disabled=${state.creatingSession}
+					>${icon(Plus, "xs")}</button>
+					<button
+						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+						@click=${toggleRolePicker}
+						title="New session with role"
+					>${icon(ChevronDown, "xs")}</button>
+					${renderRolePickerDropdown()}
+				</div>
 			</div>
-		` : ""}
-		${goals.length === 0 && sessions.length === 0 ? html`
-			<div class="text-center py-2 text-[11px] text-muted-foreground">No sessions</div>
-		` : ""}
+			${sessions.length > 0 ? html`
+				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+					${sessions.map(renderSessionRow)}
+				</div>
+			` : ""}
+		</div>
 	`;
 }
 
@@ -962,8 +980,7 @@ export function renderSidebar() {
 									bucket.sessions.push(s);
 								}
 								return html`${state.projects.map((project, i) => {
-									const data = projectMap.get(project.id);
-									if (!data || (data.goals.length === 0 && data.sessions.length === 0)) return "";
+									const data = projectMap.get(project.id) || { goals: [], sessions: [] };
 									const expanded = isProjectExpanded(project.id);
 									return html`
 										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}

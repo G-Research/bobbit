@@ -264,8 +264,7 @@ function renderMobileLanding() {
 											bucket.sessions.push(s);
 										}
 										return html`${state.projects.map((project, i) => {
-											const data = projectMap.get(project.id);
-											if (!data || (data.goals.length === 0 && data.sessions.length === 0)) return "";
+											const data = projectMap.get(project.id) || { goals: [], sessions: [] };
 											const expanded = isProjectExpanded(project.id);
 											const color = project.color || "var(--muted-foreground)";
 											return html`
@@ -275,25 +274,37 @@ function renderMobileLanding() {
 													<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
-													<button
-														class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-														@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
-														title="New session in ${project.name}"
-													>${icon(Plus, "sm")}</button>
 												</div>
 												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 													${data.goals.map((goal, gi) => html`
 														${gi > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
 													`)}
-													${data.sessions.length > 0 ? html`
-														<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-															${data.sessions.map(renderSessionRow)}
+													${data.goals.length > 0 && data.sessions.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+													<div class="flex flex-col gap-0.5">
+														<div class="flex items-center gap-1.5 pl-0 pr-2 py-1 rounded-md">
+															<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
+															<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
+															<div class="flex items-center relative">
+																<button
+																	class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
+																	@click=${() => createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id)}
+																	title="New session in ${project.name}"
+																>${icon(Plus, "sm")}</button>
+																<button
+																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
+																	@click=${toggleRolePicker}
+																	title="New session with role"
+																>${icon(ChevronDown, "sm")}</button>
+																${renderRolePickerDropdown()}
+															</div>
 														</div>
-													` : ""}
-													${data.goals.length === 0 && data.sessions.length === 0 ? html`
-														<div class="text-center py-2 text-sm text-muted-foreground">No sessions</div>
-													` : ""}
+														${data.sessions.length > 0 ? html`
+															<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+																${data.sessions.map(renderSessionRow)}
+															</div>
+														` : ""}
+													</div>
 												</div>` : ""}
 											`;
 										})}`;
