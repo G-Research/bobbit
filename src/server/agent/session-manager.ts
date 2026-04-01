@@ -411,9 +411,7 @@ export class SessionManager {
 		return this.costTracker;
 	}
 
-	getSessionStore(): SessionStore {
-		return this.store;
-	}
+
 
 	getMcpManager(): McpManager | null {
 		return this.mcpManager;

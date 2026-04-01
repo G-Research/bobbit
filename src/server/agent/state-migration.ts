@@ -77,7 +77,7 @@ export function migrateToPerProjectState(
 	}
 
 	// Helper: merge items into an existing JSON array file by ID field, write back
-	function mergeAndWrite<T extends Record<string, unknown>>(
+	function mergeAndWrite<T>(
 		targetFile: string,
 		newItems: T[],
 		idField: string,

@@ -26,7 +26,7 @@ import { PersonalityManager } from "./agent/personality-manager.js";
 import { getPromptSections, initPromptDirs } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
-import type { GateStore } from "./agent/gate-store.js";
+
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot } from "./skills/git.js";
@@ -46,7 +46,6 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
-import { ProjectContext } from "./agent/project-context.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { migrateToPerProjectState } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
