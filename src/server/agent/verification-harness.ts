@@ -10,6 +10,7 @@ import { assembleSystemPrompt } from "./system-prompt.js";
 import type { WorkflowGate } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
 import { GIT_BASH, getShellConfig } from "./shell-util.js";
+import type { ProjectContextManager } from "./project-context-manager.js";
 
 /** Extract pass/fail verdict from sub-agent output. Exported for unit testing. */
 export function parseVerdict(output: string): boolean | null {
@@ -54,6 +55,7 @@ export class VerificationHarness {
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
 	private activeVerifications = new Map<string, ActiveVerification>();
 	private readonly _persistPath: string;
+	private projectContextManager: ProjectContextManager | null;
 
 	/** Get all active (in-flight) verifications, optionally filtered by goalId */
 	getActiveVerifications(goalId?: string): ActiveVerification[] {
@@ -126,11 +128,11 @@ export class VerificationHarness {
 			} catch (err) {
 				console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
 				// Mark as failed and update gate
-				this.gateStore.updateSignalVerification(v.signalId, {
+				this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 					status: "failed",
 					steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 }],
 				});
-				this.gateStore.updateGateStatus(v.goalId, v.gateId, "failed");
+				this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
 				this.broadcastFn(v.goalId, {
 					type: "gate_verification_complete",
 					goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
@@ -259,7 +261,7 @@ export class VerificationHarness {
 		const allPassed = resolvedSteps.every(r => r.passed);
 		const status = allPassed ? "passed" as const : "failed" as const;
 
-		this.gateStore.updateSignalVerification(v.signalId, {
+		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status,
 			steps: resolvedSteps.map(r => ({
 				name: r.name,
@@ -269,7 +271,7 @@ export class VerificationHarness {
 				duration_ms: r.duration_ms,
 			})),
 		});
-		this.gateStore.updateGateStatus(v.goalId, v.gateId, status);
+		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, status);
 
 		this.broadcastFn(v.goalId, {
 			type: "gate_verification_complete",
@@ -295,15 +297,25 @@ export class VerificationHarness {
 		private sessionManager?: import("./session-manager.js").SessionManager,
 		private teamManager?: import("./team-manager.js").TeamManager,
 		private projectConfigStore?: ProjectConfigStore,
+		projectContextManager?: ProjectContextManager,
 	) {
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
+		this.projectContextManager = projectContextManager ?? null;
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
 		const persisted = this._loadActive();
 		for (const v of persisted) {
 			this.activeVerifications.set(v.signalId, v);
 		}
+	}
+
+	private resolveGateStore(goalId: string): GateStore {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.gateStore;
+		}
+		return this.gateStore;
 	}
 
 	/** Register a callback to notify the team lead agent when verification completes. */
@@ -374,8 +386,8 @@ export class VerificationHarness {
 		const steps = gate.verify;
 		if (!steps || steps.length === 0) {
 			// No verification — auto-pass
-			this.gateStore.updateSignalVerification(signal.id, { status: "passed", steps: [] });
-			this.gateStore.updateGateStatus(signal.goalId, signal.gateId, "passed");
+			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "passed", steps: [] });
+			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "passed");
 			this.broadcastFn(signal.goalId, {
 				type: "gate_verification_complete",
 				goalId: signal.goalId,
@@ -437,7 +449,7 @@ export class VerificationHarness {
 			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
 			const cachedSteps = new Map<string, GateSignalStep>();
 			if (signal.commitSha) {
-				const gateState = this.gateStore.getGate(signal.goalId, signal.gateId);
+				const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
 				if (gateState) {
 					for (const prev of gateState.signals) {
 						if (prev.id === signal.id) continue;
@@ -464,8 +476,8 @@ export class VerificationHarness {
 				});
 				const allPassed = results.every(r => r.passed);
 				const status = allPassed ? "passed" as const : "failed" as const;
-				this.gateStore.updateSignalVerification(signal.id, { status, steps: results });
-				this.gateStore.updateGateStatus(signal.goalId, signal.gateId, status);
+				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
+				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 				this.activeVerifications.delete(signal.id);
 				this._persistActive();
 				// Broadcast step completions and overall result
@@ -652,8 +664,8 @@ export class VerificationHarness {
 			const allPassed = results.every(r => r.passed);
 			const status = allPassed ? "passed" : "failed";
 
-			this.gateStore.updateSignalVerification(signal.id, { status, steps: results });
-			this.gateStore.updateGateStatus(signal.goalId, signal.gateId, status);
+			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
+			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 			this.activeVerifications.delete(signal.id);
 			this._persistActive();
 
@@ -677,11 +689,11 @@ export class VerificationHarness {
 				this._persistActive();
 				return;
 			}
-			this.gateStore.updateSignalVerification(signal.id, {
+			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
 				steps: [{ name: "Error", type: "command", passed: false, output: err.message, duration_ms: 0 }],
 			});
-			this.gateStore.updateGateStatus(signal.goalId, signal.gateId, "failed");
+			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
 			this.activeVerifications.delete(signal.id);
 			this._persistActive();
 
@@ -873,7 +885,10 @@ export class VerificationHarness {
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				allowedTools: role.allowedTools,
-				sandboxed: (goalId ? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed : undefined) ?? this.sessionManager!.isSandboxEnabled,
+				sandboxed: (goalId
+				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
+					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				: undefined) ?? this.sessionManager!.isSandboxEnabled,
 			});
 			sessionId = session.id;
 

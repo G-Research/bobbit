@@ -30,16 +30,77 @@ Key behaviors:
 - `remove()` only unregisters — it does not delete files. Callers guard against removing the default project.
 - Persistence is atomic (write to `.tmp` then rename).
 
+### Per-project state isolation
+
+Each registered project is a self-contained unit on disk. State (goals, sessions, tasks, teams, gates, search, costs) lives in `<project-root>/.bobbit/state/`, not in a central directory. The server aggregates across all projects.
+
+```
+<project-root>/.bobbit/
+  config/          # Project config (roles, tools, etc.)
+  state/
+    goals.json     # Goals for THIS project
+    sessions.json  # Sessions for THIS project
+    tasks.json     # Tasks for THIS project's goals
+    team-state.json # Team state
+    gates.json     # Gate state and signals
+    staff.json     # Staff agents
+    search.db      # Search index for THIS project
+    costs/         # Cost tracking
+
+<server-cwd>/.bobbit/
+  state/
+    projects.json     # Global project registry (only truly global state)
+    preferences.json  # Global UI preferences
+    token             # Auth token
+    gateway-url       # Gateway address
+    colors.json       # Session colors
+```
+
+This means removing a project cleanly removes its state, and pointing a different Bobbit instance at a project directory gives access to its history.
+
 ### ProjectContext (scoped stores)
 
 `ProjectContext` (`project-context.ts`) holds a complete set of stores scoped to one project. Every store constructor accepts a directory parameter (`stateDir` or `configDir`) instead of using module-level globals:
 
-- **State stores** (stateDir): GoalStore, SessionStore, GateStore, TaskStore, TeamStore, StaffStore, ColorStore
+- **State stores** (stateDir): GoalStore, SessionStore, GateStore, TaskStore, TeamStore, StaffStore, ColorStore, SearchIndex, CostTracker
 - **Config stores** (configDir): RoleStore, PersonalityStore, WorkflowStore, ToolManager, ProjectConfigStore, ToolGroupPolicyStore
+- **Managers**: GoalManager (wraps GoalStore)
 
 Directories derive from the project's `rootPath`:
 - `stateDir` = `<rootPath>/.bobbit/state/`
 - `configDir` = `<rootPath>/.bobbit/config/`
+
+`ProjectContext.open()` initializes the search index and wires mutation hooks so goal/session changes are automatically indexed. `ProjectContext.close()` flushes the session store and closes the search index.
+
+### ProjectContextManager
+
+`ProjectContextManager` (`project-context-manager.ts`) is the central registry of `ProjectContext` instances. It initializes a context for each registered project on startup and provides aggregation methods for cross-project queries.
+
+Key responsibilities:
+- **Lazy creation**: `getOrCreate(projectId)` — creates and opens a context on first access
+- **Store routing**: `getContextForGoal(goalId)` / `getContextForSession(sessionId)` — scans all contexts to find the owning project
+- **Aggregation**: `getAllLiveGoals()`, `getAllLiveSessions()`, `searchAll()` — merge results across all projects
+- **Generation counters**: Sums per-project generation counters so clients detect any change via a single `?since=N` parameter
+- **Lifecycle**: `closeAll()` on shutdown, `remove(projectId)` when a project is unregistered
+
+All API endpoints and WebSocket handlers resolve the correct per-project store through `ProjectContextManager` rather than accessing stores directly. Managers (`GoalManager`, `TaskManager`, `StaffManager`) accept store instances directly — they no longer create stores internally.
+
+### State migration
+
+On first startup after upgrading to per-project state, `migrateToPerProjectState()` (`state-migration.ts`) distributes centralized state to per-project directories:
+
+1. Reads central `goals.json`, `sessions.json`, `tasks.json`, `team-state.json`, `gates.json`, `staff.json`
+2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
+3. Merges into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
+4. Staff agents (no `projectId`) go to the default project
+5. Renames central files with `.pre-migration` suffix (not deleted)
+6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
+
+The migration is idempotent and handles missing files gracefully (fresh installs have nothing to migrate). Central `search.db` is renamed — per-project indexes rebuild automatically on first access.
+
+**What stays global**: `projects.json`, auth token, gateway URL, preferences, session colors, PR status.
+
+**Known limitations**: Staff is only per-default-project (the API doesn't yet route staff by project). Cost tracking uses the default project's `CostTracker` for all sessions. `active-verifications.json` stays in the central state dir (transient operational state).
 
 ### Config resolution (3-tier hierarchy)
 
@@ -69,7 +130,7 @@ Each registered project can override system-level settings (from `project.yaml`)
 
 **Resolution cascade**: For each config key, `resolveScalarConfig()` checks project → server → global → built-in default. The first defined value wins. This reuses the same `config-resolver.ts` infrastructure described in [Config resolution](#config-resolution-3-tier-hierarchy) above.
 
-**Server-side caching**: The server lazily instantiates a `ProjectContext` per project via `getOrCreateProjectContext()` (cached in a `Map<string, ProjectContext>` in `server.ts`). This avoids creating stores for projects that are never accessed during a server lifetime.
+**Server-side caching**: `ProjectContextManager` lazily instantiates a `ProjectContext` per project via `getOrCreate()`. On startup, `initAll()` pre-creates contexts for all registered projects.
 
 **REST API**:
 
@@ -132,7 +193,9 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 | File | Purpose |
 |---|---|
 | `project-registry.ts` | Project CRUD and persistence |
-| `project-context.ts` | Scoped store container per project |
+| `project-context.ts` | Scoped store container per project (with `open()`/`close()` lifecycle) |
+| `project-context-manager.ts` | Central registry of contexts, aggregation, store routing |
+| `state-migration.ts` | One-time migration from centralized to per-project state |
 | `config-resolver.ts` | 3-tier config cascade |
 | `project-assistant.ts` | Guided project registration |
 
@@ -171,7 +234,7 @@ All tool access uses a **grant policy** system. Every tool resolves to one of fo
 
 ## Full-text search & paginated archives
 
-SQLite FTS5 via `better-sqlite3`. Index at `.bobbit/state/search.db` (rebuildable cache).
+SQLite FTS5 via `better-sqlite3`. Each project has its own index at `<project-root>/.bobbit/state/search.db` (rebuildable cache). `ProjectContextManager.searchAll()` aggregates results across all project indexes.
 
 **Key files:** `search-index.ts`, `message-extractor.ts`, `SearchBox.ts`, `SearchResults.ts`, `search-page.ts`.
 
@@ -393,19 +456,29 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Group grant policies |
 | `mcp.json` | `McpManager` | MCP server overrides |
 
-### `.bobbit/state/` — gitignored runtime
+### `<project-root>/.bobbit/state/` — per-project, gitignored
+
+Each registered project has its own state directory. All store data is scoped to the owning project.
+
+| File / Directory | Owner | Purpose |
+|---|---|---|
+| `goals.json` | `GoalStore` | Goal definitions |
+| `sessions.json` | `SessionStore` | Session metadata |
+| `tasks.json` | `TaskStore` | Task state |
+| `gates.json` | `GateStore` | Gate state + signals |
+| `team-state.json` | `TeamStore` | Team agents/roles |
+| `staff.json` | `StaffStore` | Staff agents |
+| `search.db` | `SearchIndex` | FTS5 search index |
+| `costs/` | `CostTracker` | Token/cost data |
+
+### `<server-cwd>/.bobbit/state/` — global, gitignored
+
+Only truly global state lives in the server's central state directory.
 
 | File / Directory | Owner | Purpose |
 |---|---|---|
 | `projects.json` | `ProjectRegistry` | Registered project definitions |
 | `token` | `token.ts` | Auth token (0600) |
-| `sessions.json` | `SessionStore` | Session metadata |
-| `goals.json` | `GoalStore` | Goal definitions |
-| `tasks.json` | `TaskStore` | Task state |
-| `gates.json` | `GateStore` | Gate state + signals |
-| `team-state.json` | `TeamStore` | Team agents/roles |
-| `staff.json` | `StaffStore` | Staff agents |
-| `session-costs.json` | `CostTracker` | Token/cost data |
 | `session-colors.json` | `ColorStore` | Session colors |
 | `preferences.json` | `PreferencesStore` | Key-value prefs |
 | `session-prompts/` | `system-prompt.ts` | Per-session prompts |
@@ -414,7 +487,6 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `gateway-restart` | `harness.ts` | Dev restart sentinel |
 | `rpc-debug.log` | `rpc-bridge.ts` | RPC event log |
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |
-| `search.db` | `SearchIndex` | FTS5 search index |
 
 ### Global
 

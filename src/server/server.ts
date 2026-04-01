@@ -25,8 +25,9 @@ import { PersonalityManager } from "./agent/personality-manager.js";
 
 import { getPromptSections, initPromptDirs } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
+import { TaskManager } from "./agent/task-manager.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
-import { GateStore } from "./agent/gate-store.js";
+
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot } from "./skills/git.js";
@@ -46,22 +47,12 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
-import { ProjectContext } from "./agent/project-context.js";
+import { ProjectContextManager } from "./agent/project-context-manager.js";
+import { GoalManager } from "./agent/goal-manager.js";
+import type { PersistedGoal } from "./agent/goal-store.js";
+import { migrateToPerProjectState } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
-
-const projectContextCache = new Map<string, ProjectContext>();
-
-function getOrCreateProjectContext(projectId: string, projectRegistry: ProjectRegistry): ProjectContext | null {
-	const project = projectRegistry.get(projectId);
-	if (!project) return null;
-	let ctx = projectContextCache.get(projectId);
-	if (!ctx) {
-		ctx = new ProjectContext(project);
-		projectContextCache.set(projectId, ctx);
-	}
-	return ctx;
-}
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -228,6 +219,13 @@ export function createGateway(config: GatewayConfig) {
 	const projectRegistry = new ProjectRegistry(stateDir);
 	projectRegistry.ensureDefaultProject(getProjectRoot());
 
+	// Run one-time migration from centralized to per-project state
+	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
+
+	// Initialize per-project contexts
+	const projectContextManager = new ProjectContextManager(projectRegistry);
+	projectContextManager.initAll();
+
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
@@ -242,7 +240,6 @@ export function createGateway(config: GatewayConfig) {
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	const gateStore = new GateStore(stateDir);
 	const workflowStore = new WorkflowStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
@@ -256,14 +253,17 @@ export function createGateway(config: GatewayConfig) {
 		preferencesStore,
 		projectConfigStore,
 		groupPolicyStore,
+		projectContextManager,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
-	// Wire gate status changes to bump goal generation so the UI polling detects them
-	gateStore.onStatusChange = () => {
-		sessionManager.goalManager.getGoalStore().bumpGeneration();
-	};
+	// Wire gate status changes to bump goal generation for all project contexts
+	for (const ctx of projectContextManager.all()) {
+		ctx.gateStore.onStatusChange = () => {
+			ctx.goalStore.bumpGeneration();
+		};
+	}
 	const workflowManager = new WorkflowManager(workflowStore);
-	const staffManager = new StaffManager();
+	const staffManager = new StaffManager(projectContextManager.getDefault().staffStore);
 	// Wire staff into search index for indexing and rebuilds
 	sessionManager.searchIndex.staffStore = staffManager.getStore();
 	staffManager.searchIndex = sessionManager.searchIndex;
@@ -273,8 +273,9 @@ export function createGateway(config: GatewayConfig) {
 		colorStore,
 		taskManager: sessionManager.taskManager,
 		roleStore,
-		gateStore,
+		gateStore: projectContextManager.getDefault().gateStore,
 		personalityManager,
+		projectContextManager,
 	});
 	const bgProcessManager = new BgProcessManager((sessionId: string) => {
 		const session = sessionManager.getSession(sessionId);
@@ -363,7 +364,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, gateStore, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, projectRegistry, sandboxScope, sandboxTokenStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, projectRegistry, sandboxScope, sandboxTokenStore);
 
 			return;
 		}
@@ -426,13 +427,14 @@ export function createGateway(config: GatewayConfig) {
 	sessionManager.setOnPrCreationDetected((session) => {
 		const goalId = session.goalId || session.teamGoalId;
 		if (!goalId) return;
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goalCtx = projectContextManager.getContextForGoal(goalId);
+		const goal = goalCtx?.goalStore.get(goalId);
 		if (!goal) return;
 		_prCache.delete(goal.cwd);
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
-	verificationHarness = new VerificationHarness(stateDir, gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore);
+	verificationHarness = new VerificationHarness(stateDir, projectContextManager.getDefault().gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -605,6 +607,7 @@ export function createGateway(config: GatewayConfig) {
 			triggerEngine.stop();
 			wss.close();
 			await sessionManager.shutdown();
+			projectContextManager.closeAll();
 			if (sandboxPool) {
 				await sandboxPool.shutdown();
 			}
@@ -667,7 +670,7 @@ async function handleApiRoute(
 	teamManager: TeamManager,
 	roleManager: RoleManager,
 	toolManager: ToolManager,
-	gateStore: GateStore,
+	projectContextManager: ProjectContextManager,
 	personalityManager: PersonalityManager,
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
@@ -687,6 +690,53 @@ async function handleApiRoute(
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
 	};
+
+	// ── Cross-project helper functions ─────────────────────────────
+
+	/** Retrieve a goal from any project context. */
+	function getGoalAcrossProjects(goalId: string): PersistedGoal | undefined {
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		return ctx?.goalStore.get(goalId);
+	}
+
+	/** List live goals across all projects, optionally filtered by projectId. */
+	function listGoalsAcrossProjects(opts?: { projectId?: string }): PersistedGoal[] {
+		if (opts?.projectId) {
+			const ctx = projectContextManager.getOrCreate(opts.projectId);
+			return ctx ? ctx.goalStore.getLive() : [];
+		}
+		return projectContextManager.getAllLiveGoals();
+	}
+
+	/** Get a GoalManager for the project that owns the given goal. Falls back to default. */
+	function getGoalManagerForGoal(goalId: string): GoalManager {
+		const ctx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
+		return ctx.goalManager;
+	}
+
+	/** Get a TaskManager for the project that owns the given goal. Falls back to default. */
+	const taskManagerCache = new Map<string, TaskManager>();
+	function getTaskManagerForGoal(goalId: string): TaskManager {
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) return sessionManager.taskManager;
+		const projectId = ctx.project.id;
+		let tm = taskManagerCache.get(projectId);
+		if (!tm) {
+			tm = new TaskManager(ctx.taskStore);
+			taskManagerCache.set(projectId, tm);
+		}
+		return tm;
+	}
+
+	/** Get a TaskManager for a task by looking up which goal it belongs to. Falls back to default. */
+	function getTaskManagerForTask(taskId: string): TaskManager {
+		// Search all project contexts for the task
+		for (const ctx of projectContextManager.all()) {
+			const task = ctx.taskStore.get(taskId);
+			if (task) return getTaskManagerForGoal(task.goalId);
+		}
+		return sessionManager.taskManager;
+	}
 
 	// GET /api/health — unauthenticated so the client can probe localhost mode
 	if (url.pathname === "/api/health" && req.method === "GET") {
@@ -931,6 +981,13 @@ async function handleApiRoute(
 		try {
 			const color = typeof body.color === "string" ? body.color : undefined;
 			const project = projectRegistry.register(body.name, body.rootPath, color);
+			// Initialize project context for the new project
+			const newCtx = projectContextManager.getOrCreate(project.id);
+			if (newCtx) {
+				newCtx.gateStore.onStatusChange = () => {
+					newCtx.goalStore.bumpGeneration();
+				};
+			}
 			json(project, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
@@ -972,6 +1029,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
+			projectContextManager.remove(projectId);
 			projectRegistry.remove(projectId);
 			json({ ok: true });
 		} catch (err: any) {
@@ -983,7 +1041,7 @@ async function handleApiRoute(
 	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
 	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
 	if (projectConfigMatch) {
-		const ctx = getOrCreateProjectContext(projectConfigMatch[1], projectRegistry);
+		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
 
@@ -1038,7 +1096,7 @@ async function handleApiRoute(
 		try {
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const projectNames = new Map(projectRegistry.list().map(p => [p.id, p.name]));
-			const results = sessionManager.searchIndex.search(q, { type, limit, offset, projectId, projectNames });
+			const results = projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
 			json(results);
 		} catch (err) {
 			json({ error: `Search failed: ${err}` }, 500);
@@ -1048,7 +1106,7 @@ async function handleApiRoute(
 
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
-		const currentGen = sessionManager.getSessionStore().getGeneration();
+		const currentGen = projectContextManager.getSessionGeneration();
 		const sinceParam = url.searchParams.get("since");
 		if (sinceParam !== null) {
 			const since = parseInt(sinceParam, 10);
@@ -1067,26 +1125,39 @@ async function handleApiRoute(
 		}
 		// Support ?include=archived to return archived sessions too
 		if (url.searchParams.get("include") === "archived") {
+			// Collect archived sessions across all project contexts
+			const allArchived: typeof sessions = [];
+			for (const ctx of projectContextManager.all()) {
+				const store = ctx.sessionStore;
+				for (const s of store.getArchived()) {
+					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
+				}
+			}
+			// Sort by archivedAt descending
+			allArchived.sort((a: any, b: any) => ((b as any).archivedAt ?? 0) - ((a as any).archivedAt ?? 0));
+			// Apply projectId filter if present
+			const filteredArchived = filterProjectId
+				? allArchived.filter((s: any) => s.projectId === filterProjectId)
+				: allArchived;
+
 			const limitParam = url.searchParams.get("limit");
 			const afterParam = url.searchParams.get("after");
 			if (limitParam) {
 				// Paginated archived sessions
 				const limit = Math.min(Math.max(1, parseInt(limitParam, 10) || 50), 200);
 				const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
-				const page = sessionManager.getSessionStore().listArchivedSessionsPaginated(limit, afterCursor);
-				const archivedSessions = page.sessions.map((s) => ({
-					...s,
-					colorIndex: colorStore.get(s.id),
-					status: "archived",
-				}));
-				json({ generation: currentGen, sessions: [...sessions, ...archivedSessions], total: page.total, hasMore: page.hasMore, nextCursor: page.nextCursor });
+				let page = filteredArchived;
+				if (afterCursor !== undefined) {
+					page = page.filter((s: any) => ((s as any).archivedAt ?? 0) < afterCursor);
+				}
+				const total = filteredArchived.length;
+				const hasMore = page.length > limit;
+				const sliced = page.slice(0, limit);
+				const nextCursor = sliced.length > 0 ? (sliced[sliced.length - 1] as any).archivedAt : undefined;
+				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, hasMore, nextCursor });
 			} else {
 				// Backward compatible: return all archived sessions
-				const archived = sessionManager.listArchivedSessions().map((s) => ({
-					...s,
-					colorIndex: colorStore.get(s.id),
-				}));
-				json({ generation: currentGen, sessions: [...sessions, ...archived] });
+				json({ generation: currentGen, sessions: [...sessions, ...filteredArchived] });
 			}
 		} else {
 			json({ generation: currentGen, sessions });
@@ -1134,7 +1205,7 @@ async function handleApiRoute(
 			res.end(JSON.stringify({ error: "Session not found" }));
 			return;
 		}
-		const sessionPs = sessionManager.getSessionStore().get(session.id);
+		const sessionPs = sessionManager.getSessionStore(session.projectId).get(session.id);
 		json({
 			id: session.id,
 			title: session.title,
@@ -1222,12 +1293,12 @@ async function handleApiRoute(
 			if (proj) cwd = proj.rootPath;
 		}
 		if (goalId) {
-			const goal = sessionManager.goalManager.getGoal(goalId);
+			const goal = getGoalAcrossProjects(goalId);
 			if (goal) {
 				cwd = body?.cwd || goal.cwd;
 				// Auto-transition goal to in-progress when first session starts
 				if (goal.state === "todo") {
-					await sessionManager.goalManager.updateGoal(goalId, { state: "in-progress" });
+					await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
 				}
 			}
 		}
@@ -1333,12 +1404,12 @@ async function handleApiRoute(
 
 			// Store reattemptGoalId on the session if provided
 			if (reattemptGoalId) {
-				sessionManager.getSessionStore().update(session.id, { reattemptGoalId });
+				sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
 			}
 
 			// Store projectId on the session if provided
 			if (body?.projectId && typeof body.projectId === "string") {
-				sessionManager.getSessionStore().update(session.id, { projectId: body.projectId });
+				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: body.projectId });
 			}
 
 			json({
@@ -1366,17 +1437,31 @@ async function handleApiRoute(
 
 	// GET /api/goals
 	if (url.pathname === "/api/goals" && req.method === "GET") {
-		// Paginated archived goals
+		// Paginated archived goals — aggregate across all projects
 		if (url.searchParams.get("archived") === "true") {
 			const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10) || 50), 200);
 			const afterParam = url.searchParams.get("after");
 			const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
-			const page = sessionManager.goalManager.getGoalStore().listArchivedGoalsPaginated(limit, afterCursor);
-			json({ goals: page.goals, total: page.total, hasMore: page.hasMore, nextCursor: page.nextCursor });
+			const filterProjectId = url.searchParams.get("projectId") || undefined;
+			// Aggregate archived goals across all project contexts
+			let allArchived: PersistedGoal[] = [];
+			for (const ctx of projectContextManager.all()) {
+				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
+				allArchived.push(...ctx.goalStore.getArchived());
+			}
+			allArchived.sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
+			const total = allArchived.length;
+			if (afterCursor !== undefined) {
+				allArchived = allArchived.filter(g => (g.archivedAt ?? 0) < afterCursor);
+			}
+			const page = allArchived.slice(0, limit);
+			const hasMore = allArchived.length > limit;
+			const nextCursor = page.length > 0 ? page[page.length - 1].archivedAt : undefined;
+			json({ goals: page, total, hasMore, nextCursor });
 			return;
 		}
 
-		const currentGen = sessionManager.goalManager.getGoalGeneration();
+		const currentGen = projectContextManager.getGoalGeneration();
 		const sinceParam = url.searchParams.get("since");
 		if (sinceParam !== null) {
 			const since = parseInt(sinceParam, 10);
@@ -1386,10 +1471,7 @@ async function handleApiRoute(
 			}
 		}
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
-		let goals = sessionManager.goalManager.listGoals();
-		if (filterProjectId) {
-			goals = goals.filter(g => g.projectId === filterProjectId);
-		}
+		const goals = listGoalsAcrossProjects({ projectId: filterProjectId });
 		json({ generation: currentGen, goals });
 		return;
 	}
@@ -1412,7 +1494,15 @@ async function handleApiRoute(
 		}
 		try {
 			const sandboxed = body.sandboxed === true;
-			const goal = await sessionManager.goalManager.createGoal(title, cwd, {
+			// Resolve target project context for goal creation
+			const targetProjectId = (body.projectId && typeof body.projectId === "string") ? body.projectId : projectContextManager.getDefaultProjectId();
+			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
+			if (!targetCtx) {
+				json({ error: "Invalid project" }, 400);
+				return;
+			}
+			const targetGoalManager = targetCtx.goalManager;
+			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
 				workflowStore: workflowManager.store,
@@ -1420,23 +1510,23 @@ async function handleApiRoute(
 			});
 			// Set projectId if provided
 			if (body.projectId && typeof body.projectId === "string") {
-				sessionManager.goalManager.updateGoal(goal.id, { projectId: body.projectId });
+				targetGoalManager.updateGoal(goal.id, { projectId: body.projectId });
 				goal.projectId = body.projectId;
 			}
 			// Set reattemptOf if provided
 			if (body.reattemptOf && typeof body.reattemptOf === "string") {
-				sessionManager.goalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
+				targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
 				goal.reattemptOf = body.reattemptOf;
 			}
 			// Initialize gate states for the workflow
 			if (goal.workflow) {
-				gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
+				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
 			}
 			json(goal, 201);
 
 			// Fire-and-forget async worktree setup
 			if (goal.setupStatus === "preparing") {
-				sessionManager.goalManager.setupWorktree(goal.id).then(() => {
+				targetGoalManager.setupWorktree(goal.id).then(() => {
 					broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
 				}).catch((err) => {
 					broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
@@ -1452,14 +1542,15 @@ async function handleApiRoute(
 	const retrySetupMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-setup$/);
 	if (retrySetupMatch && req.method === "POST") {
 		const goalId = retrySetupMatch[1];
-		const ok = sessionManager.goalManager.retrySetup(goalId);
+		const retryGoalManager = getGoalManagerForGoal(goalId);
+		const ok = retryGoalManager.retrySetup(goalId);
 		if (!ok) {
 			json({ error: "Goal not found or not in error state" }, 400);
 			return;
 		}
 		json({ ok: true });
 		// Fire-and-forget async worktree setup
-		sessionManager.goalManager.setupWorktree(goalId).then(() => {
+		retryGoalManager.setupWorktree(goalId).then(() => {
 			broadcastToAll({ type: "goal_setup_complete", goalId });
 		}).catch((err) => {
 			broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
@@ -1473,18 +1564,19 @@ async function handleApiRoute(
 		const id = goalMatch[1];
 
 		if (req.method === "GET") {
-			const goal = sessionManager.goalManager.getGoal(id);
+			const goal = getGoalAcrossProjects(id);
 			if (!goal) { json({ error: "Goal not found" }, 404); return; }
 			json(goal);
 			return;
 		}
 
 		if (req.method === "PUT") {
-			const putGoal = sessionManager.goalManager.getGoal(id);
+			const putGoal = getGoalAcrossProjects(id);
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const ok = await sessionManager.goalManager.updateGoal(id, {
+			const goalMgr = getGoalManagerForGoal(id);
+			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
 				cwd: body.cwd,
 				state: body.state,
@@ -1519,7 +1611,8 @@ async function handleApiRoute(
 				}
 			}
 			// Archive instead of hard-delete — tasks, gates, team state remain intact
-			await sessionManager.goalManager.archiveGoal(id);
+			const deleteGoalMgr = getGoalManagerForGoal(id);
+			await deleteGoalMgr.archiveGoal(id);
 			prStatusStore.remove(id);
 			json({ ok: true });
 			return;
@@ -2065,7 +2158,7 @@ async function handleApiRoute(
 	// GET /api/goals/:goalId/tasks — list tasks for a goal
 	const goalTasksMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tasks$/);
 	if (goalTasksMatch && req.method === "GET") {
-		const tasks = sessionManager.taskManager.getTasksForGoal(goalTasksMatch[1]);
+		const tasks = getTaskManagerForGoal(goalTasksMatch[1]).getTasksForGoal(goalTasksMatch[1]);
 		json({ tasks });
 		return;
 	}
@@ -2073,7 +2166,7 @@ async function handleApiRoute(
 	// POST /api/goals/:goalId/tasks — create a task
 	if (goalTasksMatch && req.method === "POST") {
 		const goalId = goalTasksMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
 
@@ -2089,7 +2182,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const task = sessionManager.taskManager.createTask(goalId, title, type, {
+			const task = getTaskManagerForGoal(goalId).createTask(goalId, title, type, {
 				parentTaskId: body.parentTaskId,
 				spec: body.spec,
 				dependsOn: body.dependsOn,
@@ -2109,8 +2202,10 @@ async function handleApiRoute(
 	const goalGatesMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates$/);
 	if (goalGatesMatch && req.method === "GET") {
 		const goalId = goalGatesMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const gateCtx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
+		const gateStore = gateCtx.gateStore;
 		const gates = gateStore.getGatesForGoal(goalId);
 		// Enrich with workflow gate definitions
 		const enriched = gates.map(g => {
@@ -2125,9 +2220,10 @@ async function handleApiRoute(
 	const gateDetailMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)$/);
 	if (gateDetailMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateDetailMatch;
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		const def = goal?.workflow?.gates.find(wg => wg.id === gateId);
 		json({ ...gate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream });
 		return;
@@ -2137,10 +2233,11 @@ async function handleApiRoute(
 	const gateSignalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signal$/);
 	if (gateSignalMatch && req.method === "POST") {
 		const [, goalId, gateId] = gateSignalMatch;
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
 
@@ -2310,6 +2407,7 @@ async function handleApiRoute(
 	const gateSignalsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signals$/);
 	if (gateSignalsMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateSignalsMatch;
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ signals: gate.signals });
@@ -2329,6 +2427,7 @@ async function handleApiRoute(
 	const gateContentMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/content$/);
 	if (gateContentMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateContentMatch;
+		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ content: gate.currentContent, version: gate.currentContentVersion });
@@ -2340,7 +2439,7 @@ async function handleApiRoute(
 	if (workflowContextMatch && req.method === "GET") {
 		const goalId = workflowContextMatch[1];
 		const gateId = workflowContextMatch[2];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 404); return; }
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
@@ -2358,7 +2457,7 @@ async function handleApiRoute(
 
 		// GET /api/tasks/:id
 		if (req.method === "GET") {
-			const task = sessionManager.taskManager.getTask(id);
+			const task = getTaskManagerForTask(id).getTask(id);
 			if (!task) { json({ error: "Task not found" }, 404); return; }
 			json(task);
 			return;
@@ -2369,9 +2468,10 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
 			try {
-				const task = sessionManager.taskManager.getTask(id);
+				const tm = getTaskManagerForTask(id);
+				const task = tm.getTask(id);
 				const prevState = task?.state;
-				const ok = sessionManager.taskManager.updateTask(id, {
+				const ok = tm.updateTask(id, {
 					title: body.title,
 					spec: body.spec,
 					state: body.state,
@@ -2396,7 +2496,7 @@ async function handleApiRoute(
 
 		// DELETE /api/tasks/:id
 		if (req.method === "DELETE") {
-			const ok = sessionManager.taskManager.deleteTask(id);
+			const ok = getTaskManagerForTask(id).deleteTask(id);
 			if (!ok) { json({ error: "Task not found" }, 404); return; }
 			json({ ok: true });
 			return;
@@ -2413,7 +2513,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const ok = sessionManager.taskManager.assignTask(taskAssignMatch[1], sessionId);
+			const ok = getTaskManagerForTask(taskAssignMatch[1]).assignTask(taskAssignMatch[1], sessionId);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 			json({ ok: true });
 		} catch (err: any) {
@@ -2437,8 +2537,9 @@ async function handleApiRoute(
 		}
 		try {
 			const taskId = taskTransitionMatch[1];
-			const task = sessionManager.taskManager.getTask(taskId);
-			const ok = sessionManager.taskManager.transitionTask(taskId, state as TaskState);
+			const tm = getTaskManagerForTask(taskId);
+			const task = tm.getTask(taskId);
+			const ok = tm.transitionTask(taskId, state as TaskState);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
 
 			// Notify team lead when a task reaches a terminal or blocked state
@@ -2474,7 +2575,7 @@ async function handleApiRoute(
 	if (teamSpawnMatch && req.method === "POST") {
 		const goalId = teamSpawnMatch[1];
 		// Guard: reject spawn if goal is archived
-		const spawnGoal = sessionManager.goalManager.getGoal(goalId);
+		const spawnGoal = getGoalAcrossProjects(goalId);
 		if (spawnGoal?.archived) {
 			json({ error: "Goal is archived" }, 409);
 			return;
@@ -2527,7 +2628,7 @@ async function handleApiRoute(
 	const commitsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/commits$/);
 	if (commitsMatch && req.method === "GET") {
 		const goalId = commitsMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!fs.existsSync(goal.cwd)) { json({ commits: [] }); return; }
 		const branch = goal.branch || "HEAD";
@@ -2567,7 +2668,7 @@ async function handleApiRoute(
 	const goalGitMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/git-status$/);
 	if (goalGitMatch && req.method === "GET") {
 		const goalId = goalGitMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -2651,7 +2752,7 @@ async function handleApiRoute(
 	const goalDiffMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/git-diff$/);
 	if (goalDiffMatch && req.method === "GET") {
 		const goalId = goalDiffMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -2677,7 +2778,7 @@ async function handleApiRoute(
 	const goalPrStatusMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-status$/);
 	if (goalPrStatusMatch && req.method === "GET") {
 		const goalId = goalPrStatusMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -2692,7 +2793,7 @@ async function handleApiRoute(
 	const goalPrCacheBustMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-cache-bust$/);
 	if (req.method === 'POST' && goalPrCacheBustMatch) {
 		const goalId = goalPrCacheBustMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		_prCache.delete(cwd);
@@ -2706,7 +2807,7 @@ async function handleApiRoute(
 	const goalPrMergeMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-merge$/);
 	if (goalPrMergeMatch && req.method === "POST") {
 		const goalId = goalPrMergeMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -2837,11 +2938,12 @@ async function handleApiRoute(
 		const wfGateId = typeof body.workflowGateId === "string" ? body.workflowGateId : undefined;
 		const inputIds = Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined;
 		if (wfGateId) {
-			const goal = sessionManager.goalManager.getGoal(goalId);
-			if (goal?.workflow && gateStore) {
+			const goal = getGoalAcrossProjects(goalId);
+			const goalGateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+			if (goal?.workflow && goalGateStore) {
 				const wfGate = goal.workflow.gates.find((g: any) => g.id === wfGateId);
 				if (wfGate?.dependsOn?.length) {
-					const gateStates = gateStore.getGatesForGoal(goalId);
+					const gateStates = goalGateStore.getGatesForGoal(goalId);
 					const passedIds = new Set(gateStates.filter((g: any) => g.status === "passed").map((g: any) => g.gateId));
 					const notPassed = wfGate.dependsOn.filter((depId: string) => !passedIds.has(depId));
 					if (notPassed.length > 0) {
@@ -3448,7 +3550,7 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged
-		const goalBranch = session.goalId ? sessionManager.goalManager.getGoal(session.goalId)?.branch : undefined;
+		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
 		const pr = await getCachedPrStatus(cwd, goalBranch, process.cwd());
 		if (pr) {
 			const goalId = session.goalId;
@@ -3506,7 +3608,7 @@ async function handleApiRoute(
 			return;
 		}
 		const sessAdminFlag = body?.admin ? " --admin" : "";
-		const sessMergeBranch = session.goalId ? sessionManager.goalManager.getGoal(session.goalId)?.branch : undefined;
+		const sessMergeBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
 		try {
 			await execAsync(`gh pr merge --${method}${sessAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
@@ -3594,7 +3696,7 @@ async function handleApiRoute(
 		const wf = workflowManager.getWorkflow(id);
 		if (!wf) { json({ error: "Workflow not found" }, 404); return; }
 		// Check if any active goal references this workflow
-		const allGoals = sessionManager.goalManager.listGoals();
+		const allGoals = projectContextManager.getAllLiveGoals();
 		if (allGoals.some((g: any) => g.workflowId === id && g.state !== "complete")) {
 			json({ error: "Cannot delete: workflow is in use by active goals" }, 409);
 			return;
@@ -3660,7 +3762,7 @@ async function handleApiRoute(
 	const goalCostBreakdownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/cost\/breakdown$/);
 	if (goalCostBreakdownMatch && req.method === "GET") {
 		const goalId = goalCostBreakdownMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) {
 			json({ error: "Goal not found" }, 404);
 			return;
@@ -3705,7 +3807,7 @@ async function handleApiRoute(
 	const goalCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/cost$/);
 	if (goalCostMatch && req.method === "GET") {
 		const goalId = goalCostMatch[1];
-		const goal = sessionManager.goalManager.getGoal(goalId);
+		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) {
 			json({ error: "Goal not found" }, 404);
 			return;
@@ -3720,7 +3822,7 @@ async function handleApiRoute(
 	const taskCostMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cost$/);
 	if (taskCostMatch && req.method === "GET") {
 		const taskId = taskCostMatch[1];
-		const task = sessionManager.taskManager.getTask(taskId);
+		const task = getTaskManagerForTask(taskId).getTask(taskId);
 		if (!task) {
 			json({ error: "Task not found" }, 404);
 			return;
@@ -4068,7 +4170,11 @@ async function handleApiRoute(
 			}
 			// Verify the session exists (live or persisted).
 			const mcpSession = sessionManager.getSession(mcpSessionId);
-			const persistedSession = mcpSession ? null : sessionManager.getSessionStore().get(mcpSessionId);
+			const persistedSession = mcpSession ? null : (
+				// Search across all project stores for persisted session
+				projectContextManager.getContextForSession(mcpSessionId)?.sessionStore.get(mcpSessionId)
+				?? sessionManager.getSessionStore().get(mcpSessionId)
+			);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
 				return;

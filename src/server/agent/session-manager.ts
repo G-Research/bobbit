@@ -30,6 +30,10 @@ import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
+import { ProjectContextManager } from "./project-context-manager.js";
+import { GoalStore, type PersistedGoal } from "./goal-store.js";
+import { TaskStore } from "./task-store.js";
+import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
 import { SandboxProxy } from "./sandbox-proxy.js";
 import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
@@ -151,6 +155,8 @@ export interface SessionManagerOptions {
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	/** Project config store for reading project defaults (e.g. default_thinking_level) */
 	projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
+	/** Project context manager for per-project store resolution */
+	projectContextManager?: ProjectContextManager;
 }
 
 export class SessionManager {
@@ -167,6 +173,7 @@ export class SessionManager {
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
+	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
 	private sandboxProxy: SandboxProxy | null = null;
 	sandboxPool: SandboxPool | null = null;
@@ -195,7 +202,6 @@ export class SessionManager {
 	}
 
 	constructor(options?: SessionManagerOptions) {
-		const stateDir = bobbitStateDir();
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
 		this.colorStore = options?.colorStore;
@@ -206,11 +212,105 @@ export class SessionManager {
 		this.preferencesStore = options?.preferencesStore;
 		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
-		this.store = new SessionStore(stateDir);
-		this.costTracker = new CostTracker(stateDir);
-		this.goalManager = new GoalManager(options?.workflowStore, stateDir);
-		this.taskManager = new TaskManager(stateDir);
-		this.searchIndex = new SearchIndex(path.join(stateDir, "search.db"));
+		this.projectContextManager = options?.projectContextManager ?? null;
+		if (this.projectContextManager) {
+			const defaultCtx = this.projectContextManager.getDefault();
+			this.store = defaultCtx.sessionStore;
+			this.costTracker = defaultCtx.costTracker;
+			this.goalManager = new GoalManager(defaultCtx.goalStore, options?.workflowStore);
+			this.taskManager = new TaskManager(defaultCtx.taskStore);
+			this.searchIndex = defaultCtx.searchIndex;
+		} else {
+			const stateDir = bobbitStateDir();
+			this.store = new SessionStore(stateDir);
+			this.costTracker = new CostTracker(stateDir);
+			this.goalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
+			this.taskManager = new TaskManager(new TaskStore(stateDir));
+			this.searchIndex = new SearchIndex(path.join(stateDir, "search.db"));
+		}
+	}
+
+	getProjectContextManager(): ProjectContextManager | null {
+		return this.projectContextManager;
+	}
+
+	/** Resolve the SessionStore for a given project. */
+	getSessionStore(projectId?: string): SessionStore {
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.sessionStore;
+		}
+		return this.store;
+	}
+
+	/** Resolve the GoalStore for a given project. */
+	getGoalStoreForProject(projectId?: string): GoalStore {
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.goalStore;
+		}
+		return this.goalManager.getGoalStore();
+	}
+
+	/** Resolve the GateStore for a goal. */
+	getGateStoreForGoal(goalId: string): GateStore | null {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.gateStore;
+		}
+		return null;
+	}
+
+	/** Resolve SearchIndex for a project. */
+	getSearchIndexForProject(projectId?: string): SearchIndex {
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.searchIndex;
+		}
+		return this.searchIndex;
+	}
+
+	/** Resolve the correct SessionStore for an in-memory session by ID. */
+	private resolveStoreForSession(id: string): SessionStore {
+		const session = this.sessions.get(id);
+		if (session?.projectId) {
+			return this.getSessionStore(session.projectId);
+		}
+		return this.store;
+	}
+
+	/** Resolve the correct SessionStore for any session by ID (in-memory or persisted). */
+	private resolveStoreForId(id: string): SessionStore {
+		// Try in-memory first (fast path)
+		const session = this.sessions.get(id);
+		if (session?.projectId) {
+			return this.getSessionStore(session.projectId);
+		}
+		// Search all project stores for persisted/archived sessions
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				if (ctx.sessionStore.get(id)) return ctx.sessionStore;
+			}
+		}
+		return this.store;
+	}
+
+	/** Resolve the correct SearchIndex for a session based on its project. */
+	private resolveSearchIndex(session: { projectId?: string }): SearchIndex {
+		if (session.projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(session.projectId);
+			if (ctx) return ctx.searchIndex;
+		}
+		return this.searchIndex;
+	}
+
+	/** Resolve a goal across all project contexts. */
+	private resolveGoal(goalId: string): PersistedGoal | undefined {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.goalStore.get(goalId);
+		}
+		return this.goalManager.getGoalStore().get(goalId);
 	}
 
 	/** Whether Docker sandbox mode is enabled in project config. */
@@ -219,23 +319,34 @@ export class SessionManager {
 	}
 
 	/** Build a PipelineContext from this manager's fields. */
-	buildPipelineContext(): PipelineContext {
+	buildPipelineContext(projectId?: string): PipelineContext {
+		const resolvedStore = this.getSessionStore(projectId);
+		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
+		let resolvedGoalManager = this.goalManager;
+		let resolvedTaskManager = this.taskManager;
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) {
+				resolvedGoalManager = ctx.goalManager;
+				resolvedTaskManager = new TaskManager(ctx.taskStore);
+			}
+		}
 		return {
 			agentCliPath: this.agentCliPath,
 			systemPromptPath: this.systemPromptPath,
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
 			mcpManager: this.mcpManager,
-			goalManager: this.goalManager,
-			taskManager: this.taskManager,
+			goalManager: resolvedGoalManager,
+			taskManager: resolvedTaskManager,
 			personalityManager: this.personalityManager ?? null,
 			projectConfigStore: this.projectConfigStore ?? null,
 			sandboxPool: this.sandboxPool,
 			sandboxTokenStore: this.sandboxTokenStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			costTracker: this.costTracker,
-			store: this.store,
-			searchIndex: this.searchIndex,
+			store: resolvedStore,
+			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 			buildToolRestrictionsText: (tools, role) => this.buildToolRestrictionsText(tools, role),
@@ -354,9 +465,7 @@ export class SessionManager {
 		return this.costTracker;
 	}
 
-	getSessionStore(): SessionStore {
-		return this.store;
-	}
+
 
 	getMcpManager(): McpManager | null {
 		return this.mcpManager;
@@ -459,9 +568,9 @@ export class SessionManager {
 			if (session.assistantType === "goal") {
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
 				// Inject re-attempt context if this is a re-attempt session
-				const reattemptId = (this.store.get(session.id) as any)?.reattemptGoalId;
+				const reattemptId = (this.resolveStoreForSession(session.id).get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
-					const origGoal = this.goalManager.getGoal(reattemptId);
+					const origGoal = this.resolveGoal(reattemptId);
 					if (origGoal) {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
@@ -477,7 +586,7 @@ export class SessionManager {
 				projectConfigStore: this.projectConfigStore,
 			};
 		} else {
-			const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
+			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 			const resolvedPersonalities = (session.personalities && session.personalities.length > 0 && this.personalityManager)
 				? this.personalityManager.resolvePersonalities(session.personalities)
 				: undefined;
@@ -533,7 +642,7 @@ export class SessionManager {
 			sessionId: session.id,
 			queue: session.promptQueue.toArray(),
 		});
-		this.store.update(session.id, { messageQueue: session.promptQueue.toArray() });
+		this.resolveStoreForSession(session.id).update(session.id, { messageQueue: session.promptQueue.toArray() });
 	}
 
 	/**
@@ -643,7 +752,7 @@ export class SessionManager {
 		// Optimistic status update to prevent double-dispatch race
 		session.status = "streaming";
 		session.streamingStartedAt = session.streamingStartedAt ?? Date.now();
-		this.store.update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 		broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
 
 		// Always dispatch as prompt — agent is idle, steer is only for mid-turn
@@ -756,7 +865,7 @@ export class SessionManager {
 			session.turnHadToolCalls = false;
 			session.permissionBroadcastSent = false;
 			session.streamingStartedAt = Date.now();
-			this.store.update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
 		} else if (event.type === "agent_end") {
 			// Revoke one-time granted tools after the turn completes
@@ -770,7 +879,7 @@ export class SessionManager {
 
 			session.status = "idle";
 			session.streamingStartedAt = undefined;
-			this.store.update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
 			broadcast(session.clients, { type: "session_status", status: "idle" });
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
@@ -799,7 +908,7 @@ export class SessionManager {
 			try {
 				const { text, toolNames } = extractTextFromMessage(event.message);
 				if (text.trim()) {
-					this.searchIndex.indexMessage(
+					this.resolveSearchIndex(session).indexMessage(
 						session.id,
 						session.title,
 						text,
@@ -976,7 +1085,7 @@ export class SessionManager {
 	 * which re-applies tool activation with the updated role.
 	 */
 	private async _restartSessionWithUpdatedRole(session: SessionInfo): Promise<void> {
-		const ps = this.store.get(session.id);
+		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) return;
 
 		// Save state that must survive the restart
@@ -1064,29 +1173,34 @@ export class SessionManager {
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
 	async restoreSessions(): Promise<void> {
-		// Initialize search index
-		try {
-			this.searchIndex.open();
-			if (this.searchIndex.needsRebuild()) {
-				const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
-				this.searchIndex.rebuildFromStores(goalStore, this.store);
+		// Initialize search index (skip when ProjectContextManager is active —
+		// ProjectContext.open() already opens the index and wires callbacks)
+		if (!this.projectContextManager) {
+			try {
+				this.searchIndex.open();
+				if (this.searchIndex.needsRebuild()) {
+					const goalStore = this.goalManager.getGoalStore();
+					this.searchIndex.rebuildFromStores(goalStore, this.store);
+				}
+				// Wire index update callbacks
+				const goalStore = this.goalManager.getGoalStore();
+				goalStore.onIndexUpdate = (goal) => {
+					try { this.searchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
+				};
+				this.store.onIndexUpdate = (session) => {
+					try {
+						const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
+						this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
+					} catch (err) { console.error("[search] Failed to index session:", err); }
+				};
+			} catch (err) {
+				console.error("[search] Failed to initialize search index:", err);
 			}
-			// Wire index update callbacks
-			const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
-			goalStore.onIndexUpdate = (goal) => {
-				try { this.searchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
-			};
-			this.store.onIndexUpdate = (session) => {
-				try {
-					const goalTitle = session.goalId ? this.goalManager.getGoal(session.goalId)?.title : undefined;
-					this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
-				} catch (err) { console.error("[search] Failed to index session:", err); }
-			};
-		} catch (err) {
-			console.error("[search] Failed to initialize search index:", err);
 		}
 
-		const persisted = this.store.getLive();
+		const persisted = this.projectContextManager
+			? [...this.projectContextManager.getAllLiveSessions()]
+			: this.store.getLive();
 		if (persisted.length === 0) return;
 
 		// Separate regular sessions from delegate sessions
@@ -1105,7 +1219,7 @@ export class SessionManager {
 		// Delegate sessions: dormant entries only — restored on-demand via addClient()
 		for (const ps of delegates) {
 			if (!ps.agentSessionFile || !fs.existsSync(ps.agentSessionFile)) {
-				this.store.remove(ps.id);
+				this.getSessionStore(ps.projectId).remove(ps.id);
 				continue;
 			}
 			this.addDormantSession(ps);
@@ -1133,28 +1247,32 @@ export class SessionManager {
 		// Get session IDs that the verification harness will resume — skip those
 		const resumingIds = this._verificationHarness?.getResumingSessionIds() ?? new Set<string>();
 
-		const orphans: string[] = [];
-		for (const ps of this.store.getLive()) {
+		const orphans: { id: string; projectId?: string }[] = [];
+		const allLive = this.projectContextManager
+			? [...this.projectContextManager.getAllLiveSessions()]
+			: this.store.getLive();
+		for (const ps of allLive) {
 			if (ps.nonInteractive && !resumingIds.has(ps.id)) {
-				orphans.push(ps.id);
+				orphans.push({ id: ps.id, projectId: ps.projectId });
 			}
 		}
 		if (orphans.length === 0) return;
 
 		console.log(`[session-manager] Cleaning up ${orphans.length} orphaned non-interactive session(s)...`);
-		for (const id of orphans) {
+		for (const { id, projectId } of orphans) {
 			try {
 				await this.terminateSession(id);
 				console.log(`[session-manager] Terminated orphaned non-interactive session ${id}`);
 			} catch (err) {
 				// If terminate fails (e.g. session wasn't fully restored), archive directly
 				console.warn(`[session-manager] Failed to terminate orphan ${id}, archiving:`, err);
-				this.store.archive(id);
+				this.getSessionStore(projectId).archive(id);
 			}
 		}
 	}
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
+		const sessionStore = this.getSessionStore(ps.projectId);
 		if (!ps.agentSessionFile) {
 			if (ps.worktreePath && ps.branch) {
 				// Code may be recoverable — the branch exists in git
@@ -1163,16 +1281,16 @@ export class SessionManager {
 					`(branch: ${ps.branch}, path: ${ps.worktreePath}). ` +
 					`Code may be recoverable. Archiving session — branch "${ps.branch}" preserved in git.`,
 				);
-				this.store.archive(ps.id);
+				sessionStore.archive(ps.id);
 			} else {
 				console.log(`[session-manager] Removing ${ps.id} — no agent session file and no worktree`);
-				this.store.remove(ps.id);
+				sessionStore.remove(ps.id);
 			}
 			return;
 		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
 			console.log(`[session-manager] Removing ${ps.id} — agent session file missing: ${ps.agentSessionFile}`);
-			this.store.remove(ps.id);
+			sessionStore.remove(ps.id);
 			return;
 		}
 		try {
@@ -1200,6 +1318,7 @@ export class SessionManager {
 			titleGenerated: true,
 			goalId: ps.goalId,
 			delegateOf: ps.delegateOf,
+			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 		});
 	}
@@ -1279,7 +1398,7 @@ export class SessionManager {
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
-					const origGoal = this.goalManager.getGoal(ps.reattemptGoalId);
+					const origGoal = this.resolveGoal(ps.reattemptGoalId);
 					if (origGoal) {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
@@ -1297,7 +1416,7 @@ export class SessionManager {
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
-			const goal = ps.goalId ? this.goalManager.getGoal(ps.goalId) : undefined;
+			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
 			// Resolve persisted personality names to prompt fragments
 			const resolvedPersonalities = (ps.personalities && ps.personalities.length > 0 && this.personalityManager)
 				? this.personalityManager.resolvePersonalities(ps.personalities)
@@ -1369,15 +1488,17 @@ export class SessionManager {
 			allowedTools: restoredAllowedTools,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
+			projectId: ps.projectId,
 		};
 
 		// Skip cost tracking during session restore (switch_session replays
 		// all historical message_update events which would double-count costs)
 		let restoring = true;
 
+		const restoreStore = this.getSessionStore(ps.projectId);
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = Date.now();
-			this.store.update(ps.id, { lastActivity: session.lastActivity });
+			restoreStore.update(ps.id, { lastActivity: session.lastActivity });
 
 			this.handleAgentLifecycle(session, event);
 
@@ -1409,7 +1530,7 @@ export class SessionManager {
 		// If the agent was mid-turn when the server died, re-prompt it to continue
 		if (ps.wasStreaming) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn — re-prompting to continue`);
-			this.store.update(ps.id, { wasStreaming: false });
+			restoreStore.update(ps.id, { wasStreaming: false });
 			rpcClient.prompt(
 				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
@@ -1420,9 +1541,11 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions; projectId?: string }): Promise<SessionInfo> {
 		const id = randomUUID();
-		const ctx = this.buildPipelineContext();
+		// Resolve projectId from opts or from the goal's project
+		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
+		const ctx = this.buildPipelineContext(projectId);
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
@@ -1454,6 +1577,7 @@ export class SessionManager {
 				personalities: opts?.personalityNames,
 				allowedTools: opts?.allowedTools,
 				worktreePath,
+				projectId,
 				promptQueue: new PromptQueue(),
 			};
 
@@ -1484,7 +1608,7 @@ export class SessionManager {
 			};
 
 			// Persist immediately with all known structural fields
-			persistOnce(session, plan, this.store);
+			persistOnce(session, plan, ctx.store);
 
 			// Fire-and-forget: create worktree then complete pipeline
 			executeWorktreeAsync(plan, session, ctx).then(() => {
@@ -1523,6 +1647,7 @@ export class SessionManager {
 		};
 
 		const session = await executePlan(plan, ctx);
+		if (projectId) session.projectId = projectId;
 
 		// Persist session metadata (fire-and-forget)
 		this.persistSessionMetadata(session).catch((err) => {
@@ -1545,10 +1670,13 @@ export class SessionManager {
 		context?: Record<string, string>;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
-		const ctx = this.buildPipelineContext();
+		// Resolve projectId from parent session
+		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
+			?? this.resolveStoreForId(parentSessionId).get(parentSessionId)?.projectId;
+		const ctx = this.buildPipelineContext(parentProjectId);
 
 		// ── Sandbox propagation from parent ──
-		const parentMeta = this.store.get(parentSessionId);
+		const parentMeta = this.getSessionStore(parentProjectId).get(parentSessionId);
 		let delegateSandboxed = false;
 		if (parentMeta?.sandboxed) {
 			// Always use the parent's validated host-side cwd — never trust the
@@ -1581,6 +1709,8 @@ export class SessionManager {
 		this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		});
+
+		if (parentProjectId) session.projectId = parentProjectId;
 
 		// Send delegate prompt with 30s timeout
 		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
@@ -1697,7 +1827,7 @@ export class SessionManager {
 				try {
 					await session.rpcClient.setModel(provider, modelId);
 					this._writeModelNameFile(session.id, sessionModelPref);
-					this.store.update(session.id, { modelProvider: provider, modelId });
+					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
 					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}`);
 					broadcast(session.clients, {
 						type: "state",
@@ -1737,7 +1867,7 @@ export class SessionManager {
 
 			await session.rpcClient.setModel("aigw", modelToUse.id);
 			this._writeModelNameFile(session.id, modelToUse.id);
-			this.store.update(session.id, { modelProvider: "aigw", modelId: modelToUse.id });
+			this.resolveStoreForSession(session.id).update(session.id, { modelProvider: "aigw", modelId: modelToUse.id });
 			console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
 
 			broadcast(session.clients, {
@@ -1797,7 +1927,7 @@ export class SessionManager {
 					? containerToHostSessionPath(stateResp.data.sessionFile)
 					: stateResp.data.sessionFile;
 
-				this.store.update(session.id, { agentSessionFile });
+				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
 				return; // success
 			} catch (err) {
 				if (attempt < maxRetries) {
@@ -1862,9 +1992,16 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
+		// Resolve project from goal
+		const extProjectId = opts.goalId
+			? this.projectContextManager?.getContextForGoal(opts.goalId)?.project.id
+			: undefined;
+		const extStore = extProjectId ? this.getSessionStore(extProjectId) : this.store;
+		if (extProjectId) session.projectId = extProjectId;
+
 		// Initial persist — structural fields (store.put must precede persistSessionMetadata
 		// since persistSessionMetadata now only does store.update)
-		this.store.put({
+		extStore.put({
 			id,
 			title: opts.title,
 			cwd: opts.cwd,
@@ -1875,6 +2012,7 @@ export class SessionManager {
 			role: opts.role,
 			teamGoalId: opts.teamGoalId,
 			nonInteractive: true,
+			projectId: extProjectId,
 		});
 
 		// Then update with agentSessionFile
@@ -1892,7 +2030,7 @@ export class SessionManager {
 			}
 			session.clients.clear();
 			this.sessions.delete(id);
-			this.store.remove(id);
+			extStore.remove(id);
 			cleanupSessionPrompt(id);
 			console.log(`[session-manager] Unregistered external session ${id}`);
 		};
@@ -1927,36 +2065,39 @@ export class SessionManager {
 		sandboxed?: boolean;
 		projectId?: string;
 	}> {
-		return Array.from(this.sessions.values()).map((s) => ({
-			id: s.id,
-			title: s.title,
-			cwd: s.cwd,
-			status: s.status,
-			createdAt: s.createdAt,
-			lastActivity: s.lastActivity,
-			clientCount: s.clients.size,
-			isCompacting: s.isCompacting,
-			goalId: s.goalId,
-			assistantType: s.assistantType,
-			// Legacy boolean fields for backward compat
-			goalAssistant: s.assistantType === "goal",
-			roleAssistant: s.assistantType === "role",
-			toolAssistant: s.assistantType === "tool",
-			delegateOf: s.delegateOf,
-			role: s.role,
-			teamGoalId: s.teamGoalId,
-			teamLeadSessionId: s.teamLeadSessionId,
-			worktreePath: s.worktreePath,
-			taskId: s.taskId,
-			staffId: s.staffId,
-			accessory: s.accessory,
-			nonInteractive: s.nonInteractive,
-			preview: s.preview,
-			personalities: s.personalities,
-			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
-			sandboxed: this.store.get(s.id)?.sandboxed || s.sandboxed,
-			projectId: this.store.get(s.id)?.projectId,
-		}));
+		return Array.from(this.sessions.values()).map((s) => {
+			const ps = this.resolveStoreForSession(s.id).get(s.id);
+			return {
+				id: s.id,
+				title: s.title,
+				cwd: s.cwd,
+				status: s.status,
+				createdAt: s.createdAt,
+				lastActivity: s.lastActivity,
+				clientCount: s.clients.size,
+				isCompacting: s.isCompacting,
+				goalId: s.goalId,
+				assistantType: s.assistantType,
+				// Legacy boolean fields for backward compat
+				goalAssistant: s.assistantType === "goal",
+				roleAssistant: s.assistantType === "role",
+				toolAssistant: s.assistantType === "tool",
+				delegateOf: s.delegateOf,
+				role: s.role,
+				teamGoalId: s.teamGoalId,
+				teamLeadSessionId: s.teamLeadSessionId,
+				worktreePath: s.worktreePath,
+				taskId: s.taskId,
+				staffId: s.staffId,
+				accessory: s.accessory,
+				nonInteractive: s.nonInteractive,
+				preview: s.preview,
+				personalities: s.personalities,
+				reattemptGoalId: ps?.reattemptGoalId,
+				sandboxed: ps?.sandboxed || s.sandboxed,
+				projectId: ps?.projectId,
+			};
+		});
 	}
 
 	/**
@@ -1969,7 +2110,10 @@ export class SessionManager {
 				.filter((s) => s.goalId === goalId)
 				.map((s) => s.id),
 		);
-		for (const ps of this.store.getAll()) {
+		const allPersisted = this.projectContextManager
+			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getAll())
+			: this.store.getAll();
+		for (const ps of allPersisted) {
 			if (ps.goalId === goalId) ids.add(ps.id);
 		}
 		return [...ids];
@@ -1979,7 +2123,7 @@ export class SessionManager {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		session.title = title;
-		this.store.update(id, { title });
+		this.resolveStoreForSession(id).update(id, { title });
 		broadcast(session.clients, { type: "session_title", sessionId: id, title });
 		return true;
 	}
@@ -2001,7 +2145,7 @@ export class SessionManager {
 		if (title) {
 			const finalTitle = `New goal: ${title}`;
 			session.title = finalTitle;
-			this.store.update(session.id, { title: finalTitle });
+			this.resolveStoreForSession(session.id).update(session.id, { title: finalTitle });
 			broadcast(session.clients, { type: "session_title", sessionId: session.id, title: finalTitle });
 		}
 	}
@@ -2011,7 +2155,7 @@ export class SessionManager {
 		const session = this.sessions.get(id);
 		if (!session) {
 			// Store-only session (dormant/delegate) — update store directly
-			this.store.update(id, updates);
+			this.resolveStoreForId(id).update(id, updates);
 			return true;
 		}
 		if (updates.role !== undefined) session.role = updates.role;
@@ -2021,7 +2165,7 @@ export class SessionManager {
 		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
 		if (updates.teamLeadSessionId !== undefined) session.teamLeadSessionId = updates.teamLeadSessionId;
 		if (updates.delegateOf !== undefined) session.delegateOf = updates.delegateOf;
-		this.store.update(id, updates);
+		this.resolveStoreForSession(id).update(id, updates);
 		return true;
 	}
 
@@ -2036,8 +2180,9 @@ export class SessionManager {
 	private ensureStoreEntry(id: string): boolean {
 		const session = this.sessions.get(id);
 		if (!session) return false;
-		if (!this.store.get(id)) {
-			this.store.put({
+		const store = this.resolveStoreForSession(id);
+		if (!store.get(id)) {
+			store.put({
 				id: session.id,
 				title: session.title,
 				cwd: session.cwd,
@@ -2046,6 +2191,7 @@ export class SessionManager {
 				lastActivity: session.lastActivity,
 				goalId: session.goalId,
 				sandboxed: session.sandboxed,
+				projectId: session.projectId,
 			});
 		}
 		return true;
@@ -2054,19 +2200,19 @@ export class SessionManager {
 	/** Get a draft for a session by type. */
 	getDraft(id: string, type: string): unknown | undefined {
 		if (!this.ensureStoreEntry(id)) return undefined;
-		return this.store.getDraft(id, type);
+		return this.resolveStoreForSession(id).getDraft(id, type);
 	}
 
 	/** Set a draft for a session by type. Returns false if session not found. */
 	setDraft(id: string, type: string, data: unknown): boolean {
 		if (!this.ensureStoreEntry(id)) return false;
-		return this.store.setDraft(id, type, data);
+		return this.resolveStoreForSession(id).setDraft(id, type, data);
 	}
 
 	/** Delete a draft for a session by type. */
 	deleteDraft(id: string, type: string): boolean {
 		if (!this.ensureStoreEntry(id)) return false;
-		return this.store.deleteDraft(id, type);
+		return this.resolveStoreForSession(id).deleteDraft(id, type);
 	}
 
 	/**
@@ -2085,7 +2231,7 @@ export class SessionManager {
 			const stateResp = await session.rpcClient.getState();
 			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
 		} catch {
-			const persisted = this.store.get(id);
+			const persisted = this.resolveStoreForSession(id).get(id);
 			agentSessionFile = persisted?.agentSessionFile;
 		}
 
@@ -2094,7 +2240,7 @@ export class SessionManager {
 		await session.rpcClient.stop();
 
 		// Reassemble system prompt with role instructions as separate fields
-		const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
+		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
 		let toolRestrictionsText: string | undefined;
 		// Look up the full role (with toolPolicies) from roleManager if available
@@ -2150,9 +2296,10 @@ export class SessionManager {
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let switchingSession = true;
+		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = Date.now();
-			this.store.update(id, { lastActivity: session.lastActivity });
+			roleStore.update(id, { lastActivity: session.lastActivity });
 			this.handleAgentLifecycle(session, event);
 			session.eventBuffer.push(event);
 			broadcast(session.clients, { type: "event", data: event });
@@ -2163,7 +2310,7 @@ export class SessionManager {
 
 		// Restore conversation from session file
 		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-			const rolePersisted = this.store.get(id);
+			const rolePersisted = roleStore.get(id);
 			const roleSwitchPath = rolePersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 			const switchResp = await rpcClient.sendCommand(
 				{ type: "switch_session", sessionPath: roleSwitchPath },
@@ -2184,7 +2331,7 @@ export class SessionManager {
 		session.allowedTools = role.allowedTools;
 		if (opts?.personalities) session.personalities = opts.personalities;
 
-		this.store.update(id, { role: role.name, accessory: role.accessory, personalities: opts?.personalities });
+		roleStore.update(id, { role: role.name, accessory: role.accessory, personalities: opts?.personalities });
 
 		broadcast(session.clients, { type: "session_status", status: "idle" } as any);
 
@@ -2216,7 +2363,7 @@ export class SessionManager {
 			const stateResp = await session.rpcClient.getState();
 			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
 		} catch {
-			const persisted = this.store.get(id);
+			const persisted = this.resolveStoreForSession(id).get(id);
 			agentSessionFile = persisted?.agentSessionFile;
 		}
 
@@ -2225,7 +2372,7 @@ export class SessionManager {
 		await session.rpcClient.stop();
 
 		// Reassemble system prompt with new personalities (preserving role prompt if assigned)
-		const goal = session.goalId ? this.goalManager.getGoal(session.goalId) : undefined;
+		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
 
 		// If the session has a role, include its prompt template as separate fields
@@ -2292,9 +2439,10 @@ export class SessionManager {
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let switchingSession = true;
+		const persoStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = Date.now();
-			this.store.update(id, { lastActivity: session.lastActivity });
+			persoStore.update(id, { lastActivity: session.lastActivity });
 			this.handleAgentLifecycle(session, event);
 			session.eventBuffer.push(event);
 			broadcast(session.clients, { type: "event", data: event });
@@ -2304,7 +2452,7 @@ export class SessionManager {
 		await rpcClient.start();
 
 		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-			const persoPersisted = this.store.get(id);
+			const persoPersisted = persoStore.get(id);
 			const persoSwitchPath = persoPersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 			const switchResp = await rpcClient.sendCommand(
 				{ type: "switch_session", sessionPath: persoSwitchPath },
@@ -2322,7 +2470,7 @@ export class SessionManager {
 		session.status = "idle";
 		session.personalities = personalityNames;
 
-		this.store.update(id, { personalities: personalityNames });
+		persoStore.update(id, { personalities: personalityNames });
 
 		broadcast(session.clients, { type: "session_status", status: "idle" } as any);
 
@@ -2365,7 +2513,7 @@ export class SessionManager {
 		const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 		if (title) {
 			session.title = title;
-			this.store.update(session.id, { title });
+			this.resolveStoreForSession(session.id).update(session.id, { title });
 			broadcast(session.clients, { type: "session_title", sessionId: session.id, title });
 		}
 	}
@@ -2381,7 +2529,7 @@ export class SessionManager {
 			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (title) {
 				session.title = title;
-				this.store.update(session.id, { title });
+				this.resolveStoreForSession(session.id).update(session.id, { title });
 				broadcast(session.clients, { type: "session_title", sessionId: session.id, title });
 			}
 		} catch (err) {
@@ -2399,7 +2547,7 @@ export class SessionManager {
 		if (existing && existing.status !== "terminated") return; // already alive
 
 		// Try to restore from persisted data
-		const persisted = this.store.get(sessionId);
+		const persisted = this.resolveStoreForId(sessionId).get(sessionId);
 		if (!persisted) {
 			throw new Error(`Cannot restore session ${sessionId}: no persisted data found`);
 		}
@@ -2424,7 +2572,7 @@ export class SessionManager {
 
 	/** Persist model provider/id so archived sessions can display model info. */
 	persistSessionModel(sessionId: string, provider: string, modelId: string): void {
-		this.store.update(sessionId, { modelProvider: provider, modelId });
+		this.resolveStoreForSession(sessionId).update(sessionId, { modelProvider: provider, modelId });
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
@@ -2438,9 +2586,12 @@ export class SessionManager {
 			await this.terminateSession(child.id);
 		}
 		// Also archive persisted-but-not-in-memory delegate sessions
-		for (const ps of this.store.getLive()) {
+		const allLiveForTerminate = this.projectContextManager
+			? [...this.projectContextManager.getAllLiveSessions()]
+			: this.store.getLive();
+		for (const ps of allLiveForTerminate) {
 			if (ps.delegateOf === id && !this.sessions.has(ps.id)) {
-				this.store.archive(ps.id);
+				this.getSessionStore(ps.projectId).archive(ps.id);
 			}
 		}
 
@@ -2483,11 +2634,12 @@ export class SessionManager {
 		this.sessions.delete(id);
 		// Archive the session — keep metadata for 7 days.
 		// But sessions with no agentSessionFile are unrestorable, so just remove them.
-		const persisted = this.store.get(id);
+		const terminateStore = this.resolveStoreForSession(id);
+		const persisted = terminateStore.get(id);
 		if (persisted?.agentSessionFile) {
-			this.store.archive(id);
+			terminateStore.archive(id);
 		} else {
-			this.store.remove(id);
+			terminateStore.remove(id);
 		}
 		// Don't remove color or session prompt — they're needed for archived view
 		return true;
@@ -2495,26 +2647,27 @@ export class SessionManager {
 
 	/** Get an archived session's metadata. */
 	getArchivedSession(id: string): PersistedSession | undefined {
-		const ps = this.store.get(id);
+		const ps = this.resolveStoreForId(id).get(id);
 		return ps?.archived ? ps : undefined;
 	}
 
 	/** Archive a session directly in the store (for dormant/store-only sessions). */
 	storeArchive(id: string): boolean {
-		return this.store.archive(id);
+		return this.resolveStoreForId(id).archive(id);
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */
 	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string }): boolean {
-		const ps = this.store.get(id);
+		const store = this.resolveStoreForId(id);
+		const ps = store.get(id);
 		if (!ps?.archived) return false;
-		this.store.update(id, updates);
+		store.update(id, updates);
 		return true;
 	}
 
 	/** Parse the .jsonl file for an archived session and return messages. */
 	getArchivedMessages(id: string): unknown[] {
-		const ps = this.store.get(id);
+		const ps = this.resolveStoreForId(id).get(id);
 		if (!ps?.archived || !ps.agentSessionFile) return [];
 		try {
 			if (!fs.existsSync(ps.agentSessionFile)) return [];
@@ -2566,7 +2719,10 @@ export class SessionManager {
 		archived: boolean;
 		archivedAt?: number;
 	}> {
-		return this.store.getArchived().map((ps) => ({
+		const allArchived = this.projectContextManager
+			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
+			: this.store.getArchived();
+		return allArchived.map((ps) => ({
 			id: ps.id,
 			title: ps.title,
 			cwd: ps.cwd,
@@ -2596,7 +2752,7 @@ export class SessionManager {
 
 	/** Permanently purge a single archived session immediately. */
 	async purgeArchivedSession(id: string): Promise<boolean> {
-		const ps = this.store.get(id);
+		const ps = this.resolveStoreForId(id).get(id);
 		if (!ps?.archived) return false;
 		await this.purgeOneSession(ps);
 		return true;
@@ -2606,7 +2762,9 @@ export class SessionManager {
 	async purgeExpiredArchives(): Promise<void> {
 		const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 		const cutoff = Date.now() - SEVEN_DAYS_MS;
-		const archived = this.store.getArchived();
+		const archived = this.projectContextManager
+			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
+			: this.store.getArchived();
 		for (const ps of archived) {
 			if (ps.archivedAt && ps.archivedAt < cutoff) {
 				try {
@@ -2623,8 +2781,9 @@ export class SessionManager {
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
 		// Remove from search index
 		try {
-			this.searchIndex.removeMessagesForSession(ps.id);
-			this.searchIndex.removeSession(ps.id);
+			const purgeSearchIndex = this.resolveSearchIndex(ps);
+			purgeSearchIndex.removeMessagesForSession(ps.id);
+			purgeSearchIndex.removeSession(ps.id);
 		} catch (err) {
 			console.error(`[session-manager] Failed to remove session ${ps.id} from search index:`, err);
 		}
@@ -2663,7 +2822,7 @@ export class SessionManager {
 		}
 
 		// Remove from store
-		this.store.purge(ps.id);
+		this.resolveStoreForId(ps.id).purge(ps.id);
 	}
 
 	/** Start the archive purge schedule — call after restoreSessions(). */
@@ -2686,7 +2845,7 @@ export class SessionManager {
 
 		// If session is dormant (failed restore), try to revive it
 		if (session.status === "terminated") {
-			const ps = this.store.get(sessionId);
+			const ps = this.resolveStoreForId(sessionId).get(sessionId);
 			if (ps && fs.existsSync(ps.agentSessionFile)) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
 				this.restoreSession(ps)
@@ -2772,7 +2931,7 @@ export class SessionManager {
 			}
 		} catch {
 			// Process may be unresponsive — try the persisted store
-			const persisted = this.store.get(id);
+			const persisted = this.resolveStoreForSession(id).get(id);
 			agentSessionFile = persisted?.agentSessionFile;
 		}
 
@@ -2819,9 +2978,10 @@ export class SessionManager {
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
+			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
 				session.lastActivity = Date.now();
-				this.store.update(id, { lastActivity: session.lastActivity });
+				abortStore.update(id, { lastActivity: session.lastActivity });
 
 				this.handleAgentLifecycle(session, event);
 
@@ -2834,7 +2994,7 @@ export class SessionManager {
 
 			// Resume session if we have the session file
 			if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-				const abortPersisted = this.store.get(id);
+				const abortPersisted = abortStore.get(id);
 				const abortSwitchPath = abortPersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 				const switchResp = await rpcClient.sendCommand(
 					{ type: "switch_session", sessionPath: abortSwitchPath },
@@ -2876,7 +3036,7 @@ export class SessionManager {
 			// This is authoritative — the in-memory status is always correct,
 			// and we write it here to handle the case where shutdown() races
 			// with a pending agent_end that hasn't flushed to disk yet.
-			this.store.update(id, { wasStreaming: session.status === "streaming", streamingStartedAt: session.streamingStartedAt });
+			this.resolveStoreForSession(id).update(id, { wasStreaming: session.status === "streaming", streamingStartedAt: session.streamingStartedAt });
 
 			session.unsubscribe();
 			await session.rpcClient.stop();
@@ -2890,11 +3050,19 @@ export class SessionManager {
 		}
 
 		// Flush any debounced store writes before exit
-		this.store.flush();
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) ctx.sessionStore.flush();
+		} else {
+			this.store.flush();
+		}
 
 		// Close search index
 		try {
-			this.searchIndex.close();
+			if (this.projectContextManager) {
+				// ProjectContextManager.closeAll() handles search index closing
+			} else {
+				this.searchIndex.close();
+			}
 		} catch (err) {
 			console.error("[search] Failed to close search index:", err);
 		}

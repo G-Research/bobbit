@@ -25,13 +25,14 @@ function ensureStateDir() {
 
 // Import after env var is set
 const { TaskManager } = await import("../src/server/agent/task-manager.ts");
+const { TaskStore } = await import("../src/server/agent/task-store.ts");
 
 describe("TaskManager State Machine", () => {
 	let mgr: InstanceType<typeof TaskManager>;
 
 	beforeEach(() => {
 		ensureStateDir();
-		mgr = new TaskManager();
+		mgr = new TaskManager(new TaskStore(path.join(TEST_DIR, "state")));
 	});
 
 	afterEach(() => {

@@ -42,7 +42,7 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 
 ## Session persistence
 
-- Check `.bobbit/state/sessions.json`
+- Check `<project-root>/.bobbit/state/sessions.json` (per-project, not centralized)
 - Initial persist happens via `persistOnce()` in `session-setup.ts` — a single `store.put()` with all structural fields at creation time
 - `persistSessionMetadata()` only calls `store.update()` (never `store.put()`) — updates `agentSessionFile` once the agent reports it
 - `persistSessionMetadata()` retries 3 times with backoff (500ms, 1s, 2s) on failure
@@ -99,7 +99,8 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 
 ## Search index
 
-- `.bobbit/state/search.db` is a rebuildable cache — delete and restart to rebuild
+- Each project has its own `<project-root>/.bobbit/state/search.db` — delete and restart to rebuild
+- `ProjectContextManager.searchAll()` aggregates results across all project indexes
 - Schema version is 3 (added `project_id` column for multi-project filtering). Version mismatch triggers automatic rebuild on next server start
 - Check `better-sqlite3` loaded correctly (native addon)
 - FTS5 on 10K docs < 10ms — slow search means network/serialization bottleneck
@@ -114,16 +115,21 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - Missing items? Check `archivedAt` is set (older items may lack it)
 - Count mismatch? Verify total from paginated response metadata
 
-## Multi-project
+## Multi-project / per-project state
 
-- Project registry at `.bobbit/state/projects.json` — check file exists and is valid JSON
+- State is per-project: goals, sessions, tasks, teams, gates, search, costs all live in `<project-root>/.bobbit/state/`
+- `ProjectContextManager` manages all `ProjectContext` instances and routes store access
+- Project registry at `<server-cwd>/.bobbit/state/projects.json` — check file exists and is valid JSON
 - Server CWD auto-registered as default project via `ensureDefaultProject()` on startup
 - `GET /api/projects` to list all registered projects
-- Sessions/goals not appearing? Check `projectId` field matches the expected project
+- Sessions/goals not appearing? Check `projectId` field matches the expected project. Verify the correct project's `sessions.json` / `goals.json` contains the record
 - Sidebar not grouping? Only groups when multiple projects are registered
 - Project registration failing? `rootPath` must be absolute and exist on disk; duplicate paths are rejected
-- Search not filtering by project? Verify `?projectId=` query param is passed; check `project_id` column exists in search.db (schema v3)
+- Search not filtering by project? Verify `?projectId=` query param is passed; each project has its own `search.db`
 - Config not cascading? Check all three `.bobbit/config/` directories (global, server, project) and verify `resolveScalarConfig()` / `resolveEntities()` return expected scope
+- **State migration**: On first startup after upgrade, central state is distributed to per-project dirs. Check for `.bobbit/state/.migrated-to-per-project` marker. Central files renamed with `.pre-migration` suffix (not deleted). If migration didn't run, check that projects are registered before migration runs
+- **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`
+- **Known limitations**: Staff is only per-default-project (API doesn't route staff by project yet). Cost tracking uses the default project's `CostTracker`. `active-verifications.json` stays in central state dir
 
 ## Gate re-signal cancellation
 

@@ -7,6 +7,7 @@ import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
+import { TaskManager } from "../agent/task-manager.js";
 import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
 // patchModelContextWindow removed — model-registry returns correct context windows via inferMeta()
 
@@ -334,7 +335,8 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "task_create": {
-					const task = sessionManager.taskManager.createTask(
+					const tm = resolveTaskManagerForGoal(sessionManager, msg.goalId);
+					const task = tm.createTask(
 						msg.goalId,
 						msg.title,
 						msg.taskType,
@@ -344,10 +346,11 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "task_update": {
+					const tm = resolveTaskManagerForTask(sessionManager, msg.taskId);
 					const updates = { ...msg.updates, state: msg.updates.state as TaskState | undefined };
-					const updated = sessionManager.taskManager.updateTask(msg.taskId, updates);
+					const updated = tm.updateTask(msg.taskId, updates);
 					if (updated) {
-						const task = sessionManager.taskManager.getTask(msg.taskId);
+						const task = tm.getTask(msg.taskId);
 						broadcast(session.clients, { type: "task_changed", task });
 					} else {
 						send(ws, { type: "error", message: `Task ${msg.taskId} not found`, code: "TASK_NOT_FOUND" });
@@ -355,9 +358,10 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "task_delete": {
-					const task = sessionManager.taskManager.getTask(msg.taskId);
+					const tm = resolveTaskManagerForTask(sessionManager, msg.taskId);
+					const task = tm.getTask(msg.taskId);
 					if (task) {
-						sessionManager.taskManager.deleteTask(msg.taskId);
+						tm.deleteTask(msg.taskId);
 						broadcast(session.clients, { type: "task_changed", task: { ...task, _deleted: true } });
 					} else {
 						send(ws, { type: "error", message: `Task ${msg.taskId} not found`, code: "TASK_NOT_FOUND" });
@@ -403,4 +407,31 @@ export function handleWebSocketConnection(
 	ws.on("error", (err) => {
 		console.error(`[gateway] WebSocket error from ${ip}:`, err.message);
 	});
+}
+
+/** Resolve the correct TaskManager for a goal (uses per-project store if available). */
+function resolveTaskManagerForGoal(sessionManager: SessionManager, goalId?: string): TaskManager {
+	const pcm = sessionManager.getProjectContextManager();
+	if (goalId && pcm) {
+		const ctx = pcm.getContextForGoal(goalId);
+		if (ctx) return new TaskManager(ctx.taskStore);
+	}
+	return sessionManager.taskManager;
+}
+
+/** Resolve the correct TaskManager for a task ID (finds via goalId lookup). */
+function resolveTaskManagerForTask(sessionManager: SessionManager, taskId: string): TaskManager {
+	// Try default first
+	const task = sessionManager.taskManager.getTask(taskId);
+	if (task) return sessionManager.taskManager;
+
+	// Search across projects
+	const pcm = sessionManager.getProjectContextManager();
+	if (pcm) {
+		for (const ctx of pcm.all()) {
+			const candidateTm = new TaskManager(ctx.taskStore);
+			if (candidateTm.getTask(taskId)) return candidateTm;
+		}
+	}
+	return sessionManager.taskManager;
 }
