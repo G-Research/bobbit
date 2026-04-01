@@ -798,7 +798,7 @@ function _handleFullSearchClick(query: string): void {
 }
 
 /** Render a collapsible project section header. */
-function renderProjectHeader(project: Project, expanded: boolean) {
+function renderProjectHeader(project: Project, expanded: boolean, sessionCount: number = 0) {
 	const color = getProjectAccentColor(project);
 	return html`
 		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
@@ -806,6 +806,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
+			${sessionCount > 0 ? html`<span class="text-[9px] text-muted-foreground font-normal">(${sessionCount})</span>` : ""}
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
@@ -1024,7 +1025,7 @@ export function renderSidebar() {
 									const expanded = isProjectExpanded(project.id);
 									return html`
 										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-										${renderProjectHeader(project, expanded)}
+										${renderProjectHeader(project, expanded, state.gatewaySessions.filter(s => !s.archived && s.projectId === project.id).length)}
 										${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 											${renderProjectContent(project, data.goals, data.sessions, data.staff)}
 										</div>` : ""}
