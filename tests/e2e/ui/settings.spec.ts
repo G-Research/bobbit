@@ -66,7 +66,7 @@ test.describe("Settings (full-stack UI)", () => {
 		}
 
 		// Wait for the setting to persist (the toggle sends a PUT to /api/preferences)
-		await page.waitForTimeout(500);
+		await page.waitForResponse(resp => resp.url().includes("/api/preferences") && resp.status() === 200);
 
 		// Reload the page
 		await page.reload();

@@ -125,10 +125,10 @@ test.describe("Navigation (UI)", () => {
 		// Go back — should return to landing
 		await page.goBack();
 
-		// Verify we're back at landing — the "New session" button should be visible
+		// Verify we're back at landing — the sidebar Settings button should be visible
 		// and no session textarea should be active
 		await expect(
-			page.locator("button[title='New session']").first(),
+			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 10_000 });
 
 		// Cleanup

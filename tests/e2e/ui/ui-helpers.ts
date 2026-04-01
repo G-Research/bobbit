@@ -75,8 +75,8 @@ export async function navigateToHash(page: Page, hash: string): Promise<void> {
  */
 export async function navigateToGoalDashboard(page: Page, goalId: string): Promise<void> {
 	await navigateToHash(page, `#/goal/${goalId}`);
-	// Wait briefly for the view to render
-	await page.waitForTimeout(500);
+	// Wait for goal dashboard content to appear (tab bar is always present)
+	await expect(page.locator(".tab").first()).toBeVisible({ timeout: 10_000 });
 }
 
 /**
