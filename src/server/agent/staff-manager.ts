@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
-import type { SearchIndex } from "../search/search-index.js";
+import type { ProjectContextManager } from "./project-context-manager.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 
 function sanitiseBranchName(name: string): string {
@@ -9,15 +9,26 @@ function sanitiseBranchName(name: string): string {
 }
 
 export class StaffManager {
-	private store: StaffStore;
+	private pcm: ProjectContextManager;
 
-	constructor(staffStore: StaffStore) {
-		this.store = staffStore;
+	constructor(pcm: ProjectContextManager) {
+		this.pcm = pcm;
 	}
-	searchIndex?: SearchIndex;
 
-	getStore(): StaffStore {
-		return this.store;
+	private getStore(projectId?: string): StaffStore {
+		if (projectId) {
+			const ctx = this.pcm.getOrCreate(projectId);
+			if (ctx) return ctx.staffStore;
+		}
+		return this.pcm.getDefault().staffStore;
+	}
+
+	private findStoreForStaff(id: string): { store: StaffStore; staff: PersistedStaff; projectId: string } | null {
+		for (const ctx of this.pcm.all()) {
+			const staff = ctx.staffStore.get(id);
+			if (staff) return { store: ctx.staffStore, staff, projectId: ctx.project.id };
+		}
+		return null;
 	}
 
 	async createStaff(
@@ -26,10 +37,11 @@ export class StaffManager {
 		systemPrompt: string,
 		cwd: string,
 		sessionManager: SessionManager,
-		opts?: { triggers?: StaffTrigger[]; roleId?: string },
+		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string },
 	): Promise<PersistedStaff> {
 		const now = Date.now();
 		const id = randomUUID();
+		const projectId = opts?.projectId;
 
 		// Auto-assign UUIDs to triggers missing IDs
 		const triggers = (opts?.triggers ?? []).map((t) => ({
@@ -49,6 +61,7 @@ export class StaffManager {
 			roleId: opts?.roleId,
 			createdAt: now,
 			updatedAt: now,
+			projectId,
 		};
 		// Create a worktree for this staff agent
 		const shortId = randomUUID().slice(0, 8);
@@ -57,8 +70,12 @@ export class StaffManager {
 		staff.worktreePath = worktreeResult.worktreePath;
 		staff.branch = worktreeResult.branchName;
 
-		this.store.put(staff);
-		this.searchIndex?.indexStaff(staff);
+		const store = this.getStore(projectId);
+		store.put(staff);
+
+		const resolvedProjectId = projectId || this.pcm.getDefaultProjectId();
+		const searchIndex = this.pcm.getOrCreate(resolvedProjectId)?.searchIndex;
+		searchIndex?.indexStaff(staff, projectId);
 
 		// Create the permanent session for this staff agent
 		try {
@@ -74,7 +91,7 @@ export class StaffManager {
 			session.staffId = id;
 			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
 			await sessionManager.persistSessionMetadata(session);
-			this.store.update(id, { currentSessionId: session.id });
+			store.update(id, { currentSessionId: session.id });
 			staff.currentSessionId = session.id;
 		} catch (err) {
 			// Clean up the orphaned worktree on failure
@@ -84,8 +101,8 @@ export class StaffManager {
 			} catch (cleanupErr) {
 				console.error(`[staff-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
 			}
-			this.store.remove(id);
-			this.searchIndex?.removeStaff(id);
+			store.remove(id);
+			searchIndex?.removeStaff(id);
 			throw err;
 		}
 
@@ -93,11 +110,18 @@ export class StaffManager {
 	}
 
 	getStaff(id: string): PersistedStaff | undefined {
-		return this.store.get(id);
+		return this.findStoreForStaff(id)?.staff;
 	}
 
-	listStaff(): PersistedStaff[] {
-		return this.store.getAll();
+	listStaff(projectId?: string): PersistedStaff[] {
+		if (projectId) {
+			return this.getStore(projectId).getAll();
+		}
+		const all: PersistedStaff[] = [];
+		for (const ctx of this.pcm.all()) {
+			all.push(...ctx.staffStore.getAll());
+		}
+		return all;
 	}
 
 	updateStaff(
@@ -121,17 +145,23 @@ export class StaffManager {
 				id: t.id || randomUUID(),
 			}));
 		}
-		const ok = this.store.update(id, updates);
-		if (ok && this.searchIndex) {
-			const staff = this.store.get(id);
-			if (staff) this.searchIndex.indexStaff(staff);
+		const found = this.findStoreForStaff(id);
+		if (!found) return false;
+		const ok = found.store.update(id, updates);
+		if (ok) {
+			const staff = found.store.get(id);
+			if (staff) {
+				const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
+				searchIndex?.indexStaff(staff, found.projectId);
+			}
 		}
 		return ok;
 	}
 
 	async deleteStaff(id: string, sessionManager: SessionManager): Promise<boolean> {
-		const staff = this.store.get(id);
-		if (!staff) return false;
+		const found = this.findStoreForStaff(id);
+		if (!found) return false;
+		const { store, staff } = found;
 
 		// Terminate the permanent session if it exists
 		if (staff.currentSessionId) {
@@ -151,8 +181,9 @@ export class StaffManager {
 			}
 		}
 
-		this.store.remove(id);
-		this.searchIndex?.removeStaff(id);
+		store.remove(id);
+		const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
+		searchIndex?.removeStaff(id);
 		return true;
 	}
 
@@ -164,8 +195,9 @@ export class StaffManager {
 		triggerId: string,
 		updates: { lastFired?: number; lastSeenSha?: string },
 	): boolean {
-		const staff = this.store.get(staffId);
-		if (!staff) return false;
+		const found = this.findStoreForStaff(staffId);
+		if (!found) return false;
+		const { store, staff } = found;
 
 		const trigger = staff.triggers.find((t) => t.id === triggerId);
 		if (!trigger) return false;
@@ -173,7 +205,7 @@ export class StaffManager {
 		if (updates.lastFired !== undefined) trigger.lastFired = updates.lastFired;
 		if (updates.lastSeenSha !== undefined) trigger.lastSeenSha = updates.lastSeenSha;
 
-		this.store.update(staffId, { triggers: staff.triggers });
+		store.update(staffId, { triggers: staff.triggers });
 		return true;
 	}
 
@@ -187,8 +219,9 @@ export class StaffManager {
 		prompt: string | undefined,
 		sessionManager: SessionManager,
 	): Promise<string> {
-		const staff = this.store.get(staffId);
-		if (!staff) throw new Error("Staff agent not found");
+		const found = this.findStoreForStaff(staffId);
+		if (!found) throw new Error("Staff agent not found");
+		const { store, staff } = found;
 		if (staff.state !== "active") throw new Error(`Staff agent is ${staff.state}, cannot wake`);
 
 		const wakePrompt = prompt || "You have been woken. Review your memory and carry out your mission.";
@@ -207,7 +240,7 @@ export class StaffManager {
 			});
 			session.staffId = staffId;
 			await sessionManager.persistSessionMetadata(session);
-			this.store.update(staffId, { currentSessionId: session.id, lastWakeAt: Date.now() });
+			store.update(staffId, { currentSessionId: session.id, lastWakeAt: Date.now() });
 
 			await sessionManager.enqueuePrompt(session.id, wakePrompt);
 			console.log(`[staff-manager] Woke staff "${staff.name}" (${staffId}) → session ${session.id} (legacy migration)`);
@@ -222,7 +255,7 @@ export class StaffManager {
 			} catch {
 				// Session was deleted — clear and recreate
 				console.log(`[staff-manager] Session ${staff.currentSessionId} unrecoverable, creating new one for "${staff.name}"`);
-				this.store.update(staffId, { currentSessionId: undefined as any });
+				store.update(staffId, { currentSessionId: undefined as any });
 				staff.currentSessionId = undefined as any;
 				return this.wake(staffId, prompt, sessionManager);
 			}
@@ -232,7 +265,7 @@ export class StaffManager {
 		await sessionManager.enqueuePrompt(staff.currentSessionId, wakePrompt);
 
 		// Update last wake time
-		this.store.update(staffId, { lastWakeAt: Date.now() });
+		store.update(staffId, { lastWakeAt: Date.now() });
 
 		console.log(`[staff-manager] Woke staff "${staff.name}" (${staffId}) → session ${staff.currentSessionId}`);
 		return staff.currentSessionId;
