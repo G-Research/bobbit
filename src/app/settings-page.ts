@@ -20,7 +20,7 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
-import { gatewayFetch, fetchSandboxStatus } from "./api.js";
+import { gatewayFetch } from "./api.js";
 import { openOAuthDialog } from "./dialogs.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
@@ -30,7 +30,6 @@ const DEFAULT_TAB: SettingsTab = "shortcuts";
 const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "shortcuts", label: "Shortcuts" },
 	{ id: "general", label: "General" },
-	{ id: "project", label: "Commands & Sandbox" },
 	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
 	{ id: "palette", label: "Color Palette" },
@@ -74,19 +73,10 @@ let conflictEntry: ShortcutEntry | null = null;
 let browserReservedWarning = false;
 let _listening = false;
 
-let settingsCwd = "";
-let settingsCwdLoaded = false;
-let settingsCwdSaveStatus: "" | "saving" | "saved" | "error" = "";
+
 
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
-
-// ── Project tab state ──
-let projectConfig: Record<string, string> = {};
-let projectDefaults: Record<string, string> = {};
-let projectConfigLoaded = false;
-let projectSaveStatus: "" | "saving" | "saved" | "error" = "";
-let projectNewEntries: { key: string; value: string }[] = [];
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
@@ -145,17 +135,7 @@ async function resetProjectScopeField(projectId: string, key: string): Promise<v
 	await saveProjectScopeConfig(projectId, { [key]: "" });
 }
 
-// ── Docker Sandbox section state ──
-let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; dockerfileExists?: boolean; buildCommand?: string; configured: boolean } | null = null;
-let sandboxStatusLoaded = false;
-let sandboxBuildInProgress = false;
-let sandboxBuildError = "";
-let sandboxCredEntries: { key: string; value: string }[] = [];
-let sandboxMountEntries: string[] = [];
 
-// ── Container Pool status ──
-let poolStatus: { enabled: boolean; total?: number; idle?: number; claimed?: number; warming?: number } | null = null;
-let poolStatusLoaded = false;
 
 function resetRebindState(): void {
 	rebindingId = null;
@@ -972,75 +952,6 @@ function renderModelsTab() {
 	`;
 }
 
-// ── Project tab ──
-
-function loadProjectConfig(): void {
-	if (projectConfigLoaded) return;
-	projectConfigLoaded = true;
-	(async () => {
-		try {
-			const [configRes, defaultsRes] = await Promise.all([
-				gatewayFetch("/api/project-config"),
-				gatewayFetch("/api/project-config/defaults"),
-			]);
-			if (configRes.ok && defaultsRes.ok) {
-				const merged: Record<string, string> = await configRes.json();
-				projectDefaults = await defaultsRes.json();
-				// Pre-populate all values including defaults so the user sees what workflows will use
-				projectConfig = { ...merged };
-				projectNewEntries = [];
-				syncSandboxEntriesFromConfig();
-			}
-		} catch {}
-		renderApp();
-	})();
-}
-
-async function saveProjectConfig(): Promise<void> {
-	projectSaveStatus = "saving";
-	renderApp();
-	try {
-		const body: Record<string, string | null> = {};
-		// For each key in projectConfig: send null if value matches the default (don't persist redundant entries),
-		// otherwise send the value.
-		for (const [key, value] of Object.entries(projectConfig)) {
-			if (!value) {
-				body[key] = null;
-			} else if (key in projectDefaults && value === projectDefaults[key]) {
-				body[key] = null; // matches default — no need to persist
-			} else {
-				body[key] = value;
-			}
-		}
-		// Include new entries with non-empty key and value
-		for (const entry of projectNewEntries) {
-			if (entry.key && entry.value) {
-				body[entry.key] = entry.value;
-			}
-		}
-		const res = await gatewayFetch("/api/project-config", {
-			method: "PUT",
-			body: JSON.stringify(body),
-		});
-		if (res.ok) {
-			// Merge new entries into projectConfig and clear the new-entries list
-			for (const entry of projectNewEntries) {
-				if (entry.key && entry.value) {
-					projectConfig[entry.key] = entry.value;
-				}
-			}
-			projectNewEntries = [];
-			projectSaveStatus = "saved";
-			setTimeout(() => { projectSaveStatus = ""; renderApp(); }, 2000);
-		} else {
-			projectSaveStatus = "error";
-		}
-	} catch {
-		projectSaveStatus = "error";
-	}
-	renderApp();
-}
-
 /** Human-readable labels for known project config keys. */
 const PROJECT_KEY_LABELS: Record<string, string> = {
 	build_command: "Build",
@@ -1056,530 +967,9 @@ function projectKeyLabel(key: string): string {
 	return PROJECT_KEY_LABELS[key] || key;
 }
 
-function loadSandboxStatus(): void {
-	if (sandboxStatusLoaded) return;
-	sandboxStatusLoaded = true;
-	fetchSandboxStatus().then(s => {
-		sandboxStatusLocal = s;
-		state.sandboxStatus = s;
-		renderApp();
-	});
-}
 
-function loadPoolStatus(): void {
-	if (poolStatusLoaded) return;
-	poolStatusLoaded = true;
-	gatewayFetch("/api/sandbox-pool").then(async (res) => {
-		if (res.ok) {
-			poolStatus = await res.json();
-		} else {
-			poolStatus = { enabled: false };
-		}
-		renderApp();
-	}).catch(() => {
-		poolStatus = { enabled: false };
-		renderApp();
-	});
-}
-
-function syncSandboxEntriesFromConfig(): void {
-	// Parse credentials from project config
-	try {
-		const raw = projectConfig.sandbox_credentials || "";
-		if (raw) {
-			const obj = JSON.parse(raw);
-			if (typeof obj === "object" && obj !== null && !Array.isArray(obj)) {
-				sandboxCredEntries = Object.entries(obj).map(([key, value]) => ({ key, value: String(value) }));
-			}
-		} else {
-			sandboxCredEntries = [];
-		}
-	} catch { sandboxCredEntries = []; }
-
-	// Parse mounts from project config
-	try {
-		const raw = projectConfig.sandbox_mounts || "";
-		if (raw) {
-			const arr = JSON.parse(raw);
-			if (Array.isArray(arr)) sandboxMountEntries = arr;
-		} else {
-			sandboxMountEntries = [];
-		}
-	} catch { sandboxMountEntries = []; }
-}
-
-function renderSandboxSection(inputClass: string) {
-	loadSandboxStatus();
-
-	const sandboxMode = projectConfig.sandbox || projectDefaults.sandbox || "none";
-	const imageName = projectConfig.sandbox_image || projectDefaults.sandbox_image || "bobbit-agent";
-	const allowlistRaw = projectConfig.sandbox_network_allowlist || "";
-	let allowlistDisplay = "";
-	try {
-		const arr = JSON.parse(allowlistRaw);
-		if (Array.isArray(arr)) allowlistDisplay = arr.join(", ");
-	} catch { allowlistDisplay = allowlistRaw; }
-
-	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
-
-	return html`
-		<div class="flex flex-col gap-2">
-			<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Docker Sandbox</div>
-			<p class="text-xs text-muted-foreground -mt-1">
-				Run agent sessions in isolated Docker containers with restricted filesystem and network access.
-			</p>
-
-			<!-- Sandbox Mode -->
-			<div class="flex items-center gap-3">
-				<span class="${labelClass}">Sandbox Mode</span>
-				<select
-					class="${inputClass} max-w-48"
-					.value=${sandboxMode}
-					@change=${(e: Event) => {
-						projectConfig.sandbox = (e.target as HTMLSelectElement).value;
-						projectSaveStatus = "";
-						renderApp();
-					}}
-				>
-					<option value="none">none</option>
-					<option value="docker">docker</option>
-				</select>
-			</div>
-
-			<!-- Docker Status -->
-			<div class="flex items-center gap-3">
-				<span class="${labelClass}">Docker Status</span>
-				<div class="flex items-center gap-2 text-sm">
-					${sandboxStatusLocal === null
-						? html`<span class="text-muted-foreground">Checking...</span>`
-						: sandboxStatusLocal.available
-							? html`
-								<span class="w-2 h-2 rounded-full bg-green-500"></span>
-								<span class="text-foreground">Available${sandboxStatusLocal.dockerVersion ? ` (v${sandboxStatusLocal.dockerVersion})` : ""}</span>
-								${sandboxStatusLocal.imageExists !== undefined
-									? sandboxStatusLocal.imageExists
-										? html`<span class="text-xs text-muted-foreground ml-2">Image "${imageName}": found</span>`
-										: html`<span class="text-xs text-orange-500 ml-2">Image "${imageName}": not found</span>
-											${sandboxStatusLocal!.buildCommand ? html`
-												<div class="flex flex-col gap-1 ml-2">
-													<div class="flex items-center gap-2">
-														<code class="text-xs bg-secondary px-1.5 py-0.5 rounded font-mono">${sandboxStatusLocal!.buildCommand}</code>
-														<button
-															class="text-xs px-2 py-0.5 rounded border border-border hover:bg-secondary transition-colors disabled:opacity-50"
-															?disabled=${sandboxBuildInProgress}
-															@click=${async () => {
-																sandboxBuildInProgress = true;
-																sandboxBuildError = "";
-																renderApp();
-																try {
-																	const resp = await gatewayFetch("/api/sandbox-image/build", {
-																		method: "POST"
-																	});
-																	let result: any = {};
-																	try { result = await resp.json(); } catch (_e) { /* non-JSON response */ }
-																	if (resp.ok && result.success) {
-																		sandboxBuildInProgress = false;
-																		sandboxStatusLoaded = false;
-																		loadSandboxStatus();
-																	} else {
-																		sandboxBuildInProgress = false;
-																		sandboxBuildError = result.error || "Build failed";
-																		renderApp();
-																	}
-																} catch (e: any) {
-																	sandboxBuildInProgress = false;
-																	sandboxBuildError = e.message || "Build failed";
-																	renderApp();
-																}
-															}}
-														>${sandboxBuildInProgress ? "Building..." : "Build Image"}</button>
-													</div>
-													<span class="text-xs text-muted-foreground">Server restart required after build for sandbox pool.</span>
-													${sandboxBuildError ? html`<span class="text-xs text-red-500">${sandboxBuildError}</span>` : ""}
-												</div>
-											` : ""}`
-									: ""}
-							`
-							: html`
-								<span class="w-2 h-2 rounded-full bg-red-500"></span>
-								<span class="text-muted-foreground">Not available${sandboxStatusLocal.error ? ` — ${sandboxStatusLocal.error}` : ""}</span>
-							`}
-					<button
-						class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
-						title="Refresh Docker status"
-						@click=${() => { sandboxStatusLoaded = false; loadSandboxStatus(); }}
-					>${icon(RotateCcw, "xs")}</button>
-				</div>
-			</div>
-
-			<!-- Image Name -->
-			<div class="flex items-center gap-3">
-				<span class="${labelClass}">Image Name</span>
-				<input
-					type="text"
-					class="${inputClass} max-w-64"
-					placeholder=${projectDefaults.sandbox_image || "bobbit-agent"}
-					.value=${projectConfig.sandbox_image || ""}
-					@input=${(e: Event) => {
-						projectConfig.sandbox_image = (e.target as HTMLInputElement).value;
-						projectSaveStatus = "";
-						renderApp();
-					}}
-				/>
-			</div>
-
-			<!-- Network Allowlist -->
-			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Network Allowlist</span>
-				<div class="flex-1 min-w-0 flex flex-col gap-1">
-					<input
-						type="text"
-						class="${inputClass}"
-						placeholder="github.com, api.github.com"
-						.value=${allowlistDisplay}
-						@input=${(e: Event) => {
-							const v = (e.target as HTMLInputElement).value;
-							const hosts = v.split(",").map(h => h.trim()).filter(Boolean);
-							projectConfig.sandbox_network_allowlist = hosts.length > 0 ? JSON.stringify(hosts) : "";
-							projectSaveStatus = "";
-							renderApp();
-						}}
-					/>
-					<span class="text-[10px] text-muted-foreground">Comma-separated hostnames allowed through the network proxy.</span>
-				</div>
-			</div>
-
-			<!-- Credentials -->
-			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Credentials</span>
-				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
-					${sandboxCredEntries.map((entry, i) => html`
-						<div class="flex items-center gap-2">
-							<input
-								type="text"
-								class="w-36 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
-									focus:outline-none focus:ring-2 focus:ring-ring"
-								placeholder="ENV_VAR"
-								.value=${entry.key}
-								@input=${(e: Event) => {
-									sandboxCredEntries[i].key = (e.target as HTMLInputElement).value;
-									const obj: Record<string, string> = {};
-									for (const e2 of sandboxCredEntries) { if (e2.key) obj[e2.key] = e2.value; }
-									projectConfig.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
-									projectSaveStatus = "";
-									renderApp();
-								}}
-							/>
-							<span class="text-muted-foreground text-xs">=</span>
-							<input
-								type="text"
-								class="${inputClass}"
-								placeholder="value"
-								.value=${entry.value}
-								@input=${(e: Event) => {
-									sandboxCredEntries[i].value = (e.target as HTMLInputElement).value;
-									const obj: Record<string, string> = {};
-									for (const e2 of sandboxCredEntries) { if (e2.key) obj[e2.key] = e2.value; }
-									projectConfig.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
-									projectSaveStatus = "";
-									renderApp();
-								}}
-							/>
-							<button
-								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-								title="Remove"
-								@click=${() => {
-									sandboxCredEntries.splice(i, 1);
-									const obj: Record<string, string> = {};
-									for (const e2 of sandboxCredEntries) { if (e2.key) obj[e2.key] = e2.value; }
-									projectConfig.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
-									projectSaveStatus = "";
-									renderApp();
-								}}
-							>${icon(X, "xs")}</button>
-						</div>
-					`)}
-					<button
-						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
-							hover:bg-muted rounded-md transition-colors self-start"
-						@click=${() => { sandboxCredEntries.push({ key: "", value: "" }); renderApp(); }}
-					>${icon(Plus, "xs")} Add credential</button>
-				</div>
-			</div>
-
-			<!-- Additional Mounts -->
-			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Additional Mounts</span>
-				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
-					${sandboxMountEntries.map((mount, i) => html`
-						<div class="flex items-center gap-2">
-							<input
-								type="text"
-								class="${inputClass}"
-								placeholder="/host/path:/container/path:ro"
-								.value=${mount}
-								@input=${(e: Event) => {
-									sandboxMountEntries[i] = (e.target as HTMLInputElement).value;
-									const filtered = sandboxMountEntries.filter(Boolean);
-									projectConfig.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
-									projectSaveStatus = "";
-									renderApp();
-								}}
-							/>
-							<button
-								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-								title="Remove"
-								@click=${() => {
-									sandboxMountEntries.splice(i, 1);
-									const filtered = sandboxMountEntries.filter(Boolean);
-									projectConfig.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
-									projectSaveStatus = "";
-									renderApp();
-								}}
-							>${icon(X, "xs")}</button>
-						</div>
-					`)}
-					<button
-						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
-							hover:bg-muted rounded-md transition-colors self-start"
-						@click=${() => { sandboxMountEntries.push(""); renderApp(); }}
-					>${icon(Plus, "xs")} Add mount</button>
-				</div>
-			</div>
-
-			<!-- Container Pool -->
-			${sandboxMode === "docker" ? html`
-				<div class="border-t border-border pt-2 mt-1 flex flex-col gap-2">
-					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Container Pool</div>
-					<p class="text-xs text-muted-foreground -mt-1">
-						Pre-warmed containers reduce sandbox startup time. Changes take effect on gateway restart.
-					</p>
-
-					<!-- Pool Size -->
-					<div class="flex items-center gap-3">
-						<span class="${labelClass}">Pool Size</span>
-						<input
-							type="number"
-							min="0"
-							class="${inputClass} max-w-32"
-							placeholder=${projectDefaults.sandbox_pool_size || "2"}
-							.value=${projectConfig.sandbox_pool_size || ""}
-							@input=${(e: Event) => {
-								projectConfig.sandbox_pool_size = (e.target as HTMLInputElement).value;
-								projectSaveStatus = "";
-								renderApp();
-							}}
-						/>
-						<span class="text-xs text-muted-foreground">Pre-warmed containers (0 = disable)</span>
-					</div>
-
-					<!-- Max Idle Time -->
-					<div class="flex items-center gap-3">
-						<span class="${labelClass}">Max Idle Time</span>
-						<input
-							type="number"
-							min="0"
-							class="${inputClass} max-w-32"
-							placeholder=${projectDefaults.sandbox_pool_max_idle || "300"}
-							.value=${projectConfig.sandbox_pool_max_idle || ""}
-							@input=${(e: Event) => {
-								projectConfig.sandbox_pool_max_idle = (e.target as HTMLInputElement).value;
-								projectSaveStatus = "";
-								renderApp();
-							}}
-						/>
-						<span class="text-xs text-muted-foreground">Seconds before excess containers culled</span>
-					</div>
-
-					<!-- Pool Status -->
-					<div class="flex items-center gap-3">
-						<span class="${labelClass}">Pool Status</span>
-						<div class="flex items-center gap-2 text-sm">
-							${(() => {
-								loadPoolStatus();
-								if (poolStatus === null) {
-									return html`<span class="text-muted-foreground">Loading...</span>`;
-								}
-								if (!poolStatus.enabled) {
-									return html`<span class="text-muted-foreground">Pool disabled</span>`;
-								}
-								return html`
-									<span class="text-xs font-mono flex items-center gap-3">
-										<span>Total: <span class="text-foreground font-medium">${poolStatus.total}</span></span>
-										<span>Idle: <span class="text-foreground font-medium">${poolStatus.idle}</span></span>
-										<span>Claimed: <span class="text-foreground font-medium">${poolStatus.claimed}</span></span>
-										<span>Warming: <span class="text-foreground font-medium">${poolStatus.warming}</span></span>
-									</span>
-								`;
-							})()}
-							<button
-								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
-								title="Refresh pool status"
-								@click=${() => { poolStatusLoaded = false; poolStatus = null; loadPoolStatus(); }}
-							>${icon(RotateCcw, "xs")}</button>
-						</div>
-					</div>
-				</div>
-			` : ""}
-		</div>
-	`;
-}
-
-function renderProjectTab() {
-	loadProjectConfig();
-
-	// Known command keys (from defaults), excluding keys that have dedicated UI sections
-	const HIDDEN_FROM_COMMANDS = new Set([
-		"default_thinking_level",       // Models tab
-		"sandbox",                      // Docker Sandbox section below
-		"sandbox_image",
-		"sandbox_network_allowlist",
-		"sandbox_credentials",
-		"sandbox_mounts",
-		"sandbox_pool_size",
-		"sandbox_pool_max_idle",
-	]);
-	const commandKeys = Object.keys(projectDefaults).filter((k) => !HIDDEN_FROM_COMMANDS.has(k));
-	// Custom keys not in defaults, also excluding keys with dedicated UI
-	const HIDDEN_CUSTOM_KEYS = new Set([
-		"config_directories",           // Directories tab
-		"skill_directories",            // Legacy, Directories tab
-	]);
-	const customKeys = Object.keys(projectConfig).filter((k) => !(k in projectDefaults) && !HIDDEN_FROM_COMMANDS.has(k) && !HIDDEN_CUSTOM_KEYS.has(k));
-
-	// Shared label width class for vertical alignment across all sections
-	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
-	const inputClass = `flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
-		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
-
-	return html`
-		<div class="flex flex-col gap-4">
-
-			<!-- Commands -->
-			<div class="flex flex-col gap-2">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
-				${commandKeys.map((key) => html`
-					<div class="flex items-center gap-3">
-						<span class="${labelClass}">${projectKeyLabel(key)}</span>
-						<input
-							type="text"
-							class="${inputClass} ${projectConfig[key] && projectConfig[key] !== projectDefaults[key] ? "text-foreground" : "text-muted-foreground"}"
-							placeholder=${projectDefaults[key] || ""}
-							.value=${projectConfig[key] || ""}
-							@input=${(e: Event) => {
-								const v = (e.target as HTMLInputElement).value;
-								projectConfig[key] = v || projectDefaults[key] || "";
-								projectSaveStatus = "";
-								renderApp();
-							}}
-						/>
-						<div class="w-7 shrink-0"></div>
-					</div>
-				`)}
-			</div>
-
-			<hr class="border-border" />
-
-			<!-- Docker Sandbox -->
-			${renderSandboxSection(inputClass)}
-
-			<hr class="border-border" />
-
-			<!-- Custom settings -->
-			<div class="flex flex-col gap-2">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Custom Settings</div>
-				${customKeys.map((key) => html`
-					<div class="flex items-center gap-3">
-						<input
-							type="text"
-							class="w-28 sm:w-44 shrink-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
-								font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-							.value=${key}
-							@input=${(e: Event) => {
-								const newKey = (e.target as HTMLInputElement).value;
-								const val = projectConfig[key];
-								delete projectConfig[key];
-								if (newKey) projectConfig[newKey] = val;
-								projectSaveStatus = "";
-								renderApp();
-							}}
-						/>
-						<input
-							type="text"
-							class="${inputClass} text-foreground"
-							.value=${projectConfig[key] || ""}
-							@input=${(e: Event) => {
-								projectConfig[key] = (e.target as HTMLInputElement).value;
-								projectSaveStatus = "";
-								renderApp();
-							}}
-						/>
-						<button
-							class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-							title="Remove"
-							@click=${() => { delete projectConfig[key]; projectSaveStatus = ""; renderApp(); }}
-						>${icon(X, "xs")}</button>
-					</div>
-				`)}
-				${projectNewEntries.map((entry, i) => html`
-					<div class="flex items-center gap-3">
-						<input
-							type="text"
-							class="w-28 sm:w-44 shrink-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
-								font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-							placeholder="key"
-							.value=${entry.key}
-							@input=${(e: Event) => {
-								projectNewEntries[i].key = (e.target as HTMLInputElement).value;
-								projectSaveStatus = "";
-								renderApp();
-							}}
-						/>
-						<input
-							type="text"
-							class="${inputClass} text-foreground"
-							placeholder="value"
-							.value=${entry.value}
-							@input=${(e: Event) => {
-								projectNewEntries[i].value = (e.target as HTMLInputElement).value;
-								projectSaveStatus = "";
-								renderApp();
-							}}
-						/>
-						<button
-							class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-							title="Remove"
-							@click=${() => { projectNewEntries.splice(i, 1); projectSaveStatus = ""; renderApp(); }}
-						>${icon(X, "xs")}</button>
-					</div>
-				`)}
-				<button
-					class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground
-						hover:bg-muted rounded-md transition-colors self-start"
-					@click=${() => { projectNewEntries.push({ key: "", value: "" }); renderApp(); }}
-				>${icon(Plus, "xs")} Add Setting</button>
-			</div>
-
-			<!-- Save -->
-			<div class="flex items-center gap-3 pt-2 border-t border-border">
-				<button
-					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
-						hover:bg-primary/90 transition-colors disabled:opacity-50"
-					?disabled=${projectSaveStatus === "saving"}
-					@click=${saveProjectConfig}
-				>${projectSaveStatus === "saving" ? "Saving..." : "Save"}</button>
-				${projectSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved successfully.</span>` : ""}
-				${projectSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
-			</div>
-		</div>
-	`;
-}
 
 function loadGeneralSettings() {
-	if (!settingsCwdLoaded) {
-		settingsCwd = state.defaultCwd;
-		settingsCwdLoaded = true;
-	}
 	if (!settingsShowTimestampsLoaded) {
 		settingsShowTimestampsLoaded = true;
 		(async () => {
@@ -1606,57 +996,10 @@ async function toggleShowTimestamps(): Promise<void> {
 	} catch {}
 }
 
-async function saveDefaultCwd(): Promise<void> {
-	settingsCwdSaveStatus = "saving";
-	renderApp();
-	try {
-		const res = await gatewayFetch("/api/config/cwd", {
-			method: "PUT",
-			body: JSON.stringify({ cwd: settingsCwd }),
-		});
-		if (res.ok) {
-			const data = await res.json();
-			state.defaultCwd = data.cwd;
-			settingsCwdSaveStatus = "saved";
-			setTimeout(() => { settingsCwdSaveStatus = ""; renderApp(); }, 2000);
-		} else {
-			settingsCwdSaveStatus = "error";
-		}
-	} catch {
-		settingsCwdSaveStatus = "error";
-	}
-	renderApp();
-}
-
 function renderGeneralTab() {
 	loadGeneralSettings();
 	return html`
 		<div class="flex flex-col gap-4">
-			<div class="flex flex-col gap-1.5">
-				<label class="text-sm font-medium text-foreground">Default Working Directory</label>
-				<p class="text-xs text-muted-foreground">
-					The default directory used when creating new sessions and goals without an explicit path.
-				</p>
-				<div class="flex gap-2">
-					<input
-						type="text"
-						class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-							focus:outline-none focus:ring-2 focus:ring-ring"
-						.value=${settingsCwd}
-						placeholder="e.g. C:\\Users\\you\\projects"
-						@input=${(e: Event) => { settingsCwd = (e.target as HTMLInputElement).value; settingsCwdSaveStatus = ""; renderApp(); }}
-					/>
-					<button
-						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
-							hover:bg-primary/90 transition-colors disabled:opacity-50"
-						?disabled=${settingsCwdSaveStatus === "saving"}
-						@click=${saveDefaultCwd}
-					>${settingsCwdSaveStatus === "saving" ? "Saving..." : "Save"}</button>
-				</div>
-				${settingsCwdSaveStatus === "saved" ? html`<p class="text-xs text-green-600">Saved successfully.</p>` : ""}
-				${settingsCwdSaveStatus === "error" ? html`<p class="text-xs text-destructive">Failed to save.</p>` : ""}
-			</div>
-
 			<div class="flex flex-col gap-1.5">
 				<label class="flex items-center gap-2 cursor-pointer">
 					<input
@@ -2187,7 +1530,7 @@ export function renderSettingsPage() {
 			<div class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border">
 				<button
 					class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
-					@click=${() => { resetRebindState(); cleanupListener(); settingsCwdLoaded = false; toggleSettings(); }}
+					@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
 					title="Back"
 				>${icon(ArrowLeft, "sm")}</button>
 				<h1 class="text-lg font-semibold">Settings</h1>
@@ -2217,7 +1560,6 @@ export function renderSettingsPage() {
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
 					` : html`
 						${currentTab === "general" ? renderGeneralTab() : ""}
-						${currentTab === "project" ? renderProjectTab() : ""}
 						${currentTab === "models" ? renderModelsTab() : ""}
 						${currentTab === "shortcuts" ? renderShortcutsTab() : ""}
 						${currentTab === "palette" ? renderPaletteTab() : ""}
