@@ -5,7 +5,6 @@ allowedTools:
   - read
   - write
   - edit
-  - bash
   - grep
   - find
   - ls
@@ -42,48 +41,10 @@ allowedTools:
   - mcp__playwright__browser_tabs
   - mcp__playwright__browser_wait_for
 toolPolicies:
-  read: always-allow
-  write: always-allow
-  edit: always-allow
-  bash: always-allow
-  grep: always-allow
-  find: always-allow
-  ls: always-allow
-  web_search: always-allow
-  web_fetch: always-allow
-  delegate: always-allow
-  browser_navigate: always-allow
-  browser_screenshot: always-allow
-  browser_click: always-allow
-  browser_type: always-allow
-  browser_eval: always-allow
-  browser_wait: always-allow
-  preview_open: always-allow
-  bash_bg: always-allow
-  mcp__playwright__browser_close: always-allow
-  mcp__playwright__browser_resize: always-allow
-  mcp__playwright__browser_console_messages: always-allow
-  mcp__playwright__browser_handle_dialog: always-allow
-  mcp__playwright__browser_evaluate: always-allow
-  mcp__playwright__browser_file_upload: always-allow
-  mcp__playwright__browser_fill_form: always-allow
-  mcp__playwright__browser_press_key: always-allow
-  mcp__playwright__browser_type: always-allow
-  mcp__playwright__browser_navigate: always-allow
-  mcp__playwright__browser_navigate_back: always-allow
-  mcp__playwright__browser_network_requests: always-allow
-  mcp__playwright__browser_run_code: always-allow
-  mcp__playwright__browser_take_screenshot: always-allow
-  mcp__playwright__browser_snapshot: always-allow
-  mcp__playwright__browser_click: always-allow
-  mcp__playwright__browser_drag: always-allow
-  mcp__playwright__browser_hover: always-allow
-  mcp__playwright__browser_select_option: always-allow
-  mcp__playwright__browser_tabs: always-allow
-  mcp__playwright__browser_wait_for: always-allow
+  bash: ask-once
   Gates: ask-once
   Tasks: ask-once
 _policyMigrated: true
 createdAt: 0
-updatedAt: 1775043991585
+updatedAt: 1775078898664
 promptTemplate: ""

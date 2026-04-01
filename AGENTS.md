@@ -92,7 +92,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Change message rendering**: `src/ui/components/Messages.ts` for standard roles, `message-renderer-registry.ts` for custom types.
 
-**Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `sandbox-proxy.ts`, `sandbox-pool.ts`, `docker-args.ts`, `sandbox-guard.ts`. See @docs/internals.md#docker-sandbox for full architecture.
+**Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `sandbox-pool.ts`, `docker-args.ts`, `sandbox-guard.ts`. Containers run on a dedicated `bobbit-sandbox-net` Docker bridge network with direct internet access (no proxy). See @docs/internals.md#docker-sandbox for full architecture.
 
 **Configure per-project settings**: Settings uses a two-tier layout — scope row (System + per-project tabs) above sub-tabs. System scope has all tabs; per-project scope shows Commands & Sandbox, Models, Config Directories, and Appearance. The Appearance tab has a palette picker and dual light/dark accent color inputs. Project settings inherit from System and can override individual fields. The sidebar gear icon on project headers navigates directly to that project's settings. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID. REST: `GET/PUT /api/projects/:id/config`, `GET /api/projects/:id/config/resolved` (with `{ value, source }` annotations). See [docs/internals.md](docs/internals.md#per-project-config) for the resolution cascade.
 
@@ -107,7 +107,7 @@ Quick pointers for the most common issues:
 - **Streaming sluggishness**: `AgentInterface` must NOT call `requestUpdate()` in the `message_update` handler — only `StreamingMessageContainer.setMessage()` updates during streaming (rAF-batched). See @docs/debugging.md#streaming-performance for full checklist.
 - **Duplicate messages**: Check `flushDeferredMessage()` in `remote-agent.ts` — `MessageList` and `StreamingMessageContainer` must never overlap.
 - **Session persistence**: Check `<project-root>/.bobbit/state/sessions.json` (per-project). Missing `.jsonl` = session skipped on restore.
-- **Sandbox**: `GET /api/sandbox-status` for Docker state. Proxy logs prefixed `[sandbox-proxy]`.
+- **Sandbox**: `GET /api/sandbox-status` for Docker state. Containers use `bobbit-sandbox-net` bridge network — check `docker network inspect bobbit-sandbox-net` for connectivity issues.
 - **Search**: Each project has its own `<project-root>/.bobbit/state/search.db`. Delete and restart to rebuild. Searches aggregate across all project indexes. See @docs/debugging.md#search-index for full checklist.
 - **Gates**: Check `GET /api/goals/:id/gates` for dependency state.
 - **Multi-project / per-project state**: Each project stores its own state in `<project-root>/.bobbit/state/` (goals, sessions, tasks, teams, gates, staff, search index, costs). The server aggregates via `ProjectContextManager`. Check `GET /api/projects` for registered projects. Sessions/goals/staff carry optional `projectId`; filter with `?projectId=` on list endpoints. Config directories (MCP servers, skills, AGENTS.md/agent files) are resolved per-project through each project's `config_directories` setting. Per-project config: `GET /api/projects/:id/config/resolved` shows resolved values with source. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.

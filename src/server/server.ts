@@ -5,7 +5,7 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import dns from "node:dns";
+
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
 import { WebSocketServer } from "ws";
@@ -285,16 +285,6 @@ export function createGateway(config: GatewayConfig) {
 
 	const cleanupInterval = setInterval(() => {
 		rateLimiter.cleanup();
-		// Clean stale web proxy rate limit entries
-		const now = Date.now();
-		for (const [ip, timestamps] of webProxyRequests) {
-			const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
-			if (recent.length === 0) {
-				webProxyRequests.delete(ip);
-			} else {
-				webProxyRequests.set(ip, recent);
-			}
-		}
 	}, 60_000);
 
 	// Verification harness — assigned after wss is created (closure captures the reference)
@@ -386,6 +376,12 @@ export function createGateway(config: GatewayConfig) {
 			requestHandler,
 		)
 		: http.createServer(requestHandler);
+
+	// Long-polling endpoints (e.g. /api/sessions/:id/wait) can block for 10+ minutes.
+	// Node >= 19 defaults requestTimeout to 300s which would kill those requests.
+	// Disable the server-level timeout; individual endpoints manage their own.
+	server.requestTimeout = 0;
+	server.headersTimeout = 0;
 
 	// WebSocket server (noServer mode — we handle upgrade manually)
 	const wss = new WebSocketServer({ noServer: true });
@@ -536,6 +532,18 @@ export function createGateway(config: GatewayConfig) {
 							poolCredentials = credsRaw ? JSON.parse(credsRaw) : {};
 						} catch (err) { console.warn(`[sandbox-pool] Invalid sandbox_credentials JSON, ignoring: ${err}`); }
 
+						// Ensure the restricted Docker network exists before creating pool containers
+						let sandboxNetwork: string | undefined;
+						try {
+							sandboxNetwork = await sessionManager.ensureSandboxNetwork();
+						} catch (err) {
+							console.error("[sandbox-pool] Cannot create sandbox network — pool disabled:", err);
+						}
+
+						if (!sandboxNetwork) {
+							console.warn("[sandbox-pool] Skipping pool initialization — no sandbox network available");
+						} else {
+
 						sandboxPool = new SandboxPool({
 							poolSize,
 							maxIdleSeconds,
@@ -548,9 +556,11 @@ export function createGateway(config: GatewayConfig) {
 							gatewayToken: gwToken,
 							sandboxMounts: poolMounts,
 							sandboxCredentials: poolCredentials,
+							sandboxNetwork,
 						});
 						await sandboxPool.init();
 						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
+						} // end if (sandboxNetwork)
 					} else {
 						console.log("[sandbox-pool] Not a git repo — sandbox pool disabled (worktrees require git)");
 					}
@@ -609,6 +619,7 @@ export function createGateway(config: GatewayConfig) {
 			if (sandboxPool) {
 				await sandboxPool.shutdown();
 			}
+			await sessionManager.cleanupSandboxNetwork();
 			server.close();
 		},
 	};
@@ -637,85 +648,6 @@ function isSetupComplete(): boolean {
 	} catch {
 		return false;
 	}
-}
-
-// ── SSRF protection for web proxy ──────────────────────────────────────
-const dnsLookup = promisify(dns.lookup);
-
-/** Returns true if the IP address is private, loopback, or link-local. */
-function isPrivateIp(ip: string): boolean {
-	// IPv4-mapped IPv6 (::ffff:x.x.x.x) — extract the IPv4 part
-	const v4Mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-	const addr = v4Mapped ? v4Mapped[1] : ip;
-
-	// IPv6 loopback
-	if (addr === "::1") return true;
-	// IPv6 link-local
-	if (addr.toLowerCase().startsWith("fe80:")) return true;
-	// IPv6 unique local
-	if (/^f[cd]/i.test(addr)) return true;
-
-	const parts = addr.split(".").map(Number);
-	if (parts.length !== 4 || parts.some(n => isNaN(n))) return false; // not IPv4, allow
-
-	// 127.0.0.0/8 loopback
-	if (parts[0] === 127) return true;
-	// 10.0.0.0/8
-	if (parts[0] === 10) return true;
-	// 172.16.0.0/12
-	if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
-	// 192.168.0.0/16
-	if (parts[0] === 192 && parts[1] === 168) return true;
-	// 169.254.0.0/16 link-local (AWS metadata etc.)
-	if (parts[0] === 169 && parts[1] === 254) return true;
-	// 0.0.0.0/8
-	if (parts[0] === 0) return true;
-
-	return false;
-}
-
-/**
- * Resolve hostname and check that it doesn't point to a private IP.
- * Returns an error string if blocked, or null if safe.
- */
-async function checkSsrf(hostname: string): Promise<string | null> {
-	// Block obvious private hostnames
-	if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) {
-		return `Blocked: ${hostname} is a private hostname`;
-	}
-	// If it's already an IP literal, check directly
-	if (/^[\d.]+$/.test(hostname) || hostname.includes(":")) {
-		if (isPrivateIp(hostname)) return `Blocked: ${hostname} is a private IP`;
-		return null;
-	}
-	// DNS resolve and check
-	try {
-		const { address } = await dnsLookup(hostname);
-		if (isPrivateIp(address)) {
-			return `Blocked: ${hostname} resolves to private IP ${address}`;
-		}
-	} catch {
-		// DNS failure — let curl handle it (will fail with a network error)
-	}
-	return null;
-}
-
-// Rate limiting for web proxy endpoints (10 req/min per client IP)
-const webProxyRequests = new Map<string, number[]>();
-const WEB_PROXY_RATE_LIMIT = 10;
-const WEB_PROXY_WINDOW_MS = 60_000;
-
-function checkWebProxyRateLimit(clientIp: string): boolean {
-	const now = Date.now();
-	const timestamps = webProxyRequests.get(clientIp) || [];
-	const recent = timestamps.filter(t => now - t < WEB_PROXY_WINDOW_MS);
-	if (recent.length >= WEB_PROXY_RATE_LIMIT) {
-		webProxyRequests.set(clientIp, recent);
-		return false;
-	}
-	recent.push(now);
-	webProxyRequests.set(clientIp, recent);
-	return true;
 }
 
 async function handleApiRoute(
@@ -929,109 +861,6 @@ async function handleApiRoute(
 			json({ success: true });
 		} else {
 			json({ success: false, error: result.error }, 500);
-		}
-		return;
-	}
-
-	// POST /api/web-proxy/search
-	if (url.pathname === "/api/web-proxy/search" && req.method === "POST") {
-		const clientIp = req.socket.remoteAddress || "unknown";
-		if (!checkWebProxyRateLimit(clientIp)) {
-			json({ error: "Rate limit exceeded: max 10 web proxy requests per minute" }, 429);
-			return;
-		}
-		const body = await readBody(req);
-		const query = body?.query;
-		if (!query || typeof query !== "string") {
-			json({ error: "Missing query" }, 400);
-			return;
-		}
-		const maxResults = Math.min(Math.max(1, body?.maxResults || 10), 20);
-		try {
-			const formBody = `q=${encodeURIComponent(query)}`;
-			const { stdout } = await execFileAsync(
-				"curl", [
-					"-sL", "https://html.duckduckgo.com/html/",
-					"-X", "POST",
-					"-d", formBody,
-					"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-				],
-				{ timeout: 15000, maxBuffer: 1024 * 1024 },
-			);
-			// Parse DuckDuckGo HTML results (class="result " blocks)
-			const results: Array<{ title: string; url: string; snippet: string }> = [];
-			const resultBlocks = stdout.split(/class="result\s/g).slice(1);
-			for (const block of resultBlocks) {
-				const titleMatch = block.match(/class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/);
-				if (!titleMatch) continue;
-				let rawUrl = titleMatch[1];
-				const title = titleMatch[2].replace(/<[^>]+>/g, "").trim();
-				// DDG wraps URLs in a redirect: //duckduckgo.com/l/?uddg=<encoded>&rut=...
-				const uddgMatch = rawUrl.match(/[?&]uddg=([^&]+)/);
-				if (uddgMatch) rawUrl = decodeURIComponent(uddgMatch[1]);
-				const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|td|div)>/);
-				const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
-				if (title && rawUrl.startsWith("http")) {
-					results.push({ title, url: rawUrl, snippet });
-				}
-				if (results.length >= maxResults) break;
-			}
-			json({ results });
-		} catch (err) {
-			json({ error: `Search failed: ${err}` }, 502);
-		}
-		return;
-	}
-
-	// POST /api/web-proxy/fetch
-	if (url.pathname === "/api/web-proxy/fetch" && req.method === "POST") {
-		const clientIp = req.socket.remoteAddress || "unknown";
-		if (!checkWebProxyRateLimit(clientIp)) {
-			json({ error: "Rate limit exceeded: max 10 web proxy requests per minute" }, 429);
-			return;
-		}
-		const body = await readBody(req);
-		const targetUrl = body?.url;
-		if (!targetUrl || typeof targetUrl !== "string") {
-			json({ error: "Missing url" }, 400);
-			return;
-		}
-		// Validate URL scheme and SSRF protection
-		let parsedTarget: URL;
-		try {
-			parsedTarget = new URL(targetUrl);
-			if (parsedTarget.protocol !== "http:" && parsedTarget.protocol !== "https:") {
-				json({ error: "URL must use http or https" }, 400);
-				return;
-			}
-		} catch {
-			json({ error: "Invalid URL" }, 400);
-			return;
-		}
-		const ssrfBlock = await checkSsrf(parsedTarget.hostname);
-		if (ssrfBlock) {
-			json({ error: ssrfBlock }, 403);
-			return;
-		}
-		const maxLength = Math.min(body?.maxLength || 20000, 100000);
-		try {
-			const { stdout } = await execFileAsync(
-				"curl", ["-sL", "--max-time", "30", parsedTarget.href],
-				{ timeout: 35000, maxBuffer: 5 * 1024 * 1024 },
-			);
-			// Strip HTML tags for a basic text extraction
-			let text = stdout
-				.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-				.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-				.replace(/<[^>]+>/g, " ")
-				.replace(/\s+/g, " ")
-				.trim();
-			if (text.length > maxLength) {
-				text = text.substring(0, maxLength);
-			}
-			json({ text, length: text.length });
-		} catch (err) {
-			json({ error: `Fetch failed: ${err}` }, 502);
 		}
 		return;
 	}

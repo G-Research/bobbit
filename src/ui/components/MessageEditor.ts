@@ -153,6 +153,10 @@ export class MessageEditor extends LitElement {
 		// Show autocomplete when input is "/" or "/partial-match"
 		const match = text.match(/^\/([a-zA-Z0-9-]*)$/);
 		if (match) {
+			// Eagerly load skills if not yet loaded (handles race with cwd arrival)
+			if (!this._slashSkillsLoaded && this.cwd) {
+				this._loadSlashSkills().then(() => this._updateSlashAutocomplete());
+			}
 			const query = match[1].toLowerCase();
 			this._slashFilteredSkills = query
 				? this._slashSkills.filter((s) => s.name.toLowerCase().includes(query))

@@ -48,52 +48,18 @@ test.describe("Docker Sandbox", () => {
 		expect(data.error).toContain("not configured");
 	});
 
-	test("POST /api/web-proxy/search with missing query returns 400", async () => {
-		const res = await apiFetch("/api/web-proxy/search", {
+	test("POST /api/web-proxy endpoints are removed (404)", async () => {
+		const searchRes = await apiFetch("/api/web-proxy/search", {
 			method: "POST",
-			body: JSON.stringify({}),
+			body: JSON.stringify({ query: "test" }),
 		});
-		expect(res.status).toBe(400);
-		const data = await res.json();
-		expect(data.error).toContain("query");
-	});
+		expect(searchRes.status).toBe(404);
 
-	test("POST /api/web-proxy/fetch with invalid URL returns 400", async () => {
-		const res = await apiFetch("/api/web-proxy/fetch", {
+		const fetchRes = await apiFetch("/api/web-proxy/fetch", {
 			method: "POST",
-			body: JSON.stringify({ url: "ftp://invalid" }),
+			body: JSON.stringify({ url: "https://example.com" }),
 		});
-		expect(res.status).toBe(400);
-		const data = await res.json();
-		expect(data.error).toContain("http");
-	});
-
-	test("POST /api/web-proxy/fetch blocks private IPs (SSRF protection)", async () => {
-		for (const blockedUrl of [
-			"http://127.0.0.1/secret",
-			"http://localhost/secret",
-			"http://169.254.169.254/latest/meta-data/",
-			"http://10.0.0.1/internal",
-			"http://192.168.1.1/admin",
-		]) {
-			const res = await apiFetch("/api/web-proxy/fetch", {
-				method: "POST",
-				body: JSON.stringify({ url: blockedUrl }),
-			});
-			const data = await res.json();
-			expect(res.status).toBe(403);
-			expect(data.error).toContain("Blocked");
-		}
-	});
-
-	test("POST /api/web-proxy/fetch with missing URL returns 400", async () => {
-		const res = await apiFetch("/api/web-proxy/fetch", {
-			method: "POST",
-			body: JSON.stringify({}),
-		});
-		expect(res.status).toBe(400);
-		const data = await res.json();
-		expect(data.error).toContain("url");
+		expect(fetchRes.status).toBe(404);
 	});
 
 	test("GET /api/sandbox-status reflects config changes", async () => {

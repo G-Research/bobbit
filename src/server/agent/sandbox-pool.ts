@@ -48,7 +48,7 @@ export interface SandboxPoolOptions {
 	sandboxCredentials?: Record<string, string>;
 	gatewayUrl: string;
 	gatewayToken: string;
-	sandboxProxyPort?: number;
+	sandboxNetwork?: string;
 	worktreeSetupCommand?: string;
 }
 
@@ -337,7 +337,7 @@ export class SandboxPool {
 			sandboxCredentials: this.options.sandboxCredentials,
 			gatewayUrl: this.options.gatewayUrl,
 			gatewayToken: this.options.gatewayToken,
-			sandboxProxyPort: this.options.sandboxProxyPort,
+			sandboxNetwork: this.options.sandboxNetwork,
 		});
 	}
 

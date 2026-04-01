@@ -1091,6 +1091,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					const cls = accId === "crown" ? "bobbit-crowned" : `bobbit-${accId}`;
 					document.documentElement.classList.add(cls);
 				}
+				// Apply cwd/branch if not set earlier (sessionData wasn't in gatewaySessions yet)
+				if (state.chatPanel?.agentInterface && !state.chatPanel.agentInterface.cwd && sessionForRole?.cwd) {
+					state.chatPanel.agentInterface.cwd = sessionForRole.cwd;
+					if (sessionForRole.goalId) {
+						const goal = state.goals.find((g) => g.id === sessionForRole.goalId);
+						if (goal?.branch) {
+							state.chatPanel.agentInterface.branch = goal.branch;
+						}
+					}
+				}
 			}),
 			storage.providerKeys.set(remote.state.model?.provider || "anthropic", "gateway-managed"),
 		]);

@@ -69,10 +69,9 @@ Bobbit handles all mount and environment configuration automatically when launch
 
 - **Non-root execution**: Runs as the `node` user (uid=1000), not root. Files created in the bind-mounted workspace are owned by uid=1000 on the host, matching typical developer user IDs. A container escape does not grant host root access.
 - **No Docker socket**: The Docker socket (`/var/run/docker.sock`) is never mounted. The container cannot control Docker or escape to the host.
-- **Network control**: Containers always run on the default Docker bridge network (not `--network=none`). All outbound HTTP/HTTPS is routed through a sandbox proxy on the gateway host via `http_proxy`/`https_proxy` env vars. With an empty allowlist, the proxy blocks all outbound traffic (functionally equivalent to network isolation). With a non-empty allowlist, only connections to listed hostnames are permitted. The gateway is always reachable via `host.docker.internal` (bypassed via `no_proxy`). `web_search` and `web_fetch` are routed through gateway API endpoints and work regardless of allowlist configuration.
+- **Network control**: Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with direct outbound internet access. Inter-container communication is disabled (`enable_icc=false`). Cloud metadata endpoints (`metadata.google.internal`, `metadata.internal`) are blackholed via `--add-host` entries. The gateway is reachable via `host.docker.internal`. `web_search` and `web_fetch` use direct `curl` from inside the container.
 - **Filesystem isolation**: The container only sees the project directory (`/workspace`), the agent modules (`/node_modules`, read-only), and tool extensions (`/tools`, read-only). Host directories like `~/.ssh`, `~/.aws`, and `~/.config` are not accessible.
 - **Credential isolation**: Only explicitly configured `sandbox_credentials` environment variables are passed into the container.
-- **Proxy security**: The sandbox proxy binds to `0.0.0.0` so it is reachable from Docker containers. On shared networks, use firewall rules to restrict access to the proxy port from external machines.
 
 ## Customization
 
@@ -129,4 +128,4 @@ This image is used automatically by Bobbit when sandbox mode is enabled. You do 
 2. The image is built automatically on the next server startup if missing — or build manually: `docker build -t bobbit-agent docker/`
 3. Enable the "Sandbox" checkbox when creating a new session
 
-See the main Bobbit documentation for full sandbox configuration options including network allowlists, credentials, and additional mounts.
+See the main Bobbit documentation for full sandbox configuration options including credentials and additional mounts.

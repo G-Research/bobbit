@@ -84,8 +84,8 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - `GET /api/sandbox-status` for Docker availability
 - Worktree sessions now correctly call `applySandboxWiring()` via the pipeline (previously `_setupWorktreeAndLaunchAgent()` skipped sandbox wiring)
 - `sessions.json` has `sandboxed: boolean`
-- Proxy logs: `[sandbox-proxy]` prefix — look for `BLOCKED` / `CONNECT`
-- Container can't reach gateway? Check: (1) proxy allowlist has gateway hostname, (2) `BOBBIT_GATEWAY_URL` matches real address, (3) CONNECT forwarding in proxy logs
+- Container can't reach internet? Check: (1) `docker network inspect bobbit-sandbox-net` shows the network exists, (2) container is attached to it (`docker inspect <container>` → Networks), (3) host firewall isn't blocking Docker bridge traffic
+- Container can't reach gateway? Check: (1) `--add-host=host.docker.internal:host-gateway` is in the Docker args, (2) `BOBBIT_GATEWAY_URL` matches real address
 - Auth failing? Check `BOBBIT_TOKEN` is scoped token from `SandboxTokenStore`
 - Sessions not surviving restart? Check `agentSessionFile` is host-native path (not `/home/node/...`)
 - Delegates failing? Parent needs `sandboxed: true` + sandbox still configured in `project.yaml`
