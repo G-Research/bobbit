@@ -113,16 +113,28 @@ function token(): string {
 	return _tokenCache[p];
 }
 
-/** Authenticated REST fetch against the E2E gateway. */
-export function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	return fetch(`${base()}${path}`, {
-		...opts,
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${token()}`,
-			...(opts.headers as Record<string, string> || {}),
-		},
-	});
+/** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
+export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const maxRetries = 3;
+	for (let attempt = 0; attempt < maxRetries; attempt++) {
+		try {
+			return await fetch(`${base()}${path}`, {
+				...opts,
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token()}`,
+					...(opts.headers as Record<string, string> || {}),
+				},
+			});
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? (err.cause as Error)?.message ?? err.message : String(err);
+			const isTransient = /ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|UND_ERR_SOCKET/i.test(msg);
+			if (!isTransient || attempt === maxRetries - 1) throw err;
+			// Brief back-off before retry
+			await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+		}
+	}
+	throw new Error("apiFetch: unreachable");
 }
 
 /** Create a session via REST, return its ID. Defaults cwd to a non-git temp dir. */

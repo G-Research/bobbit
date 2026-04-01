@@ -777,15 +777,26 @@ describe("TeamManager", () => {
 			execSync('git config user.name "Test"', { cwd: tmp, stdio: "pipe" });
 			fs.writeFileSync(path.join(tmp, "README.md"), "# test");
 			execSync("git add . && git commit -m init", { cwd: tmp, stdio: "pipe" });
+
+			// Create a bare clone to act as "origin" so that `origin/feat/test` exists
+			const bare = `${tmp}-bare`;
+			execSync(`git clone --bare "${tmp}" "${bare}"`, { stdio: "pipe" });
+			execSync(`git remote add origin "${bare}"`, { cwd: tmp, stdio: "pipe" });
+			// Create the feat/test branch and push it to origin
+			execSync("git checkout -b feat/test", { cwd: tmp, stdio: "pipe" });
+			execSync("git push origin feat/test", { cwd: tmp, stdio: "pipe" });
+			// Return to default branch so worktree creation doesn't conflict
+			execSync("git checkout -", { cwd: tmp, stdio: "pipe" });
+
 			return {
 				repoPath: tmp,
 				cleanup: () => {
-					// Also remove any sibling worktrees
+					// Also remove any sibling worktrees and the bare clone
 					const parent = path.dirname(tmp);
 					const basename = path.basename(tmp);
 					try {
 						for (const entry of fs.readdirSync(parent)) {
-							if (entry.startsWith(`${basename}-wt-`)) {
+							if (entry.startsWith(`${basename}-wt-`) || entry === `${basename}-bare`) {
 								fs.rmSync(path.join(parent, entry), { recursive: true, force: true });
 							}
 						}
