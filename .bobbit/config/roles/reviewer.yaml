@@ -9,7 +9,7 @@ allowedTools:
   - task_list
   - task_update
 toolPolicies:
-  edit: never-ask
+  edit: never
 _policyMigrated: true
 createdAt: 1773875507369
 updatedAt: 1774972321972
