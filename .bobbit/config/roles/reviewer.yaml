@@ -9,12 +9,6 @@ allowedTools:
   - task_list
   - task_update
 toolPolicies:
-  read: always-allow
-  bash: always-allow
-  web_search: always-allow
-  web_fetch: always-allow
-  task_list: always-allow
-  task_update: always-allow
   edit: never-ask
 _policyMigrated: true
 createdAt: 1773875507369

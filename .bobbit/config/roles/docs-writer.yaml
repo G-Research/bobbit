@@ -2,18 +2,14 @@ name: docs-writer
 label: Docs Writer
 accessory: pencil
 allowedTools:
-  - Read
-  - Write
-  - Edit
-  - Bash
+  - read
+  - write
+  - edit
+  - bash
   - web_search
   - web_fetch
-  - write
-  - read
-  - edit
   - task_update
   - task_list
-  - bash
   - browser_click
   - browser_eval
   - browser_navigate
@@ -23,28 +19,7 @@ allowedTools:
   - find
   - grep
   - ls
-toolPolicies:
-  Read: always-allow
-  Write: always-allow
-  Edit: always-allow
-  Bash: always-allow
-  web_search: always-allow
-  web_fetch: always-allow
-  write: always-allow
-  read: always-allow
-  edit: always-allow
-  task_update: always-allow
-  task_list: always-allow
-  bash: always-allow
-  browser_click: always-allow
-  browser_eval: always-allow
-  browser_navigate: always-allow
-  browser_screenshot: always-allow
-  browser_type: always-allow
-  browser_wait: always-allow
-  find: always-allow
-  grep: always-allow
-  ls: always-allow
+toolPolicies: {}
 _policyMigrated: true
 createdAt: 1773948781652
 updatedAt: 1774972319697
