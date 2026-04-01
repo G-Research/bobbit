@@ -711,7 +711,7 @@ async function handleApiRoute(
 	/** Get a GoalManager for the project that owns the given goal. Falls back to default. */
 	function getGoalManagerForGoal(goalId: string): GoalManager {
 		const ctx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
-		return new GoalManager(ctx.goalStore, workflowManager.store);
+		return ctx.goalManager;
 	}
 
 	/** Get a TaskManager for the project that owns the given goal. Falls back to default. */
