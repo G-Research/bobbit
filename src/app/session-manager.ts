@@ -75,6 +75,7 @@ export function saveGoalDraft(sessionId: string): void {
 			previewTitle: state.previewTitle,
 			previewSpec: state.previewSpec,
 			previewCwd: state.previewCwd,
+			previewProjectId: state.previewProjectId,
 			previewTitleEdited: state.previewTitleEdited,
 			previewSpecEdited: state.previewSpecEdited,
 			previewCwdEdited: state.previewCwdEdited,
@@ -96,6 +97,7 @@ async function restoreGoalDraft(sessionId: string): Promise<boolean> {
 		state.previewTitle = draft.previewTitle ?? "";
 		state.previewSpec = draft.previewSpec ?? "";
 		state.previewCwd = draft.previewCwd ?? "";
+		state.previewProjectId = draft.previewProjectId ?? "";
 		state.previewTitleEdited = draft.previewTitleEdited ?? false;
 		state.previewSpecEdited = draft.previewSpecEdited ?? false;
 		state.previewCwdEdited = draft.previewCwdEdited ?? false;
@@ -551,6 +553,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		remote.onCompactionChange = (isCompacting: boolean) => {
+			const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
+			if (idx >= 0) {
+				state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], isCompacting };
+			}
+			renderApp();
+		};
+
 		remote.onWorkflowUpdate = () => renderApp();
 
 		remote.onGoalSetupEvent = async () => {
@@ -965,6 +975,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.previewCwdEdited = false;
 					state.previewSpecEdited = false;
 					state.assistantHasProposal = false;
+					// Keep previewProjectId if set by showGoalDialog (pre-filled from project button)
+					// Only clear if not already set
+					if (!state.previewProjectId) {
+						const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
+						state.previewProjectId = currentSession?.projectId || "";
+					}
 				}
 				state.previewSpecEditMode = false;
 			} else if (state.assistantType === "role") {

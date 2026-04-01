@@ -274,6 +274,18 @@ function renderMobileLanding() {
 													<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
+													<button
+														class="p-1.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative shrink-0"
+														@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
+														title="New goal in ${project.name}"
+													>
+														<span class="relative inline-flex" style="width:16px;height:16px;">
+															${icon(GoalIcon, "sm")}
+															<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:10px;height:10px;">
+																<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
+															</svg>
+														</span>
+													</button>
 												</div>
 												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 													${data.goals.map((goal, gi) => html`
@@ -480,6 +492,7 @@ function goalPreviewPanel() {
 		}
 		state.assistantType = null;
 		state.activeGoalProposal = null;
+		state.previewProjectId = "";
 		const workflowId = _selectedWorkflowId || "general";
 		_selectedWorkflowId = "general";
 		const sandboxed = _goalSandboxed;
@@ -500,6 +513,7 @@ function goalPreviewPanel() {
 			workflowId,
 			reattemptOf: reattemptGoalId || undefined,
 			sandboxed,
+			projectId: state.previewProjectId || undefined,
 		});
 
 		// If this is a re-attempt, archive the old goal and link the new one
@@ -553,6 +567,28 @@ function goalPreviewPanel() {
 						},
 					})}
 				</div>
+				${state.projects.length > 1 ? html`
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Project</label>
+					<select
+						class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
+						.value=${state.previewProjectId || state.projects[0]?.id || ""}
+						@change=${(e: Event) => {
+							const pid = (e.target as HTMLSelectElement).value;
+							state.previewProjectId = pid;
+							const project = state.projects.find(p => p.id === pid);
+							if (project && !state.previewCwdEdited) {
+								state.previewCwd = project.rootPath;
+							}
+							renderApp();
+						}}
+					>
+						${state.projects.map((p) => html`
+							<option value=${p.id} ?selected=${(state.previewProjectId || state.projects[0]?.id) === p.id}>${p.name}</option>
+						`)}
+					</select>
+				</div>
+				` : ""}
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
 						<label class="text-xs text-muted-foreground font-medium">Working Directory</label>
@@ -1726,6 +1762,7 @@ function goalProposalPanel() {
 				spec: _proposalSpec,
 				workflowId: _proposalWorkflowId || undefined,
 				sandboxed,
+				projectId: state.previewProjectId || undefined,
 			});
 			state.activeGoalProposal = null;
 			_proposalInitializedFrom = null;

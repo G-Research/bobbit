@@ -78,6 +78,8 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `sandbox-proxy.ts`, `sandbox-pool.ts`, `docker-args.ts`, `sandbox-guard.ts`. See @docs/internals.md#docker-sandbox for full architecture.
 
+**Configure per-project settings**: Settings uses a two-tier layout — scope row (System + per-project tabs) above sub-tabs. System scope has all tabs; per-project scope shows Commands & Sandbox, Models, and Config Directories. Project settings inherit from System and can override individual fields. The sidebar gear icon on project headers navigates directly to that project's settings. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID. REST: `GET/PUT /api/projects/:id/config`, `GET /api/projects/:id/config/resolved` (with `{ value, source }` annotations). See [docs/internals.md](docs/internals.md#per-project-config) for the resolution cascade.
+
 **Manage config directories**: Settings → Config Directories tab, or `config_directories` in `project.yaml`. See @docs/internals.md#config-scan-directories.
 
 ## Debugging
@@ -92,7 +94,7 @@ Quick pointers for the most common issues:
 - **Sandbox**: `GET /api/sandbox-status` for Docker state. Proxy logs prefixed `[sandbox-proxy]`.
 - **Search**: Delete `.bobbit/state/search.db` and restart to rebuild index. Schema version 3 adds `project_id` column for multi-project filtering. See @docs/debugging.md#search-index for full checklist.
 - **Gates**: Check `GET /api/goals/:id/gates` for dependency state.
-- **Multi-project**: Project registry at `.bobbit/state/projects.json`. Server CWD auto-registered as default project on startup. Check `GET /api/projects` for registered projects. Sessions/goals carry optional `projectId`; filter with `?projectId=` on list endpoints. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
+- **Multi-project**: Project registry at `.bobbit/state/projects.json`. Server CWD auto-registered as default project on startup. Check `GET /api/projects` for registered projects. Sessions/goals carry optional `projectId`; filter with `?projectId=` on list endpoints. Per-project config: `GET /api/projects/:id/config/resolved` shows resolved values with source. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
 
 ## Git conventions
 

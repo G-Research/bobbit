@@ -106,6 +106,8 @@ export class RemoteAgent {
 	/** Callback fired when background process state changes. */
 	/** Callback fired when goal setup status changes (worktree ready or failed). */
 	onGoalSetupEvent?: () => void;
+	/** Callback fired when compaction state changes (start/end). */
+	onCompactionChange?: (isCompacting: boolean) => void;
 	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; process?: any }) => void;
 	/** Callback fired when preview panel flag changes for a session. */
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
@@ -1098,6 +1100,7 @@ export class RemoteAgent {
 			case "auto_compaction_start":
 				// Don't set isStreaming — compaction uses its own blob animation
 				this._isCompacting = true;
+				this.onCompactionChange?.(true);
 				// Add a placeholder message so compaction is visible in chat history
 				this._addCompactingPlaceholder();
 				// Normalize to compaction_start for UI subscribers
@@ -1120,6 +1123,7 @@ export class RemoteAgent {
 			case "compaction_end":
 			case "auto_compaction_end": {
 				this._isCompacting = false;
+				this.onCompactionChange?.(false);
 				// Replace the placeholder with the final result message
 				const filtered = this._state.messages.filter((m: any) => m.id !== "compacting_placeholder");
 				const success = event.type === "compaction_end" ? event.success : !event.aborted;
