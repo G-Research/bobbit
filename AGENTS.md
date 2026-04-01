@@ -41,6 +41,20 @@ UI-only changes need only unit tests. Server changes need E2E too.
 **Test types:**
 - **Unit** (`tests/*.spec.ts`, `tests/*.test.ts`): Playwright `file://` fixtures + Node test runner. See `mobile-header.spec.ts`.
 - **E2E** (`tests/e2e/*.spec.ts`): Import `test` from `./gateway-harness.js` for auto-started gateway per worker. See `session-lifecycle-ui.spec.ts` for fullstack pattern.
+- **UI E2E** (`tests/e2e/ui/*.spec.ts`): Browser-based fullstack tests that exercise user journeys (click buttons, fill forms, verify outcomes) through UI → WebSocket → server → mock agent → UI. Covers project management, goal creation, team lifecycle, session interactions, navigation, and settings. Run with: `npx playwright test --config playwright-e2e.config.ts tests/e2e/ui/`
+
+**UI E2E page-object helpers** (`tests/e2e/ui/ui-helpers.ts`): Reusable helpers for browser tests. Import from `./ui-helpers.js`:
+- `openApp(page)` — navigate with token auth, wait for sidebar to load
+- `createSessionViaUI(page)` — click "New session", wait for textarea
+- `sendMessage(page, text)` — fill textarea, press Enter
+- `waitForAgentResponse(page, opts?)` — wait for assistant message (default: "OK")
+- `navigateToHash(page, hash)` — set `location.hash`, wait for transition
+- `navigateToGoalDashboard(page, goalId)` — navigate to `#/goal/<id>`, wait for dashboard
+- `clickSidebarItem(page, label)` — click sidebar entry by text
+- `getVisibleSessions(page)` — return sidebar session titles
+- `waitForSessionIdle(sessionId)` — poll API until session is idle
+
+**Mock agent keywords**: The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `<goal_proposal>` XML block response — used to test the goal assistant flow without a real LLM.
 
 **Rules:**
 - All tests run in isolation. E2E tests get unique `BOBBIT_DIR` (`.e2e-worker-<port>/`).
@@ -49,6 +63,8 @@ UI-only changes need only unit tests. Server changes need E2E too.
 - Prefer `file://` fixtures for new tests. Use E2E only when you need a real server.
 
 ## Recipes
+
+**Add a UI E2E test**: Create a `.spec.ts` file in `tests/e2e/ui/`. Import `test, expect` from `../gateway-harness.js`, API helpers from `../e2e-setup.js`, and page helpers from `./ui-helpers.js`. Use `openApp(page)` to authenticate, page-object helpers for interactions, and API helpers for setup/teardown. See `session-interactions.spec.ts` for a simple example. Pattern: create state via API → interact via browser → assert via UI or API. Never use `setTimeout` — use Playwright's built-in waiting.
 
 **Add a REST endpoint**: Edit `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` handlers for pattern (`execFileAsync`, path sanitization, 5s timeout). For project-scoped CRUD, see the `/api/projects` endpoints for the pattern (JSON body parsing, type guards, registry calls).
 

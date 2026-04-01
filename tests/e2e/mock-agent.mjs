@@ -44,6 +44,14 @@ function respondToPrompt(text) {
 		return { toolDenied: toolDeniedMatch[1] };
 	}
 
+	// Goal proposal keyword — emit XML-tagged proposal block
+	if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
+		return {
+			tool: null,
+			text: `Here is a goal proposal:\n\n<goal_proposal>\n<title>E2E Test Goal</title>\n<workflow>general</workflow>\n<spec>\nThis is a test goal created via the assistant flow.\nIt validates the goal creation UI.\n</spec>\n</goal_proposal>`
+		};
+	}
+
 	// Detect tool requests by keywords
 	if (lower.includes("bash") || lower.includes("echo ")) {
 		return { tool: "Bash", input: { command: "echo BOBBIT_TOOL_TEST_OK_12345" }, output: "BOBBIT_TOOL_TEST_OK_12345\n" };
@@ -137,7 +145,7 @@ async function handlePrompt(requestId, text) {
 		};
 		conversationMessages.push(assistantMsg);
 		emit({ type: "message_end", message: assistantMsg });
-	} else if (toolAction) {
+	} else if (toolAction && toolAction.tool) {
 		const toolId = `tool_${Date.now()}`;
 
 		// Tool execution start
@@ -175,6 +183,14 @@ async function handlePrompt(requestId, text) {
 				{ type: "tool_use", id: toolId, name: toolAction.tool, input: toolAction.input },
 				{ type: "text", text: `Done. Used ${toolAction.tool} tool.` },
 			],
+		};
+		conversationMessages.push(assistantMsg);
+		emit({ type: "message_end", message: assistantMsg });
+	} else if (toolAction && toolAction.text) {
+		// Custom text response (e.g. goal_proposal)
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: toolAction.text }],
 		};
 		conversationMessages.push(assistantMsg);
 		emit({ type: "message_end", message: assistantMsg });
