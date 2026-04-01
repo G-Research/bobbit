@@ -27,7 +27,7 @@ import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
@@ -797,7 +797,7 @@ function _handleFullSearchClick(query: string): void {
 
 /** Render a collapsible project section header. */
 function renderProjectHeader(project: Project, expanded: boolean) {
-	const color = project.color || "var(--muted-foreground)";
+	const color = getProjectAccentColor(project);
 	return html`
 		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
