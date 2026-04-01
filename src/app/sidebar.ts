@@ -30,7 +30,7 @@ import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
-import { isRouteActive, toggleConfigPage } from "./routing.js";
+import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
 
 // ============================================================================
 // PROJECT EXPANSION STATE
@@ -789,11 +789,16 @@ function _handleFullSearchClick(query: string): void {
 function renderProjectHeader(project: Project, expanded: boolean) {
 	const color = project.color || "var(--muted-foreground)";
 	return html`
-		<div class="flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
 			<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
+			<button
+				class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors opacity-0 group-hover:opacity-100"
+				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
+				title="Project settings"
+			>${icon(Settings, "xs")}</button>
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
 				style="padding:0 2px;line-height:0;"

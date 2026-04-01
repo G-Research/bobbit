@@ -27,13 +27,43 @@ import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 type SettingsTab = SettingsTabId;
 const DEFAULT_TAB: SettingsTab = "shortcuts";
 
+const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
+	{ id: "shortcuts", label: "Shortcuts" },
+	{ id: "general", label: "General" },
+	{ id: "project", label: "Commands & Sandbox" },
+	{ id: "models", label: "Models" },
+	{ id: "directories", label: "Config Directories" },
+	{ id: "palette", label: "Color Palette" },
+	{ id: "account", label: "Account" },
+];
+
+const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
+	{ id: "project", label: "Commands & Sandbox" },
+	{ id: "models", label: "Models" },
+	{ id: "directories", label: "Config Directories" },
+];
+
+function getActiveScope(): string {
+	return (getRouteFromHash() as any).settingsScope ?? "system";
+}
+
+function getTabsForScope(scope: string): { id: SettingsTab; label: string }[] {
+	return scope === "system" ? SYSTEM_TABS : PROJECT_TABS;
+}
+
 /** Allow external code to deep-link to a specific settings tab. */
 export function setActiveSettingsTab(tab: SettingsTab): void {
-	setHashRoute("settings", tab);
+	const scope = getActiveScope();
+	setHashRoute("settings", `${scope}/${tab}`);
 }
 
 function getActiveTab(): SettingsTab {
-	return getRouteFromHash().settingsTab ?? DEFAULT_TAB;
+	const raw = getRouteFromHash().settingsTab ?? DEFAULT_TAB;
+	const scope = getActiveScope();
+	const tabs = getTabsForScope(scope);
+	// If current tab is not valid for this scope, default to first
+	if (!tabs.some(t => t.id === raw)) return tabs[0].id;
+	return raw;
 }
 
 // Rebind state (same as shortcuts-dialog)
@@ -57,6 +87,63 @@ let projectDefaults: Record<string, string> = {};
 let projectConfigLoaded = false;
 let projectSaveStatus: "" | "saving" | "saved" | "error" = "";
 let projectNewEntries: { key: string; value: string }[] = [];
+
+// ── Per-project scope config state ──
+const projectScopeConfigCache = new Map<string, {
+	resolved: Record<string, { value: string; source: string }>;
+	raw: Record<string, string>;
+	loaded: boolean;
+}>();
+
+let projectScopeSaveStatus: "" | "saving" | "saved" | "error" = "";
+const _projectScopePending = new Map<string, Record<string, string>>();
+
+function loadProjectScopeConfig(projectId: string): void {
+	const cached = projectScopeConfigCache.get(projectId);
+	if (cached?.loaded) return;
+	if (cached) return; // loading in progress
+	projectScopeConfigCache.set(projectId, { resolved: {}, raw: {}, loaded: false });
+	(async () => {
+		try {
+			const [resolvedRes, rawRes] = await Promise.all([
+				gatewayFetch(`/api/projects/${projectId}/config/resolved`),
+				gatewayFetch(`/api/projects/${projectId}/config`),
+			]);
+			if (resolvedRes.ok && rawRes.ok) {
+				const resolved = await resolvedRes.json();
+				const raw = await rawRes.json();
+				projectScopeConfigCache.set(projectId, { resolved, raw, loaded: true });
+			}
+		} catch {}
+		renderApp();
+	})();
+}
+
+async function saveProjectScopeConfig(projectId: string, updates: Record<string, string>): Promise<void> {
+	projectScopeSaveStatus = "saving";
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify(updates),
+		});
+		if (res.ok) {
+			projectScopeSaveStatus = "saved";
+			// Invalidate cache to reload
+			projectScopeConfigCache.delete(projectId);
+			setTimeout(() => { projectScopeSaveStatus = ""; renderApp(); }, 2000);
+		} else {
+			projectScopeSaveStatus = "error";
+		}
+	} catch {
+		projectScopeSaveStatus = "error";
+	}
+	renderApp();
+}
+
+async function resetProjectScopeField(projectId: string, key: string): Promise<void> {
+	await saveProjectScopeConfig(projectId, { [key]: "" });
+}
 
 // ── Docker Sandbox section state ──
 let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; dockerfileExists?: boolean; buildCommand?: string; configured: boolean } | null = null;
@@ -1939,22 +2026,160 @@ function renderAccountTab() {
 	`;
 }
 
+function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: string }[]) {
+	const projects = state.projects || [];
+	// Only show scope row when there are projects to choose between
+	if (projects.length === 0) return "";
+
+	return html`
+		<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border overflow-x-auto" style="scrollbar-width:thin;">
+			<button
+				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0
+					${currentScope === "system"
+						? "bg-background text-foreground shadow-sm border border-border"
+						: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
+				@click=${() => { setHashRoute("settings", `system/${SYSTEM_TABS[0].id}`, true); }}
+			>System</button>
+			${projects.map((project) => {
+				const isActive = currentScope === project.id;
+				const color = project.color || "var(--muted-foreground)";
+				return html`
+					<button
+						class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5
+							${isActive
+								? "bg-background text-foreground shadow-sm border border-border"
+								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
+						@click=${() => { setHashRoute("settings", `${project.id}/${PROJECT_TABS[0].id}`, true); }}
+					>
+						<span class="inline-block w-2 h-2 rounded-full shrink-0" style="background:${color};"></span>
+						${project.name}
+					</button>
+				`;
+			})}
+		</div>
+	`;
+}
+
+function renderProjectScopeTab(projectId: string) {
+	loadProjectScopeConfig(projectId);
+	const cached = projectScopeConfigCache.get(projectId);
+	if (!cached?.loaded) {
+		return html`<div class="text-sm text-muted-foreground">Loading project configuration…</div>`;
+	}
+
+	const resolved = cached.resolved;
+	const raw = cached.raw;
+
+	// Keys to show in the Commands & Sandbox tab (same filter as system renderProjectTab)
+	const HIDDEN_KEYS = new Set([
+		"default_thinking_level", "sandbox", "sandbox_image", "sandbox_network_allowlist",
+		"sandbox_credentials", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
+		"config_directories", "skill_directories",
+	]);
+
+	const commandKeys = Object.keys(resolved).filter(k => !HIDDEN_KEYS.has(k));
+	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
+	const inputClass = `flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
+
+	// Track pending changes in a module-level map so they survive re-renders
+	if (!_projectScopePending.has(projectId)) _projectScopePending.set(projectId, {});
+	const pendingChanges = _projectScopePending.get(projectId)!;
+
+	return html`
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
+				${commandKeys.map((key) => {
+					const entry = resolved[key];
+					if (!entry) return "";
+					const isInherited = entry.source !== "project";
+					const displayValue = raw[key] ?? "";
+					return html`
+						<div class="flex items-center gap-3">
+							<span class="${labelClass}">${projectKeyLabel(key)}</span>
+							<div class="flex-1 min-w-0 relative">
+								<input
+									type="text"
+									class="${inputClass} ${isInherited ? "text-muted-foreground" : "text-foreground"}"
+									placeholder=${isInherited ? entry.value : ""}
+									.value=${displayValue}
+									@input=${(e: Event) => {
+										pendingChanges[key] = (e.target as HTMLInputElement).value;
+									}}
+								/>
+								${isInherited ? html`<span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none">(inherited)</span>` : ""}
+							</div>
+							${!isInherited ? html`
+								<button
+									class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+									title="Reset to inherited value"
+									@click=${() => resetProjectScopeField(projectId, key)}
+								>${icon(X, "xs")}</button>
+							` : html`<div class="w-7 shrink-0"></div>`}
+						</div>
+					`;
+				})}
+			</div>
+
+			<!-- Save -->
+			<div class="flex items-center gap-3 pt-2 border-t border-border">
+				<button
+					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
+						hover:bg-primary/90 transition-colors disabled:opacity-50"
+					?disabled=${projectScopeSaveStatus === "saving"}
+					@click=${() => {
+						if (Object.keys(pendingChanges).length > 0) {
+							saveProjectScopeConfig(projectId, pendingChanges);
+							_projectScopePending.delete(projectId);
+						}
+					}}
+				>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
+				${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved successfully.</span>` : ""}
+				${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+			</div>
+		</div>
+	`;
+}
+
+function renderProjectScopeModelsTab(_projectId: string) {
+	// For now, show a simplified models view indicating inheritance from system
+	return html`
+		<div class="flex flex-col gap-4">
+			<p class="text-sm text-muted-foreground">
+				Model preferences for this project. Currently inherits all settings from System.
+			</p>
+			<p class="text-xs text-muted-foreground">
+				Per-project model overrides will be available in a future update. Configure models in
+				<button class="text-primary hover:underline" @click=${() => setHashRoute("settings", "system/models", true)}>System &rarr; Models</button>.
+			</p>
+		</div>
+	`;
+}
+
+function renderProjectScopeDirectoriesTab(_projectId: string) {
+	// For now, show the system directories tab content with a note
+	return html`
+		<div class="flex flex-col gap-4">
+			<p class="text-sm text-muted-foreground">
+				Config directories for this project. Currently inherits from System.
+			</p>
+			<p class="text-xs text-muted-foreground">
+				Per-project config directory overrides will be available in a future update. Configure directories in
+				<button class="text-primary hover:underline" @click=${() => setHashRoute("settings", "system/directories", true)}>System &rarr; Config Directories</button>.
+			</p>
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
 
+	const currentScope = getActiveScope();
+	const tabs = getTabsForScope(currentScope);
 	const currentTab = getActiveTab();
-
-	// Shortcuts first so the default tab doubles as a quick shortcut reference (Ctrl+,)
-	const tabs: { id: SettingsTab; label: string }[] = [
-		{ id: "shortcuts", label: "Shortcuts" },
-		{ id: "general" as SettingsTab, label: "General" },
-		{ id: "project", label: "Project" },
-		{ id: "models", label: "Models" },
-		{ id: "directories", label: "Config Directories" },
-		{ id: "palette", label: "Color Palette" },
-		{ id: "account", label: "Account" },
-	];
+	const isProjectScope = currentScope !== "system";
 
 	return html`
 		<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -1967,6 +2192,8 @@ export function renderSettingsPage() {
 				>${icon(ArrowLeft, "sm")}</button>
 				<h1 class="text-lg font-semibold">Settings</h1>
 			</div>
+			<!-- Scope row -->
+			${renderScopeRow(currentScope, tabs)}
 			<!-- Tab bar -->
 			<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border bg-secondary/20">
 				${tabs.map((tab) => html`
@@ -1976,7 +2203,7 @@ export function renderSettingsPage() {
 								? "bg-background text-foreground shadow-sm border border-border"
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 						title="${tab.label}"
-						@click=${() => { setHashRoute("settings", tab.id, true); }}
+						@click=${() => { setHashRoute("settings", `${currentScope}/${tab.id}`, true); }}
 					>${tab.label}</button>
 				`)}
 			</div>
@@ -1984,13 +2211,19 @@ export function renderSettingsPage() {
 			<div class="flex-1 overflow-y-auto">
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
 				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
-					${currentTab === "general" ? renderGeneralTab() : ""}
-					${currentTab === "project" ? renderProjectTab() : ""}
-					${currentTab === "models" ? renderModelsTab() : ""}
-					${currentTab === "shortcuts" ? renderShortcutsTab() : ""}
-					${currentTab === "palette" ? renderPaletteTab() : ""}
-					${currentTab === "directories" ? renderDirectoriesTab() : ""}
-					${currentTab === "account" ? renderAccountTab() : ""}
+					${isProjectScope ? html`
+						${currentTab === "project" ? renderProjectScopeTab(currentScope) : ""}
+						${currentTab === "models" ? renderProjectScopeModelsTab(currentScope) : ""}
+						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
+					` : html`
+						${currentTab === "general" ? renderGeneralTab() : ""}
+						${currentTab === "project" ? renderProjectTab() : ""}
+						${currentTab === "models" ? renderModelsTab() : ""}
+						${currentTab === "shortcuts" ? renderShortcutsTab() : ""}
+						${currentTab === "palette" ? renderPaletteTab() : ""}
+						${currentTab === "directories" ? renderDirectoriesTab() : ""}
+						${currentTab === "account" ? renderAccountTab() : ""}
+					`}
 				</div>
 			 </div>
 			</div>

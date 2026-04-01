@@ -46,7 +46,22 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
+import { ProjectContext } from "./agent/project-context.js";
+import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
+
+const projectContextCache = new Map<string, ProjectContext>();
+
+function getOrCreateProjectContext(projectId: string, projectRegistry: ProjectRegistry): ProjectContext | null {
+	const project = projectRegistry.get(projectId);
+	if (!project) return null;
+	let ctx = projectContextCache.get(projectId);
+	if (!ctx) {
+		ctx = new ProjectContext(project);
+		projectContextCache.set(projectId, ctx);
+	}
+	return ctx;
+}
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -962,6 +977,49 @@ async function handleApiRoute(
 			json({ error: err.message }, 400);
 		}
 		return;
+	}
+
+	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
+	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
+	if (projectConfigMatch) {
+		const ctx = getOrCreateProjectContext(projectConfigMatch[1], projectRegistry);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
+
+		if (req.method === "GET" && !suffix) {
+			json(ctx.projectConfigStore.getAll());
+			return;
+		}
+		if (req.method === "GET" && suffix === "defaults") {
+			json(ctx.projectConfigStore.getDefaults());
+			return;
+		}
+		if (req.method === "GET" && suffix === "resolved") {
+			const defaults = ctx.projectConfigStore.getDefaults();
+			const result: Record<string, { value: string; source: string }> = {};
+			for (const key of Object.keys(defaults)) {
+				result[key] = resolveScalarConfig(key, ctx.projectConfigStore, projectConfigStore, null, defaults);
+			}
+			json(result);
+			return;
+		}
+		if (req.method === "PUT" && !suffix) {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			for (const [key, value] of Object.entries(body)) {
+				if (key.includes(".")) {
+					json({ error: `Config key "${key}" must not contain dots` }, 400);
+					return;
+				}
+				if (value === null || value === "") {
+					ctx.projectConfigStore.remove(key);
+				} else if (typeof value === "string") {
+					ctx.projectConfigStore.set(key, value);
+				}
+			}
+			json({ ok: true });
+			return;
+		}
 	}
 
 	// GET /api/search
