@@ -39,7 +39,7 @@ function worktreePreviewPath(cwd: string, title: string): string {
 	const parent = lastSlash > 0 ? normalized.slice(0, lastSlash) : normalized;
 	const base = lastSlash > 0 ? normalized.slice(lastSlash + 1) : normalized;
 	const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 10) || "goal";
-	return `${parent}/${base}-wt/goal-${slug}-{id}/`;
+	return `${parent}/${base}-wt/goal-${slug}-xxxxxxxx/`;
 }
 
 function skipSetup(): void {
