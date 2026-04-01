@@ -4,9 +4,9 @@
 
 export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
 
-export type SettingsTabId = "shortcuts" | "general" | "project" | "models" | "palette" | "directories" | "account";
+export type SettingsTabId = "shortcuts" | "general" | "project" | "models" | "palette" | "directories" | "account" | "appearance";
 
-const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "models", "palette", "directories", "account"]);
+const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "models", "palette", "directories", "account", "appearance"]);
 
 export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
 	const hash = window.location.hash || "";
