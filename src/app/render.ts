@@ -269,13 +269,13 @@ function renderMobileLanding() {
 											const color = project.color || "var(--muted-foreground)";
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-												<div class="flex items-center gap-1.5 pl-0.5 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+												<div class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 													@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
 													<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
 													<button
-														class="p-1.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative shrink-0"
+														class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative shrink-0"
 														@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 														title="New goal in ${project.name}"
 													>
