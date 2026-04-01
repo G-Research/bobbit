@@ -508,6 +508,7 @@ function ensureStaffLoaded(): void {
 		state.staffList = list.map((s) => ({
 			id: s.id, name: s.name, description: s.description, state: s.state,
 			lastWakeAt: s.lastWakeAt, currentSessionId: s.currentSessionId, triggers: s.triggers,
+			projectId: s.projectId,
 		}));
 		renderApp();
 	});
@@ -519,6 +520,7 @@ export function reloadStaffList(): Promise<void> {
 		state.staffList = list.map((s) => ({
 			id: s.id, name: s.name, description: s.description, state: s.state,
 			lastWakeAt: s.lastWakeAt, currentSessionId: s.currentSessionId, triggers: s.triggers,
+			projectId: s.projectId,
 		}));
 		renderApp();
 	});
@@ -832,6 +834,7 @@ function renderProjectContent(
 	project: Project,
 	goals: Goal[],
 	sessions: GatewaySession[],
+	staff?: typeof state.staffList,
 ) {
 	return html`
 		${goals.map((goal, i) => html`
@@ -867,6 +870,7 @@ function renderProjectContent(
 				</div>
 			` : ""}
 		</div>
+		${staff && state.projects.length > 1 ? renderStaffSidebarSection(staff) : ""}
 	`;
 }
 
@@ -995,9 +999,9 @@ export function renderSidebar() {
 							const multiProject = state.projects.length > 1;
 							return html`
 							${multiProject ? (() => {
-								// Group goals and sessions by project
-								const projectMap = new Map<string, { goals: Goal[]; sessions: GatewaySession[] }>();
-								for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [] });
+								// Group goals, sessions, and staff by project
+								const projectMap = new Map<string, { goals: Goal[]; sessions: GatewaySession[]; staff: typeof filteredStaff }>();
+								for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
 								// Fallback bucket for items without a projectId
 								const defaultId = state.projects[0]?.id || "";
 								for (const g of filteredGoals) {
@@ -1010,14 +1014,19 @@ export function renderSidebar() {
 									const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
 									bucket.sessions.push(s);
 								}
+								for (const s of filteredStaff) {
+									const pid = s.projectId || defaultId;
+									const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+									bucket.staff.push(s);
+								}
 								return html`${state.projects.map((project, i) => {
-									const data = projectMap.get(project.id) || { goals: [], sessions: [] };
+									const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
 									const expanded = isProjectExpanded(project.id);
 									return html`
 										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 										${renderProjectHeader(project, expanded)}
 										${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-											${renderProjectContent(project, data.goals, data.sessions)}
+											${renderProjectContent(project, data.goals, data.sessions, data.staff)}
 										</div>` : ""}
 									`;
 								})}`;
@@ -1088,7 +1097,7 @@ export function renderSidebar() {
 								</div>
 								</div>
 							`}
-							${state.searchQuery ? renderStaffSidebarSection(filteredStaff) : renderStaffSidebarSection()}
+							${!multiProject ? (state.searchQuery ? renderStaffSidebarSection(filteredStaff) : renderStaffSidebarSection()) : ""}
 							${(() => {
 								// Archived section: archived goals + standalone archived sessions
 								// Goal-affiliated archived sessions render inside their goal groups.

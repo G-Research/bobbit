@@ -251,7 +251,7 @@ export const state = {
 	goalDashboardId: null as string | null,
 
 	/** Staff agents list */
-	staffList: [] as Array<{ id: string; name: string; description: string; state: string; lastWakeAt?: number; currentSessionId?: string; triggers: any[] }>,
+	staffList: [] as Array<{ id: string; name: string; description: string; state: string; lastWakeAt?: number; currentSessionId?: string; triggers: any[]; projectId?: string }>,
 
 	// Staff assistant split-screen state
 	activeStaffProposal: null as { name: string; description: string; prompt: string; triggers: string; cwd: string } | null,

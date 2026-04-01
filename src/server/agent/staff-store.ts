@@ -38,6 +38,7 @@ export interface PersistedStaff {
 	currentSessionId?: string;
 	worktreePath?: string;
 	branch?: string;
+	projectId?: string;
 }
 
 /**

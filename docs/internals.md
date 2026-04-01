@@ -83,7 +83,7 @@ Key responsibilities:
 - **Generation counters**: Sums per-project generation counters so clients detect any change via a single `?since=N` parameter
 - **Lifecycle**: `closeAll()` on shutdown, `remove(projectId)` when a project is unregistered
 
-All API endpoints and WebSocket handlers resolve the correct per-project store through `ProjectContextManager` rather than accessing stores directly. Managers (`GoalManager`, `TaskManager`, `StaffManager`) accept store instances directly — they no longer create stores internally.
+All API endpoints and WebSocket handlers resolve the correct per-project store through `ProjectContextManager` rather than accessing stores directly. Managers (`GoalManager`, `TaskManager`) accept store instances directly — they no longer create stores internally. `StaffManager` accepts `ProjectContextManager` and resolves the correct per-project `StaffStore` on each operation, matching the aggregation pattern used by goals and sessions.
 
 ### State migration
 
@@ -92,7 +92,7 @@ On first startup after upgrading to per-project state, `migrateToPerProjectState
 1. Reads central `goals.json`, `sessions.json`, `tasks.json`, `team-state.json`, `gates.json`, `staff.json`
 2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
 3. Merges into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
-4. Staff agents (no `projectId`) go to the default project
+4. Staff agents without a `projectId` go to the default project
 5. Renames central files with `.pre-migration` suffix (not deleted)
 6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
 
@@ -100,7 +100,7 @@ The migration is idempotent and handles missing files gracefully (fresh installs
 
 **What stays global**: `projects.json`, auth token, gateway URL, preferences, session colors, PR status.
 
-**Known limitations**: Staff is only per-default-project (the API doesn't yet route staff by project). Cost tracking uses the default project's `CostTracker` for all sessions. `active-verifications.json` stays in the central state dir (transient operational state).
+**Known limitations**: Cost tracking uses the default project's `CostTracker` for all sessions. `active-verifications.json` stays in the central state dir (transient operational state).
 
 ### Config resolution (3-tier hierarchy)
 

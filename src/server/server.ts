@@ -263,10 +263,7 @@ export function createGateway(config: GatewayConfig) {
 		};
 	}
 	const workflowManager = new WorkflowManager(workflowStore);
-	const staffManager = new StaffManager(projectContextManager.getDefault().staffStore);
-	// Wire staff into search index for indexing and rebuilds
-	sessionManager.searchIndex.staffStore = staffManager.getStore();
-	staffManager.searchIndex = sessionManager.searchIndex;
+	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
 	const teamManager = new TeamManager(sessionManager, {
@@ -3991,7 +3988,8 @@ async function handleApiRoute(
 
 	// GET /api/staff
 	if (url.pathname === "/api/staff" && req.method === "GET") {
-		json({ staff: staffManager.listStaff() });
+		const projectId = url.searchParams.get("projectId") || undefined;
+		json({ staff: staffManager.listStaff(projectId) });
 		return;
 	}
 
@@ -4007,6 +4005,7 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = body.cwd || config.defaultCwd;
+		const projectId = (typeof body.projectId === "string") ? body.projectId : undefined;
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,
@@ -4014,7 +4013,7 @@ async function handleApiRoute(
 				body.systemPrompt,
 				cwd,
 				sessionManager,
-				{ triggers: body.triggers, roleId: body.roleId },
+				{ triggers: body.triggers, roleId: body.roleId, projectId },
 			);
 			json(staff, 201);
 		} catch (err: any) {
