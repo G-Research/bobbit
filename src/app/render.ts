@@ -274,23 +274,25 @@ function renderMobileLanding() {
 													<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
-													<button
-														class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors shrink-0"
-														@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
-														title="Project settings"
-													>${icon(Settings, "sm")}</button>
-													<button
-														class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative shrink-0"
-														@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
-														title="New goal in ${project.name}"
-													>
-														<span class="relative inline-flex" style="width:16px;height:16px;">
-															${icon(GoalIcon, "sm")}
-															<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
-																<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
-															</svg>
-														</span>
-													</button>
+													<div class="flex items-center gap-0.5 shrink-0">
+														<button
+															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
+															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
+															title="Project settings"
+														>${icon(Settings, "sm")}</button>
+														<button
+															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative flex items-center justify-center"
+															@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
+															title="New goal in ${project.name}"
+														>
+															<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
+																${icon(GoalIcon, "sm")}
+																<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
+																	<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
+																</svg>
+															</span>
+														</button>
+													</div>
 												</div>
 												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 													${data.goals.map((goal, gi) => html`
