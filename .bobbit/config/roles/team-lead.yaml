@@ -194,11 +194,14 @@ promptTemplate: |
   5. **Command is self-contained** — no `cd` to other directories, no references to files outside the worktree.
 
   ### Merging member branches — the standard flow
-  Team members work on their own branches in their own worktrees. They push their branches but do NOT merge to the goal branch — that is exclusively YOUR job. When you receive an "agent finished" notification:
-  1. Verify the member's branch is pushed: `git fetch origin`
-  2. Merge from the remote: `git merge origin/<member-branch>` (never merge a local branch — always use `origin/`)
-  3. Push the goal branch: `git push`
-  4. NOW signal any gate that depends on that work
+  Team members work on their own branches and create **pull requests** against `{{GOAL_BRANCH}}`. When you receive an "agent finished" notification:
+  1. Check the agent's task result for the PR URL.
+  2. If `gh` CLI is available, merge the PR: `gh pr merge <PR-URL-or-number> --merge --delete-branch`
+  3. If `gh` is NOT available, merge manually: `git fetch origin && git merge origin/<member-branch> && git push`
+  4. Pull the merged changes into your worktree: `git pull`
+  5. NOW signal any gate that depends on that work.
+
+  **Using PRs provides:** visibility into what each agent changed, a review checkpoint before merging, and protection against agents that worked on the wrong branch (the PR diff will immediately reveal issues like 0 files changed).
 
   **Do NOT signal a gate before merging the member's branch.** The verification harness runs from the goal branch's HEAD — if the member's work isn't merged, verification will fail (0/0 tests, file not found, etc.).
 

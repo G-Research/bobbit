@@ -43,18 +43,20 @@ export interface WorktreeResult {
 }
 
 /**
- * Create a git worktree on a new branch from HEAD.
+ * Create a git worktree on a new branch from a given start-point (default HEAD).
  * The worktree is placed as a sibling directory to the repo.
  *
  * Fully async — the `git worktree add`, dependency setup, and `git push`
  * are all awaited without blocking the Node.js event loop.
  *
- * @param setupCommand — worktree setup command from project config
+ * @param opts.setupCommand — worktree setup command from project config
  *   (`worktree_setup_command`). If provided, runs this shell command in the
  *   worktree directory. If empty string or undefined/not configured, skips
  *   setup entirely — no implicit npm/pip/cargo assumptions.
+ * @param opts.startPoint — git ref to base the new branch on (default `"HEAD"`).
+ *   Pass e.g. `origin/my-branch` to start from a remote tracking branch.
  */
-export async function createWorktree(repoPath: string, branchName: string, setupCommand?: string): Promise<WorktreeResult> {
+export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string }): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
 	// "spawn git ENOENT" that looks like git isn't installed
 	if (!fs.existsSync(repoPath)) {
@@ -68,14 +70,14 @@ export async function createWorktree(repoPath: string, branchName: string, setup
 	const worktreePath = path.join(wtRoot, safeName);
 
 	// Create branch and worktree in one step (async, no shell, prevents injection)
-	await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, "HEAD"], {
+	await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, opts?.startPoint ?? "HEAD"], {
 		cwd: repoPath,
 	});
 
 	// Set up dependencies in the new worktree (only if configured).
 	// Reads `worktree_setup_command` from project.yaml. If not set, does nothing.
 	if (!process.env.BOBBIT_SKIP_NPM_CI) {
-		const cmd = setupCommand !== undefined ? setupCommand : (readWorktreeSetupCommand() ?? "");
+		const cmd = opts?.setupCommand !== undefined ? opts.setupCommand : (readWorktreeSetupCommand() ?? "");
 		await setupWorktreeDeps(repoPath, worktreePath, cmd);
 	}
 
