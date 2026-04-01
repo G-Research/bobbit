@@ -29,12 +29,16 @@ async function registerProject(name: string): Promise<{ id: string; rootPath: st
 async function openApp(page: Page, hash?: string): Promise<void> {
 	const token = readE2EToken();
 	const base = `http://127.0.0.1:${process.env.E2E_PORT}`;
-	const url = hash
-		? `${base}/?token=${encodeURIComponent(token)}#${hash}`
-		: `${base}/?token=${encodeURIComponent(token)}`;
-	await page.goto(url);
-	// Wait for the app to be interactive
-	await page.waitForLoadState("networkidle");
+	// First load the app root and wait for it to be fully interactive
+	// (projects list must be loaded before navigating to project-scoped settings)
+	await page.goto(`${base}/?token=${encodeURIComponent(token)}`);
+	await expect(
+		page.getByRole("button", { name: "Settings", exact: true }),
+	).toBeVisible({ timeout: 15_000 });
+	// Now navigate to the desired hash route
+	if (hash) {
+		await page.evaluate((h) => { window.location.hash = h; }, hash);
+	}
 }
 
 test.describe("Per-project Config Directories", () => {
