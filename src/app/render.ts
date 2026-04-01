@@ -567,44 +567,25 @@ function goalPreviewPanel() {
 						},
 					})}
 				</div>
-				${state.projects.length > 1 ? html`
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Project</label>
-					<select
-						class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
-						.value=${state.previewProjectId || state.projects[0]?.id || ""}
-						@change=${(e: Event) => {
-							const pid = (e.target as HTMLSelectElement).value;
-							state.previewProjectId = pid;
-							const project = state.projects.find(p => p.id === pid);
-							if (project && !state.previewCwdEdited) {
-								state.previewCwd = project.rootPath;
-							}
-							renderApp();
-						}}
-					>
-						${state.projects.map((p) => html`
-							<option value=${p.id} ?selected=${(state.previewProjectId || state.projects[0]?.id) === p.id}>${p.name}</option>
-						`)}
-					</select>
-				</div>
-				` : ""}
-				<div>
-					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">Working Directory</label>
-						${state.sandboxStatus?.configured ? html`
-							<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
-								<span class="text-[11px] text-muted-foreground">Sandbox (Docker)</span>
-								<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
-									? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-									: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
-									class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-								<input type="checkbox" class="toggle-switch" .checked=${_goalSandboxed}
-									?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
-									@change=${(e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
-							</label>
-						` : ""}
+				${(() => {
+					const linkedProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
+					if (linkedProject) {
+						return html`
+				<div class="flex gap-4">
+					<div class="flex-1 min-w-0">
+						<label class="text-xs text-muted-foreground mb-1 block font-medium">Project</label>
+						<div class="text-sm text-foreground/80 truncate">${linkedProject.name}</div>
 					</div>
+					<div class="flex-1 min-w-0">
+						<label class="text-xs text-muted-foreground mb-1 block font-medium">Working Directory</label>
+						<div class="text-sm text-foreground/80 truncate font-mono" title=${linkedProject.rootPath}>${linkedProject.rootPath}</div>
+					</div>
+				</div>
+				<p class="text-[11px] text-muted-foreground opacity-70 -mt-2">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(linkedProject.rootPath, state.previewTitle)}</code></p>`;
+					}
+					return html`
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
 					${cwdCombobox({
 						value: state.previewCwd,
 						onInput: (v) => {
@@ -627,7 +608,22 @@ function goalPreviewPanel() {
 						onHighlight: (i) => { state.cwdHighlightIndex = i; },
 					})}
 					<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(state.previewCwd, state.previewTitle)}</code></p>
-					</div>
+				</div>`;
+				})()}
+				${state.sandboxStatus?.configured ? html`
+				<div>
+					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
+						<input type="checkbox" class="toggle-switch" .checked=${_goalSandboxed}
+							?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+							@change=${(e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
+						<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+							: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
+							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+					</label>
+				</div>
+				` : ""}
 				${_cachedWorkflows.length > 0 ? html`
 					<div>
 						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
