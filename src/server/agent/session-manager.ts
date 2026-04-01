@@ -1605,7 +1605,7 @@ export class SessionManager {
 			};
 
 			// Persist immediately with all known structural fields
-			persistOnce(session, plan, this.store);
+			persistOnce(session, plan, ctx.store);
 
 			// Fire-and-forget: create worktree then complete pipeline
 			executeWorktreeAsync(plan, session, ctx).then(() => {
