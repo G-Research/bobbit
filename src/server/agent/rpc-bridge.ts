@@ -107,10 +107,15 @@ export class RpcBridge {
 			args.push("--tools", "read,edit,write,grep,find,ls");
 		}
 
-		// Always load the custom bash tool extension (FD-safe bash + bash_bg)
-		const bashExtPath = path.join(TOOLS_DIR, "shell", "extension.ts");
-		if (!args.includes(bashExtPath)) {
-			args.push("--extension", bashExtPath);
+		// When computeToolActivationArgs runs, it adds --no-extensions and explicitly
+		// loads needed extensions (including shell/extension.ts for bash/bash_bg).
+		// For sessions that don't go through tool activation (no role, fallback path),
+		// force-load shell/extension.ts so bash/bash_bg remain available.
+		if (!args.includes("--no-extensions")) {
+			const bashExtPath = path.join(TOOLS_DIR, "shell", "extension.ts");
+			if (!args.includes(bashExtPath)) {
+				args.push("--extension", bashExtPath);
+			}
 		}
 
 		if (this.options.containerId) {

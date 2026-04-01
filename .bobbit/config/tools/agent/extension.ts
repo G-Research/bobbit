@@ -133,7 +133,13 @@ export async function waitForDelegate(
 		return { status: "failed", output: `API error: ${resp.status}` };
 	}
 
-	const data = await resp.json() as any;
+	// The server sends chunked responses with periodic heartbeat newlines
+	// to prevent undici's bodyTimeout. Read full body and trim whitespace.
+	const rawText = await resp.text();
+	const data = JSON.parse(rawText.trim()) as any;
+	if (data.error) {
+		return { status: "timeout", output: "" };
+	}
 	return { status: "completed", output: data.output || "" };
 }
 

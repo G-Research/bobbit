@@ -3037,22 +3037,38 @@ async function handleApiRoute(
 	}
 
 	// POST /api/sessions/:id/wait — block until session becomes idle
+	// Uses chunked transfer with periodic heartbeat newlines to prevent
+	// HTTP client body-timeout (undici defaults to 300s between chunks).
 	const waitMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/wait$/);
 	if (waitMatch && req.method === "POST") {
 		const id = waitMatch[1];
 		const body = await readBody(req);
 		const timeoutMs = body?.timeout_ms ?? 600_000;
+
+		// Stream chunked response with heartbeat to keep connection alive
+		res.writeHead(200, {
+			"Content-Type": "application/json",
+			"Transfer-Encoding": "chunked",
+			"Cache-Control": "no-cache",
+		});
+
+		// Send a heartbeat newline every 60s to prevent client body-timeout
+		const heartbeat = setInterval(() => {
+			try { res.write("\n"); } catch { /* connection gone */ }
+		}, 60_000);
+
 		try {
 			await sessionManager.waitForIdle(id, timeoutMs);
-			// Session is idle — return the output
 			const output = await sessionManager.getSessionOutput(id);
 			const session = sessionManager.getSession(id);
-			json({
+			res.end(JSON.stringify({
 				status: session?.status || "idle",
 				output,
-			});
+			}));
 		} catch (err) {
-			json({ error: String(err) }, 408); // Request Timeout
+			res.end(JSON.stringify({ error: String(err) }));
+		} finally {
+			clearInterval(heartbeat);
 		}
 		return;
 	}
