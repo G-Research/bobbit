@@ -903,7 +903,12 @@ export class TeamManager {
 				worktreePath: agent.worktreePath,
 			});
 			// Store repoPath and branch in the session store for later purge cleanup
-			const store = (this.sessionManager as any).store;
+			const projectCtx = goalId && this.config.projectContextManager
+				? this.config.projectContextManager.getContextForGoal(goalId)
+				: null;
+			const store = projectCtx
+				? projectCtx.sessionStore
+				: (this.sessionManager as any).store;
 			if (store) {
 				store.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
 			}
@@ -1081,7 +1086,12 @@ export class TeamManager {
 		if (entry.teamLeadSessionId) {
 			const goal = this.resolveGoal(goalId);
 			if (goal?.repoPath) {
-				const store = (this.sessionManager as any).store;
+				const projectCtx = this.config.projectContextManager
+					? this.config.projectContextManager.getContextForGoal(goalId)
+					: null;
+				const store = projectCtx
+					? projectCtx.sessionStore
+					: (this.sessionManager as any).store;
 				if (store) {
 					store.update(entry.teamLeadSessionId, {
 						repoPath: goal.repoPath,

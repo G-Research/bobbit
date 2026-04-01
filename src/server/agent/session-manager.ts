@@ -322,14 +322,23 @@ export class SessionManager {
 	buildPipelineContext(projectId?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
 		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
+		let resolvedGoalManager = this.goalManager;
+		let resolvedTaskManager = this.taskManager;
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) {
+				resolvedGoalManager = new GoalManager(ctx.goalStore);
+				resolvedTaskManager = new TaskManager(ctx.taskStore);
+			}
+		}
 		return {
 			agentCliPath: this.agentCliPath,
 			systemPromptPath: this.systemPromptPath,
 			roleManager: this.roleManager ?? null,
 			toolManager: this.toolManager ?? null,
 			mcpManager: this.mcpManager,
-			goalManager: this.goalManager,
-			taskManager: this.taskManager,
+			goalManager: resolvedGoalManager,
+			taskManager: resolvedTaskManager,
 			personalityManager: this.personalityManager ?? null,
 			projectConfigStore: this.projectConfigStore ?? null,
 			sandboxPool: this.sandboxPool,
