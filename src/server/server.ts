@@ -950,9 +950,10 @@ async function handleApiRoute(
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
 		const body = await readBody(req);
-		const updates: { name?: string; color?: string } = {};
+		const updates: { name?: string; color?: string; rootPath?: string } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
+		if (typeof body?.rootPath === "string") updates.rootPath = body.rootPath;
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);

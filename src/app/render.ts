@@ -275,6 +275,11 @@ function renderMobileLanding() {
 													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
 													<button
+														class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors shrink-0"
+														@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
+														title="Project settings"
+													>${icon(Settings, "sm")}</button>
+													<button
 														class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative shrink-0"
 														@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 														title="New goal in ${project.name}"

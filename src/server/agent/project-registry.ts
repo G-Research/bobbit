@@ -101,16 +101,17 @@ export class ProjectRegistry {
     return project;
   }
 
-  /** Update mutable fields (name, color) of an existing project. */
+  /** Update mutable fields (name, color, rootPath) of an existing project. */
   update(
     id: string,
-    updates: Partial<Pick<RegisteredProject, "name" | "color">>,
+    updates: Partial<Pick<RegisteredProject, "name" | "color" | "rootPath">>,
   ): RegisteredProject {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
 
     if (updates.name !== undefined) project.name = updates.name;
     if (updates.color !== undefined) project.color = updates.color;
+    if (updates.rootPath !== undefined) project.rootPath = path.resolve(updates.rootPath);
 
     this.projects.set(id, project);
     this.save();
