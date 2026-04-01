@@ -75,8 +75,6 @@ test.describe("Sandbox Token Scoping", () => {
 
 		// Always-allowed
 		expect(isSandboxAllowed("/api/health", "GET", scope)).toBe(true);
-		expect(isSandboxAllowed("/api/web-proxy/search", "POST", scope)).toBe(true);
-		expect(isSandboxAllowed("/api/web-proxy/fetch", "POST", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/internal/mcp-call", "POST", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/preview", "POST", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/personalities", "GET", scope)).toBe(true);
@@ -109,6 +107,10 @@ test.describe("Sandbox Token Scoping", () => {
 	test("sandbox guard blocks dangerous endpoints", async () => {
 		const { isSandboxAllowed } = await import("../../dist/server/auth/sandbox-guard.js");
 		const scope = { sessionId: "s1", goalId: "g1", childSessionIds: new Set<string>() };
+
+		// Web proxy endpoints removed — should now be blocked
+		expect(isSandboxAllowed("/api/web-proxy/search", "POST", scope)).toBe(false);
+		expect(isSandboxAllowed("/api/web-proxy/fetch", "POST", scope)).toBe(false);
 
 		expect(isSandboxAllowed("/api/project-config", "GET", scope)).toBe(false);
 		expect(isSandboxAllowed("/api/project-config", "PUT", scope)).toBe(false);

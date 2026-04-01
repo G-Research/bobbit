@@ -15,8 +15,6 @@ export function isSandboxAllowed(
 
 	// ── Always-allowed endpoints ───────────────────────────────────────
 	if (pathname === "/api/health" && m === "GET") return true;
-	if (pathname === "/api/web-proxy/search" && m === "POST") return true;
-	if (pathname === "/api/web-proxy/fetch" && m === "POST") return true;
 	if (pathname === "/api/internal/mcp-call" && m === "POST") return true;
 	if (pathname === "/api/preview" && m === "POST") return true;
 	if (pathname === "/api/personalities" && (m === "GET" || m === "POST")) return true;

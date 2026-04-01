@@ -44,7 +44,8 @@ export interface DockerRunConfig {
 	sandboxCredentials?: Record<string, string>;
 	gatewayUrl?: string;
 	gatewayToken?: string;
-	sandboxProxyPort?: number;
+	/** Docker network to attach the container to (e.g. "bobbit-sandbox-net"). */
+	sandboxNetwork?: string;
 
 	// ── Session env (cold mode) ──────────────────────────────────────────
 	sessionEnv?: Record<string, string>;
@@ -61,15 +62,25 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		label, labelVersion, labelPrefix, worktreePath,
 		mountWorktreeRoot,
 		sandboxMounts, sandboxCredentials,
-		gatewayUrl, gatewayToken, sandboxProxyPort,
+		gatewayUrl, gatewayToken, sandboxNetwork,
 		sessionEnv, systemPromptPath,
 	} = config;
 
 	const toolsDir = TOOLS_DIR;
 
+	const baseHostArgs = ["--add-host=host.docker.internal:host-gateway"];
+
+	// Attach to a restricted Docker network for sandboxed containers
+	if (sandboxNetwork) {
+		baseHostArgs.push(`--network=${sandboxNetwork}`);
+		// Black-hole cloud metadata endpoints (defense-in-depth)
+		baseHostArgs.push("--add-host=metadata.google.internal:0.0.0.0");
+		baseHostArgs.push("--add-host=metadata.internal:0.0.0.0");
+	}
+
 	const args: string[] = mode === "pool"
-		? ["run", "-d", "--add-host=host.docker.internal:host-gateway"]
-		: ["run", "--rm", "-i", "--add-host=host.docker.internal:host-gateway"];
+		? ["run", "-d", ...baseHostArgs]
+		: ["run", "--rm", "-i", ...baseHostArgs];
 
 	// ── Labels (pool mode only) ────────────────────────────────────────
 	if (mode === "pool" && label && labelPrefix) {
@@ -165,14 +176,6 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 			}
 			args.push("-e", `${key}=${value}`);
 		}
-	}
-
-	// Proxy env vars
-	if (sandboxProxyPort) {
-		const proxyUrl = `http://host.docker.internal:${sandboxProxyPort}`;
-		args.push("-e", `http_proxy=${proxyUrl}`);
-		args.push("-e", `https_proxy=${proxyUrl}`);
-		args.push("-e", "no_proxy=localhost,127.0.0.1");
 	}
 
 	// ── MCP extensions ─────────────────────────────────────────────────
