@@ -572,11 +572,11 @@ function goalPreviewPanel() {
 					if (linkedProject) {
 						return html`
 				<div class="flex gap-4">
-					<div class="flex-1 min-w-0">
+					<div class="min-w-0" style="width:30%;">
 						<label class="text-xs text-muted-foreground mb-1 block font-medium">Project</label>
 						<div class="text-sm text-foreground/80 truncate">${linkedProject.name}</div>
 					</div>
-					<div class="flex-1 min-w-0">
+					<div class="min-w-0" style="width:70%;">
 						<label class="text-xs text-muted-foreground mb-1 block font-medium">Working Directory</label>
 						<div class="text-sm text-foreground/80 truncate font-mono" title=${linkedProject.rootPath}>${linkedProject.rootPath}</div>
 					</div>
