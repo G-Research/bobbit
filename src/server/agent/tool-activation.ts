@@ -61,9 +61,54 @@ export function resolveGrantPolicy(
 	return 'always-allow';
 }
 
+/**
+ * Compute the effective allowed tools for a role by running every known tool
+ * through the full resolveGrantPolicy cascade.  Tools whose resolved policy
+ * is `always-allow` are returned.
+ *
+ * This replaces the simple `deriveAllowedTools` (which only scans explicit
+ * entries in toolPolicies) when the full cascade — including the system
+ * fallback of `always-allow` — must be honoured.
+ */
+export function computeEffectiveAllowedTools(
+	toolManager: ToolManager,
+	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	groupPolicyStore?: GroupPolicyProvider,
+	mcpManager?: { getToolInfos(): Array<{ name: string; group: string }> },
+): string[] {
+	const result: string[] = [];
+	const seen = new Set<string>();
+
+	// Builtin + bobbit-extension tools
+	for (const tool of toolManager.getAvailableTools()) {
+		if (seen.has(tool.name.toLowerCase())) continue;
+		seen.add(tool.name.toLowerCase());
+		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
+		if (policy === 'always-allow') result.push(tool.name);
+	}
+
+	// MCP tools
+	if (mcpManager) {
+		for (const info of mcpManager.getToolInfos()) {
+			if (seen.has(info.name.toLowerCase())) continue;
+			seen.add(info.name.toLowerCase());
+			const policy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+			if (policy === 'always-allow') result.push(info.name);
+		}
+	}
+
+	return result;
+}
+
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--tools", "read,bash", "--no-extensions", "--extension", "/path/to/ext"]) */
 	args: string[];
+	/**
+	 * Tools that will be registered by loaded extensions but are NOT in allowedTools.
+	 * These "leaked" tools need blocking stubs loaded before the extensions (first-registered-wins)
+	 * to prevent them from becoming available.
+	 */
+	leakedTools?: Array<{ name: string; description: string }>;
 }
 
 /**
@@ -204,6 +249,117 @@ export default function(pi) {
 ${toolRegistrations}
 }
 `;
+}
+
+/**
+ * Generate an extension that registers builtin/bobbit-extension tools as stubs
+ * returning an error. Same pattern as MCP stubs — the agent sees the tool but
+ * gets a clear error on invocation, triggering the grant-permission UI flow.
+ *
+ * Uses a permissive parameter schema (accepts any object) since the agent
+ * already knows the real parameter shapes from the system prompt tool docs.
+ */
+export function generateToolStubExtension(
+	tools: Array<{ name: string; description: string }>,
+): string {
+	const toolRegistrations = tools.map(tool => {
+		return `
+  pi.registerTool({
+    name: ${JSON.stringify(tool.name)},
+    description: ${JSON.stringify(tool.description)},
+    parameters: Type.Object({}, { additionalProperties: true }),
+    execute: async (toolCallId, params) => {
+      return { content: [{ type: "text", text: ${JSON.stringify(`Error: Tool ${tool.name} is not allowed for your current role. Ask the user to grant permission.`)} }], isError: true };
+    }
+  });`;
+	}).join('\n');
+
+	return `import { Type } from "@sinclair/typebox";
+
+export default function(pi) {
+${toolRegistrations}
+}
+`;
+}
+
+/**
+ * Write stub extension files for non-MCP tools that are restricted by role policy.
+ * Returns array of written file paths (to be loaded BEFORE real extensions — pi-coding-agent uses first-registered-wins).
+ *
+ * For each non-MCP tool NOT in allowedTools:
+ * - `never-ask`/`never`: tool is invisible (no stub, no real extension)
+ * - `ask-once`/`always-ask`: stub generated so the agent can invoke it and trigger the grant flow
+ * - `always-allow`: should be in allowedTools already (no stub needed)
+ */
+export function writeToolStubExtensions(
+	toolManager: ToolManager,
+	allowedTools: string[],
+	role?: { toolPolicies?: Record<string, GrantPolicy> },
+	groupPolicyStore?: GroupPolicyProvider,
+): string[] {
+	const allowedSet = new Set(allowedTools.map(t => t.toLowerCase()));
+	const allTools = toolManager.getAvailableTools();
+	const stubTools: Array<{ name: string; description: string }> = [];
+
+	for (const tool of allTools) {
+		// Skip tools that are already allowed
+		if (allowedSet.has(tool.name.toLowerCase())) continue;
+
+		// Skip MCP tools — handled by writeMcpProxyExtensions
+		if (tool.name.toLowerCase().startsWith("mcp__")) continue;
+
+		// Resolve grant policy
+		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
+
+		if (policy === 'never-ask' || policy === 'never') {
+			continue; // Invisible — no stub
+		}
+
+		if (policy === 'ask-once' || policy === 'always-ask') {
+			stubTools.push({ name: tool.name, description: tool.description });
+		}
+		// 'always-allow' tools not in allowedTools: shouldn't happen normally,
+		// but don't generate stubs — the role just doesn't include them
+	}
+
+	if (stubTools.length === 0) return [];
+
+	// Write stub extension file to a hash-based subdirectory
+	const baseDir = path.join(bobbitStateDir(), "tool-stubs");
+	const hashInput = stubTools.map(t => t.name.toLowerCase()).sort().join(",");
+	const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
+	const extDir = path.join(baseDir, hash);
+	fs.mkdirSync(extDir, { recursive: true });
+
+	const code = generateToolStubExtension(stubTools);
+	const filePath = path.join(extDir, "stubs.ts");
+	fs.writeFileSync(filePath, code, "utf-8");
+
+	return [filePath];
+}
+
+/**
+ * Write blocking stub extensions for "leaked" tools — tools that will be registered
+ * by loaded extensions but are NOT in allowedTools. These stubs must be loaded BEFORE
+ * the real extensions (first-registered-wins) to prevent the leaked tools from becoming available.
+ *
+ * Unlike ask-once/always-ask stubs (which return an error prompting grant), these stubs
+ * return a hard error that tells the agent the tool is not available.
+ */
+export function writeLeakedToolStubs(leakedTools: Array<{ name: string; description: string }>): string[] {
+	if (leakedTools.length === 0) return [];
+
+	const baseDir = path.join(bobbitStateDir(), "tool-stubs");
+	const hashInput = "leaked:" + leakedTools.map(t => t.name.toLowerCase()).sort().join(",");
+	const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
+	const extDir = path.join(baseDir, hash);
+	fs.mkdirSync(extDir, { recursive: true });
+
+	const code = generateToolStubExtension(leakedTools);
+	const filePath = path.join(extDir, "leaked-stubs.ts");
+	fs.writeFileSync(filePath, code, "utf-8");
+
+	return [filePath];
 }
 
 /**
@@ -348,8 +504,19 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 
 		for (const [, provider] of providers) {
 			if (provider.type === "builtin" && provider.tool) {
-				// Skip bash — provided by custom bash-tool.ts extension (loaded by rpc-bridge)
-				if (provider.tool === "bash") continue;
+				// Skip bash from --tools — it's provided by shell/extension.ts
+				// (which is loaded via bash_bg's provider entry or explicitly below)
+				if (provider.tool === "bash") {
+					// Ensure shell/extension.ts is loaded for bash
+					const bashProvider = providers.get("bash_bg");
+					if (bashProvider?.type === "bobbit-extension" && bashProvider.extension) {
+						extensionPaths.add(resolveExtensionPath(bashProvider));
+					} else {
+						// Fallback: load shell/extension.ts directly
+						extensionPaths.add(path.join(TOOLS_DIR, "shell", "extension.ts"));
+					}
+					continue;
+				}
 				builtins.push(provider.tool);
 			} else if (provider.type === "bobbit-extension" && provider.extension) {
 				extensionPaths.add(resolveExtensionPath(provider));
@@ -383,10 +550,42 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 			continue;
 		}
 		if (provider.type === "builtin" && provider.tool) {
-			// Skip bash — provided by custom bash-tool.ts extension (loaded by rpc-bridge)
-			if (provider.tool !== "bash") activeBaseTools.push(provider.tool);
+			// Skip bash from --tools — it's provided by shell/extension.ts
+			if (provider.tool === "bash") {
+				// bash is allowed: ensure shell/extension.ts is loaded
+				neededExtensions.add(path.join(TOOLS_DIR, "shell", "extension.ts"));
+				continue;
+			}
+			activeBaseTools.push(provider.tool);
 		} else if (provider.type === "bobbit-extension" && provider.extension) {
 			neededExtensions.add(resolveExtensionPath(provider));
+		}
+	}
+
+	// Detect "leaked" tools: tools registered by loaded extensions that aren't in allowedTools.
+	// Extensions can register multiple tools (e.g. shell/extension.ts registers both bash and bash_bg).
+	// Loading an extension for one allowed tool leaks the others unless we generate blocking stubs.
+	const allowedSet = new Set(allowedTools.map(t => t.toLowerCase()));
+	const leakedTools: Array<{ name: string; description: string }> = [];
+
+	for (const [toolName, provider] of providers) {
+		if (allowedSet.has(toolName.toLowerCase())) continue; // already allowed
+
+		let extPath: string | undefined;
+		if (provider.type === "bobbit-extension" && provider.extension) {
+			extPath = resolveExtensionPath(provider);
+		} else if (provider.type === "builtin" && provider.tool === "bash") {
+			// bash is special-cased: loaded via shell/extension.ts
+			extPath = path.join(TOOLS_DIR, "shell", "extension.ts");
+		}
+
+		if (extPath && neededExtensions.has(extPath)) {
+			// This tool's extension is being loaded for another tool — it will leak
+			const toolInfo = toolManager.getToolByName?.(toolName);
+			leakedTools.push({
+				name: toolName,
+				description: toolInfo?.description ?? `Tool ${toolName}`,
+			});
 		}
 	}
 
@@ -408,5 +607,5 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 		}
 	}
 
-	return { args };
+	return { args, leakedTools: leakedTools.length > 0 ? leakedTools : undefined };
 }

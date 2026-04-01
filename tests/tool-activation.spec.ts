@@ -37,6 +37,7 @@ function standardProviders(): Map<string, ProviderWithGroup> {
 		["browser_click", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser" }],
 		["task_create", { type: "bobbit-extension", extension: "extension.ts", groupDir: "tasks" }],
 		["team_spawn", { type: "bobbit-extension", extension: "extension.ts", groupDir: "team" }],
+		["bash_bg", { type: "bobbit-extension", extension: "extension.ts", groupDir: "shell" }],
 	]);
 }
 
@@ -171,6 +172,41 @@ test.describe("computeToolActivationArgs", () => {
 			.map(p => p.replace(/\\/g, "/"));
 		expect(extPaths.some(p => p.includes("/tasks/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/team/extension.ts"))).toBe(true);
+	});
+
+	test("detects leaked tools from shared extensions — bash_bg loads bash via shell/extension.ts", () => {
+		const tm = mockToolManager(standardProviders());
+		// Allow bash_bg but NOT bash — both share shell/extension.ts
+		const result = computeToolActivationArgs(["read", "bash_bg"], tm);
+
+		// bash should be detected as a leaked tool
+		expect(result.leakedTools).toBeDefined();
+		expect(result.leakedTools!.some(t => t.name === "bash")).toBe(true);
+	});
+
+	test("detects leaked tools from shared extensions — web_search leaks web_fetch", () => {
+		const tm = mockToolManager(standardProviders());
+		// Allow web_search but NOT web_fetch — both share web/extension.ts
+		const result = computeToolActivationArgs(["read", "web_search"], tm);
+
+		expect(result.leakedTools).toBeDefined();
+		expect(result.leakedTools!.some(t => t.name === "web_fetch")).toBe(true);
+	});
+
+	test("no leaked tools when all tools from extension are allowed", () => {
+		const tm = mockToolManager(standardProviders());
+		// Allow both web tools — no leak
+		const result = computeToolActivationArgs(["read", "web_search", "web_fetch"], tm);
+
+		expect(result.leakedTools).toBeUndefined();
+	});
+
+	test("no leaked tools when no extensions are loaded", () => {
+		const tm = mockToolManager(standardProviders());
+		// Only builtins — no extensions loaded, nothing can leak
+		const result = computeToolActivationArgs(["read", "write", "edit"], tm);
+
+		expect(result.leakedTools).toBeUndefined();
 	});
 
 	test("bash-only role — bash excluded from --tools, gets --no-tools", () => {

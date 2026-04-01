@@ -23,7 +23,7 @@ import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, resolveGrantPolicy } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolStubExtensions, writeLeakedToolStubs, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
 import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -537,32 +537,100 @@ export class SessionManager {
 		}).join('\n');
 	}
 
-	/** Build tool restrictions text including available-but-ungranted MCP tools.
-	 *  When a role is provided, tools with explicit `never-ask` policy are hidden
-	 *  from the "additional tools" list. Tools with no policy (null) preserve current behavior. */
+	/** Build tool restrictions text including available-but-ungranted tools (MCP + builtin/extension).
+	 *  Only tools with `ask-once` or `always-ask` policy are listed — `never-ask`/`never` are hidden,
+	 *  and `always-allow` tools should already be in allowedTools. */
 	private buildToolRestrictionsText(allowedTools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }): string {
 		const toolList = allowedTools.join(", ");
 		let text = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools that are not listed above or mentioned below.`;
 
-		// List available-but-not-granted MCP tools so the agent knows
-		// it can attempt them (the stub will error and trigger a
-		// permission grant prompt in the UI).
+		// Collect all available-but-not-granted tools (MCP + builtin/extension)
+		// so the agent knows it can attempt them (the stub will error and trigger
+		// a permission grant prompt in the UI).
+		const ungrantedTools: Array<{ name: string; description: string }> = [];
+		const allowedLower = new Set(allowedTools.map(a => a.toLowerCase()));
+
+		// MCP tools
 		if (this.mcpManager) {
-			const mcpInfos = this.mcpManager.getToolInfos();
-			const ungrantedMcp = mcpInfos.filter(t => {
-				const notAllowed = !allowedTools.some(a => a.toLowerCase() === t.name.toLowerCase());
-				if (!notAllowed) return false;
-				// When role is provided, hide tools with explicit never-ask policy
+			for (const t of this.mcpManager.getToolInfos()) {
+				if (allowedLower.has(t.name.toLowerCase())) continue;
 				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
-				return policy !== 'never-ask' && policy !== 'never';
-			});
-			if (ungrantedMcp.length > 0) {
-				const ungrantedList = ungrantedMcp.map(t => `- **${t.name}**: ${t.description}`).join("\n");
-				text += `\n\n### Additional tools available with permission\n\nThe following tools exist but are not currently granted to your role. If a task would benefit from one of these tools, go ahead and attempt to call it — the user will be prompted to grant you access.\n\n${ungrantedList}`;
+				if (policy === 'ask-once' || policy === 'always-ask') {
+					ungrantedTools.push({ name: t.name, description: t.description });
+				}
 			}
 		}
 
+		// Builtin/extension tools
+		if (this.toolManager) {
+			const allTools = this.toolManager.getAvailableTools();
+			for (const t of allTools) {
+				if (allowedLower.has(t.name.toLowerCase())) continue;
+				if (t.name.toLowerCase().startsWith("mcp__")) continue; // already handled above
+				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
+				if (policy === 'ask-once' || policy === 'always-ask') {
+					ungrantedTools.push({ name: t.name, description: t.description });
+				}
+			}
+		}
+
+		if (ungrantedTools.length > 0) {
+			const ungrantedList = ungrantedTools.map(t => `- **${t.name}**: ${t.description}`).join("\n");
+			text += `\n\n### Additional tools available with permission\n\nThe following tools exist but are not currently granted to your role. If a task would benefit from one of these tools, go ahead and attempt to call it — the user will be prompted to grant you access.\n\n${ungrantedList}`;
+		}
+
 		return text;
+	}
+
+	/**
+	 * Build the full set of CLI args for tool activation, including stubs, MCP proxies,
+	 * and builtin/extension activation. Stubs are loaded first (pi-coding-agent uses
+	 * first-registered-wins), then real extensions.
+	 *
+	 * Returns the args array to prepend to bridgeOptions.args.
+	 */
+	/**
+	 * Resolve the effective allowed tools for a role.
+	 * If the role has explicit allowedTools, use those.
+	 * Otherwise, compute from the full policy cascade (honouring the always-allow default).
+	 */
+	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): string[] {
+		if (!role) return [];
+		if (role.allowedTools.length > 0) return role.allowedTools;
+		// Sparse toolPolicies — use the full cascade so system default (always-allow) applies
+		if (this.toolManager) {
+			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
+		}
+		return [];
+	}
+
+	private buildToolActivationArgs(
+		allowedTools: string[],
+		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+		cwd: string,
+	): string[] {
+		// 1. Generate stubs for restricted-but-visible tools (loaded first)
+		const stubArgs: string[] = [];
+		if (this.toolManager) {
+			const stubPaths = writeToolStubExtensions(this.toolManager, allowedTools, role, this.groupPolicyStore);
+			for (const p of stubPaths) stubArgs.push("--extension", p);
+		}
+
+		// 2. MCP proxy/stub extensions
+		const mcpExtPaths = this.mcpManager
+			? writeMcpProxyExtensions(this.mcpManager, allowedTools, role, this.toolManager, this.groupPolicyStore)
+			: undefined;
+
+		// 3. Builtin + bobbit-extension activation
+		const activation = computeToolActivationArgs(allowedTools, this.toolManager, cwd, mcpExtPaths);
+
+		// 4. Block leaked tools from shared extensions (loaded before real extensions)
+		if (activation.leakedTools && activation.leakedTools.length > 0) {
+			const leakPaths = writeLeakedToolStubs(activation.leakedTools);
+			for (const p of leakPaths) stubArgs.push("--extension", p);
+		}
+
+		return [...stubArgs, ...activation.args];
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
@@ -633,8 +701,11 @@ export class SessionManager {
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
 					roleName = session.role;
 				}
-				if (role && role.allowedTools.length > 0) {
-					toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools, role);
+				if (role) {
+					const effective = this.resolveEffectiveAllowedTools(role);
+					if (effective.length > 0) {
+						toolRestrictionsText = this.buildToolRestrictionsText(effective, role);
+					}
 				}
 			}
 
@@ -821,11 +892,12 @@ export class SessionManager {
 			session.lastTurnErrored = event.message.stopReason === "error";
 		}
 
-		// Detect MCP tool permission errors and prompt the user to grant access.
+		// Detect tool permission errors and prompt the user to grant access.
+		// Works for ALL tool types: MCP, builtin, and bobbit-extension tools.
 		// Two detection paths:
 		// 1. tool_execution_end with isError (if the runtime propagates it)
 		// 2. message_end with toolResult containing our sentinel error text
-		if (this.mcpManager) {
+		{
 			let deniedToolName: string | undefined;
 
 			if (event.type === "tool_execution_end") {
@@ -845,15 +917,30 @@ export class SessionManager {
 			}
 
 			if (deniedToolName && !session.permissionBroadcastSent) {
-				const mcpInfos = this.mcpManager.getToolInfos();
-				const mcpTool = mcpInfos.find(t => t.name === deniedToolName);
-				if (mcpTool && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === deniedToolName!.toLowerCase())) {
+				// Look up tool info from MCP manager first, then fall back to toolManager
+				let toolName: string | undefined;
+				let toolGroup: string | undefined;
+
+				const mcpInfos = this.mcpManager?.getToolInfos();
+				const mcpTool = mcpInfos?.find(t => t.name === deniedToolName);
+				if (mcpTool) {
+					toolName = mcpTool.name;
+					toolGroup = mcpTool.group;
+				} else if (this.toolManager) {
+					const toolInfo = this.toolManager.getToolByName(deniedToolName);
+					if (toolInfo) {
+						toolName = toolInfo.name;
+						toolGroup = toolInfo.group;
+					}
+				}
+
+				if (toolName && toolGroup && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === deniedToolName!.toLowerCase())) {
 					// Use explicit role or fall back to "general" (implicit default)
 					const roleName = session.role || "general";
 					const role = this.roleManager?.getRole(roleName);
 
 					// Resolve grant policy for this tool
-					const policy = resolveGrantPolicy(deniedToolName, mcpTool.group, role, this.toolManager, this.groupPolicyStore);
+					const policy = resolveGrantPolicy(deniedToolName, toolGroup, role, this.toolManager, this.groupPolicyStore);
 
 					if (policy === 'never-ask' || policy === 'never') {
 						// Guard: should not happen (stubs shouldn't exist for never-ask tools)
@@ -863,8 +950,8 @@ export class SessionManager {
 						session.permissionBroadcastSent = true;
 						broadcast(session.clients, {
 							type: "tool_permission_needed",
-							toolName: mcpTool.name,
-							group: mcpTool.group,
+							toolName,
+							group: toolGroup,
 							roleName: role?.name ?? roleName,
 							roleLabel: role?.label ?? roleName,
 							lastPromptText: session.lastPromptText,
@@ -873,10 +960,10 @@ export class SessionManager {
 						// Abort the agent turn to prevent it from chatting about the denial
 						session.rpcClient.abort().catch(() => {});
 					}
-				} else {
+				} else if (deniedToolName) {
 					console.warn(
-						`[session-manager] MCP tool denial detected for "${deniedToolName}" in session ${session.id} ` +
-						`but grant not triggered: mcpTool=${!!mcpTool}, allowedTools=${JSON.stringify(session.allowedTools?.slice(0, 5))}, role=${session.role}`
+						`[session-manager] Tool denial detected for "${deniedToolName}" in session ${session.id} ` +
+						`but grant not triggered: toolFound=${!!toolName}, allowedTools=${JSON.stringify(session.allowedTools?.slice(0, 5))}, role=${session.role}`
 					);
 				}
 			}
@@ -1032,12 +1119,22 @@ export class SessionManager {
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
 		const newTools: string[] = [];
-		if (scope === "group" && group && this.mcpManager) {
-			// Add all tools from the MCP group
-			const infos = this.mcpManager.getToolInfos();
-			for (const info of infos) {
-				if (info.group === group && !role.allowedTools.includes(info.name)) {
-					newTools.push(info.name);
+		if (scope === "group" && group) {
+			// Add all tools from the group (MCP + non-MCP)
+			if (this.mcpManager) {
+				const infos = this.mcpManager.getToolInfos();
+				for (const info of infos) {
+					if (info.group === group && !role.allowedTools.includes(info.name)) {
+						newTools.push(info.name);
+					}
+				}
+			}
+			if (this.toolManager) {
+				const allTools = this.toolManager.getAvailableTools();
+				for (const tool of allTools) {
+					if (tool.group === group && !role.allowedTools.includes(tool.name) && !newTools.includes(tool.name)) {
+						newTools.push(tool.name);
+					}
 				}
 			}
 		} else {
@@ -1054,8 +1151,9 @@ export class SessionManager {
 		// Also reject never-ask tools entirely.
 		if (this.toolManager || this.mcpManager) {
 			const filtered = newTools.filter(t => {
-				const mcpInfo = this.mcpManager?.getToolInfos().find(i => i.name === t);
-				const policy = resolveGrantPolicy(t, mcpInfo?.group, role, this.toolManager!, this.groupPolicyStore);
+				const toolGroup = this.mcpManager?.getToolInfos().find(i => i.name === t)?.group
+					?? this.toolManager?.getToolByName(t)?.group;
+				const policy = resolveGrantPolicy(t, toolGroup, role, this.toolManager!, this.groupPolicyStore);
 				return policy !== 'never-ask' && policy !== 'never';
 			});
 			if (filtered.length === 0) {
@@ -1066,8 +1164,9 @@ export class SessionManager {
 			newTools.push(...filtered);
 
 			// Override mode based on server-resolved policy for the primary tool
-			const primaryInfo = this.mcpManager?.getToolInfos().find(i => i.name === toolName);
-			const primaryPolicy = resolveGrantPolicy(toolName, primaryInfo?.group, role, this.toolManager ?? undefined, this.groupPolicyStore);
+			const primaryGroup = this.mcpManager?.getToolInfos().find(i => i.name === toolName)?.group
+				?? this.toolManager?.getToolByName(toolName)?.group;
+			const primaryPolicy = resolveGrantPolicy(toolName, primaryGroup, role, this.toolManager ?? undefined, this.groupPolicyStore);
 			if (primaryPolicy === 'always-ask') {
 				mode = 'one-time';
 			} else if (primaryPolicy === 'ask-once') {
@@ -1385,15 +1484,14 @@ export class SessionManager {
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
-			let effectiveAllowed = overrideAllowedTools ?? (role ? role.allowedTools : []);
+			let effectiveAllowed = overrideAllowedTools ?? this.resolveEffectiveAllowedTools(role);
 			// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
 			if (ps.sandboxed && effectiveAllowed.length > 0) {
 				effectiveAllowed = effectiveAllowed.filter(t => t !== "bash_bg");
 			}
 			if (effectiveAllowed.length > 0) {
-				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, effectiveAllowed, role, this.toolManager, this.groupPolicyStore) : undefined;
-				const activation = computeToolActivationArgs(effectiveAllowed, this.toolManager, ps.cwd, mcpExtPaths);
-				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+				const toolArgs = this.buildToolActivationArgs(effectiveAllowed, role, ps.cwd);
+				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
 				for (const extPath of mcpExtPaths) {
@@ -1408,8 +1506,9 @@ export class SessionManager {
 			restoredAllowedTools = overrideAllowedTools;
 		} else if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
-			if (role && role.allowedTools.length > 0) {
-				restoredAllowedTools = role.allowedTools;
+			if (role) {
+				const effective = this.resolveEffectiveAllowedTools(role);
+				if (effective.length > 0) restoredAllowedTools = effective;
 			}
 		}
 
@@ -1721,6 +1820,10 @@ export class SessionManager {
 
 		const titleSummary = opts.title || opts.instructions.split("\n")[0].slice(0, 60) || "Delegate";
 
+		// Inherit tool access from parent session
+		const parentSession = this.sessions.get(parentSessionId);
+		const parentAllowedTools = parentSession?.allowedTools;
+
 		const plan: SessionSetupPlan = {
 			id,
 			mode: "delegate",
@@ -1730,6 +1833,7 @@ export class SessionManager {
 			sandboxed: delegateSandboxed || undefined,
 			instructions: opts.instructions,
 			context: opts.context,
+			effectiveAllowedTools: parentAllowedTools,
 			bridgeOptions: { cwd: opts.cwd },
 		};
 
@@ -2275,8 +2379,9 @@ export class SessionManager {
 		let toolRestrictionsText: string | undefined;
 		// Look up the full role (with toolPolicies) from roleManager if available
 		const fullRole = this.roleManager?.getRole(role.name);
-		if (role.allowedTools.length > 0) {
-			toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools, fullRole);
+		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
+		if (effectiveAllowed.length > 0) {
+			toolRestrictionsText = this.buildToolRestrictionsText(effectiveAllowed, fullRole);
 		}
 
 		// Resolve personalities for system prompt
@@ -2295,7 +2400,7 @@ export class SessionManager {
 			roleName: role.name,
 			toolRestrictions: toolRestrictionsText,
 			personalities: resolvedPersonalities,
-			allowedTools: role.allowedTools.length > 0 ? role.allowedTools : undefined,
+			allowedTools: effectiveAllowed.length > 0 ? effectiveAllowed : undefined,
 			projectConfigStore: this.projectConfigStore,
 		});
 
@@ -2313,10 +2418,9 @@ export class SessionManager {
 		}
 
 		// Apply tool activation args based on role's allowedTools
-		if (role.allowedTools.length > 0) {
-			const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools, fullRole, this.toolManager, this.groupPolicyStore) : undefined;
-			const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
-			bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+		if (effectiveAllowed.length > 0) {
+			const toolArgs = this.buildToolActivationArgs(effectiveAllowed, fullRole, session.cwd);
+			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
 			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
 			for (const extPath of mcpExtPaths) {
@@ -2358,7 +2462,7 @@ export class SessionManager {
 		session.status = "idle";
 		session.role = role.name;
 		session.accessory = role.accessory;
-		session.allowedTools = role.allowedTools;
+		session.allowedTools = effectiveAllowed;
 		if (opts?.personalities) session.personalities = opts.personalities;
 
 		roleStore.update(id, { role: role.name, accessory: role.accessory, personalities: opts?.personalities });
@@ -2415,9 +2519,10 @@ export class SessionManager {
 			if (role) {
 				rolePrompt = role.promptTemplate;
 				roleName = role.name;
-				if (role.allowedTools.length > 0) {
-					roleAllowedTools = role.allowedTools;
-					toolRestrictionsText = this.buildToolRestrictionsText(role.allowedTools, role);
+				const effective = this.resolveEffectiveAllowedTools(role);
+				if (effective.length > 0) {
+					roleAllowedTools = effective;
+					toolRestrictionsText = this.buildToolRestrictionsText(effective, role);
 				}
 			}
 		}
@@ -2455,10 +2560,10 @@ export class SessionManager {
 		// Restore tool activation from role's allowedTools
 		if (session.role && this.roleManager) {
 			const role = this.roleManager.getRole(session.role);
-			if (role && role.allowedTools.length > 0) {
-				const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools, role, this.toolManager, this.groupPolicyStore) : undefined;
-				const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
-				bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+			const effective = this.resolveEffectiveAllowedTools(role);
+			if (effective.length > 0) {
+				const toolArgs = this.buildToolActivationArgs(effective, role, session.cwd);
+				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
 				for (const extPath of mcpExtPaths) {
@@ -2994,10 +3099,10 @@ export class SessionManager {
 			// Restore tool activation from role's allowedTools
 			if (session.role && this.roleManager) {
 				const role = this.roleManager.getRole(session.role);
-				if (role && role.allowedTools.length > 0) {
-					const mcpExtPaths = this.mcpManager ? writeMcpProxyExtensions(this.mcpManager, role.allowedTools, role, this.toolManager, this.groupPolicyStore) : undefined;
-					const activation = computeToolActivationArgs(role.allowedTools, this.toolManager, session.cwd, mcpExtPaths);
-					bridgeOptions.args = [...activation.args, ...(bridgeOptions.args || [])];
+				const effective = this.resolveEffectiveAllowedTools(role);
+				if (effective.length > 0) {
+					const toolArgs = this.buildToolActivationArgs(effective, role, session.cwd);
+					bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 				} else if (this.mcpManager) {
 					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
 					for (const extPath of mcpExtPaths) {
