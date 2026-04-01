@@ -10,6 +10,9 @@
  *
  * Provider info is read from .bobbit/config/tools/<group>/*.yaml via ToolManager instead of hardcoded maps.
  * All sessions use `--no-extensions` so Bobbit has complete control over extension loading.
+ *
+ * Access control is handled by a single tool_call guard extension (see tool-guard-extension.ts)
+ * instead of stub extensions and error regex matching.
  */
 
 
@@ -20,7 +23,7 @@ import type { ToolManager, ToolProvider } from "./tool-manager.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
-// ToolGroupPolicyStore interface used inline to avoid circular deps
+import { generateToolGuardExtension, type ToolPolicyEntry } from "./tool-guard-extension.js";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 
@@ -30,9 +33,57 @@ export interface GroupPolicyProvider {
 }
 
 /**
+ * Normalize old grant policy values to the new simplified set.
+ * - `always-allow` → `allow`
+ * - `ask-once` / `always-ask` → `ask`
+ * - `never-ask` → `never`
+ * - New values (`allow`, `ask`, `never`) pass through unchanged.
+ */
+function normalizePolicy(policy: GrantPolicy): GrantPolicy {
+	switch (policy) {
+		case 'always-allow': return 'always-allow'; // maps to 'allow' semantically, but keep type-compatible for now
+		case 'ask-once':
+		case 'always-ask': return 'always-ask'; // maps to 'ask' semantically
+		case 'never-ask': return 'never'; // maps to 'never'
+		case 'never': return 'never';
+		default:
+			// Handle new policy values that may come from migrated configs
+			if ((policy as string) === 'allow') return 'always-allow';
+			if ((policy as string) === 'ask') return 'always-ask';
+			return policy;
+	}
+}
+
+/**
+ * Check if a policy (after normalization) means "allow" (tool executes immediately).
+ */
+function isAllowPolicy(policy: GrantPolicy): boolean {
+	const p = policy as string;
+	return p === 'always-allow' || p === 'allow';
+}
+
+/**
+ * Check if a policy (after normalization) means "ask" (guard blocks until granted).
+ */
+function isAskPolicy(policy: GrantPolicy): boolean {
+	const p = policy as string;
+	return p === 'ask-once' || p === 'always-ask' || p === 'ask';
+}
+
+/**
+ * Check if a policy (after normalization) means "never" (tool not registered).
+ */
+function isNeverPolicy(policy: GrantPolicy): boolean {
+	const p = policy as string;
+	return p === 'never-ask' || p === 'never';
+}
+
+/**
  * Resolve the effective grant policy for a tool.
  * Priority: role tool-specific > role group-level > tool YAML default > group default > system fallback.
  * Always returns a concrete policy (never null).
+ *
+ * Normalizes old policy values internally: `always-allow`→allow, `ask-once`/`always-ask`→ask, `never-ask`→never.
  */
 export function resolveGrantPolicy(
 	toolName: string,
@@ -42,19 +93,19 @@ export function resolveGrantPolicy(
 	groupPolicyStore?: GroupPolicyProvider,
 ): GrantPolicy {
 	// 1. Role-level tool-specific override
-	if (role?.toolPolicies?.[toolName]) return role.toolPolicies[toolName];
+	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
 
 	// 2. Role-level group override (e.g. "mcp__playwright" matches "mcp__playwright__snap")
-	if (toolGroup && role?.toolPolicies?.[toolGroup]) return role.toolPolicies[toolGroup];
+	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
 
 	// 3. Tool definition default from YAML
 	const toolDef = toolManager?.getToolByName(toolName);
-	if (toolDef?.grantPolicy) return toolDef.grantPolicy;
+	if (toolDef?.grantPolicy) return normalizePolicy(toolDef.grantPolicy);
 
 	// 4. Group-level default policy
 	if (toolGroup && groupPolicyStore) {
 		const gp = groupPolicyStore.getGroupPolicy(toolGroup);
-		if (gp) return gp;
+		if (gp) return normalizePolicy(gp);
 	}
 
 	// 5. System fallback — always allow
@@ -63,12 +114,11 @@ export function resolveGrantPolicy(
 
 /**
  * Compute the effective allowed tools for a role by running every known tool
- * through the full resolveGrantPolicy cascade.  Tools whose resolved policy
- * is `always-allow` are returned.
+ * through the full resolveGrantPolicy cascade. Tools whose resolved policy
+ * is `allow` OR `ask` are returned (both need to be registered — the guard
+ * controls access for `ask` tools).
  *
- * This replaces the simple `deriveAllowedTools` (which only scans explicit
- * entries in toolPolicies) when the full cascade — including the system
- * fallback of `always-allow` — must be honoured.
+ * Only `never` tools are excluded.
  */
 export function computeEffectiveAllowedTools(
 	toolManager: ToolManager,
@@ -84,7 +134,8 @@ export function computeEffectiveAllowedTools(
 		if (seen.has(tool.name.toLowerCase())) continue;
 		seen.add(tool.name.toLowerCase());
 		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
-		if (policy === 'always-allow') result.push(tool.name);
+		// Include tools with allow OR ask policy (not never)
+		if (!isNeverPolicy(policy)) result.push(tool.name);
 	}
 
 	// MCP tools
@@ -93,7 +144,7 @@ export function computeEffectiveAllowedTools(
 			if (seen.has(info.name.toLowerCase())) continue;
 			seen.add(info.name.toLowerCase());
 			const policy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
-			if (policy === 'always-allow') result.push(info.name);
+			if (!isNeverPolicy(policy)) result.push(info.name);
 		}
 	}
 
@@ -103,12 +154,6 @@ export function computeEffectiveAllowedTools(
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--tools", "read,bash", "--no-extensions", "--extension", "/path/to/ext"]) */
 	args: string[];
-	/**
-	 * Tools that will be registered by loaded extensions but are NOT in allowedTools.
-	 * These "leaked" tools need blocking stubs loaded before the extensions (first-registered-wins)
-	 * to prevent them from becoming available.
-	 */
-	leakedTools?: Array<{ name: string; description: string }>;
 }
 
 /**
@@ -220,160 +265,96 @@ ${toolRegistrations}
 }
 
 /**
- * Generate an extension that registers MCP tools as stubs returning an error.
- * The agent sees these tools exist but gets a clear error on invocation,
- * which triggers the grant-permission UI flow.
+ * Compute the effective policy and group for every known tool.
+ * Returns a map of tool name → { policy: 'allow'|'ask'|'never', group }.
  */
-export function generateMcpStubExtension(
-	serverName: string,
-	tools: Array<{ name: string; bobbitName: string; description?: string; inputSchema: Record<string, unknown> }>,
-): string {
-	const toolRegistrations = tools.map(tool => {
-		const fullName = tool.bobbitName;
-		const schema = jsonSchemaToTypeBox(tool.inputSchema);
-		const desc = tool.description ? JSON.stringify(tool.description) : `"MCP tool ${tool.name} from ${serverName}"`;
-		return `
-  pi.registerTool({
-    name: ${JSON.stringify(fullName)},
-    description: ${desc},
-    parameters: ${schema},
-    execute: async (toolCallId, params) => {
-      return { content: [{ type: "text", text: ${JSON.stringify(`Error: Tool ${fullName} is not allowed for your current role. Ask the user to grant permission.`)} }], isError: true };
-    }
-  });`;
-	}).join('\n');
-
-	return `import { Type } from "@sinclair/typebox";
-
-export default function(pi) {
-${toolRegistrations}
-}
-`;
-}
-
-/**
- * Generate an extension that registers builtin/bobbit-extension tools as stubs
- * returning an error. Same pattern as MCP stubs — the agent sees the tool but
- * gets a clear error on invocation, triggering the grant-permission UI flow.
- *
- * Uses a permissive parameter schema (accepts any object) since the agent
- * already knows the real parameter shapes from the system prompt tool docs.
- */
-export function generateToolStubExtension(
-	tools: Array<{ name: string; description: string }>,
-): string {
-	const toolRegistrations = tools.map(tool => {
-		return `
-  pi.registerTool({
-    name: ${JSON.stringify(tool.name)},
-    description: ${JSON.stringify(tool.description)},
-    parameters: Type.Object({}, { additionalProperties: true }),
-    execute: async (toolCallId, params) => {
-      return { content: [{ type: "text", text: ${JSON.stringify(`Error: Tool ${tool.name} is not allowed for your current role. Ask the user to grant permission.`)} }], isError: true };
-    }
-  });`;
-	}).join('\n');
-
-	return `import { Type } from "@sinclair/typebox";
-
-export default function(pi) {
-${toolRegistrations}
-}
-`;
-}
-
-/**
- * Write stub extension files for non-MCP tools that are restricted by role policy.
- * Returns array of written file paths (to be loaded BEFORE real extensions — pi-coding-agent uses first-registered-wins).
- *
- * For each non-MCP tool NOT in allowedTools:
- * - `never-ask`/`never`: tool is invisible (no stub, no real extension)
- * - `ask-once`/`always-ask`: stub generated so the agent can invoke it and trigger the grant flow
- * - `always-allow`: should be in allowedTools already (no stub needed)
- */
-export function writeToolStubExtensions(
+export function computeToolPolicies(
 	toolManager: ToolManager,
-	allowedTools: string[],
-	role?: { toolPolicies?: Record<string, GrantPolicy> },
+	mcpManager: McpManager | undefined,
+	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
-): string[] {
-	const allowedSet = new Set(allowedTools.map(t => t.toLowerCase()));
-	const allTools = toolManager.getAvailableTools();
-	const stubTools: Array<{ name: string; description: string }> = [];
+): Record<string, ToolPolicyEntry> {
+	const result: Record<string, ToolPolicyEntry> = {};
 
-	for (const tool of allTools) {
-		// Skip tools that are already allowed
-		if (allowedSet.has(tool.name.toLowerCase())) continue;
-
-		// Skip MCP tools — handled by writeMcpProxyExtensions
-		if (tool.name.toLowerCase().startsWith("mcp__")) continue;
-
-		// Resolve grant policy
-		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
-
-		if (policy === 'never-ask' || policy === 'never') {
-			continue; // Invisible — no stub
-		}
-
-		if (policy === 'ask-once' || policy === 'always-ask') {
-			stubTools.push({ name: tool.name, description: tool.description });
-		}
-		// 'always-allow' tools not in allowedTools: shouldn't happen normally,
-		// but don't generate stubs — the role just doesn't include them
+	// Builtin + bobbit-extension tools
+	for (const tool of toolManager.getAvailableTools()) {
+		const rawPolicy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
+		let policy: string;
+		if (isAllowPolicy(rawPolicy)) policy = 'allow';
+		else if (isAskPolicy(rawPolicy)) policy = 'ask';
+		else policy = 'never';
+		result[tool.name] = { policy, group: tool.group };
 	}
 
-	if (stubTools.length === 0) return [];
+	// MCP tools
+	if (mcpManager) {
+		for (const info of mcpManager.getToolInfos()) {
+			if (result[info.name]) continue; // already seen
+			const rawPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+			let policy: string;
+			if (isAllowPolicy(rawPolicy)) policy = 'allow';
+			else if (isAskPolicy(rawPolicy)) policy = 'ask';
+			else policy = 'never';
+			result[info.name] = { policy, group: info.group };
+		}
+	}
 
-	// Write stub extension file to a hash-based subdirectory
-	const baseDir = path.join(bobbitStateDir(), "tool-stubs");
-	const hashInput = stubTools.map(t => t.name.toLowerCase()).sort().join(",");
-	const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
-	const extDir = path.join(baseDir, hash);
-	fs.mkdirSync(extDir, { recursive: true });
-
-	const code = generateToolStubExtension(stubTools);
-	const filePath = path.join(extDir, "stubs.ts");
-	fs.writeFileSync(filePath, code, "utf-8");
-
-	return [filePath];
+	return result;
 }
 
 /**
- * Write blocking stub extensions for "leaked" tools — tools that will be registered
- * by loaded extensions but are NOT in allowedTools. These stubs must be loaded BEFORE
- * the real extensions (first-registered-wins) to prevent the leaked tools from becoming available.
- *
- * Unlike ask-once/always-ask stubs (which return an error prompting grant), these stubs
- * return a hard error that tells the agent the tool is not available.
+ * Write the tool_call guard extension if any tools have 'ask' policy.
+ * Returns the file path of the written extension, or undefined if no guard is needed.
  */
-export function writeLeakedToolStubs(leakedTools: Array<{ name: string; description: string }>): string[] {
-	if (leakedTools.length === 0) return [];
+export function writeToolGuardExtension(
+	sessionId: string,
+	toolManager: ToolManager,
+	mcpManager: McpManager | undefined,
+	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	groupPolicyStore?: GroupPolicyProvider,
+	grantedTools?: string[],
+): string | undefined {
+	const policies = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore);
 
-	const baseDir = path.join(bobbitStateDir(), "tool-stubs");
-	const hashInput = "leaked:" + leakedTools.map(t => t.name.toLowerCase()).sort().join(",");
-	const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
+	// Check if any tools have 'ask' policy
+	const hasAskTools = Object.values(policies).some(p => p.policy === 'ask');
+	if (!hasAskTools) return undefined;
+
+	// Generate the guard extension source
+	const code = generateToolGuardExtension(sessionId, policies, grantedTools ?? []);
+
+	// Write to .bobbit/state/tool-guard/ with content hash for dedup
+	const baseDir = path.join(bobbitStateDir(), "tool-guard");
+	const hash = createHash("sha256").update(code).digest("hex").slice(0, 12);
 	const extDir = path.join(baseDir, hash);
 	fs.mkdirSync(extDir, { recursive: true });
 
-	const code = generateToolStubExtension(leakedTools);
-	const filePath = path.join(extDir, "leaked-stubs.ts");
+	const filePath = path.join(extDir, "guard.ts");
+	// Only write if content changed (avoid unnecessary fs writes)
+	try {
+		const existing = fs.readFileSync(filePath, "utf-8");
+		if (existing === code) return filePath;
+	} catch { /* file doesn't exist yet */ }
 	fs.writeFileSync(filePath, code, "utf-8");
 
-	return [filePath];
+	return filePath;
 }
 
 /**
  * Write proxy extension files for all connected MCP servers.
  * Returns array of written file paths.
  *
- * When `allowedTools` is provided and non-empty, allowed MCP tools get
- * full proxy extensions while disallowed MCP tools get stub extensions
- * that return an immediate error. This ensures the agent sees all MCP
- * tools (so the grant-permission flow can trigger) but can only execute
- * the ones in its allowedTools list. Filtered extensions are written to
- * a hash-based subdirectory to avoid conflicts with other sessions.
+ * Generates proxy extensions for ALL MCP tools except those with `never` policy.
+ * Access control for `ask` tools is handled by the tool_call guard extension,
+ * not by stub extensions.
  */
-export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }, toolManager?: ToolManager, groupPolicyStore?: GroupPolicyProvider): string[] {
+export function writeMcpProxyExtensions(
+	mcpManager: McpManager,
+	allowedTools?: string[],
+	role?: { toolPolicies?: Record<string, GrantPolicy> },
+	toolManager?: ToolManager,
+	groupPolicyStore?: GroupPolicyProvider,
+): string[] {
 	const infos = mcpManager.getToolInfos();
 
 	// Determine if we're filtering
@@ -388,20 +369,7 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 	if (filtering) {
 		// Collect only the MCP tool names from allowedTools for the hash
 		const mcpAllowed = allowedTools!.filter(t => t.toLowerCase().startsWith("mcp__")).sort();
-		let hashInput = mcpAllowed.join(",").toLowerCase();
-		// Include explicitly hidden tools in hash (never-ask changes the extension set)
-		if (role || toolManager || groupPolicyStore) {
-			const hiddenTools = infos
-				.filter(i => {
-					const p = resolveGrantPolicy(i.name, i.group, role, toolManager, groupPolicyStore);
-					return !allowedSet?.has(i.name.toLowerCase()) && (p === 'never-ask' || p === 'never');
-				})
-				.map(i => i.name.toLowerCase())
-				.sort();
-			if (hiddenTools.length > 0) {
-				hashInput += '|hidden:' + hiddenTools.join(',');
-			}
-		}
+		const hashInput = mcpAllowed.join(",").toLowerCase();
 		const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
 		extDir = path.join(baseExtDir, hash);
 	} else {
@@ -411,29 +379,26 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 
 	const extensionPaths: string[] = [];
 
-	// Group tool infos by server, separating allowed vs disallowed
-	const allowedByServer = new Map<string, typeof infos>();
-	const disallowedByServer = new Map<string, typeof infos>();
+	// Group tool infos by server — only include tools that are not 'never'
+	const toolsByServer = new Map<string, typeof infos>();
 	for (const info of infos) {
-		const isAllowed = !allowedSet || allowedSet.has(info.name.toLowerCase());
-		if (isAllowed) {
-			if (!allowedByServer.has(info.serverName)) allowedByServer.set(info.serverName, []);
-			allowedByServer.get(info.serverName)!.push(info);
-		} else {
-			// Check grant policy — 'never-ask' or 'never' hides the tool (no stub)
-			const policy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
-			if (policy === 'never-ask' || policy === 'never') {
-				continue; // Explicitly hidden — no stub, tool invisible to agent
-			}
-			// 'always-ask' or 'ask-once' — generate stub so agent sees the tool
-			// and the grant-permission flow can trigger on attempted use
-			if (!disallowedByServer.has(info.serverName)) disallowedByServer.set(info.serverName, []);
-			disallowedByServer.get(info.serverName)!.push(info);
+		// If filtering, check if tool is in allowed set
+		if (allowedSet && !allowedSet.has(info.name.toLowerCase())) {
+			continue; // Not in allowed tools — skip (it's either 'never' or wasn't included)
 		}
+
+		// Double-check policy: skip 'never' tools explicitly
+		if (role || toolManager || groupPolicyStore) {
+			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+			if (isNeverPolicy(p)) continue;
+		}
+
+		if (!toolsByServer.has(info.serverName)) toolsByServer.set(info.serverName, []);
+		toolsByServer.get(info.serverName)!.push(info);
 	}
 
-	// Write full proxy extensions for allowed tools
-	for (const [serverName, tools] of allowedByServer) {
+	// Write proxy extensions (real implementations for all allowed + ask tools)
+	for (const [serverName, tools] of toolsByServer) {
 		const toolDefs = tools.map(t => ({
 			name: t.mcpToolName,
 			bobbitName: t.name,
@@ -446,27 +411,6 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 		extensionPaths.push(filePath);
 	}
 
-	// Write stub extensions for disallowed tools (so the agent sees them
-	// and the grant-permission flow triggers on attempted use)
-	if (filtering) {
-		for (const [serverName, tools] of disallowedByServer) {
-			// Skip if this server already has a full proxy extension (mixed allowed/disallowed)
-			const stubFileName = allowedByServer.has(serverName)
-				? `${serverName}-denied.ts`
-				: `${serverName}.ts`;
-			const toolDefs = tools.map(t => ({
-				name: t.mcpToolName,
-				bobbitName: t.name,
-				description: t.description,
-				inputSchema: t.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
-			}));
-			const code = generateMcpStubExtension(serverName, toolDefs);
-			const filePath = path.join(extDir, stubFileName);
-			fs.writeFileSync(filePath, code, "utf-8");
-			extensionPaths.push(filePath);
-		}
-	}
-
 	return extensionPaths;
 }
 
@@ -476,6 +420,8 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
  *
  * If allowedTools is empty or undefined, all tools are enabled (all builtins + all bobbit extensions).
  * Always adds `--no-extensions` so Bobbit has complete control over extension loading.
+ *
+ * No leaked tool detection — the tool_call guard extension handles access control.
  */
 export function computeToolActivationArgs(allowedTools?: string[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[]): ToolActivationResult {
 	const args: string[] = [];
@@ -562,33 +508,6 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 		}
 	}
 
-	// Detect "leaked" tools: tools registered by loaded extensions that aren't in allowedTools.
-	// Extensions can register multiple tools (e.g. shell/extension.ts registers both bash and bash_bg).
-	// Loading an extension for one allowed tool leaks the others unless we generate blocking stubs.
-	const allowedSet = new Set(allowedTools.map(t => t.toLowerCase()));
-	const leakedTools: Array<{ name: string; description: string }> = [];
-
-	for (const [toolName, provider] of providers) {
-		if (allowedSet.has(toolName.toLowerCase())) continue; // already allowed
-
-		let extPath: string | undefined;
-		if (provider.type === "bobbit-extension" && provider.extension) {
-			extPath = resolveExtensionPath(provider);
-		} else if (provider.type === "builtin" && provider.tool === "bash") {
-			// bash is special-cased: loaded via shell/extension.ts
-			extPath = path.join(TOOLS_DIR, "shell", "extension.ts");
-		}
-
-		if (extPath && neededExtensions.has(extPath)) {
-			// This tool's extension is being loaded for another tool — it will leak
-			const toolInfo = toolManager.getToolByName?.(toolName);
-			leakedTools.push({
-				name: toolName,
-				description: toolInfo?.description ?? `Tool ${toolName}`,
-			});
-		}
-	}
-
 	if (activeBaseTools.length > 0) {
 		args.push("--tools", activeBaseTools.join(","));
 	} else {
@@ -607,5 +526,5 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 		}
 	}
 
-	return { args, leakedTools: leakedTools.length > 0 ? leakedTools : undefined };
+	return { args };
 }
