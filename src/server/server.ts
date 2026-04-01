@@ -977,7 +977,10 @@ async function handleApiRoute(
 		}
 		try {
 			const color = typeof body.color === "string" ? body.color : undefined;
-			const project = projectRegistry.register(body.name, body.rootPath, color);
+			const palette = typeof body.palette === "string" ? body.palette : undefined;
+			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
+			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+			const project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark });
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
 			if (newCtx) {
@@ -1004,10 +1007,13 @@ async function handleApiRoute(
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
 		const body = await readBody(req);
-		const updates: { name?: string; color?: string; rootPath?: string } = {};
+		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
 		if (typeof body?.rootPath === "string") updates.rootPath = body.rootPath;
+		if (typeof body?.palette === "string" || body?.palette === null || body?.palette === "") updates.palette = body.palette ?? "";
+		if (typeof body?.colorLight === "string") updates.colorLight = body.colorLight;
+		if (typeof body?.colorDark === "string") updates.colorDark = body.colorDark;
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);

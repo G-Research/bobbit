@@ -37,6 +37,7 @@ const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 ];
 
 const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
+	{ id: "appearance", label: "Appearance" },
 	{ id: "project", label: "Commands & Sandbox" },
 	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
@@ -816,6 +817,34 @@ const PALETTES: ColorPalette[] = [
 	{ id: "copper", name: "Copper" },
 	{ id: "mono",   name: "Mono" },
 ];
+
+const PALETTE_PRIMARY_COLORS: Record<string, { light: string; dark: string }> = {
+	forest: { light: "oklch(0.42 0.14 148)", dark: "oklch(0.72 0.12 140)" },
+	ocean:  { light: "oklch(0.42 0.14 230)", dark: "oklch(0.72 0.12 230)" },
+	dusk:   { light: "oklch(0.42 0.14 300)", dark: "oklch(0.72 0.12 300)" },
+	ember:  { light: "oklch(0.42 0.14 65)",  dark: "oklch(0.72 0.12 65)"  },
+	rose:   { light: "oklch(0.42 0.14 10)",  dark: "oklch(0.72 0.12 10)"  },
+	slate:  { light: "oklch(0.38 0.04 260)", dark: "oklch(0.72 0.06 260)" },
+	sand:   { light: "oklch(0.42 0.14 85)",  dark: "oklch(0.72 0.12 85)"  },
+	teal:   { light: "oklch(0.42 0.14 195)", dark: "oklch(0.72 0.12 195)" },
+	copper: { light: "oklch(0.42 0.14 50)",  dark: "oklch(0.72 0.12 50)"  },
+	mono:   { light: "oklch(0.38 0 0)",      dark: "oklch(0.72 0 0)"      },
+};
+
+function oklchToHex(oklch: string): string {
+	if (!oklch || oklch.startsWith('#')) return oklch || '#808080';
+	try {
+		const canvas = document.createElement('canvas');
+		canvas.width = canvas.height = 1;
+		const ctx = canvas.getContext('2d')!;
+		ctx.fillStyle = oklch;
+		ctx.fillRect(0, 0, 1, 1);
+		const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+		return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+	} catch {
+		return '#808080';
+	}
+}
 
 /** Read the active palette from the DOM (source of truth) or fall back to "forest". */
 function getActivePaletteId(): string {
@@ -1782,9 +1811,10 @@ function renderScopeRow(currentScope: string, _tabs: { id: SettingsTab; label: s
 						: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 				@click=${() => { setHashRoute("settings", `system/${SYSTEM_TABS[0].id}`, true); }}
 			>System</button>
-			${projects.map((project) => {
+			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;
-				const color = project.color || "var(--muted-foreground)";
+				const isDark = document.documentElement.classList.contains("dark");
+				const color = isDark ? (project.colorDark || project.color || "var(--muted-foreground)") : (project.colorLight || project.color || "var(--muted-foreground)");
 				return html`
 					<button
 						class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5
@@ -1945,6 +1975,135 @@ function renderProjectScopeDirectoriesTab(_projectId: string) {
 	`;
 }
 
+function renderAppearanceTab(projectId: string) {
+	const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
+	if (!project) return html`<div class="text-sm text-muted-foreground">Project not found.</div>`;
+
+	const currentPalette: string | null = project.palette || null;
+
+	const savePaletteAndColors = async (palette: string | undefined, colorLight?: string, colorDark?: string) => {
+		const body: any = { palette: palette ?? null };
+		if (colorLight) body.colorLight = colorLight;
+		if (colorDark) body.colorDark = colorDark;
+		try {
+			const res = await gatewayFetch(`/api/projects/${projectId}`, {
+				method: "PUT",
+				body: JSON.stringify(body),
+			});
+			if (res.ok) {
+				const updated = await res.json();
+				const idx = state.projects.findIndex((p: any) => p.id === projectId);
+				if (idx >= 0) state.projects[idx] = { ...state.projects[idx], ...updated };
+				renderApp();
+			}
+		} catch { /* ignore */ }
+	};
+
+	const saveColor = async (field: "colorLight" | "colorDark", value: string) => {
+		try {
+			const res = await gatewayFetch(`/api/projects/${projectId}`, {
+				method: "PUT",
+				body: JSON.stringify({ [field]: value }),
+			});
+			if (res.ok) {
+				const updated = await res.json();
+				const idx = state.projects.findIndex((p: any) => p.id === projectId);
+				if (idx >= 0) state.projects[idx] = { ...state.projects[idx], ...updated };
+				renderApp();
+			}
+		} catch { /* ignore */ }
+	};
+
+	return html`
+		<div class="flex flex-col gap-6">
+			<!-- Palette Picker -->
+			<div class="flex flex-col gap-3">
+				<div>
+					<h3 class="text-sm font-medium text-foreground">Color Palette</h3>
+					<p class="text-xs text-muted-foreground mt-1">
+						Override the global color palette when viewing this project's sessions and goals.
+					</p>
+				</div>
+				<div class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));">
+					<!-- None option -->
+					<button
+						class="flex flex-col gap-1.5 px-3 py-2.5 rounded-lg border transition-all cursor-pointer text-left w-full
+							${currentPalette === null
+								? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+								: 'border-border hover:border-primary/40 hover:bg-secondary/30'}"
+						@click=${() => savePaletteAndColors(undefined)}
+					>
+						<div class="flex items-center justify-center w-full rounded-md border border-dashed border-border" style="height:68px;">
+							<span class="text-sm text-muted-foreground">No override</span>
+						</div>
+						<div class="flex items-center gap-1.5">
+							<span class="text-sm font-medium ${currentPalette === null ? 'text-foreground' : 'text-muted-foreground'}">
+								None (use global)
+							</span>
+							${currentPalette === null ? html`<span class="text-xs text-primary">Active</span>` : ""}
+						</div>
+					</button>
+					<!-- Palette cards -->
+					${PALETTES.map((palette) => {
+						const isActive = currentPalette === palette.id;
+						const colors = PALETTE_PRIMARY_COLORS[palette.id];
+						return html`
+							<button
+								class="flex flex-col gap-1.5 px-3 py-2.5 rounded-lg border transition-all cursor-pointer text-left w-full
+									${isActive
+										? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+										: 'border-border hover:border-primary/40 hover:bg-secondary/30'}"
+								title="Select ${palette.name} palette"
+								@click=${() => savePaletteAndColors(palette.id, colors?.light, colors?.dark)}
+							>
+								${renderPalettePreview(palette)}
+								<div class="flex items-center gap-1.5">
+									<span class="text-sm font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}">
+										${palette.name}
+									</span>
+									${isActive ? html`<span class="text-xs text-primary">Active</span>` : ""}
+								</div>
+							</button>
+						`;
+					})}
+				</div>
+			</div>
+
+			<!-- Project Accent Color -->
+			<div class="flex flex-col gap-3">
+				<div>
+					<h3 class="text-sm font-medium text-foreground">Project Accent Color</h3>
+					<p class="text-xs text-muted-foreground mt-1">
+						Used for the project header in the sidebar. Automatically seeded when you pick a palette.
+					</p>
+				</div>
+				<div class="flex items-center gap-6">
+					<div class="flex items-center gap-2">
+						<label class="text-sm text-muted-foreground">Light mode</label>
+						<input type="color"
+							.value=${oklchToHex(project.colorLight || '')}
+							@change=${(e: Event) => { const hex = (e.target as HTMLInputElement).value; saveColor("colorLight", hex); }}
+							class="w-10 h-8 rounded border border-input cursor-pointer"
+							title="Light mode accent color"
+						/>
+						<span class="text-xs text-muted-foreground font-mono">${project.colorLight || ''}</span>
+					</div>
+					<div class="flex items-center gap-2">
+						<label class="text-sm text-muted-foreground">Dark mode</label>
+						<input type="color"
+							.value=${oklchToHex(project.colorDark || '')}
+							@change=${(e: Event) => { const hex = (e.target as HTMLInputElement).value; saveColor("colorDark", hex); }}
+							class="w-10 h-8 rounded border border-input cursor-pointer"
+							title="Dark mode accent color"
+						/>
+						<span class="text-xs text-muted-foreground font-mono">${project.colorDark || ''}</span>
+					</div>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
@@ -1983,8 +2142,9 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto">
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" ? "max-w-3xl" : "max-w-xl"}">
+				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" || currentTab === "appearance" ? "max-w-3xl" : "max-w-xl"}">
 					${isProjectScope ? html`
+						${currentTab === "appearance" ? renderAppearanceTab(currentScope) : ""}
 						${currentTab === "project" ? renderProjectScopeTab(currentScope) : ""}
 						${currentTab === "models" ? renderProjectScopeModelsTab(currentScope) : ""}
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}

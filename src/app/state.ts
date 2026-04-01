@@ -10,7 +10,10 @@ export interface Project {
   id: string;
   name: string;
   rootPath: string;
-  color?: string;
+  color?: string;       // Deprecated, kept for compat
+  palette?: string;
+  colorLight: string;
+  colorDark: string;
 }
 
 export interface GatewaySession {

@@ -52,12 +52,14 @@ describe("ProjectRegistry", () => {
 	it("register creates a project and persists to disk", () => {
 		const reg = new ProjectRegistry(stateDir);
 		const root = freshProjectRoot();
-		const proj = reg.register("my-project", root, "#ff0000");
+		const proj = reg.register("my-project", root, { color: "#ff0000" });
 
 		assert.ok(proj.id, "should have an id");
 		assert.strictEqual(proj.name, "my-project");
 		assert.strictEqual(proj.rootPath, root);
 		assert.strictEqual(proj.color, "#ff0000");
+		assert.strictEqual(proj.colorLight, "#ff0000");
+		assert.strictEqual(proj.colorDark, "#ff0000");
 		assert.ok(proj.createdAt > 0, "should have a timestamp");
 
 		// Verify persisted
@@ -177,7 +179,7 @@ describe("ProjectRegistry", () => {
 	it("save/load roundtrip preserves all fields", () => {
 		const reg = new ProjectRegistry(stateDir);
 		const root = freshProjectRoot();
-		const proj = reg.register("roundtrip", root, "#abcdef");
+		const proj = reg.register("roundtrip", root, { color: "#abcdef" });
 
 		// Create a new instance to force reload
 		const reg2 = new ProjectRegistry(stateDir);
@@ -186,6 +188,8 @@ describe("ProjectRegistry", () => {
 		assert.strictEqual(loaded.name, "roundtrip");
 		assert.strictEqual(loaded.rootPath, root);
 		assert.strictEqual(loaded.color, "#abcdef");
+		assert.strictEqual(loaded.colorLight, "#abcdef");
+		assert.strictEqual(loaded.colorDark, "#abcdef");
 		assert.strictEqual(loaded.createdAt, proj.createdAt);
 	});
 
