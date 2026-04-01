@@ -61,7 +61,7 @@ test.describe("Settings (full-stack UI)", () => {
 		// Reload the page
 		await page.reload();
 		await expect(
-			page.locator("button[title='New session']").first(),
+			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 15_000 });
 
 		// Navigate back to settings
