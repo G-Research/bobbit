@@ -33,7 +33,7 @@ import type { PromptParts } from "./system-prompt.js";
 import type { GrantPolicy } from "./role-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolStubExtensions, writeLeakedToolStubs, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 
@@ -323,40 +323,29 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 	}
 }
 
-/** Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolStubExtensions. */
+/** Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolGuardExtension. */
 export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	if (plan.effectiveAllowedTools && plan.effectiveAllowedTools.length > 0) {
 		const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
 		const mcpExtPaths = ctx.mcpManager
 			? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
 			: undefined;
-		// Generate stubs for non-MCP tools that are restricted but visible (ask-once/always-ask).
-		// Loaded BEFORE real extensions because pi-coding-agent uses first-registered-wins semantics.
-		const toolStubArgs: string[] = [];
-		if (ctx.toolManager) {
-			const toolStubPaths = writeToolStubExtensions(
-				ctx.toolManager,
-				plan.effectiveAllowedTools,
-				effectiveRole ?? undefined,
-				ctx.groupPolicyStore ?? undefined,
-			);
-			for (const stubPath of toolStubPaths) {
-				toolStubArgs.push("--extension", stubPath);
-			}
-		}
 
 		const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
 
-		// Generate blocking stubs for "leaked" tools — tools registered by loaded extensions
-		// that aren't in allowedTools. These must load BEFORE real extensions (first-registered-wins).
-		if (activation.leakedTools && activation.leakedTools.length > 0) {
-			const leakStubPaths = writeLeakedToolStubs(activation.leakedTools);
-			for (const stubPath of leakStubPaths) {
-				toolStubArgs.push("--extension", stubPath);
-			}
-		}
+		plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
 
-		plan.bridgeOptions.args = [...toolStubArgs, ...activation.args, ...(plan.bridgeOptions.args || [])];
+		// Generate and add the tool_call guard extension if any tools have 'ask' policy
+		const guardPath = writeToolGuardExtension(
+			plan.id,
+			ctx.toolManager ?? undefined,
+			ctx.mcpManager ?? undefined,
+			effectiveRole ?? undefined,
+			ctx.groupPolicyStore ?? undefined,
+		);
+		if (guardPath) {
+			plan.bridgeOptions.args.push("--extension", guardPath);
+		}
 	} else if (ctx.mcpManager) {
 		const mcpExtPaths = writeMcpProxyExtensions(ctx.mcpManager);
 		for (const extPath of mcpExtPaths) {
