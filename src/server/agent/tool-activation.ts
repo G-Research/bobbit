@@ -471,6 +471,24 @@ export function writeMcpProxyExtensions(mcpManager: McpManager, allowedTools?: s
 }
 
 /**
+ * Generate and write the tool_call guard extension for a session.
+ * Returns the path to the written extension file, or undefined if no guard is needed
+ * (i.e. no tools have 'ask' policy).
+ *
+ * Stub — real implementation provided by tool-guard-extension.ts task.
+ */
+export function writeToolGuardExtension(
+	_sessionId: string,
+	_toolManager?: ToolManager,
+	_mcpManager?: McpManager,
+	_role?: { toolPolicies?: Record<string, GrantPolicy> },
+	_groupPolicyStore?: GroupPolicyProvider,
+): string | undefined {
+	// TODO: Replace with real implementation from tool-guard-extension.ts
+	return undefined;
+}
+
+/**
  * Given a role's allowedTools list and a ToolManager, compute the CLI args needed
  * to activate exactly those tools.
  *
