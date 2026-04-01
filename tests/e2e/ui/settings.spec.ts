@@ -2,8 +2,18 @@
  * Settings E2E tests: tab switching, persistence, per-project scope.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, nonGitCwd } from "../e2e-setup.js";
+import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+/** Create a unique temp dir for project rootPath to avoid conflicts. */
+function uniqueProjectDir(): string {
+	const dir = join(tmpdir(), `bobbit-e2e-settings-${process.env.E2E_PORT}-${Date.now()}`);
+	mkdirSync(dir, { recursive: true });
+	return dir;
+}
 
 test.describe("Settings (full-stack UI)", () => {
 	test("open settings and switch tabs", async ({ page }) => {
@@ -86,7 +96,7 @@ test.describe("Settings (full-stack UI)", () => {
 		// Create a project via API
 		const resp = await apiFetch("/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "Settings Test Project", rootPath: nonGitCwd() }),
+			body: JSON.stringify({ name: "Settings Test Project", rootPath: uniqueProjectDir() }),
 		});
 		expect(resp.ok).toBe(true);
 		const project = await resp.json();
