@@ -85,6 +85,8 @@ Key responsibilities:
 
 All API endpoints and WebSocket handlers resolve the correct per-project store through `ProjectContextManager` rather than accessing stores directly. Managers (`GoalManager`, `TaskManager`) accept store instances directly — they no longer create stores internally. `StaffManager` accepts `ProjectContextManager` and resolves the correct per-project `StaffStore` on each operation, matching the aggregation pattern used by goals and sessions.
 
+**Per-project config directory scoping:** Config directories (for MCP servers, skills, and AGENTS.md/agent files) are resolved per-project. When a session is created for a project, the pipeline resolves that project's `ProjectConfigStore` to discover its custom config directories. This means each project can define its own MCP servers, slash skills, and agent instruction files via `config_directories` in its `project.yaml`, and sessions in that project will use them. MCP discovery additionally scans all registered projects so that MCP servers defined in any project are available to all sessions (with the primary project's configs taking priority on name conflicts).
+
 ### State migration
 
 On first startup after upgrading to per-project state, `migrateToPerProjectState()` (`state-migration.ts`) distributes centralized state to per-project directories:
@@ -319,6 +321,8 @@ config_directories: '[{"path":"~/my-config","types":["skills","mcp"]}]'
 
 Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority.
 
+**Per-project scoping:** Config directories are resolved per-project. Each project's `config_directories` in its `project.yaml` affects only that project's sessions — a session in project B uses project B's custom directories for skill, MCP, and agent file discovery. This prevents non-default projects from inheriting the default project's custom config directories, which would be incorrect in multi-project setups. The API endpoints (`/api/config-directories`, `/api/slash-skills`, `/api/slash-skills/details`) accept a `?projectId=` query parameter to resolve directories for a specific project.
+
 **Built-in directories:**
 
 | Type | Directories |
@@ -339,12 +343,15 @@ Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additi
 Auto-discovered from Claude Code-compatible locations. Sources (later overrides earlier):
 
 1. Custom directories with type `"mcp"` (lowest priority)
-2. `~/.claude.json` → `mcpServers` + `projects[<cwd>].mcpServers`
-3. `~/.claude/.mcp.json`
-4. `~/.bobbit/.mcp.json`
-5. `<project>/.mcp.json`
-6. `<project>/.claude/.mcp.json`
-7. `<project>/.bobbit/config/mcp.json` (highest priority)
+2. Additional registered projects' MCP locations (see below)
+3. `~/.claude.json` → `mcpServers` + `projects[<cwd>].mcpServers`
+4. `~/.claude/.mcp.json`
+5. `~/.bobbit/.mcp.json`
+6. `<project>/.mcp.json`
+7. `<project>/.claude/.mcp.json`
+8. `<project>/.bobbit/config/mcp.json` (highest priority)
+
+**Multi-project discovery:** In multi-project setups, MCP discovery scans all registered projects — not just the primary project. Each additional project's custom MCP directories, `.mcp.json`, `.claude/.mcp.json`, and `.bobbit/config/mcp.json` are included. Additional project configs have lower priority than user-level configs (`~/.claude.json` etc.) and the primary project's own configs, so the primary project always wins on name conflicts. This ensures sessions can access MCP servers defined in any registered project without manual duplication.
 
 Config format matches Claude Code `.mcp.json`:
 ```json

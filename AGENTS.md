@@ -64,7 +64,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Add a slash skill**: Create `SKILL.md` in `.claude/skills/<name>/` or `~/.claude/skills/<name>/`. YAML frontmatter: `description`, optional `argument_hint`, `allowed_tools`, `context`, `agent`. Auto-discovered by `discoverSlashSkills()`.
 
-**Add/use MCP servers**: Configure in `.mcp.json` (project), `.bobbit/config/mcp.json` (overrides), or any of 7 discovery locations. See @docs/internals.md#mcp-servers for full priority list.
+**Add/use MCP servers**: Configure in `.mcp.json` (project), `.bobbit/config/mcp.json` (overrides), or any of 7 discovery locations. In multi-project setups, MCP servers from all registered projects are discovered — not just the default project. See @docs/internals.md#mcp-servers for full priority list and multi-project behavior.
 
 **Add a goal feature**: CRUD in `goal-manager.ts`/`goal-store.ts`. REST in `server.ts`. Assistant prompt in `goal-assistant.ts`. Proposal parsing in `remote-agent.ts` `_checkForGoalProposal()`. Re-attempt: `buildReattemptContext()`, `startReattempt()`. Goals carry an optional `projectId` linking them to a registered project. All goal/task/gate operations route through `ProjectContextManager` to resolve the correct per-project store.
 
@@ -80,7 +80,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Configure per-project settings**: Settings uses a two-tier layout — scope row (System + per-project tabs) above sub-tabs. System scope has all tabs; per-project scope shows Appearance, Commands & Sandbox, Models, and Config Directories. The Appearance tab (first tab) has a palette picker and dual light/dark accent color inputs. Project settings inherit from System and can override individual fields. The sidebar gear icon on project headers navigates directly to that project's settings. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID. REST: `GET/PUT /api/projects/:id/config`, `GET /api/projects/:id/config/resolved` (with `{ value, source }` annotations). See [docs/internals.md](docs/internals.md#per-project-config) for the resolution cascade.
 
-**Manage config directories**: Settings → Config Directories tab, or `config_directories` in `project.yaml`. See @docs/internals.md#config-scan-directories.
+**Manage config directories**: Settings → Config Directories tab, or `config_directories` in `project.yaml`. Config directories are scoped per-project — each project's `config_directories` affects only that project's sessions for skills, MCP servers, and agent files. See @docs/internals.md#config-scan-directories.
 
 ## Debugging
 
@@ -94,7 +94,7 @@ Quick pointers for the most common issues:
 - **Sandbox**: `GET /api/sandbox-status` for Docker state. Proxy logs prefixed `[sandbox-proxy]`.
 - **Search**: Each project has its own `<project-root>/.bobbit/state/search.db`. Delete and restart to rebuild. Searches aggregate across all project indexes. See @docs/debugging.md#search-index for full checklist.
 - **Gates**: Check `GET /api/goals/:id/gates` for dependency state.
-- **Multi-project / per-project state**: Each project stores its own state in `<project-root>/.bobbit/state/` (goals, sessions, tasks, teams, gates, staff, search index, costs). The server aggregates via `ProjectContextManager`. Check `GET /api/projects` for registered projects. Sessions/goals/staff carry optional `projectId`; filter with `?projectId=` on list endpoints. Per-project config: `GET /api/projects/:id/config/resolved` shows resolved values with source. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
+- **Multi-project / per-project state**: Each project stores its own state in `<project-root>/.bobbit/state/` (goals, sessions, tasks, teams, gates, staff, search index, costs). The server aggregates via `ProjectContextManager`. Check `GET /api/projects` for registered projects. Sessions/goals/staff carry optional `projectId`; filter with `?projectId=` on list endpoints. Config directories (MCP servers, skills, AGENTS.md/agent files) are resolved per-project through each project's `config_directories` setting. Per-project config: `GET /api/projects/:id/config/resolved` shows resolved values with source. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
 - **State migration**: On first startup after upgrade, centralized state files are distributed to per-project dirs based on `projectId` tags. Central files renamed with `.pre-migration` suffix. Check for `.bobbit/state/.migrated-to-per-project` marker. See @docs/internals.md#state-migration for details.
 
 ## Git conventions
