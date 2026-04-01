@@ -856,7 +856,11 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 	renderApp();
 	try {
 		const bodyObj: Record<string, any> = { assistantType: "goal" };
-		if (projectId) bodyObj.projectId = projectId;
+		if (projectId) {
+			bodyObj.projectId = projectId;
+			const project = state.projects.find(p => p.id === projectId);
+			if (project) bodyObj.cwd = project.rootPath;
+		}
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(bodyObj),

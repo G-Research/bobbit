@@ -1216,6 +1216,11 @@ async function handleApiRoute(
 
 		// If creating under a goal, use the goal's cwd as default
 		let cwd = body?.cwd || config.defaultCwd;
+		// If a projectId is provided and no explicit cwd, use the project's rootPath
+		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
+			const proj = projectRegistry.get(body.projectId);
+			if (proj) cwd = proj.rootPath;
+		}
 		if (goalId) {
 			const goal = sessionManager.goalManager.getGoal(goalId);
 			if (goal) {
@@ -1393,7 +1398,12 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
 		const title = body?.title;
-		const cwd = body?.cwd || config.defaultCwd;
+		let cwd = body?.cwd || config.defaultCwd;
+		// If a projectId is provided and no explicit cwd, use the project's rootPath
+		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
+			const proj = projectRegistry.get(body.projectId);
+			if (proj) cwd = proj.rootPath;
+		}
 		const spec = body?.spec || "";
 		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
 		if (!title || typeof title !== "string") {
