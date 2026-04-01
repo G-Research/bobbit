@@ -37,10 +37,10 @@ const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 ];
 
 const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
-	{ id: "appearance", label: "Appearance" },
 	{ id: "project", label: "Commands & Sandbox" },
 	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
+	{ id: "appearance", label: "Appearance" },
 ];
 
 function getActiveScope(): string {
