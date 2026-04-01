@@ -380,7 +380,6 @@ All settings in `project.yaml` (Settings → Project → Docker Sandbox):
 ```yaml
 sandbox: "docker"                      # "none" (default) or "docker"
 sandbox_image: "bobbit-agent"          # must be pre-built
-sandbox_network_allowlist: '["github.com"]'  # JSON array of hostnames
 sandbox_credentials: '{"GITHUB_TOKEN": "ghp_..."}'  # env vars for container
 sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 sandbox_pool_size: 2                   # pre-warmed containers (0 = disable)
@@ -399,12 +398,12 @@ Auto-built on startup if image missing but `docker/Dockerfile` exists (120s time
 
 On `sandboxed: true` session creation:
 
-1. Session manager validates mounts, starts sandbox proxy
+1. Session manager validates mounts, ensures `bobbit-sandbox-net` Docker network exists
 2. RpcBridge spawns agent inside Docker:
    - **Pool mode** (`pool_size > 0`): `docker exec -i <containerId>` into pre-warmed container (~200ms)
    - **Cold mode** (`pool_size == 0`): `docker run --rm` with project at `/workspace`, agent at `/agent-modules` (ro), tools at `/tools` (ro)
 3. Tool extensions read credentials from env vars (fallback to files for non-sandboxed)
-4. Sandbox proxy controls all outbound HTTP/HTTPS
+4. Container has direct internet access via the bridge network
 
 Delegates inherit parent sandbox config. Container-internal paths remapped to host paths.
 
@@ -414,17 +413,19 @@ Pre-warmed containers eliminate 5–10s cold-start overhead. Lifecycle: pre-warm
 
 ### Network
 
-Containers use default Docker bridge (not `--network=none`). All traffic routes through `SandboxProxy` (HTTP/HTTPS forward proxy on host):
-- Gateway hostname auto-added to allowlist
-- Empty allowlist = block all except gateway
-- `web_search`/`web_fetch` routed through gateway API endpoints, bypass allowlist
-- `BOBBIT_GATEWAY_URL` is real gateway address (not `host.docker.internal`)
+Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with direct outbound internet access. This replaces the previous proxy-based approach where all traffic was routed through a gateway-hosted `SandboxProxy`.
+
+- **Network creation**: `ensureSandboxNetwork()` in `session-manager.ts` creates the network idempotently via `docker network create bobbit-sandbox-net --driver bridge --opt com.docker.network.bridge.enable_icc=false`. The `enable_icc=false` flag prevents inter-container communication.
+- **Metadata endpoint blackholing**: Cloud metadata endpoints are blocked via `--add-host` entries in `docker-args.ts` (`metadata.google.internal` and `metadata.internal` resolve to `0.0.0.0`). This is defense-in-depth against SSRF via cloud instance metadata.
+- **Gateway reachable**: `--add-host=host.docker.internal:host-gateway` ensures the container can reach the gateway for API calls (tool extensions, delegate sessions, etc.).
+- **Cleanup**: `cleanupSandboxNetwork()` removes the network on shutdown (non-fatal if containers are still connected).
+- `web_search`/`web_fetch` use direct `curl` from inside the container — no gateway proxy needed.
 
 ### Scoped tokens
 
 Each sandboxed session gets a unique 256-bit token restricting API access. Generated in `applySandboxWiring()`, in-memory only (regenerated on restart). Auth tries admin token first, then `SandboxTokenStore`.
 
-**Allowed endpoints:** `/api/health`, `/api/web-proxy/*`, `/api/internal/mcp-call`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`, `/api/personalities`. Everything else blocked. `bash_bg` blocked at tool and API level.
+**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`, `/api/personalities`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 
@@ -441,7 +442,6 @@ Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 | File | Purpose |
 |---|---|
 | `docker/Dockerfile` | Image definition |
-| `sandbox-proxy.ts` | HTTP/HTTPS forward proxy with allowlist |
 | `sandbox-pool.ts` | Pool lifecycle |
 | `docker-args.ts` | Docker argument builder |
 | `sandbox-status.ts` | Docker availability check, auto-build |
@@ -454,8 +454,6 @@ Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 |---|---|---|
 | `/api/sandbox-status` | GET | Docker availability + image status |
 | `/api/sandbox-image/build` | POST | Build image from Dockerfile |
-| `/api/web-proxy/search` | POST | Gateway-mediated search (10 req/min) |
-| `/api/web-proxy/fetch` | POST | Gateway-mediated fetch (10 req/min) |
 | `/api/sandbox-pool` | GET | Pool stats |
 
 ---
