@@ -1205,7 +1205,7 @@ async function handleApiRoute(
 			res.end(JSON.stringify({ error: "Session not found" }));
 			return;
 		}
-		const sessionPs = sessionManager.getSessionStore().get(session.id);
+		const sessionPs = sessionManager.getSessionStore(session.projectId).get(session.id);
 		json({
 			id: session.id,
 			title: session.title,
@@ -1404,12 +1404,12 @@ async function handleApiRoute(
 
 			// Store reattemptGoalId on the session if provided
 			if (reattemptGoalId) {
-				sessionManager.getSessionStore().update(session.id, { reattemptGoalId });
+				sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
 			}
 
 			// Store projectId on the session if provided
 			if (body?.projectId && typeof body.projectId === "string") {
-				sessionManager.getSessionStore().update(session.id, { projectId: body.projectId });
+				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: body.projectId });
 			}
 
 			json({
@@ -4170,7 +4170,11 @@ async function handleApiRoute(
 			}
 			// Verify the session exists (live or persisted).
 			const mcpSession = sessionManager.getSession(mcpSessionId);
-			const persistedSession = mcpSession ? null : sessionManager.getSessionStore().get(mcpSessionId);
+			const persistedSession = mcpSession ? null : (
+				// Search across all project stores for persisted session
+				projectContextManager.getContextForSession(mcpSessionId)?.sessionStore.get(mcpSessionId)
+				?? sessionManager.getSessionStore().get(mcpSessionId)
+			);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
 				return;
