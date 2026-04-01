@@ -1822,7 +1822,7 @@ function renderProjectScopeTab(projectId: string) {
 
 	const commandKeys = Object.keys(resolved).filter(k => !HIDDEN_KEYS.has(k));
 	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
-	const inputClass = `flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
+	const inputClass = `w-full min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
 		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
 
 	// Track pending changes in a module-level map so they survive re-renders
