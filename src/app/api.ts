@@ -106,10 +106,19 @@ export async function refreshSessions(): Promise<void> {
 			? `/api/goals?since=${state.goalsGeneration}`
 			: "/api/goals";
 
-		const [sessionsRes, goalsRes] = await Promise.all([
+		const [sessionsRes, goalsRes, projectsResult] = await Promise.all([
 			gatewayFetch(sessionsUrl),
 			gatewayFetch(goalsUrl),
+			// Fetch projects alongside sessions/goals so project grouping is
+			// available on the very first render — prevents sessions briefly
+			// appearing under the wrong project.
+			isInitial ? fetchProjects().catch((): null => null) : Promise.resolve(null),
 		]);
+		// Apply projects before processing sessions so the first renderApp()
+		// already has the correct project list for sidebar grouping.
+		if (projectsResult) {
+			state.projects = projectsResult;
+		}
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
 		const sessionsData = await sessionsRes.json();
 
@@ -199,14 +208,6 @@ export async function refreshSessions(): Promise<void> {
 		Promise.all(badgePromises).then(results => {
 			if (results.some(Boolean)) renderApp();
 		});
-	}
-
-	// Fetch projects on initial load
-	if (isInitial) {
-		fetchProjects().then(projects => {
-			state.projects = projects;
-			renderApp();
-		}).catch(() => {});
 	}
 
 	// One-time hydration of PR status from disk cache (instant badge rendering)
