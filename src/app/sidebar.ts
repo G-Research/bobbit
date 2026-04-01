@@ -795,7 +795,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
 			<button
-				class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
+				class="px-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
 				@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 				title="New goal in ${project.name}"
 			>
