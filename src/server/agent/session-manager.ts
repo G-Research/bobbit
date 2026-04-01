@@ -118,8 +118,14 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
-	/** True if a tool_permission_needed broadcast was already sent this turn (prevents duplicates) */
-	permissionBroadcastSent?: boolean;
+	/** Pending grant request from the guard extension's long-poll */
+	pendingGrantRequest?: {
+		resolve: (result: { granted: boolean; tools?: string[] }) => void;
+		reject: (err: Error) => void;
+		toolName: string;
+		toolGroup: string;
+		timer: ReturnType<typeof setTimeout>;
+	};
 	/** Tools granted via "one-time" mode — revoked on agent_end */
 	oneTimeGrantedTools?: string[];
 	/** Whether post-start setup (model, thinking, metadata) has completed */
@@ -892,83 +898,6 @@ export class SessionManager {
 			session.lastTurnErrored = event.message.stopReason === "error";
 		}
 
-		// Detect tool permission errors and prompt the user to grant access.
-		// Works for ALL tool types: MCP, builtin, and bobbit-extension tools.
-		// Two detection paths:
-		// 1. tool_execution_end with isError (if the runtime propagates it)
-		// 2. message_end with toolResult containing our sentinel error text
-		{
-			let deniedToolName: string | undefined;
-
-			if (event.type === "tool_execution_end") {
-				if (event.isError && event.toolName) {
-					deniedToolName = event.toolName;
-				}
-			}
-
-			if (event.type === "message_end" && event.message?.role === "toolResult") {
-				const text = Array.isArray(event.message.content)
-					? event.message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")
-					: typeof event.message.content === "string" ? event.message.content : "";
-				const match = text.match(/^Error: Tool (\S+) is not allowed for your current role\./);
-				if (match) {
-					deniedToolName = match[1];
-				}
-			}
-
-			if (deniedToolName && !session.permissionBroadcastSent) {
-				// Look up tool info from MCP manager first, then fall back to toolManager
-				let toolName: string | undefined;
-				let toolGroup: string | undefined;
-
-				const mcpInfos = this.mcpManager?.getToolInfos();
-				const mcpTool = mcpInfos?.find(t => t.name === deniedToolName);
-				if (mcpTool) {
-					toolName = mcpTool.name;
-					toolGroup = mcpTool.group;
-				} else if (this.toolManager) {
-					const toolInfo = this.toolManager.getToolByName(deniedToolName);
-					if (toolInfo) {
-						toolName = toolInfo.name;
-						toolGroup = toolInfo.group;
-					}
-				}
-
-				if (toolName && toolGroup && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === deniedToolName!.toLowerCase())) {
-					// Use explicit role or fall back to "general" (implicit default)
-					const roleName = session.role || "general";
-					const role = this.roleManager?.getRole(roleName);
-
-					// Resolve grant policy for this tool
-					const policy = resolveGrantPolicy(deniedToolName, toolGroup, role, this.toolManager, this.groupPolicyStore);
-
-					if (policy === 'never-ask' || policy === 'never') {
-						// Guard: should not happen (stubs shouldn't exist for never-ask tools)
-						console.warn(`[session-manager] Unexpected denial for never-ask tool "${deniedToolName}" in session ${session.id}`);
-					} else {
-						// Mark as sent to prevent duplicate broadcasts from multiple detection paths
-						session.permissionBroadcastSent = true;
-						broadcast(session.clients, {
-							type: "tool_permission_needed",
-							toolName,
-							group: toolGroup,
-							roleName: role?.name ?? roleName,
-							roleLabel: role?.label ?? roleName,
-							lastPromptText: session.lastPromptText,
-							grantPolicy: policy,
-						});
-						// Abort the agent turn to prevent it from chatting about the denial
-						session.rpcClient.abort().catch(() => {});
-					}
-				} else if (deniedToolName) {
-					console.warn(
-						`[session-manager] Tool denial detected for "${deniedToolName}" in session ${session.id} ` +
-						`but grant not triggered: toolFound=${!!toolName}, allowedTools=${JSON.stringify(session.allowedTools?.slice(0, 5))}, role=${session.role}`
-					);
-				}
-			}
-		}
-
 		// When a steered user message appears in chat, remove the dispatched pill
 		if (event.type === "message_end" && event.message?.role === "user") {
 			if (session.promptQueue.removeDispatched()) {
@@ -980,7 +909,6 @@ export class SessionManager {
 			session.status = "streaming";
 			session.lastTurnErrored = false;
 			session.turnHadToolCalls = false;
-			session.permissionBroadcastSent = false;
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
@@ -1146,47 +1074,20 @@ export class SessionManager {
 
 		if (newTools.length === 0) return role.allowedTools;
 
-		// Enforce grant policy server-side: resolve the effective policy for the
-		// primary tool and override client-provided mode to prevent bypass.
-		// Also reject never-ask tools entirely.
-		if (this.toolManager || this.mcpManager) {
-			const filtered = newTools.filter(t => {
-				const toolGroup = this.mcpManager?.getToolInfos().find(i => i.name === t)?.group
-					?? this.toolManager?.getToolByName(t)?.group;
-				const policy = resolveGrantPolicy(t, toolGroup, role, this.toolManager!, this.groupPolicyStore);
-				return policy !== 'never-ask' && policy !== 'never';
-			});
-			if (filtered.length === 0) {
-				console.warn(`[session-manager] Grant rejected: all requested tools have never-ask policy`);
-				return role.allowedTools;
-			}
-			newTools.length = 0;
-			newTools.push(...filtered);
-
-			// Override mode based on server-resolved policy for the primary tool
-			const primaryGroup = this.mcpManager?.getToolInfos().find(i => i.name === toolName)?.group
-				?? this.toolManager?.getToolByName(toolName)?.group;
-			const primaryPolicy = resolveGrantPolicy(toolName, primaryGroup, role, this.toolManager ?? undefined, this.groupPolicyStore);
-			if (primaryPolicy === 'always-ask') {
-				mode = 'one-time';
-			} else if (primaryPolicy === 'ask-once') {
-				mode = 'session-only';
-			}
-			// 'always-allow' → keep client mode (defaults to persistent)
-		}
+		let resultTools: string[];
 
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
 			session.oneTimeGrantedTools = [...(session.oneTimeGrantedTools || []), ...newTools];
 			await this._restartSessionWithUpdatedRole(session);
-			return session.allowedTools;
+			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
 			await this._restartSessionWithUpdatedRole(session);
-			return session.allowedTools;
+			resultTools = session.allowedTools;
 
 		} else {
 			// Persistent grant (default): update toolPolicies on role YAML (allowedTools is derived automatically)
@@ -1200,12 +1101,52 @@ export class SessionManager {
 			session.allowedTools = updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
 			await this._restartSessionWithUpdatedRole(session);
 
-			// Note: prompt replay after grant is handled client-side. The
-			// tool_permission_needed message includes lastPromptText, and
-			// the client re-sends it after receiving the session_status: idle
-			// broadcast from the restart.
-			return updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
+			resultTools = updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
 		}
+
+		// Resolve pending grant request from guard extension
+		if (session.pendingGrantRequest) {
+			clearTimeout(session.pendingGrantRequest.timer);
+			const pending = session.pendingGrantRequest;
+			session.pendingGrantRequest = undefined;
+			pending.resolve({ granted: true, tools: session.allowedTools });
+		}
+
+		return resultTools;
+	}
+
+	/**
+	 * Called by the guard extension's long-poll endpoint. Creates a pending
+	 * grant request, broadcasts to UI clients, and returns a promise that
+	 * resolves when the user grants/denies or after a 5-minute timeout.
+	 */
+	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<{ granted: boolean; tools?: string[] }> {
+		const session = this.sessions.get(sessionId);
+		if (!session) throw new Error("Session not found");
+
+		// Create promise that will be resolved by grantToolPermission
+		const promise = new Promise<{ granted: boolean; tools?: string[] }>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				session.pendingGrantRequest = undefined;
+				resolve({ granted: false });
+			}, 5 * 60 * 1000); // 5 minute timeout
+
+			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer };
+		});
+
+		// Broadcast to UI clients
+		const roleName = session.role || "general";
+		const role = this.roleManager?.getRole(roleName);
+		broadcast(session.clients, {
+			type: "tool_permission_needed",
+			toolName,
+			group: toolGroup,
+			roleName: role?.name ?? roleName,
+			roleLabel: role?.label ?? roleName,
+			lastPromptText: session.lastPromptText,
+		});
+
+		return promise;
 	}
 
 	/**
