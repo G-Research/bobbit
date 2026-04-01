@@ -1806,6 +1806,23 @@ function goalProposalPanel() {
 					onInput: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
 				})}
 			</div>
+			${(() => {
+				const linkedProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
+				if (linkedProject) {
+					return html`
+				<div class="flex gap-4">
+					<div class="min-w-0" style="width:30%;">
+						<label class="text-xs text-muted-foreground mb-1 block font-medium">Project</label>
+						<div class="text-sm text-foreground/80 truncate">${linkedProject.name}</div>
+					</div>
+					<div class="min-w-0" style="width:70%;">
+						<label class="text-xs text-muted-foreground mb-1 block font-medium">Working Directory</label>
+						<div class="text-sm text-foreground/80 truncate font-mono" title=${linkedProject.rootPath}>${linkedProject.rootPath}</div>
+					</div>
+				</div>
+				<p class="text-[11px] text-muted-foreground opacity-70 -mt-2">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(linkedProject.rootPath, _proposalTitle)}</code></p>`;
+				}
+				return html`
 			<div>
 				<div class="flex items-center justify-between mb-1.5">
 					<label class="text-xs text-muted-foreground font-medium">Working Directory</label>
@@ -1832,7 +1849,8 @@ function goalProposalPanel() {
 					onHighlight: (i) => { _proposalCwdHighlightIndex = i; },
 				})}
 				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(_proposalCwd, _proposalTitle)}</code></p>
-				</div>
+			</div>`;
+			})()}
 			${_cachedWorkflows.length > 0 ? html`
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>

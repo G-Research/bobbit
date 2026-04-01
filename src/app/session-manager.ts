@@ -644,6 +644,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (isProposalDismissed(sessionId, proposal)) return;
 				// Show inline preview panel
 				state.activeGoalProposal = proposal;
+				// Set projectId from current session so the goal is created in the correct project
+				const currentSess = state.gatewaySessions.find(s => s.id === sessionId);
+				if (currentSess?.projectId) {
+					state.previewProjectId = currentSess.projectId;
+				}
 				state.previewPanelActiveTab = "goal";
 				// Un-collapse panel on desktop
 				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
