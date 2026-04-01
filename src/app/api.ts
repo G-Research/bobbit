@@ -21,6 +21,12 @@ const _prevSessionStatus = new Map<string, string>();
 let _lastPrRefresh = 0;
 const PR_POLL_INTERVAL_MS = 60_000;
 
+/** Reset PR poll throttle so next session poll triggers an immediate refresh.
+ *  Called on visibilitychange (tab becomes visible) to avoid stale badges. */
+export function resetPrPollThrottle(): void {
+	_lastPrRefresh = 0;
+}
+
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
 async function showConnectionError(title: string, message: string): Promise<void> {
 	const { showConnectionError: show } = await import("./dialogs.js");
@@ -185,7 +191,7 @@ export async function refreshSessions(): Promise<void> {
 		badgePromises.push(refreshGateStatusCache(true));
 	}
 	const now = Date.now();
-	if (now - _lastPrRefresh >= PR_POLL_INTERVAL_MS && document.visibilityState === "visible") {
+	if ((now - _lastPrRefresh >= PR_POLL_INTERVAL_MS || goalsChanged) && document.visibilityState === "visible") {
 		_lastPrRefresh = now;
 		badgePromises.push(refreshPrStatusCache(true));
 	}

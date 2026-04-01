@@ -9,7 +9,7 @@ import {
 	GW_TOKEN_KEY,
 	activeSessionId,
 } from "./state.js";
-import { gatewayFetch, refreshSessions } from "./api.js";
+import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
@@ -590,6 +590,10 @@ async function initApp() {
 	document.addEventListener("visibilitychange", async () => {
 		if (document.visibilityState !== "visible") return;
 		if (state.appView !== "authenticated") return;
+		// Reset PR poll throttle so the next session poll refreshes PR badges immediately
+		resetPrPollThrottle();
+		// Trigger an immediate session refresh (includes PR status due to throttle reset)
+		refreshSessions();
 		try {
 			const res = await gatewayFetch("/api/preferences");
 			if (!res.ok) return;
