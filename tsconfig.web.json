@@ -15,5 +15,5 @@
     "noUnusedParameters": true,
     "noEmit": true
   },
-  "include": ["src/ui/**/*.ts", "src/app/**/*.ts"]
+  "include": ["src/ui/**/*.ts", "src/app/**/*.ts", "src/shared/**/*.ts"]
 }
