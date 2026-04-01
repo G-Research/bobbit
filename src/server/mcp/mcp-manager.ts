@@ -49,9 +49,15 @@ export class McpManager {
   private _toolNameMap = new Map<string, { serverName: string; mcpToolName: string }>();
 
   private projectConfigStore: ProjectConfigReader | null;
+  private additionalProjects: Array<{cwd: string, configStore: ProjectConfigReader}> = [];
 
   constructor(private cwd: string, projectConfigStore?: ProjectConfigReader) {
     this.projectConfigStore = projectConfigStore ?? null;
+  }
+
+  /** Register additional project directories for MCP server discovery. */
+  setAdditionalProjects(projects: Array<{cwd: string, configStore: ProjectConfigReader}>): void {
+    this.additionalProjects = projects;
   }
 
   // ── Discovery ──────────────────────────────────────────────────────
@@ -77,6 +83,20 @@ export class McpManager {
       for (const dir of customDirs) {
         this._mergeConfigFile(merged, path.join(dir.path, ".mcp.json"), "mcpServers");
       }
+    }
+
+    // 0b. Additional registered projects (low priority — overridden by user and primary project)
+    for (const proj of this.additionalProjects) {
+      // Custom directories from the project's config
+      const projCustomDirs = parseCustomDirectories(proj.configStore)
+        .filter(d => d.types.includes("mcp"));
+      for (const dir of projCustomDirs) {
+        this._mergeConfigFile(merged, path.join(dir.path, ".mcp.json"), "mcpServers");
+      }
+      // Project-scoped built-in MCP locations
+      this._mergeConfigFile(merged, path.join(proj.cwd, ".mcp.json"), "mcpServers");
+      this._mergeConfigFile(merged, path.join(proj.cwd, ".claude", ".mcp.json"), "mcpServers");
+      this._mergeConfigFile(merged, path.join(proj.cwd, ".bobbit", "config", "mcp.json"), "mcpServers");
     }
 
     // Discovery mirrors the same root directories used for skills.
