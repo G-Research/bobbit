@@ -16,9 +16,10 @@ export async function openApp(page: Page): Promise<void> {
 	const token = readE2EToken();
 	const baseUrl = base();
 	await page.goto(`${baseUrl}/?token=${encodeURIComponent(token)}`);
-	// Wait for the app to render — the "New session" button in the sidebar
+	// Wait for sidebar to be fully loaded — Settings button is always present
+	// regardless of single-project or multi-project mode
 	await expect(
-		page.locator("button[title='New session']").first(),
+		page.locator("button").filter({ hasText: "Settings" }).first(),
 	).toBeVisible({ timeout: 15_000 });
 }
 
@@ -26,7 +27,8 @@ export async function openApp(page: Page): Promise<void> {
  * Click "New session" button in the sidebar and wait for the chat textarea.
  */
 export async function createSessionViaUI(page: Page): Promise<void> {
-	await page.locator("button[title='New session']").first().click();
+	// In multi-project mode the button title is "New session in <project>"
+	await page.locator("button[title^='New session']").first().click();
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 }
 
