@@ -107,7 +107,7 @@ test.describe("Team lifecycle (UI)", () => {
 		// Reload and navigate back to the dashboard
 		await page.reload();
 		await expect(
-			page.locator("button[title='New session']").first(),
+			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 15_000 });
 		await navigateToGoalDashboard(page, goal.id);
 

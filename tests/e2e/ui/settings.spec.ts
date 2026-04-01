@@ -55,6 +55,11 @@ test.describe("Settings (full-stack UI)", () => {
 		// Get the current state of the checkbox
 		const wasChecked = await checkbox.isChecked();
 
+		// Set up response listener BEFORE the click to avoid race condition
+		const responsePromise = page.waitForResponse(
+			resp => resp.url().includes("/api/preferences") && resp.status() === 200
+		);
+
 		// Toggle the checkbox
 		await checkbox.click();
 
@@ -65,8 +70,8 @@ test.describe("Settings (full-stack UI)", () => {
 			await expect(checkbox).toBeChecked();
 		}
 
-		// Wait for the setting to persist (the toggle sends a PUT to /api/preferences)
-		await page.waitForResponse(resp => resp.url().includes("/api/preferences") && resp.status() === 200);
+		// Wait for the setting to persist
+		await responsePromise;
 
 		// Reload the page
 		await page.reload();

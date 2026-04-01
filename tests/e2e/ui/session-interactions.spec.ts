@@ -72,7 +72,7 @@ test.describe("Session interactions (UI)", () => {
 
 		// The textarea from the deleted session should not be visible
 		// on the landing page. Wait for the landing state.
-		await expect(page.locator("button[title='New session']").first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 10_000 });
 
 		// Verify the session is no longer in the API
 		const resp = await apiFetch("/api/sessions");
@@ -101,7 +101,7 @@ test.describe("Session interactions (UI)", () => {
 
 		// After reload, wait for the app to load
 		await expect(
-			page.locator("button[title='New session']").first(),
+			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 15_000 });
 
 		// Verify the session is still in the API
