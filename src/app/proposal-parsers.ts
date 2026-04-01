@@ -48,4 +48,10 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 		requiredFields: ["id", "name"],
 		callbackName: "onWorkflowProposal",
 	},
+	{
+		tag: "project_proposal",
+		fields: ["name", "root_path", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "system_prompt_context"],
+		requiredFields: ["name", "root_path"],
+		callbackName: "onProjectProposal",
+	},
 ];

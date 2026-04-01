@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 
 export interface SessionCost {
 	inputTokens: number;
@@ -17,9 +16,6 @@ export interface UsageData {
 	cacheWriteTokens?: number;
 	cost?: number;
 }
-
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "session-costs.json");
 
 function emptyCost(): SessionCost {
 	return {
@@ -38,15 +34,19 @@ function emptyCost(): SessionCost {
  */
 export class CostTracker {
 	private costs: Map<string, SessionCost> = new Map();
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "session-costs.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (data && typeof data === "object" && !Array.isArray(data)) {
 					for (const [id, cost] of Object.entries(data)) {
 						if (id && cost && typeof cost === "object") {
@@ -69,14 +69,14 @@ export class CostTracker {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) {
-				fs.mkdirSync(STORE_DIR, { recursive: true });
+			if (!fs.existsSync(this.storeDir)) {
+				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data: Record<string, SessionCost> = {};
 			for (const [id, cost] of this.costs) {
 				data[id] = cost;
 			}
-			fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[cost-tracker] Failed to save costs:", err);
 		}

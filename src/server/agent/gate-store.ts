@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { bobbitStateDir } from "../bobbit-dir.js";
 import type { Workflow } from "./workflow-store.js";
 
 export type GateStatus = "pending" | "passed" | "failed";
@@ -41,27 +40,28 @@ export interface GateState {
 	updatedAt: number;
 }
 
-const STORE_DIR = bobbitStateDir();
-const STORE_FILE = path.join(STORE_DIR, "gates.json");
-
 function compositeKey(goalId: string, gateId: string): string {
 	return `${goalId}::${gateId}`;
 }
 
 export class GateStore {
+	private readonly storeDir: string;
+	private readonly storeFile: string;
 	private gates: Map<string, GateState> = new Map();
 
 	/** Optional callback invoked when any gate status changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
 
-	constructor() {
+	constructor(stateDir: string) {
+		this.storeDir = stateDir;
+		this.storeFile = path.join(stateDir, "gates.json");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(STORE_FILE)) {
-				const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			if (fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const g of data) {
 						if (g.gateId && g.goalId) {
@@ -77,11 +77,11 @@ export class GateStore {
 
 	private save(): void {
 		try {
-			if (!fs.existsSync(STORE_DIR)) {
-				fs.mkdirSync(STORE_DIR, { recursive: true });
+			if (!fs.existsSync(this.storeDir)) {
+				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data = Array.from(this.gates.values());
-			fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf-8");
+			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[gate-store] Failed to save gates:", err);
 		}

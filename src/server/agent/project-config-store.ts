@@ -1,9 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
-import { bobbitConfigDir } from "../bobbit-dir.js";
-
-const CONFIG_FILE = path.join(bobbitConfigDir(), "project.yaml");
 
 export type ProjectConfig = Record<string, string>;
 
@@ -30,15 +27,17 @@ const DEFAULTS: Record<string, string> = {
  */
 export class ProjectConfigStore {
 	private data: ProjectConfig = {};
+	private readonly configFile: string;
 
-	constructor() {
+	constructor(configDir: string) {
+		this.configFile = path.join(configDir, "project.yaml");
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(CONFIG_FILE)) {
-				const raw = yaml.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+			if (fs.existsSync(this.configFile)) {
+				const raw = yaml.parse(fs.readFileSync(this.configFile, "utf-8"));
 				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 					// Only keep string values
 					const cleaned: ProjectConfig = {};
@@ -57,11 +56,11 @@ export class ProjectConfigStore {
 
 	private save(): void {
 		try {
-			const dir = path.dirname(CONFIG_FILE);
+			const dir = path.dirname(this.configFile);
 			if (!fs.existsSync(dir)) {
 				fs.mkdirSync(dir, { recursive: true });
 			}
-			fs.writeFileSync(CONFIG_FILE, yaml.stringify(this.data), "utf-8");
+			fs.writeFileSync(this.configFile, yaml.stringify(this.data), "utf-8");
 		} catch (err) {
 			console.error("[project-config-store] Failed to save project config:", err);
 		}

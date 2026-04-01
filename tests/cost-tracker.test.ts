@@ -22,6 +22,8 @@ const STORE_FILE = path.join(tmpDir, "state", "session-costs.json");
 // Dynamic import so BOBBIT_DIR is set before module-level constants are evaluated
 const { CostTracker } = await import("../src/server/agent/cost-tracker.ts");
 
+const stateDir = path.join(tmpDir, "state");
+
 describe("CostTracker", () => {
 	beforeEach(() => {
 		try { fs.unlinkSync(STORE_FILE); } catch { /* ok */ }
@@ -33,7 +35,7 @@ describe("CostTracker", () => {
 
 	describe("construction", () => {
 		it("creates with empty costs when no store file exists", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			assert.equal(tracker.getAllCosts().size, 0);
 		});
 
@@ -49,7 +51,7 @@ describe("CostTracker", () => {
 			};
 			fs.writeFileSync(STORE_FILE, JSON.stringify(data), "utf-8");
 
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const cost = tracker.getSessionCost("session-1");
 			assert.ok(cost);
 			assert.equal(cost.inputTokens, 100);
@@ -61,13 +63,13 @@ describe("CostTracker", () => {
 
 		it("handles corrupt JSON gracefully", () => {
 			fs.writeFileSync(STORE_FILE, "NOT JSON{{{", "utf-8");
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			assert.equal(tracker.getAllCosts().size, 0);
 		});
 
 		it("handles non-object JSON gracefully", () => {
 			fs.writeFileSync(STORE_FILE, JSON.stringify([1, 2, 3]), "utf-8");
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			assert.equal(tracker.getAllCosts().size, 0);
 		});
 
@@ -81,7 +83,7 @@ describe("CostTracker", () => {
 			};
 			fs.writeFileSync(STORE_FILE, JSON.stringify(data), "utf-8");
 
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const cost = tracker.getSessionCost("session-1");
 			assert.ok(cost);
 			assert.equal(cost.inputTokens, 0);
@@ -92,7 +94,7 @@ describe("CostTracker", () => {
 
 	describe("recordUsage", () => {
 		it("records usage for a new session", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const result = tracker.recordUsage("s1", {
 				inputTokens: 100,
 				outputTokens: 50,
@@ -104,7 +106,7 @@ describe("CostTracker", () => {
 		});
 
 		it("accumulates usage across multiple calls", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 100, outputTokens: 50, cost: 0.005 });
 			const result = tracker.recordUsage("s1", { inputTokens: 200, outputTokens: 100, cost: 0.01 });
 			assert.equal(result.inputTokens, 300);
@@ -113,7 +115,7 @@ describe("CostTracker", () => {
 		});
 
 		it("handles partial usage data (undefined fields treated as 0)", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const result = tracker.recordUsage("s1", { inputTokens: 100 });
 			assert.equal(result.inputTokens, 100);
 			assert.equal(result.outputTokens, 0);
@@ -123,14 +125,14 @@ describe("CostTracker", () => {
 		});
 
 		it("handles empty usage object", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const result = tracker.recordUsage("s1", {});
 			assert.equal(result.inputTokens, 0);
 			assert.equal(result.totalCost, 0);
 		});
 
 		it("records all token types including cache tokens", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const result = tracker.recordUsage("s1", {
 				inputTokens: 100,
 				outputTokens: 50,
@@ -143,14 +145,14 @@ describe("CostTracker", () => {
 		});
 
 		it("rounds totalCost to 6 decimal places to avoid floating point drift", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { cost: 0.1 });
 			const result = tracker.recordUsage("s1", { cost: 0.2 });
 			assert.equal(result.totalCost, 0.3);
 		});
 
 		it("persists to disk after recording", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 42, cost: 0.001 });
 
 			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
@@ -159,7 +161,7 @@ describe("CostTracker", () => {
 		});
 
 		it("returns a copy (modifying return value doesn't affect tracker)", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const result = tracker.recordUsage("s1", { inputTokens: 100 });
 			result.inputTokens = 999;
 			assert.equal(tracker.getSessionCost("s1")!.inputTokens, 100);
@@ -168,12 +170,12 @@ describe("CostTracker", () => {
 
 	describe("getSessionCost", () => {
 		it("returns undefined for unknown session", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			assert.equal(tracker.getSessionCost("nonexistent"), undefined);
 		});
 
 		it("returns a copy of the session cost", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 100 });
 			const cost = tracker.getSessionCost("s1")!;
 			cost.inputTokens = 999;
@@ -183,7 +185,7 @@ describe("CostTracker", () => {
 
 	describe("getGoalCost", () => {
 		it("aggregates costs across multiple sessions", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 100, outputTokens: 50, cost: 0.01 });
 			tracker.recordUsage("s2", { inputTokens: 200, outputTokens: 100, cost: 0.02 });
 
@@ -194,7 +196,7 @@ describe("CostTracker", () => {
 		});
 
 		it("skips sessions without cost data", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 100, cost: 0.01 });
 
 			const total = tracker.getGoalCost("goal-1", ["s1", "s-nonexistent"]);
@@ -203,14 +205,14 @@ describe("CostTracker", () => {
 		});
 
 		it("returns zero costs for empty session list", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const total = tracker.getGoalCost("goal-1", []);
 			assert.equal(total.inputTokens, 0);
 			assert.equal(total.totalCost, 0);
 		});
 
 		it("returns zero costs when no sessions have data", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			const total = tracker.getGoalCost("goal-1", ["x", "y"]);
 			assert.equal(total.inputTokens, 0);
 		});
@@ -218,7 +220,7 @@ describe("CostTracker", () => {
 
 	describe("getAllCosts", () => {
 		it("returns all tracked sessions", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 10 });
 			tracker.recordUsage("s2", { inputTokens: 20 });
 
@@ -229,7 +231,7 @@ describe("CostTracker", () => {
 		});
 
 		it("returns an independent copy", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 10 });
 			const all = tracker.getAllCosts();
 			all.delete("s1");
@@ -239,14 +241,14 @@ describe("CostTracker", () => {
 
 	describe("removeSession", () => {
 		it("removes a session's cost data", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 100 });
 			tracker.removeSession("s1");
 			assert.equal(tracker.getSessionCost("s1"), undefined);
 		});
 
 		it("persists removal to disk", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.recordUsage("s1", { inputTokens: 100 });
 			tracker.removeSession("s1");
 
@@ -255,14 +257,14 @@ describe("CostTracker", () => {
 		});
 
 		it("is a no-op for nonexistent session (no crash)", () => {
-			const tracker = new CostTracker();
+			const tracker = new CostTracker(stateDir);
 			tracker.removeSession("nonexistent");
 		});
 	});
 
 	describe("persistence round-trip", () => {
 		it("survives save and reload", () => {
-			const tracker1 = new CostTracker();
+			const tracker1 = new CostTracker(stateDir);
 			tracker1.recordUsage("s1", {
 				inputTokens: 100,
 				outputTokens: 50,
@@ -272,7 +274,7 @@ describe("CostTracker", () => {
 			});
 			tracker1.recordUsage("s2", { inputTokens: 500, cost: 0.05 });
 
-			const tracker2 = new CostTracker();
+			const tracker2 = new CostTracker(stateDir);
 			const s1 = tracker2.getSessionCost("s1");
 			assert.ok(s1);
 			assert.equal(s1.inputTokens, 100);

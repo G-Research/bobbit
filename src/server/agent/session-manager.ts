@@ -93,6 +93,8 @@ export interface SessionInfo {
 	containerId?: string;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
+	/** Which project this session belongs to */
+	projectId?: string;
 	/** Personality names */
 	personalities?: string[];
 	/** Allowed tools for this session */
@@ -155,8 +157,8 @@ export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	private agentCliPath?: string;
 	private systemPromptPath?: string;
-	private store = new SessionStore();
-	private costTracker = new CostTracker();
+	private store: SessionStore;
+	private costTracker: CostTracker;
 	private colorStore?: ColorStore;
 	private personalityManager?: PersonalityManager;
 	private roleManager?: RoleManager;
@@ -193,6 +195,7 @@ export class SessionManager {
 	}
 
 	constructor(options?: SessionManagerOptions) {
+		const stateDir = bobbitStateDir();
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
 		this.colorStore = options?.colorStore;
@@ -203,9 +206,11 @@ export class SessionManager {
 		this.preferencesStore = options?.preferencesStore;
 		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
-		this.goalManager = new GoalManager(options?.workflowStore);
-		this.taskManager = new TaskManager();
-		this.searchIndex = new SearchIndex(path.join(bobbitStateDir(), "search.db"));
+		this.store = new SessionStore(stateDir);
+		this.costTracker = new CostTracker(stateDir);
+		this.goalManager = new GoalManager(options?.workflowStore, stateDir);
+		this.taskManager = new TaskManager(stateDir);
+		this.searchIndex = new SearchIndex(path.join(stateDir, "search.db"));
 	}
 
 	/** Whether Docker sandbox mode is enabled in project config. */
@@ -800,6 +805,7 @@ export class SessionManager {
 						text,
 						toolNames,
 						Date.now(),
+						session.projectId || "",
 					);
 				}
 			} catch {
@@ -1068,12 +1074,12 @@ export class SessionManager {
 			// Wire index update callbacks
 			const goalStore = (this.goalManager as any).store as import("./goal-store.js").GoalStore;
 			goalStore.onIndexUpdate = (goal) => {
-				try { this.searchIndex.indexGoal(goal); } catch (err) { console.error("[search] Failed to index goal:", err); }
+				try { this.searchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
 			};
 			this.store.onIndexUpdate = (session) => {
 				try {
 					const goalTitle = session.goalId ? this.goalManager.getGoal(session.goalId)?.title : undefined;
-					this.searchIndex.indexSession(session, goalTitle);
+					this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
 				} catch (err) { console.error("[search] Failed to index session:", err); }
 			};
 		} catch (err) {
@@ -1919,6 +1925,7 @@ export class SessionManager {
 		personalities?: string[];
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
+		projectId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => ({
 			id: s.id,
@@ -1948,6 +1955,7 @@ export class SessionManager {
 			personalities: s.personalities,
 			reattemptGoalId: this.store.get(s.id)?.reattemptGoalId,
 			sandboxed: this.store.get(s.id)?.sandboxed || s.sandboxed,
+			projectId: this.store.get(s.id)?.projectId,
 		}));
 	}
 
