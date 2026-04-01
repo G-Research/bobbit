@@ -45,6 +45,28 @@ function expandPath(p: string): string {
 }
 
 /**
+ * Parse the list of removed built-in directory paths from project config.
+ * Returns normalized absolute paths.
+ */
+export function parseRemovedDirectories(
+	projectConfigStore: ProjectConfigReader,
+): string[] {
+	const raw = projectConfigStore.get("removed_config_directories");
+	if (!raw) return [];
+	try {
+		const parsed = JSON.parse(raw);
+		if (Array.isArray(parsed)) {
+			return parsed
+				.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+				.map((p) => expandPath(p));
+		}
+	} catch (err) {
+		console.warn("[config-directories] Invalid removed_config_directories JSON, ignoring:", err);
+	}
+	return [];
+}
+
+/**
  * Parse custom directories from project config, merging both
  * `config_directories` and legacy `skill_directories` keys.
  *
@@ -116,6 +138,7 @@ export function getAllConfigDirectories(
 	projectConfigStore: ProjectConfigReader,
 ): ConfigDirectory[] {
 	const dirs: ConfigDirectory[] = [];
+	const removedSet = new Set(parseRemovedDirectories(projectConfigStore));
 
 	// ── Skills (5 built-in) ──
 	const skillDirs: Array<{ p: string; scope: "project" | "user" }> = [
@@ -127,12 +150,13 @@ export function getAllConfigDirectories(
 	];
 	for (const { p, scope } of skillDirs) {
 		const resolved = path.resolve(p);
+		if (removedSet.has(resolved)) continue;
 		dirs.push({
 			path: resolved,
 			types: ["skills"],
 			scope,
 			exists: fs.existsSync(resolved),
-			isRemovable: false,
+			isRemovable: true,
 		});
 	}
 
@@ -147,24 +171,27 @@ export function getAllConfigDirectories(
 	];
 	for (const { p, scope } of mcpDirs) {
 		const resolved = path.resolve(p);
+		if (removedSet.has(resolved)) continue;
 		dirs.push({
 			path: resolved,
 			types: ["mcp"],
 			scope,
 			exists: fs.existsSync(resolved),
-			isRemovable: false,
+			isRemovable: true,
 		});
 	}
 
 	// ── Tools (1 built-in) ──
 	const toolsDir = path.resolve(path.join(cwd, ".bobbit", "config", "tools"));
-	dirs.push({
-		path: toolsDir,
-		types: ["tools"],
-		scope: "project",
-		exists: fs.existsSync(toolsDir),
-		isRemovable: false,
-	});
+	if (!removedSet.has(toolsDir)) {
+		dirs.push({
+			path: toolsDir,
+			types: ["tools"],
+			scope: "project",
+			exists: fs.existsSync(toolsDir),
+			isRemovable: true,
+		});
+	}
 
 	// ── Agents (1 built-in — file path, not directory) ──
 	const agentsMdPath = path.resolve(path.join(cwd, "AGENTS.md"));
@@ -172,13 +199,15 @@ export function getAllConfigDirectories(
 	const agentsMdExists = fs.existsSync(agentsMdPath);
 	const claudeMdExists = !agentsMdExists && fs.existsSync(claudeMdPath);
 	const builtinAgentPath = agentsMdExists ? agentsMdPath : claudeMdExists ? claudeMdPath : agentsMdPath;
-	dirs.push({
-		path: builtinAgentPath,
-		types: ["agents"],
-		scope: "project",
-		exists: agentsMdExists || claudeMdExists,
-		isRemovable: false,
-	});
+	if (!removedSet.has(builtinAgentPath)) {
+		dirs.push({
+			path: builtinAgentPath,
+			types: ["agents"],
+			scope: "project",
+			exists: agentsMdExists || claudeMdExists,
+			isRemovable: true,
+		});
+	}
 
 	// ── Custom directories ──
 	const customDirs = parseCustomDirectories(projectConfigStore);
@@ -230,10 +259,14 @@ export function resetConfigDirectories(
  * Save custom directories to project config via the `config_directories` key.
  * Also removes the legacy `skill_directories` key to prevent stale entries
  * from reappearing on next read (migrate forward).
+ *
+ * When `removedBuiltinPaths` is provided, saves it as `removed_config_directories`.
+ * When not provided, the existing `removed_config_directories` key is left untouched.
  */
 export function saveCustomDirectories(
 	projectConfigStore: ProjectConfigWriter,
 	dirs: CustomDirEntry[],
+	removedBuiltinPaths?: string[],
 ): void {
 	const serializable = dirs.map((d) => ({
 		path: d.path,
@@ -241,6 +274,43 @@ export function saveCustomDirectories(
 	}));
 	projectConfigStore.set("config_directories", JSON.stringify(serializable));
 	projectConfigStore.remove("skill_directories");
+
+	if (removedBuiltinPaths !== undefined) {
+		projectConfigStore.set(
+			"removed_config_directories",
+			JSON.stringify(removedBuiltinPaths),
+		);
+	}
+}
+
+/**
+ * Reset all config directory settings to defaults by removing all three keys.
+ * After reset, only built-in directories will appear (none removed, none custom).
+ */
+export function resetConfigDirectories(
+	projectConfigStore: ProjectConfigWriter,
+): void {
+	projectConfigStore.remove("config_directories");
+	projectConfigStore.remove("skill_directories");
+	projectConfigStore.remove("removed_config_directories");
+}
+
+/**
+ * Add a built-in directory to the removed list so it is excluded from
+ * `getAllConfigDirectories`. Idempotent — duplicate paths are ignored.
+ */
+export function removeBuiltinDirectory(
+	projectConfigStore: ProjectConfigWriter,
+	dirPath: string,
+): void {
+	const normalized = expandPath(dirPath);
+	const current = parseRemovedDirectories(projectConfigStore);
+	if (current.includes(normalized)) return;
+	current.push(normalized);
+	projectConfigStore.set(
+		"removed_config_directories",
+		JSON.stringify(current),
+	);
 }
 
 /**
