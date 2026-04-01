@@ -327,7 +327,7 @@ export class SessionManager {
 		if (projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
 			if (ctx) {
-				resolvedGoalManager = new GoalManager(ctx.goalStore);
+				resolvedGoalManager = ctx.goalManager;
 				resolvedTaskManager = new TaskManager(ctx.taskStore);
 			}
 		}

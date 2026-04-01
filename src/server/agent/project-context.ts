@@ -15,6 +15,7 @@ import { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { ColorStore } from "./color-store.js";
 import { SearchIndex } from "../search/search-index.js";
 import { CostTracker } from "./cost-tracker.js";
+import { GoalManager } from "./goal-manager.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -42,6 +43,7 @@ export class ProjectContext {
   readonly colorStore: ColorStore;
   readonly searchIndex: SearchIndex;
   readonly costTracker: CostTracker;
+  readonly goalManager: GoalManager;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -67,6 +69,7 @@ export class ProjectContext {
     this.colorStore = new ColorStore(this.stateDir);
     this.searchIndex = new SearchIndex(path.join(this.stateDir, "search.db"));
     this.costTracker = new CostTracker(this.stateDir);
+    this.goalManager = new GoalManager(this.goalStore);
 
     // Instantiate config stores with project-scoped config directory
     this.roleStore = new RoleStore(this.configDir);

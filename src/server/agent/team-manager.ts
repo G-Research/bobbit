@@ -425,7 +425,7 @@ export class TeamManager {
 	private resolveGoalManager(goalId: string): GoalManager {
 		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
-			if (ctx) return new GoalManager(ctx.goalStore);
+			if (ctx) return ctx.goalManager;
 		}
 		return this.goalManager;
 	}
