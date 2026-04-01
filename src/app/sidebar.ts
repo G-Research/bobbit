@@ -789,10 +789,9 @@ function _handleFullSearchClick(query: string): void {
 function renderProjectHeader(project: Project, expanded: boolean) {
 	const color = project.color || "var(--muted-foreground)";
 	return html`
-		<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
-			style="padding-left:${HEADER_CHEVRON_W}px;"
+		<div class="flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
-			<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${expanded ? "▾" : "▸"}</span>
+			<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
 		</div>
@@ -988,7 +987,7 @@ export function renderSidebar() {
 									return html`
 										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 										${renderProjectHeader(project, expanded)}
-										${expanded ? html`<div class="flex flex-col gap-0.5">
+										${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 											${renderProjectContent(project, data.goals, data.sessions)}
 										</div>` : ""}
 									`;
