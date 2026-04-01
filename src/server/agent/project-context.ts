@@ -13,6 +13,8 @@ import { ToolManager } from "./tool-manager.js";
 import { ProjectConfigStore } from "./project-config-store.js";
 import { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { ColorStore } from "./color-store.js";
+import { SearchIndex } from "../search/search-index.js";
+import { CostTracker } from "./cost-tracker.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -38,6 +40,8 @@ export class ProjectContext {
   readonly teamStore: TeamStore;
   readonly staffStore: StaffStore;
   readonly colorStore: ColorStore;
+  readonly searchIndex: SearchIndex;
+  readonly costTracker: CostTracker;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -61,6 +65,8 @@ export class ProjectContext {
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
     this.colorStore = new ColorStore(this.stateDir);
+    this.searchIndex = new SearchIndex(path.join(this.stateDir, "search.db"));
+    this.costTracker = new CostTracker(this.stateDir);
 
     // Instantiate config stores with project-scoped config directory
     this.roleStore = new RoleStore(this.configDir);
@@ -69,5 +75,28 @@ export class ProjectContext {
     this.toolManager = new ToolManager(this.configDir);
     this.projectConfigStore = new ProjectConfigStore(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
+  }
+
+  /** Open resources that require initialization (e.g. SQLite). */
+  open(): void {
+    this.searchIndex.staffStore = this.staffStore;
+    this.searchIndex.open();
+    if (this.searchIndex.needsRebuild()) {
+      this.searchIndex.rebuildFromStores(this.goalStore, this.sessionStore, undefined, this.staffStore);
+    }
+    // Wire search index updates on goal/session mutations
+    this.goalStore.onIndexUpdate = (goal) => {
+      this.searchIndex.indexGoal(goal, this.project.id);
+    };
+    this.sessionStore.onIndexUpdate = (session) => {
+      const goalTitle = session.goalId ? this.goalStore.get(session.goalId)?.title : undefined;
+      this.searchIndex.indexSession(session, goalTitle, this.project.id);
+    };
+  }
+
+  /** Close resources for clean shutdown. */
+  close(): void {
+    this.sessionStore.flush();
+    this.searchIndex.close();
   }
 }
