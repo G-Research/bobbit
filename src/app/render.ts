@@ -281,8 +281,8 @@ function renderMobileLanding() {
 													>
 														<span class="relative inline-flex" style="width:16px;height:16px;">
 															${icon(GoalIcon, "sm")}
-															<svg viewBox="0 0 10 10" style="position:absolute;bottom:-2px;right:-3px;width:10px;height:10px;">
-																<path d="M5 1V9M1 5H9" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round"/>
+															<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:10px;height:10px;">
+																<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
 															</svg>
 														</span>
 													</button>
