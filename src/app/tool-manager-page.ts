@@ -311,6 +311,7 @@ function renderAccessRow(label: string, selectValue: string, onChangeSelect: (va
 				${options.map(o => html`<option value=${o.value} ?selected=${selectValue === o.value}>${o.label}</option>`)}
 			</select>
 			<span class="tools-access-row-hint">${hint ? html`\u2192 ${hint}` : nothing}</span>
+
 		</div>
 	`;
 }
@@ -639,7 +640,7 @@ function renderAccessTab(): TemplateResult {
 					editGrantPolicy,
 					(val) => { editGrantPolicy = val; renderApp(); },
 					POLICY_OPTIONS,
-					!editGrantPolicy ? `${groupDefaultLabel} (from group)` : undefined,
+					!editGrantPolicy ? `${groupDefaultLabel} [from group]` : undefined,
 				)}
 			</div>
 		</div>
@@ -665,7 +666,7 @@ function renderAccessTab(): TemplateResult {
 								renderApp();
 							},
 							ROLE_POLICY_OPTIONS,
-							!rolePolicy ? `${effectiveLabel} (${source})` : undefined,
+							`${effectiveLabel} [${source}]`,
 						);
 					})}
 				</div>
