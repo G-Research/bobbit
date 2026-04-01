@@ -273,7 +273,7 @@ export class SearchIndex {
 
 			// Index staff
 			for (const staff of staffEntries) {
-				this.indexStaff(staff);
+				this.indexStaff(staff, (staff as any).projectId);
 			}
 		});
 

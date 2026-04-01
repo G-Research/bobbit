@@ -860,11 +860,13 @@ export interface StaffAgent {
 	updatedAt: number;
 	lastWakeAt?: number;
 	currentSessionId?: string;
+	projectId?: string;
 }
 
-export async function fetchStaff(): Promise<StaffAgent[]> {
+export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
 	try {
-		const res = await gatewayFetch("/api/staff");
+		const url = projectId ? `/api/staff?projectId=${encodeURIComponent(projectId)}` : "/api/staff";
+		const res = await gatewayFetch(url);
 		if (!res.ok) return [];
 		const data = await res.json();
 		return data.staff || data || [];
@@ -883,7 +885,7 @@ export async function fetchStaffAgent(id: string): Promise<StaffAgent | null> {
 	}
 }
 
-export async function createStaffAgent(data: { name: string; description: string; systemPrompt: string; cwd: string; triggers?: any[] }): Promise<StaffAgent | null> {
+export async function createStaffAgent(data: { name: string; description: string; systemPrompt: string; cwd: string; triggers?: any[]; projectId?: string }): Promise<StaffAgent | null> {
 	try {
 		const res = await gatewayFetch("/api/staff", {
 			method: "POST",

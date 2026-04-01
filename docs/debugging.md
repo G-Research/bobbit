@@ -105,7 +105,7 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - Check `better-sqlite3` loaded correctly (native addon)
 - FTS5 on 10K docs < 10ms — slow search means network/serialization bottleneck
 - Purged sessions still showing? Check `purgeOneSession()` calls index cleanup
-- Staff not appearing in search? Verify `StaffManager` has `searchIndex` dependency and calls `indexStaff()` on create/update
+- Staff not appearing in search? `StaffManager` uses per-project `searchIndex` from `ProjectContextManager` — verify the correct project context's search index is being used. `rebuildFromStores()` passes `staff.projectId` for correct project filtering
 - Sidebar filter not working? Check `state.searchContentMode` — `false` = client-side title filter, `true` = FTS API call. Toggle state persisted in `localStorage`
 - Full search page (`#/search`) manages its own state — independent from sidebar search
 
@@ -129,7 +129,7 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - Config not cascading? Check all three `.bobbit/config/` directories (global, server, project) and verify `resolveScalarConfig()` / `resolveEntities()` return expected scope
 - **State migration**: On first startup after upgrade, central state is distributed to per-project dirs. Check for `.bobbit/state/.migrated-to-per-project` marker. Central files renamed with `.pre-migration` suffix (not deleted). If migration didn't run, check that projects are registered before migration runs
 - **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`
-- **Known limitations**: Staff is only per-default-project (API doesn't route staff by project yet). Cost tracking uses the default project's `CostTracker`. `active-verifications.json` stays in central state dir
+- **Known limitations**: Cost tracking uses the default project's `CostTracker`. `active-verifications.json` stays in central state dir
 
 ## Gate re-signal cancellation
 
