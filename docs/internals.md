@@ -145,6 +145,34 @@ Each registered project can override system-level settings (from `project.yaml`)
 
 **Sidebar shortcut**: Project headers in the sidebar show a gear icon on hover that navigates directly to `#/settings/<project-id>/project`.
 
+### Per-project palette
+
+Projects can optionally be assigned one of the 10 built-in color palettes (`forest`, `ocean`, `dusk`, `ember`, `rose`, `slate`, `sand`, `teal`, `copper`, `mono`). This lets you visually distinguish projects — when you navigate to a session or goal belonging to a project with a palette, the entire UI switches to that palette.
+
+**Data model** (`RegisteredProject` in `project-registry.ts`):
+
+| Field | Type | Description |
+|---|---|---|
+| `palette` | `string \| undefined` | One of the 10 palette IDs, or undefined for no palette (use global default) |
+| `colorLight` | `string` | Project accent color for light mode (always present, defaulted on creation) |
+| `colorDark` | `string` | Project accent color for dark mode (always present, defaulted on creation) |
+
+The deprecated `color` field is migrated on load: its value is copied to both `colorLight` and `colorDark`. Projects with no color get muted defaults from `DEFAULT_PROJECT_COLOR_LIGHT/DARK`.
+
+**Auto-seeding**: When a palette is set via the REST API without explicit `colorLight`/`colorDark` values in the same request, the colors are seeded from the palette's primary color values. The constant map `PALETTE_PRIMARY_COLORS` in `src/shared/palette-colors.ts` maps each palette ID to its light and dark primary colors (extracted from the CSS `--primary` variable values).
+
+**REST API**: `POST /api/projects` and `PUT /api/projects/:id` accept `palette`, `colorLight`, `colorDark` fields alongside existing project fields.
+
+**Palette switching (UI)**: Applied via the `data-palette` attribute on `<html>`, the same mechanism as the global palette picker. On session/goal navigation, the UI resolves `activeSession → projectId → project.palette`. If a palette exists, it is applied; otherwise the global default from user preferences is restored. The switch is handled alongside session connection logic so the entire UI — sidebar, content area, headers — shifts palette together.
+
+**Sidebar accent colors**: Project header folder icons and names use `colorLight` in light mode and `colorDark` in dark mode, selected reactively based on the current theme.
+
+**Settings UI**: The per-project settings scope includes an "Appearance" tab (first tab) with:
+1. A palette picker reusing the same palette preview cards from the global Color Palette tab, plus a "None (use global)" option.
+2. Two color inputs side by side for light and dark mode accent colors, pre-filled from the palette seed or existing values.
+
+Selecting a palette seeds the color fields from `PALETTE_PRIMARY_COLORS`; the user can then override colors independently.
+
 ### Session & goal scoping
 
 - `PersistedSession` and `PersistedGoal` carry an optional `projectId` field.

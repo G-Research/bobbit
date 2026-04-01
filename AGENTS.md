@@ -52,7 +52,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Add a REST endpoint**: Edit `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` handlers for pattern (`execFileAsync`, path sanitization, 5s timeout). For project-scoped CRUD, see the `/api/projects` endpoints for the pattern (JSON body parsing, type guards, registry calls).
 
-**Add a project**: Register via `POST /api/projects` (name + rootPath) or the "Add Project" button in the sidebar, which opens the project assistant. The assistant explores the directory and emits a `<project_proposal>` block. On acceptance, `.bobbit/config/` and `.bobbit/state/` are scaffolded in the project directory. See [docs/internals.md](docs/internals.md#multi-project-architecture) for the full architecture.
+**Add a project**: Register via `POST /api/projects` (name + rootPath) or the "Add Project" button in the sidebar, which opens the project assistant. The assistant explores the directory and emits a `<project_proposal>` block. On acceptance, `.bobbit/config/` and `.bobbit/state/` are scaffolded in the project directory. Projects can optionally have a `palette` (one of 10 built-in palettes) and accent colors (`colorLight`/`colorDark`) — see [docs/internals.md](docs/internals.md#per-project-palette) for details. See [docs/internals.md](docs/internals.md#multi-project-architecture) for the full architecture.
 
 **Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts` switch, add `RpcBridge` method if needed. Examples: `set_model`, `set_thinking_level`.
 
@@ -78,7 +78,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `sandbox-proxy.ts`, `sandbox-pool.ts`, `docker-args.ts`, `sandbox-guard.ts`. See @docs/internals.md#docker-sandbox for full architecture.
 
-**Configure per-project settings**: Settings uses a two-tier layout — scope row (System + per-project tabs) above sub-tabs. System scope has all tabs; per-project scope shows Commands & Sandbox, Models, and Config Directories. Project settings inherit from System and can override individual fields. The sidebar gear icon on project headers navigates directly to that project's settings. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID. REST: `GET/PUT /api/projects/:id/config`, `GET /api/projects/:id/config/resolved` (with `{ value, source }` annotations). See [docs/internals.md](docs/internals.md#per-project-config) for the resolution cascade.
+**Configure per-project settings**: Settings uses a two-tier layout — scope row (System + per-project tabs) above sub-tabs. System scope has all tabs; per-project scope shows Appearance, Commands & Sandbox, Models, and Config Directories. The Appearance tab (first tab) has a palette picker and dual light/dark accent color inputs. Project settings inherit from System and can override individual fields. The sidebar gear icon on project headers navigates directly to that project's settings. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID. REST: `GET/PUT /api/projects/:id/config`, `GET /api/projects/:id/config/resolved` (with `{ value, source }` annotations). See [docs/internals.md](docs/internals.md#per-project-config) for the resolution cascade.
 
 **Manage config directories**: Settings → Config Directories tab, or `config_directories` in `project.yaml`. See @docs/internals.md#config-scan-directories.
 
