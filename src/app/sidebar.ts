@@ -977,7 +977,7 @@ export function renderSidebar() {
 								${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 								${renderGoalGroup(goal)}
 							`)}`}
-							${filteredGoals.length > 0 ? html`
+							${multiProject ? "" : filteredGoals.length > 0 ? html`
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5">
 									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"

@@ -6,7 +6,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir, bobbitConfigDir } from "./bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
@@ -211,6 +211,7 @@ export function createGateway(config: GatewayConfig) {
 
 	// Project registry — persisted at server level
 	const projectRegistry = new ProjectRegistry(stateDir);
+	projectRegistry.ensureDefaultProject(getProjectRoot());
 
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir);
@@ -940,8 +941,14 @@ async function handleApiRoute(
 
 	// DELETE /api/projects/:id
 	if (projectGetMatch && req.method === "DELETE") {
+		const projectId = projectGetMatch[1];
+		const project = projectRegistry.get(projectId);
+		if (project && project.rootPath === getProjectRoot()) {
+			json({ error: "Cannot delete the default project" }, 400);
+			return;
+		}
 		try {
-			projectRegistry.remove(projectGetMatch[1]);
+			projectRegistry.remove(projectId);
 			json({ ok: true });
 		} catch (err: any) {
 			json({ error: err.message }, 400);
