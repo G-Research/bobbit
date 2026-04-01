@@ -377,6 +377,12 @@ export function createGateway(config: GatewayConfig) {
 		)
 		: http.createServer(requestHandler);
 
+	// Long-polling endpoints (e.g. /api/sessions/:id/wait) can block for 10+ minutes.
+	// Node >= 19 defaults requestTimeout to 300s which would kill those requests.
+	// Disable the server-level timeout; individual endpoints manage their own.
+	server.requestTimeout = 0;
+	server.headersTimeout = 0;
+
 	// WebSocket server (noServer mode — we handle upgrade manually)
 	const wss = new WebSocketServer({ noServer: true });
 

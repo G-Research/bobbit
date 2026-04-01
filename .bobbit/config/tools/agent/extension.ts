@@ -111,11 +111,19 @@ export async function waitForDelegate(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<{ status: string; output: string }> {
-	// Poll for completion — the /wait endpoint blocks
+	// The /wait endpoint blocks until the delegate finishes or times out server-side.
+	// Node's fetch (undici) has a default bodyTimeout of 300s which would kill the
+	// connection before our actual timeout. Use AbortSignal.timeout with generous padding
+	// (30s beyond our timeout) to let the server-side timeout be authoritative.
+	const fetchTimeout = AbortSignal.timeout(timeoutMs + 30_000);
+	const combinedSignal = signal
+		? AbortSignal.any([signal, fetchTimeout])
+		: fetchTimeout;
+
 	const resp = await gatewayFetch(`/api/sessions/${sessionId}/wait`, {
 		method: "POST",
 		body: JSON.stringify({ timeout_ms: timeoutMs }),
-		signal,
+		signal: combinedSignal,
 	});
 
 	if (!resp.ok) {
