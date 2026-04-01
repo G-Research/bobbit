@@ -499,6 +499,7 @@ function goalPreviewPanel() {
 		}
 		state.assistantType = null;
 		state.activeGoalProposal = null;
+		const projectId = state.previewProjectId || undefined;
 		state.previewProjectId = "";
 		const workflowId = _selectedWorkflowId || "general";
 		_selectedWorkflowId = "general";
@@ -520,7 +521,7 @@ function goalPreviewPanel() {
 			workflowId,
 			reattemptOf: reattemptGoalId || undefined,
 			sandboxed,
-			projectId: state.previewProjectId || undefined,
+			projectId,
 		});
 
 		// If this is a re-attempt, archive the old goal and link the new one
