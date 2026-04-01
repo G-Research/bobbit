@@ -568,23 +568,22 @@ function renderListView(): TemplateResult {
 				const currentGroupPolicy = groupPolicies[groupName] || "";
 				return html`
 					<div class="tool-group ${isCollapsed ? "collapsed" : ""}">
-						<button class="tool-group-header" title="Toggle ${groupName} group" @click=${() => toggleGroup(groupName)}>
+						<div class="tool-group-header" title="Toggle ${groupName} group" @click=${() => toggleGroup(groupName)}>
 							${chevronSvg}
 							<span class="tool-group-name">${groupName}</span>
 							<span class="tool-group-count">${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}</span>
-						</button>
-						<div class="tool-group-policy" style="display:flex;align-items:center;gap:6px;padding:4px 12px 4px 36px;font-size:12px;color:var(--muted-foreground);">
-							<span>Group default policy:</span>
-							<select class="tools-select" style="font-size:12px;padding:1px 4px;width:auto;"
+							<span class="tool-group-policy-label">Group Policy:</span>
+							<select class="tool-group-select"
 								.value=${currentGroupPolicy}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${async (e: Event) => {
+									e.stopPropagation();
 									const val = (e.target as HTMLSelectElement).value;
 									await updateGroupPolicy(groupName, val || null);
 									groupPolicies = await fetchGroupPolicies();
 									renderApp();
 								}}>
-								<option value="" ?selected=${!currentGroupPolicy}>Always Allow (system default)</option>
+								<option value="" ?selected=${!currentGroupPolicy}>Always Allow (default)</option>
 								<option value="always-allow" ?selected=${currentGroupPolicy === "always-allow"}>Always Allow</option>
 								<option value="ask-once" ?selected=${currentGroupPolicy === "ask-once"}>Ask Once Per Session</option>
 								<option value="always-ask" ?selected=${currentGroupPolicy === "always-ask"}>Ask Every Time</option>

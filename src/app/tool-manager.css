@@ -162,14 +162,40 @@
 }
 
 .tool-group-name {
-	flex: 1;
+	flex-shrink: 0;
 }
 
 .tool-group-count {
 	font-size: 10px;
-	font-weight: 400;
+	font-weight: 500;
 	color: var(--muted-foreground);
 	font-variant-numeric: tabular-nums;
+	background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+	padding: 1px 6px;
+	border-radius: 9999px;
+	line-height: 1.4;
+}
+
+.tool-group-policy-label {
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--muted-foreground);
+	margin-left: auto;
+	text-transform: none;
+	letter-spacing: normal;
+}
+
+.tool-group-select {
+	font-size: 11px;
+	padding: 2px 4px;
+	border-radius: var(--radius);
+	border: 1px solid var(--border);
+	background: var(--background);
+	color: var(--foreground);
+	cursor: pointer;
+	flex-shrink: 0;
+	text-transform: none;
+	letter-spacing: normal;
 }
 
 .tool-group-items {

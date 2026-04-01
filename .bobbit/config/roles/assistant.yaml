@@ -22,7 +22,6 @@ allowedTools:
 toolPolicies:
   read: always-allow
   write: always-allow
-  edit: ask-once
   bash: always-allow
   grep: always-allow
   find: always-allow
@@ -40,7 +39,7 @@ toolPolicies:
   preview_open: always-allow
 _policyMigrated: true
 createdAt: 0
-updatedAt: 1774887030268
+updatedAt: 1775044049020
 promptTemplate: |
   You are an **Assistant** agent (id: {{AGENT_ID}}) — an advisor that explores and proposes.
 
