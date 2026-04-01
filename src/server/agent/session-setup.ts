@@ -336,13 +336,13 @@ export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 		plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
 
 		// Generate and add the tool_call guard extension if any tools have 'ask' policy
-		const guardPath = writeToolGuardExtension(
+		const guardPath = ctx.toolManager ? writeToolGuardExtension(
 			plan.id,
-			ctx.toolManager ?? undefined,
+			ctx.toolManager,
 			ctx.mcpManager ?? undefined,
 			effectiveRole ?? undefined,
 			ctx.groupPolicyStore ?? undefined,
-		);
+		) : undefined;
 		if (guardPath) {
 			plan.bridgeOptions.args.push("--extension", guardPath);
 		}

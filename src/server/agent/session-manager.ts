@@ -23,7 +23,7 @@ import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolStubExtensions, writeLeakedToolStubs, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
 import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -561,7 +561,7 @@ export class SessionManager {
 			for (const t of this.mcpManager.getToolInfos()) {
 				if (allowedLower.has(t.name.toLowerCase())) continue;
 				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
-				if (policy === 'ask-once' || policy === 'always-ask') {
+				if (policy === 'ask') {
 					ungrantedTools.push({ name: t.name, description: t.description });
 				}
 			}
@@ -574,7 +574,7 @@ export class SessionManager {
 				if (allowedLower.has(t.name.toLowerCase())) continue;
 				if (t.name.toLowerCase().startsWith("mcp__")) continue; // already handled above
 				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
-				if (policy === 'ask-once' || policy === 'always-ask') {
+				if (policy === 'ask') {
 					ungrantedTools.push({ name: t.name, description: t.description });
 				}
 			}
@@ -615,12 +615,7 @@ export class SessionManager {
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
 	): string[] {
-		// 1. Generate stubs for restricted-but-visible tools (loaded first)
 		const stubArgs: string[] = [];
-		if (this.toolManager) {
-			const stubPaths = writeToolStubExtensions(this.toolManager, allowedTools, role, this.groupPolicyStore);
-			for (const p of stubPaths) stubArgs.push("--extension", p);
-		}
 
 		// 2. MCP proxy/stub extensions
 		const mcpExtPaths = this.mcpManager
@@ -629,12 +624,6 @@ export class SessionManager {
 
 		// 3. Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(allowedTools, this.toolManager, cwd, mcpExtPaths);
-
-		// 4. Block leaked tools from shared extensions (loaded before real extensions)
-		if (activation.leakedTools && activation.leakedTools.length > 0) {
-			const leakPaths = writeLeakedToolStubs(activation.leakedTools);
-			for (const p of leakPaths) stubArgs.push("--extension", p);
-		}
 
 		return [...stubArgs, ...activation.args];
 	}

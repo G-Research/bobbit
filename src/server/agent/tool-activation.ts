@@ -39,18 +39,17 @@ export interface GroupPolicyProvider {
  * - `never-ask` → `never`
  * - New values (`allow`, `ask`, `never`) pass through unchanged.
  */
-function normalizePolicy(policy: GrantPolicy): GrantPolicy {
+function normalizePolicy(policy: string): GrantPolicy {
 	switch (policy) {
-		case 'always-allow': return 'always-allow'; // maps to 'allow' semantically, but keep type-compatible for now
+		case 'always-allow':
+		case 'allow': return 'allow';
 		case 'ask-once':
-		case 'always-ask': return 'always-ask'; // maps to 'ask' semantically
-		case 'never-ask': return 'never'; // maps to 'never'
+		case 'always-ask':
+		case 'ask': return 'ask';
+		case 'never-ask':
 		case 'never': return 'never';
 		default:
-			// Handle new policy values that may come from migrated configs
-			if ((policy as string) === 'allow') return 'always-allow';
-			if ((policy as string) === 'ask') return 'always-ask';
-			return policy;
+			return 'allow';
 	}
 }
 
@@ -109,7 +108,7 @@ export function resolveGrantPolicy(
 	}
 
 	// 5. System fallback — always allow
-	return 'always-allow';
+	return 'allow';
 }
 
 /**
@@ -414,23 +413,7 @@ export function writeMcpProxyExtensions(
 	return extensionPaths;
 }
 
-/**
- * Generate and write the tool_call guard extension for a session.
- * Returns the path to the written extension file, or undefined if no guard is needed
- * (i.e. no tools have 'ask' policy).
- *
- * Stub — real implementation provided by tool-guard-extension.ts task.
- */
-export function writeToolGuardExtension(
-	_sessionId: string,
-	_toolManager?: ToolManager,
-	_mcpManager?: McpManager,
-	_role?: { toolPolicies?: Record<string, GrantPolicy> },
-	_groupPolicyStore?: GroupPolicyProvider,
-): string | undefined {
-	// TODO: Replace with real implementation from tool-guard-extension.ts
-	return undefined;
-}
+
 
 /**
  * Given a role's allowedTools list and a ToolManager, compute the CLI args needed
