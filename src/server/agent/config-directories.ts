@@ -211,3 +211,28 @@ export function saveCustomDirectories(
 	projectConfigStore.set("config_directories", JSON.stringify(serializable));
 	projectConfigStore.remove("skill_directories");
 }
+
+/**
+ * Remove a custom directory by path from the project config.
+ * Only removes custom (user-added) directories, not built-in ones.
+ */
+export function removeBuiltinDirectory(
+	projectConfigStore: ProjectConfigWriter,
+	dirPath: string,
+): void {
+	const resolved = path.resolve(dirPath);
+	const existing = parseCustomDirectories(projectConfigStore);
+	const filtered = existing.filter((d) => path.resolve(d.path) !== resolved);
+	if (filtered.length !== existing.length) {
+		saveCustomDirectories(projectConfigStore, filtered);
+	}
+}
+
+/**
+ * Reset config directories to defaults by clearing all custom entries.
+ */
+export function resetConfigDirectories(
+	projectConfigStore: ProjectConfigWriter,
+): void {
+	saveCustomDirectories(projectConfigStore, []);
+}
