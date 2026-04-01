@@ -1073,6 +1073,25 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/tool-grant-request — long-polling endpoint called by guard extension
+	const toolGrantMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-grant-request$/);
+	if (toolGrantMatch && req.method === "POST") {
+		const sessionId = toolGrantMatch[1];
+		const body = await readBody(req);
+		if (!body || !body.toolName || !body.toolGroup) {
+			json({ error: "toolName and toolGroup required" }, 400);
+			return;
+		}
+		try {
+			// requestToolGrant() is added by the session-manager cleanup task
+			const result = await (sessionManager as any).requestToolGrant(sessionId, body.toolName, body.toolGroup);
+			json(result);
+		} catch (err: any) {
+			json({ error: err.message }, 500);
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id (exact match — not /api/sessions/:id/output etc.)
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {
