@@ -799,9 +799,9 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 				@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 				title="New goal in ${project.name}"
 			>
-				<span class="relative inline-flex" style="width:14px;height:14px;">
+				<span class="relative inline-flex" style="width:12px;height:12px;">
 					${icon(GoalIcon, "xs")}
-					<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:8px;height:8px;filter:drop-shadow(0 0 1.5px var(--background));">
+					<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:7px;height:7px;filter:drop-shadow(0 0 1.5px var(--background));">
 						<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
 					</svg>
 				</span>
