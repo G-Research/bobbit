@@ -437,7 +437,7 @@ export class SandboxPool {
 
 	// ── Pool maintenance ───────────────────────────────────────────────────
 
-	/** Re-adopt containers from a previous gateway run. */
+	/** Re-adopt containers from a previous gateway run, killing any we can't adopt. */
 	private async _readopt(): Promise<void> {
 		try {
 			const { stdout } = await execFileAsync("docker", [
@@ -452,6 +452,7 @@ export class SandboxPool {
 			const containerIds = stdout.trim().split("\n").filter(Boolean);
 			if (containerIds.length === 0) return;
 
+			const orphaned: string[] = [];
 			for (const containerId of containerIds) {
 				if (this.slots.has(containerId)) continue;
 
@@ -459,6 +460,24 @@ export class SandboxPool {
 				const valid = await this._validateSlot(containerId);
 				if (valid) {
 					console.log(`[sandbox-pool] Re-adopted container ${containerId.slice(0, 12)}`);
+				} else {
+					orphaned.push(containerId);
+				}
+			}
+
+			// Kill containers we couldn't re-adopt (e.g. validation failed due to
+			// path format mismatches, missing worktrees, or stale containers from
+			// a previous run that was force-killed without graceful shutdown).
+			if (orphaned.length > 0) {
+				console.log(`[sandbox-pool] Removing ${orphaned.length} orphaned running container(s)...`);
+				for (const id of orphaned) {
+					try {
+						await execFileAsync("docker", ["rm", "-f", id], {
+							timeout: 10_000,
+							env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+						});
+						console.log(`[sandbox-pool] Removed orphaned container ${id.slice(0, 12)}`);
+					} catch { /* already gone */ }
 				}
 			}
 		} catch { /* no running containers */ }
@@ -478,13 +497,19 @@ export class SandboxPool {
 			const mountSource = stdout.trim();
 			if (!mountSource) return false;
 
-			// The mount source should be under our pool directory
-			const normalizedMount = mountSource.replace(/\\/g, "/");
-			const normalizedPoolDir = this._poolDir.replace(/\\/g, "/");
+			// The mount source should be under our pool directory.
+			// On Windows, Docker inspect may return paths in various formats
+			// (e.g. "C:\Users\..." vs "/c/Users/..." vs "C:/Users/..."),
+			// so normalize both sides to lowercase forward-slash paths.
+			const normalizedMount = mountSource.replace(/\\/g, "/").toLowerCase();
+			const normalizedPoolDir = this._poolDir.replace(/\\/g, "/").toLowerCase();
 			if (!normalizedMount.startsWith(normalizedPoolDir)) return false;
 
-			// Check worktree exists on disk
-			const worktreePath = mountSource;
+			// Resolve the actual host path for fs.existsSync — use the original
+			// mount source but also try our pool dir prefix for Windows path mismatches.
+			const worktreePath = fs.existsSync(mountSource)
+				? mountSource
+				: path.join(this._poolDir, mountSource.replace(/\\/g, "/").slice(this._poolDir.replace(/\\/g, "/").length));
 			if (!fs.existsSync(worktreePath)) return false;
 
 			const slot: PoolSlot = {
