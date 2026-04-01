@@ -27,17 +27,15 @@ function idleBlob(accId: string, size = 40, hueIndex = 0, phaseIndex = 0): Templ
 
 const ROLE_POLICY_OPTIONS = [
 	{ value: "", label: "Use tool default" },
-	{ value: "always-allow", label: "Always Allow" },
-	{ value: "ask-once", label: "Ask Once" },
-	{ value: "always-ask", label: "Always Ask" },
-	{ value: "never-ask", label: "Never" },
+	{ value: "allow", label: "Allow" },
+	{ value: "ask", label: "Ask" },
+	{ value: "never", label: "Never" },
 ];
 
 const POLICY_LABELS: Record<string, string> = {
-	"always-allow": "Always Allow",
-	"ask-once": "Ask Once Per Session",
-	"always-ask": "Ask Every Time",
-	"never-ask": "Never (Hidden)",
+	"allow": "Allow",
+	"ask": "Ask",
+	"never": "Never",
 };
 
 // ============================================================================
@@ -96,7 +94,7 @@ function resolveEffectivePolicy(toolName: string, toolGroup: string): string {
 	// 4. Group default from group-policies file
 	if (groupPolicies[toolGroup]) return groupPolicies[toolGroup];
 	// 5. System fallback
-	return "always-allow";
+	return "allow";
 }
 
 /** Describe where a resolved policy came from */
@@ -228,11 +226,11 @@ async function handleSave(): Promise<void> {
 
 	if (selectedRole) {
 		// Derive allowedTools from toolPolicies for backward compatibility:
-		// any tool NOT explicitly set to "never-ask" is considered "allowed"
+		// any tool NOT explicitly set to "never" is considered "allowed"
 		const allToolNames = availableTools.map(t => t.name);
 		const derivedAllowedTools = allToolNames.filter(name => {
 			const effective = resolveEffectivePolicy(name, availableTools.find(t => t.name === name)?.group || "Other");
-			return effective !== "never-ask";
+			return effective !== "never";
 		});
 
 		const ok = await updateRole(selectedRole.name, {
@@ -497,7 +495,7 @@ function renderToolAccessTab(): TemplateResult {
 								`)}
 							</select>
 							<span class="roles-access-group-hint">${(() => {
-								const groupDefault = groupPolicies[groupName] || "always-allow";
+								const groupDefault = groupPolicies[groupName] || "allow";
 								const label = POLICY_LABELS[groupDefault] || groupDefault;
 								return html`\u2192 ${label} [system default]`;
 							})()}</span>
