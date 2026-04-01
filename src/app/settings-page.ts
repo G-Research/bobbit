@@ -1539,7 +1539,11 @@ async function saveConfigDirs(customDirs: Array<{ path: string; types: string[] 
 	configDirsSaveStatus = "saving";
 	renderApp();
 	try {
-		const res = await gatewayFetch("/api/project-config", {
+		const scope = getActiveScope();
+		const endpoint = scope && scope !== "system"
+			? `/api/projects/${scope}/config`
+			: "/api/project-config";
+		const res = await gatewayFetch(endpoint, {
 			method: "PUT",
 			body: JSON.stringify({ config_directories: JSON.stringify(customDirs), skill_directories: null }),
 		});
@@ -1974,18 +1978,7 @@ function renderProjectScopeModelsTab(_projectId: string) {
 }
 
 function renderProjectScopeDirectoriesTab(_projectId: string) {
-	// For now, show the system directories tab content with a note
-	return html`
-		<div class="flex flex-col gap-4">
-			<p class="text-sm text-muted-foreground">
-				Config directories for this project. Currently inherits from System.
-			</p>
-			<p class="text-xs text-muted-foreground">
-				Per-project config directory overrides will be available in a future update. Configure directories in
-				<button class="text-primary hover:underline" @click=${() => setHashRoute("settings", "system/directories", true)}>System &rarr; Config Directories</button>.
-			</p>
-		</div>
-	`;
+	return renderDirectoriesTab();
 }
 
 function renderAppearanceTab(projectId: string) {
