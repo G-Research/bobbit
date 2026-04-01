@@ -278,12 +278,14 @@ Here's the typical flow for a team goal with a workflow:
 
 ## Storage
 
+State is per-project — each project has its own copies of these files in `<project-root>/.bobbit/state/`. The server aggregates across all projects via `ProjectContextManager`.
+
 | Location | What |
 |---|---|
 | `.bobbit/config/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
-| `.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
-| `.bobbit/state/gates.json` | Gate state and signal history |
-| `.bobbit/state/tasks.json` | Tasks with workflow gate links |
+| `<project>/.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
+| `<project>/.bobbit/state/gates.json` | Gate state and signal history |
+| `<project>/.bobbit/state/tasks.json` | Tasks with workflow gate links |
 
 ## Key source files
 
