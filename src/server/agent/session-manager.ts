@@ -1318,6 +1318,7 @@ export class SessionManager {
 			titleGenerated: true,
 			goalId: ps.goalId,
 			delegateOf: ps.delegateOf,
+			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 		});
 	}
@@ -1487,6 +1488,7 @@ export class SessionManager {
 			allowedTools: restoredAllowedTools,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
+			projectId: ps.projectId,
 		};
 
 		// Skip cost tracking during session restore (switch_session replays

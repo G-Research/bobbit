@@ -1501,7 +1501,7 @@ async function handleApiRoute(
 				json({ error: "Invalid project" }, 400);
 				return;
 			}
-			const targetGoalManager = new GoalManager(targetCtx.goalStore, workflowManager.store);
+			const targetGoalManager = targetCtx.goalManager;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
