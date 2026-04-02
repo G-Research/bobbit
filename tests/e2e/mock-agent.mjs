@@ -50,7 +50,7 @@ function respondToPrompt(text) {
 	if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
 		return {
 			tool: null,
-			text: `Here is a goal proposal:\n\n<goal_proposal>\n<title>E2E Test Goal</title>\n<workflow>general</workflow>\n<spec>\nThis is a test goal created via the assistant flow.\nIt validates the goal creation UI.\n</spec>\n</goal_proposal>`
+			text: `Here is a goal proposal:\n\n<goal_proposal>\n<title>E2E Test Goal</title>\n<workflow>general</workflow>\n<options>QA testing</options>\n<spec>\nThis is a test goal created via the assistant flow.\nIt validates the goal creation UI.\n</spec>\n</goal_proposal>`
 		};
 	}
 
