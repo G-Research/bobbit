@@ -1,7 +1,7 @@
 /**
  * E2E tests for scoped sandbox tokens.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { readE2EToken } from "./e2e-setup.js";
 
 function fetchWithToken(baseUrl: string, path: string, token: string, opts: RequestInit = {}): Promise<Response> {
