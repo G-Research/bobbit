@@ -196,12 +196,10 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 		}
 	}
 
-	// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
-	// Exclude native browser_* tools — playwright isn't in the Docker image;
+	// Exclude native browser_* tools for sandboxed sessions — playwright isn't in the Docker image;
 	// MCP playwright extension provides equivalent functionality.
 	if (plan.sandboxed && effectiveAllowedTools) {
 		const sandboxExcluded = new Set([
-			"bash_bg",
 			"browser_navigate", "browser_screenshot", "browser_click",
 			"browser_type", "browser_eval", "browser_wait",
 		]);

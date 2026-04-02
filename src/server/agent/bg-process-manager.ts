@@ -27,6 +27,8 @@ export interface BgProcess {
 	exitCode: number | null;
 	startTime: number;
 	cwd: string;
+	/** If set, process was spawned inside this Docker container */
+	containerId?: string;
 }
 
 export interface BgProcessInfo {
@@ -66,19 +68,30 @@ export class BgProcessManager {
 		}
 	}
 
-	create(sessionId: string, command: string, cwd: string): BgProcessInfo {
+	create(sessionId: string, command: string, cwd: string, containerId?: string): BgProcessInfo {
 		const id = `bg-${nextId++}`;
-		const { shell, args } = getShellConfig();
+		const { shell: hostShell, args: hostArgs } = getShellConfig();
 
-		const child = spawn(shell, [...args, command], {
-			cwd,
-			stdio: ["ignore", "pipe", "pipe"],
-			detached: true,
-			env: process.env,
-		});
+		// Inside the container: always /bin/sh, workspace at /workspace
+		const shell = containerId ? "/bin/sh" : hostShell;
+		const args = containerId ? ["-c"] : hostArgs;
+		const containerCwd = containerId ? "/workspace" : cwd;
 
-		// Unref so bg process doesn't prevent gateway from exiting
-		child.unref();
+		const child = containerId
+			? spawn("docker", ["exec", "-w", containerCwd, containerId, shell, ...args, command], {
+				stdio: ["ignore", "pipe", "pipe"],
+				detached: false, // docker exec manages the process
+				env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+			})
+			: spawn(shell, [...args, command], {
+				cwd,
+				stdio: ["ignore", "pipe", "pipe"],
+				detached: true,
+				env: process.env,
+			});
+
+		// Unref so bg process doesn't prevent gateway from exiting (host spawns only)
+		if (!containerId) child.unref();
 
 		const bg: BgProcess = {
 			id,
@@ -92,6 +105,7 @@ export class BgProcessManager {
 			exitCode: null,
 			startTime: Date.now(),
 			cwd,
+			containerId,
 		};
 
 		let logBytes = 0;
@@ -196,8 +210,11 @@ export class BgProcessManager {
 		if (!bg || bg.status !== "running") return false;
 
 		try {
-			// Kill the process group (detached processes get their own group)
-			if (bg.child.pid) {
+			if (bg.containerId) {
+				// Docker exec: kill the docker exec process on host, which signals the container process
+				try { bg.child.kill("SIGTERM"); } catch { /* ignore */ }
+			} else if (bg.child.pid) {
+				// Kill the process group (detached processes get their own group)
 				if (process.platform === "win32") {
 					// Windows: use taskkill to kill the tree
 					spawn("taskkill", ["/pid", String(bg.child.pid), "/T", "/F"], { stdio: "ignore" });

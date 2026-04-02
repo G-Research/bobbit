@@ -3932,7 +3932,7 @@ async function handleApiRoute(
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const body = await readBody(req);
 		if (!body?.command) { json({ error: "command is required" }, 400); return; }
-		const info = bgProcessManager.create(id, body.command, session.cwd);
+		const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId);
 		json(info, 201);
 		return;
 	}

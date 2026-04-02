@@ -83,12 +83,13 @@ test.describe("Sandbox Security Boundaries", () => {
 		expect(res.status).toBe(403);
 	});
 
-	test("bg-processes blocked on own session", async ({ gateway }) => {
+	test("bg-processes allowed on own session", async ({ gateway }) => {
 		const res = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, scopedToken, {
 			method: "POST",
 			body: JSON.stringify({ command: "echo hello" }),
 		});
-		expect(res.status).toBe(403);
+		// bg-processes are now allowed for sandbox tokens on own session (spawns via docker exec)
+		expect(res.status).toBe(201);
 	});
 
 	test("cannot access other sessions", async ({ gateway }) => {

@@ -31,10 +31,10 @@ export function isSandboxAllowed(
 		const subpath = sessionMatch[2] || "";
 		const isOwnOrChild = targetId === scope.sessionId || scope.childSessionIds.has(targetId);
 
-		// bg-processes: HARD BLOCK — BgProcessManager spawns on host, not in container
-		if (subpath.startsWith("/bg-processes")) return false;
-
 		if (!isOwnOrChild) return false;
+
+		// bg-processes: allowed for own session (spawns via docker exec inside container)
+		if (subpath.startsWith("/bg-processes")) return true;
 
 		if (m === "GET" && subpath === "") return true;       // session info
 		if (m === "PATCH" && subpath === "") return true;     // preview_open metadata

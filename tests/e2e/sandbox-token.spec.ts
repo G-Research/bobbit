@@ -119,9 +119,13 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/sessions", "GET", scope)).toBe(false);
 		expect(isSandboxAllowed("/api/mcp-servers", "GET", scope)).toBe(false);
 
-		// bg-processes — sandbox escape vector
-		expect(isSandboxAllowed("/api/sessions/s1/bg-processes", "POST", scope)).toBe(false);
-		expect(isSandboxAllowed("/api/sessions/s1/bg-processes/pid/logs", "GET", scope)).toBe(false);
+		// bg-processes — allowed on own session (runs via docker exec inside container)
+		expect(isSandboxAllowed("/api/sessions/s1/bg-processes", "POST", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/sessions/s1/bg-processes/pid/logs", "GET", scope)).toBe(true);
+
+		// bg-processes — blocked on OTHER session
+		expect(isSandboxAllowed("/api/sessions/other/bg-processes", "POST", scope)).toBe(false);
+		expect(isSandboxAllowed("/api/sessions/other/bg-processes/pid/logs", "GET", scope)).toBe(false);
 
 		// Other session
 		expect(isSandboxAllowed("/api/sessions/other", "GET", scope)).toBe(false);

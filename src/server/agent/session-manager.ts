@@ -1462,10 +1462,7 @@ export class SessionManager {
 		if (ps.role && this.roleManager) {
 			const role = this.roleManager.getRole(ps.role);
 			let effectiveAllowed = overrideAllowedTools ?? this.resolveEffectiveAllowedTools(role);
-			// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
-			if (ps.sandboxed && effectiveAllowed.length > 0) {
-				effectiveAllowed = effectiveAllowed.filter(t => t !== "bash_bg");
-			}
+			// (bash_bg now supported in sandbox — spawns via docker exec)
 			if (effectiveAllowed.length > 0) {
 				const toolArgs = this.buildToolActivationArgs(ps.id, effectiveAllowed, role, ps.cwd);
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
