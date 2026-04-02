@@ -77,9 +77,9 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/tasks/:id` | Get a task |
-| `PUT` | `/api/tasks/:id` | Update a task (title, spec, state, assignedSessionId, dependsOn) |
+| `PUT` | `/api/tasks/:id` | Update a task (title, spec, state, assignedSessionId, dependsOn, headSha, baseSha, branch, resultSummary) |
 | `DELETE` | `/api/tasks/:id` | Delete a task |
-| `POST` | `/api/tasks/:id/assign` | Assign a task to a session (`{ sessionId }`) |
+| `POST` | `/api/tasks/:id/assign` | Assign a task to a session (`{ sessionId }`). Auto-populates `baseSha` and `branch` from the agent's `TeamAgent` record if available |
 | `POST` | `/api/tasks/:id/transition` | Transition task state (`{ state }`) |
 | `GET` | `/api/tasks/:id/cost` | Cost for the session assigned to a task |
 

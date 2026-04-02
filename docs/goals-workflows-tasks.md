@@ -151,6 +151,31 @@ Tasks can declare:
 - **`workflowGateId`** — which workflow gate this task should produce output for
 - **`inputGateIds`** — which workflow gate IDs to inject as context when prompting the assigned agent
 
+#### Git handoff fields
+
+Tasks carry structured git fields that enable local-only merges between agents, eliminating the need for PR-based inter-agent handoffs:
+
+- **`baseSha`** — the commit the agent started from. Auto-populated by the system when a task is assigned to a spawned agent (resolved from `git rev-parse HEAD` in the agent's worktree).
+- **`headSha`** — the tip of the agent's finished work. Set by the agent on completion via `task_update(head_sha="...")`.
+- **`branch`** — the agent's working branch name. Auto-populated by the system from the `TeamAgent` record when a task is assigned.
+
+These fields replace the old `commitSha` field, which was a single optional field with ambiguous semantics. The `baseSha` + `headSha` pair precisely defines the agent's changeset, and `branch` gives the team lead a direct local ref to merge from.
+
+**Why local merges?** Agents work in co-located git worktrees on the same machine. Routing merges through origin (via PRs) added latency, created orphaned PRs, and introduced a fragile parsing step where the team lead had to extract branch names from free-text summaries. Local merges are instant and deterministic.
+
+#### Git handoff lifecycle
+
+| When | Who | What |
+|------|-----|------|
+| `team_spawn` | System | Auto-populates `baseSha` (HEAD at spawn) and `branch` (agent's branch name) on the `TeamAgent` record |
+| Task assignment | System | Copies `baseSha` and `branch` from the `TeamAgent` to the assigned task |
+| Agent works | Agent | Commits normally on its branch |
+| Agent finishes | Agent | `task_update(state="complete", head_sha="$(git rev-parse HEAD)", result_summary="...")` |
+| Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
+| Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
+
+Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
+
 Tasks and workflows are complementary layers:
 - **Workflows** = quality layer (what gates to pass, in what order, with what verification)
 - **Tasks** = operational layer (who's doing what, status tracking, assignment)
