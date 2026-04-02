@@ -70,12 +70,18 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	const baseHostArgs = ["--add-host=host.docker.internal:host-gateway"];
 
+	// Resource limits — prevent containers from consuming all host resources
+	baseHostArgs.push("--memory=4g");
+	baseHostArgs.push("--cpus=2");
+	baseHostArgs.push("--pids-limit=256");
+
 	// Attach to a restricted Docker network for sandboxed containers
 	if (sandboxNetwork) {
 		baseHostArgs.push(`--network=${sandboxNetwork}`);
 		// Black-hole cloud metadata endpoints (defense-in-depth)
 		baseHostArgs.push("--add-host=metadata.google.internal:0.0.0.0");
 		baseHostArgs.push("--add-host=metadata.internal:0.0.0.0");
+		baseHostArgs.push("--add-host=169.254.169.254:0.0.0.0");
 	}
 
 	const args: string[] = mode === "pool"
