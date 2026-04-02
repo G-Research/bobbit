@@ -145,6 +145,7 @@ export default function (pi: ExtensionAPI) {
 			const base64 = buffer.toString("base64");
 			const url = await p.url();
 			const title = await p.title();
+			const savedTo = params.savePath ? path.resolve(params.savePath) : undefined;
 
 			return {
 				content: [
@@ -153,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 						mimeType: "image/png" as const,
 						data: base64,
 					},
-					{ type: "text", text: `Screenshot of ${url} (${title})${params.savePath ? ` — saved to ${params.savePath}` : ""}` },
+					{ type: "text", text: `Screenshot of ${url} (${title})${savedTo ? ` — saved to ${savedTo}` : ""}` },
 				],
 				details: {},
 			};
