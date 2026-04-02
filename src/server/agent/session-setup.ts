@@ -188,7 +188,7 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 
 	// Fall back to general role's allowed tools
 	if ((!effectiveAllowedTools || effectiveAllowedTools.length === 0) && ctx.roleManager) {
-		const generalRole = ctx.roleManager.getRole("general");
+		const generalRole = ctx.roleManager.getRole(plan.roleName || "general");
 		if (generalRole && ctx.toolManager) {
 			effectiveAllowedTools = computeEffectiveAllowedTools(
 				ctx.toolManager, generalRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
