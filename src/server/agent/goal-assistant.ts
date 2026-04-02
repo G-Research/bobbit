@@ -73,6 +73,7 @@ When ready, output a structured proposal block in EXACTLY this format:
 <goal_proposal>
 <title>Short 2-5 word title (must be under 29 characters)</title>
 <workflow>workflow-id</workflow>
+<options>QA testing</options>
 <spec>
 Markdown spec content. Include:
 - Brief description of what needs to be done
@@ -83,6 +84,8 @@ Markdown spec content. Include:
 </goal_proposal>
 
 The \`<workflow>\` tag should contain the workflow ID (e.g. \`general\`, \`feature\`, or \`bug-fix\`).
+
+The \`<options>\` tag is optional. Use comma-separated step names matching optional steps in the workflow to pre-enable them (e.g. \`QA testing\`).
 
 Keep the spec focused and actionable — it will be injected into every coding agent session's context window for this goal. Don't pad it with generic advice. Every line should be specific to THIS goal.
 
