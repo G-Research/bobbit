@@ -121,10 +121,6 @@ gates:
 
           Rules for scenario selection:
           - Only include things verifiable through a browser (clicks, navigation, visual states)
-          - Only include things a user can trigger in a FRESH environment with no existing data.
-            You are testing in an empty ephemeral server. If a feature requires pre-existing
-            goals, completed verifications, or multi-step workflows to appear, it cannot be
-            QA-tested here — mark it SKIPPED in your plan with the reason.
           - Exclude API-only behavior, code quality, performance (covered by automated tests)
           - Each scenario is one specific sentence — what to do and what to check
           - Core happy path first, edge cases last
