@@ -17,6 +17,7 @@ export interface WorkflowGate {
 	dependsOn: string[];
 	content?: boolean;
 	injectDownstream?: boolean;
+	optional?: boolean;
 	metadata?: Record<string, string>;
 	verify?: VerifyStep[];
 }
@@ -106,6 +107,7 @@ export class WorkflowStore {
 		};
 		if (data.content === true) gate.content = true;
 		if (data.inject_downstream === true || data.injectDownstream === true) gate.injectDownstream = true;
+		if (data.optional === true) gate.optional = true;
 		if (data.metadata && typeof data.metadata === "object") {
 			gate.metadata = data.metadata as Record<string, string>;
 		}
@@ -142,6 +144,7 @@ export class WorkflowStore {
 					};
 					if (g.content) out.content = true;
 					if (g.injectDownstream) out.inject_downstream = true;
+					if (g.optional) out.optional = true;
 					if (g.dependsOn && g.dependsOn.length > 0) out.depends_on = g.dependsOn;
 					if (g.metadata) out.metadata = g.metadata;
 					if (g.verify && g.verify.length > 0) {
