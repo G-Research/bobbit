@@ -94,6 +94,26 @@ gates:
           4. Secrets handling — no hardcoded secrets, tokens, or credentials
           5. Dependency risks — any new dependencies with known vulnerabilities?
 
+      - name: "QA testing"
+        type: agent-qa
+        phase: 2
+        optional: true
+        label: "Enable QA Testing"
+        prompt: |
+          You are performing QA testing for this goal. Use the /qa-test skill to stand up
+          an ephemeral environment and drive browser-based testing scenarios.
+
+          Goal specification:
+          {{goal_spec}}
+
+          Focus on testing the user-facing changes described in the goal spec.
+          If the project does not have qa_start_command configured, emit
+          <verdict>pass</verdict> with a note that QA testing is not configured.
+
+          After completing all scenarios, emit:
+          1. A <verdict>pass</verdict> or <verdict>fail</verdict> tag based on results
+          2. A <qa_report>...HTML report...</qa_report> block containing the self-contained HTML report with embedded screenshots
+
   - id: qa-testing
     name: QA Testing
     depends_on: [implementation]
