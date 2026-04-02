@@ -48,9 +48,10 @@ test.describe("Settings (full-stack UI)", () => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
 
-		// Wait for the General tab to load with the timestamps checkbox
+		// Wait for the General tab content to fully render
+		await expect(page.getByText("Show message timestamps")).toBeVisible({ timeout: 10_000 });
 		const checkbox = page.locator("input[type='checkbox']").first();
-		await expect(checkbox).toBeVisible({ timeout: 10_000 });
+		await expect(checkbox).toBeVisible({ timeout: 5_000 });
 
 		// Get the current state of the checkbox
 		const wasChecked = await checkbox.isChecked();

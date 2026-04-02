@@ -55,11 +55,13 @@ test.describe("Session interactions (UI)", () => {
 		await sendMessage(page, "About to be terminated");
 		await waitForAgentResponse(page);
 
-		// Get the session ID from the URL hash
+		// Wait for the URL hash to contain a session ID
+		await expect(async () => {
+			const h = await page.evaluate(() => window.location.hash);
+			expect(h).toMatch(/#\/session\/[a-f0-9-]+/i);
+		}).toPass({ timeout: 5_000 });
 		const hash = await page.evaluate(() => window.location.hash);
-		const sessionIdMatch = hash.match(/#\/session\/([a-f0-9-]+)/i);
-		expect(sessionIdMatch).toBeTruthy();
-		const sessionId = sessionIdMatch![1];
+		const sessionId = hash.match(/#\/session\/([a-f0-9-]+)/i)![1];
 
 		// Wait for idle before deleting
 		await waitForSessionStatus(sessionId, "idle");
