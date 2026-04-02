@@ -584,6 +584,19 @@ export function createGateway(config: GatewayConfig) {
 				console.error("[verification] Error resuming interrupted verifications:", err);
 			});
 
+			// Port 0 = let OS assign a free port; skip the auto-increment loop
+			if (config.port === 0) {
+				await new Promise<void>((resolve, reject) => {
+					server.once("error", reject);
+					server.listen(0, config.host, () => {
+						server.removeListener("error", reject);
+						resolve();
+					});
+				});
+				const addr = server.address() as import("node:net").AddressInfo;
+				return addr.port;
+			}
+
 			const maxPort = config.portExplicit !== false ? config.port : config.port + 9;
 			let port = config.port;
 
