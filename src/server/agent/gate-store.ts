@@ -11,6 +11,11 @@ export interface GateSignalStep {
 	output: string;
 	duration_ms: number;
 	expect?: "success" | "failure";
+	artifact?: {
+		content: string;
+		contentType: string;
+		metadata?: Record<string, string>;
+	};
 }
 
 export interface GateSignal {
