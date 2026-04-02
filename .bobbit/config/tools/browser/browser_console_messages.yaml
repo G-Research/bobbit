@@ -1,0 +1,105 @@
+name: browser_console_messages
+description: "Return console messages from the current page"
+summary: "Return buffered console messages (errors, warnings, logs) from the current browser page."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Browser
+docs: |-
+  Captures console.log/error/warn/info output since page load. Filter by level (log, error, warning, info, debug). Use clear=true to reset buffer.
+detail_docs: >-
+  ## Purpose
+
+
+  Return console messages that have been captured from the browser page since it
+  was opened or since the buffer was last cleared. Essential for QA agents to
+  catch silent JavaScript errors, warnings, and debug output without needing to
+  open browser DevTools.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `level` | string | No | Filter messages by level. Matches Playwright's
+  raw `ConsoleMessage.type()`: `"log"`, `"error"`, `"warning"`, `"info"`,
+  `"debug"`, `"trace"`. If omitted, returns all messages. |
+
+  | `clear` | boolean | No | If `true`, clears the message buffer after
+  returning results. Default `false`. |
+
+
+  ## When to Use
+
+
+  - **Catching JavaScript errors** — filter by `level="error"` to find uncaught
+  exceptions and console.error calls.
+
+  - **Debugging test failures** — check console output for clues about why a
+  page isn't behaving as expected.
+
+  - **Verifying logging behavior** — confirm that expected log messages appear
+  during user interactions.
+
+  - **QA health checks** — scan for warnings and errors after page load.
+
+
+  ## When NOT to Use
+
+
+  - **Monitoring network requests** — console messages don't include network
+  traffic. Use `browser_eval` with the Performance API instead.
+
+  - **Getting page content** — use `browser_snapshot` or `browser_eval`.
+
+
+  ## Examples
+
+
+  ```
+
+  # Get all console messages
+
+  browser_console_messages()
+
+
+  # Get only errors
+
+  browser_console_messages(level="error")
+
+
+  # Get warnings and clear the buffer
+
+  browser_console_messages(level="warning", clear=true)
+
+
+  # Clear all messages without reading (pass clear=true)
+
+  browser_console_messages(clear=true)
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Playwright console types are distinct** — `console.log()` produces level
+  `"log"`, while `console.info()` produces `"info"`. These are NOT the same
+  despite similar behavior. The `level` filter matches the raw Playwright type
+  string.
+
+  - **Buffer is capped at 1000 messages** — oldest messages are dropped when
+  the cap is reached (FIFO). Clear periodically on chatty pages.
+
+  - **Buffer survives navigation** — messages persist across in-page
+  navigations (e.g. `browser_navigate` to a new URL). Use `clear=true` to reset
+  between test steps if needed.
+
+  - **Messages are captured from page load** — the listener is attached when the
+  page is created. Messages before the listener attachment are not captured.
+
+  - **Each message includes** — `level` (type string), `text` (message
+  content), `url` (source URL), `timestamp` (epoch ms).

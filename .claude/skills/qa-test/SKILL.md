@@ -10,7 +10,10 @@ You are running QA testing for a goal. This protocol stands up an isolated copy 
 
 ## Prerequisites
 
-- You need browser tools available. **Use the non-MCP browser tools** (`browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`, `browser_wait`) — NOT the `mcp__playwright__*` tools. The MCP Playwright browser is a single shared instance across all sessions — other agents and the dev server will hijack your page. The non-MCP browser tools give you an isolated browser instance.
+- You need browser tools available. **Use the native browser tools** — NOT the `mcp__playwright__*` tools. The MCP Playwright browser is a single shared instance across all sessions — other agents and the dev server will hijack your page. The native browser tools give you an isolated browser instance per session.
+- **Available native browser tools:** `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`, `browser_wait`, `browser_snapshot`, `browser_console_messages`, `browser_press_key`, `browser_hover`, `browser_select_option`, `browser_resize`
+- **`browser_snapshot`** is the best way to understand page structure — it returns an ARIA accessibility tree with element roles, names, and refs. Use it instead of screenshots when you need to find interactive elements or verify page content.
+- **`browser_console_messages`** captures JS console output. Call with `level="error"` after each navigation to catch silent errors.
 - The project must have `qa_*` keys in `.bobbit/config/project.yaml`
 
 ## Step 1: Read Configuration
@@ -102,21 +105,33 @@ If the server doesn't become healthy after 60 seconds, document the failure and 
 
 Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it using `browser_navigate` (NOT `mcp__playwright__browser_navigate`).
 
-**IMPORTANT — Use the non-MCP browser tools only:**
+**IMPORTANT — Use the native browser tools only:**
 - `browser_navigate(url=...)` — navigate to your ephemeral server
 - `browser_screenshot(savePath="...")` — take screenshots
+- `browser_snapshot()` — get ARIA accessibility tree (best for finding elements)
 - `browser_click(selector=...)` — click elements
 - `browser_type(selector=..., text=...)` — type into inputs
 - `browser_eval(expression=...)` — run JavaScript on page
 - `browser_wait(selector=...)` — wait for elements
+- `browser_press_key(key=...)` — press keyboard keys (Enter, Tab, Escape, etc.)
+- `browser_hover(selector=...)` — hover over elements (tooltips, dropdowns)
+- `browser_select_option(selector=..., value=...)` — select dropdown options
+- `browser_resize(width=..., height=...)` — resize viewport for responsive testing
+- `browser_console_messages(level=...)` — check for JS errors
 
 Do NOT use `mcp__playwright__*` tools — they share a single browser instance across all sessions and the dev server WILL hijack your page mid-test.
 
-**After each navigation or significant interaction**, verify you're still on the right URL:
-```
-browser_eval(expression="window.location.href")
-```
-If the URL doesn't match your ephemeral server (check the port), re-navigate immediately.
+**After each navigation or significant interaction:**
+1. Verify you're still on the right URL:
+   ```
+   browser_eval(expression="window.location.href")
+   ```
+   If the URL doesn't match your ephemeral server (check the port), re-navigate immediately.
+2. Check for JS errors:
+   ```
+   browser_console_messages(level="error")
+   ```
+   Log any errors in your scenario results — silent JS failures are common QA findings.
 
 For each scenario from your task prompt (respecting `qa_max_scenarios`):
 

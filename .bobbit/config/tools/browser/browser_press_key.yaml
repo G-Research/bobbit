@@ -1,0 +1,113 @@
+name: browser_press_key
+description: "Press a keyboard key"
+summary: "Press a keyboard key (Enter, Tab, Escape, etc.) in the current browser page."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Browser
+docs: |-
+  Supports single keys (Enter, Tab, Escape) and combinations (Control+A, Shift+Tab). Key names follow Playwright's key naming.
+detail_docs: >-
+  ## Purpose
+
+
+  Press a single key or key combination on the keyboard. Dispatches keydown,
+  keypress, and keyup events to the currently focused element. Useful for form
+  submission, keyboard navigation, triggering shortcuts, and interacting with
+  elements that respond to keyboard input.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `key` | string | **Yes** | Key to press. Single keys: `"Enter"`, `"Tab"`,
+  `"Escape"`, `"Backspace"`, `"ArrowDown"`, `"ArrowUp"`, `"Space"`, `"Delete"`.
+  Combinations: `"Control+A"`, `"Shift+Tab"`, `"Meta+C"`. |
+
+
+  ## When to Use
+
+
+  - **Form submission** — press Enter to submit a form after filling fields.
+
+  - **Keyboard navigation** — Tab between form fields, Arrow keys in menus.
+
+  - **Keyboard shortcuts** — trigger Ctrl+A (select all), Escape (close
+  modal), etc.
+
+  - **Dropdown interaction** — open and navigate select menus with Arrow keys.
+
+  - **Dismissing dialogs** — press Escape to close modals or popups.
+
+
+  ## When NOT to Use
+
+
+  - **Typing text into inputs** — use `browser_type` for text entry. This tool
+  is for single key presses, not sequences of characters.
+
+  - **Clicking elements** — use `browser_click` for mouse interactions.
+
+
+  ## Examples
+
+
+  ```
+
+  # Submit a form
+
+  browser_type(selector="#search-input", text="query")
+
+  browser_press_key(key="Enter")
+
+
+  # Tab to next field
+
+  browser_press_key(key="Tab")
+
+
+  # Close a modal
+
+  browser_press_key(key="Escape")
+
+
+  # Select all text
+
+  browser_press_key(key="Control+A")
+
+
+  # Navigate a dropdown
+
+  browser_press_key(key="ArrowDown")
+
+  browser_press_key(key="ArrowDown")
+
+  browser_press_key(key="Enter")
+
+
+  # Shift-Tab to previous field
+
+  browser_press_key(key="Shift+Tab")
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Key names are case-sensitive** — use `"Enter"` not `"enter"`, `"Tab"` not
+  `"tab"`. Follow Playwright's
+  [key naming](https://playwright.dev/docs/api/class-keyboard#keyboard-press).
+
+  - **Combinations use `+`** — `"Control+A"`, `"Shift+Tab"`, `"Meta+C"`. The
+  modifier is held during the key press.
+
+  - **Events go to focused element** — if no element is focused, events go to
+  the document body. Use `browser_click` to focus an element first if needed.
+
+  - **Single key press only** — this dispatches one press. For repeated presses,
+  call the tool multiple times.
