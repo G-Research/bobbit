@@ -7,7 +7,7 @@ import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
-import type { WorkflowGate } from "./workflow-store.js";
+import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
 import { GIT_BASH, getShellConfig } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
@@ -150,6 +150,64 @@ export class VerificationHarness {
 		console.log("[verification] Finished resuming interrupted verifications.");
 	}
 
+	/**
+	 * Look up the original VerifyStep definition from the goal's snapshotted workflow.
+	 * Returns undefined if not found (goal deleted, workflow missing, etc.).
+	 */
+	private _findStepDefinition(goalId: string, gateId: string, stepName: string): VerifyStep | undefined {
+		const goal = this.sessionManager?.goalManager?.getGoal(goalId);
+		if (!goal?.workflow?.gates) return undefined;
+		const gate = goal.workflow.gates.find((g: any) => g.id === gateId);
+		if (!gate?.verify) return undefined;
+		return gate.verify.find((s: any) => s.name === stepName);
+	}
+
+	/**
+	 * Gather the context needed to re-run an LLM review step from scratch.
+	 * Returns null if context is unavailable (goal deleted, etc.).
+	 */
+	private _gatherRerunContext(goalId: string, gateId: string, signalId: string): {
+		signal: GateSignal;
+		cwd: string;
+		builtinVars: Record<string, string>;
+		goalSpec?: string;
+		allGateStates: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>;
+	} | null {
+		const goal = this.sessionManager?.goalManager?.getGoal(goalId);
+		if (!goal) return null;
+
+		const gateStore = this.resolveGateStore(goalId);
+		const gateState = gateStore.getGate(goalId, gateId);
+		if (!gateState) return null;
+
+		const signal = gateState.signals.find(s => s.id === signalId);
+		if (!signal) return null;
+
+		const cwd = goal.worktreePath || goal.cwd;
+		const builtinVars: Record<string, string> = {
+			branch: goal.branch || "HEAD",
+			master: "master",
+			cwd,
+			goal_spec: goal.spec || "",
+			commit: signal.commitSha || "HEAD",
+		};
+
+		// Build allGateStates for variable substitution
+		const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
+		const allGates = gateStore.getGatesForGoal(goalId);
+		for (const g of allGates) {
+			const gateDef = goal.workflow?.gates?.find((wg: any) => wg.id === g.gateId);
+			allGateStates.set(g.gateId, {
+				metadata: g.currentMetadata,
+				content: g.currentContent,
+				status: g.status,
+				injectDownstream: gateDef?.injectDownstream,
+			});
+		}
+
+		return { signal, cwd, builtinVars, goalSpec: goal.spec, allGateStates };
+	}
+
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
 		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; output: string; duration_ms: number }> = [];
 
@@ -166,8 +224,24 @@ export class VerificationHarness {
 				continue;
 			}
 
-			// Step was running — try to resume
-			if (!step.sessionId) {
+			// Step was running — try to resume from the existing session first
+			let resumeResult = await this._tryResumeFromSession(v, step);
+
+			// If resume failed with a transient error and this is an llm-review step,
+			// re-run from scratch rather than giving up
+			if (resumeResult && !resumeResult.passed && step.type === "llm-review" && isTransientReviewError(resumeResult.output)) {
+				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
+				const rerunResult = await this._rerunLlmReviewStep(v.goalId, v.gateId, v.signalId, step.name);
+				if (rerunResult) {
+					resumeResult = rerunResult;
+				}
+				// If rerun context unavailable, fall through with the original transient failure
+			}
+
+			if (resumeResult) {
+				resolvedSteps.push(resumeResult);
+			} else {
+				// No session and not an llm-review — cannot recover
 				resolvedSteps.push({
 					name: step.name,
 					type: step.type,
@@ -175,85 +249,6 @@ export class VerificationHarness {
 					output: "Step was running but had no session ID — cannot resume after restart.",
 					duration_ms: Date.now() - step.startedAt,
 				});
-				continue;
-			}
-
-			const session = this.sessionManager?.getSession(step.sessionId);
-			if (!session) {
-				resolvedSteps.push({
-					name: step.name,
-					type: step.type,
-					passed: false,
-					output: "Session lost during server restart.",
-					duration_ms: Date.now() - step.startedAt,
-				});
-				continue;
-			}
-
-			// Re-register reviewer session in team store so team_list shows it
-			if (this.teamManager) {
-				try {
-					this.teamManager.registerReviewerSession(v.goalId, step.sessionId, step.name);
-				} catch { /* ignore — non-fatal */ }
-			}
-
-			// If the agent was mid-turn when the server died, it may have been
-			// re-prompted to continue by restoreSession(). Wait for it to finish
-			// its current turn before trying to read output.
-			try {
-				await this.sessionManager!.waitForIdle(step.sessionId, 180_000);
-			} catch (err) {
-				console.warn(`[verification] waitForIdle failed for resumed session ${step.sessionId}: ${(err as Error).message}`);
-			}
-
-			// Session exists — try to extract verdict from existing output
-			let output = "";
-			try {
-				output = await this.sessionManager!.getSessionOutput(step.sessionId);
-			} catch {
-				// Fall through to follow-up
-			}
-
-			let verdict = parseVerdict(output);
-			if (verdict === null) {
-				// No verdict yet — send follow-up prompt
-				console.log(`[verification] No verdict in restored session ${step.sessionId}, sending follow-up...`);
-				try {
-					await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
-					await this.sessionManager!.waitForIdle(step.sessionId, 120_000);
-					output = await this.sessionManager!.getSessionOutput(step.sessionId);
-					verdict = parseVerdict(output);
-				} catch (err) {
-					output = output || `Follow-up failed: ${(err as Error).message}`;
-				}
-			}
-
-			if (verdict === null) {
-				resolvedSteps.push({
-					name: step.name,
-					type: step.type,
-					passed: false,
-					output: output || "No <verdict> tag found after server restart and follow-up.",
-					duration_ms: Date.now() - step.startedAt,
-				});
-			} else {
-				resolvedSteps.push({
-					name: step.name,
-					type: step.type,
-					passed: verdict,
-					output,
-					duration_ms: Date.now() - step.startedAt,
-				});
-			}
-
-			// Terminate and unregister reviewer session
-			try {
-				await this.sessionManager!.terminateSession(step.sessionId);
-			} catch { /* ignore */ }
-			if (this.teamManager) {
-				try {
-					await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId);
-				} catch { /* ignore */ }
 			}
 		}
 
@@ -284,6 +279,125 @@ export class VerificationHarness {
 		this.notifyTeamLead(v.goalId, v.gateId, status);
 
 		console.log(`[verification] Resumed verification ${v.signalId}: ${status}`);
+	}
+
+	/**
+	 * Try to resume an llm-review step from its existing session.
+	 * Returns the step result, or null if no session exists.
+	 */
+	private async _tryResumeFromSession(
+		v: ActiveVerification,
+		step: ActiveVerification["steps"][number],
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+		if (!step.sessionId) return null;
+
+		const session = this.sessionManager?.getSession(step.sessionId);
+		if (!session) {
+			// Session lost — return transient failure so caller can re-run
+			return {
+				name: step.name, type: step.type, passed: false,
+				output: "Session lost during server restart.",
+				duration_ms: Date.now() - step.startedAt,
+			};
+		}
+
+		// Re-register reviewer session in team store so team_list shows it
+		if (this.teamManager) {
+			try { this.teamManager.registerReviewerSession(v.goalId, step.sessionId, step.name); } catch { /* ignore */ }
+		}
+
+		// Wait for the agent to finish if it was mid-turn
+		try {
+			await this.sessionManager!.waitForIdle(step.sessionId, 180_000);
+		} catch (err) {
+			console.warn(`[verification] waitForIdle failed for resumed session ${step.sessionId}: ${(err as Error).message}`);
+		}
+
+		// Extract verdict from output
+		let output = "";
+		try { output = await this.sessionManager!.getSessionOutput(step.sessionId); } catch { /* fall through */ }
+
+		let verdict = parseVerdict(output);
+		if (verdict === null) {
+			console.log(`[verification] No verdict in restored session ${step.sessionId}, sending follow-up...`);
+			try {
+				await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
+				await this.sessionManager!.waitForIdle(step.sessionId, 120_000);
+				output = await this.sessionManager!.getSessionOutput(step.sessionId);
+				verdict = parseVerdict(output);
+			} catch (err) {
+				output = output || `Follow-up failed: ${(err as Error).message}`;
+			}
+		}
+
+		// Terminate and unregister reviewer session
+		try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
+		if (this.teamManager) {
+			try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
+		}
+
+		return {
+			name: step.name, type: step.type,
+			passed: verdict ?? false,
+			output: output || "No <verdict> tag found after server restart and follow-up.",
+			duration_ms: Date.now() - step.startedAt,
+		};
+	}
+
+	/**
+	 * Re-run an LLM review step from scratch — used when resume fails transiently.
+	 * Looks up the original step definition from the goal's workflow and runs with
+	 * full retry logic (3 attempts with backoff).
+	 */
+	private async _rerunLlmReviewStep(
+		goalId: string, gateId: string, signalId: string, stepName: string,
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+			return { name: stepName, type: "llm-review", passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
+		}
+
+		const stepDef = this._findStepDefinition(goalId, gateId, stepName);
+		if (!stepDef) {
+			console.warn(`[verification] Cannot re-run "${stepName}" — step definition not found in workflow`);
+			return null;
+		}
+
+		const ctx = this._gatherRerunContext(goalId, gateId, signalId);
+		if (!ctx) {
+			console.warn(`[verification] Cannot re-run "${stepName}" — goal/signal context unavailable`);
+			return null;
+		}
+
+		const startedAt = Date.now();
+		const maxAttempts = 3;
+		let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "Re-run failed." };
+
+		// Resolve project vars and substitute the prompt template
+		const projectVars: Record<string, string> = this.projectConfigStore
+			? this.projectConfigStore.getWithDefaults()
+			: {};
+		const agentVars: Record<string, string> = ctx.signal.metadata || {};
+		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
+
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			result = await this.runLlmReviewStep(
+				{ name: stepDef.name, prompt, timeout: stepDef.timeout },
+				ctx.cwd, ctx.builtinVars,
+				ctx.signal.content, ctx.signal.metadata,
+				ctx.goalSpec, ctx.allGateStates, goalId,
+			);
+			if (result.passed || !isTransientReviewError(result.output) || attempt === maxAttempts) break;
+			const delayMs = 2000 * Math.pow(2, attempt - 1);
+			console.log(`[verification] Re-run "${stepName}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+			await new Promise(r => setTimeout(r, delayMs));
+		}
+
+		return {
+			name: stepName, type: "llm-review",
+			passed: result.passed,
+			output: result.output,
+			duration_ms: Date.now() - startedAt,
+		};
 	}
 
 	private readonly _stateDir: string;
