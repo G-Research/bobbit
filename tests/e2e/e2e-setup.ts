@@ -269,6 +269,55 @@ export function statusPredicate(status: string): (m: WsMsg) => boolean {
 	return (m) => m.type === "session_status" && m.status === status;
 }
 
+/** Predicate: wait for gate_status_changed with specific gate and status. */
+export function gateStatusPredicate(gateId: string, status: string): (m: WsMsg) => boolean {
+	return (m) => m.type === "gate_status_changed" && (m as any).gateId === gateId && (m as any).status === status;
+}
+
+/** Connect a WS and subscribe to goal broadcasts. */
+export async function connectGoalWs(sessionId: string, goalId: string): Promise<WsConnection> {
+	const conn = await connectWs(sessionId);
+	conn.send({ type: "subscribe_goal", goalId });
+	return conn;
+}
+
+/** Create a lightweight session for WS event observation (no agent). */
+export async function createObserverSession(): Promise<string> {
+	const res = await apiFetch("/api/sessions", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ title: "__e2e_observer__" }),
+	});
+	const data = await res.json();
+	return data.id;
+}
+
+/**
+ * Wait for a gate to reach target status via WebSocket subscription.
+ * Returns the full gate object on success; throws on timeout.
+ */
+export async function waitForGateStatus(
+	goalId: string,
+	gateId: string,
+	targetStatus: string,
+	wsSessionId: string,
+	timeoutMs = 15_000,
+): Promise<any> {
+	// Check current status first (gate may already be in target state)
+	const res0 = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
+	const current = await res0.json();
+	if (current.status === targetStatus) return current;
+
+	const conn = await connectGoalWs(wsSessionId, goalId);
+	try {
+		await conn.waitFor(gateStatusPredicate(gateId, targetStatus), timeoutMs);
+		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
+		return await res.json();
+	} finally {
+		conn.close();
+	}
+}
+
 /** Predicate: wait for a queue_update with a specific queue length. */
 export function queueLenPredicate(len: number): (m: WsMsg) => boolean {
 	return (m) => m.type === "queue_update" && m.queue !== undefined && m.queue.length === len;
@@ -304,26 +353,29 @@ export async function waitForHealth(timeoutMs = 10_000): Promise<void> {
 }
 
 /**
- * Poll a session's status until it matches the target.
- * Replaces fixed `setTimeout` waits and manual poll loops.
+ * Wait for a session to reach the target status via WebSocket subscription.
+ * Checks current status first via HTTP (fast path if already reached).
  */
 export async function waitForSessionStatus(
 	sessionId: string,
 	targetStatus: string,
 	timeoutMs = 15_000,
 ): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		try {
-			const resp = await apiFetch(`/api/sessions/${sessionId}`);
-			if (resp.ok) {
-				const data = await resp.json();
-				if (data.status === targetStatus) return;
-			}
-		} catch {
-			// Session may not exist yet
+	// Check current status first via HTTP
+	try {
+		const resp = await apiFetch(`/api/sessions/${sessionId}`);
+		if (resp.ok) {
+			const data = await resp.json();
+			if (data.status === targetStatus) return;
 		}
-		await new Promise(r => setTimeout(r, 100));
+	} catch {
+		// Session may not exist yet
 	}
-	throw new Error(`Session ${sessionId} did not reach "${targetStatus}" within ${timeoutMs}ms`);
+
+	const conn = await connectWs(sessionId);
+	try {
+		await conn.waitFor(statusPredicate(targetStatus), timeoutMs);
+	} finally {
+		conn.close();
+	}
 }

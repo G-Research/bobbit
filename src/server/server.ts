@@ -399,6 +399,11 @@ export function createGateway(config: GatewayConfig) {
 						ws.send(data);
 						continue;
 					}
+					// Check explicit goal subscriptions (e.g. test observers)
+					if ((ws as any).subscribedGoals?.has(goalId)) {
+						ws.send(data);
+						continue;
+					}
 					// Session is associated with a different goal — skip it
 					if (session?.teamGoalId || session?.goalId) continue;
 				}

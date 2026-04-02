@@ -37,7 +37,8 @@ export type ClientMessage =
 	| { type: "task_delete"; taskId: string }
 	| { type: "summarize_goal_title"; goalTitle: string }
 	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" }
-	| { type: "deny_tool_permission"; toolName: string };
+	| { type: "deny_tool_permission"; toolName: string }
+	| { type: "subscribe_goal"; goalId: string };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =

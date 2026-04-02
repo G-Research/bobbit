@@ -433,6 +433,11 @@ export function handleWebSocketConnection(
 					sessionManager.denyToolPermission(sessionId, msg.toolName);
 					break;
 				}
+				case "subscribe_goal": {
+					(ws as any).subscribedGoals = (ws as any).subscribedGoals || new Set();
+					(ws as any).subscribedGoals.add(msg.goalId);
+					break;
+				}
 				case "ping":
 					send(ws, { type: "pong" });
 					break;
