@@ -110,12 +110,14 @@ let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 interface LiveVerification {
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: string; durationMs?: number; output?: string; liveOutput?: string; startedAt: number; sessionId?: string }>;
+	steps: Array<{ name: string; type: string; status: string; phase?: number; durationMs?: number; output?: string; liveOutput?: string; startedAt: number; sessionId?: string }>;
 	overallStatus: string;
+	currentPhase?: number;
 }
 let liveVerifications: Map<string, LiveVerification> = new Map();
 let liveVerifTimer: ReturnType<typeof setInterval> | null = null;
 let expandedLiveStepKeys: Set<string> = new Set();
+let expandedArtifactKeys: Set<string> = new Set();
 let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; stepName: string; liveOutput: string } | null = null;
 
 /** Current dashboard tab */
@@ -289,6 +291,7 @@ export function clearDashboardState(): void {
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	liveVerifications = new Map();
 	expandedLiveStepKeys = new Set();
+	expandedArtifactKeys = new Set();
 	dashboardModalStep = null;
 	stopLiveVerifTimer();
 }
@@ -433,11 +436,20 @@ function handleLiveVerificationEvent(e: Event) {
 			renderApp();
 			break;
 		}
+		case "gate_verification_phase_started": {
+			const entry = liveVerifications.get(key);
+			if (entry) {
+				entry.currentPhase = detail.phase;
+				renderApp();
+			}
+			break;
+		}
 		case "gate_verification_step_started": {
 			const entry = liveVerifications.get(key);
 			if (entry && entry.steps[detail.stepIndex]) {
 				entry.steps[detail.stepIndex] = {
 					...entry.steps[detail.stepIndex],
+					phase: detail.phase ?? entry.steps[detail.stepIndex].phase,
 					startedAt: detail.startedAt || entry.steps[detail.stepIndex].startedAt,
 					sessionId: detail.sessionId,
 				};
@@ -461,6 +473,7 @@ function handleLiveVerificationEvent(e: Event) {
 				...entry.steps[detail.stepIndex],
 				name: detail.stepName || entry.steps[detail.stepIndex].name,
 				status: detail.status,
+				phase: detail.phase ?? entry.steps[detail.stepIndex].phase,
 				durationMs: detail.durationMs,
 				output: detail.output,
 				sessionId: detail.sessionId ?? entry.steps[detail.stepIndex].sessionId,
@@ -1666,7 +1679,7 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 								<span>Passed (no verification)</span>
 							</div>`
 						: html`
-						${signal.verification.steps.map(step => html`
+						${signal.verification.steps.map((step, si) => html`
 							<div class="verify-step verify-step--${step.passed ? "pass" : "fail"}">
 								<div class="verify-step__header">
 									<span class="verify-step__icon">${step.passed ? "\u2713" : "\u2717"}</span>
@@ -1678,6 +1691,7 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 								${step.output ? html`
 									<div class="verify-step__output">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</div>
 								` : nothing}
+								${step.artifact ? renderStepArtifact(step.artifact, `${signal.id}:${si}`) : nothing}
 							</div>
 						`)}
 					`}
@@ -1717,6 +1731,54 @@ function formatStepDuration(ms: number): string {
 	return `${m}m ${s}s`;
 }
 
+function toggleArtifactExpand(key: string): void {
+	if (expandedArtifactKeys.has(key)) {
+		expandedArtifactKeys.delete(key);
+	} else {
+		expandedArtifactKeys.add(key);
+	}
+	renderApp();
+}
+
+function renderStepArtifact(artifact: { content: string; contentType: string; metadata?: Record<string, string> }, key: string): TemplateResult {
+	const isExpanded = expandedArtifactKeys.has(key);
+
+	const contentBlock = artifact.contentType === "text/html"
+		? html`
+			<button class="artifact-report-btn" @click=${(e: Event) => {
+				e.stopPropagation();
+				const blob = new Blob([artifact.content], { type: "text/html" });
+				window.open(URL.createObjectURL(blob), "_blank");
+			}}>View Report</button>
+		`
+		: isExpanded
+			? html`<div class="artifact-content"><markdown-block .content=${artifact.content}></markdown-block></div>`
+			: nothing;
+
+	const metadataBlock = artifact.metadata && Object.keys(artifact.metadata).length > 0
+		? html`
+			<div class="artifact-metadata">
+				${Object.entries(artifact.metadata).map(([k, v]) => html`
+					<span class="artifact-metadata-item"><strong>${k}:</strong> ${v}</span>
+				`)}
+			</div>
+		`
+		: nothing;
+
+	return html`
+		<div class="artifact-section">
+			${artifact.contentType === "text/html" ? contentBlock : html`
+				<div class="artifact-toggle" @click=${(e: Event) => { e.stopPropagation(); toggleArtifactExpand(key); }}>
+					<span class="artifact-toggle-icon">${isExpanded ? "\u25B4" : "\u25BE"}</span>
+					Full Review
+				</div>
+				${contentBlock}
+			`}
+			${metadataBlock}
+		</div>
+	`;
+}
+
 function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 	// Auto-pass: complete with no steps
 	if (entry.steps.length === 0 && entry.overallStatus !== "running") {
@@ -1737,8 +1799,13 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 
 	const passedCount = entry.steps.filter(s => s.status === "passed").length;
 	const failedCount = entry.steps.filter(s => s.status === "failed").length;
+	const skippedCount = entry.steps.filter(s => s.status === "skipped").length;
 	const totalCount = entry.steps.length;
 	const isDone = entry.overallStatus !== "running";
+
+	// Determine if steps span multiple phases for phase dividers
+	const phases = new Set(entry.steps.map(s => s.phase ?? 0));
+	const hasMultiplePhases = phases.size > 1;
 
 	return html`
 		<div class="verify-cards">
@@ -1746,22 +1813,32 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 				${isDone
 					? entry.overallStatus === "passed"
 						? html`<span class="verify-cards__header-status verify-cards__header-status--pass">\u2713 Verified \u2014 passed</span>`
-						: html`<span class="verify-cards__header-status verify-cards__header-status--fail">\u2717 Verified \u2014 failed</span>`
+						: html`<span class="verify-cards__header-status verify-cards__header-status--fail">\u2717 Verified \u2014 failed${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}</span>`
 					: html`<span class="verify-cards__header-status verify-cards__header-status--running">Verifying \u2014 ${passedCount}/${totalCount} checks passed${failedCount > 0 ? html`, <span style="color:var(--destructive)">${failedCount} failed</span>` : nothing}</span>`
 				}
 			</div>
 			${entry.steps.map((step, i) => {
+				// Phase divider: show before first step of a new phase (when multiple phases exist)
+				const prevPhase = i > 0 ? (entry.steps[i - 1].phase ?? 0) : -1;
+				const curPhase = step.phase ?? 0;
+				const showPhaseDivider = hasMultiplePhases && (i === 0 || curPhase !== prevPhase);
 				const stepKey = `${entry.gateId}:${entry.signalId}:${i}`;
 				const isRunning = step.status === "running";
 				const isPassed = step.status === "passed";
+				const isSkipped = step.status === "skipped";
 				const hasOutput = !!step.output;
 				const isExpanded = expandedLiveStepKeys.has(stepKey);
 				const isLlm = step.type === "llm-review";
 				const isRunningCmd = isRunning && step.type === "command";
 				const clickable = hasOutput || isRunningCmd;
 
+				const cardClass = isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
+				const iconClass = isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
+				const icon = isSkipped ? "\u2298" : isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717";
+
 				return html`
-					<div class="verify-card verify-card--${isRunning ? "running" : isPassed ? "pass" : "fail"}">
+					${showPhaseDivider ? html`<div class="phase-divider">Phase ${curPhase}</div>` : nothing}
+					<div class="verify-card verify-card--${cardClass}">
 						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
 							@click=${clickable ? () => {
 								if (isRunningCmd) {
@@ -1771,8 +1848,8 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 									toggleLiveStepExpand(stepKey);
 								}
 							} : null}>
-							<span class="verify-card__icon verify-card__icon--${isRunning ? "running" : isPassed ? "pass" : "fail"}">
-								${isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717"}
+							<span class="verify-card__icon verify-card__icon--${iconClass}">
+								${icon}
 							</span>
 							<span class="verify-card__name">${step.name}</span>
 							<span class="verify-card__type-badge ${isLlm ? "verify-card__type-badge--llm" : ""}">${step.type}</span>

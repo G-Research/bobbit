@@ -674,6 +674,7 @@ export interface VerifyStep {
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
+	phase?: number;
 }
 
 export interface WorkflowGate {
@@ -803,6 +804,11 @@ export interface GateSignal {
 			output: string;
 			duration_ms: number;
 			expect?: string;
+			artifact?: {
+				content: string;
+				contentType: string;
+				metadata?: Record<string, string>;
+			};
 		}>;
 	};
 }
