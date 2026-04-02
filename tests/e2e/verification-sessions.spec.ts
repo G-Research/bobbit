@@ -12,11 +12,13 @@ import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
+	createObserverSession,
 	deleteGoal,
 	connectWs,
 	createSession,
 	deleteSession,
 	nonGitCwd,
+	waitForGateStatus,
 	type WsMsg,
 } from "./e2e-setup.js";
 
@@ -32,26 +34,11 @@ async function createGeneralGoal(): Promise<string> {
 	return goal.id;
 }
 
-/** Poll until a gate reaches the target status or timeout expires. */
-async function waitForGateStatus(
-	goalId: string,
-	gateId: string,
-	targetStatus: string,
-	timeoutMs = 30_000,
-): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		const data = await res.json();
-		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 300));
-	}
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	const data = await res.json();
-	throw new Error(
-		`Gate ${gateId} did not reach "${targetStatus}" within ${timeoutMs}ms. Current: "${data.status}"`,
-	);
-}
+let observerSessionId: string;
+
+test.beforeAll(async () => {
+	observerSessionId = await createObserverSession();
+});
 
 test.describe("Verification sessions and step events", () => {
 
@@ -82,7 +69,7 @@ test.describe("Verification sessions and step events", () => {
 			expect(started.steps[0].name).toBe("Content present");
 			expect(started.steps[0].type).toBe("command");
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -138,7 +125,7 @@ test.describe("Verification sessions and step events", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design" }),
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			// Signal implementation which also has 1 step in test-fast
 			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
@@ -213,9 +200,7 @@ test.describe("Verification sessions and step events", () => {
 			}
 
 			// Wait for completion, then verify the map is cleaned up
-			await waitForGateStatus(goalId, "design-doc", "passed");
-			// Give a brief pause for cleanup
-			await new Promise(r => setTimeout(r, 200));
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 			const afterResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 			const afterData = await afterResp.json();
 			// After completion, the active verifications map should have been cleaned up
@@ -273,7 +258,7 @@ test.describe("Verification sessions and step events", () => {
 			expect(stepComplete.sessionId).toMatch(/^llm-review-/);
 			expect(stepComplete.status).toMatch(/^(passed|failed)$/);
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -299,7 +284,7 @@ test.describe("Verification sessions and step events", () => {
 			expect(stepComplete.sessionId).toBeUndefined();
 			expect(stepComplete.status).toBe("passed");
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);

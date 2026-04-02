@@ -1,19 +1,11 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, nonGitCwd } from "./e2e-setup.js";
-
-let token: string;
-
-const headers = () => ({
-	Authorization: `Bearer ${token}`,
-	"Content-Type": "application/json",
-});
-
-async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
-	return fetch(`${base()}${path}`, {
-		...opts,
-		headers: { ...headers(), ...(opts?.headers || {}) },
-	});
-}
+import {
+	apiFetch,
+	createObserverSession,
+	deleteGoal,
+	nonGitCwd,
+	waitForGateStatus,
+} from "./e2e-setup.js";
 
 async function createGoalWithWorkflow(workflowId: string): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
@@ -30,32 +22,10 @@ async function createGoalWithWorkflow(workflowId: string): Promise<string> {
 	return goal.id;
 }
 
-async function deleteGoal(goalId: string): Promise<void> {
-	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
-}
+let observerSessionId: string;
 
-async function waitForGateStatus(
-	goalId: string,
-	gateId: string,
-	targetStatus: string,
-	timeoutMs = 15000,
-): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		const data = await res.json();
-		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 500));
-	}
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	const data = await res.json();
-	throw new Error(
-		`Expected gate ${gateId} status to be "${targetStatus}" but got "${data.status}" after ${timeoutMs}ms`,
-	);
-}
-
-test.beforeAll(() => {
-	token = readE2EToken();
+test.beforeAll(async () => {
+	observerSessionId = await createObserverSession();
 });
 
 test.describe("Error pattern verification for expect:failure gates", () => {
@@ -74,7 +44,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 						"# Bug Analysis\n\nSteps: 1. run the command\nRoot cause: src/server/agent/verification-harness.ts treats any non-zero exit as pass for expect:failure",
 				}),
 			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
+			await waitForGateStatus(goalId, "issue-analysis", "passed", observerSessionId);
 
 			// 2. Signal reproducing-test with a command that fails (exit 1)
 			//    but WITHOUT error_pattern metadata.
@@ -98,6 +68,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 				goalId,
 				"reproducing-test",
 				"failed",
+				observerSessionId,
 			);
 
 			// Verify the failure reason mentions error_pattern
@@ -128,7 +99,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 						"# Bug Analysis\n\nSteps: 1. run failing test\nRoot cause: src/calc.ts returns wrong value",
 				}),
 			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
+			await waitForGateStatus(goalId, "issue-analysis", "passed", observerSessionId);
 
 			// Signal with error_pattern that matches the command output
 			const signalResp = await apiFetch(
@@ -147,7 +118,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 			expect(signalResp.status).toBe(201);
 
 			// Gate should pass — command failed AND output matches the pattern
-			await waitForGateStatus(goalId, "reproducing-test", "passed");
+			await waitForGateStatus(goalId, "reproducing-test", "passed", observerSessionId);
 		} finally {
 			await deleteGoal(goalId);
 		}
@@ -165,7 +136,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 						"# Bug Analysis\n\nSteps: 1. run test\nRoot cause: src/foo.ts:10 off-by-one",
 				}),
 			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
+			await waitForGateStatus(goalId, "issue-analysis", "passed", observerSessionId);
 
 			// Signal with error_pattern that does NOT match the actual output
 			const signalResp = await apiFetch(
@@ -188,6 +159,7 @@ test.describe("Error pattern verification for expect:failure gates", () => {
 				goalId,
 				"reproducing-test",
 				"failed",
+				observerSessionId,
 			);
 
 			const signalsResp = await apiFetch(
