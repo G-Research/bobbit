@@ -39,8 +39,7 @@ detail_docs: >-
   | `result_summary` | string | No | Summary of what was accomplished. Best
   practice: always set this when marking a task complete. |
 
-  | `commit_sha` | string | No | Git commit SHA associated with the task's work.
-  |
+  | `head_sha` | string | No | HEAD commit SHA of your finished work. |
 
   | `assigned_to` | string | No | Session ID to assign the task to. Get the
   session ID from `team_spawn` or `team_list`. |
@@ -89,7 +88,7 @@ detail_docs: >-
   - **Blocking a task** — set `state="blocked"` and `result_summary` explaining
   the blocker.
 
-  - **Recording results** — update `result_summary` and `commit_sha` with
+  - **Recording results** — update `result_summary` and `head_sha` with
   completion details.
 
   - **Reassigning** — change `assigned_to` if a task needs to move to a
@@ -117,11 +116,11 @@ detail_docs: >-
   task_update(task_id="abc123", assigned_to="session-456", state="in-progress")
 
 
-  # Mark a task complete with summary and commit
+  # Mark a task complete with summary and head SHA
 
   task_update(task_id="abc123", state="complete",
     result_summary="Implemented GET/PUT /api/tools/:name endpoints. All E2E tests pass. Merged to goal branch.",
-    commit_sha="a1b2c3d4")
+    head_sha="a1b2c3d4")
 
   # Mark a task as blocked
 

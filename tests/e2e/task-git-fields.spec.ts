@@ -18,7 +18,6 @@ import {
 	deleteGoal,
 	startTeam,
 	teardownTeam,
-	nonGitCwd,
 } from "./e2e-setup.js";
 
 test.setTimeout(60_000);
@@ -145,7 +144,7 @@ test.describe("Task git fields — team spawn auto-population", () => {
 	let goalId: string;
 
 	test.beforeAll(async () => {
-		// Use nonGitCwd — spawn skips worktree creation but still works.
+		// Spawn skips worktree creation but still works.
 		// baseSha may be undefined (no git repo), but the test verifies the
 		// assign endpoint auto-populates from the TeamAgent record.
 		const goal = await createGoal({ title: "git-fields-spawn", team: true });

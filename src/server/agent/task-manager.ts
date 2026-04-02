@@ -301,7 +301,7 @@ export class TaskManager {
 
 /**
  * Mark test/review tasks as stale when a new commit lands on the goal branch.
- * Tasks completed at a different commitSha than the current HEAD are stale.
+ * Tasks completed at a different headSha than the current HEAD are stale.
  */
 export function markStaleTasks(store: TaskStore, goalId: string, currentHeadSha: string): PersistedTask[] {
 	const tasks = store.getByGoalId(goalId);

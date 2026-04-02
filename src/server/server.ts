@@ -2476,12 +2476,11 @@ async function handleApiRoute(
 			if (agent) {
 				const task = tm.getTask(taskId);
 				if (task) {
-					let updated = false;
-					if (agent.baseSha && !task.baseSha) { task.baseSha = agent.baseSha; updated = true; }
-					if (agent.branch && !task.branch) { task.branch = agent.branch; updated = true; }
-					if (updated) {
-						task.updatedAt = Date.now();
-						tm.updateTask(taskId, { baseSha: task.baseSha, branch: task.branch });
+					const fields: Record<string, string> = {};
+					if (agent.baseSha && !task.baseSha) fields.baseSha = agent.baseSha;
+					if (agent.branch && !task.branch) fields.branch = agent.branch;
+					if (Object.keys(fields).length) {
+						tm.updateTask(taskId, fields);
 					}
 				}
 			}
