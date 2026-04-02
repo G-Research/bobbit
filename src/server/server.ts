@@ -2447,6 +2447,10 @@ async function handleApiRoute(
 					dependsOn: body.dependsOn,
 					workflowGateId: typeof body.workflowGateId === "string" ? body.workflowGateId : undefined,
 					inputGateIds: Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined,
+					headSha: typeof body.headSha === "string" ? body.headSha : undefined,
+					baseSha: typeof body.baseSha === "string" ? body.baseSha : undefined,
+					branch: typeof body.branch === "string" ? body.branch : undefined,
+					resultSummary: typeof body.resultSummary === "string" ? body.resultSummary : undefined,
 				});
 				if (!ok) { json({ error: "Task not found" }, 404); return; }
 
@@ -2481,8 +2485,25 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const ok = getTaskManagerForTask(taskAssignMatch[1]).assignTask(taskAssignMatch[1], sessionId);
+			const taskId = taskAssignMatch[1];
+			const tm = getTaskManagerForTask(taskId);
+			const ok = tm.assignTask(taskId, sessionId);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
+
+			// Auto-populate baseSha and branch from TeamAgent record
+			const agent = teamManager.findAgentBySessionId(sessionId);
+			if (agent) {
+				const task = tm.getTask(taskId);
+				if (task) {
+					const fields: Record<string, string> = {};
+					if (agent.baseSha && !task.baseSha) fields.baseSha = agent.baseSha;
+					if (agent.branch && !task.branch) fields.branch = agent.branch;
+					if (Object.keys(fields).length) {
+						tm.updateTask(taskId, fields);
+					}
+				}
+			}
+
 			json({ ok: true });
 		} catch (err: any) {
 			json({ error: err.message }, 400);
