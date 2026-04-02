@@ -7,6 +7,8 @@
 import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
+	connectWs,
+	agentEndPredicate,
 	createSession,
 	deleteSession,
 	createGoal,
@@ -144,8 +146,17 @@ test.describe("team steer — agent must be streaming", () => {
 		if (spawnResp.status === 201) {
 			const { sessionId: agentId } = await spawnResp.json();
 
-			// Wait for agent to reach a known state (idle after processing initial task)
-			await waitForSessionStatus(agentId, "idle");
+			// Wait for agent to finish processing the initial task.
+			// Use agentEnd (turn completion) rather than session_status "idle",
+			// because the WS buffer contains ALL messages including the initial
+			// "idle" status sent on connect — a second waitFor("idle") would
+			// match that stale message.
+			const conn = await connectWs(agentId);
+			try {
+				await conn.waitFor(agentEndPredicate(), 10_000);
+			} finally {
+				conn.close();
+			}
 
 			const steerResp = await apiFetch(`/api/goals/${goalId}/team/steer`, {
 				method: "POST",
