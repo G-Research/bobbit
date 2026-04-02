@@ -99,7 +99,7 @@ test.describe("Workflow editor phases", () => {
 
 		// Verify the prompt textarea appears
 		await expect(
-			page.locator(".wf-vstep-body textarea[placeholder='Review prompt...']").first(),
+			page.locator(".wf-vstep-body textarea[placeholder='QA test prompt...']").first(),
 		).toBeVisible({ timeout: 5_000 });
 
 		// Verify the command run input is no longer visible
@@ -293,9 +293,9 @@ test.describe("Workflow editor phases", () => {
 		const data = await resp.json();
 		const steps = data.gates[0].verify;
 		expect(steps).toHaveLength(2);
-		expect(steps[0].phase).toBe(0);
+		expect(steps[0].phase ?? 0).toBe(0);
 		expect(steps[0].type).toBe("command");
-		expect(steps[1].phase).toBe(1);
+		expect(steps[1].phase ?? 0).toBe(1);
 		expect(steps[1].type).toBe("agent-qa");
 		expect(steps[1].optional).toBe(true);
 		expect(steps[1].label).toBe("Enable QA");
@@ -335,8 +335,8 @@ test.describe("Workflow editor phases", () => {
 		const data = await resp.json();
 		const steps = data.gates[0].verify;
 		expect(steps).toHaveLength(2);
-		expect(steps[0].phase).toBe(0);
-		expect(steps[1].phase).toBe(1); // was 2, now compacted to 1
+		expect(steps[0].phase ?? 0).toBe(0);
+		expect(steps[1].phase ?? 0).toBe(1); // was 2, now compacted to 1
 	});
 
 	test("empty phase can be removed", async ({ page }) => {
@@ -355,21 +355,23 @@ test.describe("Workflow editor phases", () => {
 		await openApp(page);
 		await navigateToEditAndExpandGate(page);
 
+		// Count initial phase groups (should be 1 — phase 0 with Step 1)
+		const initialCount = await page.locator(".wf-phase-group").count();
+
 		// Add a new empty phase
 		const addPhaseBtn = page.locator("button").filter({ hasText: /Add Phase/i }).first();
 		await addPhaseBtn.click();
 
-		const phaseGroupsBefore = await page.locator(".wf-phase-group").count();
+		// Wait for the new phase group to appear
+		await expect(page.locator(".wf-phase-group")).toHaveCount(initialCount + 1, { timeout: 5_000 });
 
-		// Find the delete button on the empty phase header
-		const emptyPhaseHeader = page.locator(".wf-phase-header").last();
-		const deleteBtn = emptyPhaseHeader.locator("button, .wf-phase-delete").first();
-		// Only click if visible — the delete button may only appear on empty phases
-		if (await deleteBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
-			await deleteBtn.click();
-			// Verify the phase group was removed
-			await expect(page.locator(".wf-phase-group")).toHaveCount(phaseGroupsBefore - 1);
-		}
+		// Find the delete button on the empty phase header and click it
+		const deleteBtn = page.locator(".wf-phase-delete").last();
+		await expect(deleteBtn).toBeVisible({ timeout: 5_000 });
+		await deleteBtn.click();
+
+		// Verify we're back to the initial count (empty phase removed)
+		await expect(page.locator(".wf-phase-group")).toHaveCount(initialCount, { timeout: 5_000 });
 	});
 
 	test("steps without phase field default to phase 0", async ({ page }) => {
