@@ -1735,6 +1735,7 @@ let _proposalCwdDropdownOpen = false;
 let _proposalCwdHighlightIndex = -1;
 let _proposalSaving = false;
 let _proposalSandboxed = false;
+let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
 
 /** Sync module-level form state from the active goal proposal when it changes. */
@@ -1742,7 +1743,7 @@ function syncProposalFormState(): void {
 	const proposal = state.activeGoalProposal;
 	if (!proposal) return;
 	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}`;
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -1750,6 +1751,9 @@ function syncProposalFormState(): void {
 	_proposalCwd = proposal.cwd || "";
 	_proposalWorkflowId = proposal.workflow || "general";
 	_proposalSpecEditMode = false;
+	_proposalEnabledOptionalSteps = proposal.options
+		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
+		: [];
 	_proposalSaving = false;
 }
 
@@ -1772,8 +1776,10 @@ function goalProposalPanel() {
 				workflowId: _proposalWorkflowId || undefined,
 				sandboxed,
 				projectId: state.previewProjectId || undefined,
+				enabledOptionalSteps: _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined,
 			});
 			state.activeGoalProposal = null;
+			_proposalEnabledOptionalSteps = [];
 			_proposalInitializedFrom = null;
 			if (goal) {
 				setHashRoute("goal-dashboard", goal.id, true);
@@ -1788,6 +1794,7 @@ function goalProposalPanel() {
 		const dismissed = state.activeGoalProposal;
 		state.activeGoalProposal = null;
 		_proposalInitializedFrom = null;
+		_proposalEnabledOptionalSteps = [];
 		// Persist dismiss so it survives reconnect
 		const sid = activeSessionId();
 		if (sid && dismissed) markProposalDismissed(sid, dismissed);
@@ -1871,6 +1878,43 @@ function goalProposalPanel() {
 					</select>
 				</div>
 			` : ""}
+			${(() => {
+				const wf = _cachedWorkflows.find(w => w.id === _proposalWorkflowId);
+				if (!wf) return "";
+				const optionalSteps: Array<{name: string; label: string}> = [];
+				for (const gate of wf.gates) {
+					if (gate.verify) {
+						for (const step of gate.verify) {
+							if (step.optional) {
+								optionalSteps.push({ name: step.name, label: step.label || step.name });
+							}
+						}
+					}
+				}
+				if (optionalSteps.length === 0) return "";
+				return html`
+					<div class="flex flex-col gap-2">
+						<label class="text-xs text-muted-foreground font-medium">Optional Steps</label>
+						${optionalSteps.map(os => html`
+							<label class="flex items-center gap-2 text-sm cursor-pointer">
+								<input type="checkbox" class="toggle-switch"
+									.checked=${_proposalEnabledOptionalSteps.includes(os.name)}
+									@change=${(e: Event) => {
+										const checked = (e.target as HTMLInputElement).checked;
+										if (checked && !_proposalEnabledOptionalSteps.includes(os.name)) {
+											_proposalEnabledOptionalSteps = [..._proposalEnabledOptionalSteps, os.name];
+										} else if (!checked) {
+											_proposalEnabledOptionalSteps = _proposalEnabledOptionalSteps.filter(n => n !== os.name);
+										}
+										renderApp();
+									}}
+								/>
+								<span>${os.label}</span>
+							</label>
+						`)}
+					</div>
+				`;
+			})()}
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
 					<label class="text-xs text-muted-foreground font-medium">Spec</label>
