@@ -32,8 +32,8 @@
  * @returns {string} The output string the modal would receive
  */
 function chatWidgetOpenModal(stepOutputs, steps, index) {
-	// Current buggy behavior: only reads from WS accumulator
-	const output = stepOutputs.get(index) || "";
+	// Fixed behavior: falls back to API-fetched step output
+	const output = stepOutputs.get(index) || (steps[index] && steps[index].output) || "";
 	return output;
 }
 
@@ -63,8 +63,8 @@ function chatWidgetOpenModalFixed(stepOutputs, steps, index) {
  * @returns {string} The output string the modal would receive
  */
 function dashboardOpenModal(step) {
-	// Current buggy behavior: only reads liveOutput
-	const output = step.liveOutput || "";
+	// Fixed behavior: falls back to API-fetched step output
+	const output = step.liveOutput || step.output || "";
 	return output;
 }
 
@@ -93,9 +93,14 @@ function dashboardOpenModalFixed(step) {
  * @returns {Map} The _stepOutputs Map after reconcile
  */
 function reconcileStepOutputs(stepOutputs, apiSteps) {
-	// Current behavior: does NOT seed stepOutputs from API
-	// (This is the bug — reconcile should seed stepOutputs)
-	return new Map(stepOutputs);
+	// Fixed behavior: seeds stepOutputs from API response
+	const result = new Map(stepOutputs);
+	apiSteps.forEach(function(step, i) {
+		if (step.output && !result.has(i)) {
+			result.set(i, step.output);
+		}
+	});
+	return result;
 }
 
 /**

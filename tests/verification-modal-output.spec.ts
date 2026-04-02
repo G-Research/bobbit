@@ -41,8 +41,8 @@ test.describe("Verification output modal data flow bug", () => {
 			return { buggyOutput, fixedOutput };
 		});
 
-		// The buggy path gives empty string — this is the bug
-		expect(result.buggyOutput).toBe("");
+		// After fix: buggy path now returns API output
+		expect(result.buggyOutput).toBe("ok\n");
 
 		// The fixed path should give the API output
 		// THIS ASSERTION TESTS THE FIX — it should pass after the code change
@@ -75,8 +75,8 @@ test.describe("Verification output modal data flow bug", () => {
 			return { buggyOutput, fixedOutput };
 		});
 
-		// Buggy path: empty
-		expect(result.buggyOutput).toBe("");
+		// After fix: buggy path now returns API output
+		expect(result.buggyOutput).toBe("ok\n");
 
 		// Fixed path: has content
 		expect(result.fixedOutput).toBe("ok\n");

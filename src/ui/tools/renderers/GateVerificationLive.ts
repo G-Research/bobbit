@@ -157,6 +157,12 @@ export class GateVerificationLive extends LitElement {
 						sessionId: s.sessionId,
 					}));
 					this.overallStatus = "running";
+					// Seed _stepOutputs from API so modal has initial content
+					for (let i = 0; i < this.steps.length; i++) {
+						if (this.steps[i].output && !this._stepOutputs.has(i)) {
+							this._stepOutputs.set(i, this.steps[i].output!);
+						}
+					}
 				}
 			}
 		} catch {
@@ -310,7 +316,7 @@ export class GateVerificationLive extends LitElement {
 	}
 
 	private _openModal(index: number, name: string) {
-		const output = this._stepOutputs.get(index) || "";
+		const output = this._stepOutputs.get(index) || this.steps[index]?.output || "";
 		this.modalStep = { index, name, output };
 	}
 
