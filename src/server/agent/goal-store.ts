@@ -45,6 +45,8 @@ export interface PersistedGoal {
 	archivedAt?: number;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
+	/** Names of optional verification steps enabled for this goal */
+	enabledOptionalSteps?: string[];
 }
 
 /**

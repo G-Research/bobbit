@@ -4,12 +4,14 @@ import { stringify, parse } from "yaml";
 
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review";
+	type: "command" | "llm-review" | "agent-qa";
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
 	phase?: number;
+	optional?: boolean;
+	label?: string;
 }
 
 export interface WorkflowGate {
@@ -121,13 +123,15 @@ export class WorkflowStore {
 	private normalizeVerifyStep(data: Record<string, unknown>): VerifyStep {
 		const step: VerifyStep = {
 			name: (data.name as string) ?? "",
-			type: (data.type as "command" | "llm-review") ?? "command",
+			type: (data.type as "command" | "llm-review" | "agent-qa") ?? "command",
 		};
 		if (typeof data.run === "string") step.run = data.run;
 		if (typeof data.prompt === "string") step.prompt = data.prompt;
 		if (data.expect === "success" || data.expect === "failure") step.expect = data.expect;
 		if (typeof data.timeout === "number") step.timeout = data.timeout;
 		if (typeof data.phase === "number") step.phase = data.phase;
+		if (data.optional === true) step.optional = true;
+		if (typeof data.label === "string") step.label = data.label;
 		return step;
 	}
 
@@ -157,6 +161,8 @@ export class WorkflowStore {
 							if (v.expect) s.expect = v.expect;
 							if (v.timeout) s.timeout = v.timeout;
 							if (v.phase) s.phase = v.phase;
+							if (v.optional) s.optional = v.optional;
+							if (v.label) s.label = v.label;
 							return s;
 						});
 					}

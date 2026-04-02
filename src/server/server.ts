@@ -1446,6 +1446,10 @@ async function handleApiRoute(
 		}
 		try {
 			const sandboxed = body.sandboxed === true;
+			let enabledOptionalSteps: string[] | undefined;
+			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
+				enabledOptionalSteps = body.enabledOptionalSteps;
+			}
 			// Resolve target project context for goal creation (explicit > cwd-match > default)
 			let targetProjectId = (body.projectId && typeof body.projectId === "string") ? body.projectId : undefined;
 			if (!targetProjectId && cwd) {
@@ -1464,6 +1468,7 @@ async function handleApiRoute(
 				workflowId,
 				workflowStore: workflowManager.store,
 				sandboxed,
+				enabledOptionalSteps,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {

@@ -19,6 +19,12 @@ export function parseVerdict(output: string): boolean | null {
 	return match[1].toLowerCase() === "pass";
 }
 
+/** Extract QA report HTML from agent output. Exported for unit testing. */
+export function parseQaReport(output: string): string | null {
+	const match = output.match(/<qa_report>([\s\S]*?)<\/qa_report>/i);
+	return match ? match[1].trim() : null;
+}
+
 const VERDICT_FOLLOWUP_PROMPT = "Your review is complete but you did not include the required <verdict> tag. Based on your review findings above, respond with ONLY a <verdict>pass</verdict> or <verdict>fail</verdict> tag. Use <verdict>fail</verdict> if you found any critical or high severity issues, otherwise <verdict>pass</verdict>.";
 
 /** Patterns that indicate a transient/infrastructure failure worth retrying. */
@@ -228,11 +234,16 @@ export class VerificationHarness {
 			// Step was running — try to resume from the existing session first
 			let resumeResult = await this._tryResumeFromSession(v, step);
 
-			// If resume failed with a transient error and this is an llm-review step,
+			// If resume failed with a transient error and this is an llm-review or agent-qa step,
 			// re-run from scratch rather than giving up
-			if (resumeResult && !resumeResult.passed && step.type === "llm-review" && isTransientReviewError(resumeResult.output)) {
+			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && isTransientReviewError(resumeResult.output)) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
-				const rerunResult = await this._rerunLlmReviewStep(v.goalId, v.gateId, v.signalId, step.name);
+				let rerunResult: typeof resumeResult | null = null;
+				if (step.type === "agent-qa") {
+					rerunResult = await this._rerunAgentQaStep(v.goalId, v.gateId, v.signalId, step.name);
+				} else {
+					rerunResult = await this._rerunLlmReviewStep(v.goalId, v.gateId, v.signalId, step.name);
+				}
 				if (rerunResult) {
 					resumeResult = rerunResult;
 				}
@@ -261,7 +272,7 @@ export class VerificationHarness {
 			status,
 			steps: resolvedSteps.map(r => ({
 				name: r.name,
-				type: r.type as "command" | "llm-review",
+				type: r.type as "command" | "llm-review" | "agent-qa",
 				passed: r.passed,
 				output: r.output,
 				duration_ms: r.duration_ms,
@@ -399,6 +410,48 @@ export class VerificationHarness {
 			output: result.output,
 			duration_ms: Date.now() - startedAt,
 		};
+	}
+
+	/**
+	 * Re-run an agent-qa step from scratch — used when resume fails transiently.
+	 */
+	private async _rerunAgentQaStep(
+		goalId: string, gateId: string, signalId: string, stepName: string,
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+			return { name: stepName, type: "agent-qa", passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
+		}
+
+		const stepDef = this._findStepDefinition(goalId, gateId, stepName);
+		if (!stepDef) {
+			console.warn(`[verification] Cannot re-run QA "${stepName}" — step definition not found in workflow`);
+			return null;
+		}
+
+		const ctx = this._gatherRerunContext(goalId, gateId, signalId);
+		if (!ctx) {
+			console.warn(`[verification] Cannot re-run QA "${stepName}" — goal/signal context unavailable`);
+			return null;
+		}
+
+		const startedAt = Date.now();
+		const projectVars = this.projectConfigStore?.getWithDefaults() ?? {};
+		const agentVars: Record<string, string> = ctx.signal.metadata || {};
+		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
+
+		const maxAttempts = 3;
+		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any } = { passed: false, output: "Re-run failed." };
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			result = await this.runAgentQaStep(
+				{ name: stepDef.name, prompt, timeout: stepDef.timeout },
+				ctx.cwd, goalId, ctx.builtinVars,
+				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
+			);
+			if (result.passed || !isTransientReviewError(result.output) || attempt === maxAttempts) break;
+			await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt - 1)));
+		}
+
+		return { name: stepName, type: "agent-qa", passed: result.passed, output: result.output, duration_ms: Date.now() - startedAt };
 	}
 
 	private readonly _stateDir: string;
@@ -560,6 +613,9 @@ export class VerificationHarness {
 			// Signal metadata — resolved via {{agent.key}}
 			const agentVars: Record<string, string> = signal.metadata || {};
 
+			// Results array indexed by step position (declared early for optional step skipping)
+			const allResults: Array<GateSignalStep | null> = new Array(steps.length).fill(null);
+
 			// Build cache of previously-passed step results for the same commit SHA.
 			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
 			const cachedSteps = new Map<string, GateSignalStep>();
@@ -582,10 +638,50 @@ export class VerificationHarness {
 				}
 			}
 
-			// If ALL steps can be served from cache, skip spawning agents entirely
-			if (cachedSteps.size >= steps.length && steps.every(s => cachedSteps.has(s.name))) {
-				console.log(`[verification] All ${steps.length} step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
-				const results: GateSignalStep[] = steps.map(s => {
+			// --- Optional step skipping ---
+			// Look up enabledOptionalSteps from the goal
+			const goalForOptional = this.sessionManager?.goalManager?.getGoal(signal.goalId)
+				?? (this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId));
+			const enabledOptional = goalForOptional?.enabledOptionalSteps ?? [];
+
+			// Partition steps into active and skipped
+			const activeSteps: typeof steps = [];
+			const skippedIndices: number[] = [];
+			steps.forEach((step, index) => {
+				if (step.optional && !enabledOptional.includes(step.name)) {
+					skippedIndices.push(index);
+				} else {
+					activeSteps.push(step);
+				}
+			});
+
+			// Immediately resolve skipped optional steps
+			for (const idx of skippedIndices) {
+				const s = steps[idx];
+				const skipResult: GateSignalStep = {
+					name: s.name, type: s.type as GateSignalStep["type"],
+					passed: true, output: "Skipped — not enabled for this goal", duration_ms: 0,
+				};
+				allResults[idx] = skipResult;
+				const av = this.activeVerifications.get(signal.id);
+				if (av?.steps[idx]) {
+					av.steps[idx] = { ...av.steps[idx], status: "skipped", durationMs: 0, output: skipResult.output };
+					this._persistActive();
+				}
+				if (!active.cancelled) this.broadcastFn(signal.goalId, {
+					type: "gate_verification_step_complete",
+					goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+					stepIndex: idx, stepName: s.name,
+					status: "skipped", durationMs: 0, output: skipResult.output,
+					phase: s.phase ?? 0,
+				});
+			}
+
+			// If ALL active steps can be served from cache, skip spawning agents entirely
+			if (cachedSteps.size >= activeSteps.length && activeSteps.every(s => cachedSteps.has(s.name))) {
+				console.log(`[verification] All ${activeSteps.length} active step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
+				const results: GateSignalStep[] = steps.map((s, i) => {
+					if (allResults[i]) return allResults[i]!; // skipped optional step
 					const cached = cachedSteps.get(s.name)!;
 					return { ...cached, output: `[cached from prior signal] ${cached.output}` };
 				});
@@ -619,20 +715,18 @@ export class VerificationHarness {
 			}
 
 			// --- Phased execution ---
-			// Group steps by phase (default 0), execute phases sequentially,
-			// steps within each phase run in parallel.
+			// Group active steps by phase (default 0), execute phases sequentially,
+			// steps within each phase run in parallel. Skipped optional steps are excluded.
 			const phaseGroups = new Map<number, Array<{ step: VerifyStep; index: number }>>();
-			steps.forEach((step, index) => {
+			activeSteps.forEach((step) => {
+				const originalIndex = steps.indexOf(step);
 				const phase = step.phase ?? 0;
 				if (!phaseGroups.has(phase)) phaseGroups.set(phase, []);
-				phaseGroups.get(phase)!.push({ step, index });
+				phaseGroups.get(phase)!.push({ step, index: originalIndex });
 			});
 			const sortedPhases = [...phaseGroups.keys()].sort((a, b) => a - b);
 
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
-
-			// Results array indexed by step position
-			const allResults: Array<GateSignalStep | null> = new Array(steps.length).fill(null);
 			let phaseFailed = false;
 
 			for (const phase of sortedPhases) {
@@ -702,12 +796,14 @@ export class VerificationHarness {
 						}
 
 						let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "No verification result." };
+						let artifact: GateSignalStep["artifact"];
 						const startTime = Date.now();
 
-						// Pre-generate sessionId for LLM review steps so we can broadcast it before the step starts
+						// Pre-generate sessionId for LLM review and agent-qa steps so we can broadcast it before the step starts
 						let stepSessionId: string | undefined;
-						if (step.type === "llm-review") {
-							stepSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
+						if (step.type === "llm-review" || step.type === "agent-qa") {
+							const prefix = step.type === "agent-qa" ? "agent-qa" : "llm-review";
+							stepSessionId = `${prefix}-${randomUUID().slice(0, 12)}`;
 							active.steps[index].startedAt = Date.now();
 							this.broadcastFn(signal.goalId, {
 								type: "gate_verification_step_started",
@@ -753,6 +849,31 @@ export class VerificationHarness {
 								goalId: signal.goalId, gateId: signal.gateId,
 								signalId: signal.id, stepIndex: index,
 							}, errorPattern);
+						} else if (step.type === "agent-qa") {
+							// agent-qa — spawn a one-shot test-engineer sub-agent
+							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
+							} else {
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const maxAttempts = 3;
+								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									const qaResult = await this.runAgentQaStep(
+										{ name: step.name, prompt, timeout: step.timeout },
+										cwd, signal.goalId, builtinVars,
+										signal.content, signal.metadata,
+										goalSpec, allGateStates, stepSessionId,
+									);
+									result = qaResult;
+									if (qaResult.artifact) {
+										artifact = qaResult.artifact;
+									}
+									const isTransient = isTransientReviewError(qaResult.output);
+									if (qaResult.passed || !isTransient || attempt === maxAttempts) break;
+									const delayMs = 2000 * Math.pow(2, attempt - 1);
+									console.log(`[verification] Agent QA "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+									await new Promise(r => setTimeout(r, delayMs));
+								}
+							}
 						} else {
 							// llm-review — spawn a one-shot reviewer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -778,9 +899,8 @@ export class VerificationHarness {
 
 						const duration_ms = Date.now() - startTime;
 
-						// Build artifact for llm-review steps
-						let artifact: GateSignalStep["artifact"];
-						if (step.type === "llm-review" && result.output && result.output.length > 0) {
+						// Build artifact for llm-review steps (agent-qa artifacts are set during execution)
+						if (!artifact && step.type === "llm-review" && result.output && result.output.length > 0) {
 							artifact = {
 								content: result.output.length > MAX_ARTIFACT_SIZE ? result.output.slice(0, MAX_ARTIFACT_SIZE) : result.output,
 								contentType: "text/markdown",
@@ -1168,6 +1288,175 @@ export class VerificationHarness {
 					try {
 						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
 					} catch { /* ignore */ }
+				}
+			}
+		}
+	}
+
+	/**
+	 * Spawn a one-shot test-engineer sub-agent to perform QA testing.
+	 * Similar to runLlmReviewViaSession() but with test-engineer role and QA-specific prompt.
+	 */
+	private async runAgentQaStep(
+		step: { name: string; prompt?: string; timeout?: number },
+		cwd: string,
+		goalId: string,
+		builtinVars: Record<string, string>,
+		_signalContent?: string,
+		_signalMetadata?: Record<string, string>,
+		goalSpec?: string,
+		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
+		sessionId?: string,
+	): Promise<{ passed: boolean; output: string; sessionId?: string; artifact?: { content: string; contentType: string } }> {
+		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
+		const role = this.roleStore.get("test-engineer") || this.roleStore.get("reviewer");
+		if (!role) {
+			return { passed: false, output: "Agent QA failed: no 'test-engineer' or 'reviewer' role found in role store.", sessionId };
+		}
+
+		// Build system prompt (dedicated QA prompt, not buildReviewPrompt)
+		const sections: string[] = ["You are a QA test engineer performing automated testing."];
+		if (step.prompt) sections.push(`\n## Task\n\n${step.prompt}`);
+		if (goalSpec) sections.push(`\n## Goal Specification\n\n${goalSpec}`);
+		if (allGateStates) {
+			const upstreamParts: string[] = [];
+			for (const [gateId, gs] of allGateStates) {
+				if (gs.status === "passed" && gs.injectDownstream && gs.content) {
+					upstreamParts.push(`### Gate: ${gateId}\n\n${gs.content}`);
+				}
+			}
+			if (upstreamParts.length > 0) {
+				sections.push(`\n## Upstream Gate Content\n\n${upstreamParts.join("\n\n")}`);
+			}
+		}
+		const combinedPrompt = sections.join("\n");
+
+		// Compute timeout: qa_max_duration_minutes + 5 min buffer
+		const projectVars = this.projectConfigStore?.getWithDefaults() ?? {};
+		const qaMinutes = parseInt(projectVars["qa_max_duration_minutes"] || "10", 10) || 10;
+		const qaTimeoutMs = (qaMinutes + 5) * 60 * 1000;
+		const timeoutMs = Math.max(qaTimeoutMs, (step.timeout || 900) * 1000);
+
+		// Build kickoff message
+		const kickoff = [
+			`Perform QA testing for: "${step.name}".`,
+			`Your working directory is on branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`.`,
+			"",
+			step.prompt || "",
+			"",
+			"## Required Output Format",
+			"After completing testing, you MUST emit:",
+			"1. A <verdict>pass</verdict> or <verdict>fail</verdict> tag",
+			"2. A <qa_report>...your HTML report...</qa_report> tag wrapping the full HTML report",
+			"",
+			"The verdict and report tags are REQUIRED. The verification system parses them automatically.",
+		].join("\n");
+
+		let qaSessionId: string | undefined;
+		try {
+			// Create session via SessionManager
+			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+				rolePrompt: combinedPrompt,
+				roleName: "test-engineer",
+				sandboxed: (goalId
+					? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
+						?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+					: undefined) ?? this.sessionManager!.isSandboxEnabled,
+			});
+			qaSessionId = session.id;
+
+			// Set title and metadata
+			this.sessionManager!.setTitle(qaSessionId, `QA: ${step.name}`);
+			this.sessionManager!.updateSessionMeta(qaSessionId, {
+				role: "test-engineer",
+				teamGoalId: goalId,
+				accessory: "test-tube",
+				nonInteractive: true,
+			});
+
+			// Register in team store
+			if (this.teamManager) {
+				try {
+					await this.teamManager.registerReviewerSession(goalId, qaSessionId, step.name);
+				} catch (err) {
+					console.warn(`[verification] Failed to register QA session in team:`, err);
+				}
+			}
+
+			// Override model if default.reviewModel preference is set
+			if (this.preferencesStore) {
+				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
+				if (reviewModelPref) {
+					const slash = reviewModelPref.indexOf("/");
+					if (slash > 0 && slash < reviewModelPref.length - 1) {
+						const provider = reviewModelPref.slice(0, slash);
+						const modelId = reviewModelPref.slice(slash + 1);
+						try {
+							await session.rpcClient.setModel(provider, modelId);
+							this.sessionManager?.persistSessionModel(qaSessionId, provider, modelId);
+							console.log(`[verification] Set QA model "${reviewModelPref}" for ${qaSessionId}`);
+						} catch (err) {
+							console.warn(`[verification] Failed to set QA model "${reviewModelPref}", using default:`, err);
+						}
+					}
+				}
+			}
+
+			// Apply thinking level
+			{
+				const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+				const level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+					? reviewThinking : "off";
+				try {
+					await session.rpcClient.setThinkingLevel(level);
+				} catch (err) {
+					console.warn(`[verification] Failed to set QA thinking level:`, err);
+				}
+			}
+
+			// Send kickoff prompt and wait for idle
+			await session.rpcClient.prompt(kickoff);
+			await this.sessionManager!.waitForIdle(qaSessionId, timeoutMs);
+
+			// Get output from the session
+			const output = await this.sessionManager!.getSessionOutput(qaSessionId);
+
+			let verdict = parseVerdict(output);
+			if (verdict === null) {
+				// Follow-up: ask the agent to emit the verdict tag
+				console.log(`[verification] No verdict tag from QA agent, sending follow-up to ${qaSessionId}`);
+				await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
+				await this.sessionManager!.waitForIdle(qaSessionId, timeoutMs);
+				const fullOutput = await this.sessionManager!.getSessionOutput(qaSessionId);
+				verdict = parseVerdict(fullOutput);
+				if (verdict === null) {
+					const reportHtml = parseQaReport(fullOutput);
+					const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
+					return { passed: false, output: fullOutput || "Agent QA failed: no <verdict> tag found.", sessionId: qaSessionId, artifact };
+				}
+				const reportHtml = parseQaReport(fullOutput);
+				const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
+				return { passed: verdict, output: fullOutput, sessionId: qaSessionId, artifact };
+			}
+
+			const reportHtml = parseQaReport(output);
+			const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
+			return { passed: verdict, output, sessionId: qaSessionId, artifact };
+		} catch (err: any) {
+			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
+			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
+			const errOutput = isTimeout
+				? `Agent QA timed out after ${(timeoutMs / 1000)}s.`
+				: `Agent QA failed: ${err.message}`;
+			if (isProcessDeath) {
+				console.error(`[verification] QA agent process died during "${step.name}" (session ${qaSessionId}): ${err.message}`);
+			}
+			return { passed: false, output: errOutput, sessionId: qaSessionId };
+		} finally {
+			if (qaSessionId) {
+				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
+				if (this.teamManager) {
+					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
 				}
 			}
 		}

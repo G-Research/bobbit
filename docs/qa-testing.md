@@ -4,13 +4,25 @@ Automated E2E tests exercise known paths through simulated components, but they 
 
 ## How it fits in the architecture
 
-QA testing sits between the **implementation** gate and the **documentation** gate in both the `feature` and `bug-fix` workflows. After code passes type checks, automated tests, and code review, the team lead decides whether visual/integration validation is needed. If so, a test-engineer agent invokes the `/qa-test` slash skill, which handles the ephemeral environment lifecycle. The agent handles the actual browser interaction and report authoring.
+QA testing can run in two modes:
+
+### 1. Standalone `qa-testing` gate
+
+The `qa-testing` gate sits between the **implementation** gate and the **documentation** gate in both the `feature` and `bug-fix` workflows. After code passes type checks, automated tests, and code review, the team lead decides whether visual/integration validation is needed. If so, a test-engineer agent invokes the `/qa-test` slash skill, which handles the ephemeral environment lifecycle.
 
 ```
 design-doc → implementation → qa-testing (optional) → documentation → ready-to-merge
 ```
 
-The gate is **optional** — projects without `qa_*` config or goals without UI changes simply skip it via an "N/A" signal. The workflow continues to the documentation gate either way.
+The gate is **optional** — projects without `qa_*` config or goals without UI changes simply skip it via an "N/A" signal.
+
+### 2. `agent-qa` verification step on implementation
+
+The implementation gate in `feature` and `bug-fix` workflows includes an optional `agent-qa` verify step at phase 2. When enabled at goal creation (via the "Enable QA Testing" toggle), the verification harness automatically spawns a test-engineer session after phase 0 (commands) and phase 1 (LLM reviews) pass. The agent uses the `/qa-test` skill, emits `<verdict>` and `<qa_report>` tags, and the harness records the HTML report as a step artifact.
+
+This mode is fully automated — the team lead does not need to spawn a test-engineer or signal a gate. See [goals-workflows-tasks.md — agent-qa step type](goals-workflows-tasks.md#agent-qa-step-type) for execution details and [goals-workflows-tasks.md — Optional verify steps](goals-workflows-tasks.md#optional-verify-steps) for the toggle mechanism.
+
+Both modes coexist — a goal can use either or both.
 
 ## Project configuration
 
@@ -93,7 +105,7 @@ The protocol has 9 steps:
 
 7. **Produce HTML report** — Write a self-contained HTML report with base64-embedded screenshots (see Report Format below).
 
-8. **Signal gate** — Convert the report to markdown and signal the `qa-testing` gate with content and metadata (`scenarios_passed`, `scenarios_failed`, `budget_used`).
+8. **Emit results** — Emit structured output tags: `<verdict>pass|fail</verdict>` and `<qa_report>...HTML...</qa_report>`. When invoked by the `agent-qa` verification harness, these tags are parsed automatically and the harness handles gate signaling. When invoked standalone (team lead spawns test-engineer for the `qa-testing` gate), the agent should also call `gate_signal()` with the report content and metadata.
 
 9. **Cleanup** — Kill the background server via `bash_bg`, delete the temp directory. Always runs, even on failure.
 
