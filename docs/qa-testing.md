@@ -4,7 +4,7 @@ Automated E2E tests exercise known paths through simulated components, but they 
 
 ## How it fits in the architecture
 
-The implementation gate in `feature` and `bug-fix` workflows includes an optional `agent-qa` verify step at phase 2. When enabled at goal creation (via the "Enable QA Testing" toggle), the verification harness automatically spawns a test-engineer session after phase 0 (commands) and phase 1 (LLM reviews) pass. The agent uses the `/qa-test` skill, emits `<verdict>` and `<qa_report>` tags, and the harness records the HTML report as a step artifact.
+The implementation gate in `feature` and `bug-fix` workflows includes an optional `agent-qa` verify step at phase 2. When enabled at goal creation (via the "Enable QA Testing" toggle), the verification harness automatically spawns a test-engineer session after phase 0 (commands) and phase 1 (LLM reviews) pass. The agent uses the `/qa-test` skill, calls the `verification_result` tool to deliver structured results (verdict, summary, and optional HTML report), and the harness records the report as a step artifact.
 
 This mode is fully automated — the team lead does not need to spawn a test-engineer or signal a gate. See [goals-workflows-tasks.md — agent-qa step type](goals-workflows-tasks.md#agent-qa-step-type) for execution details and [goals-workflows-tasks.md — Optional verify steps](goals-workflows-tasks.md#optional-verify-steps) for the toggle mechanism.
 
@@ -93,7 +93,7 @@ The protocol has 9 steps:
 
 7. **Produce HTML report** — Write a self-contained HTML report with base64-embedded screenshots (see Report Format below).
 
-8. **Emit results** — Emit structured output tags: `<verdict>pass|fail</verdict>` and `<qa_report>...HTML...</qa_report>`. The `agent-qa` verification harness parses these tags automatically and handles gate signaling.
+8. **Submit results** — Call the `verification_result` tool with `verdict` ("pass" or "fail"), `summary` (concise findings), and `report_html` (self-contained HTML report). The verification harness receives results through this tool and handles gate signaling automatically.
 
 9. **Cleanup** — Kill the background server via `bash_bg`, delete the temp directory. Always runs, even on failure.
 
