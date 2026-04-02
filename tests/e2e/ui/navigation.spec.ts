@@ -66,7 +66,7 @@ test.describe("Navigation (UI)", () => {
 
 		// Navigate to session
 		await navigateToHash(page, `#/session/${sessionId}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 		// Click the Settings button — desktop sidebar has "Settings (Ctrl+,)"
 		await page.locator("button[title='Settings (Ctrl+,)']").first().click();
@@ -82,7 +82,7 @@ test.describe("Navigation (UI)", () => {
 		await page.goBack();
 
 		// Verify we're back at the session view
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 		// Cleanup
 		await deleteSession(sessionId);

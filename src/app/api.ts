@@ -678,6 +678,7 @@ export interface VerifyStep {
 	phase?: number;
 	optional?: boolean;
 	label?: string;
+	description?: string;
 }
 
 export interface WorkflowGate {
