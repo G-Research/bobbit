@@ -8,7 +8,7 @@
  * 4. Testing reconnection scenarios to see if messages survive
  */
 import { test, expect } from "./in-process-harness.js";
-import { createSession, connectWs, messageEndPredicate } from "./e2e-setup.js";
+import { createSession, connectWs, messageEndPredicate, waitForSessionStatus } from "./e2e-setup.js";
 
 test.describe("User message echo", () => {
 	test("prompt sends back a message_end event with role=user", async () => {
@@ -68,8 +68,6 @@ test.describe("User message echo", () => {
 			await conn1.waitFor(messageEndPredicate("user"));
 			conn1.close();
 
-			await new Promise((r) => setTimeout(r, 200));
-
 			const conn2 = await connectWs(sessionId);
 			try {
 				conn2.send({ type: "get_messages" });
@@ -101,8 +99,8 @@ test.describe("User message echo", () => {
 			await new Promise((r) => setTimeout(r, 50));
 			conn1.close();
 
-			// Wait for the agent to process
-			await new Promise((r) => setTimeout(r, 500));
+			// Wait for the agent to finish processing
+			await waitForSessionStatus(sessionId, "idle");
 
 			const conn2 = await connectWs(sessionId);
 			try {

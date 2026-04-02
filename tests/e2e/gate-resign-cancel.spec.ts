@@ -234,7 +234,11 @@ test.describe("Gate Re-signal Cancellation", () => {
 		expect(s1Res.status).toBe(201);
 
 		// Wait for verification to start
-		await new Promise(r => setTimeout(r, 200));
+		await pollUntil(
+			() => getActiveVerifications(goalId),
+			(v) => v.length > 0,
+			5000,
+		);
 
 		// Signal 2 (cancels signal 1)
 		const s2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
@@ -243,8 +247,12 @@ test.describe("Gate Re-signal Cancellation", () => {
 		});
 		expect(s2Res.status).toBe(201);
 
-		// Wait briefly
-		await new Promise(r => setTimeout(r, 200));
+		// Wait for verification to start
+		await pollUntil(
+			() => getActiveVerifications(goalId),
+			(v) => v.length > 0,
+			5000,
+		);
 
 		// Signal 3 (cancels signal 2)
 		const s3Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {

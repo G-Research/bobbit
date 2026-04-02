@@ -24,11 +24,11 @@ test.describe("Thinking Level", () => {
 			// Send set_thinking_level
 			conn.send({ type: "set_thinking_level", level: "high" });
 
-			// The server should NOT respond with an error.
-			// On the broken codebase, it responds with:
-			//   { type: "error", message: "Unknown message type", code: "UNKNOWN_TYPE" }
-			// Wait a moment for any error to arrive
-			await new Promise((r) => setTimeout(r, 500));
+			// Send a follow-up message we know the server responds to.
+			// If set_thinking_level was going to produce an error, it would
+			// arrive before this response (WS messages are ordered).
+			conn.send({ type: "get_state" });
+			await conn.waitFor((m) => m.type === "state");
 
 			const errors = conn.messages.filter(
 				(m) => m.type === "error" && m.code === "UNKNOWN_TYPE",
