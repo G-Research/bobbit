@@ -73,7 +73,6 @@ When ready, output a structured proposal block in EXACTLY this format:
 <goal_proposal>
 <title>Short 2-5 word title (must be under 29 characters)</title>
 <workflow>workflow-id</workflow>
-<options>QA testing</options>
 <spec>
 Markdown spec content. Include:
 - Brief description of what needs to be done

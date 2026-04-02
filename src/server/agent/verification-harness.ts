@@ -1308,6 +1308,7 @@ export class VerificationHarness {
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string; artifact?: { content: string; contentType: string } }> {
+		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		const role = this.roleStore.get("test-engineer") || this.roleStore.get("reviewer");
 		if (!role) {
 			return { passed: false, output: "Agent QA failed: no 'test-engineer' or 'reviewer' role found in role store.", sessionId };
@@ -1430,16 +1431,16 @@ export class VerificationHarness {
 				verdict = parseVerdict(fullOutput);
 				if (verdict === null) {
 					const reportHtml = parseQaReport(fullOutput);
-					const artifact = reportHtml ? { content: reportHtml, contentType: "text/html" } : undefined;
+					const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
 					return { passed: false, output: fullOutput || "Agent QA failed: no <verdict> tag found.", sessionId: qaSessionId, artifact };
 				}
 				const reportHtml = parseQaReport(fullOutput);
-				const artifact = reportHtml ? { content: reportHtml, contentType: "text/html" } : undefined;
+				const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
 				return { passed: verdict, output: fullOutput, sessionId: qaSessionId, artifact };
 			}
 
 			const reportHtml = parseQaReport(output);
-			const artifact = reportHtml ? { content: reportHtml, contentType: "text/html" } : undefined;
+			const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
 			return { passed: verdict, output, sessionId: qaSessionId, artifact };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
