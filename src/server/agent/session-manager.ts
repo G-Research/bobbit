@@ -2192,7 +2192,7 @@ export class SessionManager {
 				personalities: s.personalities,
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
-				projectId: ps?.projectId,
+				projectId: ps?.projectId || s.projectId,
 			};
 		});
 	}

@@ -1160,6 +1160,7 @@ async function handleApiRoute(
 			preview: session.preview,
 			personalities: session.personalities,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
+			projectId: sessionPs?.projectId || session.projectId,
 		});
 		return;
 	}
@@ -1320,6 +1321,16 @@ async function handleApiRoute(
 
 		// Auto-detect projectId from cwd if not explicitly provided
 		let resolvedProjectId = body?.projectId as string | undefined;
+
+		// If re-attempting a goal, inherit cwd and projectId from the original goal
+		if (reattemptGoalId && !body?.cwd) {
+			const origGoal = getGoalAcrossProjects(reattemptGoalId);
+			if (origGoal) {
+				cwd = origGoal.cwd || cwd;
+				if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
+			}
+		}
+
 		if (!resolvedProjectId && cwd) {
 			const matched = projectRegistry.findByCwd(cwd);
 			if (matched) resolvedProjectId = matched.id;
@@ -2450,6 +2461,10 @@ async function handleApiRoute(
 					dependsOn: body.dependsOn,
 					workflowGateId: typeof body.workflowGateId === "string" ? body.workflowGateId : undefined,
 					inputGateIds: Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined,
+					headSha: typeof body.headSha === "string" ? body.headSha : undefined,
+					baseSha: typeof body.baseSha === "string" ? body.baseSha : undefined,
+					branch: typeof body.branch === "string" ? body.branch : undefined,
+					resultSummary: typeof body.resultSummary === "string" ? body.resultSummary : undefined,
 				});
 				if (!ok) { json({ error: "Task not found" }, 404); return; }
 
@@ -2484,8 +2499,25 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const ok = getTaskManagerForTask(taskAssignMatch[1]).assignTask(taskAssignMatch[1], sessionId);
+			const taskId = taskAssignMatch[1];
+			const tm = getTaskManagerForTask(taskId);
+			const ok = tm.assignTask(taskId, sessionId);
 			if (!ok) { json({ error: "Task not found" }, 400); return; }
+
+			// Auto-populate baseSha and branch from TeamAgent record
+			const agent = teamManager.findAgentBySessionId(sessionId);
+			if (agent) {
+				const task = tm.getTask(taskId);
+				if (task) {
+					const fields: Record<string, string> = {};
+					if (agent.baseSha && !task.baseSha) fields.baseSha = agent.baseSha;
+					if (agent.branch && !task.branch) fields.branch = agent.branch;
+					if (Object.keys(fields).length) {
+						tm.updateTask(taskId, fields);
+					}
+				}
+			}
+
 			json({ ok: true });
 		} catch (err: any) {
 			json({ error: err.message }, 400);

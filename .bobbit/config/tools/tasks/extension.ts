@@ -115,7 +115,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Update Task",
 		description: [
 			"Update a task's fields, assignment, and/or state in a single call.",
-			"Provide any combination: field updates (title, spec, result_summary, commit_sha),",
+			"Provide any combination: field updates (title, spec, result_summary, head_sha),",
 			"assignment (assigned_to session ID), and/or state transition (state).",
 			"States: todo, in-progress, blocked, complete, skipped.",
 		].join(" "),
@@ -125,7 +125,7 @@ export default function (pi: ExtensionAPI) {
 			title: Type.Optional(Type.String({ description: "New title" })),
 			spec: Type.Optional(Type.String({ description: "New spec" })),
 			result_summary: Type.Optional(Type.String({ description: "Summary of results" })),
-			commit_sha: Type.Optional(Type.String({ description: "Commit SHA" })),
+			head_sha: Type.Optional(Type.String({ description: "HEAD commit SHA of your finished work" })),
 			assigned_to: Type.Optional(Type.String({ description: "Session ID to assign task to" })),
 			state: Type.Optional(Type.String({ description: "Transition to: todo, in-progress, blocked, complete, skipped" })),
 		}),
@@ -136,7 +136,7 @@ export default function (pi: ExtensionAPI) {
 				if (fields.title !== undefined) updateBody.title = fields.title;
 				if (fields.spec !== undefined) updateBody.spec = fields.spec;
 				if (fields.result_summary !== undefined) updateBody.resultSummary = fields.result_summary;
-				if (fields.commit_sha !== undefined) updateBody.commitSha = fields.commit_sha;
+				if (fields.head_sha !== undefined) updateBody.headSha = fields.head_sha;
 				if (Object.keys(updateBody).length > 0) {
 					await api("PUT", `/api/tasks/${task_id}`, updateBody);
 				}

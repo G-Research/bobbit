@@ -25,7 +25,9 @@ export interface Task {
 	state: TaskState;
 	assignedSessionId?: string;
 	goalId: string;
-	commitSha?: string;
+	baseSha?: string;
+	headSha?: string;
+	branch?: string;
 	resultSummary?: string;
 	spec?: string;
 	createdAt: number;
@@ -754,11 +756,11 @@ function deriveBadges(commitList: CommitInfo[], taskList: Task[]): Map<string, C
 	const badges = new Map<string, CommitBadges>();
 	for (const c of commitList) badges.set(c.sha, {});
 
-	const testTasks = taskList.filter(t => t.type === "test" && t.commitSha);
-	const reviewTasks = taskList.filter(t => t.type === "review" && t.commitSha);
+	const testTasks = taskList.filter(t => t.type === "test" && t.headSha);
+	const reviewTasks = taskList.filter(t => t.type === "review" && t.headSha);
 
 	for (const task of testTasks) {
-		const sha = task.commitSha!;
+		const sha = task.headSha!;
 		if (!badges.has(sha)) continue;
 		const b = badges.get(sha)!;
 		if (task.state === "complete") b.tests = "pass";
@@ -767,7 +769,7 @@ function deriveBadges(commitList: CommitInfo[], taskList: Task[]): Map<string, C
 	}
 
 	for (const task of reviewTasks) {
-		const sha = task.commitSha!;
+		const sha = task.headSha!;
 		if (!badges.has(sha)) continue;
 		const b = badges.get(sha)!;
 		if (task.state === "complete") b.review = "pass";

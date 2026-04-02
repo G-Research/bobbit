@@ -46,7 +46,11 @@ detail_docs: >-
 
   - `resultSummary` — completion summary (populated when task is completed)
 
-  - `commitSha` — associated git commit (if set)
+  - `baseSha` — commit the agent started from (set by system at spawn)
+
+  - `headSha` — tip of the agent's finished work (set by agent on completion)
+
+  - `branch` — agent's working branch name (set by system at spawn)
 
   - `parentTaskId` — ID of the parent task (null if top-level)
 
