@@ -213,7 +213,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Submit verification verdict, summary, and optional HTML report.",
 		parameters: Type.Object({
 			verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], { description: "Whether verification passed or failed" }),
-			summary: Type.String({ description: "Concise summary of findings" }),
+			summary: Type.String({ description: "Detailed markdown summary of findings — what was reviewed, specific issues found (with file:line references), and verdict rationale" }),
 			report_html: Type.Optional(Type.String({ description: "Self-contained HTML report with embedded screenshots (for QA agents)" })),
 		}),
 		async execute(_id, params) {

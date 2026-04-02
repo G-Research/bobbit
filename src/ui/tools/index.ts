@@ -26,6 +26,7 @@ import "./renderers/GateVerificationLive.js"; // registers <gate-verification-li
 import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
 import { PersonalitiesListRenderer, PersonalitiesCreateRenderer } from "./renderers/PersonalityToolRenderers.js";
 import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
+import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
 import type { ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
@@ -64,6 +65,7 @@ registerToolRenderer("gate_list", new GateListRenderer());
 registerToolRenderer("gate_signal", new GateSignalRenderer());
 registerToolRenderer("gate_status", new GateStatusRenderer());
 registerToolRenderer("preview_open", new PreviewOpenRenderer());
+registerToolRenderer("verification_result", new VerificationResultRenderer());
 
 const defaultRenderer = new DefaultRenderer();
 

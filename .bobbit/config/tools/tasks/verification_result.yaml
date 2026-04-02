@@ -5,3 +5,43 @@ provider:
   type: bobbit-extension
   extension: extension.ts
 group: Gates
+detail_docs: |
+  ## Summary Format
+
+  The `summary` field should be **detailed markdown** covering:
+  - **What was reviewed** — which files, components, or areas were examined
+  - **Specific findings** — with file paths and line numbers where relevant (e.g. `src/server/foo.ts:42`)
+  - **Verdict rationale** — why the review passes or fails
+
+  ### Good pass summary example:
+  ```
+  ## Review Summary
+  
+  Reviewed 12 files across `src/server/` and `src/ui/` for the new feature.
+  
+  ### Findings
+  - **No critical issues found**
+  - Minor: `src/server/handler.ts:85` — unused import (non-blocking)
+  - Style: consistent naming conventions throughout
+  
+  ### Verdict: PASS
+  All acceptance criteria met. Implementation matches design doc.
+  ```
+
+  ### Good fail summary example:
+  ```
+  ## Review Summary
+  
+  Reviewed implementation of the verification renderer.
+  
+  ### Critical Issues
+  1. **Missing null check** — `src/ui/tools/renderers/VerificationResultRenderer.ts:45` — `params.summary` accessed without checking if params exists during streaming
+  2. **XSS vulnerability** — `report_html` rendered via unsafeHTML without sanitization
+  
+  ### Verdict: FAIL
+  2 critical issues must be resolved before merge.
+  ```
+
+  ### Notes
+  - `report_html` is only for QA agents with screenshots; most reviewers should focus on `summary`
+  - Use headings, bullet lists, and code blocks for readability
