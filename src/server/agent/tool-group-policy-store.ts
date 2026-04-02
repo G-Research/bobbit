@@ -11,7 +11,7 @@ import path from "node:path";
 import { stringify, parse } from "yaml";
 import type { GrantPolicy } from "./role-store.js";
 
-const VALID_POLICIES = new Set<string>(['always-ask', 'ask-once', 'never-ask', 'never', 'always-allow']);
+const VALID_POLICIES = new Set<string>(['allow', 'ask', 'never', 'always-ask', 'ask-once', 'never-ask', 'always-allow']);
 
 export class ToolGroupPolicyStore {
 	private readonly policyFile: string;

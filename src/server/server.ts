@@ -1073,6 +1073,25 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/tool-grant-request — long-polling endpoint called by guard extension
+	const toolGrantMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-grant-request$/);
+	if (toolGrantMatch && req.method === "POST") {
+
+		const sessionId = toolGrantMatch[1];
+		const body = await readBody(req);
+		if (!body || !body.toolName || !body.toolGroup) {
+			json({ error: "toolName and toolGroup required" }, 400);
+			return;
+		}
+		try {
+			const result = await sessionManager.requestToolGrant(sessionId, body.toolName, body.toolGroup);
+			json(result);
+		} catch (err: any) {
+			json({ error: err.message }, 500);
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id (exact match — not /api/sessions/:id/output etc.)
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {
@@ -1589,9 +1608,9 @@ async function handleApiRoute(
 		const group = decodeURIComponent(groupPolicyMatch[1]);
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const validPolicies = ['always-allow', 'ask-once', 'always-ask', 'never-ask', 'never'];
+		const validPolicies = ['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask'];
 		if (body.policy && !validPolicies.includes(body.policy)) {
-			json({ error: `Invalid policy. Must be one of: ${validPolicies.join(', ')}` }, 400);
+			json({ error: `Invalid policy. Must be one of: allow, ask, never` }, 400);
 			return;
 		}
 		groupPolicyStore.setGroupPolicy(group, body.policy || null);
@@ -2021,7 +2040,7 @@ async function handleApiRoute(
 				accessory: body.accessory,
 				toolPolicies: body.toolPolicies !== undefined ? (() => {
 					// Validate toolPolicies values
-					const validPolicies = new Set(['always-allow', 'ask-once', 'always-ask', 'never-ask', 'never']);
+					const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 					const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
 					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
 						for (const [k, v] of Object.entries(body.toolPolicies)) {

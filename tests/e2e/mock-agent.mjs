@@ -8,6 +8,8 @@
  */
 import { createInterface } from "node:readline";
 import fs from "node:fs";
+import path from "node:path";
+import http from "node:http";
 
 const rl = createInterface({ input: process.stdin });
 
@@ -109,8 +111,8 @@ async function handlePrompt(requestId, text) {
 	const toolAction = respondToPrompt(text);
 
 	if (toolAction && toolAction.toolDenied) {
-		// Simulate a tool permission denial — emit the events that a real agent
-		// would produce when executing a stub extension for an ungranted MCP tool.
+		// Simulate a tool_call guard requesting permission via the gateway REST endpoint.
+		// This triggers the tool_permission_needed WebSocket broadcast to UI clients.
 		const deniedTool = toolAction.toolDenied;
 		const toolId = `tool_${Date.now()}`;
 
@@ -122,29 +124,89 @@ async function handlePrompt(requestId, text) {
 			input: {},
 		});
 
-		// Tool execution end with error
-		emit({
-			type: "tool_execution_end",
-			toolId,
-			toolName: deniedTool,
-			isError: true,
-		});
+		// POST to the gateway's tool-grant-request endpoint (same as the real guard extension)
+		const sessionId = process.env.BOBBIT_SESSION_ID;
+		const bobbitDir = process.env.BOBBIT_DIR || path.join(process.env.HOME || process.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (process.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch (err) {
+			// Fallback: emit old-style error if gateway credentials unavailable
+			const toolResultMsg = {
+				role: "toolResult",
+				content: [{ type: "text", text: `Error: Tool ${deniedTool} is not allowed for your current role. Ask the user to grant permission.` }],
+			};
+			conversationMessages.push(toolResultMsg);
+			emit({ type: "message_end", message: toolResultMsg });
+			emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: true });
+			emit({ type: "agent_end" });
+			emit({ type: "session_status", status: "idle" });
+			return;
+		}
 
-		// toolResult message_end with the sentinel error text
-		const toolResultMsg = {
-			role: "toolResult",
-			content: [{ type: "text", text: `Error: Tool ${deniedTool} is not allowed for your current role. Ask the user to grant permission.` }],
-		};
-		conversationMessages.push(toolResultMsg);
-		emit({ type: "message_end", message: toolResultMsg });
+		// Determine the MCP group name from the tool name (e.g. mcp__mock__echo → "MCP: mock")
+		// MCP manager uses "MCP: <serverName>" as the group name
+		const toolGroup = deniedTool.startsWith("mcp__")
+			? "MCP: " + deniedTool.split("__")[1]
+			: "unknown";
 
-		// Assistant acknowledges the denial
-		const assistantMsg = {
-			role: "assistant",
-			content: [{ type: "text", text: `I tried to use ${deniedTool} but it is not allowed. Please grant permission.` }],
-		};
-		conversationMessages.push(assistantMsg);
-		emit({ type: "message_end", message: assistantMsg });
+		const body = JSON.stringify({ toolName: deniedTool, toolGroup });
+		const url = new URL(gwUrl + "/api/sessions/" + sessionId + "/tool-grant-request");
+
+		try {
+			const result = await new Promise((resolve, reject) => {
+				const req = http.request(url, {
+					method: "POST",
+					headers: {
+						"Authorization": "Bearer " + token,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(body),
+					},
+					// Long-poll can take a while if user is slow to respond,
+					// but 30s is enough for E2E tests
+					timeout: 30_000,
+				}, (res) => {
+					let data = "";
+					res.on("data", (chunk) => data += chunk);
+					res.on("end", () => {
+						try { resolve(JSON.parse(data)); } catch { resolve({ granted: false }); }
+					});
+				});
+				req.on("timeout", () => { req.destroy(); resolve({ granted: false, reason: "timeout" }); });
+				req.on("error", reject);
+				req.write(body);
+				req.end();
+			});
+
+			if (result && result.granted) {
+				// Permission was granted — simulate successful tool execution
+				emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: false });
+				const assistantMsg = {
+					role: "assistant",
+					content: [{ type: "text", text: `Permission granted for ${deniedTool}. Tool executed successfully.` }],
+				};
+				conversationMessages.push(assistantMsg);
+				emit({ type: "message_end", message: assistantMsg });
+			} else {
+				// Permission denied
+				emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: true });
+				const assistantMsg = {
+					role: "assistant",
+					content: [{ type: "text", text: `I tried to use ${deniedTool} but permission was denied.` }],
+				};
+				conversationMessages.push(assistantMsg);
+				emit({ type: "message_end", message: assistantMsg });
+			}
+		} catch (err) {
+			emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: true });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "text", text: `Error requesting permission for ${deniedTool}: ${err.message}` }],
+			};
+			conversationMessages.push(assistantMsg);
+			emit({ type: "message_end", message: assistantMsg });
+		}
 	} else if (toolAction && toolAction.tool) {
 		const toolId = `tool_${Date.now()}`;
 

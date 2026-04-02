@@ -531,13 +531,13 @@ export class AgentInterface extends LitElement {
 						: undefined}
 					@grant-tool-permission=${(e: CustomEvent) => {
 						if (!this.session) return;
-						const { toolName, scope, group, lastPromptText, grantPolicy } = e.detail;
-						(this.session as any).grantToolPermission?.(toolName, scope, group, lastPromptText, grantPolicy);
+						const { toolName, scope, group, lastPromptText, mode } = e.detail;
+						(this.session as any).grantToolPermission?.(toolName, scope, group, lastPromptText, mode);
 					}}
 					@deny-tool-permission=${(e: CustomEvent) => {
 						if (!this.session) return;
-						const { id } = e.detail;
-						(this.session as any).denyToolPermission?.(id);
+						const { id, toolName } = e.detail;
+						(this.session as any).denyToolPermission?.(id, toolName);
 					}}
 				></message-list>
 

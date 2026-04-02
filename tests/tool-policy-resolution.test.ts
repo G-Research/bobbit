@@ -42,95 +42,95 @@ describe("resolveGrantPolicy — unified 5-layer resolution", () => {
 	it("layer 1: role tool-specific override wins over everything", () => {
 		const role = {
 			toolPolicies: {
-				"mcp__pw__snap": "never-ask" as const,
-				"mcp__pw": "ask-once" as const,
+				"mcp__pw__snap": "never" as const,
+				"mcp__pw": "ask" as const,
 			},
 		};
-		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "always-ask" } });
-		const gps = mockGroupPolicyStore({ "mcp__pw": "always-allow" });
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "never-ask");
+		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "ask" } });
+		const gps = mockGroupPolicyStore({ "mcp__pw": "allow" });
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "never");
 	});
 
 	it("layer 2: role group override wins over tool default and group default", () => {
-		const role = { toolPolicies: { "mcp__playwright": "always-ask" as const } };
-		const tm = mockToolManager({ "mcp__playwright__snap": { grantPolicy: "ask-once" } });
-		const gps = mockGroupPolicyStore({ "mcp__playwright": "always-allow" });
-		assert.equal(resolveGrantPolicy("mcp__playwright__snap", "mcp__playwright", role, tm, gps), "always-ask");
+		const role = { toolPolicies: { "mcp__playwright": "ask" as const } };
+		const tm = mockToolManager({ "mcp__playwright__snap": { grantPolicy: "ask" } });
+		const gps = mockGroupPolicyStore({ "mcp__playwright": "allow" });
+		assert.equal(resolveGrantPolicy("mcp__playwright__snap", "mcp__playwright", role, tm, gps), "ask");
 	});
 
 	it("layer 3: tool YAML default wins over group default", () => {
 		const role = {};
-		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "ask-once" } });
-		const gps = mockGroupPolicyStore({ "mcp__pw": "always-ask" });
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "ask-once");
+		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "ask" } });
+		const gps = mockGroupPolicyStore({ "mcp__pw": "ask" });
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "ask");
 	});
 
 	it("layer 4: group default wins over system fallback", () => {
 		const role = {};
 		const tm = mockToolManager({ "mcp__pw__snap": {} });
-		const gps = mockGroupPolicyStore({ "mcp__pw": "always-ask" });
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "always-ask");
+		const gps = mockGroupPolicyStore({ "mcp__pw": "ask" });
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "ask");
 	});
 
-	it("layer 5: system fallback returns 'always-allow' when no policy configured", () => {
+	it("layer 5: system fallback returns 'allow' when no policy configured", () => {
 		const role = {};
 		const tm = mockToolManager({});
 		const gps = mockGroupPolicyStore({});
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "always-allow");
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm, gps), "allow");
 	});
 
 	it("system fallback when no groupPolicyStore provided", () => {
 		const role = {};
 		const tm = mockToolManager({});
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm), "always-allow");
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", role, tm), "allow");
 	});
 
 	it("system fallback with undefined role and toolManager", () => {
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", undefined, undefined), "always-allow");
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", undefined, undefined), "allow");
 	});
 
-	it("'never-ask' policy correctly returned at role tool level", () => {
-		const role = { toolPolicies: { "dangerous_tool": "never-ask" as const } };
-		assert.equal(resolveGrantPolicy("dangerous_tool", "SomeGroup", role, undefined), "never-ask");
+	it("'never' policy correctly returned at role tool level", () => {
+		const role = { toolPolicies: { "dangerous_tool": "never" as const } };
+		assert.equal(resolveGrantPolicy("dangerous_tool", "SomeGroup", role, undefined), "never");
 	});
 
-	it("'never-ask' policy correctly returned at role group level", () => {
-		const role = { toolPolicies: { "mcp__dangerous": "never-ask" as const } };
-		assert.equal(resolveGrantPolicy("mcp__dangerous__tool", "mcp__dangerous", role, undefined), "never-ask");
+	it("'never' policy correctly returned at role group level", () => {
+		const role = { toolPolicies: { "mcp__dangerous": "never" as const } };
+		assert.equal(resolveGrantPolicy("mcp__dangerous__tool", "mcp__dangerous", role, undefined), "never");
 	});
 
-	it("'never-ask' policy correctly returned at tool YAML level", () => {
-		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "never-ask" } });
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", {}, tm), "never-ask");
+	it("'never' policy correctly returned at tool YAML level", () => {
+		const tm = mockToolManager({ "mcp__pw__snap": { grantPolicy: "never" } });
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", "mcp__pw", {}, tm), "never");
 	});
 
-	it("'never-ask' policy correctly returned at group default level", () => {
-		const gps = mockGroupPolicyStore({ "Browser": "never-ask" });
-		assert.equal(resolveGrantPolicy("browser_click", "Browser", {}, mockToolManager({}), gps), "never-ask");
+	it("'never' policy correctly returned at group default level", () => {
+		const gps = mockGroupPolicyStore({ "Browser": "never" });
+		assert.equal(resolveGrantPolicy("browser_click", "Browser", {}, mockToolManager({}), gps), "never");
 	});
 
-	it("'always-allow' at group level matches group name exactly", () => {
-		const gps = mockGroupPolicyStore({ "Browser": "ask-once" });
+	it("'ask' at group level matches group name exactly", () => {
+		const gps = mockGroupPolicyStore({ "Browser": "ask" });
 		// Tool in a different group should not match
-		assert.equal(resolveGrantPolicy("read", "Filesystem", {}, mockToolManager({}), gps), "always-allow");
+		assert.equal(resolveGrantPolicy("read", "Filesystem", {}, mockToolManager({}), gps), "allow");
 	});
 
 	it("undefined toolGroup skips group-level checks", () => {
-		const role = { toolPolicies: { "mcp__pw": "ask-once" as const } };
-		const gps = mockGroupPolicyStore({ "mcp__pw": "always-ask" });
+		const role = { toolPolicies: { "mcp__pw": "ask" as const } };
+		const gps = mockGroupPolicyStore({ "mcp__pw": "ask" });
 		// With undefined toolGroup, neither role group nor group default apply
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", undefined, role, undefined, gps), "always-allow");
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", undefined, role, undefined, gps), "allow");
 	});
 
 	it("empty toolPolicies falls through to tool default", () => {
 		const role = { toolPolicies: {} };
-		const tm = mockToolManager({ "read": { grantPolicy: "always-ask" } });
-		assert.equal(resolveGrantPolicy("read", "Filesystem", role, tm), "always-ask");
+		const tm = mockToolManager({ "read": { grantPolicy: "ask" } });
+		assert.equal(resolveGrantPolicy("read", "Filesystem", role, tm), "ask");
 	});
 
-	it("'always-allow' at any layer is returned correctly", () => {
-		const role = { toolPolicies: { "my_tool": "always-allow" as const } };
-		assert.equal(resolveGrantPolicy("my_tool", "Group", role, undefined), "always-allow");
+	it("'allow' at any layer is returned correctly", () => {
+		const role = { toolPolicies: { "my_tool": "allow" as const } };
+		assert.equal(resolveGrantPolicy("my_tool", "Group", role, undefined), "allow");
 	});
 });
 
@@ -168,8 +168,8 @@ describe("ToolGroupPolicyStore", () => {
 	it("setGroupPolicy creates file and stores policy", () => {
 		const configDir = path.join(tmpDir, "config");
 		const store = new ToolGroupPolicyStore(configDir);
-		store.setGroupPolicy("Browser", "ask-once");
-		assert.equal(store.getGroupPolicy("Browser"), "ask-once");
+		store.setGroupPolicy("Browser", "ask");
+		assert.equal(store.getGroupPolicy("Browser"), "ask");
 	});
 
 	it("getGroupPolicy returns null for unknown group", () => {
@@ -181,8 +181,8 @@ describe("ToolGroupPolicyStore", () => {
 	it("setGroupPolicy with null removes the entry", () => {
 		const configDir = path.join(tmpDir, "config");
 		const store = new ToolGroupPolicyStore(configDir);
-		store.setGroupPolicy("Browser", "ask-once");
-		assert.equal(store.getGroupPolicy("Browser"), "ask-once");
+		store.setGroupPolicy("Browser", "ask");
+		assert.equal(store.getGroupPolicy("Browser"), "ask");
 		store.setGroupPolicy("Browser", null);
 		assert.equal(store.getGroupPolicy("Browser"), null);
 	});
@@ -190,33 +190,33 @@ describe("ToolGroupPolicyStore", () => {
 	it("getAll returns all stored policies", () => {
 		const configDir = path.join(tmpDir, "config");
 		const store = new ToolGroupPolicyStore(configDir);
-		store.setGroupPolicy("Agent", "always-allow");
-		store.setGroupPolicy("mcp__playwright", "always-ask");
+		store.setGroupPolicy("Agent", "allow");
+		store.setGroupPolicy("mcp__playwright", "ask");
 		const all = store.getAll();
-		assert.equal(all["Agent"], "always-allow");
-		assert.equal(all["mcp__playwright"], "always-ask");
+		assert.equal(all["Agent"], "allow");
+		assert.equal(all["mcp__playwright"], "ask");
 	});
 
 	it("persists to disk — new instance reads same data", () => {
 		const configDir = path.join(tmpDir, "config");
 		const store1 = new ToolGroupPolicyStore(configDir);
-		store1.setGroupPolicy("Shell", "never-ask");
+		store1.setGroupPolicy("Shell", "never");
 
 		// Create a new instance — should read from disk
 		const store2 = new ToolGroupPolicyStore(configDir);
-		assert.equal(store2.getGroupPolicy("Shell"), "never-ask");
+		assert.equal(store2.getGroupPolicy("Shell"), "never");
 	});
 
 	it("invalid policy values in YAML are filtered out", () => {
 		// Write invalid data directly to the file
 		const filePath = path.join(tmpDir, "config", "tool-group-policies.yaml");
-		fs.writeFileSync(filePath, "Browser: ask-once\nInvalid: not-a-policy\nAgent: always-allow\n");
+		fs.writeFileSync(filePath, "Browser: ask\nInvalid: not-a-policy\nAgent: allow\n");
 
 		const configDir = path.join(tmpDir, "config");
 		const store = new ToolGroupPolicyStore(configDir);
 		const all = store.getAll();
-		assert.equal(all["Browser"], "ask-once");
-		assert.equal(all["Agent"], "always-allow");
+		assert.equal(all["Browser"], "ask");
+		assert.equal(all["Agent"], "allow");
 		assert.equal(all["Invalid"], undefined);
 	});
 });
