@@ -155,6 +155,12 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_status", status: session.status, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+
+			// If there's a pending tool permission request, send it to the new client
+			const pendingPerm = sessionManager.getPendingToolPermission(sessionId);
+			if (pendingPerm) {
+				send(ws, { type: "tool_permission_needed", ...pendingPerm });
+			}
 			return;
 		}
 

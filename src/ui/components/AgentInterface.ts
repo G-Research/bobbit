@@ -301,6 +301,11 @@ export class AgentInterface extends LitElement {
 				}
 				return;
 			}
+			if ((ev as any).type === "render") {
+				// Generic re-render request (e.g. tool permission card added)
+				this.requestUpdate();
+				return;
+			}
 			switch (ev.type) {
 				case "turn_end":
 				case "agent_start":

@@ -2065,6 +2065,24 @@ export class SessionManager {
 	}
 
 	/**
+	 * Get the pending tool permission request for a session, if any.
+	 * Used to send the permission card to newly connecting clients.
+	 */
+	getPendingToolPermission(id: string): { toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string } | undefined {
+		const session = this.sessions.get(id);
+		if (!session?.pendingGrantRequest) return undefined;
+		const roleName = session.role || "general";
+		const role = this.roleManager?.getRole(roleName);
+		return {
+			toolName: session.pendingGrantRequest.toolName,
+			group: session.pendingGrantRequest.toolGroup,
+			roleName: role?.name ?? roleName,
+			roleLabel: role?.label ?? roleName,
+			lastPromptText: session.lastPromptText,
+		};
+	}
+
+	/**
 	 * Register an externally-created RPC bridge as a viewable session.
 	 * Used for LLM review sub-agents in verification harness so users can watch them live.
 	 * Returns an unsubscribe function to call when the session ends.
