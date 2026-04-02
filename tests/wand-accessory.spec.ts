@@ -16,23 +16,34 @@ test.describe("wand accessory chat blob integration", () => {
 		).toBe(true);
 	});
 
-	test("session-manager.ts includes bobbit-wand in accClasses arrays", () => {
+	test("session-manager.ts builds accClasses from ACCESSORY_IDS for class cleanup", () => {
 		const source = fs.readFileSync(
 			path.resolve("src/app/session-manager.ts"),
 			"utf-8"
 		);
-		// Both accClasses arrays must include "bobbit-wand" for proper class cleanup
-		const accClassesMatches = source.match(/accClasses\s*=\s*\[([^\]]+)\]/g);
+		// accClasses are now built dynamically via ACCESSORY_IDS.map(...)
+		// Verify ACCESSORY_IDS is imported and used to build accClasses at least twice
+		expect(
+			source.includes("ACCESSORY_IDS"),
+			"Expected session-manager.ts to import ACCESSORY_IDS"
+		).toBe(true);
+		const accClassesMatches = source.match(/ACCESSORY_IDS\.map\(/g);
 		expect(
 			accClassesMatches && accClassesMatches.length >= 2,
-			"Expected session-manager.ts to have at least 2 accClasses arrays"
+			"Expected session-manager.ts to have at least 2 ACCESSORY_IDS.map() calls for accClasses"
 		).toBe(true);
-		for (const match of accClassesMatches!) {
-			expect(
-				match.includes("bobbit-wand"),
-				"Expected session-manager.ts accClasses to include bobbit-wand for class cleanup"
-			).toBe(true);
-		}
+	});
+
+	test("ACCESSORY_IDS includes wand for bobbit-wand class cleanup", () => {
+		// Verify wand is defined in sprite data (source of ACCESSORY_DEFS / ACCESSORY_IDS)
+		const spriteData = fs.readFileSync(
+			path.resolve("src/ui/bobbit-sprite-data.ts"),
+			"utf-8"
+		);
+		expect(
+			spriteData.includes("'wand'"),
+			"Expected bobbit-sprite-data.ts to define a 'wand' accessory"
+		).toBe(true);
 	});
 
 	test("app.css contains .bobbit-blob__wand CSS rules", () => {

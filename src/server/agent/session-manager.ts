@@ -1821,13 +1821,12 @@ export class SessionManager {
 		};
 
 		const session = await executePlan(plan, ctx);
+		if (parentProjectId) session.projectId = parentProjectId;
 
 		// Persist with all structural fields (delegateOf is in the initial put)
 		this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		});
-
-		if (parentProjectId) session.projectId = parentProjectId;
 
 		// Send delegate prompt with 30s timeout
 		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
