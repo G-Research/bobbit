@@ -4,7 +4,7 @@ Automated E2E tests exercise known paths through simulated components, but they 
 
 ## How it fits in the architecture
 
-QA testing sits between the **implementation** gate and the **documentation** gate in both the `feature` and `bug-fix` workflows. After code passes type checks, automated tests, and code review, the team lead decides whether visual/integration validation is needed. If so, a test-engineer agent invokes the `/validate` slash skill, which handles the ephemeral environment lifecycle. The agent handles the actual browser interaction and report authoring.
+QA testing sits between the **implementation** gate and the **documentation** gate in both the `feature` and `bug-fix` workflows. After code passes type checks, automated tests, and code review, the team lead decides whether visual/integration validation is needed. If so, a test-engineer agent invokes the `/qa-test` slash skill, which handles the ephemeral environment lifecycle. The agent handles the actual browser interaction and report authoring.
 
 ```
 design-doc → implementation → qa-testing (optional) → documentation → ready-to-merge
@@ -71,9 +71,9 @@ GET /api/projects/:id/qa-testing-config
 
 Returns `{ config: QaTestingConfig | null }`. Returns `null` when `qa_start_command` is not set. The `QaTestingConfig` object has camelCase field names: `buildCommand`, `startCommand`, `healthCheck`, `browserEntry`, `env`, `maxDurationMinutes`, `maxScenarios`.
 
-## The `/validate` slash skill
+## The `/qa-test` slash skill
 
-The `/validate` skill (in `.claude/skills/validate/SKILL.md`) provides the full ephemeral environment protocol. Agents invoke it to run QA testing scenarios. The skill handles environment lifecycle; the agent handles browser interaction and report writing.
+The `/qa-test` skill (in `.claude/skills/qa-test/SKILL.md`) provides the full ephemeral environment protocol. Agents invoke it to run QA testing scenarios. The skill handles environment lifecycle; the agent handles browser interaction and report writing.
 
 ### Protocol overview
 
@@ -161,7 +161,7 @@ The team-lead role prompt includes instructions for the QA testing gate:
 
 1. **Decide if needed** — If the goal has no UI changes or is purely infrastructure, signal the gate with "N/A" content and zeroed metadata. The LLM reviewer accepts this.
 
-2. **If needed** — Spawn a test-engineer agent with `workflowGateId: "qa-testing"`, a task prompt listing scenarios to validate (derived from the design doc), and instructions to invoke `/validate`.
+2. **If needed** — Spawn a test-engineer agent with `workflowGateId: "qa-testing"`, a task prompt listing scenarios to validate (derived from the design doc), and instructions to invoke `/qa-test`.
 
 3. **The test-engineer signals the gate** with the report and metadata after completing the validation.
 

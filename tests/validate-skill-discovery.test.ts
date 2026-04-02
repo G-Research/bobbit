@@ -3,16 +3,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-describe("/validate slash skill", () => {
+describe("/qa-test slash skill", () => {
   it("SKILL.md exists and has valid frontmatter", () => {
-    const skillPath = path.join(process.cwd(), ".claude", "skills", "validate", "SKILL.md");
-    assert.ok(fs.existsSync(skillPath), "SKILL.md should exist at .claude/skills/validate/SKILL.md");
+    const skillPath = path.join(process.cwd(), ".claude", "skills", "qa-test", "SKILL.md");
+    assert.ok(fs.existsSync(skillPath), "SKILL.md should exist at .claude/skills/qa-test/SKILL.md");
     
     const content = fs.readFileSync(skillPath, "utf-8");
     
     // Check frontmatter
     assert.ok(content.startsWith("---"), "Should start with YAML frontmatter");
-    assert.ok(content.includes("name: validate"), "Should have name: validate");
+    assert.ok(content.includes("name: qa-test"), "Should have name: qa-test");
     assert.ok(content.includes("description:"), "Should have a description");
     
     // Check key protocol sections

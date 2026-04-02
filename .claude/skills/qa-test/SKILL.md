@@ -1,5 +1,5 @@
 ---
-name: validate
+name: qa-test
 description: Stand up an ephemeral test environment and drive browser-based QA testing scenarios
 argument-hint: [scenario description]
 ---

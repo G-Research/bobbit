@@ -291,8 +291,8 @@ promptTemplate: |
   2. **If validation is needed**: Spawn a test-engineer with:
      - `workflowGateId: "qa-testing"`
      - Task prompt that includes: the specific scenarios to validate (derived from the design doc 
-       and goal spec), instruction to invoke the `/validate` slash skill, and the expected report format
-     - The test-engineer will use `/validate` to stand up an ephemeral environment, drive the browser 
+       and goal spec), instruction to invoke the `/qa-test` slash skill, and the expected report format
+     - The test-engineer will use `/qa-test` to stand up an ephemeral environment, drive the browser 
        through scenarios, and produce an HTML report with screenshots
 
   3. **The test-engineer signals the gate** with the report as content and metadata including 
