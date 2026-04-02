@@ -12,6 +12,12 @@
  *
  * The fixture sets process.env.E2E_PORT before any test files import
  * e2e-setup.ts, so helpers automatically target the right server.
+ *
+ * IMPORTANT: This fixture MUST remain worker-scoped (not test-scoped).
+ * Node's module cache means server singletons (caches, stores, prompt dirs)
+ * persist for the worker's lifetime. createGateway() creates fresh store
+ * instances each call, but module-level state in server.ts is shared.
+ * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -60,7 +66,7 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 		const { createGateway } = await import("../../dist/server/server.js");
 
 		setProjectRoot(bobbitDir);
-		scaffoldBobbitDir();
+		scaffoldBobbitDir(bobbitDir);
 		const token = loadOrCreateToken();
 
 		const gw = createGateway({
@@ -77,7 +83,6 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 
 		// Set env so e2e-setup.ts helpers target this worker's server
 		process.env.E2E_PORT = String(port);
-		process.env.BOBBIT_DIR = bobbitDir;
 
 		const info: GatewayInfo = {
 			port,
