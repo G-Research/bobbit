@@ -54,7 +54,7 @@ export default function(pi) {
   const sessionId = ${JSON.stringify(sessionId)};
 
   pi.on("tool_call", async (event) => {
-    const toolName = event.tool;
+    const toolName = event.toolName || event.tool;
 
     // If tool is already granted or not in the ask-policies map, pass through
     if (grantedTools.has(toolName) || !askPolicies[toolName]) {
