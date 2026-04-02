@@ -46,15 +46,18 @@ export function summarizeInstructions(instructions: string): string {
 export function statusColor(status: string): string {
 	if (status === "completed") return "text-green-500";
 	if (status === "timeout") return "text-orange-500";
-	if (status === "running" || status === "starting") return "text-muted-foreground animate-pulse";
+	if (status === "running" || status === "starting") return "text-blue-500 animate-pulse";
+	if (status === "waiting" || status === "skipped") return "text-muted-foreground";
 	return "text-red-500";
 }
 
 export function statusIcon(status: string): string {
 	if (status === "completed") return "✓";
-	if (status === "running") return "⏳";
-	if (status === "starting") return "⏳";
+	if (status === "running") return "●";
+	if (status === "starting") return "●";
+	if (status === "waiting") return "○";
 	if (status === "timeout") return "⏱";
+	if (status === "skipped") return "—";
 	return "✗";
 }
 
@@ -113,7 +116,7 @@ export function renderRunningCard(name: string, delegateId?: string): TemplateRe
 	}
 	return html`
 		<div class="p-2 border border-border rounded text-sm flex items-center gap-2">
-			<span class="text-muted-foreground animate-pulse">⏳</span>
+			<span class="text-blue-500 animate-pulse">●</span>
 			<span class="inline-block text-muted-foreground">${icon(Bot, "sm")}</span>
 			<span class="font-mono text-xs flex-1 min-w-0 truncate">${name}</span>
 			<span class="text-xs text-muted-foreground">starting…</span>
