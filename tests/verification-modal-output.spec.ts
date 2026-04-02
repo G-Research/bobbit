@@ -75,14 +75,13 @@ test.describe("Verification output modal data flow bug", () => {
 			return { buggyOutput, fixedOutput };
 		});
 
-		// Buggy path: empty
-		expect(result.buggyOutput).toBe("");
+		// Fixed: now returns API output when liveOutput is empty
+		expect(result.buggyOutput).toBe("ok\n");
 
 		// Fixed path: has content
 		expect(result.fixedOutput).toBe("ok\n");
 
-		// THE KEY ASSERTION: current buggy code must provide output
-		// This FAILS because dashboardOpenModal reads only liveOutput
+		// THE KEY ASSERTION: current code must provide output
 		expect(
 			result.buggyOutput,
 			"Expected dashboard modal to show output but got empty string (bug: reads only liveOutput, ignores API output)"

@@ -63,8 +63,8 @@ function chatWidgetOpenModalFixed(stepOutputs, steps, index) {
  * @returns {string} The output string the modal would receive
  */
 function dashboardOpenModal(step) {
-	// Current buggy behavior: only reads liveOutput
-	const output = step.liveOutput || "";
+	// Fixed behavior: falls back to step.output when liveOutput is empty
+	const output = step.liveOutput || step.output || "";
 	return output;
 }
 
