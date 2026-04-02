@@ -9,6 +9,7 @@ export interface VerifyStep {
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
+	phase?: number;
 }
 
 export interface WorkflowGate {
@@ -126,6 +127,7 @@ export class WorkflowStore {
 		if (typeof data.prompt === "string") step.prompt = data.prompt;
 		if (data.expect === "success" || data.expect === "failure") step.expect = data.expect;
 		if (typeof data.timeout === "number") step.timeout = data.timeout;
+		if (typeof data.phase === "number") step.phase = data.phase;
 		return step;
 	}
 
@@ -154,6 +156,7 @@ export class WorkflowStore {
 							if (v.prompt) s.prompt = v.prompt;
 							if (v.expect) s.expect = v.expect;
 							if (v.timeout) s.timeout = v.timeout;
+							if (v.phase) s.phase = v.phase;
 							return s;
 						});
 					}

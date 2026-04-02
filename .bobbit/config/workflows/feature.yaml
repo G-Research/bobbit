@@ -48,6 +48,7 @@ gates:
         run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
+        phase: 1
         prompt: |
           Compare the goal specification and design document to the actual implementation on this branch.
 
@@ -64,6 +65,7 @@ gates:
 
       - name: "Code quality review"
         type: llm-review
+        phase: 1
         prompt: |
           Review the code changes on branch {{branch}} vs {{master}} for quality.
 
@@ -79,6 +81,7 @@ gates:
 
       - name: "Security review"
         type: llm-review
+        phase: 1
         prompt: |
           Security review of changes on branch {{branch}} vs {{master}}.
 

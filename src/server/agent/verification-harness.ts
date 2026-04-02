@@ -45,7 +45,8 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed"; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
+	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed" | "skipped"; phase?: number; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
+	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
 	cancelled?: boolean;
@@ -535,7 +536,7 @@ export class VerificationHarness {
 			goalId: signal.goalId,
 			gateId: signal.gateId,
 			signalId: signal.id,
-			steps: steps.map(s => ({ name: s.name, type: s.type, status: "running" as const, startedAt: verificationStartedAt })),
+			steps: steps.map(s => ({ name: s.name, type: s.type, status: "running" as const, phase: s.phase ?? 0, startedAt: verificationStartedAt })),
 			overallStatus: "running",
 			startedAt: verificationStartedAt,
 		};
@@ -584,7 +585,7 @@ export class VerificationHarness {
 			// If ALL steps can be served from cache, skip spawning agents entirely
 			if (cachedSteps.size >= steps.length && steps.every(s => cachedSteps.has(s.name))) {
 				console.log(`[verification] All ${steps.length} step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
-				const results = steps.map(s => {
+				const results: GateSignalStep[] = steps.map(s => {
 					const cached = cachedSteps.get(s.name)!;
 					return { ...cached, output: `[cached from prior signal] ${cached.output}` };
 				});
@@ -602,6 +603,7 @@ export class VerificationHarness {
 						stepIndex: index, stepName: r.name,
 						status: r.passed ? "passed" : "failed",
 						durationMs: r.duration_ms || 0, output: r.output,
+						phase: steps[index].phase ?? 0,
 					});
 				});
 				this.broadcastFn(signal.goalId, {
@@ -616,152 +618,211 @@ export class VerificationHarness {
 				return;
 			}
 
-			// Run all verification steps in parallel (skipping cached passes)
-			const indexedResults = await Promise.all(
-				steps.map(async (step, index) => {
-					const cached = cachedSteps.get(step.name);
-					if (cached) {
-						const cachedResult = { ...cached, output: `[cached from prior signal] ${cached.output}` };
+			// --- Phased execution ---
+			// Group steps by phase (default 0), execute phases sequentially,
+			// steps within each phase run in parallel.
+			const phaseGroups = new Map<number, Array<{ step: VerifyStep; index: number }>>();
+			steps.forEach((step, index) => {
+				const phase = step.phase ?? 0;
+				if (!phaseGroups.has(phase)) phaseGroups.set(phase, []);
+				phaseGroups.get(phase)!.push({ step, index });
+			});
+			const sortedPhases = [...phaseGroups.keys()].sort((a, b) => a - b);
+
+			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
+
+			// Results array indexed by step position
+			const allResults: Array<GateSignalStep | null> = new Array(steps.length).fill(null);
+			let phaseFailed = false;
+
+			for (const phase of sortedPhases) {
+				if (active.cancelled) break;
+
+				if (phaseFailed) {
+					// Skip all steps in this and subsequent phases
+					const phaseSteps = phaseGroups.get(phase)!;
+					for (const { step, index } of phaseSteps) {
+						const skipResult: GateSignalStep = {
+							name: step.name,
+							type: step.type,
+							passed: false,
+							output: "Skipped — earlier phase failed",
+							duration_ms: 0,
+							expect: step.expect,
+						};
+						allResults[index] = skipResult;
+						const av = this.activeVerifications.get(signal.id);
+						if (av && av.steps[index]) {
+							av.steps[index] = { ...av.steps[index], status: "skipped", durationMs: 0, output: skipResult.output };
+							this._persistActive();
+						}
 						if (!active.cancelled) this.broadcastFn(signal.goalId, {
 							type: "gate_verification_step_complete",
-							goalId: signal.goalId,
-							gateId: signal.gateId,
-							signalId: signal.id,
-							stepIndex: index,
-							stepName: step.name,
-							status: cachedResult.passed ? "passed" : "failed",
-							durationMs: cachedResult.duration_ms || 0,
-							output: cachedResult.output,
+							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+							stepIndex: index, stepName: step.name,
+							status: "skipped", durationMs: 0, output: skipResult.output,
+							phase,
 						});
-						const av = this.activeVerifications.get(signal.id);
-						if (av && av.steps[index]) {
-							av.steps[index] = { ...av.steps[index], status: cachedResult.passed ? "passed" : "failed", durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
-							this._persistActive();
-						}
-						return { index, stepResult: cachedResult };
 					}
+					continue;
+				}
 
-					let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "No verification result." };
-					const startTime = Date.now();
+				const phaseSteps = phaseGroups.get(phase)!;
+				const stepIndices = phaseSteps.map(ps => ps.index);
 
-					// Pre-generate sessionId for LLM review steps so we can broadcast it before the step starts
-					let stepSessionId: string | undefined;
-					if (step.type === "llm-review") {
-						stepSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
-						active.steps[index].startedAt = Date.now();
-						this.broadcastFn(signal.goalId, {
-							type: "gate_verification_step_started",
-							goalId: signal.goalId,
-							gateId: signal.gateId,
-							signalId: signal.id,
-							stepIndex: index,
-							stepName: step.name,
-							startedAt: active.steps[index].startedAt,
-							sessionId: stepSessionId,
-						});
-						const av = this.activeVerifications.get(signal.id);
-						if (av && av.steps[index]) {
-							av.steps[index].sessionId = stepSessionId;
-							this._persistActive();
+				// Broadcast phase started
+				active.currentPhase = phase;
+				this._persistActive();
+				this.broadcastFn(signal.goalId, {
+					type: "gate_verification_phase_started",
+					goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+					phase, stepIndices,
+				});
+
+				// Run steps in this phase in parallel
+				const phaseResults = await Promise.all(
+					phaseSteps.map(async ({ step, index }) => {
+						const cached = cachedSteps.get(step.name);
+						if (cached) {
+							const cachedResult: GateSignalStep = { ...cached, output: `[cached from prior signal] ${cached.output}` };
+							if (!active.cancelled) this.broadcastFn(signal.goalId, {
+								type: "gate_verification_step_complete",
+								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+								stepIndex: index, stepName: step.name,
+								status: cachedResult.passed ? "passed" : "failed",
+								durationMs: cachedResult.duration_ms || 0, output: cachedResult.output,
+								phase,
+							});
+							const av = this.activeVerifications.get(signal.id);
+							if (av && av.steps[index]) {
+								av.steps[index] = { ...av.steps[index], status: cachedResult.passed ? "passed" : "failed", durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
+								this._persistActive();
+							}
+							return { index, stepResult: cachedResult };
 						}
-					}
 
-					if (step.type === "command") {
-						active.steps[index].startedAt = Date.now();
-						this.broadcastFn(signal.goalId, {
-							type: "gate_verification_step_started",
-							goalId: signal.goalId,
-							gateId: signal.gateId,
-							signalId: signal.id,
-							stepIndex: index,
-							stepName: step.name,
-							startedAt: active.steps[index].startedAt,
-						});
-						const cmd = this.substituteVars(step.run || "", builtinVars, projectVars, agentVars, allGateStates);
-						const expectFailure = step.expect === "failure";
+						let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "No verification result." };
+						const startTime = Date.now();
 
-						// Look up error_pattern for expect: failure steps
-						let errorPattern: string | undefined;
-						if (expectFailure) {
-							errorPattern = agentVars["error_pattern"];
-							if (!errorPattern && allGateStates) {
-								// Check upstream gates for error_pattern in metadata
-								for (const [, gs] of allGateStates) {
-									if (gs.metadata?.["error_pattern"]) {
-										errorPattern = gs.metadata["error_pattern"];
-										break;
+						// Pre-generate sessionId for LLM review steps so we can broadcast it before the step starts
+						let stepSessionId: string | undefined;
+						if (step.type === "llm-review") {
+							stepSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
+							active.steps[index].startedAt = Date.now();
+							this.broadcastFn(signal.goalId, {
+								type: "gate_verification_step_started",
+								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+								stepIndex: index, stepName: step.name,
+								startedAt: active.steps[index].startedAt,
+								sessionId: stepSessionId, phase,
+							});
+							const av = this.activeVerifications.get(signal.id);
+							if (av && av.steps[index]) {
+								av.steps[index].sessionId = stepSessionId;
+								this._persistActive();
+							}
+						}
+
+						if (step.type === "command") {
+							active.steps[index].startedAt = Date.now();
+							this.broadcastFn(signal.goalId, {
+								type: "gate_verification_step_started",
+								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+								stepIndex: index, stepName: step.name,
+								startedAt: active.steps[index].startedAt,
+								phase,
+							});
+							const cmd = this.substituteVars(step.run || "", builtinVars, projectVars, agentVars, allGateStates);
+							const expectFailure = step.expect === "failure";
+
+							// Look up error_pattern for expect: failure steps
+							let errorPattern: string | undefined;
+							if (expectFailure) {
+								errorPattern = agentVars["error_pattern"];
+								if (!errorPattern && allGateStates) {
+									for (const [, gs] of allGateStates) {
+										if (gs.metadata?.["error_pattern"]) {
+											errorPattern = gs.metadata["error_pattern"];
+											break;
+										}
 									}
+								}
+							}
+
+							result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure, {
+								goalId: signal.goalId, gateId: signal.gateId,
+								signalId: signal.id, stepIndex: index,
+							}, errorPattern);
+						} else {
+							// llm-review — spawn a one-shot reviewer sub-agent
+							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
+							} else {
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const maxAttempts = 3;
+								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									result = await this.runLlmReviewStep(
+										{ name: step.name, prompt, timeout: step.timeout },
+										cwd, builtinVars,
+										signal.content, signal.metadata,
+										goalSpec, allGateStates, signal.goalId, stepSessionId,
+									);
+									const isTransient = isTransientReviewError(result.output);
+									if (result.passed || !isTransient || attempt === maxAttempts) break;
+									const delayMs = 2000 * Math.pow(2, attempt - 1);
+									console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+									await new Promise(r => setTimeout(r, delayMs));
 								}
 							}
 						}
 
-						result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure, {
-							goalId: signal.goalId,
-							gateId: signal.gateId,
-							signalId: signal.id,
-							stepIndex: index,
-						}, errorPattern);
-					} else {
-						// llm-review — spawn a one-shot reviewer sub-agent
-						if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
-							// Fast path for test environments without API keys
-							result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
-						} else {
-							const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-							const maxAttempts = 3;
-							for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-								result = await this.runLlmReviewStep(
-									{ name: step.name, prompt, timeout: step.timeout },
-									cwd,
-									builtinVars,
-									signal.content,
-									signal.metadata,
-									goalSpec,
-									allGateStates,
-									signal.goalId,
-									stepSessionId,
-								);
-								const isTransient = isTransientReviewError(result.output);
-								if (result.passed || !isTransient || attempt === maxAttempts) break;
-								// Exponential backoff: 2s, 4s before retries
-								const delayMs = 2000 * Math.pow(2, attempt - 1);
-								console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-								await new Promise(r => setTimeout(r, delayMs));
-							}
-						}
-					}
+						const duration_ms = Date.now() - startTime;
 
-					const duration_ms = Date.now() - startTime;
-					if (!active.cancelled) this.broadcastFn(signal.goalId, {
-						type: "gate_verification_step_complete",
-						goalId: signal.goalId,
-						gateId: signal.gateId,
-						signalId: signal.id,
-						stepIndex: index,
-						stepName: step.name,
-						status: result.passed ? "passed" : "failed",
-						durationMs: duration_ms,
-						output: result.output || "",
-						sessionId: result.sessionId,
-					});
-					const av = this.activeVerifications.get(signal.id);
-					if (av && av.steps[index]) {
-						av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
-						this._persistActive();
-					}
-					return {
-						index,
-						stepResult: {
+						// Build artifact for llm-review steps
+						let artifact: GateSignalStep["artifact"];
+						if (step.type === "llm-review" && result.output && result.output.length > 0) {
+							artifact = {
+								content: result.output.length > MAX_ARTIFACT_SIZE ? result.output.slice(0, MAX_ARTIFACT_SIZE) : result.output,
+								contentType: "text/markdown",
+							};
+						}
+
+						if (!active.cancelled) this.broadcastFn(signal.goalId, {
+							type: "gate_verification_step_complete",
+							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+							stepIndex: index, stepName: step.name,
+							status: result.passed ? "passed" : "failed",
+							durationMs: duration_ms, output: result.output || "",
+							sessionId: result.sessionId, phase,
+						});
+						const av = this.activeVerifications.get(signal.id);
+						if (av && av.steps[index]) {
+							av.steps[index] = { ...av.steps[index], status: result.passed ? "passed" : "failed", durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
+							this._persistActive();
+						}
+						const stepResult: GateSignalStep = {
 							name: step.name,
 							type: step.type,
 							passed: result.passed,
 							output: result.output,
 							duration_ms,
 							expect: step.expect,
-						},
-					};
-				})
-			);
+						};
+						if (artifact) stepResult.artifact = artifact;
+						return { index, stepResult };
+					})
+				);
+
+				// Store phase results
+				for (const { index, stepResult } of phaseResults) {
+					allResults[index] = stepResult;
+				}
+
+				// Check if any step in this phase failed
+				if (phaseResults.some(r => !r.stepResult.passed)) {
+					phaseFailed = true;
+				}
+			}
 
 			// If cancelled while steps were running, skip result processing
 			if (active.cancelled) {
@@ -770,10 +831,15 @@ export class VerificationHarness {
 				return;
 			}
 
-			// Sort by original YAML order for deterministic results
-			const results = indexedResults
-				.sort((a, b) => a.index - b.index)
-				.map(r => r.stepResult);
+			// Collect final results in YAML order
+			const results = allResults.map((r, i) => r ?? {
+				name: steps[i].name,
+				type: steps[i].type,
+				passed: false,
+				output: "No result collected",
+				duration_ms: 0,
+				expect: steps[i].expect,
+			});
 
 			const allPassed = results.every(r => r.passed);
 			const status = allPassed ? "passed" : "failed";
