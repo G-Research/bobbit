@@ -5,7 +5,7 @@
  * A mock MCP server (tests/fixtures/mock-mcp-server.mjs) provides
  * deterministic tool responses via stdio transport.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "./gateway-harness.js";
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

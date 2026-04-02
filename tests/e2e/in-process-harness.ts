@@ -54,10 +54,10 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 
-		const { setProjectRoot } = await import("../../src/server/bobbit-dir.js");
-		const { scaffoldBobbitDir } = await import("../../src/server/scaffold.js");
-		const { loadOrCreateToken } = await import("../../src/server/auth/token.js");
-		const { createGateway } = await import("../../src/server/server.js");
+		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
+		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
+		const { createGateway } = await import("../../dist/server/server.js");
 
 		setProjectRoot(bobbitDir);
 		scaffoldBobbitDir();
