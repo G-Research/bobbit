@@ -263,16 +263,28 @@ export function migrateToPerProjectState(
 	}
 
 	// ── 8. Rename central files for backup ──
-	renameForBackup(centralGoalsFile);
-	renameForBackup(centralSessionsFile);
-	renameForBackup(centralTasksFile);
-	renameForBackup(centralStaffFile);
-	renameForBackup(centralGatesFile);
-	// Team store files
-	renameForBackup(path.join(centralStateDir, "team-state.json"));
-	renameForBackup(path.join(centralStateDir, "gateway-swarms.json"));
-	// Search index — will be rebuilt per-project on first access
-	renameForBackup(path.join(centralStateDir, "search.db"));
+	// Skip renaming when the central state dir IS the default project's state dir
+	// (same physical path). Renaming would delete the per-project file we just wrote.
+	const defaultProjectStateDir = path.resolve(
+		path.join(defaultProject.rootPath, ".bobbit", "state"),
+	);
+	const centralResolved = path.resolve(centralStateDir);
+	if (centralResolved !== defaultProjectStateDir) {
+		renameForBackup(centralGoalsFile);
+		renameForBackup(centralSessionsFile);
+		renameForBackup(centralTasksFile);
+		renameForBackup(centralStaffFile);
+		renameForBackup(centralGatesFile);
+		// Team store files
+		renameForBackup(path.join(centralStateDir, "team-state.json"));
+		renameForBackup(path.join(centralStateDir, "gateway-swarms.json"));
+		// Search index — will be rebuilt per-project on first access
+		renameForBackup(path.join(centralStateDir, "search.db"));
+	} else {
+		console.log(
+			"[migration] Central state dir is the default project dir — skipping backup rename",
+		);
+	}
 
 	// ── 9. Write migration marker ──
 	try {

@@ -19,7 +19,7 @@ async function openApp(page: Page): Promise<void> {
 	const base = `http://127.0.0.1:${process.env.E2E_PORT}`;
 	await page.goto(`${base}/?token=${encodeURIComponent(token)}`);
 	await expect(
-		page.locator("button[title='New session']").first(),
+		page.locator("button[title^='New session']").first(),
 	).toBeVisible({ timeout: 15_000 });
 }
 
@@ -41,7 +41,7 @@ test.describe("Session lifecycle (full-stack UI)", () => {
 		await openApp(page);
 
 		// Create a new session
-		await page.locator("button[title='New session']").first().click();
+		await page.locator("button[title^='New session']").first().click();
 		const textarea = page.locator("textarea").first();
 		await expect(textarea).toBeVisible({ timeout: 15_000 });
 
@@ -93,7 +93,7 @@ test.describe("Session lifecycle (full-stack UI)", () => {
 		const token = readE2EToken();
 		await page.goto(`${base}/?token=${encodeURIComponent(token)}#/landing`);
 		await expect(
-			page.locator("button[title='New session']").first(),
+			page.locator("button[title^='New session']").first(),
 		).toBeVisible({ timeout: 15_000 });
 		await expect(textarea).not.toBeVisible({ timeout: 5_000 });
 	});

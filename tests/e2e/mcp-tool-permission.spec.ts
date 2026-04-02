@@ -332,7 +332,7 @@ async function openApp(page: Page): Promise<void> {
 	const b = `http://127.0.0.1:${process.env.E2E_PORT}`;
 	await page.goto(`${b}/?token=${encodeURIComponent(token)}`);
 	await expect(
-		page.locator("button[title='New session']").first(),
+		page.locator("button[title^='New session']").first(),
 	).toBeVisible({ timeout: 15_000 });
 }
 

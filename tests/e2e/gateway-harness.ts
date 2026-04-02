@@ -13,7 +13,7 @@
 import { test as base } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,7 +50,9 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 
 	// Clean slate
 	rmSync(bobbitDir, { recursive: true, force: true });
-	mkdirSync(bobbitDir, { recursive: true });
+	mkdirSync(join(bobbitDir, "state"), { recursive: true });
+	// Mark setup as complete so the setup wizard doesn't appear in tests
+	writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
 	const args = [
 		SERVER_CLI,
@@ -59,6 +61,10 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 		"--no-tls",
 		"--auth",
 		"--agent-cli", MOCK_AGENT,
+		// Use BOBBIT_DIR as the CWD so ensureDefaultProject() registers the
+		// isolated directory — not the real project root.  Without this, every
+		// E2E gateway writes goals/sessions to the main project's state files.
+		"--cwd", bobbitDir,
 	];
 	// UI is always served — fullstack tests need it, API tests ignore it.
 
