@@ -33,6 +33,7 @@ export interface GatewayInfo {
 	baseURL: string;
 	wsBase: string;
 	bobbitDir: string;
+	sessionManager: any;  // Exposed for sandbox security tests
 }
 
 /**
@@ -89,6 +90,7 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 			baseURL: `http://127.0.0.1:${port}`,
 			wsBase: `ws://127.0.0.1:${port}`,
 			bobbitDir,
+			sessionManager: gw.sessionManager,
 		};
 
 		await use(info);
