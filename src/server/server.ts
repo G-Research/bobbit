@@ -2021,6 +2021,7 @@ async function handleApiRoute(
 				label: body?.label,
 				promptTemplate: body?.promptTemplate || "",
 				accessory: body?.accessory,
+				toolPolicies: body?.toolPolicies,
 			});
 			json(role, 201);
 		} catch (err: any) {
