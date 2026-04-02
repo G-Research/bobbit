@@ -66,15 +66,14 @@ export function getAuthToken(): string | null {
 
 // ── Render primitives ──
 
-/** Render a session link for a delegate (opens the delegate session in a new tab) */
+/** Render a session link for a delegate (navigates in-place to the session) */
 export function renderSessionLink(sessionId: string | undefined): TemplateResult {
 	if (!sessionId) return html``;
-	const token = getAuthToken();
-	const sessionUrl = `/?token=${token ? encodeURIComponent(token) : ""}#/session/${sessionId}`;
 	return html`
-		<a href="${sessionUrl}" target="_blank" rel="noopener"
+		<a href="#/session/${sessionId}"
 			class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded hover:bg-accent transition-colors"
 			title="View delegate session"
+			@click=${(e: Event) => { e.preventDefault(); e.stopPropagation(); location.hash = '#/session/' + sessionId; }}
 		>${icon(ScrollText, "xs")} view</a>
 	`;
 }

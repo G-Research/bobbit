@@ -79,6 +79,8 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onCostClick?: () => void;
 	// When true, hide the message editor (for archived/read-only sessions)
 	@property({ type: Boolean }) readOnly = false;
+	// When true, show the editor only while agent is streaming (steer-only mode)
+	@property({ type: Boolean }) nonInteractive = false;
 
 	// References
 	@query("message-editor") private _messageEditor!: MessageEditor;
@@ -873,7 +875,7 @@ export class AgentInterface extends LitElement {
 							></git-status-widget>` : nothing}
 						</div>
 						` : ''}
-						${this.readOnly || (state as any).isPreparing ? nothing : html`<message-editor
+						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
 							.isStreaming=${state.isStreaming}

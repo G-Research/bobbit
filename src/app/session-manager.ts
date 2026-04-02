@@ -890,9 +890,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel.agentInterface.readOnly = true;
 		}
 
-		// Disable input for non-interactive sessions (e.g. verification reviewers)
+		// Non-interactive sessions (e.g. verification reviewers) — show editor only while streaming (steer-only)
 		if (state.chatPanel.agentInterface && sessionData?.nonInteractive) {
 			state.chatPanel.agentInterface.readOnly = true;
+			state.chatPanel.agentInterface.nonInteractive = true;
 		}
 
 		// Set up bg process kill/dismiss handlers
