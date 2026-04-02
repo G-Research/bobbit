@@ -20,9 +20,28 @@ let playwrightMod: typeof import("playwright") | null = null;
 
 let browser: import("playwright").Browser | null = null;
 let page: import("playwright").Page | null = null;
+let currentListenerPage: import("playwright").Page | null = null;
+const consoleMessages: Array<{level: string, text: string, url: string, timestamp: number}> = [];
+
+function attachConsoleListener(p: import("playwright").Page) {
+	currentListenerPage = p;
+	consoleMessages.length = 0;
+	p.on('console', (msg) => {
+		consoleMessages.push({
+			level: msg.type(),
+			text: msg.text(),
+			url: msg.location().url,
+			timestamp: Date.now(),
+		});
+		if (consoleMessages.length > 1000) consoleMessages.shift();
+	});
+}
 
 async function ensurePage(): Promise<import("playwright").Page> {
-	if (page && !page.isClosed()) return page;
+	if (page && !page.isClosed()) {
+		if (page !== currentListenerPage) attachConsoleListener(page);
+		return page;
+	}
 
 	if (!playwrightMod) throw new Error("playwright is not available");
 
@@ -33,6 +52,7 @@ async function ensurePage(): Promise<import("playwright").Page> {
 		viewport: { width: 1280, height: 720 },
 	});
 	page = await context.newPage();
+	attachConsoleListener(page);
 	return page;
 }
 
@@ -42,6 +62,8 @@ async function cleanup() {
 	}
 	browser = null;
 	page = null;
+	consoleMessages.length = 0;
+	currentListenerPage = null;
 }
 
 /** Race a promise against an AbortSignal. Throws if aborted. */
@@ -220,6 +242,125 @@ export default function (pi: ExtensionAPI) {
 			);
 			return {
 				content: [{ type: "text", text: `Element visible: ${params.selector}` }],
+				details: {},
+			};
+		},
+	});
+
+	// ── browser_snapshot ─────────────────────────────────────────────
+	pi.registerTool({
+		name: "browser_snapshot",
+		label: "Browser Snapshot",
+		description: "Capture accessibility snapshot of the current page. Returns the ARIA accessibility tree as structured YAML text.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, signal) {
+			const p = await withAbort(ensurePage(), signal);
+			const snapshot = await withAbort(p.locator('body').ariaSnapshot(), signal);
+			return {
+				content: [{ type: "text", text: snapshot || "(empty page)" }],
+				details: {},
+			};
+		},
+	});
+
+	// ── browser_console_messages ─────────────────────────────────────
+	pi.registerTool({
+		name: "browser_console_messages",
+		label: "Browser Console Messages",
+		description: "Returns console messages (errors, warnings, info, logs) captured from the current page.",
+		parameters: Type.Object({
+			level: Type.Optional(Type.String({ description: 'Filter by message level: "log", "error", "warning", "info", "debug", "trace"' })),
+			clear: Type.Optional(Type.Boolean({ description: "Clear the message buffer after returning. Default false." })),
+		}),
+		async execute(_toolCallId, params, _signal) {
+			// Ensure page exists so listener is attached, but don't need the page ref
+			await withAbort(ensurePage(), _signal);
+			const filtered = params.level
+				? consoleMessages.filter((m) => m.level === params.level)
+				: [...consoleMessages];
+			const text = JSON.stringify(filtered, null, 2);
+			if (params.clear) {
+				consoleMessages.length = 0;
+			}
+			return {
+				content: [{ type: "text", text: filtered.length > 0 ? text : "No console messages captured." }],
+				details: {},
+			};
+		},
+	});
+
+	// ── browser_press_key ────────────────────────────────────────────
+	pi.registerTool({
+		name: "browser_press_key",
+		label: "Browser Press Key",
+		description: "Press a key on the keyboard.",
+		parameters: Type.Object({
+			key: Type.String({ description: 'Key to press, e.g. "Enter", "Tab", "Escape", "Control+A"' }),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const p = await withAbort(ensurePage(), signal);
+			await withAbort(p.keyboard.press(params.key), signal);
+			return {
+				content: [{ type: "text", text: `Pressed key: ${params.key}` }],
+				details: {},
+			};
+		},
+	});
+
+	// ── browser_hover ────────────────────────────────────────────────
+	pi.registerTool({
+		name: "browser_hover",
+		label: "Browser Hover",
+		description: "Hover over an element on the page by CSS selector.",
+		parameters: Type.Object({
+			selector: Type.String({ description: "CSS selector of the element to hover over" }),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const p = await withAbort(ensurePage(), signal);
+			await withAbort(p.locator(params.selector).first().hover({ timeout: 10_000 }), signal);
+			return {
+				content: [{ type: "text", text: `Hovered: ${params.selector}` }],
+				details: {},
+			};
+		},
+	});
+
+	// ── browser_select_option ────────────────────────────────────────
+	pi.registerTool({
+		name: "browser_select_option",
+		label: "Browser Select Option",
+		description: "Select an option in a <select> dropdown by value.",
+		parameters: Type.Object({
+			selector: Type.String({ description: "CSS selector of the <select> element" }),
+			values: Type.Array(Type.String(), { description: "Option values to select" }),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const p = await withAbort(ensurePage(), signal);
+			const selected = await withAbort(
+				p.locator(params.selector).first().selectOption(params.values, { timeout: 10_000 }),
+				signal,
+			);
+			return {
+				content: [{ type: "text", text: `Selected option(s) in ${params.selector}: ${selected.join(", ")}` }],
+				details: {},
+			};
+		},
+	});
+
+	// ── browser_resize ───────────────────────────────────────────────
+	pi.registerTool({
+		name: "browser_resize",
+		label: "Browser Resize",
+		description: "Resize the browser viewport.",
+		parameters: Type.Object({
+			width: Type.Number({ description: "Viewport width in pixels" }),
+			height: Type.Number({ description: "Viewport height in pixels" }),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const p = await withAbort(ensurePage(), signal);
+			await withAbort(p.setViewportSize({ width: params.width, height: params.height }), signal);
+			return {
+				content: [{ type: "text", text: `Resized viewport to ${params.width}x${params.height}` }],
 				details: {},
 			};
 		},
