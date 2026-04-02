@@ -479,6 +479,18 @@ function ensureWorkflowsLoaded(): void {
 }
 
 let _sandboxStatusFetching = false;
+
+const _qaConfigCache = new Map<string, boolean>();
+async function ensureQaConfigLoaded(projectId: string): Promise<void> {
+	if (_qaConfigCache.has(projectId)) return;
+	try {
+		const res = await fetch(`/api/projects/${projectId}/qa-testing-config`);
+		const data = await res.json();
+		_qaConfigCache.set(projectId, !!data.config?.qa_start_command);
+	} catch {
+		_qaConfigCache.set(projectId, false);
+	}
+}
 function ensureSandboxStatusLoaded(): void {
 	if (state.sandboxStatus || _sandboxStatusFetching) return;
 	_sandboxStatusFetching = true;
@@ -599,12 +611,15 @@ function renderGoalForm(config: GoalFormConfig) {
 			${(() => {
 				const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
 				if (!wf) return "";
-				const optionalSteps: Array<{name: string; label: string}> = [];
+				if (config.linkedProjectId) {
+					ensureQaConfigLoaded(config.linkedProjectId).then(() => renderApp());
+				}
+				const optionalSteps: Array<{name: string; label: string; description?: string; type?: string}> = [];
 				for (const gate of wf.gates) {
 					if (gate.verify) {
 						for (const step of gate.verify) {
 							if (step.optional) {
-								optionalSteps.push({ name: step.name, label: step.label || step.name });
+								optionalSteps.push({ name: step.name, label: step.label || step.name, description: step.description, type: step.type });
 							}
 						}
 					}
@@ -613,10 +628,13 @@ function renderGoalForm(config: GoalFormConfig) {
 				return html`
 					<div class="flex flex-col gap-2">
 						<label class="text-xs text-muted-foreground font-medium">Optional Steps</label>
-						${optionalSteps.map(os => html`
-							<label class="flex items-center gap-2 text-sm cursor-pointer">
+						${optionalSteps.map(os => {
+							const qaDisabled = os.type === 'agent-qa' && !!config.linkedProjectId && _qaConfigCache.has(config.linkedProjectId) && !_qaConfigCache.get(config.linkedProjectId);
+							return html`
+							<label class="flex items-center gap-2 text-sm cursor-pointer ${qaDisabled ? 'opacity-40 pointer-events-none' : ''}">
 								<input type="checkbox" class="toggle-switch"
 									.checked=${config.enabledOptionalSteps.includes(os.name)}
+									?disabled=${qaDisabled}
 									@change=${(e: Event) => {
 										const checked = (e.target as HTMLInputElement).checked;
 										const updated = checked
@@ -626,8 +644,14 @@ function renderGoalForm(config: GoalFormConfig) {
 									}}
 								/>
 								<span>${os.label}</span>
+								${os.description ? html`
+									<span title=${qaDisabled
+										? 'Configure qa_start_command in project settings to enable QA testing'
+										: os.description}
+										class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+								` : ''}
 							</label>
-						`)}
+						`;})}
 					</div>
 				`;
 			})()}

@@ -13,6 +13,7 @@ export interface VerifyStep {
 	optional?: boolean;
 	label?: string;
 	role?: string;
+	description?: string;
 }
 
 export interface WorkflowGate {
