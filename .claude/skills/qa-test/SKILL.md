@@ -45,6 +45,11 @@ mkdir -p "$WORK_DIR/.bobbit/state"
 echo "test" > "$WORK_DIR/.bobbit/state/setup-complete"
 ```
 
+Seed with realistic test data (project, sessions, goals, gates, tasks, team, messages):
+```bash
+node "$REPO/scripts/qa-seed/seed.mjs" "$WORK_DIR"
+```
+
 Record the repo path:
 ```bash
 REPO=$(pwd)
