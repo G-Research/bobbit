@@ -9,6 +9,7 @@ export interface PersistedTeamEntry {
 		role: string;
 		worktreePath?: string;
 		branch?: string;
+		baseSha?: string;
 		task: string;
 		createdAt: number;
 	}>;

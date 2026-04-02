@@ -66,6 +66,7 @@ export interface TeamAgent {
 	role: string;
 	worktreePath?: string;
 	branch?: string;
+	baseSha?: string;
 	task: string;
 	createdAt: number;
 	/** Unsubscribe from the agent_end event listener (cleanup on dismiss). */
@@ -209,6 +210,7 @@ export class TeamManager {
 				role: a.role,
 				worktreePath: a.worktreePath,
 				branch: a.branch,
+				baseSha: a.baseSha,
 				task: a.task,
 				createdAt: a.createdAt,
 			})),
@@ -254,6 +256,7 @@ export class TeamManager {
 					role: a.role,
 					worktreePath: a.worktreePath,
 					branch: a.branch,
+					baseSha: a.baseSha,
 					task: a.task,
 					createdAt: a.createdAt,
 				})),
@@ -755,12 +758,21 @@ export class TeamManager {
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
 			});
 
+			// Resolve baseSha from the agent's working directory
+			let baseSha: string | undefined;
+			try {
+				const effectiveCwd = actualWorktreePath || session.cwd || agentCwd;
+				const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: effectiveCwd, timeout: 5_000 });
+				baseSha = stdout.trim() || undefined;
+			} catch { /* non-fatal — baseSha stays undefined */ }
+
 			// Track the agent
 			const agent: TeamAgent = {
 				sessionId: session.id,
 				role,
 				worktreePath: actualWorktreePath,
 				branch: branchName,
+				baseSha,
 				task,
 				createdAt: Date.now(),
 			};
@@ -1031,6 +1043,18 @@ export class TeamManager {
 				createdAt: agent.createdAt,
 			};
 		});
+	}
+
+	/**
+	 * Find a team agent by session ID across all goals.
+	 * Returns the TeamAgent record if found, undefined otherwise.
+	 */
+	findAgentBySessionId(sessionId: string): TeamAgent | undefined {
+		const goalId = this.sessionToGoal.get(sessionId);
+		if (!goalId) return undefined;
+		const entry = this.teams.get(goalId);
+		if (!entry) return undefined;
+		return entry.agents.find(a => a.sessionId === sessionId);
 	}
 
 	/**

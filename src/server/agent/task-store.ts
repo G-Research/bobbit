@@ -16,7 +16,9 @@ export interface PersistedTask {
 	updatedAt: number;
 	completedAt?: number;
 	dependsOn?: string[];
-	commitSha?: string;
+	baseSha?: string;
+	headSha?: string;
+	branch?: string;
 	resultSummary?: string;
 	/** Workflow gate ID this task should produce (0 or 1). */
 	workflowGateId?: string;
@@ -55,6 +57,11 @@ export class TaskStore {
 								t.inputGateIds = t.inputArtifactIds;
 								delete t.inputArtifactIds;
 							}
+							// Migrate commitSha -> headSha
+							if (t.commitSha && !t.headSha) {
+								t.headSha = t.commitSha;
+							}
+							delete t.commitSha;
 							this.tasks.set(t.id, t);
 						}
 					}

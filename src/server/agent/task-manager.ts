@@ -102,6 +102,10 @@ export class TaskManager {
 			dependsOn?: string[];
 			workflowGateId?: string;
 			inputGateIds?: string[];
+			headSha?: string;
+			baseSha?: string;
+			branch?: string;
+			resultSummary?: string;
 		},
 	): boolean {
 		const task = this.store.get(id);
@@ -299,19 +303,18 @@ export class TaskManager {
  * Mark test/review tasks as stale when a new commit lands on the goal branch.
  * Tasks completed at a different commitSha than the current HEAD are stale.
  */
-export function markStaleTasks(store: TaskStore, goalId: string, currentCommitSha: string): PersistedTask[] {
+export function markStaleTasks(store: TaskStore, goalId: string, currentHeadSha: string): PersistedTask[] {
 	const tasks = store.getByGoalId(goalId);
 	const staleMarked: PersistedTask[] = [];
 	for (const task of tasks) {
 		if (
 			task.state === "complete" &&
 			(task.type === "testing" || task.type === "tdd-tests" || task.type === "code-review" || task.type === "security-review" || task.type === "design-review") &&
-			task.commitSha &&
-			task.commitSha !== currentCommitSha
+			task.headSha &&
+			task.headSha !== currentHeadSha
 		) {
 			// Don't change state to avoid breaking master's state machine,
-			// but set commitSha to empty to indicate staleness
-			// The dashboard can compare task.commitSha vs branch HEAD to show stale badges
+			// but the dashboard can compare task.headSha vs branch HEAD to show stale badges
 			staleMarked.push(task);
 		}
 	}
