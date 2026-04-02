@@ -13,6 +13,17 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(args.includes("--pids-limit=256"));
 	});
 
+	it("allows custom resource limits", () => {
+		const args = buildDockerRunArgs({
+			mode: "pool", image: "test", workspaceDir: "/tmp/test",
+			label: "test", labelPrefix: "bobbit-sandbox",
+			memoryLimit: "8g", cpuLimit: "4", pidsLimit: "512",
+		});
+		assert.ok(args.includes("--memory=8g"));
+		assert.ok(args.includes("--cpus=4"));
+		assert.ok(args.includes("--pids-limit=512"));
+	});
+
 	it("blackholes cloud metadata endpoints when sandboxNetwork is set", () => {
 		const args = buildDockerRunArgs({
 			mode: "pool", image: "test", workspaceDir: "/tmp/test",

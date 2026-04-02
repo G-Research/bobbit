@@ -160,8 +160,13 @@ test.describe("Docker Sandbox — Container Lifecycle", () => {
 	test("shutdown stops all containers", async () => {
 		test.setTimeout(60_000);
 		await pool.shutdown();
-		// Give Docker a moment to stop
-		await new Promise(r => setTimeout(r, 2000));
+		// Poll until containers are gone (max 15s)
+		const start = Date.now();
+		while (Date.now() - start < 15_000) {
+			const c = await dockerPs(poolLabel);
+			if (c.length === 0) break;
+			await new Promise(r => setTimeout(r, 500));
+		}
 		const containers = await dockerPs(poolLabel);
 		expect(containers.length).toBe(0);
 		pool = null as any;
@@ -175,6 +180,7 @@ test.describe("Docker Sandbox — Container Lifecycle", () => {
 test.describe("Docker Sandbox — Network Access", () => {
 	test.skip(!IMAGE_OK, "Docker or bobbit-agent image not available");
 
+	const iccTestName = `bobbit-icc-test-${Date.now()}`;
 	let pool: InstanceType<any>;
 	let containerId: string;
 	let gatewayPort: number;
@@ -232,21 +238,21 @@ test.describe("Docker Sandbox — Network Access", () => {
 		test.setTimeout(60_000);
 		// Create a second container on the same network
 		try {
-			await execFileAsync("docker", ["rm", "-f", "bobbit-icc-test"], {
+			await execFileAsync("docker", ["rm", "-f", iccTestName], {
 				timeout: 10_000, env: DOCKER_ENV,
 			});
 		} catch { /* may not exist */ }
 
 		await execFileAsync("docker", [
 			"run", "-d", "--network=bobbit-sandbox-net",
-			"--name=bobbit-icc-test", IMAGE_NAME, "sleep", "infinity",
+			`--name=${iccTestName}`, IMAGE_NAME, "sleep", "infinity",
 		], { timeout: 30_000, env: DOCKER_ENV });
 
 		// Get the second container's IP address
 		const { stdout: inspectOut } = await execFileAsync("docker", [
 			"inspect", "--format",
 			"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-			"bobbit-icc-test",
+			iccTestName,
 		], { timeout: 10_000, env: DOCKER_ENV });
 		const otherIp = inspectOut.trim();
 		expect(otherIp).toBeTruthy();
@@ -267,7 +273,7 @@ test.describe("Docker Sandbox — Network Access", () => {
 	test("cleanup: release and shutdown", async () => {
 		test.setTimeout(60_000);
 		try {
-			await execFileAsync("docker", ["rm", "-f", "bobbit-icc-test"], {
+			await execFileAsync("docker", ["rm", "-f", iccTestName], {
 				timeout: 10_000, env: DOCKER_ENV,
 			});
 		} catch { /* may not exist */ }

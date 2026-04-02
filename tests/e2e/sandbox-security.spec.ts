@@ -121,6 +121,7 @@ test.describe("Sandbox Security Boundaries", () => {
 		// Should be 201 (created) — server forces sandboxed=true
 		expect(res.status).toBe(201);
 		const data = await res.json();
+		expect(data.sandboxed).toBe(true);
 		// Clean up the delegate session
 		await adminFetch(gateway.baseURL, `/api/sessions/${data.id}`, { method: "DELETE" }).catch(() => {});
 	});
