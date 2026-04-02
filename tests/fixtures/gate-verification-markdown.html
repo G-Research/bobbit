@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GateVerificationLive Markdown Rendering Test Fixture</title>
+</head>
+<body>
+<div id="results"></div>
+<script>
+/**
+ * Test fixture for GateVerificationLive markdown rendering logic.
+ *
+ * Mirrors the rendering decision in _renderStepCard() and VerificationOutputModal:
+ * - step.type !== "command" → <markdown-block> (covers "llm-review", "agent-qa", etc.)
+ * - step.type === "command" → <pre> with optional ANSI-to-HTML
+ *
+ * Also tests the _isAgentStep() helper in VerificationOutputModal:
+ * - stepType !== "" && stepType !== "command" → agent step (markdown)
+ * - stepType === "command" or "" → command step (pre + ANSI)
+ */
+
+/**
+ * Determine the rendering element for a step's expanded output.
+ * Mirrors the conditional in GateVerificationLive._renderStepCard():
+ *   step.type !== "command" ? <markdown-block> : <pre>
+ *
+ * @param {string} stepType - The step's type field
+ * @returns {string} "markdown-block" or "pre"
+ */
+function stepOutputElement(stepType) {
+	return stepType !== "command" ? "markdown-block" : "pre";
+}
+
+/**
+ * Determine if a step is an "agent" step for VerificationOutputModal.
+ * Mirrors _isAgentStep() in VerificationOutputModal.ts:
+ *   return this.stepType !== "" && this.stepType !== "command";
+ *
+ * @param {string} stepType
+ * @returns {boolean}
+ */
+function isAgentStep(stepType) {
+	return stepType !== "" && stepType !== "command";
+}
+
+/**
+ * Determine the modal body element type.
+ * Agent steps get <div> with <markdown-block>, command steps get <pre>.
+ *
+ * @param {string} stepType
+ * @returns {string} "div" (with markdown-block inside) or "pre"
+ */
+function modalBodyElement(stepType) {
+	return isAgentStep(stepType) ? "div" : "pre";
+}
+
+/**
+ * Simulate rendering decisions for a list of steps.
+ * Returns an array of { name, type, element, isAgentStep } objects.
+ *
+ * @param {Array} steps - Array of { name, type, output }
+ * @returns {Array}
+ */
+function renderSteps(steps) {
+	return steps.map(function(step) {
+		return {
+			name: step.name,
+			type: step.type,
+			outputElement: stepOutputElement(step.type),
+			isAgentStep: isAgentStep(step.type),
+			modalElement: modalBodyElement(step.type),
+			hasOutput: !!step.output,
+		};
+	});
+}
+
+/**
+ * Build modal step data from a step, matching GateVerificationLive._openModal():
+ *   const stepType = this.steps[index]?.type || "";
+ *   this.modalStep = { index, name, output, type: stepType };
+ *
+ * @param {Object} step - Step object
+ * @param {number} index - Step index
+ * @param {Map|null} stepOutputsMap - Optional _stepOutputs map (WS-accumulated)
+ * @returns {Object} modalStep data
+ */
+function buildModalStep(step, index, stepOutputsMap) {
+	var wsOutput = stepOutputsMap ? stepOutputsMap.get(index) : null;
+	var output = wsOutput || step.output || "";
+	var stepType = step.type || "";
+	return {
+		index: index,
+		name: step.name,
+		output: output,
+		type: stepType,
+	};
+}
+
+/**
+ * Test ANSI detection — mirrors the hasAnsi() check used in command step rendering.
+ * Only command steps should ever go through ANSI rendering; agent steps use markdown.
+ */
+function hasAnsi(text) {
+	return /\x1b\[/.test(text);
+}
+
+/**
+ * Determine if step output should go through ANSI processing.
+ * Only command-type steps with ANSI sequences get ANSI-to-HTML conversion.
+ */
+function shouldUseAnsi(stepType, output) {
+	if (stepType !== "command") return false;
+	return hasAnsi(output);
+}
+
+// Expose all functions
+window.stepOutputElement = stepOutputElement;
+window.isAgentStep = isAgentStep;
+window.modalBodyElement = modalBodyElement;
+window.renderSteps = renderSteps;
+window.buildModalStep = buildModalStep;
+window.hasAnsi = hasAnsi;
+window.shouldUseAnsi = shouldUseAnsi;
+</script>
+</body>
+</html>

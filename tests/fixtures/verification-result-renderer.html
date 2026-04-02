@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VerificationResultRenderer Test Fixture</title>
+</head>
+<body>
+<div id="results"></div>
+<script>
+/**
+ * Test fixture for VerificationResultRenderer logic.
+ *
+ * Mirrors the rendering decisions in VerificationResultRenderer.ts:
+ * - getToolState() resolves to inprogress/complete/error/warning
+ * - verdictBadge() returns pass/fail badge HTML
+ * - render() branches on: no result (streaming), error, success (complete)
+ * - Collapsed heuristic: summary > 300 chars
+ * - HTML report shows details/iframe when present
+ */
+
+/**
+ * Resolve tool header state — same logic as getToolState() in renderer-registry.ts
+ */
+function getToolState(result, isStreaming) {
+	if (!result) return isStreaming ? "inprogress" : "complete";
+	if (result.isError) {
+		const text = (result.content || []).filter(c => c.type === "text").map(c => c.text).join("");
+		if (text.includes("Skipped due to queued user message")) return "warning";
+		return "error";
+	}
+	return "complete";
+}
+
+/**
+ * Extract text/data from result — same pattern as getResult() in renderer
+ */
+function getResult(result) {
+	const text = (result && result.content || [])
+		.filter(c => c.type === "text")
+		.map(c => c.text)
+		.join("\n") || "";
+	let data = null;
+	try { data = JSON.parse(text); } catch(e) { /* not JSON */ }
+	return { text, data };
+}
+
+/**
+ * Determine verdict badge class and label — mirrors verdictBadge() helper
+ */
+function verdictBadge(verdict) {
+	const isPass = (verdict || "").toLowerCase() === "pass";
+	return {
+		isPass,
+		cls: isPass
+			? "bg-green-500/20 text-green-600 dark:text-green-400"
+			: "bg-red-500/20 text-red-600 dark:text-red-400",
+		label: isPass ? "✓ PASS" : "✗ FAIL",
+	};
+}
+
+/**
+ * Determine the rendering branch and output structure for the renderer.
+ * Returns an object describing what would be rendered.
+ */
+function renderDecision(params, result, isStreaming) {
+	const state = getToolState(result, isStreaming);
+
+	// Streaming (no result yet)
+	if (!result) {
+		return {
+			branch: "streaming",
+			state,
+			headerText: "Submitting verification…",
+			hasVerdictBadge: !!(params && params.verdict),
+			verdictBadge: params && params.verdict ? verdictBadge(params.verdict) : null,
+			hasSummaryMarkdown: !!(params && params.summary),
+			summaryContent: params && params.summary || "",
+			hasReportNote: !!(params && params.report_html),
+		};
+	}
+
+	// Error
+	if (result.isError) {
+		const { text } = getResult(result);
+		const skipped = text.includes("Skipped due to queued user message");
+		return {
+			branch: "error",
+			state,
+			isSkipped: skipped,
+			headerText: skipped ? "Aborted verification" : "Verification failed",
+			errorText: text,
+			errorClass: skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive",
+		};
+	}
+
+	// Complete (success)
+	const { data, text } = getResult(result);
+	const verdict = (data && data.verdict) || (params && params.verdict) || "";
+	const summary = (data && data.summary) || (params && params.summary) || text || "";
+	const reportHtml = (data && data.report_html) || (params && params.report_html) || "";
+
+	const collapsed = summary.length > 300;
+
+	return {
+		branch: "complete",
+		state,
+		verdict,
+		verdictBadge: verdictBadge(verdict),
+		summary,
+		collapsed,
+		hasReportHtml: !!reportHtml,
+		reportHtml,
+		hasMarkdownBlock: true,
+		hasIframe: !!reportHtml,
+	};
+}
+
+// Expose all functions for Playwright tests
+window.getToolState = getToolState;
+window.getResult = getResult;
+window.verdictBadge = verdictBadge;
+window.renderDecision = renderDecision;
+</script>
+</body>
+</html>
