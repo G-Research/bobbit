@@ -4,6 +4,16 @@ import yaml from "yaml";
 
 export type ProjectConfig = Record<string, string>;
 
+export interface ExploratoryValidationConfig {
+	buildCommand: string;
+	startCommand: string;
+	healthCheck: string;
+	browserEntry: string;
+	env: Record<string, string>;
+	maxDurationMinutes: number;
+	maxScenarios: number;
+}
+
 const DEFAULTS: Record<string, string> = {
 	build_command: "npm run build",
 	test_command: "npm test",
@@ -97,5 +107,20 @@ export class ProjectConfigStore {
 	getWithDefaults(): Record<string, string> {
 		this.load();
 		return { ...DEFAULTS, ...this.data };
+	}
+
+	/** Parse exploratory validation config from ev_* keys. Returns null if not configured (no ev_start_command). */
+	getExploratoryValidationConfig(): ExploratoryValidationConfig | null {
+		const all = this.getWithDefaults();
+		if (!all.ev_start_command) return null;
+		return {
+			buildCommand: all.ev_build_command || all.build_command || "npm run build",
+			startCommand: all.ev_start_command,
+			healthCheck: all.ev_health_check || "",
+			browserEntry: all.ev_browser_entry || "",
+			env: all.ev_env ? JSON.parse(all.ev_env) : {},
+			maxDurationMinutes: parseInt(all.ev_max_duration_minutes || "10", 10),
+			maxScenarios: parseInt(all.ev_max_scenarios || "5", 10),
+		};
 	}
 }
