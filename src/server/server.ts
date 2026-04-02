@@ -452,12 +452,15 @@ export function createGateway(config: GatewayConfig) {
 
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
-		const match = url.pathname.match(/^\/ws\/([^/]+)$/);
+		const viewerMatch = url.pathname === "/ws/viewer";
+		const match = viewerMatch ? null : url.pathname.match(/^\/ws\/([^/]+)$/);
 
-		if (!match) {
+		if (!match && !viewerMatch) {
 			socket.destroy();
 			return;
 		}
+
+		const sessionId = viewerMatch ? "__viewer__" : match![1];
 
 		const ip = req.socket.remoteAddress || "unknown";
 		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
@@ -466,7 +469,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, match[1], req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager);
 		});
 	});
 
