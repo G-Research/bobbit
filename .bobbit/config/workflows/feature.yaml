@@ -20,7 +20,7 @@ gates:
 
       - name: "Gap analysis"
         type: llm-review
-        role: conformance-reviewer
+        role: spec-auditor
         prompt: |
           Compare the goal specification to this design document.
 
@@ -50,7 +50,7 @@ gates:
         run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
-        role: conformance-reviewer
+        role: spec-auditor
         phase: 1
         prompt: |
           Compare the goal specification and design document to the actual implementation on this branch.
