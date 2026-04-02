@@ -1791,11 +1791,6 @@ function toggleLiveStepExpand(key: string): void {
 	renderApp();
 }
 
-function formatStepElapsed(startedAt: number): string {
-	const s = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-	return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
-}
-
 function formatStepDuration(ms: number): string {
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
@@ -1876,6 +1871,16 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 	const totalCount = entry.steps.length;
 	const isDone = entry.overallStatus !== "running";
 
+	// While running — show compact blue pulsing dot with progress count
+	if (!isDone) {
+		const completedCount = passedCount + failedCount;
+		return html`<div class="verify-card verify-card--running" style="padding:8px 10px; display:flex; align-items:center; gap:6px;">
+			<span class="verify-card__icon verify-card__icon--running">\u25CF</span>
+			<span>Verifying \u2014 ${completedCount}/${totalCount} steps${failedCount > 0 ? html`, <span style="color:var(--destructive)">${failedCount} failed</span>` : nothing}</span>
+		</div>`;
+	}
+
+	// Completed — show full step cards
 	// Determine if steps span multiple phases for phase dividers
 	const phases = new Set(entry.steps.map(s => s.phase ?? 0));
 	const hasMultiplePhases = phases.size > 1;
@@ -1883,11 +1888,9 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 	return html`
 		<div class="verify-cards">
 			<div class="verify-cards__header">
-				${isDone
-					? entry.overallStatus === "passed"
-						? html`<span class="verify-cards__header-status verify-cards__header-status--pass">\u2713 Verified \u2014 passed</span>`
-						: html`<span class="verify-cards__header-status verify-cards__header-status--fail">\u2717 Verified \u2014 failed${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}</span>`
-					: html`<span class="verify-cards__header-status verify-cards__header-status--running">Verifying \u2014 ${passedCount}/${totalCount} checks passed${failedCount > 0 ? html`, <span style="color:var(--destructive)">${failedCount} failed</span>` : nothing}</span>`
+				${entry.overallStatus === "passed"
+					? html`<span class="verify-cards__header-status verify-cards__header-status--pass">\u2713 Verified \u2014 passed</span>`
+					: html`<span class="verify-cards__header-status verify-cards__header-status--fail">\u2717 Verified \u2014 failed${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}</span>`
 				}
 			</div>
 			${entry.steps.map((step, i) => {
@@ -1896,46 +1899,36 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 				const curPhase = step.phase ?? 0;
 				const showPhaseDivider = hasMultiplePhases && (i === 0 || curPhase !== prevPhase);
 				const stepKey = `${entry.gateId}:${entry.signalId}:${i}`;
-				const isRunning = step.status === "running";
 				const isPassed = step.status === "passed";
 				const isSkipped = step.status === "skipped";
 				const isWaiting = step.status === "waiting";
 				const hasOutput = !!step.output;
 				const isExpanded = expandedLiveStepKeys.has(stepKey);
 				const isLlm = step.type === "llm-review";
-				const isRunningCmd = isRunning && step.type === "command";
-				const clickable = hasOutput || isRunningCmd;
+				const clickable = !!hasOutput;
 
-				const cardClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
-				const iconClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
-				const icon = isWaiting ? "\u25CB" : isSkipped ? "\u2014" : isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717";
+				const cardClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isPassed ? "pass" : "fail";
+				const iconClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isPassed ? "pass" : "fail";
+				const iconChar = isWaiting ? "\u25CB" : isSkipped ? "\u2014" : isPassed ? "\u2713" : "\u2717";
 
 				return html`
 					${showPhaseDivider ? html`<div class="phase-divider">Phase ${curPhase}</div>` : nothing}
 					<div class="verify-card verify-card--${cardClass}">
 						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
-							@click=${clickable ? () => {
-								if (isRunningCmd) {
-									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || step.output || "" };
-									renderApp();
-								} else if (hasOutput) {
-									toggleLiveStepExpand(stepKey);
-								}
-							} : null}>
+							@click=${clickable ? () => { toggleLiveStepExpand(stepKey); } : null}>
 							<span class="verify-card__icon verify-card__icon--${iconClass}">
-								${icon}
+								${iconChar}
 							</span>
 							<span class="verify-card__name">${step.name}</span>
 							<span class="verify-card__type-badge ${isLlm ? "verify-card__type-badge--llm" : ""}">${step.type}</span>
 							<span class="verify-card__duration">
-								${isWaiting ? "" : isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
+								${step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
 							</span>
 							${step.sessionId ? html`
 								<a href="#/session/${step.sessionId}"
 								   class="verify-card__session-link" title="View live logs"
 								   @click=${(e: Event) => { e.preventDefault(); e.stopPropagation(); location.hash = '#/session/' + step.sessionId; }}>view</a>
 							` : nothing}
-							${isRunningCmd ? html`<span class="verify-card__expand" title="View live output">▸</span>` : nothing}
 							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
 						</div>
 						${isExpanded && step.output ? html`
