@@ -147,3 +147,21 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 - Cancelled flag checked after `Promise.all` to suppress stale results
 - Check `sessionManager` and `teamManager` passed to `VerificationHarness`
 - Inspect: `GET /api/goals/:goalId/verifications/active`
+
+## Phased verification
+
+- Steps are grouped by `phase` (integer, default 0) and phases execute sequentially
+- Within each phase, steps run in parallel
+- If any step in a phase fails, remaining phases are skipped (status: `"skipped"`)
+- `gate_verification_phase_started` WebSocket event fires before each phase
+- Step events include `phase` field; skipped steps show `"Skipped — earlier phase failed"`
+- Check `ActiveVerification.currentPhase` via `GET /api/goals/:goalId/verifications/active`
+- If LLM reviews run when they shouldn't: verify `phase: 1` is set on `llm-review` steps in the workflow YAML
+
+## Verification artifacts
+
+- `llm-review` steps store full output as `text/markdown` artifacts on `GateSignalStep.artifact`
+- Artifacts are capped at 10 MB; content truncated if exceeded
+- Dashboard shows markdown artifacts in collapsible "Full Review" sections; HTML artifacts via "View Report" button
+- If artifacts are missing: check that the `llm-review` step completed (not skipped/cancelled)
+- Artifact data persists in `gates.json` alongside step results
