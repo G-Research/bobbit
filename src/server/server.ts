@@ -1159,6 +1159,7 @@ async function handleApiRoute(
 			preview: session.preview,
 			personalities: session.personalities,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
+			projectId: sessionPs?.projectId || session.projectId,
 		});
 		return;
 	}
@@ -1317,6 +1318,16 @@ async function handleApiRoute(
 
 		// Auto-detect projectId from cwd if not explicitly provided
 		let resolvedProjectId = body?.projectId as string | undefined;
+
+		// If re-attempting a goal, inherit cwd and projectId from the original goal
+		if (reattemptGoalId && !body?.cwd) {
+			const origGoal = getGoalAcrossProjects(reattemptGoalId);
+			if (origGoal) {
+				cwd = origGoal.cwd || cwd;
+				if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
+			}
+		}
+
 		if (!resolvedProjectId && cwd) {
 			const matched = projectRegistry.findByCwd(cwd);
 			if (matched) resolvedProjectId = matched.id;
