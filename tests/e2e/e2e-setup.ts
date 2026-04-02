@@ -294,6 +294,7 @@ export async function createObserverSession(): Promise<string> {
 
 /**
  * Wait for a gate to reach target status via WebSocket subscription.
+ * Subscribes to WS first, then checks HTTP to avoid TOCTOU races.
  * Returns the full gate object on success; throws on timeout.
  */
 export async function waitForGateStatus(
@@ -303,13 +304,15 @@ export async function waitForGateStatus(
 	wsSessionId: string,
 	timeoutMs = 15_000,
 ): Promise<any> {
-	// Check current status first (gate may already be in target state)
-	const res0 = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	const current = await res0.json();
-	if (current.status === targetStatus) return current;
-
+	// Subscribe to WS FIRST so no events are missed between HTTP check and subscribe
 	const conn = await connectGoalWs(wsSessionId, goalId);
 	try {
+		// Now check current status — if already in target state, return immediately
+		const res0 = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
+		const current = await res0.json();
+		if (current.status === targetStatus) return current;
+
+		// Wait for WS event (also checks already-buffered messages)
 		await conn.waitFor(gateStatusPredicate(gateId, targetStatus), timeoutMs);
 		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
 		return await res.json();

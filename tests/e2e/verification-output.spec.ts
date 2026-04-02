@@ -9,11 +9,13 @@ import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
+	createObserverSession,
 	deleteGoal,
 	connectWs,
 	createSession,
 	deleteSession,
 	nonGitCwd,
+	waitForGateStatus,
 } from "./e2e-setup.js";
 
 /** Create a goal using the test-fast workflow (command-only steps, fast). */
@@ -22,22 +24,11 @@ async function createTestFastGoal(): Promise<string> {
 	return goal.id;
 }
 
-/** Poll until a gate reaches the target status or timeout expires. */
-async function waitForGateStatus(
-	goalId: string,
-	gateId: string,
-	targetStatus: string,
-	timeoutMs = 30_000,
-): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		const data = await res.json();
-		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 300));
-	}
-	throw new Error(`Gate ${gateId} did not reach "${targetStatus}" within ${timeoutMs}ms`);
-}
+let observerSessionId: string;
+
+test.beforeAll(async () => {
+	observerSessionId = await createObserverSession();
+});
 
 test.describe("Verification output streaming and timestamps", () => {
 
@@ -66,7 +57,7 @@ test.describe("Verification output streaming and timestamps", () => {
 			expect(started.startedAt).toBeGreaterThanOrEqual(before);
 			expect(started.startedAt).toBeLessThanOrEqual(after);
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -103,7 +94,7 @@ test.describe("Verification output streaming and timestamps", () => {
 			expect(typeof stepStarted.stepIndex).toBe("number");
 			expect(stepStarted.stepName).toBe("Content present");
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -138,7 +129,7 @@ test.describe("Verification output streaming and timestamps", () => {
 			expect(output.text).toContain("ok");
 			expect(typeof output.ts).toBe("number");
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -156,7 +147,7 @@ test.describe("Verification output streaming and timestamps", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design" }),
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			// Signal implementation (also has 1 command step in test-fast: "echo ok")
 			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
@@ -178,7 +169,7 @@ test.describe("Verification output streaming and timestamps", () => {
 			expect(typeof output.ts).toBe("number");
 			expect(output.ts).toBeGreaterThan(0);
 
-			await waitForGateStatus(goalId, "implementation", "passed");
+			await waitForGateStatus(goalId, "implementation", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -218,7 +209,7 @@ test.describe("Verification output streaming and timestamps", () => {
 			expect(now - started.startedAt).toBeLessThan(30_000);
 			expect(now - stepStarted.startedAt).toBeLessThan(30_000);
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
