@@ -21,6 +21,6 @@ describe("/qa-test slash skill", () => {
     assert.ok(content.includes("bash_bg"), "Should reference bash_bg for server lifecycle");
     assert.ok(content.includes("qa_start_command"), "Should reference qa_start_command config");
     assert.ok(content.includes("base64"), "Should mention base64 for screenshots");
-    assert.ok(content.includes("gate_signal"), "Should reference gate_signal");
+    assert.ok(content.includes("verification_result"), "Should reference verification_result tool");
   });
 });

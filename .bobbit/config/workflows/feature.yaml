@@ -154,12 +154,15 @@ gates:
              grep or cat .ts files. If you need to create test data, use the UI, not curl.
 
           Focus on testing the user-facing changes described in the goal spec.
-          If the project does not have qa_start_command configured, emit
-          <verdict>pass</verdict> with a note that QA testing is not configured.
+          If the project does not have qa_start_command configured, call
+          `verification_result(verdict="pass", summary="QA testing is not configured for this project.")`.
 
-          After completing all scenarios, emit:
-          1. A <verdict>pass</verdict> or <verdict>fail</verdict> tag based on results
-          2. A <qa_report>...HTML report...</qa_report> block containing the self-contained HTML report with embedded screenshots
+          After completing all scenarios, call `verification_result` to submit your results:
+          - `verdict`: "pass" or "fail" based on test results
+          - `summary`: concise summary of findings
+          - `report_html`: self-contained HTML report with embedded base64 screenshots
+
+          This tool call is REQUIRED. Do not emit <verdict> or <qa_report> XML tags.
 
   - id: documentation
     name: Documentation

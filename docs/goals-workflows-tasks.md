@@ -229,9 +229,9 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 **How it works:**
 1. The harness spawns a test-engineer session with the step's `prompt` (after variable substitution with `{{goal_spec}}`, `{{branch}}`, etc.) and upstream gate content injected as context.
 2. The agent uses the `/qa-test` skill to stand up an ephemeral server, drive browser scenarios, and produce an HTML report.
-3. The harness parses `<verdict>pass|fail</verdict>` from the agent's output to determine pass/fail.
-4. If the agent emits a `<qa_report>...HTML...</qa_report>` block, the HTML is stored as the step's artifact with `contentType: "text/html"`.
-5. If no verdict is found, the harness sends a follow-up prompt (same pattern as `llm-review`) to request one.
+3. The agent calls the `verification_result` tool to deliver structured results: verdict (pass/fail), summary, and optional HTML report.
+4. If the agent includes `report_html`, the HTML is stored as the step's artifact with `contentType: "text/html"`.
+5. If the agent goes idle without calling the tool, the harness sends a reminder prompt. If idle again, the step fails.
 
 **Timeout:** Reads `qa_max_duration_minutes` from project config (default 10) plus a 5-minute buffer for setup/teardown.
 

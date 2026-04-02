@@ -478,7 +478,7 @@ Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with 
 
 Each sandboxed session gets a unique 256-bit token restricting API access. Generated in `applySandboxWiring()`, in-memory only (regenerated on restart). Auth tries admin token first, then `SandboxTokenStore`.
 
-**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`, `/api/personalities`. Everything else blocked. `bash_bg` blocked at tool and API level.
+**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`, `/api/personalities`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 

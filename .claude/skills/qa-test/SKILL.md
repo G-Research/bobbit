@@ -222,27 +222,21 @@ The report structure:
 
 Save the report to `$WORK_DIR/validation-report.html`.
 
-## Step 8: Emit Results
+## Step 8: Submit Results
 
-Instead of signaling a gate directly, emit structured output tags that the verification harness will parse:
+Call the `verification_result` tool to deliver your findings:
 
-1. **Verdict tag** (REQUIRED): Based on your test results, emit exactly one of:
-   - `<verdict>pass</verdict>` — if all critical scenarios passed
-   - `<verdict>fail</verdict>` — if any critical scenario failed
+1. **verdict** (REQUIRED): Based on your test results:
+   - `"pass"` — if all critical scenarios passed
+   - `"fail"` — if any critical scenario failed
 
-2. **QA Report tag** (REQUIRED): Wrap your HTML report in a qa_report tag:
-   ```
-   <qa_report>
-   <!DOCTYPE html>
-   <html>
-   ... your full HTML report with embedded base64 screenshots ...
-   </html>
-   </qa_report>
-   ```
+2. **summary** (REQUIRED): Concise summary of what you tested and what you found.
 
-The verification harness will extract these tags from your output automatically.
+3. **report_html** (REQUIRED): Your self-contained HTML report with embedded base64 screenshots.
 
-The `agent-qa` verification harness handles gate signaling based on your verdict — do NOT call `gate_signal()` yourself.
+This tool call is how the verification system receives your results. Without it, your testing work is lost.
+
+Do NOT emit `<verdict>` or `<qa_report>` XML tags — use the `verification_result` tool exclusively.
 
 ## Step 9: Cleanup
 

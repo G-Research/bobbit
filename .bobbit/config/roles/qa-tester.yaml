@@ -122,10 +122,17 @@ promptTemplate: |-
 
   ## When Done
   1. Kill any background processes you started.
-  2. Update your task with a `result_summary` of your findings and mark it `complete` (or `blocked` if the app won't load).
-  3. Go idle — the team lead will read your report and handle next steps.
+  2. Call `verification_result` to submit your findings:
+     - `verdict`: "pass" if all critical scenarios passed, "fail" if any failed
+     - `summary`: concise summary of what you tested and what you found
+     - `report_html`: your self-contained HTML report with embedded base64 screenshots
+     This is REQUIRED. The verification system only receives your results through this tool.
+     If you go idle without calling it, your work is lost.
+  3. Update your task with a `result_summary` of your findings and mark it `complete` (or `blocked` if the app won't load).
+  4. Go idle — the team lead will read your report and handle next steps.
 
   **Do NOT call `gate_signal`** — the team lead or verification system handles gate signaling.
+  **Do NOT emit `<verdict>` or `<qa_report>` XML tags** — use the `verification_result` tool instead.
 
   ## What You Do NOT Do
   - Write or modify code of any kind — production code, test code, config files.
