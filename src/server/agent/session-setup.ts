@@ -182,7 +182,7 @@ export function resolveGoalExtensions(plan: SessionSetupPlan, _ctx: PipelineCont
 	}
 }
 
-/** Step 3: Compute effectiveAllowedTools, filter bash_bg for sandbox. */
+/** Step 3: Compute effectiveAllowedTools, filter host-only tools for sandbox. */
 export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	let effectiveAllowedTools = plan.effectiveAllowedTools;
 
@@ -197,8 +197,15 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 	}
 
 	// Exclude bash_bg for sandboxed sessions — BgProcessManager spawns on host
+	// Exclude native browser_* tools — playwright isn't in the Docker image;
+	// MCP playwright extension provides equivalent functionality.
 	if (plan.sandboxed && effectiveAllowedTools) {
-		effectiveAllowedTools = effectiveAllowedTools.filter(t => t !== "bash_bg");
+		const sandboxExcluded = new Set([
+			"bash_bg",
+			"browser_navigate", "browser_screenshot", "browser_click",
+			"browser_type", "browser_eval", "browser_wait",
+		]);
+		effectiveAllowedTools = effectiveAllowedTools.filter(t => !sandboxExcluded.has(t));
 	}
 
 	plan.effectiveAllowedTools = effectiveAllowedTools;

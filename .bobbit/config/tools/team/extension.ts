@@ -18,7 +18,6 @@ export default function (pi: ExtensionAPI) {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const goalId = process.env.BOBBIT_GOAL_ID;
 	if (!sessionId || !goalId) {
-		console.error("[team-lead-tools] Missing BOBBIT_SESSION_ID or BOBBIT_GOAL_ID — tools not registered");
 		return;
 	}
 

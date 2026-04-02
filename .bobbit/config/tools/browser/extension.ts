@@ -12,18 +12,22 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { chromium, type Browser, type Page } from "playwright";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-let browser: Browser | null = null;
-let page: Page | null = null;
+// Lazy-loaded playwright — may not be installed (e.g. Docker sandbox containers).
+let playwrightMod: typeof import("playwright") | null = null;
 
-async function ensurePage(): Promise<Page> {
+let browser: import("playwright").Browser | null = null;
+let page: import("playwright").Page | null = null;
+
+async function ensurePage(): Promise<import("playwright").Page> {
 	if (page && !page.isClosed()) return page;
 
+	if (!playwrightMod) throw new Error("playwright is not available");
+
 	if (!browser || !browser.isConnected()) {
-		browser = await chromium.launch({ headless: true });
+		browser = await playwrightMod.chromium.launch({ headless: true });
 	}
 	const context = await browser.newContext({
 		viewport: { width: 1280, height: 720 },
@@ -55,6 +59,14 @@ function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Try to load playwright — silently skip tool registration if unavailable
+	try {
+		playwrightMod = require("playwright");
+	} catch {
+		// playwright not installed — skip native browser tools.
+		// MCP playwright extension provides equivalent functionality when configured.
+		return;
+	}
 	// Clean up browser on session shutdown
 	pi.on("session_shutdown", async () => {
 		await cleanup();
