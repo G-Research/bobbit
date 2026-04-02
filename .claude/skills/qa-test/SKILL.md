@@ -105,10 +105,10 @@ If the server doesn't become healthy after 60 seconds, document the failure and 
 
 Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it using `browser_navigate` (NOT `mcp__playwright__browser_navigate`).
 
-**IMPORTANT — Use the native browser tools only:**
+**Available browser tools:**
 - `browser_navigate(url=...)` — navigate to your ephemeral server
-- `browser_screenshot(savePath="...")` — take screenshots
-- `browser_snapshot()` — get ARIA accessibility tree (best for finding elements)
+- `browser_screenshot(savePath="...")` — take screenshots (always use absolute paths in $WORK_DIR)
+- `browser_snapshot()` — get ARIA accessibility tree (best for understanding page structure and finding elements)
 - `browser_click(selector=...)` — click elements
 - `browser_type(selector=..., text=...)` — type into inputs
 - `browser_eval(expression=...)` — run JavaScript on page
@@ -119,26 +119,28 @@ Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it using `
 - `browser_resize(width=..., height=...)` — resize viewport for responsive testing
 - `browser_console_messages(level=...)` — check for JS errors
 
-Do NOT use `mcp__playwright__*` tools — they share a single browser instance across all sessions and the dev server WILL hijack your page mid-test.
+**After each navigation**, verify you're on the right URL:
+```
+browser_eval(expression="window.location.href")
+```
+If the URL doesn't match your ephemeral server (check the port), re-navigate.
 
-**After each navigation or significant interaction:**
-1. Verify you're still on the right URL:
-   ```
-   browser_eval(expression="window.location.href")
-   ```
-   If the URL doesn't match your ephemeral server (check the port), re-navigate immediately.
-2. Check for JS errors:
-   ```
-   browser_console_messages(level="error")
-   ```
-   Log any errors in your scenario results — silent JS failures are common QA findings.
+### Pacing rules
+
+- **Breadth first.** Cover all scenarios from the goal spec at a surface level before going deep on any one. A report covering 5/5 features shallowly is more valuable than 1/5 deeply.
+- **10 tool calls per scenario max.** If a scenario requires complex setup that isn't working after 10 calls, record it as "SKIPPED — could not test: [reason]" and move on.
+- **Do NOT read source code.** You are a user, not a developer. Never `grep` or `cat` production `.ts` files. The only files you should read are config files needed for server setup.
+- **Do NOT create test fixtures via API/curl.** If testing requires projects, goals, or entities, create them through the UI. If the UI can't do it, that's a finding, not a problem to solve with curl.
+- **If it works, move on.** One screenshot proving a feature works is enough. Don't verify CSS classes, DOM structure, or internal state.
+
+### Per-scenario flow
 
 For each scenario from your task prompt (respecting `qa_max_scenarios`):
 
 1. **Before**: Take a screenshot documenting the starting state
 2. **Action**: Perform the user interaction (click, type, navigate, etc.)
 3. **After**: Take a screenshot documenting the result
-4. **Verdict**: Record PASS or FAIL with a clear explanation
+4. **Verdict**: Record PASS, FAIL, or SKIPPED with a clear explanation
 
 Use `browser_screenshot(savePath="$WORK_DIR/screenshot-N.png")` to save screenshots — always use **absolute paths** in `$WORK_DIR`, never relative paths (relative paths resolve against the master repo root, not your worktree).
 

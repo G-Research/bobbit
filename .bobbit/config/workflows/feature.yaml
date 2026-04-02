@@ -115,22 +115,25 @@ gates:
 
           ## Critical Rules
 
-          1. **Use non-MCP browser tools ONLY** — use `browser_navigate`, `browser_screenshot`,
-             `browser_click`, `browser_type`, `browser_eval`, `browser_wait`. Do NOT use
-             `mcp__playwright__*` tools — the MCP Playwright browser is shared across all
-             sessions and other agents WILL hijack your page mid-test.
-
-          2. **Save screenshots to absolute paths in $WORK_DIR** — never use relative paths.
+          1. **Save screenshots to absolute paths in $WORK_DIR** — never use relative paths.
              Relative paths save to the master repo root, not your worktree. Example:
              `browser_screenshot(savePath="/tmp/qa-work-xxx/screenshot-01.png")`
 
-          3. **Verify your port is unique** — check `cat .bobbit/state/gateway-url` to see
+          2. **Verify your port is unique** — check `cat .bobbit/state/gateway-url` to see
              the dev server port. Your ephemeral server MUST use a different port. If port
              allocation gives you the same port, allocate again.
 
-          4. **Verify URL after each navigation** — run `browser_eval(expression="window.location.href")`
+          3. **Verify URL after each navigation** — run `browser_eval(expression="window.location.href")`
              after navigating and after significant interactions to confirm you're still on
              your ephemeral server. If the port is wrong, re-navigate.
+
+          4. **Prioritise breadth over depth** — cover all requirements from the goal spec
+             at a surface level before going deep on any single one. Spend no more than
+             10 tool calls per scenario. If setup for a scenario isn't working, document
+             "could not test — [reason]" and move on.
+
+          5. **Do NOT read source code** — test from the user's perspective only. Do not
+             grep or cat .ts files. If you need to create test data, use the UI, not curl.
 
           Focus on testing the user-facing changes described in the goal spec.
           If the project does not have qa_start_command configured, emit
