@@ -53,6 +53,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
+
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
@@ -1235,7 +1236,7 @@ async function handleApiRoute(
 
 		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
 		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
+		let createOpts: { rolePrompt?: string; roleName?: string; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
 		let roleForMeta: { name: string; accessory: string } | undefined;
 
 		if (roleId && typeof roleId === "string") {
@@ -1246,6 +1247,7 @@ async function handleApiRoute(
 			}
 			createOpts = {
 				rolePrompt: role.promptTemplate,
+				roleName: role.name,
 			};
 			roleForMeta = { name: role.name, accessory: role.accessory };
 		}
