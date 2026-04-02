@@ -2887,10 +2887,8 @@ async function handleApiRoute(
 			json({ error: "Session not found" }, 404);
 			return;
 		}
-		if (session.nonInteractive) {
-			json({ error: "Cannot steer a non-interactive (automated review) session" }, 400);
-			return;
-		}
+		// Allow steering non-interactive sessions (e.g. verification reviewers)
+		// so the user can redirect them mid-run
 		if (session.status !== "streaming") {
 			json({ error: "Agent is not currently streaming — use team/prompt instead" }, 409);
 			return;
