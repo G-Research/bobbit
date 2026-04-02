@@ -316,9 +316,16 @@ export class GateVerificationLive extends LitElement {
 		});
 		const sortedPhases = [...stepsByPhase.keys()].sort((a, b) => a - b);
 
+		// Running: show step count top-right, no subtitle. Completed: show full header.
+		const completedCount = passedCount + failedCount;
+		const isRunning = this.overallStatus === "running";
+
 		return html`
 			<div class="mt-2 space-y-1">
-				${this._renderHeader(passedCount, failedCount, total)}
+				${isRunning
+					? html`<div class="flex items-center justify-end text-[10px] text-muted-foreground mb-0.5 tabular-nums">${completedCount}/${total} steps${failedCount > 0 ? html` <span class="text-red-500 ml-1">(${failedCount} failed)</span>` : nothing}</div>`
+					: this._renderHeader(passedCount, failedCount, total)
+				}
 				${sortedPhases.map(phase => {
 					const phaseSteps = stepsByPhase.get(phase)!;
 					const isActive = phase === this.currentPhase && this.overallStatus === "running";
