@@ -14,7 +14,7 @@ import {
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
-import { sessionHueRotation } from "./session-colors.js";
+import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
 import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
@@ -440,7 +440,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	// Update accessory class synchronously
 	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
-	const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat", "bobbit-wand"];
+	const accClasses = ACCESSORY_IDS.map(id => id === "crown" ? "bobbit-crowned" : `bobbit-${id}`);
 	accClasses.forEach((c) => document.documentElement.classList.remove(c));
 	const accId = sessionData?.accessory
 		?? (sessionData?.role === "team-lead" ? "crown" : sessionData?.role === "coder" ? "bandana" : undefined);
@@ -1084,8 +1084,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (isStale()) return;
 				// Re-apply accessory class after refreshSessions (may have new data)
 				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
-				const accClasses = ["bobbit-crowned", "bobbit-bandana", "bobbit-magnifier", "bobbit-palette", "bobbit-pencil", "bobbit-shield", "bobbit-set-square", "bobbit-flask", "bobbit-wizard-hat", "bobbit-wand"];
-				accClasses.forEach((c) => document.documentElement.classList.remove(c));
+				const accClasses2 = ACCESSORY_IDS.map(id => id === "crown" ? "bobbit-crowned" : `bobbit-${id}`);
+				accClasses2.forEach((c) => document.documentElement.classList.remove(c));
 				const accId = sessionForRole?.accessory
 					?? (sessionForRole?.role === "team-lead" ? "crown" : sessionForRole?.role === "coder" ? "bandana" : undefined);
 				if (accId && accId !== "none") {
