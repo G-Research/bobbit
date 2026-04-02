@@ -526,14 +526,15 @@ export async function fetchGitStatus(sessionId: string, opts?: { fetch?: boolean
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[] }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
 		if (reattemptOf) body.reattemptOf = reattemptOf;
 		if (sandboxed !== undefined) body.sandboxed = !!sandboxed;
 		if (projectId) body.projectId = projectId;
+		if (enabledOptionalSteps?.length) body.enabledOptionalSteps = enabledOptionalSteps;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -669,12 +670,14 @@ export async function teardownTeam(goalId: string): Promise<boolean> {
 
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review";
+	type: "command" | "llm-review" | "agent-qa";
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
 	phase?: number;
+	optional?: boolean;
+	label?: string;
 }
 
 export interface WorkflowGate {

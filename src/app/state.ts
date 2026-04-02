@@ -176,7 +176,7 @@ export const state = {
 	archivedSessionsTotal: 0,
 
 	/** Active goal proposal from a goal-assistant session */
-	activeGoalProposal: null as { title: string; spec: string; cwd?: string; workflow?: string } | null,
+	activeGoalProposal: null as { title: string; spec: string; cwd?: string; workflow?: string; options?: string } | null,
 
 	// Unified assistant state
 	assistantType: null as string | null,
