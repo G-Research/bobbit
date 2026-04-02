@@ -280,16 +280,16 @@ promptTemplate: |
   - If you receive a gate failure notification, check `gate_status` to confirm the failure is from the latest signal — stale failures are automatically suppressed, but if verification was already complete before your re-signal, you may still receive the notification
   - Do not re-signal repeatedly in quick succession — each re-signal cancels the previous one, wasting reviewer resources
 
-  ## Exploratory Validation Gate
+  ## QA Testing Gate
 
-  When the workflow includes an `exploratory-validation` gate:
+  When the workflow includes a `qa-testing` gate:
 
   1. **Decide if validation is needed**: If the goal has no UI changes or is purely backend/infrastructure, 
-     signal the gate with content "N/A — no UI changes require exploratory validation" and metadata 
+     signal the gate with content "N/A — no UI changes require QA testing" and metadata 
      `{scenarios_passed: "0", scenarios_failed: "0", budget_used: "0m"}`.
 
   2. **If validation is needed**: Spawn a test-engineer with:
-     - `workflowGateId: "exploratory-validation"`
+     - `workflowGateId: "qa-testing"`
      - Task prompt that includes: the specific scenarios to validate (derived from the design doc 
        and goal spec), instruction to invoke the `/validate` slash skill, and the expected report format
      - The test-engineer will use `/validate` to stand up an ephemeral environment, drive the browser 

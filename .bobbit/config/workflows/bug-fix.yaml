@@ -130,8 +130,8 @@ gates:
           4. Secrets handling — no hardcoded secrets, tokens, or credentials
           5. Dependency risks — any new dependencies with known vulnerabilities?
 
-  - id: exploratory-validation
-    name: Exploratory Validation
+  - id: qa-testing
+    name: QA Testing
     depends_on: [implementation]
     content: true
     optional: true
@@ -143,7 +143,7 @@ gates:
       - name: "Report has evidence"
         type: llm-review
         prompt: |
-          Review this exploratory validation report for a bug fix.
+          Review this QA testing report for a bug fix.
           
           1. Does every scenario include screenshots as evidence?
           2. Are failures explained with actionable detail?
@@ -153,7 +153,7 @@ gates:
 
   - id: documentation
     name: Documentation
-    depends_on: [exploratory-validation]
+    depends_on: [qa-testing]
     verify:
       - name: "Documentation coverage"
         type: llm-review

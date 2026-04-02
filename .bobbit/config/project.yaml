@@ -11,14 +11,14 @@ worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
 config_directories: '[{"path":"C:\\tmp\\.bobbit","types":["skills"]},{"path":"C:\\Users\\jsubr\\.claude\\AGENTS.md","types":["agents"]}]'
 sandbox: docker
 sandbox_image: bobbit-agent
-ev_build_command: npm run build
-ev_start_command: >-
+qa_build_command: npm run build
+qa_start_command: >-
   PORT=$PORT WORK_DIR=$WORK_DIR BOBBIT_DIR=$WORK_DIR/.bobbit
   BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1 BOBBIT_SKIP_NPM_CI=1
   node dist/server/cli.js
   --host 127.0.0.1 --port $PORT --no-tls --auth --cwd $WORK_DIR
-ev_health_check: http://127.0.0.1:$PORT/api/health
-ev_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
-ev_env: '{"BOBBIT_NO_OPEN":"1","BOBBIT_LLM_REVIEW_SKIP":"1","BOBBIT_SKIP_NPM_CI":"1"}'
-ev_max_duration_minutes: "10"
-ev_max_scenarios: "5"
+qa_health_check: http://127.0.0.1:$PORT/api/health
+qa_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
+qa_env: '{"BOBBIT_NO_OPEN":"1","BOBBIT_LLM_REVIEW_SKIP":"1","BOBBIT_SKIP_NPM_CI":"1"}'
+qa_max_duration_minutes: "10"
+qa_max_scenarios: "5"

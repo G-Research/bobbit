@@ -4,7 +4,7 @@ import yaml from "yaml";
 
 export type ProjectConfig = Record<string, string>;
 
-export interface ExploratoryValidationConfig {
+export interface QaTestingConfig {
 	buildCommand: string;
 	startCommand: string;
 	healthCheck: string;
@@ -109,18 +109,18 @@ export class ProjectConfigStore {
 		return { ...DEFAULTS, ...this.data };
 	}
 
-	/** Parse exploratory validation config from ev_* keys. Returns null if not configured (no ev_start_command). */
-	getExploratoryValidationConfig(): ExploratoryValidationConfig | null {
+	/** Parse QA testing config from qa_* keys. Returns null if not configured (no qa_start_command). */
+	getQaTestingConfig(): QaTestingConfig | null {
 		const all = this.getWithDefaults();
-		if (!all.ev_start_command) return null;
+		if (!all.qa_start_command) return null;
 		return {
-			buildCommand: all.ev_build_command || all.build_command || "npm run build",
-			startCommand: all.ev_start_command,
-			healthCheck: all.ev_health_check || "",
-			browserEntry: all.ev_browser_entry || "",
-			env: all.ev_env ? JSON.parse(all.ev_env) : {},
-			maxDurationMinutes: parseInt(all.ev_max_duration_minutes || "10", 10),
-			maxScenarios: parseInt(all.ev_max_scenarios || "5", 10),
+			buildCommand: all.qa_build_command || all.build_command || "npm run build",
+			startCommand: all.qa_start_command,
+			healthCheck: all.qa_health_check || "",
+			browserEntry: all.qa_browser_entry || "",
+			env: all.qa_env ? JSON.parse(all.qa_env) : {},
+			maxDurationMinutes: parseInt(all.qa_max_duration_minutes || "10", 10),
+			maxScenarios: parseInt(all.qa_max_scenarios || "5", 10),
 		};
 	}
 }

@@ -990,12 +990,12 @@ async function handleApiRoute(
 		}
 	}
 
-	// GET /api/projects/:id/exploratory-validation-config
-	const evConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/exploratory-validation-config$/);
+	// GET /api/projects/:id/qa-testing-config
+	const evConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/qa-testing-config$/);
 	if (evConfigMatch && req.method === "GET") {
 		const ctx = projectContextManager.getOrCreate(evConfigMatch[1]);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const config = ctx.projectConfigStore.getExploratoryValidationConfig();
+		const config = ctx.projectConfigStore.getQaTestingConfig();
 		json({ config });
 		return;
 	}

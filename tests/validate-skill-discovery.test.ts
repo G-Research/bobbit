@@ -19,7 +19,7 @@ describe("/validate slash skill", () => {
     assert.ok(content.includes("Step 1"), "Should have Step 1");
     assert.ok(content.includes("Step 9") || content.includes("Cleanup"), "Should have cleanup step");
     assert.ok(content.includes("bash_bg"), "Should reference bash_bg for server lifecycle");
-    assert.ok(content.includes("ev_start_command"), "Should reference ev_start_command config");
+    assert.ok(content.includes("qa_start_command"), "Should reference qa_start_command config");
     assert.ok(content.includes("base64"), "Should mention base64 for screenshots");
     assert.ok(content.includes("gate_signal"), "Should reference gate_signal");
   });

@@ -1,36 +1,36 @@
 ---
 name: validate
-description: Stand up an ephemeral test environment and drive browser-based exploratory validation scenarios
+description: Stand up an ephemeral test environment and drive browser-based QA testing scenarios
 argument-hint: [scenario description]
 ---
 
-# Exploratory Validation Protocol
+# QA Testing Protocol
 
-You are running exploratory validation for a goal. This protocol stands up an isolated copy of the application, drives a real browser through user scenarios, captures screenshot evidence, and produces an HTML validation report.
+You are running QA testing for a goal. This protocol stands up an isolated copy of the application, drives a real browser through user scenarios, captures screenshot evidence, and produces an HTML validation report.
 
 ## Prerequisites
 
 - You need browser tools (Playwright MCP) available
-- The project must have `ev_*` keys in `.bobbit/config/project.yaml`
+- The project must have `qa_*` keys in `.bobbit/config/project.yaml`
 
 ## Step 1: Read Configuration
 
-Read the project config to get the exploratory validation settings:
+Read the project config to get the QA testing settings:
 
 ```bash
 cat .bobbit/config/project.yaml
 ```
 
 Look for these keys:
-- `ev_build_command` — how to build the project (falls back to `build_command`)
-- `ev_start_command` — how to start an isolated server (REQUIRED — if missing, stop)
-- `ev_health_check` — URL to poll for readiness
-- `ev_browser_entry` — URL to open in the browser
-- `ev_env` — JSON object of extra environment variables
-- `ev_max_duration_minutes` — time budget (default: 10)
-- `ev_max_scenarios` — scenario budget (default: 5)
+- `qa_build_command` — how to build the project (falls back to `build_command`)
+- `qa_start_command` — how to start an isolated server (REQUIRED — if missing, stop)
+- `qa_health_check` — URL to poll for readiness
+- `qa_browser_entry` — URL to open in the browser
+- `qa_env` — JSON object of extra environment variables
+- `qa_max_duration_minutes` — time budget (default: 10)
+- `qa_max_scenarios` — scenario budget (default: 5)
 
-If `ev_start_command` is not set, report "No exploratory validation configured for this project" and stop.
+If `qa_start_command` is not set, report "No QA testing configured for this project" and stop.
 
 ## Step 2: Create Isolated Environment
 
@@ -57,7 +57,7 @@ COMMIT=$(git rev-parse --short HEAD)
 
 Run the build command from the repo directory:
 ```bash
-cd "$REPO" && eval "<ev_build_command value>"
+cd "$REPO" && eval "<qa_build_command value>"
 ```
 
 If the build fails, produce a report documenting the build failure and skip to Step 9 (Cleanup).
@@ -71,7 +71,7 @@ FREE_PORT=$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1
 
 Start the server using `bash_bg` (NEVER use `bash` with `&`):
 ```bash
-bash_bg(action="create", command="PORT=<free_port> WORK_DIR=<work_dir> BOBBIT_DIR=<work_dir>/.bobbit <ev_env vars> eval '<ev_start_command>'")
+bash_bg(action="create", command="PORT=<free_port> WORK_DIR=<work_dir> BOBBIT_DIR=<work_dir>/.bobbit <qa_env vars> eval '<qa_start_command>'")
 ```
 
 Record the background process ID for later cleanup.
@@ -100,7 +100,7 @@ If the server doesn't become healthy after 60 seconds, document the failure and 
 
 Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it.
 
-For each scenario from your task prompt (respecting `ev_max_scenarios`):
+For each scenario from your task prompt (respecting `qa_max_scenarios`):
 
 1. **Before**: Take a screenshot documenting the starting state
 2. **Action**: Perform the user interaction (click, type, navigate, etc.)
@@ -109,7 +109,7 @@ For each scenario from your task prompt (respecting `ev_max_scenarios`):
 
 Use `browser_screenshot(savePath="<work_dir>/screenshot-N.png")` to save screenshots.
 
-Track elapsed time. If `ev_max_duration_minutes` is exceeded, stop testing immediately and proceed to report generation with partial results.
+Track elapsed time. If `qa_max_duration_minutes` is exceeded, stop testing immediately and proceed to report generation with partial results.
 
 ## Step 7: Produce HTML Report
 
@@ -125,7 +125,7 @@ The report structure:
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Exploratory Validation Report</title>
+  <title>QA Testing Report</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 2rem; line-height: 1.6; }
     h1 { border-bottom: 2px solid #333; padding-bottom: 0.5rem; }
@@ -145,7 +145,7 @@ The report structure:
   </style>
 </head>
 <body>
-  <h1>Exploratory Validation Report</h1>
+  <h1>QA Testing Report</h1>
   
   <h2>Environment</h2>
   <table class="env-table">
@@ -191,7 +191,7 @@ Convert key sections of the HTML report to markdown and signal the gate:
 
 ```
 gate_signal(
-  gate_id="exploratory-validation",
+  gate_id="qa-testing",
   content="<markdown version of the report>",
   metadata={
     "scenarios_passed": "<count>",
