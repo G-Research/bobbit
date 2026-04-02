@@ -14,11 +14,12 @@ export class ToolPermissionCard extends LitElement {
 	@property() group = "";
 	@property() roleName = "";
 	@property() roleLabel = "";
-	@property({ attribute: false }) onGrant?: (scope: "tool" | "group") => void;
+	@property({ attribute: false }) onGrant?: (scope: "tool" | "group", mode?: string) => void;
 	@property({ attribute: false }) onDeny?: () => void;
 	@state() private _granting = false;
 	@state() private _granted = false;
 	@state() private _denied = false;
+	@state() private _mode: string = "persistent";
 
 	protected override createRenderRoot() {
 		return this;
@@ -27,7 +28,7 @@ export class ToolPermissionCard extends LitElement {
 	private _handleGrant(scope: "tool" | "group") {
 		if (this._granting || this._granted || this._denied) return;
 		this._granting = true;
-		this.onGrant?.(scope);
+		this.onGrant?.(scope, this._mode);
 		// Show success after a short delay (server will restart the session)
 		setTimeout(() => {
 			this._granting = false;
@@ -87,6 +88,17 @@ export class ToolPermissionCard extends LitElement {
 				<div class="flex items-center gap-2 text-sm font-medium text-amber-600 dark:text-amber-400">
 					${icon(ShieldCheck, "sm")}
 					<span>Role "${this.roleLabel}" doesn't have access to <code class="px-1 py-0.5 rounded bg-amber-500/10 text-xs">${this._shortToolName}</code></span>
+				</div>
+				<div class="flex items-center gap-2 flex-wrap">
+					<label class="text-xs text-muted-foreground">Duration:</label>
+					<select
+						class="text-xs rounded-md border border-border bg-background px-2 py-1 cursor-pointer"
+						@change=${(e: Event) => this._mode = (e.target as HTMLSelectElement).value}
+					>
+						<option value="persistent">Always</option>
+						<option value="session-only">This session only</option>
+						<option value="one-time">Just this once</option>
+					</select>
 				</div>
 				<div class="flex gap-2 flex-wrap">
 					<button

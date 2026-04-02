@@ -342,7 +342,7 @@ export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 			ctx.mcpManager ?? undefined,
 			effectiveRole ?? undefined,
 			ctx.groupPolicyStore ?? undefined,
-			plan.effectiveAllowedTools,
+			[],
 		) : undefined;
 		if (guardPath) {
 			plan.bridgeOptions.args.push("--extension", guardPath);

@@ -551,7 +551,7 @@ export class SessionManager {
 		let text = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools that are not listed above or mentioned below.`;
 
 		// Collect all available-but-not-granted tools (MCP + builtin/extension)
-		// so the agent knows it can attempt them (the stub will error and trigger
+		// so the agent knows it can attempt them (the guard extension blocks and triggers
 		// a permission grant prompt in the UI).
 		const ungrantedTools: Array<{ name: string; description: string }> = [];
 		const allowedLower = new Set(allowedTools.map(a => a.toLowerCase()));
@@ -589,9 +589,8 @@ export class SessionManager {
 	}
 
 	/**
-	 * Build the full set of CLI args for tool activation, including stubs, MCP proxies,
-	 * and builtin/extension activation. Stubs are loaded first (pi-coding-agent uses
-	 * first-registered-wins), then real extensions.
+	 * Build the full set of CLI args for tool activation, including guard extensions,
+	 * MCP proxies, and builtin/extension activation.
 	 *
 	 * Returns the args array to prepend to bridgeOptions.args.
 	 */
@@ -615,7 +614,6 @@ export class SessionManager {
 		allowedTools: string[],
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
-		grantedTools?: string[],
 	): string[] {
 		// MCP proxy extensions
 		const mcpExtPaths = this.mcpManager
@@ -629,7 +627,7 @@ export class SessionManager {
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, grantedTools)
+			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, [])
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -1451,7 +1449,7 @@ export class SessionManager {
 				effectiveAllowed = effectiveAllowed.filter(t => t !== "bash_bg");
 			}
 			if (effectiveAllowed.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(ps.id, effectiveAllowed, role, ps.cwd, overrideAllowedTools);
+				const toolArgs = this.buildToolActivationArgs(ps.id, effectiveAllowed, role, ps.cwd);
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -2523,7 +2521,7 @@ export class SessionManager {
 			const role = this.roleManager.getRole(session.role);
 			const effective = this.resolveEffectiveAllowedTools(role);
 			if (effective.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd, session.allowedTools);
+				const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd);
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -3069,7 +3067,7 @@ export class SessionManager {
 				const role = this.roleManager.getRole(session.role);
 				const effective = this.resolveEffectiveAllowedTools(role);
 				if (effective.length > 0) {
-					const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd, session.allowedTools);
+					const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd);
 					bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 				} else if (this.mcpManager) {
 					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
