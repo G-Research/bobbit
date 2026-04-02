@@ -11,6 +11,7 @@ import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
 import { GIT_BASH, getShellConfig } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import { generateTeamName } from "./team-names.js";
 
 /** Extract pass/fail verdict from sub-agent output. Exported for unit testing. */
 export function parseVerdict(output: string): boolean | null {
@@ -1227,8 +1228,8 @@ export class VerificationHarness {
 			sessionId = session.id;
 
 			// Set title and metadata
-			const roleLabel = role.name ? (role.name.charAt(0).toUpperCase() + role.name.slice(1).replace(/-/g, " ")) : "Reviewer";
-			this.sessionManager!.setTitle(sessionId, `${roleLabel}: ${step.name}`);
+			const funName = await generateTeamName("verification");
+			this.sessionManager!.setTitle(sessionId, `${step.name}: ${funName}`);
 			this.sessionManager!.updateSessionMeta(sessionId, {
 				role: roleName,
 				teamGoalId: goalId,
@@ -1406,8 +1407,8 @@ export class VerificationHarness {
 			qaSessionId = session.id;
 
 			// Set title and metadata
-			const qaRoleLabel = qaRoleName.charAt(0).toUpperCase() + qaRoleName.slice(1).replace(/-/g, " ");
-			this.sessionManager!.setTitle(qaSessionId, `${qaRoleLabel}: ${step.name}`);
+			const qaFunName = await generateTeamName("verification");
+			this.sessionManager!.setTitle(qaSessionId, `${step.name}: ${qaFunName}`);
 			this.sessionManager!.updateSessionMeta(qaSessionId, {
 				role: qaRoleName,
 				teamGoalId: goalId,
