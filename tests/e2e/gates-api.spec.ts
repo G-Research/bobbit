@@ -1,7 +1,8 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, nonGitCwd } from "./e2e-setup.js";
+import { readE2EToken, base, nonGitCwd, waitForGateStatus, createObserverSession } from "./e2e-setup.js";
 
 let token: string;
+let observerSessionId: string;
 
 const headers = () => ({
 	Authorization: `Bearer ${token}`,
@@ -36,33 +37,9 @@ async function deleteGoal(goalId: string): Promise<void> {
 	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
 }
 
-/**
- * Poll until a gate reaches the target status or timeout expires.
- * Returns the gate object on success; throws on timeout.
- */
-async function waitForGateStatus(
-	goalId: string,
-	gateId: string,
-	targetStatus: string,
-	timeoutMs = 15000,
-): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		const data = await res.json();
-		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 500));
-	}
-	// One last check with detail for error message
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	const data = await res.json();
-	throw new Error(
-		`Gate ${gateId} did not reach status "${targetStatus}" within ${timeoutMs}ms. Current status: "${data.status}"`,
-	);
-}
-
-test.beforeAll(() => {
+test.beforeAll(async () => {
 	token = readE2EToken();
+	observerSessionId = await createObserverSession();
 });
 
 test.describe("Gates API", () => {
@@ -105,7 +82,7 @@ test.describe("Gates API", () => {
 			expect(signalData.signal.status).toBe("running");
 
 			// Wait for pass (LLM review auto-passes)
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			// Verify content is retrievable
 			const contentResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/content`);
@@ -152,7 +129,7 @@ test.describe("Gates API", () => {
 					content: "# Bug Analysis\n\nSteps: 1. call add(2,3)\nRoot cause: src/calc.ts:5 uses minus instead of plus",
 				}),
 			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
+			await waitForGateStatus(goalId, "issue-analysis", "passed", observerSessionId);
 
 			// Signal reproducing-test with a command that fails (exit 1) and matching error_pattern
 			// Because the gate has expect: failure + non-zero exit + matching pattern = pass
@@ -165,7 +142,7 @@ test.describe("Gates API", () => {
 			expect(signalResp.status).toBe(201);
 
 			// Gate should pass because expect:failure + non-zero exit + matching error_pattern = pass
-			await waitForGateStatus(goalId, "reproducing-test", "passed");
+			await waitForGateStatus(goalId, "reproducing-test", "passed", observerSessionId);
 		} finally {
 			await deleteGoal(goalId);
 		}
@@ -181,7 +158,7 @@ test.describe("Gates API", () => {
 					content: "# Bug\n\nSteps: 1. run test\nRoot cause: src/x.ts:1",
 				}),
 			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
+			await waitForGateStatus(goalId, "issue-analysis", "passed", observerSessionId);
 
 			// Signal reproducing-test with a command that succeeds (exit 0)
 			// Because the gate has expect: failure, a zero exit = fail
@@ -193,7 +170,7 @@ test.describe("Gates API", () => {
 			});
 
 			// Gate should fail because expect:failure + zero exit = fail
-			const gate = await waitForGateStatus(goalId, "reproducing-test", "failed");
+			const gate = await waitForGateStatus(goalId, "reproducing-test", "failed", observerSessionId);
 			// Verify the verification step shows failure
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signals`);
 			const { signals } = await signalsResp.json();
@@ -215,14 +192,14 @@ test.describe("Gates API", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design v1\n\nApproach: X\nFiles: a.ts\nCriteria: Y" }),
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			// Signal implementation (test-fast just runs "echo ok")
 			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
 				method: "POST",
 				body: JSON.stringify({}),
 			});
-			await waitForGateStatus(goalId, "implementation", "passed");
+			await waitForGateStatus(goalId, "implementation", "passed", observerSessionId);
 
 			// Verify both are passed
 			const gatesResp1 = await apiFetch(`/api/goals/${goalId}/gates`);
@@ -235,7 +212,7 @@ test.describe("Gates API", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design v2\n\nApproach: Y\nFiles: b.ts\nCriteria: Z" }),
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			// Implementation and ready-to-merge should be reset to pending
 			const gatesResp2 = await apiFetch(`/api/goals/${goalId}/gates`);
@@ -255,13 +232,13 @@ test.describe("Gates API", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design v1\n\nApproach: A\nFiles: x.ts\nCriteria: P" }),
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design v2\n\nApproach: B\nFiles: y.ts\nCriteria: Q" }),
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			// Check signal history
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
@@ -293,7 +270,7 @@ test.describe("Gates API", () => {
 					content: "# Analysis\n\nSteps: run echo\nRoot cause: src/a.ts:1",
 				}),
 			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
+			await waitForGateStatus(goalId, "issue-analysis", "passed", observerSessionId);
 
 			// Signal reproducing-test with metadata
 			await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
@@ -304,7 +281,7 @@ test.describe("Gates API", () => {
 			});
 			// This gate has expect:failure but "echo metadata-works" exits 0, so it fails
 			// That's fine — we want to check the verification output contains the resolved command
-			await waitForGateStatus(goalId, "reproducing-test", "failed");
+			await waitForGateStatus(goalId, "reproducing-test", "failed", observerSessionId);
 
 			// Check the signal's verification step output — the {{test_command}} should have resolved
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signals`);
@@ -364,7 +341,7 @@ test.describe("Gates API", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Bug\nSteps: x\nRoot cause: y" }),
 			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
+			await waitForGateStatus(goalId, "issue-analysis", "passed", observerSessionId);
 
 			// Try to signal reproducing-test WITHOUT required metadata
 			const resp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
