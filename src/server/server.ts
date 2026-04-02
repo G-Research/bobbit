@@ -1608,9 +1608,9 @@ async function handleApiRoute(
 		const group = decodeURIComponent(groupPolicyMatch[1]);
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const validPolicies = ['always-allow', 'ask-once', 'always-ask', 'never-ask', 'never'];
+		const validPolicies = ['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask'];
 		if (body.policy && !validPolicies.includes(body.policy)) {
-			json({ error: `Invalid policy. Must be one of: ${validPolicies.join(', ')}` }, 400);
+			json({ error: `Invalid policy. Must be one of: allow, ask, never` }, 400);
 			return;
 		}
 		groupPolicyStore.setGroupPolicy(group, body.policy || null);
@@ -2040,7 +2040,7 @@ async function handleApiRoute(
 				accessory: body.accessory,
 				toolPolicies: body.toolPolicies !== undefined ? (() => {
 					// Validate toolPolicies values
-					const validPolicies = new Set(['always-allow', 'ask-once', 'always-ask', 'never-ask', 'never']);
+					const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 					const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
 					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
 						for (const [k, v] of Object.entries(body.toolPolicies)) {

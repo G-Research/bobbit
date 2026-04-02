@@ -32,21 +32,21 @@ test.describe("PUT /api/tool-group-policies/:group", () => {
 	test("sets a group policy and GET reflects it", async () => {
 		const putResp = await apiFetch("/api/tool-group-policies/Browser", {
 			method: "PUT",
-			body: JSON.stringify({ policy: "ask-once" }),
+			body: JSON.stringify({ policy: "ask" }),
 		});
 		expect(putResp.status).toBe(200);
 
 		const getResp = await apiFetch("/api/tool-group-policies");
 		expect(getResp.status).toBe(200);
 		const data = await getResp.json();
-		expect(data["Browser"]).toBe("ask-once");
+		expect(data["Browser"]).toBe("ask");
 	});
 
 	test("clears a group policy with null", async () => {
 		// Set first
 		await apiFetch("/api/tool-group-policies/TestGroup", {
 			method: "PUT",
-			body: JSON.stringify({ policy: "always-ask" }),
+			body: JSON.stringify({ policy: "ask" }),
 		});
 
 		// Clear
@@ -62,7 +62,7 @@ test.describe("PUT /api/tool-group-policies/:group", () => {
 	});
 
 	test("supports all valid policy values", async () => {
-		for (const policy of ["always-allow", "ask-once", "always-ask", "never-ask"]) {
+		for (const policy of ["allow", "ask", "never"]) {
 			const resp = await apiFetch(`/api/tool-group-policies/TestGroup-${policy}`, {
 				method: "PUT",
 				body: JSON.stringify({ policy }),
@@ -94,8 +94,8 @@ test.describe("Roles API — toolPolicies", () => {
 			method: "PUT",
 			body: JSON.stringify({
 				toolPolicies: {
-					"mcp__test__tool": "always-ask",
-					"mcp__test": "ask-once",
+					"mcp__test__tool": "ask",
+					"mcp__test": "ask",
 				},
 			}),
 		});
@@ -105,8 +105,8 @@ test.describe("Roles API — toolPolicies", () => {
 		expect(getResp.status).toBe(200);
 		const role = await getResp.json();
 		expect(role.toolPolicies).toBeDefined();
-		expect(role.toolPolicies["mcp__test__tool"]).toBe("always-ask");
-		expect(role.toolPolicies["mcp__test"]).toBe("ask-once");
+		expect(role.toolPolicies["mcp__test__tool"]).toBe("ask");
+		expect(role.toolPolicies["mcp__test"]).toBe("ask");
 	});
 
 	test("PUT toolPolicies with always-allow derives allowedTools", async () => {
@@ -122,16 +122,16 @@ test.describe("Roles API — toolPolicies", () => {
 			method: "PUT",
 			body: JSON.stringify({
 				toolPolicies: {
-					"read": "always-allow",
-					"bash": "always-allow",
-					"mcp__test__tool": "ask-once",
+					"read": "allow",
+					"bash": "allow",
+					"mcp__test__tool": "ask",
 				},
 			}),
 		});
 
 		const getResp = await apiFetch("/api/roles/policy-test-role");
 		const role = await getResp.json();
-		// allowedTools derived from toolPolicies entries with always-allow
+		// allowedTools derived from toolPolicies entries with allow
 		expect(role.allowedTools).toContain("read");
 		expect(role.allowedTools).toContain("bash");
 		expect(role.allowedTools).not.toContain("mcp__test__tool");
@@ -160,8 +160,8 @@ test.describe("Roles API — toolPolicies", () => {
 		expect(role.allowedTools).toContain("write");
 		// toolPolicies should have been updated accordingly
 		if (role.toolPolicies) {
-			expect(role.toolPolicies["read"]).toBe("always-allow");
-			expect(role.toolPolicies["write"]).toBe("always-allow");
+			expect(role.toolPolicies["read"]).toBe("allow");
+			expect(role.toolPolicies["write"]).toBe("allow");
 		}
 	});
 });
@@ -192,9 +192,9 @@ test.describe("Migration — allowedTools to toolPolicies", () => {
 
 		// After migration, toolPolicies should have matching entries
 		if (role.toolPolicies) {
-			expect(role.toolPolicies["read"]).toBe("always-allow");
-			expect(role.toolPolicies["bash"]).toBe("always-allow");
-			expect(role.toolPolicies["write"]).toBe("always-allow");
+			expect(role.toolPolicies["read"]).toBe("allow");
+			expect(role.toolPolicies["bash"]).toBe("allow");
+			expect(role.toolPolicies["write"]).toBe("allow");
 		}
 	});
 
@@ -212,17 +212,17 @@ test.describe("Migration — allowedTools to toolPolicies", () => {
 			method: "PUT",
 			body: JSON.stringify({
 				toolPolicies: {
-					"read": "always-allow",
-					"bash": "ask-once",
+					"read": "allow",
+					"bash": "ask",
 				},
 			}),
 		});
 
 		const getResp = await apiFetch("/api/roles/migration-test-role");
 		const role = await getResp.json();
-		expect(role.toolPolicies["read"]).toBe("always-allow");
-		expect(role.toolPolicies["bash"]).toBe("ask-once");
-		// bash should NOT be in allowedTools since it's ask-once
+		expect(role.toolPolicies["read"]).toBe("allow");
+		expect(role.toolPolicies["bash"]).toBe("ask");
+		// bash should NOT be in allowedTools since it's ask (not allow)
 		expect(role.allowedTools).toContain("read");
 		expect(role.allowedTools).not.toContain("bash");
 	});
