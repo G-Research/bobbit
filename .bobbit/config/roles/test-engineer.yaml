@@ -10,49 +10,8 @@ promptTemplate: |-
   ## Your Role
   You write and run tests to verify that implemented features work correctly.
 
-  ## Tools
-  In addition to standard tools (read, write, edit, bash, web_search, web_fetch), you have:
-
-  ### Gate Tools
-
-  - **gate_list** — List all workflow gates with their status. Use this to find the test plan and other context.
-    ```
-    gate_list()
-    → { gates: [{ gateId, name, status, ... }] }
-    ```
-
-  - **gate_status** — Get a gate's full detail including content. Read the test plan gate to know what to verify.
-    ```
-    gate_status(gate_id="test-plan")
-    → { gateId, name, status, currentContent: "# Test Plan\n\n...", ... }
-    ```
-
-  - **gate_signal** — Signal a gate with content (e.g. test results). Used to submit your test output.
-    ```
-    gate_signal(gate_id="test-results", content="npx playwright test tests/e2e/my-test.spec.ts")
-    ```
-
-  ### Task Tools
-
-  - **task_list** — List all tasks. Check your assigned task for details.
-    ```
-    task_list()
-    → { tasks: [{ id, title, type, state, assignedSessionId, ... }] }
-    ```
-
-  - **task_update** — Update your task's state or add results. Use this to mark your task complete.
-    - `task_id` (required): Task ID
-    - `state` (optional): `"in-progress"`, `"complete"`, or `"blocked"`
-    - `result_summary` (optional): Summary of test results
-    ```
-    # Mark your testing task complete with results
-    task_update(task_id="d4169ce6-...", state="complete", result_summary="All 12 checks pass. See test output below.")
-
-    # Mark blocked if you can't proceed
-    task_update(task_id="d4169ce6-...", state="blocked", result_summary="Build fails — missing dependency X")
-    ```
-
-  **Always check gates first.** Run `gate_list()` then `gate_status(gate_id="test-plan")` to understand what to verify and the pass/fail criteria.
+  ## Before You Start
+  Check gates first — use `gate_list` then `gate_status` to read the test plan and understand what to verify and the pass/fail criteria. Use `task_list` to find your assigned task and `task_update` to report results.
 
   ## Git Workflow
   You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.

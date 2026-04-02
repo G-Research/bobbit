@@ -61,7 +61,7 @@ export type ServerMessage =
 	| { type: "bg_process_output"; processId: string; stream: "stdout" | "stderr"; text: string; ts: number }
 	| { type: "bg_process_exited"; processId: string; exitCode: number | null }
 	| { type: "gate_signal_received"; goalId: string; gateId: string; signalId: string }
-	| { type: "gate_verification_started"; goalId: string; gateId: string; signalId: string; startedAt?: number; steps?: Array<{ name: string; type: string }> }
+	| { type: "gate_verification_started"; goalId: string; gateId: string; signalId: string; startedAt?: number; steps?: Array<{ name: string; type: string; phase?: number }> }
 	| { type: "gate_verification_phase_started"; goalId: string; gateId: string; signalId: string; phase: number; stepIndices: number[] }
 	| { type: "gate_verification_step_started"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; startedAt?: number; sessionId?: string; phase?: number }
 	| { type: "gate_verification_step_output"; goalId: string; gateId: string; signalId: string; stepIndex: number; stream: "stdout" | "stderr"; text: string; ts: number }

@@ -36,7 +36,7 @@ npm run test:e2e 2>&1 | tail -5  # E2E tests (API in-process + browser spawned)
 
 Test filter flags: `--failures` (default), `--verbose`, `--full`.
 
-UI-only changes need only unit tests. Server changes need E2E too.
+UI-only changes need only unit tests. Server changes need E2E too. Docker-dependent tests (`tests/e2e/sandbox-docker.spec.ts`) skip automatically when Docker is unavailable — they never fail in CI without Docker.
 
 **Test types:**
 - **Unit** (`tests/*.spec.ts`, `tests/*.test.ts`): Playwright `file://` fixtures + Node test runner. See `mobile-header.spec.ts`.
@@ -58,7 +58,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 **Mock agent keywords**: The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `<goal_proposal>` XML block response (includes `<options>QA testing</options>`) — used to test the goal assistant flow without a real LLM.
 
 **Choosing a harness for new E2E tests:**
-- **`in-process-harness.js`** — Default for API-only tests (no browser, no MCP, no process-level behavior). Faster startup (~2s vs ~5-8s per worker).
+- **`in-process-harness.js`** — Default for API-only tests (no browser, no MCP, no process-level behavior). Faster startup (~2s vs ~5-8s per worker). Exposes `sessionManager` on `GatewayInfo` for sandbox token testing.
 - **`gateway-harness.js`** — Required when the test uses a `page` fixture (browser), needs MCP servers enabled, or tests process-level behavior (port allocation, auth bypass).
 
 **Rules:**
@@ -105,7 +105,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Change message rendering**: `src/ui/components/Messages.ts` for standard roles, `message-renderer-registry.ts` for custom types.
 
-**Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `sandbox-pool.ts`, `docker-args.ts`, `sandbox-guard.ts`. Containers run on a dedicated `bobbit-sandbox-net` Docker bridge network with direct internet access (no proxy). See @docs/internals.md#docker-sandbox for full architecture.
+**Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `sandbox-pool.ts`, `docker-args.ts`, `sandbox-guard.ts`. Containers run on a dedicated `bobbit-sandbox-net` Docker bridge network with direct internet access (no proxy). All containers get resource limits (`--memory=4g`, `--cpus=2`, `--pids-limit=256`) and cloud metadata blackholes (`169.254.169.254`, `metadata.google.internal`, `metadata.internal` → `0.0.0.0`). Scoped sandbox tokens are in-memory only — never persisted to disk. See @docs/internals.md#docker-sandbox for full architecture.
 
 **Configure per-project settings**: Settings uses a two-tier layout — scope row (System + per-project tabs) above sub-tabs. System scope has all tabs; per-project scope shows Commands & Sandbox, Models, Config Directories, and Appearance. The Appearance tab has a palette picker and dual light/dark accent color inputs. Project settings inherit from System and can override individual fields. The sidebar gear icon on project headers navigates directly to that project's settings. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID. REST: `GET/PUT /api/projects/:id/config`, `GET /api/projects/:id/config/resolved` (with `{ value, source }` annotations). See [docs/internals.md](docs/internals.md#per-project-config) for the resolution cascade.
 
@@ -123,9 +123,9 @@ Quick pointers for the most common issues:
 - **Duplicate messages**: Check `flushDeferredMessage()` in `remote-agent.ts` — `MessageList` and `StreamingMessageContainer` must never overlap.
 - **Context bar / model state**: After restart, `sendFallbackModelState()` in `handler.ts` sends persisted model info when `getState()` fails. If context bar shows wrong values, verify `modelProvider`/`modelId` in `<project-root>/.bobbit/state/sessions.json`. Client retries `get_state` after 3s on reconnect. See @docs/debugging.md#context-bar--model-state for full checklist.
 - **Session persistence**: Check `<project-root>/.bobbit/state/sessions.json` (per-project). Missing `.jsonl` = session skipped on restore.
-- **Sandbox**: `GET /api/sandbox-status` for Docker state. Containers use `bobbit-sandbox-net` bridge network — check `docker network inspect bobbit-sandbox-net` for connectivity issues.
+- **Sandbox**: `GET /api/sandbox-status` for Docker state. Containers use `bobbit-sandbox-net` bridge network — check `docker network inspect bobbit-sandbox-net` for connectivity issues. Run sandbox tests: `npx playwright test --config playwright-e2e.config.ts --project=api sandbox-security sandbox-docker`.
 - **Search**: Each project has its own `<project-root>/.bobbit/state/search.db`. Delete and restart to rebuild. Searches aggregate across all project indexes. See @docs/debugging.md#search-index for full checklist.
-- **Gates**: Check `GET /api/goals/:id/gates` for dependency state. Check `GET /api/goals/:id/verifications/active` for in-flight verification with phase progression. Steps may show `"skipped"` status if an earlier phase failed or if an optional step is not enabled for the goal. If the verification output modal is empty, check that the `/ws/viewer` WebSocket is connected (browser DevTools → Network → WS tab). See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md#phased-verification) for phased execution details.
+- **Gates**: Check `GET /api/goals/:id/gates` for dependency state. Check `GET /api/goals/:id/verifications/active` for in-flight verification with phase progression. Steps may show `"skipped"` status if an earlier phase failed or if an optional step is not enabled for the goal. If the verification output modal is empty, check both the API response (`/api/goals/:id/verifications/active` step output) and the `/ws/viewer` WebSocket connection (browser DevTools → Network → WS tab). The modal bootstraps from the API on open, then streams via WS events. See @docs/debugging.md#gates for the full checklist. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md#phased-verification) for phased execution details.
 - **Multi-project / per-project state**: Each project stores its own state in `<project-root>/.bobbit/state/` (goals, sessions, tasks, teams, gates, staff, search index, costs). The server aggregates via `ProjectContextManager`. Check `GET /api/projects` for registered projects. Sessions/goals/staff carry optional `projectId`; filter with `?projectId=` on list endpoints. Config directories (MCP servers, skills, AGENTS.md/agent files) are resolved per-project through each project's `config_directories` setting. Per-project config: `GET /api/projects/:id/config/resolved` shows resolved values with source. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
 - **QA testing**: Check `qa_*` keys in project.yaml. The `/qa-test` skill requires `qa_start_command` at minimum. QA runs as an `agent-qa` verification step on the implementation gate. See [docs/qa-testing.md](docs/qa-testing.md).
 - **State migration**: On first startup after upgrade, centralized state files are distributed to per-project dirs based on `projectId` tags. Central files renamed with `.pre-migration` suffix. Check for `.bobbit/state/.migrated-to-per-project` marker. See @docs/internals.md#state-migration for details.

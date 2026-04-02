@@ -302,11 +302,13 @@ async function fetchActiveVerifications(goalId: string): Promise<void> {
 						name: s.name,
 						type: s.type,
 						status: s.status,
+						phase: s.phase,
 						durationMs: s.durationMs,
 						output: s.output,
 						startedAt: s.startedAt,
 					})),
 					overallStatus: v.overallStatus,
+					currentPhase: v.currentPhase,
 				});
 			}
 		}
@@ -489,10 +491,14 @@ function handleLiveVerificationEvent(e: Event) {
 	switch (detail.type) {
 		case "gate_verification_started": {
 			const now = detail.startedAt || Date.now();
-			const steps = (detail.steps || []).map((s: any) => ({
-				name: s.name, type: s.type, status: "running", startedAt: now,
+			const stepDefs: Array<{ name: string; type: string; phase?: number }> = detail.steps || [];
+			const minPhase = stepDefs.length > 0 ? Math.min(...stepDefs.map((s: any) => s.phase ?? 0)) : 0;
+			const steps = stepDefs.map((s: any) => ({
+				name: s.name, type: s.type, phase: s.phase ?? 0,
+				status: (s.phase ?? 0) === minPhase ? "running" : "waiting",
+				startedAt: now,
 			}));
-			liveVerifications.set(key, { gateId: detail.gateId, signalId: detail.signalId, steps, overallStatus: "running" });
+			liveVerifications.set(key, { gateId: detail.gateId, signalId: detail.signalId, steps, overallStatus: "running", currentPhase: minPhase });
 			startLiveVerifTimer();
 			renderApp();
 			break;
@@ -501,6 +507,12 @@ function handleLiveVerificationEvent(e: Event) {
 			const entry = liveVerifications.get(key);
 			if (entry) {
 				entry.currentPhase = detail.phase;
+				const stepIndices: number[] = detail.stepIndices || [];
+				for (const idx of stepIndices) {
+					if (idx >= 0 && idx < entry.steps.length && entry.steps[idx].status === "waiting") {
+						entry.steps[idx] = { ...entry.steps[idx], status: "running", startedAt: Date.now() };
+					}
+				}
 				renderApp();
 			}
 			break;
@@ -1887,15 +1899,16 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 				const isRunning = step.status === "running";
 				const isPassed = step.status === "passed";
 				const isSkipped = step.status === "skipped";
+				const isWaiting = step.status === "waiting";
 				const hasOutput = !!step.output;
 				const isExpanded = expandedLiveStepKeys.has(stepKey);
 				const isLlm = step.type === "llm-review";
 				const isRunningCmd = isRunning && step.type === "command";
 				const clickable = hasOutput || isRunningCmd;
 
-				const cardClass = isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
-				const iconClass = isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
-				const icon = isSkipped ? "\u2298" : isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717";
+				const cardClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
+				const iconClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
+				const icon = isWaiting ? "\u25CB" : isSkipped ? "\u2014" : isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717";
 
 				return html`
 					${showPhaseDivider ? html`<div class="phase-divider">Phase ${curPhase}</div>` : nothing}
@@ -1903,7 +1916,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
 							@click=${clickable ? () => {
 								if (isRunningCmd) {
-									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || "" };
+									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || step.output || "" };
 									renderApp();
 								} else if (hasOutput) {
 									toggleLiveStepExpand(stepKey);
@@ -1915,7 +1928,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							<span class="verify-card__name">${step.name}</span>
 							<span class="verify-card__type-badge ${isLlm ? "verify-card__type-badge--llm" : ""}">${step.type}</span>
 							<span class="verify-card__duration">
-								${isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
+								${isWaiting ? "" : isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
 							</span>
 							${step.sessionId ? html`
 								<a href="#/session/${step.sessionId}"

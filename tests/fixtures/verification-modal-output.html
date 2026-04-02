@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Verification Modal Output Bug Fixture</title>
+</head>
+<body>
+<div id="results"></div>
+<script>
+/**
+ * This fixture tests the data flow bug where the verification output modal
+ * shows "Waiting for output…" because it reads only from the WS accumulator
+ * (_stepOutputs Map) and ignores API-fetched step output (this.steps[i].output).
+ *
+ * The bug exists in two places:
+ * 1. GateVerificationLive._openModal() — reads _stepOutputs.get(index) || ""
+ *    but should read _stepOutputs.get(index) || this.steps[index]?.output || ""
+ * 2. goal-dashboard.ts click handler — reads step.liveOutput || ""
+ *    but should read step.liveOutput || step.output || ""
+ */
+
+/**
+ * Simulate GateVerificationLive._openModal() behavior.
+ *
+ * This mirrors the actual code in GateVerificationLive.ts line ~325:
+ *   const output = this._stepOutputs.get(index) || "";
+ *   this.modalStep = { index, name, output };
+ *
+ * @param {Map} stepOutputs - WS-accumulated outputs (_stepOutputs)
+ * @param {Array} steps - API-reconciled steps (this.steps)
+ * @param {number} index - Step index to open
+ * @returns {string} The output string the modal would receive
+ */
+function chatWidgetOpenModal(stepOutputs, steps, index) {
+	// OLD buggy behavior: only reads from WS accumulator, ignores steps[].output
+	const output = stepOutputs.get(index) || "";
+	return output;
+}
+
+/**
+ * Simulate the FIXED GateVerificationLive._openModal() behavior.
+ *
+ * Fixed code should be:
+ *   const output = this._stepOutputs.get(index) || this.steps[index]?.output || "";
+ *
+ * @param {Map} stepOutputs - WS-accumulated outputs
+ * @param {Array} steps - API-reconciled steps
+ * @param {number} index - Step index to open
+ * @returns {string} The output string the modal would receive
+ */
+function chatWidgetOpenModalFixed(stepOutputs, steps, index) {
+	const output = stepOutputs.get(index) || (steps[index] && steps[index].output) || "";
+	return output;
+}
+
+/**
+ * Simulate goal-dashboard.ts modal click handler behavior.
+ *
+ * Current buggy code (line ~1906):
+ *   dashboardModalStep = { ..., liveOutput: step.liveOutput || "" }
+ *
+ * @param {Object} step - Dashboard step object { output, liveOutput }
+ * @returns {string} The output string the modal would receive
+ */
+function dashboardOpenModal(step) {
+	// OLD buggy behavior: only reads liveOutput, ignores output
+	const output = step.liveOutput || "";
+	return output;
+}
+
+/**
+ * Simulate the FIXED goal-dashboard.ts modal click handler.
+ *
+ * Fixed code should be:
+ *   liveOutput: step.liveOutput || step.output || ""
+ *
+ * @param {Object} step - Dashboard step object { output, liveOutput }
+ * @returns {string} The output string the modal would receive
+ */
+function dashboardOpenModalFixed(step) {
+	const output = step.liveOutput || step.output || "";
+	return output;
+}
+
+/**
+ * Simulate _fetchAndReconcile() seeding behavior.
+ *
+ * Current behavior: stores output in steps[i].output but NOT in _stepOutputs.
+ * This function returns what _stepOutputs looks like after reconcile.
+ *
+ * @param {Map} stepOutputs - Existing WS accumulator
+ * @param {Array} apiSteps - Steps from API response
+ * @returns {Map} The _stepOutputs Map after reconcile
+ */
+function reconcileStepOutputs(stepOutputs, apiSteps) {
+	// OLD buggy behavior: _fetchAndReconcile does NOT seed _stepOutputs from API
+	const result = new Map(stepOutputs);
+	// Old code: does NOT seed stepOutputs from steps[].output
+	return result;
+}
+
+/**
+ * Fixed version: seeds _stepOutputs from API response.
+ */
+function reconcileStepOutputsFixed(stepOutputs, apiSteps) {
+	const result = new Map(stepOutputs);
+	apiSteps.forEach(function(step, i) {
+		if (step.output && !result.has(i)) {
+			result.set(i, step.output);
+		}
+	});
+	return result;
+}
+
+// Expose all functions for Playwright tests
+window.chatWidgetOpenModal = chatWidgetOpenModal;
+window.chatWidgetOpenModalFixed = chatWidgetOpenModalFixed;
+window.dashboardOpenModal = dashboardOpenModal;
+window.dashboardOpenModalFixed = dashboardOpenModalFixed;
+window.reconcileStepOutputs = reconcileStepOutputs;
+window.reconcileStepOutputsFixed = reconcileStepOutputsFixed;
+</script>
+</body>
+</html>
