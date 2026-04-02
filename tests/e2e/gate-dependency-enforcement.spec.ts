@@ -2,9 +2,11 @@ import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
+	createObserverSession,
 	deleteGoal,
 	startTeam,
 	teardownTeam,
+	waitForGateStatus,
 	waitForSessionStatus,
 } from "./e2e-setup.js";
 
@@ -51,19 +53,13 @@ async function getGates(goalId: string) {
 	return res.json() as Promise<{ gates: Array<{ gateId: string; status: string }> }>;
 }
 
-async function waitForGatePassed(goalId: string, gateId: string, timeoutMs = 15000) {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const { gates } = await getGates(goalId);
-		const gate = gates.find(g => g.gateId === gateId);
-		if (gate?.status === "passed") return;
-		await new Promise(r => setTimeout(r, 100));
-	}
-	throw new Error(`Gate "${gateId}" did not pass within ${timeoutMs}ms`);
-}
-
 test.describe.serial("Gate Dependency Enforcement", () => {
 	const cleanupGoalIds: string[] = [];
+	let observerSessionId: string;
+
+	test.beforeAll(async () => {
+		observerSessionId = await createObserverSession();
+	});
 
 	test.afterAll(async () => {
 		for (const id of cleanupGoalIds) {
@@ -110,7 +106,7 @@ test.describe.serial("Gate Dependency Enforcement", () => {
 		expect([200, 201]).toContain(signalResult.status);
 
 		// Wait for verification to complete (test-fast uses `echo ok`)
-		await waitForGatePassed(goal.id, "design-doc");
+		await waitForGateStatus(goal.id, "design-doc", "passed", observerSessionId);
 
 		// Now spawning for "implementation" gate should succeed
 		const result = await spawnAgent(goal.id, {

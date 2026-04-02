@@ -1,7 +1,7 @@
 import { test, expect } from "./in-process-harness.js";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { apiFetch, gitCwd, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, gitCwd, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
 
 /**
  * E2E tests for session worktree creation and cleanup.
@@ -27,7 +27,7 @@ async function pollSession(
 			const data = await resp.json();
 			if (pred(data)) return data;
 		}
-		await new Promise((r) => setTimeout(r, 500));
+		await new Promise((r) => setTimeout(r, 100));
 	}
 	throw new Error(`pollSession timed out after ${timeoutMs}ms`);
 }
@@ -37,10 +37,10 @@ async function pollSession(
  * Retries DELETE until the server returns 404 (fully purged).
  */
 async function terminateAndPurge(sessionId: string): Promise<void> {
-	for (let i = 0; i < 5; i++) {
+	for (let i = 0; i < 10; i++) {
 		const resp = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 		if (resp.status === 404) return;
-		await new Promise((r) => setTimeout(r, 1_000));
+		await new Promise((r) => setTimeout(r, 200));
 	}
 }
 
@@ -158,8 +158,8 @@ test.describe("Session worktrees", () => {
 		const sessionId = created.id;
 
 		try {
-			// Give async setup a moment (there shouldn't be any worktree setup)
-			await new Promise((r) => setTimeout(r, 2_000));
+			// Wait for session to become idle (worktree setup completes or is skipped)
+			await waitForSessionStatus(sessionId, "idle");
 
 			// Fetch the session — worktreePath should be undefined/falsy
 			const detailResp = await apiFetch(`/api/sessions/${sessionId}`);

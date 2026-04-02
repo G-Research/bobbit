@@ -1,19 +1,12 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, nonGitCwd } from "./e2e-setup.js";
+import {
+	apiFetch,
+	createObserverSession,
+	nonGitCwd,
+	waitForGateStatus,
+} from "./e2e-setup.js";
 
-let token: string;
-
-const headers = () => ({
-	Authorization: `Bearer ${token}`,
-	"Content-Type": "application/json",
-});
-
-async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
-	return fetch(`${base()}${path}`, {
-		...opts,
-		headers: { ...headers(), ...(opts?.headers || {}) },
-	});
-}
+let observerSessionId: string;
 
 async function createGoalWithWorkflow(workflowId: string): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
@@ -34,31 +27,8 @@ async function deleteGoal(goalId: string): Promise<void> {
 	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
 }
 
-/**
- * Poll until a gate reaches one of the target statuses or timeout expires.
- */
-async function waitForGateAnyStatus(
-	goalId: string,
-	gateId: string,
-	targetStatuses: string[],
-	timeoutMs = 30_000,
-): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		const data = await res.json();
-		if (targetStatuses.includes(data.status)) return data;
-		await new Promise(r => setTimeout(r, 500));
-	}
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	const data = await res.json();
-	throw new Error(
-		`Gate ${gateId} did not reach any of [${targetStatuses}] within ${timeoutMs}ms. Current: "${data.status}"`,
-	);
-}
-
-test.beforeAll(() => {
-	token = readE2EToken();
+test.beforeAll(async () => {
+	observerSessionId = await createObserverSession();
 });
 
 test.describe("LLM Review Verification", () => {
@@ -77,7 +47,7 @@ test.describe("LLM Review Verification", () => {
 			expect(signalData.signal.status).toBe("running");
 
 			// Wait for gate to pass — should be fast since skip path is instant
-			const gate = await waitForGateAnyStatus(goalId, "design-doc", ["passed", "failed"]);
+			const gate = await waitForGateStatus(goalId, "design-doc", "passed", observerSessionId);
 
 			// Fetch the signal details to inspect verification step output
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
