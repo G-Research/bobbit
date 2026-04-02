@@ -1916,7 +1916,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
 							@click=${clickable ? () => {
 								if (isRunningCmd) {
-									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || "" };
+									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || step.output || "" };
 									renderApp();
 								} else if (hasOutput) {
 									toggleLiveStepExpand(stepKey);

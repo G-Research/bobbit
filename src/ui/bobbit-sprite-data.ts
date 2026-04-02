@@ -417,6 +417,58 @@ export const ACCESSORY_WAND: AccessorySpriteData = {
   ],
 };
 
+/**
+ * Stamp accessory — approval stamp with wooden handle and red rubber face.
+ * T-shaped silhouette: narrow handle on top, wide red bar below.
+ * Sidebar coordinates (yOffset=0, addsHeight=false).
+ */
+export const ACCESSORY_STAMP: AccessorySpriteData = {
+  id: 'stamp',
+  label: 'Stamp',
+  yOffset: 0,
+  addsHeight: false,
+  blobYAdjust: 0,
+  pixels: [
+    // Row 3: handle top outline
+    [9, 3, '#000'], [10, 3, '#000'],
+    // Row 4: handle body (wood)
+    [8, 4, '#000'], [9, 4, '#8b4513'], [10, 4, '#cd853f'], [11, 4, '#000'],
+    // Row 5: metal band (ferrule)
+    [8, 5, '#000'], [9, 5, '#6b7280'], [10, 5, '#9ca3af'], [11, 5, '#000'],
+    // Row 6: red rubber stamp face
+    [7, 6, '#000'], [8, 6, '#ef4444'], [9, 6, '#ef4444'], [10, 6, '#ef4444'], [11, 6, '#ef4444'], [12, 6, '#000'],
+    // Row 7: stamp face bottom outline
+    [7, 7, '#000'], [8, 7, '#000'], [9, 7, '#000'], [10, 7, '#000'], [11, 7, '#000'], [12, 7, '#000'],
+  ],
+};
+
+/**
+ * Clipboard accessory — brown board with centered silver clip.
+ * Rectangular silhouette with a small metal nub on top.
+ * Sidebar coordinates (yOffset=0, addsHeight=false).
+ */
+export const ACCESSORY_CLIPBOARD: AccessorySpriteData = {
+  id: 'clipboard',
+  label: 'Clipboard',
+  yOffset: 0,
+  addsHeight: false,
+  blobYAdjust: 0,
+  pixels: [
+    // Row 2: clip top outline (single pixel)
+    [9, 2, '#000'],
+    // Row 3: clip body — black | silver | black
+    [8, 3, '#000'], [9, 3, '#d1d5db'], [10, 3, '#000'],
+    // Row 4: board top
+    [7, 4, '#000'], [8, 4, '#8b4513'], [9, 4, '#a0522d'], [10, 4, '#8b4513'], [11, 4, '#000'],
+    // Row 5: board middle
+    [7, 5, '#000'], [8, 5, '#a0522d'], [9, 5, '#8b4513'], [10, 5, '#a0522d'], [11, 5, '#000'],
+    // Row 6: board lower
+    [7, 6, '#000'], [8, 6, '#8b4513'], [9, 6, '#a0522d'], [10, 6, '#8b4513'], [11, 6, '#000'],
+    // Row 7: board bottom outline
+    [7, 7, '#000'], [8, 7, '#000'], [9, 7, '#000'], [10, 7, '#000'], [11, 7, '#000'],
+  ],
+};
+
 /** Registry of all accessories by ID */
 export const ACCESSORIES: Record<string, AccessorySpriteData> = {
   'crown':       ACCESSORY_CROWN,
@@ -429,6 +481,8 @@ export const ACCESSORIES: Record<string, AccessorySpriteData> = {
   'flask':       ACCESSORY_FLASK,
   'wizard-hat':  ACCESSORY_WIZARD_HAT,
   'wand':        ACCESSORY_WAND,
+  'stamp':       ACCESSORY_STAMP,
+  'clipboard':   ACCESSORY_CLIPBOARD,
 };
 
 /** All accessory IDs (excluding "none") */

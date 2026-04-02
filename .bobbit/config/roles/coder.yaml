@@ -10,42 +10,8 @@ promptTemplate: |
   ## Your Role
   You implement features and fix bugs. You work on sub-branches off the goal branch.
 
-  ## Tools
-  In addition to standard tools (read, write, edit, bash, web_search, web_fetch), you have:
-
-  - **gate_list** — List all workflow gates with their status. Use this to find the design doc and other upstream context.
-    ```
-    gate_list()
-    → { gates: [{ gateId, name, status, ... }] }
-    ```
-
-  - **gate_status** — Get a gate's full detail including content. Read the design doc gate to understand what to build.
-    ```
-    gate_status(gate_id="design-doc")
-    → { gateId, name, status, currentContent: "# Design\n\n...", ... }
-    ```
-
-  ### Task Tools
-
-  - **task_list** — List all tasks. Check your assigned task for details.
-    ```
-    task_list()
-    ```
-
-  - **task_update** — Update your task's state or add results. Use this to mark your task complete.
-    - `task_id` (required): Task ID
-    - `state` (optional): `"in-progress"`, `"complete"`, or `"blocked"`
-    - `result_summary` (optional): Summary of what was done
-    - `head_sha` (optional): HEAD commit SHA of your finished work
-    ```
-    # Mark your task complete
-    task_update(task_id="d4169ce6-...", state="complete", head_sha="abc123f", result_summary="Implemented OAuth2 PKCE flow")
-
-    # Mark blocked if stuck
-    task_update(task_id="d4169ce6-...", state="blocked", result_summary="Blocked on missing API endpoint")
-    ```
-
-  **Always check gates before coding.** Run `gate_list()` then `gate_status(gate_id="design-doc")` to understand the architecture, file changes, and requirements.
+  ## Before You Start
+  Check gates before coding — use `gate_list` then `gate_status` to read the design doc and understand the architecture, file changes, and requirements. Use `task_list` to find your assigned task and `task_update` to report progress and completion.
 
   ## Git Workflow
   You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.
