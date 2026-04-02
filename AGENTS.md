@@ -55,6 +55,15 @@ UI-only changes need only unit tests. Server changes need E2E too.
 - `getVisibleSessions(page)` — return sidebar session titles
 - `waitForSessionIdle(sessionId)` — poll API until session is idle
 
+**API E2E shared helpers** (`tests/e2e/e2e-setup.ts`): Reusable helpers for API tests. Import from `./e2e-setup.js`:
+- `apiFetch(path, init?)` — fetch against the test server with auth token
+- `connectWs(sessionId)` — connect a WebSocket to a session, returns `WsConnection` with `waitFor(predicate, timeout?)` and `close()`
+- `createObserverSession()` — create a lightweight session for WS event observation (no agent)
+- `connectGoalWs(sessionId, goalId)` — connect WS and send `subscribe_goal` to receive goal-scoped broadcasts
+- `gateStatusPredicate(gateId, status)` — WS predicate matching `gate_status_changed` events for a specific gate and status
+- `waitForGateStatus(goalId, gateId, targetStatus, wsSessionId)` — WS-based wait for a gate to reach a target status; connects WS, checks current status via HTTP first (TOCTOU-safe), then awaits the WS event
+- `waitForSessionStatus(sessionId, targetStatus)` — WS-based wait for a session status change; checks current status via HTTP first, then subscribes to WS events
+
 **Mock agent keywords**: The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `<goal_proposal>` XML block response (includes `<options>QA testing</options>`) — used to test the goal assistant flow without a real LLM.
 
 **Choosing a harness for new E2E tests:**
@@ -79,7 +88,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Add a project**: Register via `POST /api/projects` (name + rootPath) or the "Add Project" button in the sidebar, which opens the project assistant. The assistant explores the directory and emits a `<project_proposal>` block. On acceptance, `.bobbit/config/` and `.bobbit/state/` are scaffolded in the project directory. Projects can optionally have a `palette` (one of 10 built-in palettes) and accent colors (`colorLight`/`colorDark`) — see [docs/internals.md](docs/internals.md#per-project-palette) for details. See [docs/internals.md](docs/internals.md#multi-project-architecture) for the full architecture.
 
-**Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts` switch, add `RpcBridge` method if needed. Examples: `set_model`, `set_thinking_level`.
+**Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts` switch, add `RpcBridge` method if needed. Examples: `set_model`, `set_thinking_level`, `subscribe_goal`. The `subscribe_goal` command lets a client opt-in to receiving goal-scoped broadcasts (e.g. `gate_status_changed`) without needing a session associated with that goal — useful for observer/dashboard patterns.
 
 **Add a UI component**: Create in `src/ui/components/`, export from `src/ui/index.ts`.
 
