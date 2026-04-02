@@ -481,15 +481,22 @@ function ensureWorkflowsLoaded(): void {
 let _sandboxStatusFetching = false;
 
 const _qaConfigCache = new Map<string, boolean>();
-async function ensureQaConfigLoaded(projectId: string): Promise<void> {
-	if (_qaConfigCache.has(projectId)) return;
-	try {
-		const res = await fetch(`/api/projects/${projectId}/qa-testing-config`);
-		const data = await res.json();
-		_qaConfigCache.set(projectId, !!data.config?.qa_start_command);
-	} catch {
-		_qaConfigCache.set(projectId, false);
-	}
+let _qaConfigFetching = false;
+function ensureQaConfigLoaded(projectId: string): void {
+	if (_qaConfigCache.has(projectId) || _qaConfigFetching) return;
+	_qaConfigFetching = true;
+	fetch(`/api/projects/${projectId}/qa-testing-config`)
+		.then(r => r.json())
+		.then(data => {
+			_qaConfigCache.set(projectId, !!data.config?.qa_start_command);
+			_qaConfigFetching = false;
+			renderApp();
+		})
+		.catch(() => {
+			_qaConfigCache.set(projectId, false);
+			_qaConfigFetching = false;
+			renderApp();
+		});
 }
 function ensureSandboxStatusLoaded(): void {
 	if (state.sandboxStatus || _sandboxStatusFetching) return;
@@ -612,7 +619,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
 				if (!wf) return "";
 				if (config.linkedProjectId) {
-					ensureQaConfigLoaded(config.linkedProjectId).then(() => renderApp());
+					ensureQaConfigLoaded(config.linkedProjectId);
 				}
 				const optionalSteps: Array<{name: string; label: string; description?: string; type?: string}> = [];
 				for (const gate of wf.gates) {

@@ -5,7 +5,6 @@
  * next to optional step toggles (e.g. "Enable QA Testing") in the goal creation form.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, switch to feature workflow. */
@@ -35,19 +34,6 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 
 	// Wait for the "Enable QA Testing" toggle to appear
 	await expect(page.getByText("Enable QA Testing").first()).toBeVisible({ timeout: 5_000 });
-}
-
-/** Helper: find the last created goal matching a title via API. */
-async function findGoalByTitle(title: string) {
-	const resp = await apiFetch("/api/goals");
-	const data = await resp.json();
-	const goals = data.goals || data;
-	return (goals as any[]).find((g: any) => g.title === title);
-}
-
-/** Helper: delete a goal by ID (best-effort). */
-async function deleteGoal(goalId: string) {
-	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
 }
 
 test.describe("Step description tooltips", () => {
