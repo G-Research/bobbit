@@ -120,6 +120,14 @@ export function handleWebSocketConnection(
 			authenticated = true;
 			(ws as any).authenticated = true;
 
+			// Viewer-only connection (no session) — used by goal dashboard for live events
+			if (sessionId === "__viewer__") {
+				send(ws, { type: "auth_ok" });
+				// Do NOT set (ws as any).sessionId — broadcastToGoal fallback will include this client
+				// Read-only: ignore all subsequent messages
+				return;
+			}
+
 			const session = sessionManager.getSession(sessionId);
 			if (!session) {
 				// Check if it's an archived session
