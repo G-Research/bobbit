@@ -111,7 +111,16 @@ UI-only changes need only unit tests. Server changes need E2E too. Docker-depend
 
 **Manage config directories**: Settings → Config Directories tab, or `config_directories` in `project.yaml`. Config directories are scoped per-project — each project's `config_directories` affects only that project's sessions for skills, MCP servers, and agent files. See @docs/internals.md#config-scan-directories.
 
-**Add QA testing to a project**: Add `qa_*` keys to `project.yaml` — at minimum `qa_start_command` (how to start an isolated server). The `/qa-test` slash skill reads these keys and orchestrates the ephemeral environment lifecycle. QA testing runs as an optional `agent-qa` verification step on the implementation gate (enabled per-goal via toggle). See [docs/qa-testing.md](docs/qa-testing.md) for full config reference and protocol details.
+**Add QA testing to a project**: Add `qa_*` keys to `project.yaml` — at minimum `qa_start_command` (how to start an isolated server). The `/qa-test` slash skill reads these keys and orchestrates the ephemeral environment lifecycle. QA testing runs as an optional `agent-qa` verification step on the implementation gate (enabled per-goal via toggle). The QA toggle in the goal creation form is automatically disabled with an explanatory tooltip when `qa_start_command` is not configured for the project. See [docs/qa-testing.md](docs/qa-testing.md) for full config reference and protocol details.
+
+**Workflow verify step descriptions**: Verify steps in workflow YAML support an optional `description` field. When set on an optional step, it renders as an ⓘ tooltip next to the step's toggle in the goal creation form. Example:
+```yaml
+- name: agent-qa
+  type: agent-qa
+  optional: true
+  label: "QA Testing"
+  description: "Spins up an ephemeral server and drives a real browser through user scenarios."
+```
 
 ## Debugging
 
