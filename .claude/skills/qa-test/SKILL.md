@@ -10,7 +10,7 @@ You are running QA testing for a goal. This protocol stands up an isolated copy 
 
 ## Prerequisites
 
-- You need browser tools (Playwright MCP) available
+- You need browser tools available. **Use the non-MCP browser tools** (`browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`, `browser_wait`) — NOT the `mcp__playwright__*` tools. The MCP Playwright browser is a single shared instance across all sessions — other agents and the dev server will hijack your page. The non-MCP browser tools give you an isolated browser instance.
 - The project must have `qa_*` keys in `.bobbit/config/project.yaml`
 
 ## Step 1: Read Configuration
@@ -64,14 +64,16 @@ If the build fails, produce a report documenting the build failure and skip to S
 
 ## Step 4: Allocate Port and Start Server
 
-Get a free port:
+Get a free port. **CRITICAL**: You must pick a port that won't conflict with the live dev server or other QA agents. Use a high random port to avoid collisions:
 ```bash
 FREE_PORT=$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
 ```
 
+**Verify the port is not the dev server port** — check `cat .bobbit/state/gateway-url` to see what port the dev server uses. If your allocated port matches, allocate again. Common dev server ports: 3001, 5173, 12835, 19871.
+
 Start the server using `bash_bg` (NEVER use `bash` with `&`):
 ```bash
-bash_bg(action="create", command="PORT=<free_port> WORK_DIR=<work_dir> BOBBIT_DIR=<work_dir>/.bobbit <qa_env vars> eval '<qa_start_command>'")
+bash_bg(action="create", command="cd <repo_dir> && PORT=<free_port> WORK_DIR=<work_dir> BOBBIT_DIR=<work_dir>/.bobbit <qa_env vars> eval '<qa_start_command>'")
 ```
 
 Record the background process ID for later cleanup.
@@ -98,7 +100,23 @@ If the server doesn't become healthy after 60 seconds, document the failure and 
 
 ## Step 6: Drive Browser Scenarios
 
-Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it.
+Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it using `browser_navigate` (NOT `mcp__playwright__browser_navigate`).
+
+**IMPORTANT — Use the non-MCP browser tools only:**
+- `browser_navigate(url=...)` — navigate to your ephemeral server
+- `browser_screenshot(savePath="...")` — take screenshots
+- `browser_click(selector=...)` — click elements
+- `browser_type(selector=..., text=...)` — type into inputs
+- `browser_eval(expression=...)` — run JavaScript on page
+- `browser_wait(selector=...)` — wait for elements
+
+Do NOT use `mcp__playwright__*` tools — they share a single browser instance across all sessions and the dev server WILL hijack your page mid-test.
+
+**After each navigation or significant interaction**, verify you're still on the right URL:
+```
+browser_eval(expression="window.location.href")
+```
+If the URL doesn't match your ephemeral server (check the port), re-navigate immediately.
 
 For each scenario from your task prompt (respecting `qa_max_scenarios`):
 
@@ -107,16 +125,18 @@ For each scenario from your task prompt (respecting `qa_max_scenarios`):
 3. **After**: Take a screenshot documenting the result
 4. **Verdict**: Record PASS or FAIL with a clear explanation
 
-Use `browser_screenshot(savePath="<work_dir>/screenshot-N.png")` to save screenshots.
+Use `browser_screenshot(savePath="$WORK_DIR/screenshot-N.png")` to save screenshots — always use **absolute paths** in `$WORK_DIR`, never relative paths (relative paths resolve against the master repo root, not your worktree).
 
 Track elapsed time. If `qa_max_duration_minutes` is exceeded, stop testing immediately and proceed to report generation with partial results.
 
 ## Step 7: Produce HTML Report
 
-Write a self-contained HTML report. Screenshots should be embedded as base64 data URIs:
+Write a self-contained HTML report. Screenshots should be embedded as base64 data URIs. Use the **absolute paths** from Step 6:
 ```bash
 base64 -w0 "$WORK_DIR/screenshot-1.png"
 ```
+
+On Windows/MSYS, use `base64 -w 0` (with space) or `cat "$WORK_DIR/screenshot-1.png" | base64 | tr -d '\n'`.
 
 The report structure:
 

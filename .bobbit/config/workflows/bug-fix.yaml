@@ -144,12 +144,32 @@ gates:
         phase: 2
         optional: true
         label: "Enable QA Testing"
+        description: "Spawn a QA agent that builds the project, starts an ephemeral server, and drives a real browser through user scenarios to validate the fix works end-to-end."
         prompt: |
           You are performing QA testing for this goal. Use the /qa-test skill to stand up
           an ephemeral environment and drive browser-based testing scenarios.
 
           Goal specification:
           {{goal_spec}}
+
+          ## Critical Rules
+
+          1. **Use non-MCP browser tools ONLY** — use `browser_navigate`, `browser_screenshot`,
+             `browser_click`, `browser_type`, `browser_eval`, `browser_wait`. Do NOT use
+             `mcp__playwright__*` tools — the MCP Playwright browser is shared across all
+             sessions and other agents WILL hijack your page mid-test.
+
+          2. **Save screenshots to absolute paths in $WORK_DIR** — never use relative paths.
+             Relative paths save to the master repo root, not your worktree. Example:
+             `browser_screenshot(savePath="/tmp/qa-work-xxx/screenshot-01.png")`
+
+          3. **Verify your port is unique** — check `cat .bobbit/state/gateway-url` to see
+             the dev server port. Your ephemeral server MUST use a different port. If port
+             allocation gives you the same port, allocate again.
+
+          4. **Verify URL after each navigation** — run `browser_eval(expression="window.location.href")`
+             after navigating and after significant interactions to confirm you're still on
+             your ephemeral server. If the port is wrong, re-navigate.
 
           Focus on testing the user-facing changes described in the goal spec.
           If the project does not have qa_start_command configured, emit

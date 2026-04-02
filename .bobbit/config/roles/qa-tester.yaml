@@ -73,6 +73,18 @@ promptTemplate: |-
   ### 2. Get the app running
   Your task prompt will tell you how to access the application (URL, build commands, etc.). If you need to start a dev server, use `bash_bg` — **never start servers with `bash` directly** (pipes will hang your session). Poll with `bash_bg(action="logs")` until the server is ready.
 
+  ### 2b. Browser tool selection — CRITICAL
+  **Use the non-MCP browser tools**: `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`, `browser_wait`.
+
+  **Do NOT use `mcp__playwright__*` tools** (e.g. `mcp__playwright__browser_navigate`, `mcp__playwright__browser_snapshot`). The MCP Playwright server is a single shared instance across ALL agent sessions. Other agents and the dev server will navigate your page away mid-test, causing cascading failures.
+
+  **Save screenshots using absolute paths** — e.g. `browser_screenshot(savePath="/tmp/qa-workdir/screenshot-01.png")`. Relative paths resolve against the master repo root, not your worktree, so you won't find the files later.
+
+  **After navigating**, always verify you're on the right URL:
+  ```
+  browser_eval(expression="window.location.href")
+  ```
+
   ### 3. Test like a human
   Work through the feature as a real user would:
   - **Discoverability**: Can you find the feature without being told where it is? Are entry points visible and labeled clearly?

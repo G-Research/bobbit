@@ -5,6 +5,7 @@ dist/
 .env.local
 .DS_Store
 .playwright-mcp
+qa-*.png
 Thumbs.db
 *.log
 bobbit2/
