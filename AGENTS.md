@@ -88,7 +88,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Add/modify session creation logic**: Session creation uses a plan/execute pipeline in `session-setup.ts`. The three creation modes (normal, worktree, delegate) share composable pipeline steps (`resolveBridgeOptions`, `resolveGoalExtensions`, `resolveTools`, `resolvePrompt`, `resolveToolActivation`) with different executors (`executePlan` for normal/delegate, `executeWorktreeAsync` for worktree). `session-manager.ts` contains thin wrappers (`createSession`, `createDelegateSession`) that build a `SessionSetupPlan` and delegate to the pipeline. Persistence uses put-once-then-update: `persistOnce()` does a single `store.put()` at creation, then `persistSessionMetadata()` only calls `store.update()` for the `agentSessionFile` field.
 
-**Change tool access policy**: Edit `.bobbit/config/tool-group-policies.yaml` (per-group) or role YAML `toolPolicies` (per-role). Resolution: role+tool → role+group → tool default → group default → `always-allow`. See @docs/internals.md#tool-access-policies for full details.
+**Change tool access policy**: Edit `.bobbit/config/tool-group-policies.yaml` (per-group) or role YAML `toolPolicies` (per-role). Three policy values: `allow` (immediate execution), `ask` (guard blocks, user prompted), `never` (tool not registered). Resolution: role+tool → role+group → tool default → group default → `allow`. See @docs/internals.md#tool-access-policies for full details.
 
 **Change message rendering**: `src/ui/components/Messages.ts` for standard roles, `message-renderer-registry.ts` for custom types.
 

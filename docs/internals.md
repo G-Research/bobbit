@@ -233,32 +233,83 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ## Tool access policies
 
-All tool access uses a **grant policy** system. Every tool resolves to one of four values:
+All tool access uses a **grant policy** system enforced by a single `tool_call` guard extension. Every tool resolves to one of three policy values:
 
 | Policy | Behavior |
 |---|---|
-| `always-allow` | Works without prompting. |
-| `ask-once` | Prompted on first use per session. |
-| `always-ask` | Prompted every time. |
-| `never` / `never-ask` | Invisible to the agent. |
+| `allow` | Tool executes immediately, no prompt. |
+| `ask` | Guard blocks execution; UI prompts user for permission. |
+| `never` | Tool is not registered — invisible to the agent. |
 
-**Resolution order** (first non-null wins):
+### Why a guard extension?
+
+Earlier versions used a fragile multi-layered approach: stub extensions raced against real extensions using first-registered-wins semantics, error regex matching detected denials after the fact, and leaked tool detection was needed because shared extensions (e.g. a single `shell/extension.ts` that registers both `bash` and `bash_bg`) bypassed allowedTools filtering. The guard extension replaces all of that with a single interception point — pi-coding-agent's `tool_call` event hook fires before every tool execution and supports `{ block: true }` to prevent it.
+
+### How the guard works
+
+1. At session setup, `writeToolGuardExtension()` generates a TypeScript extension containing a map of all `ask`-policy tools and the session's pre-existing grants.
+2. The extension registers a `pi.on("tool_call", ...)` handler that intercepts every tool invocation.
+3. For `allow` tools (or tools already granted), the handler returns immediately — no blocking.
+4. For `ask` tools without a grant, the handler POSTs to `POST /api/sessions/:id/tool-grant-request` (long-poll). The gateway broadcasts a `tool_permission_needed` WebSocket message to all connected clients, and the HTTP request blocks until the user responds.
+5. The UI shows a grant dialog. The user can grant (with a duration choice) or deny.
+6. On grant: the gateway resolves the long-poll with `{ granted: true }`. The guard adds the tool to its in-memory grant set so future invocations pass through.
+7. On deny: the gateway resolves the long-poll with `{ granted: false, reason: "..." }`. The guard returns `{ block: true, reason }` and the agent sees a tool error.
+8. `never` tools are never registered with the agent, so no `tool_call` event fires for them — the guard is not involved.
+
+**Key files:** `tool-guard-extension.ts` (generates the guard), `tool-activation.ts` (`writeToolGuardExtension`, `computeToolPolicies`), `tool-group-policy-store.ts`, role YAML `toolPolicies`, tool YAML `grantPolicy`.
+
+### Grant duration
+
+Grant duration is chosen by the user at grant time, not configured in policy YAML. The grant dialog offers three options:
+
+| Duration | Effect |
+|---|---|
+| **Always** (permanent) | Tool is added to the role's `toolPolicies` as `allow` — persists across sessions. |
+| **This session** | Grant stored in the session's in-memory grant set — lasts until session ends. |
+| **Just this once** | Grant is consumed immediately — the guard will prompt again on the next invocation. |
+
+This replaces the old `ask-once` / `always-ask` distinction, which conflated "should this tool require a grant?" with "how long should the grant last?"
+
+### Grant and deny protocol
+
+**WebSocket messages:**
+- `tool_permission_needed` (server → client): `{ toolName, group, roleName, roleLabel, lastPromptText? }`
+- `grant_tool_permission` (client → server): `{ toolName, scope: "tool" | "group", group?, mode?: "persistent" | "session-only" | "one-time" }`
+- `deny_tool_permission` (client → server): `{ toolName }`
+
+**REST endpoint:**
+- `POST /api/sessions/:id/tool-grant-request` — called by the guard extension (long-poll). Body: `{ toolName, toolGroup }`. Blocks until the user grants or denies. Returns `{ granted: boolean, reason? }`.
+
+### Policy resolution cascade
+
+Resolution order is unchanged (first non-null wins):
 
 1. `role.toolPolicies["<tool-name>"]` — per-tool override on role
 2. `role.toolPolicies["<group>"]` — per-group override on role
 3. `tool.grantPolicy` — tool YAML default
 4. Group default — `.bobbit/config/tool-group-policies.yaml`
-5. System fallback — `always-allow`
+5. System fallback — `allow`
 
-**Key files:** `tool-group-policy-store.ts`, role YAML `toolPolicies`, tool YAML `grantPolicy`.
+### REST API
 
-**REST API:**
-- `PUT /api/roles/:name` — accepts `toolPolicies`
+- `PUT /api/roles/:name` — accepts `toolPolicies` (Record of tool/group name → `allow` | `ask` | `never`)
 - `PUT /api/tools/:name` — accepts `grantPolicy`
-- `GET /api/tool-group-policies` — all group policies
-- `PUT /api/tool-group-policies/:group` — set/clear group default
+- `GET /api/tool-group-policies` — all group default policies
+- `PUT /api/tool-group-policies/:group` — set/clear group default (`{ policy: "allow" | "ask" | "never" | null }`)
+- `POST /api/sessions/:id/tool-grant-request` — guard extension long-poll endpoint
 
-**Migration:** On first startup, `allowedTools` entries migrate to `toolPolicies` as `always-allow`. Guarded by `_policyMigrated` flag. `allowedTools` is now a computed getter.
+### Migration from legacy policy values
+
+Legacy policy values are normalized on load:
+
+| Legacy value | New value |
+|---|---|
+| `always-allow` | `allow` |
+| `ask-once` | `ask` |
+| `always-ask` | `ask` |
+| `never-ask` | `never` |
+
+This happens transparently in `normalizeGrantPolicy()` — existing role YAML and tool YAML files with old values continue to work. The `allowedTools` array on roles is a computed getter derived from `toolPolicies` for backward compatibility.
 
 ---
 
