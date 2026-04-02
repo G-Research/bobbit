@@ -1077,7 +1077,7 @@ export class VerificationHarness {
 
 		// ── Session-based path (visible in UI) ──
 		if (this.sessionManager && goalId) {
-			return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs);
+			return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId);
 		}
 
 		// ── Legacy direct-RpcBridge path (fallback when SessionManager unavailable) ──
@@ -1179,6 +1179,7 @@ export class VerificationHarness {
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
+		preGeneratedSessionId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		let sessionId: string | undefined;
 		try {
@@ -1191,6 +1192,7 @@ export class VerificationHarness {
 				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
 				: undefined) ?? this.sessionManager!.isSandboxEnabled,
+				sessionId: preGeneratedSessionId,
 			});
 			sessionId = session.id;
 
@@ -1365,6 +1367,7 @@ export class VerificationHarness {
 					? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 						?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
 					: undefined) ?? this.sessionManager!.isSandboxEnabled,
+				sessionId,
 			});
 			qaSessionId = session.id;
 
