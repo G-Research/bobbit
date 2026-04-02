@@ -1,0 +1,105 @@
+name: browser_snapshot
+description: "Capture accessibility snapshot of the current page"
+summary: "Return the ARIA accessibility tree of the current browser page as structured text."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Browser
+docs: |-
+  Returns ARIA YAML showing page structure (headings, buttons, links, etc.). Better than screenshots for understanding page layout. Use after browser_navigate.
+detail_docs: >-
+  ## Purpose
+
+
+  Capture the ARIA accessibility tree of the current page as structured YAML
+  text. This gives agents a complete understanding of the page layout, headings,
+  buttons, links, form fields, and other interactive elements — without needing
+  visual processing of screenshots. It is the preferred way to understand page
+  structure before interacting with elements.
+
+
+  ## Parameters
+
+
+  This tool takes no parameters.
+
+
+  ## When to Use
+
+
+  - **Understanding page layout** — after navigating to a page, use this to see
+  all interactive elements and their roles.
+
+  - **Finding interactive elements** — discover button labels, link text, and
+  input fields to target with `browser_click` or `browser_type`.
+
+  - **Verifying content** — check that expected headings, text, and structure
+  are present.
+
+  - **Accessibility testing** — verify that ARIA roles, labels, and hierarchy
+  are correct.
+
+
+  ## When NOT to Use
+
+
+  - **Visual styling verification** — ARIA snapshots don't include CSS styles,
+  colors, or layout. Use `browser_screenshot` for visual checks.
+
+  - **Getting raw HTML** — use `browser_eval` with `document.body.innerHTML`
+  for raw markup.
+
+
+  ## Examples
+
+
+  ```
+
+  # Get page structure after navigation
+
+  browser_navigate(url="https://example.com")
+
+  browser_snapshot()
+
+  # Returns ARIA YAML like:
+
+  # - heading "Example Domain" [level=1]
+
+  # - paragraph: "This domain is for use in illustrative examples..."
+
+  # - link "More information..."
+
+
+  # Discover form fields
+
+  browser_navigate(url="https://example.com/login")
+
+  browser_snapshot()
+
+  # Returns:
+
+  # - heading "Login" [level=1]
+
+  # - textbox "Username"
+
+  # - textbox "Password"
+
+  # - button "Sign In"
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Returns ARIA YAML format** — the output is a YAML-like tree of ARIA
+  roles, names, and properties. Not raw HTML.
+
+  - **Requires a page to be open** — call `browser_navigate` first. Returns an
+  error if no page is active.
+
+  - **Reflects current DOM state** — captures the page as-is, including any
+  dynamic changes from JavaScript.
+
+  - **Better than screenshots for agents** — structured text is faster to
+  process and more reliable than image analysis for finding elements.

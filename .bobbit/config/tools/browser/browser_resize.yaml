@@ -1,0 +1,102 @@
+name: browser_resize
+description: "Resize the browser viewport"
+summary: "Resize the browser viewport to specified width and height in pixels."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Browser
+docs: |-
+  Changes viewport dimensions. Use for responsive design testing. Common sizes: mobile 375x667, tablet 768x1024, desktop 1280x720.
+detail_docs: >-
+  ## Purpose
+
+
+  Resize the browser viewport to a specific width and height in pixels. This
+  triggers responsive design breakpoints, media queries, and any resize event
+  handlers. Essential for testing how pages adapt to different screen sizes.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `width` | number | **Yes** | Viewport width in pixels. |
+
+  | `height` | number | **Yes** | Viewport height in pixels. |
+
+
+  ## When to Use
+
+
+  - **Responsive design testing** — verify layouts at mobile, tablet, and
+  desktop breakpoints.
+
+  - **Testing media queries** — confirm that CSS media queries activate at the
+  correct widths.
+
+  - **Viewport-dependent features** — test elements that show/hide or reflow
+  based on screen size.
+
+  - **Screenshot comparisons** — capture pages at specific sizes for visual
+  regression testing.
+
+
+  ## When NOT to Use
+
+
+  - **Testing zoom behavior** — this changes viewport dimensions, not zoom
+  level.
+
+
+  ## Examples
+
+
+  ```
+
+  # Test mobile layout
+
+  browser_resize(width=375, height=667)
+
+  browser_screenshot()
+
+
+  # Test tablet layout
+
+  browser_resize(width=768, height=1024)
+
+  browser_screenshot()
+
+
+  # Test desktop layout
+
+  browser_resize(width=1280, height=720)
+
+  browser_screenshot()
+
+
+  # Test wide desktop
+
+  browser_resize(width=1920, height=1080)
+
+  browser_screenshot()
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Triggers resize events** — JavaScript `resize` event handlers and CSS
+  media queries respond to the viewport change.
+
+  - **Persists until changed** — the viewport stays at the new size for all
+  subsequent operations until resized again.
+
+  - **Common breakpoints** — mobile: 375x667 (iPhone SE), 390x844 (iPhone 14);
+  tablet: 768x1024 (iPad); desktop: 1280x720, 1920x1080.
+
+  - **Minimum dimensions** — very small values may cause rendering issues.
+  Stay above 320px width for realistic testing.

@@ -1,0 +1,92 @@
+name: browser_hover
+description: "Hover over an element by CSS selector"
+summary: "Hover the mouse over an element identified by CSS selector."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Browser
+docs: |-
+  Triggers hover/mouseover events. Use for tooltips, dropdown menus, and hover states. First match in DOM order.
+detail_docs: >-
+  ## Purpose
+
+
+  Move the mouse cursor over an element identified by a CSS selector, triggering
+  mouseenter, mouseover, and hover events. This activates CSS `:hover` styles
+  and any JavaScript hover event handlers on the element.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `selector` | string | **Yes** | CSS selector identifying the element to
+  hover over. If multiple elements match, the first one in DOM order is used. |
+
+
+  ## When to Use
+
+
+  - **Tooltips** — hover over an element to trigger a tooltip, then verify its
+  content with `browser_snapshot` or `browser_eval`.
+
+  - **Dropdown menus** — hover over a menu trigger to expand a dropdown.
+
+  - **Hover states** — test that hover styles are applied correctly by hovering
+  then taking a `browser_screenshot`.
+
+  - **Revealing hidden elements** — some UI elements only appear on hover.
+
+
+  ## When NOT to Use
+
+
+  - **Clicking elements** — use `browser_click` for mouse clicks.
+
+  - **Verifying hover styles visually** — this triggers the hover, but to see
+  the result use `browser_screenshot` or `browser_eval` after.
+
+
+  ## Examples
+
+
+  ```
+
+  # Hover over a menu item to expand dropdown
+
+  browser_hover(selector=".nav-menu > li:first-child")
+
+
+  # Trigger a tooltip
+
+  browser_hover(selector="[data-tooltip]")
+
+  browser_snapshot()  # Check tooltip content
+
+
+  # Hover over a button to see hover state
+
+  browser_hover(selector=".cta-button")
+
+  browser_screenshot()  # Capture hover styling
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **First match only** — if the selector matches multiple elements, the first
+  one in DOM order is hovered. Be specific with your selector.
+
+  - **Element must be visible** — hidden elements or elements with zero
+  dimensions cannot be hovered.
+
+  - **Hover state persists** — the element remains hovered until another
+  element is hovered or clicked.
+
+  - **Scrolls into view** — the browser scrolls the element into the viewport
+  before hovering.
