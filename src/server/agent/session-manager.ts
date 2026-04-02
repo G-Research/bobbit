@@ -23,7 +23,7 @@ import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
 import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -611,21 +611,31 @@ export class SessionManager {
 	}
 
 	private buildToolActivationArgs(
+		sessionId: string,
 		allowedTools: string[],
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
+		grantedTools?: string[],
 	): string[] {
-		const stubArgs: string[] = [];
-
-		// 2. MCP proxy/stub extensions
+		// MCP proxy extensions
 		const mcpExtPaths = this.mcpManager
 			? writeMcpProxyExtensions(this.mcpManager, allowedTools, role, this.toolManager, this.groupPolicyStore)
 			: undefined;
 
-		// 3. Builtin + bobbit-extension activation
+		// Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(allowedTools, this.toolManager, cwd, mcpExtPaths);
 
-		return [...stubArgs, ...activation.args];
+		const args = [...activation.args];
+
+		// Tool guard extension for 'ask' policy tools
+		const guardPath = this.toolManager
+			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, grantedTools)
+			: undefined;
+		if (guardPath) {
+			args.push("--extension", guardPath);
+		}
+
+		return args;
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
@@ -1113,6 +1123,13 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
+		// If a previous grant request is still pending, resolve it as denied
+		if (session.pendingGrantRequest) {
+			clearTimeout(session.pendingGrantRequest.timer);
+			session.pendingGrantRequest.resolve({ granted: false });
+			session.pendingGrantRequest = undefined;
+		}
+
 		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<{ granted: boolean; tools?: string[] }>((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -1434,7 +1451,7 @@ export class SessionManager {
 				effectiveAllowed = effectiveAllowed.filter(t => t !== "bash_bg");
 			}
 			if (effectiveAllowed.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(effectiveAllowed, role, ps.cwd);
+				const toolArgs = this.buildToolActivationArgs(ps.id, effectiveAllowed, role, ps.cwd, overrideAllowedTools);
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -2363,7 +2380,7 @@ export class SessionManager {
 
 		// Apply tool activation args based on role's allowedTools
 		if (effectiveAllowed.length > 0) {
-			const toolArgs = this.buildToolActivationArgs(effectiveAllowed, fullRole, session.cwd);
+			const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed, fullRole, session.cwd);
 			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
 			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -2506,7 +2523,7 @@ export class SessionManager {
 			const role = this.roleManager.getRole(session.role);
 			const effective = this.resolveEffectiveAllowedTools(role);
 			if (effective.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(effective, role, session.cwd);
+				const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd, session.allowedTools);
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -3052,7 +3069,7 @@ export class SessionManager {
 				const role = this.roleManager.getRole(session.role);
 				const effective = this.resolveEffectiveAllowedTools(role);
 				if (effective.length > 0) {
-					const toolArgs = this.buildToolActivationArgs(effective, role, session.cwd);
+					const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd, session.allowedTools);
 					bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 				} else if (this.mcpManager) {
 					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);

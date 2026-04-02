@@ -57,24 +57,21 @@ function normalizePolicy(policy: string): GrantPolicy {
  * Check if a policy (after normalization) means "allow" (tool executes immediately).
  */
 function isAllowPolicy(policy: GrantPolicy): boolean {
-	const p = policy as string;
-	return p === 'always-allow' || p === 'allow';
+	return policy === 'allow';
 }
 
 /**
  * Check if a policy (after normalization) means "ask" (guard blocks until granted).
  */
 function isAskPolicy(policy: GrantPolicy): boolean {
-	const p = policy as string;
-	return p === 'ask-once' || p === 'always-ask' || p === 'ask';
+	return policy === 'ask';
 }
 
 /**
  * Check if a policy (after normalization) means "never" (tool not registered).
  */
 function isNeverPolicy(policy: GrantPolicy): boolean {
-	const p = policy as string;
-	return p === 'never-ask' || p === 'never';
+	return policy === 'never';
 }
 
 /**

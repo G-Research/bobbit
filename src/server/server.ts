@@ -1084,8 +1084,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			// requestToolGrant() is added by the session-manager cleanup task
-			const result = await (sessionManager as any).requestToolGrant(sessionId, body.toolName, body.toolGroup);
+			const result = await sessionManager.requestToolGrant(sessionId, body.toolName, body.toolGroup);
 			json(result);
 		} catch (err: any) {
 			json({ error: err.message }, 500);
