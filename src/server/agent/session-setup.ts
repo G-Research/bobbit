@@ -562,6 +562,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		delegateOf: plan.delegateOf,
 		personalities: plan.personalities,
 		allowedTools: plan.effectiveAllowedTools,
+		role: plan.role,
+		accessory: plan.accessory,
 		promptQueue: new PromptQueue(),
 	};
 

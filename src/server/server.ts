@@ -1236,8 +1236,7 @@ async function handleApiRoute(
 
 		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
 		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; roleName?: string; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
-		let roleForMeta: { name: string; accessory: string } | undefined;
+		let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
 
 		if (roleId && typeof roleId === "string") {
 			const role = roleManager.getRole(roleId);
@@ -1248,8 +1247,9 @@ async function handleApiRoute(
 			createOpts = {
 				rolePrompt: role.promptTemplate,
 				roleName: role.name,
+				role: role.name,
+				accessory: role.accessory,
 			};
-			roleForMeta = { name: role.name, accessory: role.accessory };
 		}
 
 		// Resolve personalities
@@ -1263,9 +1263,9 @@ async function handleApiRoute(
 				return;
 			}
 			personalityNames = bodyPersonalities;
-		} else if (roleForMeta) {
+		} else if (createOpts?.roleName) {
 			// Use role's default personalities if no explicit personalities provided
-			const role = roleManager.getRole(roleForMeta.name);
+			const role = roleManager.getRole(createOpts.roleName);
 			if (role?.defaultPersonalities && role.defaultPersonalities.length > 0) {
 				personalityNames = role.defaultPersonalities;
 			}
@@ -1337,12 +1337,8 @@ async function handleApiRoute(
 		try {
 			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId });
 
-			// Set role metadata if a role was specified
-			if (roleForMeta) {
-				sessionManager.updateSessionMeta(session.id, { role: roleForMeta.name, accessory: roleForMeta.accessory });
-				session.role = roleForMeta.name;
-				session.accessory = roleForMeta.accessory;
-			} else if (assistantType) {
+			// Set assistant role metadata if no explicit role was provided
+			if (!createOpts?.role && assistantType) {
 				sessionManager.updateSessionMeta(session.id, { role: "assistant", accessory: "wand" });
 				session.role = "assistant";
 				session.accessory = "wand";

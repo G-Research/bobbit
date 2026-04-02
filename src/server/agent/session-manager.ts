@@ -1647,7 +1647,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions; projectId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions; projectId?: string }): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -1682,6 +1682,8 @@ export class SessionManager {
 				taskId: opts?.taskId,
 				personalities: opts?.personalityNames,
 				allowedTools: opts?.allowedTools,
+				role: opts?.role,
+				accessory: opts?.accessory,
 				worktreePath,
 				projectId,
 				promptQueue: new PromptQueue(),
@@ -1702,6 +1704,8 @@ export class SessionManager {
 				branch,
 				sandboxed: opts?.sandboxed,
 				personalities: opts?.personalityNames,
+				role: opts?.role,
+				accessory: opts?.accessory,
 				agentArgs,
 				env: opts?.env,
 				rolePrompt: opts?.rolePrompt,
@@ -1740,6 +1744,8 @@ export class SessionManager {
 			taskId: opts?.taskId,
 			sandboxed: opts?.sandboxed,
 			personalities: opts?.personalityNames,
+			role: opts?.role,
+			accessory: opts?.accessory,
 			agentArgs,
 			env: opts?.env,
 			rolePrompt: opts?.rolePrompt,
