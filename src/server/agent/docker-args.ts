@@ -39,6 +39,14 @@ export interface DockerRunConfig {
 	/** Whether to mount a sibling -wt/ directory as /worktrees. */
 	mountWorktreeRoot?: boolean;
 
+	// ── Resource limits ──────────────────────────────────────────────────
+	/** Container memory limit (default: "4g"). */
+	memoryLimit?: string;
+	/** Container CPU limit (default: "2"). */
+	cpuLimit?: string;
+	/** Container PID limit (default: "256"). */
+	pidsLimit?: string;
+
 	// ── Sandbox config ───────────────────────────────────────────────────
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
@@ -70,12 +78,18 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	const baseHostArgs = ["--add-host=host.docker.internal:host-gateway"];
 
+	// Resource limits — prevent containers from consuming all host resources
+	baseHostArgs.push(`--memory=${config.memoryLimit ?? "4g"}`);
+	baseHostArgs.push(`--cpus=${config.cpuLimit ?? "2"}`);
+	baseHostArgs.push(`--pids-limit=${String(config.pidsLimit ?? "256")}`);
+
 	// Attach to a restricted Docker network for sandboxed containers
 	if (sandboxNetwork) {
 		baseHostArgs.push(`--network=${sandboxNetwork}`);
 		// Black-hole cloud metadata endpoints (defense-in-depth)
 		baseHostArgs.push("--add-host=metadata.google.internal:0.0.0.0");
 		baseHostArgs.push("--add-host=metadata.internal:0.0.0.0");
+		baseHostArgs.push("--add-host=169.254.169.254:0.0.0.0");
 	}
 
 	const args: string[] = mode === "pool"
