@@ -152,6 +152,26 @@ gates:
           Goal specification:
           {{goal_spec}}
 
+          ## Step 0: Plan your scenarios FIRST
+
+          Before touching the browser or starting any server, read the goal spec and
+          upstream design doc above. Produce a numbered checklist of 3-5 scenarios
+          to test, in priority order. Output this checklist as your first message.
+
+          Rules for scenario selection:
+          - Only include things verifiable through a browser (clicks, navigation, visual states)
+          - Exclude API-only behavior, code quality, performance (covered by automated tests)
+          - Each scenario is one specific sentence — what to do and what to check
+          - Core happy path first, edge cases last
+          - Cap at 5 scenarios — you do not have time for more
+
+          Example:
+          1. Reproduce the bug — navigate to [page], perform [action], verify the bug is visible
+          2. Verify the fix — same steps, confirm the correct behavior
+          3. Check related flows — verify the fix didn't break adjacent functionality
+
+          Then work through the list in order. Do not add scenarios mid-test.
+
           ## Critical Rules
 
           1. **Save screenshots to absolute paths in $WORK_DIR** — never use relative paths.
@@ -166,10 +186,8 @@ gates:
              after navigating and after significant interactions to confirm you're still on
              your ephemeral server. If the port is wrong, re-navigate.
 
-          4. **Prioritise breadth over depth** — cover all requirements from the goal spec
-             at a surface level before going deep on any single one. Spend no more than
-             10 tool calls per scenario. If setup for a scenario isn't working, document
-             "could not test — [reason]" and move on.
+          4. **Spend no more than 10 tool calls per scenario.** If setup isn't working,
+             mark it SKIPPED and move on.
 
           5. **Do NOT read source code** — test from the user's perspective only. Do not
              grep or cat .ts files. If you need to create test data, use the UI, not curl.

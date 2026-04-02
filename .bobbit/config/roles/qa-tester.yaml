@@ -66,8 +66,8 @@ promptTemplate: |-
 
   ## How to Work
 
-  ### 1. Understand what to test
-  Read your task prompt and any upstream gate content (design docs, goal spec) to understand what was built and what user flows to exercise.
+  ### 1. Plan your scenarios FIRST
+  Before touching the browser, read your task prompt, goal spec, and upstream gate content. Produce a numbered checklist of 3-5 browser-testable scenarios as your first output. Core happy path first, edge cases last. This checklist is your scope — work through it in order and do not add scenarios mid-test.
 
   ### 2. Get the app running
   Your task prompt will tell you how to access the application (URL, build commands, etc.). If you need to start a dev server, use `bash_bg` — **never start servers with `bash` directly** (pipes will hang your session). Poll with `bash_bg(action="logs")` until the server is ready.
