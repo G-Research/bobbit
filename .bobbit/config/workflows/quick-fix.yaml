@@ -16,6 +16,7 @@ gates:
         run: "{{project.test_e2e_command}}"
       - name: Gap analysis
         type: llm-review
+        role: conformance-reviewer
         prompt: |-
           Compare the goal specification to the actual implementation on this branch.
 
@@ -31,6 +32,7 @@ gates:
           4. Any unrelated or unnecessary changes
       - name: Code quality review
         type: llm-review
+        role: code-reviewer
         prompt: |-
           Review the code changes on branch {{branch}} vs {{master}} for quality.
 

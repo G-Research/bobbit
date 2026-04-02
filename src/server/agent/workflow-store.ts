@@ -12,6 +12,7 @@ export interface VerifyStep {
 	phase?: number;
 	optional?: boolean;
 	label?: string;
+	role?: string;
 }
 
 export interface WorkflowGate {
@@ -132,6 +133,7 @@ export class WorkflowStore {
 		if (typeof data.phase === "number") step.phase = data.phase;
 		if (data.optional === true) step.optional = true;
 		if (typeof data.label === "string") step.label = data.label;
+		if (typeof data.role === "string") step.role = data.role;
 		return step;
 	}
 
@@ -163,6 +165,7 @@ export class WorkflowStore {
 							if (v.phase) s.phase = v.phase;
 							if (v.optional) s.optional = v.optional;
 							if (v.label) s.label = v.label;
+							if (v.role) s.role = v.role;
 							return s;
 						});
 					}

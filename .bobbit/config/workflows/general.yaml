@@ -10,6 +10,7 @@ gates:
     verify:
       - name: "Design review"
         type: llm-review
+        role: architect
         prompt: |
           Review this design document for structure, clarity, and completeness. Verify:
           1. Approach is clearly described with rationale
@@ -27,6 +28,7 @@ gates:
 
       - name: "Gap analysis"
         type: llm-review
+        role: conformance-reviewer
         prompt: |
           Compare the goal specification to this design document.
 
@@ -56,6 +58,7 @@ gates:
         run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
+        role: conformance-reviewer
         prompt: |
           Compare the goal specification and design document to the actual implementation on this branch.
 
@@ -72,6 +75,7 @@ gates:
 
       - name: "Code quality review"
         type: llm-review
+        role: code-reviewer
         prompt: |
           Review the code changes on branch {{branch}} vs {{master}} for quality.
 
@@ -125,6 +129,7 @@ gates:
 
       - name: "Security review"
         type: llm-review
+        role: security-reviewer
         prompt: |
           Security review of changes on branch {{branch}} vs {{master}}.
 

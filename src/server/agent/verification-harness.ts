@@ -393,7 +393,7 @@ export class VerificationHarness {
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			result = await this.runLlmReviewStep(
-				{ name: stepDef.name, prompt, timeout: stepDef.timeout },
+				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role },
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
@@ -443,7 +443,7 @@ export class VerificationHarness {
 		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any } = { passed: false, output: "Re-run failed." };
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			result = await this.runAgentQaStep(
-				{ name: stepDef.name, prompt, timeout: stepDef.timeout },
+				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role },
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
 			);
@@ -858,7 +858,7 @@ export class VerificationHarness {
 								const maxAttempts = 3;
 								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 									const qaResult = await this.runAgentQaStep(
-										{ name: step.name, prompt, timeout: step.timeout },
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 										cwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, stepSessionId,
@@ -883,7 +883,7 @@ export class VerificationHarness {
 								const maxAttempts = 3;
 								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 									result = await this.runLlmReviewStep(
-										{ name: step.name, prompt, timeout: step.timeout },
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 										cwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, stepSessionId,
@@ -1019,7 +1019,7 @@ export class VerificationHarness {
 	 * Follows the pattern from src/server/skills/sub-agent.ts.
 	 */
 	private async runLlmReviewStep(
-		step: { name: string; prompt?: string; timeout?: number },
+		step: { name: string; prompt?: string; timeout?: number; role?: string },
 		cwd: string,
 		builtinVars: Record<string, string>,
 		signalContent?: string,
@@ -1029,9 +1029,10 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
-		const role = this.roleStore.get("reviewer");
+		const roleName = step.role || "reviewer";
+		const role = this.roleStore.get(roleName) || this.roleStore.get("reviewer");
 		if (!role) {
-			return { passed: false, output: "LLM review failed: 'reviewer' role not found in role store.", sessionId };
+			return { passed: false, output: `LLM review failed: '${roleName}' role not found in role store.`, sessionId };
 		}
 
 		const timeoutMs = (step.timeout || 600) * 1000;
@@ -1087,7 +1088,7 @@ export class VerificationHarness {
 	 * Build the combined system prompt for a review step.
 	 */
 	private buildReviewPrompt(
-		role: { promptTemplate: string },
+		role: { promptTemplate: string; name?: string },
 		step: { name: string; prompt?: string },
 		cwd: string,
 		builtinVars: Record<string, string>,
@@ -1098,7 +1099,7 @@ export class VerificationHarness {
 	): string {
 		let rolePrompt = role.promptTemplate
 			.replace(/\{\{GOAL_BRANCH\}\}/g, builtinVars.branch || "HEAD")
-			.replace(/\{\{AGENT_ID\}\}/g, "reviewer");
+			.replace(/\{\{AGENT_ID\}\}/g, role.name || "reviewer");
 
 		const sections: string[] = [rolePrompt];
 
@@ -1171,10 +1172,10 @@ export class VerificationHarness {
 	 * Run an LLM review step via SessionManager (visible in UI as a proper session).
 	 */
 	private async runLlmReviewViaSession(
-		step: { name: string; prompt?: string; timeout?: number },
+		step: { name: string; prompt?: string; timeout?: number; role?: string },
 		cwd: string,
 		goalId: string,
-		role: { promptTemplate: string; accessory?: string },
+		role: { promptTemplate: string; accessory?: string; name?: string },
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
@@ -1182,9 +1183,10 @@ export class VerificationHarness {
 		let sessionId: string | undefined;
 		try {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
+			const roleName = role.name || step.role || "reviewer";
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
-				roleName: "reviewer",
+				roleName,
 				sandboxed: (goalId
 				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
@@ -1193,9 +1195,10 @@ export class VerificationHarness {
 			sessionId = session.id;
 
 			// Set title and metadata
-			this.sessionManager!.setTitle(sessionId, `Reviewer: ${step.name}`);
+			const roleLabel = role.name ? (role.name.charAt(0).toUpperCase() + role.name.slice(1).replace(/-/g, " ")) : "Reviewer";
+			this.sessionManager!.setTitle(sessionId, `${roleLabel}: ${step.name}`);
 			this.sessionManager!.updateSessionMeta(sessionId, {
-				role: "reviewer",
+				role: roleName,
 				teamGoalId: goalId,
 				accessory: role.accessory || "magnifying-glass",
 				nonInteractive: true,
@@ -1298,7 +1301,7 @@ export class VerificationHarness {
 	 * Similar to runLlmReviewViaSession() but with test-engineer role and QA-specific prompt.
 	 */
 	private async runAgentQaStep(
-		step: { name: string; prompt?: string; timeout?: number },
+		step: { name: string; prompt?: string; timeout?: number; role?: string },
 		cwd: string,
 		goalId: string,
 		builtinVars: Record<string, string>,
@@ -1309,9 +1312,9 @@ export class VerificationHarness {
 		sessionId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string; artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
-		const role = this.roleStore.get("test-engineer") || this.roleStore.get("reviewer");
+		const role = this.roleStore.get(step.role || "qa-tester") || this.roleStore.get("test-engineer") || this.roleStore.get("reviewer");
 		if (!role) {
-			return { passed: false, output: "Agent QA failed: no 'test-engineer' or 'reviewer' role found in role store.", sessionId };
+			return { passed: false, output: "Agent QA failed: no 'qa-tester', 'test-engineer', or 'reviewer' role found in role store.", sessionId };
 		}
 
 		// Build system prompt (dedicated QA prompt, not buildReviewPrompt)
