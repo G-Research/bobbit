@@ -112,6 +112,7 @@ Quick pointers for the most common issues:
 
 - **Streaming sluggishness**: `AgentInterface` must NOT call `requestUpdate()` in the `message_update` handler — only `StreamingMessageContainer.setMessage()` updates during streaming (rAF-batched). See @docs/debugging.md#streaming-performance for full checklist.
 - **Duplicate messages**: Check `flushDeferredMessage()` in `remote-agent.ts` — `MessageList` and `StreamingMessageContainer` must never overlap.
+- **Context bar / model state**: After restart, `sendFallbackModelState()` in `handler.ts` sends persisted model info when `getState()` fails. If context bar shows wrong values, verify `modelProvider`/`modelId` in `<project-root>/.bobbit/state/sessions.json`. Client retries `get_state` after 3s on reconnect. See @docs/debugging.md#context-bar--model-state for full checklist.
 - **Session persistence**: Check `<project-root>/.bobbit/state/sessions.json` (per-project). Missing `.jsonl` = session skipped on restore.
 - **Sandbox**: `GET /api/sandbox-status` for Docker state. Containers use `bobbit-sandbox-net` bridge network — check `docker network inspect bobbit-sandbox-net` for connectivity issues.
 - **Search**: Each project has its own `<project-root>/.bobbit/state/search.db`. Delete and restart to rebuild. Searches aggregate across all project indexes. See @docs/debugging.md#search-index for full checklist.
