@@ -118,7 +118,7 @@ let liveVerifications: Map<string, LiveVerification> = new Map();
 let liveVerifTimer: ReturnType<typeof setInterval> | null = null;
 let expandedLiveStepKeys: Set<string> = new Set();
 let expandedArtifactKeys: Set<string> = new Set();
-let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; stepName: string; liveOutput: string } | null = null;
+let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; stepName: string; liveOutput: string; stepType: string } | null = null;
 
 /** Dashboard event WebSocket — receives gate verification events without a session */
 let dashboardWs: WebSocket | null = null;
@@ -1761,9 +1761,11 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 									${step.expect ? html`<span class="verify-step__expect">expect: ${step.expect}</span>` : nothing}
 									<span class="verify-step__duration">${step.duration_ms}ms</span>
 								</div>
-								${step.output ? html`
-									<div class="verify-step__output">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</div>
-								` : nothing}
+								${step.output ? (
+								step.type !== "command"
+									? html`<div class="verify-step__output"><markdown-block .content=${step.output}></markdown-block></div>`
+									: html`<div class="verify-step__output">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</div>`
+								) : nothing}
 								${step.artifact ? renderStepArtifact(step.artifact, `${signal.id}:${si}`) : nothing}
 							</div>
 						`)}
@@ -1916,7 +1918,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
 							@click=${clickable ? () => {
 								if (isRunningCmd) {
-									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || step.output || "" };
+									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || step.output || "", stepType: step.type || "" };
 									renderApp();
 								} else if (hasOutput) {
 									toggleLiveStepExpand(stepKey);
@@ -1938,9 +1940,11 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							${isRunningCmd ? html`<span class="verify-card__expand" title="View live output">▸</span>` : nothing}
 							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
 						</div>
-						${isExpanded && step.output ? html`
-							<pre class="verify-card__output">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>
-						` : nothing}
+						${isExpanded && step.output ? (
+							step.type !== "command"
+								? html`<div class="verify-card__output verify-card__output--markdown"><markdown-block .content=${step.output}></markdown-block></div>`
+								: html`<pre class="verify-card__output">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>`
+						) : nothing}
 					</div>
 				`;
 			})}
@@ -2013,6 +2017,7 @@ export function renderGoalDashboard(): TemplateResult {
 				.signalId=${dashboardModalStep.signalId}
 				.stepIndex=${dashboardModalStep.stepIndex}
 				.stepName=${dashboardModalStep.stepName}
+				.stepType=${dashboardModalStep.stepType}
 				.open=${true}
 				.initialOutput=${dashboardModalStep.liveOutput}
 				@close=${() => { dashboardModalStep = null; renderApp(); }}
