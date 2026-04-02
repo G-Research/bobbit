@@ -71,6 +71,7 @@ export class RemoteAgent {
 	private _taskStartTime: number | null = null;
 
 	// Auto-reconnect state
+	private _stateRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private _reconnectAttempt = 0;
 	private _intentionalDisconnect = false;
@@ -122,7 +123,7 @@ export class RemoteAgent {
 	constructor() {
 		this._state = {
 			systemPrompt: "",
-			model: getModel("anthropic", "claude-opus-4-6"),
+			model: { ...getModel("anthropic", "claude-opus-4-6"), contextWindow: 0 },
 			thinkingLevel: "medium",
 			tools: [],
 			messages: [] as any[],
@@ -256,6 +257,14 @@ export class RemoteAgent {
 							this._pendingReconnectNotif = true;
 							this.requestMessages();
 							this.send({ type: "get_state" });
+							// Retry get_state after 3s if we still don't have real model info
+							if (this._stateRetryTimer) clearTimeout(this._stateRetryTimer);
+							this._stateRetryTimer = setTimeout(() => {
+								this._stateRetryTimer = null;
+								if (!this._state.model?.contextWindow || this._state.model.contextWindow === 0) {
+									this.send({ type: "get_state" });
+								}
+							}, 3000);
 						}
 					} else if (msg.type === "auth_failed") {
 						settled = true;
@@ -331,6 +340,10 @@ export class RemoteAgent {
 
 	disconnect(): void {
 		this._intentionalDisconnect = true;
+		if (this._stateRetryTimer) {
+			clearTimeout(this._stateRetryTimer);
+			this._stateRetryTimer = null;
+		}
 		if (this._reconnectTimer) {
 			clearTimeout(this._reconnectTimer);
 			this._reconnectTimer = null;
@@ -610,6 +623,11 @@ export class RemoteAgent {
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
+					// Clear retry timer — we got real model info
+					if (this._stateRetryTimer) {
+						clearTimeout(this._stateRetryTimer);
+						this._stateRetryTimer = null;
+					}
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
