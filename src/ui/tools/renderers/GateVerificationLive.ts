@@ -22,7 +22,8 @@ import {
 interface VerificationStep {
 	name: string;
 	type: string;
-	status: "running" | "passed" | "failed";
+	status: "running" | "passed" | "failed" | "waiting" | "skipped";
+	phase?: number;
 	durationMs?: number;
 	output?: string;
 	startedAt: number;
@@ -30,9 +31,11 @@ interface VerificationStep {
 }
 
 /** Map verification step status to delegate-cards status strings */
-function toDelegateStatus(status: "running" | "passed" | "failed"): string {
+function toDelegateStatus(status: string): string {
 	if (status === "passed") return "completed";
 	if (status === "failed") return "error";
+	if (status === "waiting") return "waiting";
+	if (status === "skipped") return "skipped";
 	return "running";
 }
 
@@ -64,6 +67,7 @@ export class GateVerificationLive extends LitElement {
 
 	@state() private steps: VerificationStep[] = [];
 	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
+	@state() private currentPhase = 0;
 	@state() private expandedSteps = new Set<number>();
 	@state() private modalStep: { index: number; name: string; output: string } | null = null;
 	/** Accumulated streamed output per step index */
@@ -151,11 +155,13 @@ export class GateVerificationLive extends LitElement {
 						name: s.name,
 						type: s.type,
 						status: s.status,
+						phase: s.phase,
 						durationMs: s.durationMs,
 						output: s.output,
 						startedAt: s.startedAt || Date.now(),
 						sessionId: s.sessionId,
 					}));
+					this.currentPhase = active.currentPhase ?? 0;
 					this.overallStatus = "running";
 					// Seed _stepOutputs from API so modal has initial content
 					for (let i = 0; i < this.steps.length; i++) {
@@ -181,15 +187,31 @@ export class GateVerificationLive extends LitElement {
 			case "gate_verification_started": {
 				this._stepOutputs = new Map();
 				this.modalStep = null;
-				const stepDefs: Array<{ name: string; type: string }> = detail.steps || [];
+				const stepDefs: Array<{ name: string; type: string; phase?: number }> = detail.steps || [];
 				const now = detail.startedAt || Date.now();
+				const minPhase = stepDefs.length > 0 ? Math.min(...stepDefs.map(s => s.phase ?? 0)) : 0;
+				this.currentPhase = minPhase;
 				this.steps = stepDefs.map(s => ({
 					name: s.name,
 					type: s.type,
-					status: "running" as const,
+					phase: s.phase ?? 0,
+					status: ((s.phase ?? 0) === minPhase ? "running" : "waiting") as "running" | "waiting",
 					startedAt: now,
 				}));
 				this.overallStatus = "running";
+				break;
+			}
+			case "gate_verification_phase_started": {
+				const phase = detail.phase as number;
+				const stepIndices = detail.stepIndices as number[];
+				this.currentPhase = phase;
+				const updated = [...this.steps];
+				for (const idx of stepIndices) {
+					if (idx >= 0 && idx < updated.length && updated[idx].status === "waiting") {
+						updated[idx] = { ...updated[idx], status: "running", startedAt: Date.now() };
+					}
+				}
+				this.steps = updated;
 				break;
 			}
 			case "gate_verification_step_started": {
@@ -283,10 +305,32 @@ export class GateVerificationLive extends LitElement {
 		const failedCount = this.steps.filter(s => s.status === "failed").length;
 		const total = this.steps.length;
 
+		// Phase grouping
+		const phases = new Set(this.steps.map(s => s.phase ?? 0));
+		const hasMultiplePhases = phases.size > 1;
+		const stepsByPhase = new Map<number, Array<{ step: VerificationStep; index: number }>>();
+		this.steps.forEach((step, i) => {
+			const p = step.phase ?? 0;
+			if (!stepsByPhase.has(p)) stepsByPhase.set(p, []);
+			stepsByPhase.get(p)!.push({ step, index: i });
+		});
+		const sortedPhases = [...stepsByPhase.keys()].sort((a, b) => a - b);
+
 		return html`
 			<div class="mt-2 space-y-1">
 				${this._renderHeader(passedCount, failedCount, total)}
-				${this.steps.map((step, i) => this._renderStepCard(step, i))}
+				${sortedPhases.map(phase => {
+					const phaseSteps = stepsByPhase.get(phase)!;
+					const isActive = phase === this.currentPhase && this.overallStatus === "running";
+					return html`
+						${hasMultiplePhases ? html`
+							<div class="text-[10px] font-medium ${isActive ? "text-blue-500" : "text-muted-foreground"} mt-2 mb-0.5 uppercase tracking-wide">
+								Phase ${phase}${isActive ? " — active" : ""}
+							</div>
+						` : nothing}
+						${phaseSteps.map(({ step, index }) => this._renderStepCard(step, index))}
+					`;
+				})}
 			</div>
 			${this.modalStep ? html`
 				<verification-output-modal
@@ -352,7 +396,7 @@ export class GateVerificationLive extends LitElement {
 					<span class="${statusColor(dStatus)}">${statusIcon(dStatus)}</span>
 					<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name || "step"}</span>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
-					${renderDuration(entry)}
+					${dStatus !== "waiting" ? renderDuration(entry) : nothing}
 					${step.sessionId ? renderSessionLink(step.sessionId) : nothing}
 					${isRunningCommand ? html`<span class="text-muted-foreground text-[10px] shrink-0" title="View live output">▸</span>` : nothing}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}

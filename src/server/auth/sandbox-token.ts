@@ -13,6 +13,11 @@ export interface SandboxScope {
  * API access to only the endpoints that session needs. Tokens are NOT
  * persisted — they are regenerated on server restart during session restore
  * (applySandboxWiring calls register() which is idempotent).
+ *
+ * SECURITY: Tokens are stored in-memory ONLY (Map). They are never persisted
+ * to disk — not in sessions.json, not in any state file. This is by design:
+ * tokens are regenerated on server restart during session restore. If a
+ * container is compromised, the token cannot be extracted from disk.
  */
 export class SandboxTokenStore {
 	private tokens = new Map<string, SandboxScope>();
