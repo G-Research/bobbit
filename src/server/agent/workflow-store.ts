@@ -135,6 +135,7 @@ export class WorkflowStore {
 		if (data.optional === true) step.optional = true;
 		if (typeof data.label === "string") step.label = data.label;
 		if (typeof data.role === "string") step.role = data.role;
+		if (typeof data.description === "string") step.description = data.description;
 		return step;
 	}
 
@@ -167,6 +168,7 @@ export class WorkflowStore {
 							if (v.optional) s.optional = v.optional;
 							if (v.label) s.label = v.label;
 							if (v.role) s.role = v.role;
+							if (v.description) s.description = v.description;
 							return s;
 						});
 					}
