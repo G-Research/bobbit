@@ -1235,7 +1235,7 @@ async function handleApiRoute(
 
 		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
 		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
+		let createOpts: { rolePrompt?: string; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
 		let roleForMeta: { name: string; accessory: string } | undefined;
 
 		if (roleId && typeof roleId === "string") {
@@ -1246,7 +1246,6 @@ async function handleApiRoute(
 			}
 			createOpts = {
 				rolePrompt: role.promptTemplate,
-				allowedTools: role.allowedTools,
 			};
 			roleForMeta = { name: role.name, accessory: role.accessory };
 		}
@@ -2019,7 +2018,6 @@ async function handleApiRoute(
 				name: body?.name,
 				label: body?.label,
 				promptTemplate: body?.promptTemplate || "",
-				allowedTools: body?.allowedTools,
 				accessory: body?.accessory,
 			});
 			json(role, 201);
@@ -2047,7 +2045,6 @@ async function handleApiRoute(
 			const ok = roleManager.updateRole(name, {
 				label: body.label,
 				promptTemplate: body.promptTemplate,
-				allowedTools: body.allowedTools,
 				accessory: body.accessory,
 				toolPolicies: body.toolPolicies !== undefined ? (() => {
 					// Validate toolPolicies values

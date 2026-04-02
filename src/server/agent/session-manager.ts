@@ -601,8 +601,6 @@ export class SessionManager {
 	 */
 	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): string[] {
 		if (!role) return [];
-		if (role.allowedTools.length > 0) return role.allowedTools;
-		// Sparse toolPolicies — use the full cascade so system default (allow) applies
 		if (this.toolManager) {
 			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
 		}
@@ -612,7 +610,7 @@ export class SessionManager {
 	private buildToolActivationArgs(
 		sessionId: string,
 		allowedTools: string[],
-		role: { toolPolicies?: Record<string, GrantPolicy>; allowedTools?: string[] } | undefined,
+		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
 	): string[] {
 		// MCP proxy extensions
@@ -626,7 +624,10 @@ export class SessionManager {
 		const args = [...activation.args];
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
-		const roleAllowed = new Set((role?.allowedTools || []).map(t => t.toLowerCase()));
+		const roleBaseTools = role && this.toolManager
+			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, this.mcpManager ?? undefined)
+			: [];
+		const roleAllowed = new Set(roleBaseTools.map(t => t.toLowerCase()));
 		const sessionGrants = allowedTools.filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
@@ -1047,13 +1048,16 @@ export class SessionManager {
 		const role = this.roleManager.getRole(roleName);
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
+		const effectiveAllowed = this.resolveEffectiveAllowedTools(role);
+		const effectiveSet = new Set(effectiveAllowed.map(t => t.toLowerCase()));
+
 		const newTools: string[] = [];
 		if (scope === "group" && group) {
 			// Add all tools from the group (MCP + non-MCP)
 			if (this.mcpManager) {
 				const infos = this.mcpManager.getToolInfos();
 				for (const info of infos) {
-					if (info.group === group && !role.allowedTools.includes(info.name)) {
+					if (info.group === group && !effectiveSet.has(info.name.toLowerCase())) {
 						newTools.push(info.name);
 					}
 				}
@@ -1061,19 +1065,19 @@ export class SessionManager {
 			if (this.toolManager) {
 				const allTools = this.toolManager.getAvailableTools();
 				for (const tool of allTools) {
-					if (tool.group === group && !role.allowedTools.includes(tool.name) && !newTools.includes(tool.name)) {
+					if (tool.group === group && !effectiveSet.has(tool.name.toLowerCase()) && !newTools.includes(tool.name)) {
 						newTools.push(tool.name);
 					}
 				}
 			}
 		} else {
 			// Add just the single tool
-			if (!role.allowedTools.includes(toolName)) {
+			if (!effectiveSet.has(toolName.toLowerCase())) {
 				newTools.push(toolName);
 			}
 		}
 
-		if (newTools.length === 0) return role.allowedTools;
+		if (newTools.length === 0) return effectiveAllowed;
 
 		let resultTools: string[];
 
@@ -1097,12 +1101,13 @@ export class SessionManager {
 				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
 			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
-			// Re-read role to get updated derived allowedTools
+			// Re-read role and recompute effective allowed tools
 			const updatedRole = this.roleManager.getRole(role.name);
-			session.allowedTools = updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
+			const updatedEffective = this.resolveEffectiveAllowedTools(updatedRole ?? role);
+			session.allowedTools = updatedEffective;
 			await this._restartSessionWithUpdatedRole(session);
 
-			resultTools = updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
+			resultTools = updatedEffective;
 		}
 
 		// Resolve pending grant request from guard extension
@@ -1528,7 +1533,7 @@ export class SessionManager {
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
 					roleName = ps.role;
 				}
-				const effectiveTools = restoredAllowedTools ?? role?.allowedTools;
+				const effectiveTools = restoredAllowedTools ?? this.resolveEffectiveAllowedTools(role);
 				if (effectiveTools && effectiveTools.length > 0) {
 					toolRestrictionsText = this.buildToolRestrictionsText(effectiveTools, role);
 				}
@@ -2317,7 +2322,7 @@ export class SessionManager {
 	 * the system prompt with the role instructions, and respawning with
 	 * `switch_session` to preserve conversation history.
 	 */
-	async assignRole(id: string, role: { name: string; promptTemplate: string; allowedTools: string[]; accessory: string }, opts?: { personalities?: string[] }): Promise<boolean> {
+	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }, opts?: { personalities?: string[] }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (session.status === "streaming") throw new Error("Cannot assign role while agent is streaming");

@@ -5,7 +5,7 @@
  * 1. Session with a restricted role tries to use an MCP tool
  * 2. Server detects the permission denial and broadcasts tool_permission_needed
  * 3. Client receives the message and can grant access
- * 4. Grant updates the role's allowedTools
+ * 4. Grant updates the role's toolPolicies
  *
  * Uses the mock MCP server (tests/fixtures/mock-mcp-server.mjs) to provide
  * real MCP tools that the role doesn't initially have access to.
@@ -68,7 +68,7 @@ test.beforeAll(async () => {
 			name: ROLE_NAME,
 			label: "MCP Permission Test Role",
 			promptTemplate: "You are a restricted test agent.",
-			allowedTools: ["Read", "Write", "Bash"],
+			toolPolicies: { Read: "allow", Write: "allow", Bash: "allow" },
 		}),
 	});
 	expect(roleResp.status).toBe(201);
@@ -143,7 +143,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 		}
 	});
 
-	test("grant_tool_permission adds tool to role's allowedTools", async () => {
+	test("grant_tool_permission adds tool to role's toolPolicies", async () => {
 		// Use a fresh role for this test to avoid pollution
 		const grantRoleName = "mcp-grant-test-role";
 		await apiFetch("/api/roles", {
@@ -152,7 +152,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				name: grantRoleName,
 				label: "Grant Test Role",
 				promptTemplate: "Test agent for granting.",
-				allowedTools: ["Read"],
+				toolPolicies: { Read: "allow" },
 			}),
 		});
 
@@ -199,7 +199,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				const roleResp = await apiFetch(`/api/roles/${grantRoleName}`);
 				expect(roleResp.status).toBe(200);
 				const role = await roleResp.json();
-				expect(role.allowedTools).toContain(DENIED_TOOL);
+				expect(role.toolPolicies[DENIED_TOOL]).toBe("allow");
 			} finally {
 				conn.close();
 			}
@@ -216,7 +216,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				name: groupRoleName,
 				label: "Group Grant Test Role",
 				promptTemplate: "Test agent for group granting.",
-				allowedTools: ["Read"],
+				toolPolicies: { Read: "allow" },
 			}),
 		});
 
@@ -262,8 +262,8 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				// Verify the role includes both MCP tools (echo and add)
 				const roleResp = await apiFetch(`/api/roles/${groupRoleName}`);
 				const role = await roleResp.json();
-				expect(role.allowedTools).toContain("mcp__mock__echo");
-				expect(role.allowedTools).toContain("mcp__mock__add");
+				expect(role.toolPolicies["mcp__mock__echo"]).toBe("allow");
+				expect(role.toolPolicies["mcp__mock__add"]).toBe("allow");
 			} finally {
 				conn.close();
 			}
@@ -273,9 +273,9 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 	});
 
 	test("no tool_permission_needed when session has no role and no tool restrictions", async () => {
-		// The scaffolded "general" role has allowedTools, so sessions without
+		// The scaffolded "general" role has toolPolicies, so sessions without
 		// an explicit role still get tool restrictions. To test a truly
-		// unrestricted session, temporarily give the general role an empty allowedTools.
+		// unrestricted session, temporarily give the general role empty toolPolicies.
 		// Small delay to let any in-flight session restarts from prior tests settle
 		await new Promise(r => setTimeout(r, 1500));
 
@@ -288,7 +288,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 
 		await apiFetch("/api/roles/general", {
 			method: "PUT",
-			body: JSON.stringify({ ...origRole, allowedTools: [], toolPolicies: {} }),
+			body: JSON.stringify({ ...origRole, toolPolicies: {} }),
 		});
 
 		try {

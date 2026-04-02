@@ -110,10 +110,10 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 /** Mock RoleStore that provides the roles TeamManager expects */
 function createMockRoleStore() {
 	const roles = new Map<string, any>([
-		["team-lead", { name: "team-lead", label: "Team Lead", promptTemplate: "You are a team lead. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", allowedTools: ["bash", "read", "write"], accessory: "crown", createdAt: 0, updatedAt: 0 }],
-		["coder", { name: "coder", label: "Coder", promptTemplate: "You are a coder. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", allowedTools: ["bash", "read", "write", "edit"], accessory: "headphones", createdAt: 0, updatedAt: 0 }],
-		["reviewer", { name: "reviewer", label: "Reviewer", promptTemplate: "You are a reviewer. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", allowedTools: ["bash", "read"], accessory: "monocle", createdAt: 0, updatedAt: 0 }],
-		["tester", { name: "tester", label: "Tester", promptTemplate: "You are a tester. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", allowedTools: ["bash", "read", "write"], accessory: "magnifier", createdAt: 0, updatedAt: 0 }],
+		["team-lead", { name: "team-lead", label: "Team Lead", promptTemplate: "You are a team lead. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", toolPolicies: { bash: "allow", read: "allow", write: "allow" }, accessory: "crown", createdAt: 0, updatedAt: 0 }],
+		["coder", { name: "coder", label: "Coder", promptTemplate: "You are a coder. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", toolPolicies: { bash: "allow", read: "allow", write: "allow", edit: "allow" }, accessory: "headphones", createdAt: 0, updatedAt: 0 }],
+		["reviewer", { name: "reviewer", label: "Reviewer", promptTemplate: "You are a reviewer. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", toolPolicies: { bash: "allow", read: "allow" }, accessory: "monocle", createdAt: 0, updatedAt: 0 }],
+		["tester", { name: "tester", label: "Tester", promptTemplate: "You are a tester. Branch: {{GOAL_BRANCH}}, Agent: {{AGENT_ID}}", toolPolicies: { bash: "allow", read: "allow", write: "allow" }, accessory: "magnifier", createdAt: 0, updatedAt: 0 }],
 	]);
 	return {
 		get: (name: string) => roles.get(name),
@@ -283,7 +283,7 @@ describe("TeamManager", () => {
 			assert.equal(session.cwd, "/tmp/fallback");
 		});
 
-		it("should pass allowedTools from team-lead role to createSession", async () => {
+		it("should not pass allowedTools to createSession (resolved at session setup)", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
@@ -307,10 +307,10 @@ describe("TeamManager", () => {
 			await team.startTeam("goal-1");
 
 			assert.ok(capturedOpts, "createSession should have been called with opts");
-			assert.deepEqual(
+			assert.equal(
 				capturedOpts.allowedTools,
-				["bash", "read", "write"],
-				"opts.allowedTools should match the team-lead role's allowedTools",
+				undefined,
+				"opts.allowedTools should not be passed — session setup resolves tools from toolPolicies",
 			);
 		});
 

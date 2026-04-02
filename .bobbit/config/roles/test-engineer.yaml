@@ -1,27 +1,7 @@
 name: test-engineer
 label: Test Engineer
 accessory: flask
-allowedTools:
-  - read
-  - write
-  - edit
-  - bash
-  - web_search
-  - web_fetch
-  - task_update
-  - task_list
-  - browser_screenshot
-  - browser_navigate
-  - browser_click
-  - browser_type
-  - browser_eval
-  - browser_wait
-  - find
-  - grep
-  - ls
-  - bash_bg
 toolPolicies: {}
-_policyMigrated: true
 createdAt: 1774022789112
 updatedAt: 1774972383994
 promptTemplate: |-

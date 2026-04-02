@@ -189,16 +189,10 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 	// Fall back to general role's allowed tools
 	if (!effectiveAllowedTools && ctx.roleManager) {
 		const generalRole = ctx.roleManager.getRole("general");
-		if (generalRole) {
-			if (generalRole.allowedTools.length > 0) {
-				effectiveAllowedTools = generalRole.allowedTools;
-			} else if (ctx.toolManager) {
-				// Role has toolPolicies but empty derived allowedTools — use the
-				// full cascade so the system default (always-allow) is honoured.
-				effectiveAllowedTools = computeEffectiveAllowedTools(
-					ctx.toolManager, generalRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
-				);
-			}
+		if (generalRole && ctx.toolManager) {
+			effectiveAllowedTools = computeEffectiveAllowedTools(
+				ctx.toolManager, generalRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
+			);
 		}
 	}
 
@@ -237,8 +231,10 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 		}
 
 		// Use assistant role's tool restrictions
-		if (assistantRole && assistantRole.allowedTools.length > 0) {
-			plan.effectiveAllowedTools = assistantRole.allowedTools;
+		if (assistantRole && ctx.toolManager) {
+			plan.effectiveAllowedTools = computeEffectiveAllowedTools(
+				ctx.toolManager, assistantRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
+			);
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {

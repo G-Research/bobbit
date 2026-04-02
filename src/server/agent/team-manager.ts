@@ -32,7 +32,7 @@ export function buildAvailableRolesList(roleSource?: { getAll?: () => Role[]; li
 	const roles = allRoles.filter(r => r.name !== "team-lead" && r.name !== "assistant");
 	if (roles.length === 0) return "No spawnable roles defined.";
 	return roles.map(r => {
-		const tools = r.allowedTools.length > 0 ? r.allowedTools.slice(0, 8).join(", ") : "none";
+		const tools = r.toolPolicies ? Object.keys(r.toolPolicies).filter(k => r.toolPolicies![k] === 'allow').slice(0, 8).join(', ') || 'default' : 'default';
 		return `- **${r.name}** (${r.label}) — tools: ${tools}`;
 	}).join("\n");
 }
@@ -488,7 +488,6 @@ export class TeamManager {
 			{
 				rolePrompt: teamLeadPrompt,
 				env: { BOBBIT_GOAL_ID: goalId },
-				allowedTools: storedRole.allowedTools,
 				sandboxed,
 				sandboxClaim,
 			},
@@ -708,9 +707,6 @@ export class TeamManager {
 				.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch || "main")
 				.replace(/\{\{AGENT_ID\}\}/g, agentId);
 
-			// Read allowed tools from role definition
-			const allowedTools = storedRoleDef.allowedTools;
-
 			// Resolve personalities: explicit > role defaults
 			const personalityNames = opts?.personalities ?? storedRoleDef.defaultPersonalities;
 			let resolvedPersonalities: Array<{ label: string; promptFragment: string }> | undefined;
@@ -738,7 +734,7 @@ export class TeamManager {
 				undefined,
 				goalId,
 				undefined,
-				{ rolePrompt, roleName: role, allowedTools, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: memberSandboxed, sandboxClaim: memberSandboxClaim },
+				{ rolePrompt, roleName: role, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: memberSandboxed, sandboxClaim: memberSandboxClaim },
 			);
 
 			// Assign a unique color and title

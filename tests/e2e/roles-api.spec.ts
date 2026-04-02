@@ -49,7 +49,6 @@ test.describe("GET /api/roles — default roles", () => {
 			expect(role.label).toBeTruthy();
 			expect(typeof role.label).toBe("string");
 			expect(typeof role.promptTemplate).toBe("string");
-			expect(Array.isArray(role.allowedTools)).toBe(true);
 		}
 	});
 });
@@ -62,7 +61,7 @@ test.describe("POST /api/roles — create", () => {
 				name: "test-role",
 				label: "Test Role",
 				promptTemplate: "You are a test role.",
-				allowedTools: ["Read", "Write"],
+				toolPolicies: { Read: "allow", Write: "allow" },
 				accessory: "glasses",
 			}),
 		});
@@ -71,7 +70,7 @@ test.describe("POST /api/roles — create", () => {
 		expect(role.name).toBe("test-role");
 		expect(role.label).toBe("Test Role");
 		expect(role.promptTemplate).toBe("You are a test role.");
-		expect(role.allowedTools).toEqual(["Read", "Write"]);
+		expect(role.toolPolicies).toEqual({ Read: "allow", Write: "allow" });
 		expect(role.accessory).toBe("glasses");
 		expect(role.createdAt).toBeDefined();
 		expect(role.updatedAt).toBeDefined();
@@ -147,7 +146,7 @@ test.describe("POST /api/roles — create", () => {
 		expect(resp.status).toBe(201);
 	});
 
-	test("defaults accessory to 'none' and allowedTools to empty array", async () => {
+	test("defaults accessory to 'none'", async () => {
 		const resp = await apiFetch("/api/roles", {
 			method: "POST",
 			body: JSON.stringify({ name: "test-role", label: "Defaults Test" }),
@@ -155,7 +154,6 @@ test.describe("POST /api/roles — create", () => {
 		expect(resp.status).toBe(201);
 		const role = await resp.json();
 		expect(role.accessory).toBe("none");
-		expect(role.allowedTools).toEqual([]);
 	});
 });
 
@@ -193,7 +191,7 @@ test.describe("PUT /api/roles/:name — update", () => {
 		expect(role.label).toBe("Updated Label");
 	});
 
-	test("updates promptTemplate and allowedTools", async () => {
+	test("updates promptTemplate and toolPolicies", async () => {
 		await apiFetch("/api/roles", {
 			method: "POST",
 			body: JSON.stringify({ name: "test-role", label: "Test" }),
@@ -203,14 +201,14 @@ test.describe("PUT /api/roles/:name — update", () => {
 			method: "PUT",
 			body: JSON.stringify({
 				promptTemplate: "Updated prompt",
-				allowedTools: ["Bash", "Read"],
+				toolPolicies: { Bash: "allow", Read: "allow" },
 			}),
 		});
 
 		const getResp = await apiFetch("/api/roles/test-role");
 		const role = await getResp.json();
 		expect(role.promptTemplate).toBe("Updated prompt");
-		expect(role.allowedTools).toEqual(["Bash", "Read"]);
+		expect(role.toolPolicies).toEqual({ Bash: "allow", Read: "allow" });
 	});
 
 	test("updates accessory", async () => {
@@ -275,7 +273,7 @@ test.describe("DELETE /api/roles/:name", () => {
 				name: originalRole.name,
 				label: originalRole.label,
 				promptTemplate: originalRole.promptTemplate,
-				allowedTools: originalRole.allowedTools,
+				toolPolicies: originalRole.toolPolicies,
 				accessory: originalRole.accessory,
 			}),
 		});
@@ -312,7 +310,7 @@ test.describe("Role persistence", () => {
 				name: "test-role",
 				label: "Persistent Role",
 				promptTemplate: "Test prompt",
-				allowedTools: ["Bash"],
+				toolPolicies: { Bash: "allow" },
 				accessory: "pencil",
 			}),
 		});

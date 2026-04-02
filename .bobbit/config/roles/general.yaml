@@ -1,11 +1,9 @@
 name: general
 label: General
 accessory: none
-allowedTools: []
 toolPolicies:
   Gates: ask
   Tasks: ask
-_policyMigrated: true
 createdAt: 0
 updatedAt: 1775083871266
 promptTemplate: ""

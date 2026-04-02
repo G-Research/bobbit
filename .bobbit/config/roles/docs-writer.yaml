@@ -1,26 +1,7 @@
 name: docs-writer
 label: Docs Writer
 accessory: pencil
-allowedTools:
-  - read
-  - write
-  - edit
-  - bash
-  - web_search
-  - web_fetch
-  - task_update
-  - task_list
-  - browser_click
-  - browser_eval
-  - browser_navigate
-  - browser_screenshot
-  - browser_type
-  - browser_wait
-  - find
-  - grep
-  - ls
 toolPolicies: {}
-_policyMigrated: true
 createdAt: 1773948781652
 updatedAt: 1774972319697
 promptTemplate: |-

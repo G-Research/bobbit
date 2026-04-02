@@ -64,24 +64,26 @@ Bobbit extensions: .bobbit/config/tools/agent/extension.ts (delegate), .bobbit/c
 
 ## Role permissions
 
-Roles are defined in \`roles/{name}.yaml\`. Each role has an \`allowedTools\` list that controls which tools sessions with that role can use:
+Roles are defined in \`roles/{name}.yaml\`. Each role has a \`toolPolicies\` map that controls which tools sessions with that role can use:
 
 \`\`\`yaml
 name: coder
 label: Coder
-allowedTools:
-  - read
-  - write
-  - edit
-  - bash
-  - web_search
-  - web_fetch
-  - delegate
+toolPolicies:
+  read: allow
+  write: allow
+  edit: allow
+  bash: allow
+  web_search: allow
+  web_fetch: allow
+  delegate: allow
 \`\`\`
+
+Policy values: \`allow\` (immediate execution), \`ask\` (user prompted), \`never\` (tool hidden).
 
 The **General** role (\`roles/general.yaml\`) is the default for non-specific sessions — those without an explicit role assignment. It defines the standard interactive tool set.
 
-To give a role access to a new tool, add the tool name to that role's \`allowedTools\` list.
+To give a role access to a new tool, add the tool name to that role's \`toolPolicies\` with the \`allow\` policy.
 
 ## Creating a new tool end-to-end
 

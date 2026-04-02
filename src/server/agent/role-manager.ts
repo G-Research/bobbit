@@ -12,10 +12,10 @@ export class RoleManager {
 		name: string;
 		label: string;
 		promptTemplate: string;
-		allowedTools?: string[];
+		toolPolicies?: Record<string, import("./role-store.js").GrantPolicy>;
 		accessory?: string;
 	}): Role {
-		const { name, label, promptTemplate, allowedTools = [], accessory = "none" } = opts;
+		const { name, label, promptTemplate, toolPolicies, accessory = "none" } = opts;
 
 		if (!name || typeof name !== "string") {
 			throw new Error("Missing role name");
@@ -36,8 +36,8 @@ export class RoleManager {
 			name,
 			label,
 			promptTemplate: promptTemplate || "",
-			allowedTools,
 			accessory,
+			toolPolicies,
 			createdAt: now,
 			updatedAt: now,
 		};
@@ -62,7 +62,6 @@ export class RoleManager {
 	updateRole(name: string, updates: {
 		label?: string;
 		promptTemplate?: string;
-		allowedTools?: string[];
 		accessory?: string;
 		toolPolicies?: Record<string, import("./role-store.js").GrantPolicy>;
 	}): boolean {

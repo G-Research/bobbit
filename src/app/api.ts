@@ -1033,7 +1033,6 @@ export interface RoleData {
 	name: string;
 	label: string;
 	promptTemplate: string;
-	allowedTools: string[];
 	toolPolicies?: Record<string, string>;
 	accessory: string;
 	createdAt: number;
@@ -1168,7 +1167,7 @@ export async function createRole(role: {
 	name: string;
 	label: string;
 	promptTemplate: string;
-	allowedTools: string[];
+	toolPolicies?: Record<string, string>;
 	accessory: string;
 }): Promise<RoleData | null> {
 	try {
@@ -1187,7 +1186,7 @@ export async function createRole(role: {
 	}
 }
 
-export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "allowedTools" | "toolPolicies" | "accessory">>): Promise<boolean> {
+export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "toolPolicies" | "accessory">>): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/roles/${encodeURIComponent(name)}`, {
 			method: "PUT",

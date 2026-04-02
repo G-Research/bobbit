@@ -901,7 +901,7 @@ export class VerificationHarness {
 	 * Build the combined system prompt for a review step.
 	 */
 	private buildReviewPrompt(
-		role: { promptTemplate: string; allowedTools: string[] },
+		role: { promptTemplate: string },
 		step: { name: string; prompt?: string },
 		cwd: string,
 		builtinVars: Record<string, string>,
@@ -988,7 +988,7 @@ export class VerificationHarness {
 		step: { name: string; prompt?: string; timeout?: number },
 		cwd: string,
 		goalId: string,
-		role: { promptTemplate: string; allowedTools: string[]; accessory?: string },
+		role: { promptTemplate: string; accessory?: string },
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
@@ -998,7 +998,7 @@ export class VerificationHarness {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
-				allowedTools: role.allowedTools,
+				roleName: "reviewer",
 				sandboxed: (goalId
 				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
@@ -1114,7 +1114,7 @@ export class VerificationHarness {
 	private async runLlmReviewDirect(
 		step: { name: string; prompt?: string; timeout?: number },
 		cwd: string,
-		role: { promptTemplate: string; allowedTools: string[] },
+		role: { promptTemplate: string; toolPolicies?: Record<string, string> },
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
@@ -1129,9 +1129,13 @@ export class VerificationHarness {
 			goalState: "active",
 		});
 
+		// Derive allowed tools from toolPolicies (include all non-"never" entries)
+		const allowedTools = role.toolPolicies
+			? Object.entries(role.toolPolicies).filter(([, p]) => p !== "never").map(([name]) => name)
+			: [];
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
-			args: ["--tools", role.allowedTools.join(",")],
+			args: allowedTools.length > 0 ? ["--tools", allowedTools.join(",")] : [],
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 

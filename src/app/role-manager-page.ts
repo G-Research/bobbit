@@ -225,18 +225,9 @@ async function handleSave(): Promise<void> {
 	renderApp();
 
 	if (selectedRole) {
-		// Derive allowedTools from toolPolicies for backward compatibility:
-		// any tool NOT explicitly set to "never" is considered "allowed"
-		const allToolNames = availableTools.map(t => t.name);
-		const derivedAllowedTools = allToolNames.filter(name => {
-			const effective = resolveEffectivePolicy(name, availableTools.find(t => t.name === name)?.group || "Other");
-			return effective !== "never";
-		});
-
 		const ok = await updateRole(selectedRole.name, {
 			label: editLabel,
 			promptTemplate: editPrompt,
-			allowedTools: derivedAllowedTools,
 			accessory: editAccessory,
 			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : {},
 		});

@@ -1,16 +1,8 @@
 name: reviewer
 label: Reviewer
 accessory: magnifier
-allowedTools:
-  - read
-  - bash
-  - web_search
-  - web_fetch
-  - task_list
-  - task_update
 toolPolicies:
   edit: never
-_policyMigrated: true
 createdAt: 1773875507369
 updatedAt: 1774972321972
 promptTemplate: |

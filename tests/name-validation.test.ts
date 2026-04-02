@@ -134,9 +134,9 @@ describe("RoleManager", () => {
 			assert.equal(role.accessory, "none");
 		});
 
-		it("defaults allowedTools to empty array", () => {
+		it("defaults toolPolicies to undefined", () => {
 			const role = mgr.createRole({ name: "test-role", label: "Test", promptTemplate: "" });
-			assert.deepEqual(role.allowedTools, []);
+			assert.equal(role.toolPolicies, undefined);
 		});
 
 		it("defaults promptTemplate to empty string", () => {

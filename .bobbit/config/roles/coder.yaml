@@ -1,29 +1,7 @@
 name: coder
 label: Coder
 accessory: bandana
-allowedTools:
-  - read
-  - write
-  - edit
-  - bash
-  - web_search
-  - web_fetch
-  - task_list
-  - task_update
-  - delegate
-  - bash_bg
-  - browser_click
-  - browser_eval
-  - browser_navigate
-  - browser_screenshot
-  - browser_type
-  - browser_wait
-  - preview_open
-  - find
-  - grep
-  - ls
 toolPolicies: {}
-_policyMigrated: true
 createdAt: 1773875507369
 updatedAt: 1774972317496
 promptTemplate: |

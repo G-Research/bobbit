@@ -1,43 +1,18 @@
 name: team-lead
 label: Team Lead
 accessory: crown
-allowedTools:
-  - read
-  - write
-  - edit
-  - bash
-  - web_search
-  - web_fetch
-  - delegate
-  - team_spawn
-  - team_list
-  - team_dismiss
-  - team_complete
-  - personalities_list
-  - personalities_create
-  - task_list
-  - task_create
-  - task_update
-  - gate_list
-  - gate_status
-  - gate_signal
-  - browser_navigate
-  - browser_screenshot
-  - browser_click
-  - browser_type
-  - browser_eval
-  - browser_wait
-  - team_abort
-  - team_steer
-  - team_prompt
-  - bash_bg
-  - find
-  - grep
-  - ls
-toolPolicies: {}
-_policyMigrated: true
+toolPolicies:
+  edit: always-allow
+  find: always-allow
+  grep: always-allow
+  ls: always-allow
+  read: always-allow
+  write: always-allow
+  gate_list: always-allow
+  gate_signal: always-allow
+  gate_status: always-allow
 createdAt: 1773875507369
-updatedAt: 1774991292525
+updatedAt: 1775088361805
 promptTemplate: |
   You are the **Team Lead** (id: {{AGENT_ID}}) orchestrating a team of coding agents.
 

@@ -732,11 +732,15 @@ function rolePreviewPanel() {
 			.map((t) => t.trim())
 			.filter(Boolean);
 
+		// Convert tools list to toolPolicies (all explicitly listed tools get "allow")
+		const toolPolicies: Record<string, string> = {};
+		for (const t of toolsList) toolPolicies[t] = "allow";
+
 		await createRole({
 			name: trimmedName,
 			label: trimmedLabel,
 			promptTemplate: state.rolePreviewPrompt,
-			allowedTools: toolsList,
+			toolPolicies: Object.keys(toolPolicies).length > 0 ? toolPolicies : undefined,
 			accessory: state.rolePreviewAccessory,
 		});
 
