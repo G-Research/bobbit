@@ -8,6 +8,7 @@
 import { LitElement, html, nothing, type TemplateResult, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import "../../components/LiveTimer.js";
 import "../../components/VerificationOutputModal.js";
 import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
@@ -69,7 +70,7 @@ export class GateVerificationLive extends LitElement {
 	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
 	@state() private currentPhase = 0;
 	@state() private expandedSteps = new Set<number>();
-	@state() private modalStep: { index: number; name: string; output: string } | null = null;
+	@state() private modalStep: { index: number; name: string; output: string; type: string } | null = null;
 	/** Accumulated streamed output per step index */
 	private _stepOutputs = new Map<number, string>();
 
@@ -347,6 +348,7 @@ export class GateVerificationLive extends LitElement {
 					.signalId=${this.signalId}
 					.stepIndex=${this.modalStep.index}
 					.stepName=${this.modalStep.name}
+					.stepType=${this.modalStep.type}
 					.open=${true}
 					.initialOutput=${this.modalStep.output}
 					@close=${this._closeModal}
@@ -369,7 +371,8 @@ export class GateVerificationLive extends LitElement {
 
 	private _openModal(index: number, name: string) {
 		const output = this._stepOutputs.get(index) || this.steps[index]?.output || "";
-		this.modalStep = { index, name, output };
+		const stepType = this.steps[index]?.type || "";
+		this.modalStep = { index, name, output, type: stepType };
 	}
 
 	private _closeModal() {
@@ -409,9 +412,11 @@ export class GateVerificationLive extends LitElement {
 					${isRunningCommand ? html`<span class="text-muted-foreground text-[10px] shrink-0" title="View live output">▸</span>` : nothing}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
 				</div>
-				${isExpanded && step.output ? html`
-					<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>
-				` : nothing}
+				${isExpanded && step.output ? (
+				step.type !== "command"
+					? html`<div class="text-xs text-muted-foreground max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border"><markdown-block .content=${step.output}></markdown-block></div>`
+					: html`<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>`
+			) : nothing}
 			</div>
 		`;
 	}

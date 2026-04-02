@@ -6,6 +6,7 @@
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 
 interface OutputChunk {
@@ -22,6 +23,7 @@ export class VerificationOutputModal extends LitElement {
 	@property() stepName = "";
 	@property({ type: Boolean }) open = false;
 	@property() initialOutput = "";
+	@property() stepType = "";
 
 	@state() private _chunks: OutputChunk[] = [];
 	@state() private _completed = false;
@@ -161,12 +163,29 @@ export class VerificationOutputModal extends LitElement {
 						<button class="text-zinc-400 hover:text-zinc-200 transition-colors" style="font-size:18px;line-height:1;padding:2px 6px;" @click=${this._close} title="Close">\u2715</button>
 					</div>
 					<!-- Body -->
-					<pre class="verif-output-body flex-1 overflow-y-auto px-4 py-3 text-xs leading-relaxed"
-						style="background:#18181b;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;margin:0;white-space:pre-wrap;word-break:break-all;"
-						@scroll=${this._onScroll}>${this._renderOutput()}</pre>
+					${this._isAgentStep()
+						? html`<div class="verif-output-body flex-1 overflow-y-auto px-4 py-3 text-sm leading-relaxed"
+							style="background:#18181b;margin:0;color:#d4d4d8;"
+							@scroll=${this._onScroll}>${this._renderMarkdownOutput()}</div>`
+						: html`<pre class="verif-output-body flex-1 overflow-y-auto px-4 py-3 text-xs leading-relaxed"
+							style="background:#18181b;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;margin:0;white-space:pre-wrap;word-break:break-all;"
+							@scroll=${this._onScroll}>${this._renderOutput()}</pre>`
+					}
 				</div>
 			</div>
 		`;
+	}
+
+	private _isAgentStep(): boolean {
+		return this.stepType !== "" && this.stepType !== "command";
+	}
+
+	private _renderMarkdownOutput(): TemplateResult {
+		if (this._chunks.length === 0) {
+			return html`<span style="color:#71717a;">Waiting for output\u2026</span>`;
+		}
+		const joined = this._chunks.map(c => c.text).join("");
+		return html`<markdown-block .content=${joined}></markdown-block>`;
 	}
 
 	private _renderOutput(): TemplateResult {
