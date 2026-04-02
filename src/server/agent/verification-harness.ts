@@ -1349,8 +1349,11 @@ export class VerificationHarness {
 			return { passed: false, output: "Agent QA failed: no 'qa-tester', 'test-engineer', or 'reviewer' role found in role store.", sessionId };
 		}
 
-		// Build system prompt (dedicated QA prompt, not buildReviewPrompt)
-		const sections: string[] = ["You are a QA test engineer performing automated testing."];
+		// Build system prompt using the role's prompt template
+		const rolePrompt = role.promptTemplate
+			.replace(/\{\{GOAL_BRANCH\}\}/g, builtinVars.branch || "HEAD")
+			.replace(/\{\{AGENT_ID\}\}/g, role.name || "qa-tester");
+		const sections: string[] = [rolePrompt || "You are a QA tester performing automated testing."];
 		if (step.prompt) sections.push(`\n## Task\n\n${step.prompt}`);
 		if (goalSpec) sections.push(`\n## Goal Specification\n\n${goalSpec}`);
 		if (allGateStates) {
@@ -1390,9 +1393,10 @@ export class VerificationHarness {
 		let qaSessionId: string | undefined;
 		try {
 			// Create session via SessionManager
+			const qaRoleName = role.name || step.role || "qa-tester";
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
-				roleName: "test-engineer",
+				roleName: qaRoleName,
 				sandboxed: (goalId
 					? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 						?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
@@ -1402,11 +1406,12 @@ export class VerificationHarness {
 			qaSessionId = session.id;
 
 			// Set title and metadata
-			this.sessionManager!.setTitle(qaSessionId, `QA: ${step.name}`);
+			const qaRoleLabel = qaRoleName.charAt(0).toUpperCase() + qaRoleName.slice(1).replace(/-/g, " ");
+			this.sessionManager!.setTitle(qaSessionId, `${qaRoleLabel}: ${step.name}`);
 			this.sessionManager!.updateSessionMeta(qaSessionId, {
-				role: "test-engineer",
+				role: qaRoleName,
 				teamGoalId: goalId,
-				accessory: "test-tube",
+				accessory: role.accessory || "stamp",
 				nonInteractive: true,
 			});
 
