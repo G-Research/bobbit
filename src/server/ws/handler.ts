@@ -10,7 +10,27 @@ import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
+import { inferMeta } from "../agent/aigw-manager.js";
 // patchModelContextWindow removed — model-registry returns correct context windows via inferMeta()
+
+/** Send persisted model info as fallback when getState() is unavailable. */
+function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
+	const persisted = sessionManager.getPersistedSession(sessionId);
+	if (persisted?.modelProvider && persisted?.modelId) {
+		const meta = inferMeta(persisted.modelId);
+		send(ws, {
+			type: "state",
+			data: {
+				model: {
+					provider: persisted.modelProvider,
+					id: persisted.modelId,
+					contextWindow: meta.contextWindow,
+					maxTokens: meta.maxTokens,
+				}
+			}
+		});
+	}
+}
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
@@ -137,10 +157,20 @@ export function handleWebSocketConnection(
 				session.rpcClient.getState().then((stateResponse) => {
 					if (stateResponse.success) {
 						send(ws, { type: "state", data: stateResponse.data });
+						// If agent state lacks model info, supplement with persisted data
+						const data = stateResponse.data as Record<string, unknown> | undefined;
+						if (!data?.model) {
+							sendFallbackModelState(ws, sessionManager, sessionId);
+						}
+					} else {
+						sendFallbackModelState(ws, sessionManager, sessionId);
 					}
 				}).catch(() => {
-					// State not available yet — client will get events as they come
+					sendFallbackModelState(ws, sessionManager, sessionId);
 				});
+			} else {
+				// Session preparing or dormant — send persisted model info immediately
+				sendFallbackModelState(ws, sessionManager, sessionId);
 			}
 
 			// Notify other clients that a new device connected
@@ -320,9 +350,20 @@ export function handleWebSocketConnection(
 					});
 					break;
 				case "get_state": {
-					const stateResp = await session.rpcClient.getState();
-					if (stateResp.success) {
-						send(ws, { type: "state", data: stateResp.data });
+					try {
+						const stateResp = await session.rpcClient.getState();
+						if (stateResp.success) {
+							send(ws, { type: "state", data: stateResp.data });
+							// If agent state lacks model info, supplement with persisted data
+							const data = stateResp.data as Record<string, unknown> | undefined;
+							if (!data?.model) {
+								sendFallbackModelState(ws, sessionManager, sessionId);
+							}
+						} else {
+							sendFallbackModelState(ws, sessionManager, sessionId);
+						}
+					} catch {
+						sendFallbackModelState(ws, sessionManager, sessionId);
 					}
 					break;
 				}

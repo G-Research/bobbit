@@ -2788,6 +2788,11 @@ export class SessionManager {
 		return true;
 	}
 
+	/** Get persisted session metadata by ID (live or dormant). */
+	getPersistedSession(id: string): PersistedSession | undefined {
+		return this.resolveStoreForId(id).get(id);
+	}
+
 	/** Get an archived session's metadata. */
 	getArchivedSession(id: string): PersistedSession | undefined {
 		const ps = this.resolveStoreForId(id).get(id);
