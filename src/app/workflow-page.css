@@ -791,6 +791,129 @@
 }
 
 /* ============================================================================
+ * PHASE GROUPS
+ * ============================================================================ */
+
+.wf-phase-group {
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	overflow: hidden;
+}
+
+.wf-phase-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--muted-foreground);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	padding: 6px 8px;
+}
+
+.wf-phase-header::after {
+	content: "";
+	flex: 1;
+	height: 1px;
+	background: var(--border);
+}
+
+.wf-phase-body {
+	padding: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-height: 8px;
+}
+
+.wf-phase-empty-hint {
+	font-size: 11px;
+	color: var(--muted-foreground);
+	text-align: center;
+	padding: 8px 0;
+}
+
+.wf-phase-delete {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border: none;
+	background: none;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	border-radius: 4px;
+	flex-shrink: 0;
+	transition: color 150ms;
+}
+.wf-phase-delete:hover { color: var(--destructive); }
+
+.wf-phase-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.wf-add-phase-btn {
+	color: var(--muted-foreground);
+}
+
+/* ============================================================================
+ * VSTEP DRAG INDICATORS
+ * ============================================================================ */
+
+.wf-vstep-drop-indicator {
+	height: 2px;
+	background: var(--primary);
+	border-radius: 1px;
+	margin: -2px 0;
+	pointer-events: none;
+}
+
+.wf-vstep-card.vstep-dragging {
+	opacity: 0.4;
+}
+
+.wf-vstep-grip {
+	display: flex;
+	align-items: center;
+	color: var(--muted-foreground);
+	cursor: grab;
+	flex-shrink: 0;
+	opacity: 0.4;
+	transition: opacity 150ms;
+}
+.wf-vstep-collapsed-header:hover .wf-vstep-grip { opacity: 1; }
+
+@media (pointer: coarse) {
+	.wf-vstep-grip { cursor: grab; touch-action: none; }
+	.wf-vstep-collapsed-header { touch-action: pan-x; }
+}
+
+/* ============================================================================
+ * OPTIONAL / LABEL ROW
+ * ============================================================================ */
+
+.wf-vstep-optional-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.wf-vstep-optional-badge {
+	font-size: 9px;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: color-mix(in oklch, var(--muted-foreground) 12%, transparent);
+	color: var(--muted-foreground);
+	font-weight: 500;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+/* ============================================================================
  * RESPONSIVE
  * ============================================================================ */
 
