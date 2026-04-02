@@ -120,6 +120,11 @@ let expandedLiveStepKeys: Set<string> = new Set();
 let expandedArtifactKeys: Set<string> = new Set();
 let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; stepName: string; liveOutput: string } | null = null;
 
+/** Dashboard event WebSocket — receives gate verification events without a session */
+let dashboardWs: WebSocket | null = null;
+let dashboardWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let dashboardWsIntentionalClose = false;
+
 /** Current dashboard tab */
 let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
 
@@ -127,15 +132,70 @@ let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
 let roleDropdownOpen = false;
 
 // ============================================================================
+// DASHBOARD EVENT WEBSOCKET
+// ============================================================================
+
+function connectDashboardWs(): void {
+	dashboardWsIntentionalClose = false;
+	const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+	const wsUrl = `${protocol}//${location.host}/ws/viewer`;
+	const ws = new WebSocket(wsUrl);
+	dashboardWs = ws;
+
+	ws.addEventListener("open", () => {
+		const token = localStorage.getItem("gateway.token");
+		if (token) {
+			ws.send(JSON.stringify({ type: "auth", token }));
+		}
+	});
+
+	ws.addEventListener("message", (event) => {
+		try {
+			const msg = JSON.parse(event.data as string);
+			document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+		} catch {
+			// ignore unparseable messages
+		}
+	});
+
+	ws.addEventListener("close", () => {
+		if (dashboardWsIntentionalClose || !currentGoalId) return;
+		dashboardWsReconnectTimer = setTimeout(() => {
+			if (currentGoalId && !dashboardWsIntentionalClose) {
+				connectDashboardWs();
+			}
+		}, 3000);
+	});
+
+	ws.addEventListener("error", () => {
+		// The close event fires after error, which handles reconnection
+	});
+}
+
+function disconnectDashboardWs(): void {
+	dashboardWsIntentionalClose = true;
+	if (dashboardWsReconnectTimer != null) {
+		clearTimeout(dashboardWsReconnectTimer);
+		dashboardWsReconnectTimer = null;
+	}
+	if (dashboardWs && (dashboardWs.readyState === WebSocket.OPEN || dashboardWs.readyState === WebSocket.CONNECTING)) {
+		dashboardWs.close();
+	}
+	dashboardWs = null;
+}
+
+// ============================================================================
 // DATA FETCHING
 // ============================================================================
 
 export async function loadDashboardData(goalId: string): Promise<void> {
+	disconnectDashboardWs();
 	currentGoalId = goalId;
 	loading = true;
 	error = "";
 	renderApp();
 
+	connectDashboardWs();
 	document.addEventListener("gate-verification-event", handleLiveVerificationEvent);
 	startAgentPolling(goalId);
 	startTaskPolling(goalId);
@@ -264,6 +324,7 @@ async function fetchActiveVerifications(goalId: string): Promise<void> {
 }
 
 export function clearDashboardState(): void {
+	disconnectDashboardWs();
 	currentGoalId = null;
 	currentGoal = null;
 	tasks = [];
@@ -1857,10 +1918,9 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 								${isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
 							</span>
 							${step.sessionId ? html`
-								<a href="/?token=${encodeURIComponent(localStorage.getItem("gateway.token") || "")}#/session/${step.sessionId}"
-								   target="_blank" rel="noopener"
+								<a href="#/session/${step.sessionId}"
 								   class="verify-card__session-link" title="View live logs"
-								   @click=${(e: Event) => e.stopPropagation()}>view</a>
+								   @click=${(e: Event) => { e.preventDefault(); e.stopPropagation(); location.hash = '#/session/' + step.sessionId; }}>view</a>
 							` : nothing}
 							${isRunningCmd ? html`<span class="verify-card__expand" title="View live output">▸</span>` : nothing}
 							${hasOutput ? html`<span class="verify-card__expand">${isExpanded ? "\u25B4" : "\u25BE"}</span>` : nothing}
