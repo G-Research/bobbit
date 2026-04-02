@@ -36,7 +36,8 @@ export type ClientMessage =
 	| { type: "task_update"; taskId: string; updates: { title?: string; spec?: string; state?: string; assignedSessionId?: string; dependsOn?: string[] } }
 	| { type: "task_delete"; taskId: string }
 	| { type: "summarize_goal_title"; goalTitle: string }
-	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" };
+	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" }
+	| { type: "deny_tool_permission"; toolName: string };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =

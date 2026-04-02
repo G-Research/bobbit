@@ -1076,6 +1076,7 @@ async function handleApiRoute(
 	// POST /api/sessions/:id/tool-grant-request — long-polling endpoint called by guard extension
 	const toolGrantMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-grant-request$/);
 	if (toolGrantMatch && req.method === "POST") {
+
 		const sessionId = toolGrantMatch[1];
 		const body = await readBody(req);
 		if (!body || !body.toolName || !body.toolGroup) {

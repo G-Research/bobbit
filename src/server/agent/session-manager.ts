@@ -544,8 +544,8 @@ export class SessionManager {
 	}
 
 	/** Build tool restrictions text including available-but-ungranted tools (MCP + builtin/extension).
-	 *  Only tools with `ask-once` or `always-ask` policy are listed — `never-ask`/`never` are hidden,
-	 *  and `always-allow` tools should already be in allowedTools. */
+	 *  Only tools with `ask` policy are listed — `never` tools are hidden,
+	 *  and `allow` tools should already be in allowedTools. */
 	private buildToolRestrictionsText(allowedTools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }): string {
 		const toolList = allowedTools.join(", ");
 		let text = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools that are not listed above or mentioned below.`;
@@ -598,12 +598,12 @@ export class SessionManager {
 	/**
 	 * Resolve the effective allowed tools for a role.
 	 * If the role has explicit allowedTools, use those.
-	 * Otherwise, compute from the full policy cascade (honouring the always-allow default).
+	 * Otherwise, compute from the full policy cascade (honouring the allow default).
 	 */
 	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): string[] {
 		if (!role) return [];
 		if (role.allowedTools.length > 0) return role.allowedTools;
-		// Sparse toolPolicies — use the full cascade so system default (always-allow) applies
+		// Sparse toolPolicies — use the full cascade so system default (allow) applies
 		if (this.toolManager) {
 			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
 		}
@@ -1082,7 +1082,7 @@ export class SessionManager {
 			// Persistent grant (default): update toolPolicies on role YAML (allowedTools is derived automatically)
 			const updatedPolicies = { ...role.toolPolicies };
 			for (const t of newTools) {
-				updatedPolicies[t] = 'always-allow' as GrantPolicy;
+				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
 			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
 			// Re-read role to get updated derived allowedTools
@@ -1136,6 +1136,20 @@ export class SessionManager {
 		});
 
 		return promise;
+	}
+
+	/**
+	 * Called when the user clicks "Deny" in the UI grant dialog.
+	 * Resolves the pending grant request with `{ granted: false }` so the
+	 * guard extension's long-poll returns immediately instead of waiting 5 min.
+	 */
+	denyToolPermission(sessionId: string, _toolName: string): void {
+		const session = this.sessions.get(sessionId);
+		if (!session?.pendingGrantRequest) return;
+		clearTimeout(session.pendingGrantRequest.timer);
+		const pending = session.pendingGrantRequest;
+		session.pendingGrantRequest = undefined;
+		pending.resolve({ granted: false });
 	}
 
 	/**
@@ -2658,6 +2672,13 @@ export class SessionManager {
 			if (ps.delegateOf === id && !this.sessions.has(ps.id)) {
 				this.getSessionStore(ps.projectId).archive(ps.id);
 			}
+		}
+
+		// Resolve any pending grant request so the guard's long-poll returns immediately
+		if (session.pendingGrantRequest) {
+			clearTimeout(session.pendingGrantRequest.timer);
+			session.pendingGrantRequest.resolve({ granted: false });
+			session.pendingGrantRequest = undefined;
 		}
 
 		session.unsubscribe();

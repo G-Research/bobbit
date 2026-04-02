@@ -515,19 +515,18 @@ export class RemoteAgent {
 	/** Pending prompt text to replay after a tool permission grant restarts the session */
 	private _pendingGrantReplay?: string;
 
-	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, grantPolicy?: string): void {
+	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time"): void {
 		// Save the prompt to replay after the session restarts with the new tool
 		this._pendingGrantReplay = lastPromptText;
-
-		let mode: "persistent" | "session-only" | "one-time" | undefined;
-		if (grantPolicy === "always-ask") mode = "one-time";
-		else if (grantPolicy === "ask-once") mode = "session-only";
-		// else (null, undefined, ""): no mode → server defaults to "persistent" (current behavior)
 
 		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
 	}
 
-	denyToolPermission(messageId: string): void {
+	denyToolPermission(messageId: string, toolName?: string): void {
+		// Notify the server so the guard extension's long-poll resolves immediately
+		if (toolName) {
+			this.send({ type: "deny_tool_permission", toolName });
+		}
 		// Remove the tool_permission_needed message from state
 		this._state.messages = this._state.messages.filter((m: any) => m.id !== messageId);
 		this.emit({ type: "render" });
@@ -824,7 +823,6 @@ export class RemoteAgent {
 					roleName: perm.roleName,
 					roleLabel: perm.roleLabel,
 					lastPromptText: perm.lastPromptText,
-					grantPolicy: perm.grantPolicy,  // pass through from server
 					timestamp: Date.now(),
 					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
 				} as any];

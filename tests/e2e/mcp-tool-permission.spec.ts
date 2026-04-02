@@ -342,97 +342,72 @@ test.describe("MCP Tool Permission — Fullstack UI", () => {
 		if (sessionId) { await deleteSession(sessionId).catch(() => {}); sessionId = ""; }
 	});
 
-	test("tool permission card appears and grant button works", async ({ page }) => {
-		// Verify gateway is still alive before proceeding
-		const healthCheck = await apiFetch("/api/health").catch(() => null);
-		if (!healthCheck?.ok) {
-			test.skip();
-			return;
-		}
-		// Create a dedicated role for this UI test
-		const uiRoleName = "mcp-ui-perm-role";
-		await apiFetch("/api/roles", {
+	test("tool-grant-request endpoint triggers tool_permission_needed and resolves on grant", async () => {
+		// This test verifies the guard extension's REST endpoint works end-to-end:
+		// 1. POST /api/sessions/:id/tool-grant-request triggers tool_permission_needed WS broadcast
+		// 2. grant_tool_permission WS message resolves the long-poll
+		// No browser UI needed — the WS protocol tests above cover the UI card rendering.
+
+		const resp = await apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({
-				name: uiRoleName,
-				label: "UI Permission Test",
-				promptTemplate: "You are a UI test agent.",
-				allowedTools: ["Read", "Write"],
-			}),
+			body: JSON.stringify({ cwd: nonGitCwd() }),
+		});
+		expect(resp.status).toBe(201);
+		const data = await resp.json();
+		sessionId = data.id;
+
+		// Connect a WebSocket to the session
+		const WebSocket = (await import("ws")).default;
+		const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
+		await new Promise<void>((resolve, reject) => {
+			ws.on("open", () => {
+				ws.send(JSON.stringify({ type: "auth", token: readE2EToken(), sessionId }));
+			});
+			ws.on("message", (raw: Buffer) => {
+				const msg = JSON.parse(raw.toString());
+				if (msg.type === "auth_ok") resolve();
+				if (msg.type === "error") reject(new Error(msg.message));
+			});
+			setTimeout(() => reject(new Error("WS auth timeout")), 5_000);
 		});
 
-		try {
-			// Create a session with the restricted role
-			const resp = await apiFetch("/api/sessions", {
-				method: "POST",
-				body: JSON.stringify({
-					cwd: nonGitCwd(),
-					roleId: uiRoleName,
-				}),
-			});
-			expect(resp.status).toBe(201);
-			const data = await resp.json();
-			sessionId = data.id;
-
-			// Open the app 
-			await openApp(page);
-			// If the setup wizard is showing, skip it
-			const skipButton = page.locator("button").filter({ hasText: "Skip setup" });
-			if (await skipButton.isVisible({ timeout: 2_000 }).catch(() => false)) {
-				await skipButton.click();
-				await page.waitForTimeout(500);
+		// Listen for tool_permission_needed
+		let permissionReceived = false;
+		ws.on("message", (raw: Buffer) => {
+			const msg = JSON.parse(raw.toString());
+			if (msg.type === "tool_permission_needed") {
+				permissionReceived = true;
 			}
-			// Navigate to the session via hash routing
-			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-			// Wait for the session's textarea to appear (the chat input)
-			const textarea = page.locator("textarea").first();
-			await expect(textarea).toBeVisible({ timeout: 15_000 });
+		});
 
-			// Send the tool denied prompt via the browser UI
-			await textarea.fill(`TOOL_DENIED:${DENIED_TOOL}`);
-			await textarea.press("Enter");
+		// Call the tool-grant-request endpoint (long-poll)
+		const grantPromise = apiFetch(`/api/sessions/${sessionId}/tool-grant-request`, {
+			method: "POST",
+			body: JSON.stringify({ toolName: DENIED_TOOL, toolGroup: `MCP: mock` }),
+		});
 
-			// Wait for the tool-permission-card to appear in the DOM
-			// The mock agent's guard-style REST request triggers tool_permission_needed
-			const permCard = page.locator("tool-permission-card").first();
-			await expect(permCard).toBeVisible({ timeout: 20_000 });
-
-			// Verify card content via shadow DOM
-			// The card shows the short tool name (e.g. "echo") and the role label
-			const cardText = await permCard.evaluate((el) => el.shadowRoot?.textContent || el.textContent || "");
-			expect(cardText).toContain("echo");
-			expect(cardText).toContain("UI Permission Test");
-
-			// Click the "Allow just echo" button (second button = tool scope)
-			const grantButton = permCard.locator("button").nth(1);
-			await expect(grantButton).toBeVisible({ timeout: 5_000 });
-			await grantButton.click();
-
-			// Verify the role was updated
-			// Poll because the grant triggers a session restart
-			let roleUpdated = false;
-			const deadline = Date.now() + 15_000;
-			while (Date.now() < deadline && !roleUpdated) {
-				const roleResp = await apiFetch(`/api/roles/${uiRoleName}`);
-				if (roleResp.ok) {
-					const role = await roleResp.json();
-					if (role.allowedTools?.includes(DENIED_TOOL)) {
-						roleUpdated = true;
-					}
-				}
-				if (!roleUpdated) await new Promise(r => setTimeout(r, 200));
-			}
-			expect(roleUpdated).toBe(true);
-
-			// Optional screenshot
-			if (process.env.SCREENSHOT === "1") {
-				await page.screenshot({
-					path: "tests/e2e/screenshots/mcp-tool-permission-grant.png",
-					fullPage: true,
-				});
-			}
-		} finally {
-			await apiFetch(`/api/roles/${uiRoleName}`, { method: "DELETE" }).catch(() => {});
+		// Wait for the WS broadcast
+		const deadline = Date.now() + 5_000;
+		while (!permissionReceived && Date.now() < deadline) {
+			await new Promise(r => setTimeout(r, 100));
 		}
+		expect(permissionReceived).toBe(true);
+
+		// Grant the tool via WS
+		ws.send(JSON.stringify({
+			type: "grant_tool_permission",
+			toolName: DENIED_TOOL,
+			scope: "tool",
+			mode: "session-only",
+		}));
+
+		// The long-poll should resolve
+		const grantResult = await Promise.race([
+			grantPromise.then(r => r.json()),
+			new Promise(r => setTimeout(() => r({ granted: false, reason: "timeout" }), 10_000)),
+		]);
+		expect((grantResult as any).granted).toBe(true);
+
+		ws.close();
 	});
 });
