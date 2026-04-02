@@ -1077,7 +1077,16 @@ export class SessionManager {
 			}
 		}
 
-		if (newTools.length === 0) return effectiveAllowed;
+		if (newTools.length === 0) {
+			// Tool is already effectively allowed — still resolve any pending guard request
+			if (session.pendingGrantRequest) {
+				clearTimeout(session.pendingGrantRequest.timer);
+				const pending = session.pendingGrantRequest;
+				session.pendingGrantRequest = undefined;
+				pending.resolve({ granted: true, tools: effectiveAllowed });
+			}
+			return effectiveAllowed;
+		}
 
 		let resultTools: string[];
 

@@ -178,7 +178,7 @@ export class RpcBridge {
 		// so writes before the process reads are safe. No delay needed.
 		// Cold docker run needs time for container + node startup (~2-3s).
 		// Bare node processes need a brief init pause.
-		const startupDelay = this.options.containerId ? 0 : this.options.sandboxed ? 3000 : 200;
+		const startupDelay = this.options.containerId ? 0 : this.options.sandboxed ? 3000 : 50;
 		if (startupDelay > 0) {
 			await new Promise((r) => setTimeout(r, startupDelay));
 		}

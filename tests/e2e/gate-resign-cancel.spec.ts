@@ -30,7 +30,7 @@ async function createSlowWorkflow(): Promise<void> {
 							name: "Slow check",
 							type: "command",
 							// 5-second sleep — long enough to re-signal before it finishes
-							run: 'node -e "setTimeout(()=>{console.log(\'done\');process.exit(0)},5000)"',
+							run: 'node -e "setTimeout(()=>{console.log(\'done\');process.exit(0)},2000)"',
 						},
 					],
 				},
@@ -75,7 +75,7 @@ async function pollUntil<T>(
 	fn: () => Promise<T>,
 	pred: (val: T) => boolean,
 	timeoutMs = 20000,
-	intervalMs = 300,
+	intervalMs = 100,
 ): Promise<T> {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
@@ -234,7 +234,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 		expect(s1Res.status).toBe(201);
 
 		// Wait for verification to start
-		await new Promise(r => setTimeout(r, 500));
+		await new Promise(r => setTimeout(r, 200));
 
 		// Signal 2 (cancels signal 1)
 		const s2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
@@ -244,7 +244,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 		expect(s2Res.status).toBe(201);
 
 		// Wait briefly
-		await new Promise(r => setTimeout(r, 500));
+		await new Promise(r => setTimeout(r, 200));
 
 		// Signal 3 (cancels signal 2)
 		const s3Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {

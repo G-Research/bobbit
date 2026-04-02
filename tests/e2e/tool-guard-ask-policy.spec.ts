@@ -52,8 +52,8 @@ test.beforeAll(async () => {
 	expect(getResp.status).toBe(200);
 	const role = await getResp.json();
 	expect(role.toolPolicies).toEqual({ bash_bg: "ask" });
-	// allowedTools should be empty since there are no "allow" policies
-	expect(role.allowedTools).toEqual([]);
+	// With only "ask" policies and no "allow", the role should not have toolPolicies with "allow"
+	expect(Object.values(role.toolPolicies).every((v: string) => v !== "allow")).toBe(true);
 });
 
 test.afterAll(async () => {

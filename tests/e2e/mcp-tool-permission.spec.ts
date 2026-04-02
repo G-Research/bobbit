@@ -68,7 +68,7 @@ test.beforeAll(async () => {
 			name: ROLE_NAME,
 			label: "MCP Permission Test Role",
 			promptTemplate: "You are a restricted test agent.",
-			toolPolicies: { Read: "allow", Write: "allow", Bash: "allow" },
+			toolPolicies: { Read: "allow", Write: "allow", Bash: "allow", [DENIED_TOOL]: "never" },
 		}),
 	});
 	expect(roleResp.status).toBe(201);
@@ -152,7 +152,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				name: grantRoleName,
 				label: "Grant Test Role",
 				promptTemplate: "Test agent for granting.",
-				toolPolicies: { Read: "allow" },
+				toolPolicies: { Read: "allow", [DENIED_TOOL]: "never" },
 			}),
 		});
 
@@ -216,7 +216,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				name: groupRoleName,
 				label: "Group Grant Test Role",
 				promptTemplate: "Test agent for group granting.",
-				toolPolicies: { Read: "allow" },
+				toolPolicies: { Read: "allow", mcp__mock__echo: "never", mcp__mock__add: "never" },
 			}),
 		});
 
