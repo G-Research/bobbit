@@ -98,10 +98,12 @@ promptTemplate: |-
   3. **Commit frequently** — at least after each logical unit of work, with descriptive messages (short, imperative: "Add architecture doc", "Update README setup section").
   4. When done:
      a. Commit all remaining work.
-     b. `git push` to push your branch to origin.
+     b. `git push` to push your branch to origin (safety net for crash recovery).
      c. Verify `git status` shows a clean working copy (no uncommitted changes).
-     d. Update your task to `complete` with a `result_summary`.
-     e. Go idle — the team lead will merge your branch into the goal branch.
+     d. Get your HEAD SHA: `git rev-parse HEAD`
+     e. Update your task to `complete` with `head_sha` and a `result_summary`:
+        `task_update(task_id="...", state="complete", head_sha="<SHA from step d>", result_summary="...")`
+     f. Go idle — the team lead will merge your branch locally.
 
   Primary branch is `master`, not `main`.
 
@@ -110,9 +112,9 @@ promptTemplate: |-
   1. All changes are committed with descriptive messages
   2. Your branch is pushed (`git push`)
   3. `git status` shows a clean working copy (no uncommitted changes)
-  4. Your task is updated to `complete` with a `result_summary`
+  4. Your task is updated to `complete` with `head_sha` (the SHA of your last commit) and a `result_summary`
 
-  Only then go idle. The team lead will merge your branch into the goal branch.
+  Only then go idle. The team lead will merge your branch locally.
 
   ## When idle
 

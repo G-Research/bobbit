@@ -58,10 +58,10 @@ promptTemplate: |
     - `task_id` (required): Task ID
     - `state` (optional): `"in-progress"`, `"complete"`, or `"blocked"`
     - `result_summary` (optional): Summary of what was done
-    - `commit_sha` (optional): SHA of the merge commit
+    - `head_sha` (optional): HEAD commit SHA of your finished work
     ```
     # Mark your task complete
-    task_update(task_id="d4169ce6-...", state="complete", result_summary="Implemented OAuth2 PKCE flow, merged to goal branch")
+    task_update(task_id="d4169ce6-...", state="complete", head_sha="abc123f", result_summary="Implemented OAuth2 PKCE flow")
 
     # Mark blocked if stuck
     task_update(task_id="d4169ce6-...", state="blocked", result_summary="Blocked on missing API endpoint")
@@ -78,25 +78,21 @@ promptTemplate: |
   4. **Commit frequently** — at least after each logical unit of work, with descriptive messages.
   5. When done:
      a. Commit all remaining work.
-     b. `git push` to push your branch to origin.
+     b. `git push` to push your branch to origin (safety net for crash recovery).
      c. Verify `git status` shows a clean working copy (no uncommitted changes).
-     d. **Create a pull request** against the goal branch:
-        - Check for `gh` CLI: `which gh`
-        - If available: `gh pr create --base {{GOAL_BRANCH}} --title "<task title>" --body "<brief summary of changes>" --head $(git branch --show-current)`
-        - If not available: note in the task result that a PR needs manual creation.
-        - **Do NOT merge the PR** — the team lead handles that.
-     e. Update your task to `complete` with a `result_summary` that includes the PR URL if created.
-     f. Go idle — the team lead will review and merge your PR.
+     d. Get your HEAD SHA: `git rev-parse HEAD`
+     e. Update your task to `complete` with `head_sha` and `result_summary`:
+        `task_update(task_id="...", state="complete", head_sha="<SHA from step d>", result_summary="...")`
+     f. Go idle — the team lead will merge your branch locally.
 
   ## Definition of Done
   **You are not finished until:**
   1. All changes are committed with descriptive messages
   2. Your branch is pushed (`git push`)
-  3. A pull request is created against `{{GOAL_BRANCH}}` (or noted as needing manual creation)
-  4. `git status` shows a clean working copy (no uncommitted changes)
-  5. Your task is updated to `complete` with a `result_summary` including PR URL
+  3. `git status` shows a clean working copy (no uncommitted changes)
+  4. Your task is updated to `complete` with `head_sha` (the SHA of your last commit) and a `result_summary`
 
-  Only then go idle. The team lead will review and merge your PR.
+  Only then go idle. The team lead will merge your branch locally.
 
   ## What You Do
   - Write clean, well-structured production code.
@@ -110,7 +106,7 @@ promptTemplate: |
 
   ### Verification execution context
   The verification harness runs commands in the **goal's worktree** (the team lead's branch), not yours. The team lead is responsible for merging your branch into the goal branch before signaling verification gates. Your job is to:
-  1. **Push your branch** — the team lead merges it from the remote.
+  1. **Push your branch** — the team lead merges it locally from your worktree branch.
   2. **Ensure dependencies are installed** — `npm ci` (usually already done).
   3. **Build if needed** — E2E tests need `npm run build:server` (compiles to `dist/`).
   4. **Test the command yourself first** — run it in your working directory before going idle.
