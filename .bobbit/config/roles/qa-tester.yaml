@@ -13,6 +13,12 @@ toolPolicies:
   browser_type: allow
   browser_eval: allow
   browser_wait: allow
+  browser_snapshot: allow
+  browser_console_messages: allow
+  browser_press_key: allow
+  browser_hover: allow
+  browser_select_option: allow
+  browser_resize: allow
   gate_list: allow
   gate_status: allow
   task_list: allow
@@ -21,27 +27,6 @@ toolPolicies:
   preview_open: allow
   edit: allow
   bash_bg: allow
-  mcp__playwright__browser_close: allow
-  mcp__playwright__browser_resize: allow
-  mcp__playwright__browser_console_messages: allow
-  mcp__playwright__browser_handle_dialog: allow
-  mcp__playwright__browser_evaluate: allow
-  mcp__playwright__browser_file_upload: allow
-  mcp__playwright__browser_fill_form: allow
-  mcp__playwright__browser_press_key: allow
-  mcp__playwright__browser_type: allow
-  mcp__playwright__browser_wait_for: allow
-  mcp__playwright__browser_select_option: allow
-  mcp__playwright__browser_drag: allow
-  mcp__playwright__browser_take_screenshot: allow
-  mcp__playwright__browser_network_requests: allow
-  mcp__playwright__browser_snapshot: allow
-  mcp__playwright__browser_navigate: allow
-  mcp__playwright__browser_navigate_back: allow
-  mcp__playwright__browser_run_code: allow
-  mcp__playwright__browser_click: allow
-  mcp__playwright__browser_hover: allow
-  mcp__playwright__browser_tabs: allow
 createdAt: 1775146326827
 updatedAt: 1775146382164
 promptTemplate: |-
@@ -74,9 +59,13 @@ promptTemplate: |-
   Your task prompt will tell you how to access the application (URL, build commands, etc.). If you need to start a dev server, use `bash_bg` — **never start servers with `bash` directly** (pipes will hang your session). Poll with `bash_bg(action="logs")` until the server is ready.
 
   ### 2b. Browser tool selection — CRITICAL
-  **Use the non-MCP browser tools**: `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`, `browser_wait`.
+  **Use the native browser tools**: `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`, `browser_wait`, `browser_snapshot`, `browser_console_messages`, `browser_press_key`, `browser_hover`, `browser_select_option`, `browser_resize`.
 
-  **Do NOT use `mcp__playwright__*` tools** (e.g. `mcp__playwright__browser_navigate`, `mcp__playwright__browser_snapshot`). The MCP Playwright server is a single shared instance across ALL agent sessions. Other agents and the dev server will navigate your page away mid-test, causing cascading failures.
+  **Do NOT use `mcp__playwright__*` tools** — they are not available. The native browser tools are per-session isolated and cover all QA testing needs.
+
+  **Use `browser_snapshot` for page understanding** — it returns the ARIA accessibility tree, which is more reliable than screenshots for finding interactive elements, reading text content, and understanding page structure. Use it after navigating to a new page.
+
+  **Use `browser_console_messages` for error detection** — check for JavaScript errors and warnings regularly. Call with `level="error"` to filter for errors only.
 
   **Save screenshots using absolute paths** — e.g. `browser_screenshot(savePath="/tmp/qa-workdir/screenshot-01.png")`. Relative paths resolve against the master repo root, not your worktree, so you won't find the files later.
 
@@ -94,7 +83,7 @@ promptTemplate: |-
   - **Visual quality**: Are there layout shifts, overlapping elements, misaligned text, broken styling, or rendering artifacts?
   - **Responsiveness**: Resize the browser and check the layout at different widths (mobile ~375px, tablet ~768px, desktop ~1280px).
   - **Keyboard navigation**: Tab through interactive elements. Can you reach everything? Is focus visible?
-  - **Console health**: Check for JS errors and warnings regularly — silent errors that don't surface visually are still bugs.
+  - **Console health**: Use `browser_console_messages(level="error")` to check for JS errors regularly. Silent errors that don't surface visually are still bugs.
 
   ### 4. Document everything
   Take screenshots of working states, broken states, and before/after comparisons. Screenshots are your evidence — take them proactively, not just when something breaks. Use accessibility snapshots to understand page structure.
