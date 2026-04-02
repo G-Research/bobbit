@@ -13,7 +13,7 @@ npm start              # Run built gateway (serves embedded UI)
 npm run check          # Type-check both server and web without emitting
 npm test               # Run all tests (unit + E2E)
 npm run test:unit      # Unit tests — Node test runner + Playwright file:// fixtures (<30s)
-npm run test:e2e       # E2E tests — each worker spawns its own gateway (<90s)
+npm run test:e2e       # E2E tests — API (in-process) + browser (spawned gateway)
 ```
 
 ### Dev server harness
@@ -31,7 +31,7 @@ See [docs/dev-workflow.md](docs/dev-workflow.md) for the full guide.
 ```bash
 npm run check                    # Type-check first
 npm run test:unit 2>&1 | tail -5 # Unit tests (<30s, no server)
-npm run test:e2e 2>&1 | tail -5  # E2E tests (<90s, spawns gateways)
+npm run test:e2e 2>&1 | tail -5  # E2E tests (API in-process + browser spawned)
 ```
 
 Test filter flags: `--failures` (default), `--verbose`, `--full`.
@@ -40,8 +40,9 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Test types:**
 - **Unit** (`tests/*.spec.ts`, `tests/*.test.ts`): Playwright `file://` fixtures + Node test runner. See `mobile-header.spec.ts`.
-- **E2E** (`tests/e2e/*.spec.ts`): Import `test` from `./gateway-harness.js` for auto-started gateway per worker. See `session-lifecycle-ui.spec.ts` for fullstack pattern.
-- **UI E2E** (`tests/e2e/ui/*.spec.ts`): Browser-based fullstack tests that exercise user journeys (click buttons, fill forms, verify outcomes) through UI → WebSocket → server → mock agent → UI. Covers project management, goal creation, team lifecycle, session interactions, navigation, and settings. Run with: `npx playwright test --config playwright-e2e.config.ts tests/e2e/ui/`
+- **API E2E** (`tests/e2e/*.spec.ts`): Import `test` from `./in-process-harness.js` — the gateway runs in the same Node process (no child process spawn). Covers HTTP/WS API tests, CRUD, agent protocol, etc. Runs as the `api` project in `playwright-e2e.config.ts` with 4 workers.
+- **Browser E2E** (`tests/e2e/ui/*.spec.ts` + select non-ui files): Import `test` from `./gateway-harness.js` — spawns a real gateway child process. Used for tests that need a browser (`page` fixture), MCP integration, or process-level behavior (port allocation, localhost auth bypass). Runs as the `browser` project with 2 workers.
+- **UI E2E** (`tests/e2e/ui/*.spec.ts`): A subset of browser E2E — fullstack tests that exercise user journeys (click buttons, fill forms, verify outcomes) through UI → WebSocket → server → mock agent → UI. Covers project management, goal creation, team lifecycle, session interactions, navigation, and settings. Run with: `npx playwright test --config playwright-e2e.config.ts --project browser tests/e2e/ui/`
 
 **UI E2E page-object helpers** (`tests/e2e/ui/ui-helpers.ts`): Reusable helpers for browser tests. Import from `./ui-helpers.js`:
 - `openApp(page)` — navigate with token auth, wait for sidebar to load
@@ -56,13 +57,19 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Mock agent keywords**: The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `<goal_proposal>` XML block response (includes `<options>QA testing</options>`) — used to test the goal assistant flow without a real LLM.
 
+**Choosing a harness for new E2E tests:**
+- **`in-process-harness.js`** — Default for API-only tests (no browser, no MCP, no process-level behavior). Faster startup (~2s vs ~5-8s per worker).
+- **`gateway-harness.js`** — Required when the test uses a `page` fixture (browser), needs MCP servers enabled, or tests process-level behavior (port allocation, auth bypass).
+
 **Rules:**
-- All tests run in isolation. E2E tests get unique `BOBBIT_DIR` (`.e2e-worker-<port>/`).
+- All tests run in isolation. In-process tests get `.e2e-inproc-<N>/`; spawned-gateway tests get `.e2e-worker-<port>/`.
 - Never read/write `.bobbit/` in tests — use isolated directory from `e2e-setup.ts`.
 - **Never start background servers from bash** (`node server.js &`) — pipes hang the agent session. Use Playwright `webServer` config.
 - Prefer `file://` fixtures for new tests. Use E2E only when you need a real server.
 
 ## Recipes
+
+**Add an API E2E test**: Create a `.spec.ts` file in `tests/e2e/`. Import `test, expect` from `./in-process-harness.js` and API helpers from `./e2e-setup.js`. The in-process harness starts the gateway in the same Node process — no child process spawn, no browser. Pattern: call REST/WS APIs via helpers → assert responses. See `gates-api.spec.ts` for a simple example.
 
 **Add a UI E2E test**: Create a `.spec.ts` file in `tests/e2e/ui/`. Import `test, expect` from `../gateway-harness.js`, API helpers from `../e2e-setup.js`, and page helpers from `./ui-helpers.js`. Use `openApp(page)` to authenticate, page-object helpers for interactions, and API helpers for setup/teardown. See `session-interactions.spec.ts` for a simple example. Pattern: create state via API → interact via browser → assert via UI or API. Never use `setTimeout` — use Playwright's built-in waiting.
 
@@ -104,7 +111,7 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Manage config directories**: Settings → Config Directories tab, or `config_directories` in `project.yaml`. Config directories are scoped per-project — each project's `config_directories` affects only that project's sessions for skills, MCP servers, and agent files. See @docs/internals.md#config-scan-directories.
 
-**Add QA testing to a project**: Add `qa_*` keys to `project.yaml` — at minimum `qa_start_command` (how to start an isolated server). The `/qa-test` slash skill reads these keys and orchestrates the ephemeral environment lifecycle. QA testing can run two ways: as a standalone `qa-testing` gate (team lead spawns a test-engineer), or as an optional `agent-qa` verification step on the implementation gate (enabled per-goal via toggle). See [docs/qa-testing.md](docs/qa-testing.md) for full config reference and protocol details.
+**Add QA testing to a project**: Add `qa_*` keys to `project.yaml` — at minimum `qa_start_command` (how to start an isolated server). The `/qa-test` slash skill reads these keys and orchestrates the ephemeral environment lifecycle. QA testing runs as an optional `agent-qa` verification step on the implementation gate (enabled per-goal via toggle). See [docs/qa-testing.md](docs/qa-testing.md) for full config reference and protocol details.
 
 ## Debugging
 
@@ -120,7 +127,7 @@ Quick pointers for the most common issues:
 - **Search**: Each project has its own `<project-root>/.bobbit/state/search.db`. Delete and restart to rebuild. Searches aggregate across all project indexes. See @docs/debugging.md#search-index for full checklist.
 - **Gates**: Check `GET /api/goals/:id/gates` for dependency state. Check `GET /api/goals/:id/verifications/active` for in-flight verification with phase progression. Steps may show `"skipped"` status if an earlier phase failed or if an optional step is not enabled for the goal. If the verification output modal is empty, check that the `/ws/viewer` WebSocket is connected (browser DevTools → Network → WS tab). See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md#phased-verification) for phased execution details.
 - **Multi-project / per-project state**: Each project stores its own state in `<project-root>/.bobbit/state/` (goals, sessions, tasks, teams, gates, staff, search index, costs). The server aggregates via `ProjectContextManager`. Check `GET /api/projects` for registered projects. Sessions/goals/staff carry optional `projectId`; filter with `?projectId=` on list endpoints. Config directories (MCP servers, skills, AGENTS.md/agent files) are resolved per-project through each project's `config_directories` setting. Per-project config: `GET /api/projects/:id/config/resolved` shows resolved values with source. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
-- **QA testing**: Check `qa_*` keys in project.yaml. The `/qa-test` skill requires `qa_start_command` at minimum. QA can run as a standalone gate (team lead spawns test-engineer) or as an `agent-qa` verification step on the implementation gate. See [docs/qa-testing.md](docs/qa-testing.md).
+- **QA testing**: Check `qa_*` keys in project.yaml. The `/qa-test` skill requires `qa_start_command` at minimum. QA runs as an `agent-qa` verification step on the implementation gate. See [docs/qa-testing.md](docs/qa-testing.md).
 - **State migration**: On first startup after upgrade, centralized state files are distributed to per-project dirs based on `projectId` tags. Central files renamed with `.pre-migration` suffix. Check for `.bobbit/state/.migrated-to-per-project` marker. See @docs/internals.md#state-migration for details.
 
 ## Git conventions

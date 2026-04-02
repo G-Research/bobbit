@@ -7,7 +7,7 @@
  * returns agent state without model metadata, and no fallback using
  * persisted session data is sent.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import {
 	createSession,
 	connectWs,

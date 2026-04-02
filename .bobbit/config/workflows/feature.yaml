@@ -114,34 +114,9 @@ gates:
           1. A <verdict>pass</verdict> or <verdict>fail</verdict> tag based on results
           2. A <qa_report>...HTML report...</qa_report> block containing the self-contained HTML report with embedded screenshots
 
-  - id: qa-testing
-    name: QA Testing
-    depends_on: [implementation]
-    content: true
-    optional: true
-    metadata:
-      scenarios_passed: string
-      scenarios_failed: string
-      budget_used: string
-    verify:
-      - name: "Report has evidence"
-        type: llm-review
-        prompt: |
-          Review this QA testing report for a goal.
-          
-          1. Does every scenario include screenshots as evidence?
-          2. Are failures explained with actionable detail?
-          3. Were automated test coverage gaps identified?
-          4. Was the ephemeral environment properly isolated (temp dir, separate port)?
-          
-          If the content says "N/A" or "Skipped — no UI changes", that is acceptable — pass the gate.
-          If the content describes scenarios with screenshots and verdicts, evaluate the quality.
-          Fail only if scenarios claim to have evidence but screenshots are missing, or if
-          failures are described without enough detail to act on.
-
   - id: documentation
     name: Documentation
-    depends_on: [qa-testing]
+    depends_on: [implementation]
     verify:
       - name: "Documentation coverage"
         type: llm-review

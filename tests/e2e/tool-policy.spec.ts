@@ -3,7 +3,7 @@
  *
  * Tests REST API endpoints for group policies and role toolPolicies.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { apiFetch } from "./e2e-setup.js";
 
 

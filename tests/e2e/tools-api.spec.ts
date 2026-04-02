@@ -8,7 +8,7 @@
  * PUT tests modify YAML files in tools/<group>/. We backup and restore
  * the specific YAML files that are modified by PUT tests.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readE2EToken, base, bobbitDir } from "./e2e-setup.js";

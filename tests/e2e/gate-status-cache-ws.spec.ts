@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test } from "./gateway-harness.js";
+import { test } from "./in-process-harness.js";
 import {
 	apiFetch,
 	createSession,

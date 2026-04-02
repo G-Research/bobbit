@@ -232,11 +232,17 @@ npx playwright test --config playwright-e2e.config.ts
 ## Testing
 
 ```bash
-npm test              # Mobile header Playwright tests (standalone)
-npm run test:e2e      # E2E integration tests (starts gateway + vite on localhost)
+npm test              # All tests (unit + E2E)
+npm run test:unit     # Unit tests — Node test runner + Playwright file:// fixtures
+npm run test:e2e      # E2E tests — API (in-process) + browser (spawned gateway)
 ```
 
-E2E tests use `playwright-e2e.config.ts` (at the project root) which starts a sandboxed gateway on localhost automatically. Tests run against the real system — creating sessions, sending prompts, verifying UI behavior.
+E2E tests use `playwright-e2e.config.ts` which defines two projects:
+
+- **`api`** (4 workers): API-only tests import from `in-process-harness.js` — the gateway runs in the same Node process, eliminating child process spawn overhead. Covers HTTP/WS API tests, CRUD, agent protocol.
+- **`browser`** (2 workers): Browser and process-level tests import from `gateway-harness.js` — spawns a real gateway child process. Used for UI E2E tests (`tests/e2e/ui/`), MCP integration, and tests needing process-level behavior (port allocation, auth bypass).
+
+See [AGENTS.md](../AGENTS.md#testing) for harness selection guidance and test recipes.
 
 ---
 

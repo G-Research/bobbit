@@ -5,7 +5,7 @@
  * - gate_verification_step_started WS events include startedAt field
  * - gate_verification_step_output WS events are broadcast during command verification
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,

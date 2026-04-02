@@ -11,7 +11,7 @@
  * path (regression) and verify the sandbox propagation logic is wired in by
  * checking the createDelegateSession code path via internal store updates.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { nonGitCwd, apiFetch } from "./e2e-setup.js";
 
 test.describe("Sandbox Delegate", () => {

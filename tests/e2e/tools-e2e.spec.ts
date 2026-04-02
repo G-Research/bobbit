@@ -11,7 +11,7 @@
  *
  * Run with: npm run build:server && npx playwright test --config playwright-e2e.config.ts tests/e2e/tools-e2e.spec.ts
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import WebSocket from "ws";
 import { readE2EToken, base, wsBase, waitForHealth, nonGitCwd } from "./e2e-setup.js";
 
