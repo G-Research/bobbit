@@ -1,122 +1,125 @@
 # Agent-in-the-Loop Debug Cycle
 
-How to debug UI features that automated tests miss, using an agent driving a browser against an isolated test gateway.
+How to debug and validate UI features using an agent driving a real browser against an isolated gateway — without touching the production dev server.
 
-## Context: The Permission Card Bug
+## Why This Exists
 
-The tool permission card (shown when a guard blocks a tool call) had two bugs:
-1. `AgentInterface` didn't handle the `"render"` event emitted by `RemoteAgent`, so Lit never re-rendered with the card
-2. The card was only broadcast via WebSocket at block time — reconnecting clients never saw it
+Automated E2E tests use mock agents and synthetic REST calls to simulate user flows. This misses bugs that only manifest through the **real code path**: real agent → real tool call → real guard extension → real WebSocket broadcast → real UI render.
 
-The existing E2E test (`tool-ask-policy.spec.ts`) didn't catch this because it **called the REST endpoint directly** to simulate the guard, bypassing the real flow where the agent's guard extension POSTs to the gateway, the gateway broadcasts via WS, and the client renders the card.
+Example: the tool permission card had two bugs that the existing E2E test missed because the test called the REST endpoint directly instead of letting the real agent trigger the guard extension.
 
-## The Debug Session (What Worked)
+## The Protocol
 
-An agent drove the production dev server's browser UI:
+### 1. Spin up an isolated gateway
 
-1. **Created a UX Designer session** (the only role with `bash_bg: ask` policy)
-2. **Sent a message** asking the agent to use `bash_bg`
-3. **Observed the tool spinner stuck** — guard was blocking but no card appeared
-4. **Added diagnostic console.log** to both server (`requestToolGrant`) and client (`handleServerMessage`)
-5. **Checked browser state** via `browser_eval`:
-   - `state.messages` had 2 items (user + `tool_permission_needed`) — server broadcast worked
-   - `message-list.messages` had 1 item (user only) — Lit wasn't re-rendering
-6. **Found root cause**: `AgentInterface.subscribe()` didn't handle `type: "render"` events
-7. **Fixed both bugs**, rebuilt, created a new session, confirmed the card appeared
-8. **Tested persistence** by navigating away and back — card reappeared
-
-Total diagnostic artifacts: browser screenshots at each step, JS console state dumps, server log traces.
-
-## What Went Wrong: Isolation
-
-The agent ran the debug cycle against the **production dev server**, which:
-- Meant the user couldn't use their own server during testing
-- Risked corrupting production state
-- Failed when the agent tried to spin up an "isolated" gateway inside the same repo directory, which shared git state and file watchers with the dev harness, taking down the production server
-
-## How to Do It Properly
-
-### Isolated Gateway Setup
-
-The key requirement: **nothing shared with the source repo at runtime**.
+Everything in a temp dir **completely outside the repo**:
 
 ```bash
-# 1. Create temp directory completely outside the repo
 WORK_DIR=$(mktemp -d)
-BOBBIT_DIR="$WORK_DIR/.bobbit"
-mkdir -p "$BOBBIT_DIR/state" "$BOBBIT_DIR/config/roles"
-echo "test" > "$BOBBIT_DIR/state/setup-complete"
+mkdir -p "$WORK_DIR/.bobbit/state"
+echo "test" > "$WORK_DIR/.bobbit/state/setup-complete"
 
-# 2. Reference built artifacts from the repo (read-only)
 REPO="/path/to/bobbit"
-SERVER_CLI="$REPO/dist/server/cli.js"
-MOCK_AGENT="$REPO/tests/e2e/mock-agent.mjs"
+FREE_PORT=$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
 
-# 3. Create test-specific config
-cat > "$BOBBIT_DIR/config/roles/test-role.yaml" << EOF
-name: test-role
-label: Test Role
-toolPolicies:
-  bash_bg: ask
-EOF
-
-# 4. Start gateway with full isolation
-BOBBIT_DIR="$BOBBIT_DIR" \
+BOBBIT_DIR="$WORK_DIR/.bobbit" \
 BOBBIT_NO_OPEN=1 \
-  node "$SERVER_CLI" \
+BOBBIT_LLM_REVIEW_SKIP=1 \
+BOBBIT_SKIP_NPM_CI=1 \
+  node "$REPO/dist/server/cli.js" \
     --host 127.0.0.1 \
-    --port 0 \
+    --port "$FREE_PORT" \
     --no-tls \
     --auth \
-    --agent-cli "$MOCK_AGENT" \
-    --cwd "$WORK_DIR"
+    --cwd "$WORK_DIR" &
+```
 
-# 5. Clean up after
+**Use the real agent, not the mock.** The mock bypasses the extension system — tool_call guards, MCP proxies, etc. never fire. If you're spending the cost of browser automation and agent reasoning, don't undermine it by skipping the component most likely to have the bug.
+
+The mock agent is for repeatable unit-style E2E tests where you need determinism and speed. This debug cycle is for validating that the **real system works as a user would experience it**.
+
+### 2. Wait for health, read the token
+
+```bash
+# Poll until healthy
+TOKEN=$(cat "$WORK_DIR/.bobbit/state/token")
+curl -s "http://127.0.0.1:$FREE_PORT/api/health" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Note: the token may regenerate if the server restarts. Always re-read from the state file.
+
+### 3. Connect the browser
+
+```bash
+# Navigate with token in URL
+http://127.0.0.1:$FREE_PORT/?token=$TOKEN
+```
+
+If the UI shows "Not connected" despite the token, set localStorage directly:
+```js
+localStorage.setItem('gateway.url', 'http://127.0.0.1:PORT');
+localStorage.setItem('gateway.token', 'TOKEN');
+location.reload();
+```
+
+### 4. Drive the test scenario
+
+Use browser tools to interact as a real user:
+- Create sessions via the role picker
+- Send messages via the textarea
+- Take screenshots at each step
+- Use `browser_eval` to inspect DOM state, console logs, WebSocket messages
+- Test persistence by navigating away and back
+
+### 5. Verify production is unaffected
+
+```bash
+# Production gateway should still respond
+curl -sk "$PROD_GATEWAY/api/health" -H "Authorization: Bearer $PROD_TOKEN"
+```
+
+### 6. Clean up
+
+```bash
+kill $GW_PID
 rm -rf "$WORK_DIR"
 ```
 
-Critical isolation rules:
-- `--cwd` points to the temp dir, NOT the repo
-- `BOBBIT_DIR` points to temp dir's `.bobbit/`, NOT the repo's
-- The repo is only referenced for `dist/` and `tests/` (read-only)
-- No git operations in the temp dir (or init a fresh repo if needed)
+## Isolation Rules
 
-### Browser-Driven Verification
+| Rule | Why |
+|------|-----|
+| `--cwd` points to temp dir, not repo | Prevents file watcher interference |
+| `BOBBIT_DIR` points to temp's `.bobbit/` | Prevents state file corruption |
+| Repo referenced read-only for `dist/` only | No writes to source tree |
+| Separate port via `--port 0` or free port | No conflict with dev server |
+| No `--agent-cli mock` | Real agent exercises the real code path |
 
-Once the gateway is running, the agent uses browser tools to:
+## What This Caught That Tests Missed
 
-1. Navigate to `http://127.0.0.1:<port>/?token=<token>`
-2. Create a session with the test role
-3. Send a message that triggers the guarded tool
-4. Take screenshots at each step (saved to the temp dir)
-5. Use `browser_eval` to inspect DOM state and JS console
-6. Test persistence by navigating away and back
-7. Generate an HTML report with embedded screenshots
+The permission card bug had two components:
 
-### Incorporating into Goal Workflows
+1. **Missing event handler**: `AgentInterface` didn't handle the `"render"` event emitted by `RemoteAgent` after adding the permission card to messages. Lit never re-rendered.
 
-A **QA agent role** could automate this as a workflow gate:
+2. **No persistence for new clients**: `tool_permission_needed` was only broadcast at the moment the guard blocked. Reconnecting clients never saw it.
 
-1. Team lead spawns a `qa-engineer` agent after implementation
-2. QA agent checks out the goal branch
-3. Builds the server (`npm run build`)
-4. Spins up an isolated gateway in a temp dir (as above)
-5. Drives the browser through test scenarios with screenshots
-6. Produces an HTML report with pass/fail evidence
-7. Signals the `qa-validation` gate with the report
-8. Tears down the ephemeral environment
+The existing E2E test (`tool-ask-policy.spec.ts`) uses the mock agent and calls the `tool-grant-request` REST endpoint directly — this bypasses the guard extension entirely and happened to work because of timing. The real flow (agent → guard → gateway → WS broadcast → UI render) was never tested.
 
-This requires:
-- A `qa-engineer` role with browser tools and a prompt describing the test protocol
-- A skill or recipe for "spin up isolated gateway + test + report"
-- A workflow gate (`qa-validation`) that the QA agent signals
-- The team lead's prompt to know when/how to spawn the QA agent
+## Toward a QA Agent Role
 
-### Existing Infrastructure to Build On
+This protocol can be automated as a **qa-engineer** role in goal workflows:
 
-- `tests/e2e/gateway-harness.ts` — already spawns isolated gateways per Playwright worker
-- `tests/e2e/mock-agent.mjs` — deterministic mock agent (no API key needed)
-- `tests/e2e/e2e-setup.ts` — REST/WS helpers for the isolated gateway
-- `tests/e2e/ui/ui-helpers.ts` — page-object helpers for browser interaction
+1. Team lead spawns `qa-engineer` after implementation gate passes
+2. QA agent builds the server from the goal branch
+3. Spins up an isolated gateway in a temp dir
+4. Drives the browser through test scenarios with screenshots
+5. Produces an HTML report with pass/fail evidence
+6. Signals the `qa-validation` gate with the report
+7. Tears down the ephemeral environment
 
-The gap is making these available to an agent session (not just Playwright test files) and adding report generation.
+Prerequisites:
+- `qa-engineer` role with browser tools and the protocol above in its prompt
+- A skill for "ephemeral gateway lifecycle" (start, health-check, teardown)
+- HTML report generation template
+- A `qa-validation` workflow gate
