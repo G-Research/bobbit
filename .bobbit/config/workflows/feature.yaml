@@ -107,8 +107,8 @@ gates:
         label: "Enable QA Testing"
         description: "Spawn a QA agent that builds the project, starts an ephemeral server, and drives a real browser through user scenarios to validate the feature works end-to-end."
         prompt: |
-          You are performing QA testing for this goal. Use the /qa-test skill to stand up
-          an ephemeral environment and drive browser-based testing scenarios.
+          You are performing QA testing for this goal. Stand up an ephemeral test
+          environment and drive browser-based testing scenarios.
 
           Goal specification:
           {{goal_spec}}
