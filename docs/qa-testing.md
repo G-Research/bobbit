@@ -4,25 +4,13 @@ Automated E2E tests exercise known paths through simulated components, but they 
 
 ## How it fits in the architecture
 
-QA testing can run in two modes:
-
-### 1. Standalone `qa-testing` gate
-
-The `qa-testing` gate sits between the **implementation** gate and the **documentation** gate in both the `feature` and `bug-fix` workflows. After code passes type checks, automated tests, and code review, the team lead decides whether visual/integration validation is needed. If so, a test-engineer agent invokes the `/qa-test` slash skill, which handles the ephemeral environment lifecycle.
-
-```
-design-doc → implementation → qa-testing (optional) → documentation → ready-to-merge
-```
-
-The gate is **optional** — projects without `qa_*` config or goals without UI changes simply skip it via an "N/A" signal.
-
-### 2. `agent-qa` verification step on implementation
-
 The implementation gate in `feature` and `bug-fix` workflows includes an optional `agent-qa` verify step at phase 2. When enabled at goal creation (via the "Enable QA Testing" toggle), the verification harness automatically spawns a test-engineer session after phase 0 (commands) and phase 1 (LLM reviews) pass. The agent uses the `/qa-test` skill, emits `<verdict>` and `<qa_report>` tags, and the harness records the HTML report as a step artifact.
 
 This mode is fully automated — the team lead does not need to spawn a test-engineer or signal a gate. See [goals-workflows-tasks.md — agent-qa step type](goals-workflows-tasks.md#agent-qa-step-type) for execution details and [goals-workflows-tasks.md — Optional verify steps](goals-workflows-tasks.md#optional-verify-steps) for the toggle mechanism.
 
-Both modes coexist — a goal can use either or both.
+```
+design-doc → implementation → documentation → ready-to-merge
+```
 
 ## Project configuration
 
@@ -105,7 +93,7 @@ The protocol has 9 steps:
 
 7. **Produce HTML report** — Write a self-contained HTML report with base64-embedded screenshots (see Report Format below).
 
-8. **Emit results** — Emit structured output tags: `<verdict>pass|fail</verdict>` and `<qa_report>...HTML...</qa_report>`. When invoked by the `agent-qa` verification harness, these tags are parsed automatically and the harness handles gate signaling. When invoked standalone (team lead spawns test-engineer for the `qa-testing` gate), the agent should also call `gate_signal()` with the report content and metadata.
+8. **Emit results** — Emit structured output tags: `<verdict>pass|fail</verdict>` and `<qa_report>...HTML...</qa_report>`. The `agent-qa` verification harness parses these tags automatically and handles gate signaling.
 
 9. **Cleanup** — Kill the background server via `bash_bg`, delete the temp directory. Always runs, even on failure.
 
@@ -130,52 +118,6 @@ The validation report is a self-contained HTML file. Screenshots are embedded as
 ### Why self-contained HTML?
 
 The report is the gate artifact — it's stored as gate content and must be readable without a running server. Base64-embedded screenshots ensure the evidence is preserved with the report, not lost when the temp directory is cleaned up.
-
-## Workflow gate
-
-### Gate definition
-
-The `qa-testing` gate appears in both `feature.yaml` and `bug-fix.yaml`:
-
-```yaml
-- id: qa-testing
-  name: QA Testing
-  depends_on: [implementation]
-  content: true
-  optional: true
-  metadata:
-    scenarios_passed: string
-    scenarios_failed: string
-    budget_used: string
-  verify:
-    - name: "Report has evidence"
-      type: llm-review
-      prompt: |
-        Review this QA testing report...
-```
-
-Key properties:
-- **`optional: true`** — Marks the gate as skippable. The team lead **must still signal it** (even with "N/A" content) before downstream gates unblock — the `optional` flag is metadata for the team lead's decision, not an automatic bypass. The LLM reviewer accepts "N/A" or "Skipped" content as valid.
-- **`content: true`** — The gate carries the validation report as content.
-- **`metadata`** — Structured data about results (`scenarios_passed`, `scenarios_failed`, `budget_used`).
-
-### LLM review verification
-
-The gate's verifier checks:
-1. Every scenario has screenshot evidence
-2. Failures are explained with actionable detail
-3. Automated test coverage gaps were identified
-4. "N/A" or "Skipped" content is accepted as valid
-
-### How the team lead uses it
-
-The team-lead role prompt includes instructions for the QA testing gate:
-
-1. **Decide if needed** — If the goal has no UI changes or is purely infrastructure, signal the gate with "N/A" content and zeroed metadata. The LLM reviewer accepts this.
-
-2. **If needed** — Spawn a test-engineer agent with `workflowGateId: "qa-testing"`, a task prompt listing scenarios to validate (derived from the design doc), and instructions to invoke `/qa-test`.
-
-3. **The test-engineer signals the gate** with the report and metadata after completing the validation.
 
 ## Budget enforcement
 
@@ -206,7 +148,7 @@ The production dev server is completely unaffected throughout the validation pro
 - **"No QA testing configured"** — The project's `project.yaml` is missing `qa_start_command`. Add `qa_*` keys as described above.
 - **Health check never passes** — Verify `qa_health_check` URL uses `$PORT` placeholder. Check `bash_bg` logs for server startup errors.
 - **Screenshots missing from report** — The agent needs Playwright MCP tools available. Check that the browser tools are in the session's tool set.
-- **Gate signaled as N/A but downstream is blocked** — The `optional: true` flag means N/A is accepted. Check `gate_status` for the actual verification result.
+- **QA step skipped unexpectedly** — Check that the goal has QA testing enabled (`enabledOptionalSteps` includes `agent-qa`). Check `gate_status` for the implementation gate verification results.
 - **Temp directory not cleaned up** — If the agent crashes mid-protocol, the temp dir may remain. These are in the system temp directory (`$TMPDIR`) and can be manually cleaned.
 
 ## Related docs
