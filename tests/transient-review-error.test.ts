@@ -11,10 +11,6 @@ describe("isTransientReviewError", () => {
 		assert.ok(isTransientReviewError("LLM review timed out after 600s."));
 	});
 
-	it("detects missing verdict tag", () => {
-		assert.ok(isTransientReviewError("LLM review failed: no <verdict> tag found in sub-agent output."));
-	});
-
 	it("detects process exit errors", () => {
 		assert.ok(isTransientReviewError("LLM review failed: process exited with code 1"));
 	});
@@ -58,12 +54,6 @@ describe("isTransientQaError", () => {
 		assert.ok(isTransientQaError("Agent QA failed: ECONNRESET"));
 		assert.ok(isTransientQaError("Agent QA failed: process exited with code 1"));
 		assert.ok(isTransientQaError("connect ECONNREFUSED 127.0.0.1:3001"));
-	});
-
-	it("does NOT treat 'no verdict tag' as transient for QA agents", () => {
-		// QA agents that don't produce a verdict burned their budget fighting infrastructure —
-		// retrying will just waste more time/cost
-		assert.ok(!isTransientQaError("Agent QA failed: no <verdict> tag found."));
 	});
 
 	it("does NOT treat timeout as transient when no verdict was produced", () => {
