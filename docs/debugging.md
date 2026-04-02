@@ -80,6 +80,8 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 
 - State in `GateStore` (`.bobbit/state/gates.json`)
 - Check dependencies via `GET /api/goals/:id/gates`
+- **Verification output modal empty?** The goal dashboard uses a dedicated `/ws/viewer` WebSocket to receive live `gate_verification_step_output` events. If the modal shows no output, check that the `/ws/viewer` WS connection is active (browser DevTools → Network → WS tab). The connection opens on dashboard mount and closes on navigation away; it auto-reconnects after 3s on unexpected close. Events are dispatched as `gate-verification-event` CustomEvents on `document` — the `VerificationOutputModal` subscribes to these.
+- **Session "view" links**: Verification step and delegate session links navigate in-place via `location.hash` (no new tab). If clicking "view" does nothing, check for JavaScript errors in the console — the click handler sets `location.hash = '#/session/<id>'`.
 
 ## Git diff viewer not showing diffs
 
