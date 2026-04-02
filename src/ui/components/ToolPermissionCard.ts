@@ -19,7 +19,7 @@ export class ToolPermissionCard extends LitElement {
 	@state() private _granting = false;
 	@state() private _granted = false;
 	@state() private _denied = false;
-	@state() private _mode: string = "persistent";
+	@state() private _mode: string = "session-only";
 
 	protected override createRenderRoot() {
 		return this;
@@ -95,9 +95,9 @@ export class ToolPermissionCard extends LitElement {
 						class="text-xs rounded-md border border-border bg-background px-2 py-1 cursor-pointer"
 						@change=${(e: Event) => this._mode = (e.target as HTMLSelectElement).value}
 					>
-						<option value="persistent">Always</option>
-						<option value="session-only">This session only</option>
+						<option value="session-only">This session</option>
 						<option value="one-time">Just this once</option>
+						<option value="persistent">For all future sessions</option>
 					</select>
 				</div>
 				<div class="flex gap-2 flex-wrap">

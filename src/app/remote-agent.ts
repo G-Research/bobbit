@@ -55,6 +55,10 @@ export class RemoteAgent {
 	// Kept separately so they survive the server's post-compaction messages refresh.
 	private _compactionSyntheticMessages: any[] = [];
 
+	// Pending tool permission cards — in-memory only, survive message refreshes.
+	// Cleared when the user grants/denies or the session restarts.
+	private _pendingPermissionCards: any[] = [];
+
 	// Proposal deferral — when set, incoming messages are stored but
 	// _checkProposals is skipped until runDeferredProposalCheck() is called.
 	// This lets us fire requestMessages() early for fast loading while
@@ -518,6 +522,8 @@ export class RemoteAgent {
 	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time"): void {
 		// Save the prompt to replay after the session restarts with the new tool
 		this._pendingGrantReplay = lastPromptText;
+		// Clear pending permission cards — the grant will restart the session
+		this._pendingPermissionCards = [];
 
 		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
 	}
@@ -527,7 +533,8 @@ export class RemoteAgent {
 		if (toolName) {
 			this.send({ type: "deny_tool_permission", toolName });
 		}
-		// Remove the tool_permission_needed message from state
+		// Remove the tool_permission_needed message from state and pending cards
+		this._pendingPermissionCards = this._pendingPermissionCards.filter((m: any) => m.id !== messageId);
 		this._state.messages = this._state.messages.filter((m: any) => m.id !== messageId);
 		this.emit({ type: "render" });
 	}
@@ -637,6 +644,11 @@ export class RemoteAgent {
 					// so they survive the server's post-compaction refresh.
 					if (this._compactionSyntheticMessages.length > 0) {
 						this._state.messages = [...this._state.messages, ...this._compactionSyntheticMessages];
+					}
+					// Re-append pending tool_permission_needed cards — these are
+					// in-memory only and would be lost on message refresh.
+					if (this._pendingPermissionCards.length > 0) {
+						this._state.messages = [...this._state.messages, ...this._pendingPermissionCards];
 					}
 					// Emit message_end for each message so AgentInterface re-renders
 					for (const m of this._state.messages) {
@@ -816,7 +828,7 @@ export class RemoteAgent {
 					this._state.messages = this._state.messages.slice(0, lastUserIdx + 1);
 				}
 				// 3. Add the permission-request card
-				this._state.messages = [...this._state.messages, {
+				const permCard = {
 					role: "tool_permission_needed" as any,
 					toolName: perm.toolName,
 					group: perm.group,
@@ -825,7 +837,9 @@ export class RemoteAgent {
 					lastPromptText: perm.lastPromptText,
 					timestamp: Date.now(),
 					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-				} as any];
+				};
+				this._pendingPermissionCards.push(permCard);
+				this._state.messages = [...this._state.messages, permCard as any];
 				this.emit({ type: "render" });
 				break;
 			}
