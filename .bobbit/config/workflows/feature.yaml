@@ -133,6 +133,15 @@ gates:
 
           Then work through the list in order. Do not add scenarios mid-test.
 
+          ## How to test
+
+          The ephemeral server is a fully functional Bobbit instance. Use it like a
+          human would — create sessions, create goals, select workflows, interact with
+          the UI to put it in the state you need. If you need a goal dashboard with
+          verification history, create a goal and signal its gates. If you need a session
+          with tool calls, create a session and send messages. Build up the state you
+          need through normal UI interactions.
+
           ## Critical Rules
 
           1. **Save screenshots to absolute paths in $WORK_DIR** — never use relative paths.
@@ -147,11 +156,16 @@ gates:
              after navigating and after significant interactions to confirm you're still on
              your ephemeral server. If the port is wrong, re-navigate.
 
-          4. **Spend no more than 10 tool calls per scenario.** If setup isn't working,
-             mark it SKIPPED and move on.
+          4. **Spend no more than 10 tool calls per scenario.** If you hit a roadblock,
+             mark it SKIPPED, move on to the next scenario, and come back if time permits.
 
-          5. **Do NOT read source code** — test from the user's perspective only. Do not
-             grep or cat .ts files. If you need to create test data, use the UI, not curl.
+          5. **Do NOT read source code** — do not grep or cat .ts/.js files, minified
+             bundles, or built assets. Test from the user's perspective only.
+
+          6. **Do NOT write HTML files or test fixtures** — do not create workaround HTML
+             pages, inject WebSocket messages, or build synthetic test harnesses. If a
+             feature isn't visible in the UI, report that as a finding — don't try to
+             engineer around it.
 
           Focus on testing the user-facing changes described in the goal spec.
           If the project does not have qa_start_command configured, call
