@@ -469,7 +469,7 @@ Pre-warmed containers eliminate 5–10s cold-start overhead. Lifecycle: pre-warm
 Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with direct outbound internet access. This replaces the previous proxy-based approach where all traffic was routed through a gateway-hosted `SandboxProxy`.
 
 - **Network creation**: `ensureSandboxNetwork()` in `session-manager.ts` creates the network idempotently via `docker network create bobbit-sandbox-net --driver bridge --opt com.docker.network.bridge.enable_icc=false`. The `enable_icc=false` flag prevents inter-container communication.
-- **Metadata endpoint blackholing**: Cloud metadata endpoints are blocked via `--add-host` entries in `docker-args.ts` (`metadata.google.internal` and `metadata.internal` resolve to `0.0.0.0`). This is defense-in-depth against SSRF via cloud instance metadata.
+- **Metadata endpoint blackholing**: Cloud metadata endpoints are blocked via `--add-host` entries in `docker-args.ts` (`169.254.169.254`, `metadata.google.internal`, and `metadata.internal` all resolve to `0.0.0.0`). `169.254.169.254` is the AWS/GCP/Azure IMDS endpoint; the named hosts cover GCP and Azure specifically. This is defense-in-depth against SSRF via cloud instance metadata.
 - **Gateway reachable**: `--add-host=host.docker.internal:host-gateway` ensures the container can reach the gateway for API calls (tool extensions, delegate sessions, etc.).
 - **Cleanup**: `cleanupSandboxNetwork()` removes the network on shutdown (non-fatal if containers are still connected).
 - `web_search`/`web_fetch` use direct `curl` from inside the container — no gateway proxy needed.
@@ -481,6 +481,15 @@ Each sandboxed session gets a unique 256-bit token restricting API access. Gener
 **Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`, `/api/personalities`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
+
+### Resource limits
+
+All containers (pool and cold mode) receive resource limits via `docker-args.ts`:
+- `--memory=4g` — prevents runaway memory consumption
+- `--cpus=2` — limits CPU share
+- `--pids-limit=256` — prevents fork bombs
+
+These are applied unconditionally in `buildDockerRunArgs()` and cannot be overridden by project config.
 
 ### Security summary
 
