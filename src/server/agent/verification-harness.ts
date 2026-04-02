@@ -51,7 +51,7 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed" | "skipped"; phase?: number; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
+	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed" | "skipped" | "waiting"; phase?: number; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
@@ -581,15 +581,19 @@ export class VerificationHarness {
 			gateId: signal.gateId,
 			signalId: signal.id,
 			startedAt: verificationStartedAt,
-			steps: steps.map(s => ({ name: s.name, type: s.type })),
+			steps: steps.map(s => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
 		});
 
 		// Track active verification for REST bootstrapping
+		const minPhase = Math.min(...steps.map(s => s.phase ?? 0));
 		const active: ActiveVerification = {
 			goalId: signal.goalId,
 			gateId: signal.gateId,
 			signalId: signal.id,
-			steps: steps.map(s => ({ name: s.name, type: s.type, status: "running" as const, phase: s.phase ?? 0, startedAt: verificationStartedAt })),
+			steps: steps.map(s => {
+				const phase = s.phase ?? 0;
+				return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
+			}),
 			overallStatus: "running",
 			startedAt: verificationStartedAt,
 		};
@@ -764,8 +768,14 @@ export class VerificationHarness {
 				const phaseSteps = phaseGroups.get(phase)!;
 				const stepIndices = phaseSteps.map(ps => ps.index);
 
-				// Broadcast phase started
+				// Broadcast phase started — transition waiting steps in this phase to running
 				active.currentPhase = phase;
+				for (const { index } of phaseSteps) {
+					if (active.steps[index]?.status === "waiting") {
+						active.steps[index].status = "running";
+						active.steps[index].startedAt = Date.now();
+					}
+				}
 				this._persistActive();
 				this.broadcastFn(signal.goalId, {
 					type: "gate_verification_phase_started",
