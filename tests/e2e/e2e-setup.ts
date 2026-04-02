@@ -115,7 +115,7 @@ function token(): string {
 
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	const maxRetries = 3;
+	const maxRetries = 4;
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
 			return await fetch(`${base()}${path}`, {
@@ -127,11 +127,13 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 				},
 			});
 		} catch (err: unknown) {
-			const msg = err instanceof Error ? (err.cause as Error)?.message ?? err.message : String(err);
-			const isTransient = /ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|UND_ERR_SOCKET/i.test(msg);
+			const msg = err instanceof Error
+				? [err.message, (err as any).cause?.message, (err as any).cause?.code].filter(Boolean).join(" ")
+				: String(err);
+			const isTransient = /ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|UND_ERR_SOCKET|fetch failed/i.test(msg);
 			if (!isTransient || attempt === maxRetries - 1) throw err;
-			// Brief back-off before retry
-			await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+			// Increasing back-off: 250ms, 500ms, 1000ms
+			await new Promise(r => setTimeout(r, 250 * Math.pow(2, attempt)));
 		}
 	}
 	throw new Error("apiFetch: unreachable");

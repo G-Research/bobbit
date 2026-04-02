@@ -1,5 +1,5 @@
 import { test, expect } from "./gateway-harness.js";
-import { readE2EToken, base, gitCwd } from "./e2e-setup.js";
+import { readE2EToken, base, gitCwd, apiFetch } from "./e2e-setup.js";
 
 /**
  * End-to-end tests for the Staff Agents feature (persistent session model).
@@ -18,7 +18,7 @@ function GW_URL() { return base(); }
 // ---------------------------------------------------------------------------
 
 async function apiCreateStaff(
-	token: string,
+	_token: string,
 	data: {
 		name: string;
 		description?: string;
@@ -27,27 +27,20 @@ async function apiCreateStaff(
 		triggers?: Array<{ type: string; config: Record<string, unknown>; enabled: boolean; prompt?: string }>;
 	},
 ): Promise<any> {
-	const res = await fetch(`${GW_URL()}/api/staff`, {
+	const res = await apiFetch("/api/staff", {
 		method: "POST",
-		headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 		body: JSON.stringify(data),
 	});
 	expect(res.status).toBe(201);
 	return res.json();
 }
 
-async function apiDeleteStaff(token: string, id: string): Promise<void> {
-	await fetch(`${GW_URL()}/api/staff/${id}`, {
-		method: "DELETE",
-		headers: { Authorization: `Bearer ${token}` },
-	}).catch(() => {});
+async function apiDeleteStaff(_token: string, id: string): Promise<void> {
+	await apiFetch(`/api/staff/${id}`, { method: "DELETE" }).catch(() => {});
 }
 
-async function apiDeleteSession(token: string, id: string): Promise<void> {
-	await fetch(`${GW_URL()}/api/sessions/${id}`, {
-		method: "DELETE",
-		headers: { Authorization: `Bearer ${token}` },
-	}).catch(() => {});
+async function apiDeleteSession(_token: string, id: string): Promise<void> {
+	await apiFetch(`/api/sessions/${id}`, { method: "DELETE" }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -103,8 +96,7 @@ test.describe("Staff Agents — REST API", () => {
 		expect(staff.currentSessionId).toBeTruthy();
 
 		// Verify the session exists and is linked to the staff agent
-		const sessionRes = await fetch(`${GW_URL()}/api/sessions/${staff.currentSessionId}`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const sessionRes = await apiFetch(`/api/sessions/${staff.currentSessionId}`, {
 		});
 		expect(sessionRes.ok).toBe(true);
 		const session = await sessionRes.json();
@@ -112,26 +104,23 @@ test.describe("Staff Agents — REST API", () => {
 	});
 
 	test("POST /api/staff with missing name returns 400", async () => {
-		const res = await fetch(`${GW_URL()}/api/staff`, {
+		const res = await apiFetch(`/api/staff`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ systemPrompt: "test" }),
 		});
 		expect(res.status).toBe(400);
 	});
 
 	test("POST /api/staff with missing systemPrompt returns 400", async () => {
-		const res = await fetch(`${GW_URL()}/api/staff`, {
+		const res = await apiFetch(`/api/staff`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ name: "No Prompt" }),
 		});
 		expect(res.status).toBe(400);
 	});
 
 	test("GET /api/staff lists created staff agents", async () => {
-		const res = await fetch(`${GW_URL()}/api/staff`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const res = await apiFetch(`/api/staff`, {
 		});
 		expect(res.ok).toBe(true);
 		const data = await res.json();
@@ -142,8 +131,7 @@ test.describe("Staff Agents — REST API", () => {
 	});
 
 	test("GET /api/staff/:id returns a single staff agent", async () => {
-		const res = await fetch(`${GW_URL()}/api/staff/${sharedStaff.id}`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const res = await apiFetch(`/api/staff/${sharedStaff.id}`, {
 		});
 		expect(res.ok).toBe(true);
 		const staff = await res.json();
@@ -154,9 +142,8 @@ test.describe("Staff Agents — REST API", () => {
 	});
 
 	test("PUT /api/staff/:id updates fields", async () => {
-		const res = await fetch(`${GW_URL()}/api/staff/${sharedStaff.id}`, {
+		const res = await apiFetch(`/api/staff/${sharedStaff.id}`, {
 			method: "PUT",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ description: "Updated desc" }),
 		});
 		expect(res.ok).toBe(true);
@@ -165,9 +152,8 @@ test.describe("Staff Agents — REST API", () => {
 		// Name should remain unchanged
 		expect(updated.name).toBe("Shared Test Agent");
 		// Restore original description for other tests
-		await fetch(`${GW_URL()}/api/staff/${sharedStaff.id}`, {
+		await apiFetch(`/api/staff/${sharedStaff.id}`, {
 			method: "PUT",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ description: "Shared for multiple tests" }),
 		});
 	});
@@ -181,21 +167,18 @@ test.describe("Staff Agents — REST API", () => {
 		const sessionId = created.currentSessionId;
 		expect(sessionId).toBeTruthy();
 
-		const delRes = await fetch(`${GW_URL()}/api/staff/${created.id}`, {
+		const delRes = await apiFetch(`/api/staff/${created.id}`, {
 			method: "DELETE",
-			headers: { Authorization: `Bearer ${token}` },
 		});
 		expect(delRes.ok).toBe(true);
 
 		// Verify staff is gone
-		const getRes = await fetch(`${GW_URL()}/api/staff/${created.id}`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const getRes = await apiFetch(`/api/staff/${created.id}`, {
 		});
 		expect(getRes.status).toBe(404);
 
 		// Verify the associated session is also gone
-		const sessionRes = await fetch(`${GW_URL()}/api/sessions/${sessionId}`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const sessionRes = await apiFetch(`/api/sessions/${sessionId}`, {
 		});
 		expect(sessionRes.status).toBe(404);
 	});
@@ -250,9 +233,8 @@ test.describe("Staff Agents — REST API", () => {
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
 
 		// First wake — should return the permanent session ID
-		const wakeRes = await fetch(`${GW_URL()}/api/staff/${staff.id}/wake`, {
+		const wakeRes = await apiFetch(`/api/staff/${staff.id}/wake`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ prompt: "Hello, wake up!" }),
 		});
 		expect(wakeRes.status).toBe(201);
@@ -260,25 +242,22 @@ test.describe("Staff Agents — REST API", () => {
 		expect(wakeData.sessionId).toBe(staff.currentSessionId);
 
 		// Verify the session has staffId
-		const sessionRes = await fetch(`${GW_URL()}/api/sessions/${wakeData.sessionId}`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const sessionRes = await apiFetch(`/api/sessions/${wakeData.sessionId}`, {
 		});
 		expect(sessionRes.ok).toBe(true);
 		const session = await sessionRes.json();
 		expect(session.staffId).toBe(staff.id);
 
 		// Verify the staff agent's lastWakeAt is updated
-		const staffRes = await fetch(`${GW_URL()}/api/staff/${staff.id}`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const staffRes = await apiFetch(`/api/staff/${staff.id}`, {
 		});
 		const updatedStaff = await staffRes.json();
 		expect(updatedStaff.lastWakeAt).toBeGreaterThan(0);
 		expect(updatedStaff.currentSessionId).toBe(wakeData.sessionId);
 
 		// Second wake — should return the same session ID
-		const wake2Res = await fetch(`${GW_URL()}/api/staff/${staff.id}/wake`, {
+		const wake2Res = await apiFetch(`/api/staff/${staff.id}/wake`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ prompt: "Second prompt" }),
 		});
 		expect(wake2Res.status).toBe(201);
@@ -287,16 +266,14 @@ test.describe("Staff Agents — REST API", () => {
 	});
 
 	test("GET /api/staff/:id/sessions returns 410 (deprecated)", async () => {
-		const histRes = await fetch(`${GW_URL()}/api/staff/${sharedStaff.id}/sessions`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const histRes = await apiFetch(`/api/staff/${sharedStaff.id}/sessions`, {
 		});
 		expect(histRes.status).toBe(410);
 	});
 
 	test("Staff assistant session can be created via assistantType", async () => {
-		const res = await fetch(`${GW_URL()}/api/sessions`, {
+		const res = await apiFetch(`/api/sessions`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ assistantType: "staff" }),
 		});
 		expect(res.status).toBe(201);
@@ -306,8 +283,7 @@ test.describe("Staff Agents — REST API", () => {
 		expect(session.assistantType).toBe("staff");
 
 		// Verify via GET
-		const getRes = await fetch(`${GW_URL()}/api/sessions/${session.id}`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const getRes = await apiFetch(`/api/sessions/${session.id}`, {
 		});
 		expect(getRes.ok).toBe(true);
 		const detail = await getRes.json();
@@ -315,34 +291,29 @@ test.describe("Staff Agents — REST API", () => {
 	});
 
 	test("Nonexistent staff returns 404/410 for all endpoints", async () => {
-		const getRes = await fetch(`${GW_URL()}/api/staff/nonexistent-id-12345`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const getRes = await apiFetch(`/api/staff/nonexistent-id-12345`, {
 		});
 		expect(getRes.status).toBe(404);
 
-		const putRes = await fetch(`${GW_URL()}/api/staff/nonexistent-id-12345`, {
+		const putRes = await apiFetch(`/api/staff/nonexistent-id-12345`, {
 			method: "PUT",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ description: "nope" }),
 		});
 		expect(putRes.status).toBe(404);
 
-		const delRes = await fetch(`${GW_URL()}/api/staff/nonexistent-id-12345`, {
+		const delRes = await apiFetch(`/api/staff/nonexistent-id-12345`, {
 			method: "DELETE",
-			headers: { Authorization: `Bearer ${token}` },
 		});
 		expect(delRes.status).toBe(404);
 
-		const wakeRes = await fetch(`${GW_URL()}/api/staff/nonexistent-id-12345/wake`, {
+		const wakeRes = await apiFetch(`/api/staff/nonexistent-id-12345/wake`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ prompt: "hello" }),
 		});
 		expect(wakeRes.status).toBe(404);
 
 		// The sessions endpoint is fully deprecated — returns 410 regardless of staff ID
-		const sessionsRes = await fetch(`${GW_URL()}/api/staff/nonexistent-id-12345/sessions`, {
-			headers: { Authorization: `Bearer ${token}` },
+		const sessionsRes = await apiFetch(`/api/staff/nonexistent-id-12345/sessions`, {
 		});
 		expect(sessionsRes.status).toBe(410);
 	});
@@ -357,16 +328,14 @@ test.describe("Staff Agents — REST API", () => {
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
 
 		// Pause the agent
-		await fetch(`${GW_URL()}/api/staff/${staff.id}`, {
+		await apiFetch(`/api/staff/${staff.id}`, {
 			method: "PUT",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ state: "paused" }),
 		});
 
 		// Attempt to wake should fail
-		const wakeRes = await fetch(`${GW_URL()}/api/staff/${staff.id}/wake`, {
+		const wakeRes = await apiFetch(`/api/staff/${staff.id}/wake`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ prompt: "wake up!" }),
 		});
 		expect(wakeRes.status).toBe(400);
