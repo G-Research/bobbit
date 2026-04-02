@@ -49,6 +49,7 @@ import { getAvailableModels, discoverModelsForConfig } from "./agent/model-regis
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
+import { computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState } from "./agent/state-migration.js";
@@ -1234,7 +1235,7 @@ async function handleApiRoute(
 
 		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
 		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
+		let createOpts: { rolePrompt?: string; roleName?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
 		let roleForMeta: { name: string; accessory: string } | undefined;
 
 		if (roleId && typeof roleId === "string") {
@@ -1243,9 +1244,11 @@ async function handleApiRoute(
 				json({ error: `Role "${roleId}" not found` }, 404);
 				return;
 			}
+			const computedAllowedTools = computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined);
 			createOpts = {
 				rolePrompt: role.promptTemplate,
-				allowedTools: role.allowedTools,
+				roleName: role.name,
+				allowedTools: computedAllowedTools,
 			};
 			roleForMeta = { name: role.name, accessory: role.accessory };
 		}
