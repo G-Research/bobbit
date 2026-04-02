@@ -143,7 +143,7 @@ The `exploratory-validation` gate appears in both `feature.yaml` and `bug-fix.ya
 ```
 
 Key properties:
-- **`optional: true`** — The gate can be signaled with "N/A" content and still pass. Downstream gates (documentation) don't block if this gate hasn't been signaled.
+- **`optional: true`** — Marks the gate as skippable. The team lead **must still signal it** (even with "N/A" content) before downstream gates unblock — the `optional` flag is metadata for the team lead's decision, not an automatic bypass. The LLM reviewer accepts "N/A" or "Skipped" content as valid.
 - **`content: true`** — The gate carries the validation report as content.
 - **`metadata`** — Structured data about results (`scenarios_passed`, `scenarios_failed`, `budget_used`).
 
