@@ -11,7 +11,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const workDir = path.resolve(process.argv[2] || ".");
+if (!process.argv[2]) {
+	console.error("Usage: node scripts/qa-seed/seed.mjs <WORK_DIR>");
+	console.error("Error: WORK_DIR argument is required");
+	process.exit(1);
+}
+const workDir = path.resolve(process.argv[2]);
 
 // ── Fixed IDs ──────────────────────────────────────────────────────────────
 const PROJECT_ID = "qa-seed-proj-0001-0001-0001-000000000001";
@@ -25,7 +30,9 @@ const TASK_3 = "qa-seed-task-0003";
 const SIGNAL_1 = "qa-seed-signal-0001";
 const SIGNAL_2 = "qa-seed-signal-0002";
 
-const BASE_TS = 1700000000000;
+// Use recent timestamps so archived sessions survive the 7-day purge on server startup.
+// Offset by -1 hour from current time to look realistic.
+const BASE_TS = Date.now() - 3600000;
 
 // ── Directories ────────────────────────────────────────────────────────────
 const stateDir = path.join(workDir, ".bobbit", "state");
