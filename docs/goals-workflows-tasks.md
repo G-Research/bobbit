@@ -31,6 +31,7 @@ interface VerifyStep {
   phase?: number;     // Execution phase (default 0). See "Phased verification" below.
   optional?: boolean; // If true, step runs only when enabled per-goal. See "Optional verify steps".
   label?: string;     // Human-readable label for the toggle in goal creation UI.
+  description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when qa_start_command is missing.
 }
 
 interface WorkflowGate {
@@ -198,7 +199,7 @@ interface GateSignalStep {
 
 #### Optional verify steps
 
-Verify steps can be marked `optional: true` with a human-readable `label` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal.
+Verify steps can be marked `optional: true` with a human-readable `label` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal. Steps can also include a `description` string, which renders as an ⓘ tooltip icon next to the toggle. For `agent-qa` steps, the toggle is automatically greyed out when the project lacks `qa_start_command`, and the tooltip is overridden with a configuration hint.
 
 **How it works:**
 - Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
@@ -218,6 +219,7 @@ verify:
     phase: 2
     optional: true
     label: "Enable QA Testing"
+    description: "Spawn a QA agent that builds the project, starts an ephemeral server, and drives a real browser through user scenarios."
     prompt: |
       You are performing QA testing for this goal...
 ```
