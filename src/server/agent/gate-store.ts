@@ -6,11 +6,16 @@ export type GateStatus = "pending" | "passed" | "failed";
 
 export interface GateSignalStep {
 	name: string;
-	type: "command" | "llm-review";
+	type: "command" | "llm-review" | "agent-qa";
 	passed: boolean;
 	output: string;
 	duration_ms: number;
 	expect?: "success" | "failure";
+	artifact?: {
+		content: string;
+		contentType: string;
+		metadata?: Record<string, string>;
+	};
 }
 
 export interface GateSignal {

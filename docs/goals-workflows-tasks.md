@@ -23,11 +23,14 @@ Goals without workflows still work fine — workflows are optional.
 ```typescript
 interface VerifyStep {
   name: string;
-  type: "command" | "llm-review";
+  type: "command" | "llm-review" | "agent-qa";
   run?: string;       // Shell command (for type: "command")
-  prompt?: string;    // Review prompt (for type: "llm-review")
+  prompt?: string;    // Review/QA prompt (for type: "llm-review" or "agent-qa")
   expect?: "success" | "failure";
   timeout?: number;
+  phase?: number;     // Execution phase (default 0). See "Phased verification" below.
+  optional?: boolean; // If true, step runs only when enabled per-goal. See "Optional verify steps".
+  label?: string;     // Human-readable label for the toggle in goal creation UI.
 }
 
 interface WorkflowGate {
@@ -81,8 +84,10 @@ gates:
       - name: "Type check passes"
         type: command
         run: "npm run check"
+        # phase: 0 (implicit default)
       - name: "Code review"
         type: llm-review
+        phase: 1           # Runs only after phase-0 steps pass
         prompt: |
           Review the implementation for correctness, completeness, and code quality.
 
@@ -127,9 +132,116 @@ Gates can define automated verification that runs when signaled:
 
 - **Command** — runs shell commands, checks exit codes (e.g. `npm run check`)
 - **LLM review** — spawns a sub-agent for qualitative review against a prompt
-- **Combined** — mechanical + qualitative steps in sequence
+- **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill
+- **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+
+#### Phased verification
+
+Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within each phase, steps run in **parallel** (preserving pre-phase behavior for phase-0 steps).
+
+If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped steps are recorded with status `"skipped"` and output `"Skipped — earlier phase failed"`.
+
+This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
+
+```yaml
+verify:
+  - name: "Type check"
+    type: command
+    run: "npm run check"
+    # phase: 0 (default — runs first)
+
+  - name: "Unit tests"
+    type: command
+    run: "npm run test:unit"
+    # phase: 0
+
+  - name: "Code quality review"
+    type: llm-review
+    phase: 1              # Only runs if all phase-0 steps pass
+    prompt: |
+      Review for correctness, completeness, and code quality.
+```
+
+**Backward compatibility:** Steps without a `phase` field default to phase 0. Existing workflows and snapshotted goal workflows continue to work — all steps execute in parallel as before.
+
+**WebSocket events:** The server broadcasts `gate_verification_phase_started` before each phase begins, including the phase number and which step indices belong to it. Step-level events (`gate_verification_step_started`, `gate_verification_step_complete`) include an optional `phase` field. The goal dashboard uses these to show phase progression in real time.
+
+#### Verification step artifacts
+
+Step results can carry an optional `artifact` containing rich content that would be too large or structured for the short `output` summary field.
+
+```typescript
+interface GateSignalStep {
+  name: string;
+  type: string;
+  passed: boolean;
+  output: string;            // Short summary
+  duration_ms: number;
+  artifact?: {
+    content: string;         // Full report body
+    contentType: string;     // "text/markdown" | "text/html"
+    metadata?: Record<string, string>;
+  };
+}
+```
+
+**LLM review artifacts:** When an `llm-review` step completes, the verification harness stores the reviewer's full analysis as a `text/markdown` artifact. The `output` field retains the short summary, while the artifact preserves the complete review text that was previously lost.
+
+**Size limit:** Artifact content is capped at 10 MB. Content exceeding this limit is truncated.
+
+**Dashboard rendering:** The goal dashboard renders artifacts based on their content type:
+- **`text/markdown`** — shown inline in a collapsible "Full Review" section below the step result.
+- **`text/html`** — a "View Report" button opens the HTML content in a new browser tab via a Blob URL.
+- **Metadata** — if `artifact.metadata` is present, key-value pairs are displayed alongside the content.
+
+#### Optional verify steps
+
+Verify steps can be marked `optional: true` with a human-readable `label` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal.
+
+**How it works:**
+- Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
+- At goal creation, the UI shows a checkbox for each optional step in the selected workflow. The goal assistant can pre-toggle steps via `<options>step name 1, step name 2</options>` in its proposal.
+- During verification, the harness checks each step before phase grouping. If `step.optional === true` and the step's `name` is not in the goal's `enabledOptionalSteps`, the step is skipped with `{ passed: true, output: "Skipped — not enabled for this goal" }`.
+- Skipped optional steps do not block the gate and do not affect phase pass/fail logic.
+
+**Example in workflow YAML:**
+```yaml
+verify:
+  - name: "Type check"
+    type: command
+    run: "npm run check"
+
+  - name: "QA testing"
+    type: agent-qa
+    phase: 2
+    optional: true
+    label: "Enable QA Testing"
+    prompt: |
+      You are performing QA testing for this goal...
+```
+
+#### `agent-qa` step type
+
+The `agent-qa` verification step type spawns a test-engineer agent session that performs automated QA testing. It is designed for browser-based validation of user-facing changes, using the `/qa-test` skill to manage an ephemeral environment.
+
+**How it works:**
+1. The harness spawns a test-engineer session with the step's `prompt` (after variable substitution with `{{goal_spec}}`, `{{branch}}`, etc.) and upstream gate content injected as context.
+2. The agent uses the `/qa-test` skill to stand up an ephemeral server, drive browser scenarios, and produce an HTML report.
+3. The harness parses `<verdict>pass|fail</verdict>` from the agent's output to determine pass/fail.
+4. If the agent emits a `<qa_report>...HTML...</qa_report>` block, the HTML is stored as the step's artifact with `contentType: "text/html"`.
+5. If no verdict is found, the harness sends a follow-up prompt (same pattern as `llm-review`) to request one.
+
+**Timeout:** Reads `qa_max_duration_minutes` from project config (default 10) plus a 5-minute buffer for setup/teardown.
+
+**Retry logic:** Up to 3 attempts with backoff on transient failures (same pattern as `llm-review`).
+
+**Test environments:** Respects `BOBBIT_LLM_REVIEW_SKIP` — when set, `agent-qa` steps auto-pass without spawning an agent.
+
+**Resume support:** If the server restarts during an `agent-qa` step, the harness re-executes the step from scratch on the next verification cycle.
+
+The `agent-qa` step typically runs at phase 2 in the `feature` and `bug-fix` workflows — after command checks (phase 0) and LLM reviews (phase 1) have passed. See [QA Testing](qa-testing.md) for project configuration and the `/qa-test` skill protocol.
 
 ### Gate Re-Signal Cancellation
 
@@ -319,7 +431,7 @@ State is per-project — each project has its own copies of these files in `<pro
 |---|---|
 | `src/server/agent/workflow-store.ts` | YAML persistence for workflow templates |
 | `src/server/agent/workflow-manager.ts` | Workflow CRUD, DAG validation, cloning |
-| `src/server/agent/verification-harness.ts` | Async verification (command + LLM review) |
+| `src/server/agent/verification-harness.ts` | Async verification (phased execution, command + LLM review + agent-qa, artifact population) |
 | `src/server/agent/gate-store.ts` | Gate state and signal history persistence |
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |

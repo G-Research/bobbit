@@ -62,11 +62,11 @@ test.describe("Session worktrees", () => {
 		try {
 			expect(sessionId).toBeTruthy();
 
-			// Poll until worktreePath is set AND the worktree directory exists on disk.
+			// Poll until worktreePath is set, cwd is updated, AND the worktree directory exists on disk.
 			// The worktree setup is async fire-and-forget, so we need to wait.
 			const session = await pollSession(
 				sessionId,
-				(data) => !!data.worktreePath && existsSync(data.worktreePath),
+				(data) => !!data.worktreePath && data.cwd === data.worktreePath && existsSync(data.worktreePath),
 				30_000,
 			);
 

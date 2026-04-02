@@ -8,7 +8,7 @@ export interface ProposalParser {
 export const PROPOSAL_PARSERS: ProposalParser[] = [
 	{
 		tag: "goal_proposal",
-		fields: ["title", "spec", "cwd", "workflow"],
+		fields: ["title", "spec", "cwd", "workflow", "options"],
 		requiredFields: ["title", "spec"],
 		callbackName: "onGoalProposal",
 	},

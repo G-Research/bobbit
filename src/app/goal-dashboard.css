@@ -1316,6 +1316,7 @@
 .verify-card--running { border-color: oklch(0.62 0.15 250 / 0.3); }
 .verify-card--pass { border-color: oklch(0.65 0.15 145 / 0.3); background: oklch(0.65 0.15 145 / 0.03); }
 .verify-card--fail { border-color: color-mix(in oklch, var(--destructive) 30%, transparent); background: color-mix(in oklch, var(--destructive) 3%, transparent); }
+.verify-card--skipped { border-color: var(--border); background: var(--muted); opacity: 0.7; }
 
 .verify-card__header {
 	display: flex;
@@ -1335,6 +1336,7 @@
 .verify-card__icon--running { color: oklch(0.62 0.15 250); animation: pulse-verify 1.5s ease-in-out infinite; }
 .verify-card__icon--pass { color: oklch(0.72 0.15 145); }
 .verify-card__icon--fail { color: var(--destructive); }
+.verify-card__icon--skipped { color: var(--muted-foreground); }
 
 @keyframes pulse-verify {
 	0%, 100% { opacity: 1; }
@@ -1451,4 +1453,81 @@
 .btn-retry:hover {
 	background: var(--primary);
 	color: var(--primary-foreground);
+}
+
+/* ── Phase divider ── */
+.phase-divider {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--muted-foreground);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	padding: 4px 0 2px;
+}
+.phase-divider::after {
+	content: "";
+	flex: 1;
+	height: 1px;
+	background: var(--border);
+}
+
+/* ── Artifact section ── */
+.artifact-section {
+	border-top: 1px solid var(--border);
+	font-size: 12px;
+}
+.artifact-toggle {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 5px 8px;
+	cursor: pointer;
+	color: var(--muted-foreground);
+	font-weight: 500;
+	user-select: none;
+}
+.artifact-toggle:hover {
+	color: var(--foreground);
+	background: var(--accent);
+}
+.artifact-toggle-icon {
+	font-size: 10px;
+	width: 12px;
+	text-align: center;
+}
+.artifact-content {
+	padding: 8px 12px;
+	border-top: 1px solid var(--border);
+	max-height: 500px;
+	overflow-y: auto;
+}
+.artifact-report-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	margin: 6px 8px;
+	padding: 4px 10px;
+	font-size: 11px;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	background: var(--secondary);
+	color: var(--foreground);
+	cursor: pointer;
+}
+.artifact-report-btn:hover {
+	background: var(--accent);
+}
+.artifact-metadata {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 4px 8px 6px;
+	font-size: 11px;
+	color: var(--text-tertiary);
+}
+.artifact-metadata-item {
+	color: var(--text-tertiary);
 }

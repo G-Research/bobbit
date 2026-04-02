@@ -84,6 +84,8 @@ Markdown spec content. Include:
 
 The \`<workflow>\` tag should contain the workflow ID (e.g. \`general\`, \`feature\`, or \`bug-fix\`).
 
+The \`<options>\` tag is optional. Use comma-separated step names matching optional steps in the workflow to pre-enable them (e.g. \`QA testing\`).
+
 Keep the spec focused and actionable — it will be injected into every coding agent session's context window for this goal. Don't pad it with generic advice. Every line should be specific to THIS goal.
 
 If the user asks to change the working directory, include a <cwd>/path/here</cwd> tag inside the proposal.

@@ -185,21 +185,29 @@ The report structure:
 
 Save the report to `$WORK_DIR/validation-report.html`.
 
-## Step 8: Signal Gate
+## Step 8: Emit Results
 
-Convert key sections of the HTML report to markdown and signal the gate:
+Instead of signaling a gate directly, emit structured output tags that the verification harness will parse:
 
-```
-gate_signal(
-  gate_id="qa-testing",
-  content="<markdown version of the report>",
-  metadata={
-    "scenarios_passed": "<count>",
-    "scenarios_failed": "<count>",
-    "budget_used": "<minutes>m of <max>m"
-  }
-)
-```
+1. **Verdict tag** (REQUIRED): Based on your test results, emit exactly one of:
+   - `<verdict>pass</verdict>` — if all critical scenarios passed
+   - `<verdict>fail</verdict>` — if any critical scenario failed
+
+2. **QA Report tag** (REQUIRED): Wrap your HTML report in a qa_report tag:
+   ```
+   <qa_report>
+   <!DOCTYPE html>
+   <html>
+   ... your full HTML report with embedded base64 screenshots ...
+   </html>
+   </qa_report>
+   ```
+
+The verification harness will extract these tags from your output automatically.
+
+**When invoked by the `agent-qa` verification harness:** Do NOT call `gate_signal()` — the harness handles gate signaling based on your verdict.
+
+**When invoked standalone** (e.g. a team lead spawns you for the `qa-testing` gate): After emitting the tags above, also call `gate_signal()` with the report as content and metadata `{scenarios_passed, scenarios_failed, budget_used}`.
 
 ## Step 9: Cleanup
 
