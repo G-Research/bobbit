@@ -62,7 +62,7 @@ export default function(pi) {
           method: "POST",
           headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
           ...(url.protocol === "https:" ? { rejectUnauthorized: false } : {}),
-        }, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => resolve(d)); });
+        }, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { if (res.statusCode && res.statusCode >= 400) { reject(new Error("verification_result delivery failed (HTTP " + res.statusCode + "): " + d)); } else { resolve(d); } }); });
         req.on("error", reject);
         req.write(body);
         req.end();

@@ -4264,7 +4264,7 @@ async function handleApiRoute(
 	// POST /api/internal/verification-result
 	if (url.pathname === "/api/internal/verification-result" && req.method === "POST") {
 		const body = await readBody(req);
-		if (!body?.sessionId || !body?.verdict || !body?.summary) {
+		if (!body?.sessionId || !body?.verdict || !body?.summary || typeof body.sessionId !== "string" || typeof body.verdict !== "string" || typeof body.summary !== "string") {
 			json({ error: "Missing required fields: sessionId, verdict, summary" }, 400);
 			return;
 		}
@@ -4276,7 +4276,7 @@ async function handleApiRoute(
 		resolver({
 			verdict: body.verdict === "pass",
 			summary: body.summary,
-			reportHtml: body.report_html,
+			reportHtml: typeof body.report_html === "string" ? body.report_html : undefined,
 		});
 		json({ ok: true });
 		return;
