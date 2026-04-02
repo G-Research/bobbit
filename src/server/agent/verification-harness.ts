@@ -12,25 +12,71 @@ import type { ProjectConfigStore } from "./project-config-store.js";
 import { GIT_BASH, getShellConfig } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 
-/** Extract pass/fail verdict from sub-agent output. Exported for unit testing. */
-export function parseVerdict(output: string): boolean | null {
-	const match = output.match(/<verdict>\s*(pass|fail)\s*<\/verdict>/i);
-	if (!match) return null;
-	return match[1].toLowerCase() === "pass";
+/** Create a deferred promise with exposed resolve/reject. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: any) => void } {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: any) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
 }
 
-/** Extract QA report HTML from agent output. Exported for unit testing. */
-export function parseQaReport(output: string): string | null {
-	const match = output.match(/<qa_report>([\s\S]*?)<\/qa_report>/i);
-	return match ? match[1].trim() : null;
+/** Structured result delivered by the verification_result tool. */
+export interface VerificationResult {
+	verdict: boolean;
+	summary: string;
+	reportHtml?: string;
 }
 
-const VERDICT_FOLLOWUP_PROMPT = "Your review is complete but you did not include the required <verdict> tag. Based on your review findings above, respond with ONLY a <verdict>pass</verdict> or <verdict>fail</verdict> tag. Use <verdict>fail</verdict> if you found any critical or high severity issues, otherwise <verdict>pass</verdict>.";
+/** Reminder prompt sent when an agent goes idle without calling verification_result. */
+export const VERIFICATION_RESULT_REMINDER =
+	"You went idle without submitting your results. " +
+	"Call the `verification_result` tool now with your verdict and summary. " +
+	"This is REQUIRED — the verification system only receives results through this tool.";
+
+/**
+ * Generate a TypeScript extension that registers the `verification_result` tool.
+ * The tool calls POST /api/internal/verification-result on the gateway.
+ * Exported for unit testing.
+ */
+export function generateVerificationResultExtension(sessionId: string): string {
+	return `import { Type } from "@sinclair/typebox";
+export default function(pi) {
+  const token = process.env.BOBBIT_TOKEN;
+  const gwUrl = process.env.BOBBIT_GATEWAY_URL;
+  const sessionId = ${JSON.stringify(sessionId)};
+
+  pi.registerTool({
+    name: "verification_result",
+    description: "Submit your verification result. Call this when your review or QA testing is complete.",
+    parameters: Type.Object({
+      verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], { description: "Whether verification passed or failed" }),
+      summary: Type.String({ description: "Concise summary of findings" }),
+      report_html: Type.Optional(Type.String({ description: "Self-contained HTML report with embedded screenshots (for QA agents)" })),
+    }),
+    execute: async (toolCallId, params) => {
+      const body = JSON.stringify({ sessionId, verdict: params.verdict, summary: params.summary, report_html: params.report_html });
+      const url = new URL(gwUrl + "/api/internal/verification-result");
+      const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
+      await new Promise((resolve, reject) => {
+        const req = mod.request(url, {
+          method: "POST",
+          headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+          ...(url.protocol === "https:" ? { rejectUnauthorized: false } : {}),
+        }, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => resolve(d)); });
+        req.on("error", reject);
+        req.write(body);
+        req.end();
+      });
+      return { content: [{ type: "text", text: "Result recorded. You may now proceed with cleanup." }] };
+    }
+  });
+}
+`;
+}
 
 /** Patterns that indicate a transient/infrastructure failure worth retrying. */
 const TRANSIENT_ERROR_PATTERNS = [
 	"timed out",
-	"no <verdict> tag",
 	"Agent process not running",
 	"process exited",
 	"Session lost during server restart",
@@ -43,11 +89,11 @@ const TRANSIENT_ERROR_PATTERNS = [
 
 /**
  * Patterns that are transient for LLM reviews but NOT for agent-qa steps.
- * "no verdict tag" for QA agents usually means the agent spent its entire budget
- * fighting infrastructure issues — retrying will just burn more time/cost.
+ * "Agent did not call verification_result" means the agent burned its budget
+ * without producing results — retrying will just waste more time/cost.
  */
 const QA_NON_TRANSIENT_PATTERNS = [
-	"no <verdict> tag",
+	"Agent did not call verification_result",
 ];
 
 /** Check if an LLM review error output matches a transient failure pattern. */
@@ -78,6 +124,21 @@ export class VerificationHarness {
 	private activeVerifications = new Map<string, ActiveVerification>();
 	private readonly _persistPath: string;
 	private projectContextManager: ProjectContextManager | null;
+
+	/** Pending verification_result resolvers keyed by sessionId. */
+	public pendingResults = new Map<string, (result: VerificationResult) => void>();
+
+	/**
+	 * Write a verification_result extension file for the given session.
+	 * Returns the path to the generated extension file.
+	 */
+	writeVerificationResultExtension(sessionId: string): string {
+		const promptDir = path.join(this._stateDir, "session-prompts");
+		if (!fs.existsSync(promptDir)) fs.mkdirSync(promptDir, { recursive: true });
+		const extPath = path.join(promptDir, `verification-ext-${sessionId}.ts`);
+		fs.writeFileSync(extPath, generateVerificationResultExtension(sessionId));
+		return extPath;
+	}
 
 	/** Get all active (in-flight) verifications, optionally filtered by goalId */
 	getActiveVerifications(goalId?: string): ActiveVerification[] {
@@ -336,42 +397,59 @@ export class VerificationHarness {
 			try { this.teamManager.registerReviewerSession(v.goalId, step.sessionId, step.name); } catch { /* ignore */ }
 		}
 
-		// Wait for the agent to finish if it was mid-turn
+		// Set up verification_result promise for this resumed session
+		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
+		this.pendingResults.set(step.sessionId, resultResolver);
+
 		try {
-			await this.sessionManager!.waitForIdle(step.sessionId, 180_000);
-		} catch (err) {
-			console.warn(`[verification] waitForIdle failed for resumed session ${step.sessionId}: ${(err as Error).message}`);
-		}
+			// Wait for the agent to finish if it was mid-turn
+			const idleResult = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForIdle(step.sessionId, 180_000).then(() => ({ type: "idle" as const })),
+			]).catch(() => ({ type: "idle" as const }));
 
-		// Extract verdict from output
-		let output = "";
-		try { output = await this.sessionManager!.getSessionOutput(step.sessionId); } catch { /* fall through */ }
+			if (idleResult.type === "result") {
+				await this.sessionManager!.waitForIdle(step.sessionId, 30_000).catch(() => {});
+				return {
+					name: step.name, type: step.type,
+					passed: idleResult.verdict,
+					output: idleResult.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
 
-		let verdict = parseVerdict(output);
-		if (verdict === null) {
-			console.log(`[verification] No verdict in restored session ${step.sessionId}, sending follow-up...`);
-			try {
-				await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
-				await this.sessionManager!.waitForIdle(step.sessionId, 120_000);
-				output = await this.sessionManager!.getSessionOutput(step.sessionId);
-				verdict = parseVerdict(output);
-			} catch (err) {
-				output = output || `Follow-up failed: ${(err as Error).message}`;
+			// Agent went idle without calling verification_result — send reminder
+			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending reminder...`);
+			await session.rpcClient.prompt(VERIFICATION_RESULT_REMINDER);
+
+			const result2 = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForIdle(step.sessionId, 120_000).then(() => ({ type: "idle" as const })),
+			]).catch(() => ({ type: "idle" as const }));
+
+			if (result2.type === "result") {
+				return {
+					name: step.name, type: step.type,
+					passed: result2.verdict,
+					output: result2.summary,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
+
+			return {
+				name: step.name, type: step.type,
+				passed: false,
+				output: "Agent did not call verification_result after server restart and reminder.",
+				duration_ms: Date.now() - step.startedAt,
+			};
+		} finally {
+			this.pendingResults.delete(step.sessionId);
+			// Terminate and unregister reviewer session
+			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
+			if (this.teamManager) {
+				try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
 			}
 		}
-
-		// Terminate and unregister reviewer session
-		try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
-		if (this.teamManager) {
-			try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
-		}
-
-		return {
-			name: step.name, type: step.type,
-			passed: verdict ?? false,
-			output: output || "No <verdict> tag found after server restart and follow-up.",
-			duration_ms: Date.now() - step.startedAt,
-		};
 	}
 
 	/**
@@ -1078,31 +1156,14 @@ export class VerificationHarness {
 			"",
 			step.prompt || "",
 			"",
-			"## Required Output Format",
+			"## Submitting Results",
 			"",
-			"Produce your review, then end with a <verdict> tag. Example:",
+			"When your review is complete, call `verification_result`:",
+			'- verdict: "pass" or "fail" based on findings severity',
+			"- summary: your review findings and reasoning",
 			"",
-			"```",
-			"## Summary",
-			"Brief overview of what was reviewed and the outcome.",
-			"",
-			"## Findings",
-			"[critical] file.ts:line — Description",
-			"[high] file.ts:line — Description",
-			"[medium] file.ts:line — Description",
-			"[low] file.ts:line — Description",
-			"",
-			"## Verdict",
-			"Explanation of pass/fail decision.",
-			"",
-			"<verdict>pass</verdict>",
-			"```",
-			"",
-			"## Rules",
-			"- **<verdict>fail</verdict>** if any critical or high severity findings exist",
-			"- **<verdict>pass</verdict>** if no critical or high severity findings",
-			"- **You MUST include exactly one `<verdict>pass</verdict>` or `<verdict>fail</verdict>` tag — if you omit it, the review fails automatically regardless of your findings**",
-			"- **Do NOT call `gate_signal`.** The verification system handles gate signaling automatically based on your `<verdict>` tag. Just produce your review findings and verdict, then stop.",
+			"You MUST call this tool. Going idle without calling it means your review is lost.",
+			"Do NOT emit <verdict> XML tags. Do NOT call gate_signal.",
 		].join("\n");
 
 		// ── Session-based path (visible in UI) ──
@@ -1138,14 +1199,16 @@ export class VerificationHarness {
 		}
 
 		sections.push([
-			"\n## CRITICAL: Verdict Tag Requirement",
+			"\n## CRITICAL: Submitting Your Results",
 			"",
-			"Every review you produce MUST end with exactly one `<verdict>` XML tag:",
-			"- `<verdict>pass</verdict>` — if no critical or high severity findings exist",
-			"- `<verdict>fail</verdict>` — if any critical or high severity findings exist",
+			"When your review is complete, you MUST call the `verification_result` tool:",
+			'- `verdict`: "pass" if no critical or high severity findings, "fail" otherwise',
+			"- `summary`: concise summary of your findings",
 			"",
-			"If you omit this tag, the verification system cannot parse your output and the review FAILS automatically.",
-			"This is the single most important formatting requirement. Never omit it.",
+			"This tool call is how the verification system receives your results.",
+			"If you go idle without calling it, your review fails automatically.",
+			"",
+			"Do NOT emit <verdict> tags. Do NOT call gate_signal. Just call verification_result.",
 		].join("\n"));
 
 		if (goalSpec) {
@@ -1211,20 +1274,28 @@ export class VerificationHarness {
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
-		let sessionId: string | undefined;
+		// Pre-generate sessionId so we can register the verification_result resolver and extension before session creation
+		const sessionId = preGeneratedSessionId || `llm-review-${randomUUID().slice(0, 12)}`;
+
+		// Set up verification_result promise
+		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
+		this.pendingResults.set(sessionId, resultResolver);
+
+		// Write verification_result extension
+		const extPath = this.writeVerificationResultExtension(sessionId);
+
 		try {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
 			const roleName = role.name || step.role || "reviewer";
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+			const session = await this.sessionManager!.createSession(cwd, ["--extension", extPath], goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
 				sandboxed: (goalId
 				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
 				: undefined) ?? this.sessionManager!.isSandboxEnabled,
-				sessionId: preGeneratedSessionId,
+				sessionId,
 			});
-			sessionId = session.id;
 
 			// Set title and metadata
 			const roleLabel = role.name ? (role.name.charAt(0).toUpperCase() + role.name.slice(1).replace(/-/g, " ")) : "Reviewer";
@@ -1281,28 +1352,35 @@ export class VerificationHarness {
 				}
 			}
 
-			// Send kickoff prompt and wait for idle
+			// Send kickoff prompt
 			await session.rpcClient.prompt(kickoff);
-			await this.sessionManager!.waitForIdle(sessionId, timeoutMs);
 
-			// Get output from the session
-			const output = await this.sessionManager!.getSessionOutput(sessionId);
+			// Race: tool result vs idle-without-result
+			const result = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+			]);
 
-			const verdict = parseVerdict(output);
-			if (verdict === null) {
-				// Follow-up: ask the agent to emit the verdict tag
-				console.log(`[verification] No verdict tag found, sending follow-up prompt to ${sessionId}`);
-				await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
-				await this.sessionManager!.waitForIdle(sessionId!, timeoutMs);
-				const fullOutput = await this.sessionManager!.getSessionOutput(sessionId!);
-				const retryVerdict = parseVerdict(fullOutput);
-				if (retryVerdict === null) {
-					return { passed: false, output: fullOutput || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId };
-				}
-				return { passed: retryVerdict, output: fullOutput, sessionId };
+			if (result.type === "result") {
+				// Got structured result — still wait for agent to go idle (cleanup)
+				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
+				return { passed: result.verdict, output: result.summary, sessionId };
 			}
 
-			return { passed: verdict, output, sessionId };
+			// Agent went idle without calling the tool — send reminder
+			console.log(`[verification] No verification_result from ${sessionId}, sending reminder`);
+			await session.rpcClient.prompt(VERIFICATION_RESULT_REMINDER);
+			const result2 = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+			]);
+
+			if (result2.type === "result") {
+				return { passed: result2.verdict, output: result2.summary, sessionId };
+			}
+
+			// Hard failure
+			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
 			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
@@ -1314,8 +1392,13 @@ export class VerificationHarness {
 			}
 			return { passed: false, output: errOutput, sessionId };
 		} finally {
-			// Always terminate and unregister, even on error/timeout
+			// Always clean up pending results, extension file, terminate, and unregister
 			if (sessionId) {
+				this.pendingResults.delete(sessionId);
+				try {
+					const extFile = path.join(this._stateDir, "session-prompts", `verification-ext-${sessionId}.ts`);
+					if (fs.existsSync(extFile)) fs.unlinkSync(extFile);
+				} catch { /* ignore */ }
 				try {
 					await this.sessionManager!.terminateSession(sessionId);
 				} catch { /* ignore — session may already be terminated */ }
@@ -1382,26 +1465,38 @@ export class VerificationHarness {
 			"",
 			step.prompt || "",
 			"",
-			"## Required Output Format",
-			"After completing testing, you MUST emit:",
-			"1. A <verdict>pass</verdict> or <verdict>fail</verdict> tag",
-			"2. A <qa_report>...your HTML report...</qa_report> tag wrapping the full HTML report",
+			"## Submitting Results",
+			"After completing all scenarios, call `verification_result` to submit your results:",
+			'- `verdict`: "pass" or "fail"',
+			"- `summary`: concise summary of findings",
+			"- `report_html`: self-contained HTML report with embedded base64 screenshots",
 			"",
-			"The verdict and report tags are REQUIRED. The verification system parses them automatically.",
+			"This tool call is REQUIRED. Do not emit <verdict> or <qa_report> XML tags.",
 		].join("\n");
 
 		let qaSessionId: string | undefined;
 		try {
 			// Create session via SessionManager
 			const qaRoleName = role.name || step.role || "qa-tester";
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+
+			// Pre-generate sessionId so we can register the verification_result resolver before session creation
+			qaSessionId = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
+
+			// Set up verification_result promise
+			const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
+			this.pendingResults.set(qaSessionId, resultResolver);
+
+			// Write verification_result extension
+			const extPath = this.writeVerificationResultExtension(qaSessionId);
+
+			const session = await this.sessionManager!.createSession(cwd, ["--extension", extPath], goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
 				sandboxed: (goalId
 					? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 						?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
 					: undefined) ?? this.sessionManager!.isSandboxEnabled,
-				sessionId,
+				sessionId: qaSessionId,
 			});
 			qaSessionId = session.id;
 
@@ -1455,34 +1550,41 @@ export class VerificationHarness {
 				}
 			}
 
-			// Send kickoff prompt and wait for idle
+			// Send kickoff prompt
 			await session.rpcClient.prompt(kickoff);
-			await this.sessionManager!.waitForIdle(qaSessionId, timeoutMs);
 
-			// Get output from the session
-			const output = await this.sessionManager!.getSessionOutput(qaSessionId);
+			// Race: tool result vs idle-without-result
+			const result = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+			]);
 
-			let verdict = parseVerdict(output);
-			if (verdict === null) {
-				// Follow-up: ask the agent to emit the verdict tag
-				console.log(`[verification] No verdict tag from QA agent, sending follow-up to ${qaSessionId}`);
-				await session.rpcClient.prompt(VERDICT_FOLLOWUP_PROMPT);
-				await this.sessionManager!.waitForIdle(qaSessionId, timeoutMs);
-				const fullOutput = await this.sessionManager!.getSessionOutput(qaSessionId);
-				verdict = parseVerdict(fullOutput);
-				if (verdict === null) {
-					const reportHtml = parseQaReport(fullOutput);
-					const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
-					return { passed: false, output: fullOutput || "Agent QA failed: no <verdict> tag found.", sessionId: qaSessionId, artifact };
-				}
-				const reportHtml = parseQaReport(fullOutput);
-				const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
-				return { passed: verdict, output: fullOutput, sessionId: qaSessionId, artifact };
+			if (result.type === "result") {
+				// Got structured result — still wait for agent to go idle (cleanup)
+				await this.sessionManager!.waitForIdle(qaSessionId, 30_000).catch(() => {});
+				const artifact = result.reportHtml
+					? { content: result.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+					: undefined;
+				return { passed: result.verdict, output: result.summary, sessionId: qaSessionId, artifact };
 			}
 
-			const reportHtml = parseQaReport(output);
-			const artifact = reportHtml ? { content: reportHtml.length > QA_MAX_ARTIFACT ? reportHtml.slice(0, QA_MAX_ARTIFACT) : reportHtml, contentType: "text/html" } : undefined;
-			return { passed: verdict, output, sessionId: qaSessionId, artifact };
+			// Agent went idle without calling the tool — send reminder
+			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending reminder`);
+			await session.rpcClient.prompt(VERIFICATION_RESULT_REMINDER);
+			const result2 = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+			]);
+
+			if (result2.type === "result") {
+				const artifact = result2.reportHtml
+					? { content: result2.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+					: undefined;
+				return { passed: result2.verdict, output: result2.summary, sessionId: qaSessionId, artifact };
+			}
+
+			// Hard failure
+			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: qaSessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
 			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
@@ -1495,6 +1597,11 @@ export class VerificationHarness {
 			return { passed: false, output: errOutput, sessionId: qaSessionId };
 		} finally {
 			if (qaSessionId) {
+				this.pendingResults.delete(qaSessionId);
+				try {
+					const extFile = path.join(this._stateDir, "session-prompts", `verification-ext-${qaSessionId}.ts`);
+					if (fs.existsSync(extFile)) fs.unlinkSync(extFile);
+				} catch { /* ignore */ }
 				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
 				if (this.teamManager) {
 					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
@@ -1517,6 +1624,13 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 
+		// Set up verification_result promise
+		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
+		this.pendingResults.set(subSessionId, resultResolver);
+
+		// Write verification_result extension
+		const extPath = this.writeVerificationResultExtension(subSessionId);
+
 		// Assemble system prompt to temp file
 		const systemPromptPath = assembleSystemPrompt(subSessionId, {
 			cwd,
@@ -1531,7 +1645,10 @@ export class VerificationHarness {
 			: [];
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
-			args: allowedTools.length > 0 ? ["--tools", allowedTools.join(",")] : [],
+			args: [
+				...(allowedTools.length > 0 ? ["--tools", allowedTools.join(",")] : []),
+				"--extension", extPath,
+			],
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 
@@ -1584,27 +1701,12 @@ export class VerificationHarness {
 				}
 			}
 
-			// Collect assistant text from streaming events as a fallback
-			let streamedAssistantText = "";
-
 			const completionPromise = new Promise<void>((resolve, reject) => {
 				const timer = setTimeout(() => {
 					reject(new Error(`LLM review sub-agent timed out after ${timeoutMs / 1000}s`));
 				}, timeoutMs);
 
 				const eventUnsub = rpc.onEvent((event: any) => {
-					if (event.type === "message_end" && event.message?.role === "assistant") {
-						const msg = event.message;
-						if (Array.isArray(msg.content)) {
-							const text = msg.content
-								.filter((c: any) => c.type === "text")
-								.map((c: any) => c.text)
-								.join("\n");
-							if (text) streamedAssistantText = text;
-						} else if (typeof msg.content === "string" && msg.content) {
-							streamedAssistantText = msg.content;
-						}
-					}
 					if (event.type === "agent_end") {
 						clearTimeout(timer);
 						eventUnsub();
@@ -1614,59 +1716,47 @@ export class VerificationHarness {
 			});
 
 			await rpc.prompt(kickoff);
-			await completionPromise;
 
-			let output = "";
-			try {
-				const msgsResp = await rpc.getMessages();
-				if (msgsResp.success && Array.isArray(msgsResp.data)) {
-					output = extractLastAssistantOutput(msgsResp.data);
-				}
-			} catch {
-				// Non-fatal
-			}
-			if (!output && streamedAssistantText) {
-				output = streamedAssistantText;
+			// Race: tool result vs agent completion
+			const result = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				completionPromise.then(() => ({ type: "idle" as const })),
+			]);
+
+			if (result.type === "result") {
+				// Got structured result — wait briefly for agent to finish
+				await completionPromise.catch(() => {});
+				return { passed: result.verdict, output: result.summary, sessionId: subSessionId };
 			}
 
-			const verdict = parseVerdict(output);
-			if (verdict === null) {
-				// Follow-up: ask the agent to emit the verdict tag
-				console.log(`[verification] No verdict tag found, sending follow-up prompt to ${subSessionId}`);
+			// Agent completed without calling the tool — send reminder
+			console.log(`[verification] No verification_result from ${subSessionId}, sending reminder`);
 
-				const followupPromise = new Promise<void>((resolve, reject) => {
-					const timer = setTimeout(() => {
-						reject(new Error(`Follow-up timed out after ${timeoutMs / 1000}s`));
-					}, timeoutMs);
-					const eventUnsub = rpc.onEvent((event: any) => {
-						if (event.type === "agent_end") {
-							clearTimeout(timer);
-							eventUnsub();
-							resolve();
-						}
-					});
-				});
-
-				await rpc.prompt(VERDICT_FOLLOWUP_PROMPT);
-				await followupPromise;
-
-				let fullOutput = "";
-				try {
-					const msgsResp = await rpc.getMessages();
-					if (msgsResp.success && Array.isArray(msgsResp.data)) {
-						fullOutput = extractAllAssistantOutput(msgsResp.data);
+			const reminderCompletionPromise = new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					reject(new Error(`Reminder timed out after ${timeoutMs / 1000}s`));
+				}, timeoutMs);
+				const eventUnsub = rpc.onEvent((event: any) => {
+					if (event.type === "agent_end") {
+						clearTimeout(timer);
+						eventUnsub();
+						resolve();
 					}
-				} catch {}
-				if (!fullOutput) fullOutput = output; // fallback to original
+				});
+			});
 
-				const retryVerdict = parseVerdict(fullOutput);
-				if (retryVerdict === null) {
-					return { passed: false, output: fullOutput || "LLM review failed: no <verdict> tag found in sub-agent output.", sessionId: subSessionId };
-				}
-				return { passed: retryVerdict, output: fullOutput, sessionId: subSessionId };
+			await rpc.prompt(VERIFICATION_RESULT_REMINDER);
+
+			const result2 = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				reminderCompletionPromise.then(() => ({ type: "idle" as const })),
+			]);
+
+			if (result2.type === "result") {
+				return { passed: result2.verdict, output: result2.summary, sessionId: subSessionId };
 			}
 
-			return { passed: verdict, output, sessionId: subSessionId };
+			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: subSessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out");
 			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
@@ -1678,6 +1768,7 @@ export class VerificationHarness {
 			}
 			return { passed: false, output: errOutput, sessionId: subSessionId };
 		} finally {
+			this.pendingResults.delete(subSessionId);
 			await rpc.stop().catch(() => {});
 			// Unregister the session (archives it so chat history remains viewable)
 			if (unregisterSession) unregisterSession();
@@ -1685,6 +1776,9 @@ export class VerificationHarness {
 				const promptDir = path.join(this._stateDir, "session-prompts");
 				const promptFile = path.join(promptDir, `${subSessionId}.md`);
 				if (fs.existsSync(promptFile)) fs.unlinkSync(promptFile);
+			} catch { /* ignore */ }
+			try {
+				if (fs.existsSync(extPath)) fs.unlinkSync(extPath);
 			} catch { /* ignore */ }
 		}
 	}
@@ -1857,36 +1951,3 @@ export class VerificationHarness {
 	}
 }
 
-/**
- * Extract ALL assistant message text from agent messages (concatenated).
- * Used after follow-up prompts to find the verdict anywhere in the full conversation.
- */
-function extractAllAssistantOutput(messages: any[]): string {
-	return messages
-		.filter((m: any) => m?.role === "assistant")
-		.map((m: any) => {
-			if (Array.isArray(m.content)) {
-				return m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
-			}
-			return typeof m.content === "string" ? m.content : "";
-		})
-		.filter(Boolean)
-		.join("\n");
-}
-
-/**
- * Extract the last assistant message text from agent messages.
- */
-function extractLastAssistantOutput(messages: any[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (!msg || msg.role !== "assistant") continue;
-
-		const text = Array.isArray(msg.content)
-			? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-			: typeof msg.content === "string" ? msg.content : "";
-
-		if (text) return text;
-	}
-	return "";
-}

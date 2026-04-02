@@ -4261,6 +4261,27 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/internal/verification-result
+	if (url.pathname === "/api/internal/verification-result" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.sessionId || !body?.verdict || !body?.summary) {
+			json({ error: "Missing required fields: sessionId, verdict, summary" }, 400);
+			return;
+		}
+		const resolver = verificationHarness.pendingResults.get(body.sessionId);
+		if (!resolver) {
+			json({ error: "No pending verification for this session" }, 404);
+			return;
+		}
+		resolver({
+			verdict: body.verdict === "pass",
+			summary: body.summary,
+			reportHtml: body.report_html,
+		});
+		json({ ok: true });
+		return;
+	}
+
 	json({ error: "Not found" }, 404);
 }
 
