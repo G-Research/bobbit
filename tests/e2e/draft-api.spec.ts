@@ -8,7 +8,7 @@
  *
  * These endpoints do NOT exist yet (TDD). All tests should fail with 404.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createSession, deleteSession } from "./e2e-setup.js";
 
 let sessionId: string;

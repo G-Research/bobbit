@@ -13,7 +13,7 @@ npm start              # Run built gateway (serves embedded UI)
 npm run check          # Type-check both server and web without emitting
 npm test               # Run all tests (unit + E2E)
 npm run test:unit      # Unit tests — Node test runner + Playwright file:// fixtures (<30s)
-npm run test:e2e       # E2E tests — each worker spawns its own gateway (<90s)
+npm run test:e2e       # E2E tests — API (in-process) + browser (spawned gateway)
 ```
 
 ### Dev server harness
@@ -31,7 +31,7 @@ See [docs/dev-workflow.md](docs/dev-workflow.md) for the full guide.
 ```bash
 npm run check                    # Type-check first
 npm run test:unit 2>&1 | tail -5 # Unit tests (<30s, no server)
-npm run test:e2e 2>&1 | tail -5  # E2E tests (<90s, spawns gateways)
+npm run test:e2e 2>&1 | tail -5  # E2E tests (API in-process + browser spawned)
 ```
 
 Test filter flags: `--failures` (default), `--verbose`, `--full`.
@@ -40,8 +40,9 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Test types:**
 - **Unit** (`tests/*.spec.ts`, `tests/*.test.ts`): Playwright `file://` fixtures + Node test runner. See `mobile-header.spec.ts`.
-- **E2E** (`tests/e2e/*.spec.ts`): Import `test` from `./gateway-harness.js` for auto-started gateway per worker. See `session-lifecycle-ui.spec.ts` for fullstack pattern.
-- **UI E2E** (`tests/e2e/ui/*.spec.ts`): Browser-based fullstack tests that exercise user journeys (click buttons, fill forms, verify outcomes) through UI → WebSocket → server → mock agent → UI. Covers project management, goal creation, team lifecycle, session interactions, navigation, and settings. Run with: `npx playwright test --config playwright-e2e.config.ts tests/e2e/ui/`
+- **API E2E** (`tests/e2e/*.spec.ts`): Import `test` from `./in-process-harness.js` — the gateway runs in the same Node process (no child process spawn). Covers HTTP/WS API tests, CRUD, agent protocol, etc. Runs as the `api` project in `playwright-e2e.config.ts` with 4 workers.
+- **Browser E2E** (`tests/e2e/ui/*.spec.ts` + select non-ui files): Import `test` from `./gateway-harness.js` — spawns a real gateway child process. Used for tests that need a browser (`page` fixture), MCP integration, or process-level behavior (port allocation, localhost auth bypass). Runs as the `browser` project with 2 workers.
+- **UI E2E** (`tests/e2e/ui/*.spec.ts`): A subset of browser E2E — fullstack tests that exercise user journeys (click buttons, fill forms, verify outcomes) through UI → WebSocket → server → mock agent → UI. Covers project management, goal creation, team lifecycle, session interactions, navigation, and settings. Run with: `npx playwright test --config playwright-e2e.config.ts --project browser tests/e2e/ui/`
 
 **UI E2E page-object helpers** (`tests/e2e/ui/ui-helpers.ts`): Reusable helpers for browser tests. Import from `./ui-helpers.js`:
 - `openApp(page)` — navigate with token auth, wait for sidebar to load
@@ -56,13 +57,19 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Mock agent keywords**: The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `<goal_proposal>` XML block response (includes `<options>QA testing</options>`) — used to test the goal assistant flow without a real LLM.
 
+**Choosing a harness for new E2E tests:**
+- **`in-process-harness.js`** — Default for API-only tests (no browser, no MCP, no process-level behavior). Faster startup (~2s vs ~5-8s per worker).
+- **`gateway-harness.js`** — Required when the test uses a `page` fixture (browser), needs MCP servers enabled, or tests process-level behavior (port allocation, auth bypass).
+
 **Rules:**
-- All tests run in isolation. E2E tests get unique `BOBBIT_DIR` (`.e2e-worker-<port>/`).
+- All tests run in isolation. In-process tests get `.e2e-inproc-<N>/`; spawned-gateway tests get `.e2e-worker-<port>/`.
 - Never read/write `.bobbit/` in tests — use isolated directory from `e2e-setup.ts`.
 - **Never start background servers from bash** (`node server.js &`) — pipes hang the agent session. Use Playwright `webServer` config.
 - Prefer `file://` fixtures for new tests. Use E2E only when you need a real server.
 
 ## Recipes
+
+**Add an API E2E test**: Create a `.spec.ts` file in `tests/e2e/`. Import `test, expect` from `./in-process-harness.js` and API helpers from `./e2e-setup.js`. The in-process harness starts the gateway in the same Node process — no child process spawn, no browser. Pattern: call REST/WS APIs via helpers → assert responses. See `gates-api.spec.ts` for a simple example.
 
 **Add a UI E2E test**: Create a `.spec.ts` file in `tests/e2e/ui/`. Import `test, expect` from `../gateway-harness.js`, API helpers from `../e2e-setup.js`, and page helpers from `./ui-helpers.js`. Use `openApp(page)` to authenticate, page-object helpers for interactions, and API helpers for setup/teardown. See `session-interactions.spec.ts` for a simple example. Pattern: create state via API → interact via browser → assert via UI or API. Never use `setTimeout` — use Playwright's built-in waiting.
 

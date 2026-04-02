@@ -30,3 +30,5 @@ concept/
 ARCHIVE/
 prompt_tmp.json
 sessions_tmp.json
+.e2e-test-inproc/
+.e2e-inproc-*/

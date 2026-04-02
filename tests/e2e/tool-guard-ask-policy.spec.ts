@@ -9,7 +9,7 @@
  * with that role, and verifies that a tool guard extension was generated in the
  * state directory. With the bug, no guard file is created.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {

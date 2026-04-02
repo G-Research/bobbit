@@ -11,7 +11,7 @@
  * Run with:
  *   npm run build:server && npx playwright test tests/e2e/task-git-fields.spec.ts --config playwright-e2e.config.ts
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,

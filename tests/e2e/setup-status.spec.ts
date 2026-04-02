@@ -5,7 +5,7 @@
  * Verifies GET /api/setup-status, POST /api/setup-status/dismiss,
  * GET /api/health setupComplete field, and setup assistant session creation.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { base, bobbitDir, apiFetch, nonGitCwd, deleteSession } from "./e2e-setup.js";
