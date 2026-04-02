@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Terminal, Trash2 } from "lucide";
+import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Terminal, TestTube, Trash2 } from "lucide";
 import {
 	fetchWorkflows,
 	createWorkflow,
@@ -43,9 +43,17 @@ let expandedGateIndices: Set<number> = new Set();
 
 let expandedVStepKeys: Set<string> = new Set();
 
-// Drag-to-reorder state
+// Drag-to-reorder state (gates)
 let dragIndex: number | null = null;
 let dropTargetIndex: number | null = null;
+
+// Drag-to-reorder state (verification steps — separate from gate drag)
+let vstepDragGateIdx: number | null = null;
+let vstepDragStepIdx: number | null = null;
+let vstepDropTarget: { phase: number; position: number } | null = null;
+
+// Empty phases tracking (gateIdx → set of empty phase numbers)
+let emptyPhases: Map<number, Set<number>> = new Map();
 
 // ============================================================================
 // DATA LOADING
@@ -61,6 +69,10 @@ export async function loadWorkflowPageData(): Promise<void> {
 	expandedVStepKeys = new Set();
 	dragIndex = null;
 	dropTargetIndex = null;
+	vstepDragGateIdx = null;
+	vstepDragStepIdx = null;
+	vstepDropTarget = null;
+	emptyPhases = new Map();
 	renderApp();
 	workflows = await fetchWorkflows();
 	loading = false;
@@ -129,14 +141,219 @@ export function navigateToWorkflowEdit(workflowId: string): void {
 // ACTIONS
 // ============================================================================
 
+// ============================================================================
+// PHASE HELPERS
+// ============================================================================
+
+function groupStepsByPhase(steps: VerifyStep[]): Map<number, { step: VerifyStep; originalIndex: number }[]> {
+	const groups = new Map<number, { step: VerifyStep; originalIndex: number }[]>();
+	steps.forEach((step, idx) => {
+		const phase = step.phase ?? 0;
+		if (!groups.has(phase)) groups.set(phase, []);
+		groups.get(phase)!.push({ step, originalIndex: idx });
+	});
+	return new Map([...groups.entries()].sort((a, b) => a[0] - b[0]));
+}
+
+function compactPhases(gates: WorkflowGate[]): WorkflowGate[] {
+	return gates.map(g => {
+		if (!g.verify?.length) return g;
+		const phases = [...new Set(g.verify.map(s => s.phase ?? 0))].sort((a, b) => a - b);
+		const remap = new Map(phases.map((p, i) => [p, i]));
+		return {
+			...g,
+			verify: g.verify.map(s => ({ ...s, phase: remap.get(s.phase ?? 0) ?? 0 })),
+		};
+	});
+}
+
+function getAllPhaseNumbers(gateIdx: number): number[] {
+	const steps = editGates[gateIdx].verify || [];
+	const stepPhases = new Set(steps.map(s => s.phase ?? 0));
+	const empty = emptyPhases.get(gateIdx) || new Set();
+	for (const p of empty) stepPhases.add(p);
+	return [...stepPhases].sort((a, b) => a - b);
+}
+
+function addPhase(gateIdx: number): void {
+	const phases = getAllPhaseNumbers(gateIdx);
+	const next = phases.length > 0 ? Math.max(...phases) + 1 : 1;
+	if (!emptyPhases.has(gateIdx)) emptyPhases.set(gateIdx, new Set());
+	emptyPhases.get(gateIdx)!.add(next);
+	renderApp();
+}
+
+function removeEmptyPhase(gateIdx: number, phase: number): void {
+	const ep = emptyPhases.get(gateIdx);
+	if (ep) { ep.delete(phase); }
+	renderApp();
+}
+
+// ============================================================================
+// VSTEP DRAG-AND-DROP
+// ============================================================================
+
+function moveVerifyStep(gateIdx: number, fromStepIdx: number, toPhase: number, toPosition: number): void {
+	const steps = [...(editGates[gateIdx].verify || [])];
+	const [moved] = steps.splice(fromStepIdx, 1);
+	moved.phase = toPhase;
+	// Find insertion point: toPosition-th slot within the target phase
+	const targetPhaseSteps = steps.filter(s => (s.phase ?? 0) === toPhase);
+	let insertAt: number;
+	if (toPosition < targetPhaseSteps.length) {
+		insertAt = steps.indexOf(targetPhaseSteps[toPosition]);
+	} else {
+		// After last step in phase, or at end if no steps
+		if (targetPhaseSteps.length > 0) {
+			insertAt = steps.indexOf(targetPhaseSteps[targetPhaseSteps.length - 1]) + 1;
+		} else {
+			insertAt = steps.length;
+		}
+	}
+	steps.splice(insertAt, 0, moved);
+	updateGateField(gateIdx, "verify", steps);
+}
+
+function handleVStepDragStart(e: DragEvent, gateIdx: number, stepIdx: number): void {
+	vstepDragGateIdx = gateIdx;
+	vstepDragStepIdx = stepIdx;
+	if (e.dataTransfer) {
+		e.dataTransfer.effectAllowed = "move";
+		e.dataTransfer.setData("text/x-vstep", `${gateIdx}:${stepIdx}`);
+	}
+	renderApp();
+}
+
+function handleVStepDragOver(e: DragEvent, phase: number, position: number): void {
+	e.preventDefault();
+	e.stopPropagation();
+	if (vstepDragGateIdx === null) return;
+	if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+	const newTarget = { phase, position };
+	if (!vstepDropTarget || vstepDropTarget.phase !== newTarget.phase || vstepDropTarget.position !== newTarget.position) {
+		vstepDropTarget = newTarget;
+		renderApp();
+	}
+}
+
+function handleVStepDrop(e: DragEvent): void {
+	e.preventDefault();
+	e.stopPropagation();
+	if (vstepDragGateIdx !== null && vstepDragStepIdx !== null && vstepDropTarget !== null) {
+		moveVerifyStep(vstepDragGateIdx, vstepDragStepIdx, vstepDropTarget.phase, vstepDropTarget.position);
+	}
+	vstepDragGateIdx = null;
+	vstepDragStepIdx = null;
+	vstepDropTarget = null;
+	renderApp();
+}
+
+function handleVStepDragEnd(): void {
+	vstepDragGateIdx = null;
+	vstepDragStepIdx = null;
+	vstepDropTarget = null;
+	renderApp();
+}
+
+// Touch drag for verification steps
+let vstepTouchLongPressTimer: ReturnType<typeof setTimeout> | null = null;
+let vstepTouchDragging = false;
+function cancelVStepTouchDrag(): void {
+	if (vstepTouchLongPressTimer) { clearTimeout(vstepTouchLongPressTimer); vstepTouchLongPressTimer = null; }
+	if (vstepTouchDragging || vstepDragGateIdx !== null) {
+		vstepTouchDragging = false;
+		vstepDragGateIdx = null;
+		vstepDragStepIdx = null;
+		vstepDropTarget = null;
+		renderApp();
+	}
+}
+
+function vstepTouchDropTarget(clientY: number, gateIdx: number): { phase: number; position: number } | null {
+	const phaseGroups = document.querySelectorAll(`.wf-phase-group[data-gate-idx="${gateIdx}"]`);
+	for (const group of phaseGroups) {
+		const phase = parseInt(group.getAttribute("data-phase") || "0", 10);
+		const cards = group.querySelectorAll(".wf-vstep-card");
+		for (let i = 0; i < cards.length; i++) {
+			const rect = cards[i].getBoundingClientRect();
+			if (clientY < rect.top + rect.height / 2) return { phase, position: i };
+		}
+		// Past all cards in this group
+		const groupRect = group.getBoundingClientRect();
+		if (clientY < groupRect.bottom) return { phase, position: cards.length };
+	}
+	// Default: last phase, end
+	const phases = getAllPhaseNumbers(gateIdx);
+	const lastPhase = phases.length > 0 ? phases[phases.length - 1] : 0;
+	return { phase: lastPhase, position: 999 };
+}
+
+function startVStepTouchDrag(gateIdx: number, stepIdx: number): void {
+	vstepTouchDragging = true;
+	vstepDragGateIdx = gateIdx;
+	vstepDragStepIdx = stepIdx;
+	renderApp();
+}
+
+function handleVStepGripTouchStart(e: TouchEvent, gateIdx: number, stepIdx: number): void {
+	e.preventDefault();
+	e.stopPropagation();
+	startVStepTouchDrag(gateIdx, stepIdx);
+}
+
+function handleVStepHeaderTouchStart(e: TouchEvent, gateIdx: number, stepIdx: number): void {
+	const touch = e.touches[0];
+	const startY = touch.clientY;
+	const startX = touch.clientX;
+	vstepTouchLongPressTimer = setTimeout(() => {
+		vstepTouchLongPressTimer = null;
+		startVStepTouchDrag(gateIdx, stepIdx);
+	}, 500);
+	const moveCancel = (ev: TouchEvent) => {
+		const t = ev.touches[0];
+		if (Math.abs(t.clientY - startY) > 10 || Math.abs(t.clientX - startX) > 10) {
+			if (vstepTouchLongPressTimer) { clearTimeout(vstepTouchLongPressTimer); vstepTouchLongPressTimer = null; }
+			document.removeEventListener("touchmove", moveCancel);
+		}
+	};
+	document.addEventListener("touchmove", moveCancel, { passive: true });
+}
+
+function handleVStepTouchMove(e: TouchEvent): void {
+	if (!vstepTouchDragging || vstepDragGateIdx === null) return;
+	e.preventDefault();
+	const touch = e.touches[0];
+	const target = vstepTouchDropTarget(touch.clientY, vstepDragGateIdx);
+	if (target && (!vstepDropTarget || vstepDropTarget.phase !== target.phase || vstepDropTarget.position !== target.position)) {
+		vstepDropTarget = target;
+		renderApp();
+	}
+}
+
+function handleVStepTouchEnd(): void {
+	if (vstepTouchLongPressTimer) { clearTimeout(vstepTouchLongPressTimer); vstepTouchLongPressTimer = null; }
+	if (!vstepTouchDragging || vstepDragGateIdx === null) return;
+	if (vstepDragStepIdx !== null && vstepDropTarget !== null) {
+		moveVerifyStep(vstepDragGateIdx, vstepDragStepIdx, vstepDropTarget.phase, vstepDropTarget.position);
+	}
+	vstepTouchDragging = false;
+	vstepDragGateIdx = null;
+	vstepDragStepIdx = null;
+	vstepDropTarget = null;
+	renderApp();
+}
+
 async function handleSave(): Promise<void> {
 	saving = true;
 	renderApp();
 
+	// Compact phases before saving
+	const compacted = compactPhases(editGates);
+
 	// Auto-compute dependsOn from gate order (each gate depends on the one above it)
-	const gatesWithDeps = editGates.map((g, i) => ({
+	const gatesWithDeps = compacted.map((g, i) => ({
 		...g,
-		dependsOn: i > 0 && editGates[i - 1].id ? [editGates[i - 1].id] : [],
+		dependsOn: i > 0 && compacted[i - 1].id ? [compacted[i - 1].id] : [],
 	}));
 
 	if (isNew) {
@@ -410,16 +627,28 @@ function getVerifySummary(gate: WorkflowGate): string {
 // ============================================================================
 
 function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: VerifyStep, stepIdx: number): TemplateResult {
-	const typeIcon = step.type === "command" ? Terminal : MessageSquare;
+	const typeIcon = step.type === "command" ? Terminal : step.type === "agent-qa" ? TestTube : MessageSquare;
 	const isVStepExpanded = expandedVStepKeys.has(`${gateIdx}-${stepIdx}`);
+	const isDragging = vstepDragGateIdx === gateIdx && vstepDragStepIdx === stepIdx;
 	return html`
-		<div class="wf-vstep-card ${isVStepExpanded ? "vstep-expanded" : ""}">
-			<div class="wf-vstep-collapsed-header" @click=${(e: Event) => { e.stopPropagation(); toggleVStepExpand(gateIdx, stepIdx); }}>
+		<div class="wf-vstep-card ${isVStepExpanded ? "vstep-expanded" : ""} ${isDragging ? "vstep-dragging" : ""}"
+			draggable="true"
+			@dragstart=${(e: DragEvent) => { e.stopPropagation(); handleVStepDragStart(e, gateIdx, stepIdx); }}
+			@dragend=${handleVStepDragEnd}>
+			<div class="wf-vstep-collapsed-header"
+				@click=${(e: Event) => { e.stopPropagation(); toggleVStepExpand(gateIdx, stepIdx); }}
+				@touchstart=${(e: TouchEvent) => handleVStepHeaderTouchStart(e, gateIdx, stepIdx)}
+				@touchmove=${handleVStepTouchMove}
+				@touchend=${handleVStepTouchEnd}
+				@touchcancel=${cancelVStepTouchDrag}>
+				<span class="wf-vstep-grip"
+					@touchstart=${(e: TouchEvent) => handleVStepGripTouchStart(e, gateIdx, stepIdx)}>${icon(GripVertical, "sm")}</span>
 				<span class="wf-vstep-chevron">\u25B8</span>
 				<span class="wf-verify-type-icon">${icon(typeIcon, "sm")}</span>
 				<span class="wf-vstep-name-label">${step.name || "(unnamed)"}</span>
 				<span class="wf-vstep-sep">\u00B7</span>
 				<span class="wf-vstep-type-label">${step.type || "command"}</span>
+				${step.optional ? html`<span class="wf-vstep-optional-badge">optional</span>` : nothing}
 				<span class="wf-vstep-spacer"></span>
 				<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
 					e.stopPropagation();
@@ -443,11 +672,12 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 							@click=${(e: Event) => e.stopPropagation()}
 							@change=${(e: Event) => {
 								const steps = [...(gate.verify || [])];
-								steps[stepIdx] = { ...steps[stepIdx], type: (e.target as HTMLSelectElement).value as "command" | "llm-review" };
+								steps[stepIdx] = { ...steps[stepIdx], type: (e.target as HTMLSelectElement).value as "command" | "llm-review" | "agent-qa" };
 								updateGateField(gateIdx, "verify", steps);
 							}}>
 							<option value="command" ?selected=${step.type === "command"}>command</option>
 							<option value="llm-review" ?selected=${step.type === "llm-review"}>llm-review</option>
+							<option value="agent-qa" ?selected=${step.type === "agent-qa"}>agent-qa</option>
 						</select>
 						${step.type === "command" ? html`
 							<label class="wf-field-label" style="margin-left:8px;">Expect</label>
@@ -473,7 +703,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 							}} />
 						<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>
 					` : html`
-						<textarea class="wf-textarea" .value=${step.prompt || ""} placeholder="Review prompt..."
+						<textarea class="wf-textarea" .value=${step.prompt || ""} placeholder="${step.type === "agent-qa" ? "QA test prompt..." : "Review prompt..."}"
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
 								const steps = [...(gate.verify || [])];
@@ -481,6 +711,28 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 								updateGateField(gateIdx, "verify", steps);
 							}}></textarea>
 					`}
+					<div class="wf-vstep-optional-row">
+						<label class="wf-toggle-compact">
+							<input type="checkbox" .checked=${step.optional === true}
+								@click=${(e: Event) => e.stopPropagation()}
+								@change=${(e: Event) => {
+									const steps = [...(gate.verify || [])];
+									steps[stepIdx] = { ...steps[stepIdx], optional: (e.target as HTMLInputElement).checked || undefined };
+									if (!steps[stepIdx].optional) { delete steps[stepIdx].label; delete steps[stepIdx].optional; }
+									updateGateField(gateIdx, "verify", steps);
+								}} />
+							<span>Optional</span>
+						</label>
+						${step.optional ? html`
+							<input class="wf-input" style="flex:1;" .value=${step.label || ""} placeholder="UI label (e.g. Enable QA Testing)"
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => {
+									const steps = [...(gate.verify || [])];
+									steps[stepIdx] = { ...steps[stepIdx], label: (e.target as HTMLInputElement).value || undefined };
+									updateGateField(gateIdx, "verify", steps);
+								}} />
+						` : nothing}
+					</div>
 				</div>
 			</div>
 		</div>
@@ -553,6 +805,10 @@ export function initAssistantEditState(): void {
 	expandedVStepKeys = new Set();
 	dragIndex = null;
 	dropTargetIndex = null;
+	vstepDragGateIdx = null;
+	vstepDragStepIdx = null;
+	vstepDropTarget = null;
+	emptyPhases = new Map();
 }
 
 /** Populate edit state from a fetched workflow (after assistant creates/updates it). */
@@ -602,13 +858,16 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 	renderApp();
 
 	try {
+		// Compact phases before saving
+		const compactedGates = compactPhases(editGates);
+
 		if (!selectedWorkflow) {
 			// Create new
 			const result = await createWorkflow({
 				id: editId,
 				name: editName,
 				description: editDescription,
-				gates: editGates,
+				gates: compactedGates,
 			});
 			if (result) {
 				selectedWorkflow = result;
@@ -622,7 +881,7 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 			const ok = await updateWorkflow(selectedWorkflow.id, {
 				name: editName,
 				description: editDescription,
-				gates: editGates,
+				gates: compactedGates,
 			});
 			if (ok) {
 				workflows = await fetchWorkflows();
@@ -781,6 +1040,70 @@ function renderListView(): TemplateResult {
 }
 
 // ============================================================================
+// RENDER: PHASE GROUPS
+// ============================================================================
+
+function renderPhaseGroups(gate: WorkflowGate, gateIdx: number): TemplateResult {
+	const steps = gate.verify || [];
+	const grouped = groupStepsByPhase(steps);
+	const allPhases = getAllPhaseNumbers(gateIdx);
+
+	// If no phases at all (no steps, no empty phases), just show phase 0
+	if (allPhases.length === 0 && steps.length === 0) {
+		return html`
+			<div class="wf-phase-group" data-gate-idx="${gateIdx}" data-phase="0"
+				@dragover=${(e: DragEvent) => handleVStepDragOver(e, 0, 0)}
+				@drop=${handleVStepDrop}>
+				<div class="wf-phase-header"><span>Phase 0</span></div>
+				<div class="wf-phase-body wf-phase-empty-hint">No steps</div>
+			</div>
+		`;
+	}
+
+	return html`${allPhases.map(phase => {
+		const phaseSteps = grouped.get(phase) || [];
+		const isEmpty = phaseSteps.length === 0;
+		const isEmptyTracked = emptyPhases.get(gateIdx)?.has(phase) ?? false;
+		return html`
+			<div class="wf-phase-group" data-gate-idx="${gateIdx}" data-phase="${phase}"
+				@dragover=${(e: DragEvent) => {
+					// Allow drop on empty phase body
+					if (isEmpty) handleVStepDragOver(e, phase, 0);
+				}}
+				@drop=${handleVStepDrop}>
+				<div class="wf-phase-header">
+					<span>Phase ${phase}</span>
+					${isEmpty && isEmptyTracked ? html`
+						<button class="wf-phase-delete" title="Remove empty phase" @click=${(e: Event) => {
+							e.stopPropagation();
+							removeEmptyPhase(gateIdx, phase);
+						}}>${icon(Trash2, "sm")}</button>
+					` : nothing}
+				</div>
+				<div class="wf-phase-body">
+					${phaseSteps.length === 0 ? html`<div class="wf-phase-empty-hint">No steps — drag here or add one</div>` : nothing}
+					${phaseSteps.map((entry, posInPhase) => html`
+						${vstepDropTarget && vstepDropTarget.phase === phase && vstepDropTarget.position === posInPhase && vstepDragGateIdx === gateIdx
+							? html`<div class="wf-vstep-drop-indicator"></div>` : nothing}
+						<div
+							@dragover=${(e: DragEvent) => {
+								const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+								const midY = rect.top + rect.height / 2;
+								const pos = e.clientY < midY ? posInPhase : posInPhase + 1;
+								handleVStepDragOver(e, phase, pos);
+							}}>
+							${renderVerifyStepEditor(gate, gateIdx, entry.step, entry.originalIndex)}
+						</div>
+					`)}
+					${vstepDropTarget && vstepDropTarget.phase === phase && vstepDropTarget.position >= phaseSteps.length && vstepDragGateIdx === gateIdx
+						? html`<div class="wf-vstep-drop-indicator"></div>` : nothing}
+				</div>
+			</div>
+		`;
+	})}`;
+}
+
+// ============================================================================
 // RENDER: GATE EDITOR (collapsible card)
 // ============================================================================
 
@@ -842,12 +1165,18 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 					<div class="wf-field">
 						<span class="wf-verify-label">Verification Steps (${verifyCount})</span>
 						<div class="wf-verification-steps">
-							${(gate.verify || []).map((step, si) => renderVerifyStepEditor(gate, idx, step, si))}
-							<button class="wf-criteria-add-btn" title="Add verification step" @click=${(e: Event) => {
-								e.stopPropagation();
-								const steps = [...(gate.verify || []), { name: "", type: "command" as const, run: "" }];
-								updateGateField(idx, "verify", steps);
-							}}>Add Step</button>
+							${renderPhaseGroups(gate, idx)}
+							<div class="wf-phase-actions">
+								<button class="wf-criteria-add-btn" title="Add verification step" @click=${(e: Event) => {
+									e.stopPropagation();
+									const steps = [...(gate.verify || []), { name: "", type: "command" as const, run: "" }];
+									updateGateField(idx, "verify", steps);
+								}}>Add Step</button>
+								<button class="wf-criteria-add-btn wf-add-phase-btn" title="Add a new phase" @click=${(e: Event) => {
+									e.stopPropagation();
+									addPhase(idx);
+								}}>Add Phase</button>
+							</div>
 						</div>
 					</div>
 				</div>
