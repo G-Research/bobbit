@@ -67,7 +67,8 @@ export class GateVerificationLive extends LitElement {
 
 	@state() private steps: VerificationStep[] = [];
 	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
-	@state() private currentPhase = 0;
+	// @ts-expect-error Assigned by WS events, not read in template
+	private currentPhase = 0;
 	@state() private expandedSteps = new Set<number>();
 	@state() private modalStep: { index: number; name: string; output: string } | null = null;
 	/** Accumulated streamed output per step index */
@@ -305,6 +306,19 @@ export class GateVerificationLive extends LitElement {
 		const failedCount = this.steps.filter(s => s.status === "failed").length;
 		const total = this.steps.length;
 
+		// While running — show compact blue pulsing dot with progress count
+		if (this.overallStatus === "running") {
+			const completedCount = passedCount + failedCount;
+			return html`
+				<div class="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+					<span class="inline-block text-blue-500 animate-pulse">●</span>
+					<span>Verifying <code class="text-[10px]">${this.gateId}</code> — ${completedCount}/${total} steps</span>
+					${failedCount > 0 ? html` <span class="text-red-500">(${failedCount} failed)</span>` : nothing}
+				</div>
+			`;
+		}
+
+		// Completed (passed/failed) — show full step cards
 		// Phase grouping
 		const phases = new Set(this.steps.map(s => s.phase ?? 0));
 		const hasMultiplePhases = phases.size > 1;
@@ -321,11 +335,10 @@ export class GateVerificationLive extends LitElement {
 				${this._renderHeader(passedCount, failedCount, total)}
 				${sortedPhases.map(phase => {
 					const phaseSteps = stepsByPhase.get(phase)!;
-					const isActive = phase === this.currentPhase && this.overallStatus === "running";
 					return html`
 						${hasMultiplePhases ? html`
-							<div class="text-[10px] font-medium ${isActive ? "text-blue-500" : "text-muted-foreground"} mt-2 mb-0.5 uppercase tracking-wide">
-								Phase ${phase}${isActive ? " — active" : ""}
+							<div class="text-[10px] font-medium text-muted-foreground mt-2 mb-0.5 uppercase tracking-wide">
+								Phase ${phase}
 							</div>
 						` : nothing}
 						${phaseSteps.map(({ step, index }) => this._renderStepCard(step, index))}
