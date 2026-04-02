@@ -37,6 +37,7 @@ interface WorkflowGate {
   content?: boolean;       // Whether this gate accepts markdown content
   injectDownstream?: boolean; // Whether passed content is injected into downstream agents
   metadata?: Record<string, string>; // Key-value metadata schema
+  optional?: boolean;      // If true, team lead may signal with "N/A" (still must be signaled)
   verify?: VerifyStep[];   // Verification steps to run on signal
 }
 

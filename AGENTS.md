@@ -102,6 +102,8 @@ UI-only changes need only unit tests. Server changes need E2E too.
 
 **Manage config directories**: Settings → Config Directories tab, or `config_directories` in `project.yaml`. Config directories are scoped per-project — each project's `config_directories` affects only that project's sessions for skills, MCP servers, and agent files. See @docs/internals.md#config-scan-directories.
 
+**Add exploratory validation to a project**: Add `ev_*` keys to `project.yaml` — at minimum `ev_start_command` (how to start an isolated server). The `/validate` slash skill reads these keys and orchestrates the ephemeral environment lifecycle. See [docs/exploratory-validation.md](docs/exploratory-validation.md) for full config reference and protocol details. The `exploratory-validation` workflow gate (in `feature.yaml` and `bug-fix.yaml`) uses LLM review to verify the HTML evidence report.
+
 ## Debugging
 
 See @docs/debugging.md for scannable checklists covering all subsystems.
@@ -116,6 +118,7 @@ Quick pointers for the most common issues:
 - **Search**: Each project has its own `<project-root>/.bobbit/state/search.db`. Delete and restart to rebuild. Searches aggregate across all project indexes. See @docs/debugging.md#search-index for full checklist.
 - **Gates**: Check `GET /api/goals/:id/gates` for dependency state.
 - **Multi-project / per-project state**: Each project stores its own state in `<project-root>/.bobbit/state/` (goals, sessions, tasks, teams, gates, staff, search index, costs). The server aggregates via `ProjectContextManager`. Check `GET /api/projects` for registered projects. Sessions/goals/staff carry optional `projectId`; filter with `?projectId=` on list endpoints. Config directories (MCP servers, skills, AGENTS.md/agent files) are resolved per-project through each project's `config_directories` setting. Per-project config: `GET /api/projects/:id/config/resolved` shows resolved values with source. See [docs/internals.md](docs/internals.md#multi-project-architecture) for architecture.
+- **Exploratory validation**: Check `ev_*` keys in project.yaml. The `/validate` skill requires `ev_start_command` at minimum. See [docs/exploratory-validation.md](docs/exploratory-validation.md).
 - **State migration**: On first startup after upgrade, centralized state files are distributed to per-project dirs based on `projectId` tags. Central files renamed with `.pre-migration` suffix. Check for `.bobbit/state/.migrated-to-per-project` marker. See @docs/internals.md#state-migration for details.
 
 ## Git conventions
