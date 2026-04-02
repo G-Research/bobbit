@@ -205,5 +205,24 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log(`[goal-tools] Registered 6 task/gate tools for session ${sessionId}, goal ${goalId}`);
+	// ── verification_result ──────────────────────────────────────────
+	pi.registerTool({
+		name: "verification_result",
+		label: "Verification Result",
+		description: "Submit your verification result when your review or QA testing is complete. The verification system receives your results through this tool.",
+		promptSnippet: "Submit verification verdict, summary, and optional HTML report.",
+		parameters: Type.Object({
+			verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], { description: "Whether verification passed or failed" }),
+			summary: Type.String({ description: "Concise summary of findings" }),
+			report_html: Type.Optional(Type.String({ description: "Self-contained HTML report with embedded screenshots (for QA agents)" })),
+		}),
+		async execute(_id, params) {
+			try {
+				const body = { sessionId, verdict: params.verdict, summary: params.summary, report_html: params.report_html };
+				return ok(await api("POST", "/api/internal/verification-result", body));
+			} catch (e: any) { return err(e.message); }
+		},
+	});
+
+	console.log(`[goal-tools] Registered 7 task/gate tools for session ${sessionId}, goal ${goalId}`);
 }

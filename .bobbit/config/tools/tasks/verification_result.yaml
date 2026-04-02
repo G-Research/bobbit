@@ -1,0 +1,7 @@
+name: verification_result
+description: "Submit verification result — verdict, summary, and optional HTML report"
+summary: "Submit your verification result when review or QA testing is complete."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Gates

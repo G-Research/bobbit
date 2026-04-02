@@ -35,45 +35,11 @@ export const VERIFICATION_RESULT_REMINDER =
 	"This is REQUIRED — the verification system only receives results through this tool.";
 
 /**
- * Generate a TypeScript extension that registers the `verification_result` tool.
- * The tool calls POST /api/internal/verification-result on the gateway.
- * Exported for unit testing.
+ * The `verification_result` tool is now a standard goal tool registered in
+ * `.bobbit/config/tools/tasks/extension.ts` — no generated extension needed.
+ * It calls POST /api/internal/verification-result using the same api() helper
+ * as gate_signal, task_update, etc.
  */
-export function generateVerificationResultExtension(sessionId: string): string {
-	return `import { Type } from "@sinclair/typebox";
-export default function(pi) {
-  const token = process.env.BOBBIT_TOKEN;
-  const gwUrl = process.env.BOBBIT_GATEWAY_URL;
-  const sessionId = ${JSON.stringify(sessionId)};
-
-  pi.registerTool({
-    name: "verification_result",
-    description: "Submit your verification result. Call this when your review or QA testing is complete.",
-    parameters: Type.Object({
-      verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], { description: "Whether verification passed or failed" }),
-      summary: Type.String({ description: "Concise summary of findings" }),
-      report_html: Type.Optional(Type.String({ description: "Self-contained HTML report with embedded screenshots (for QA agents)" })),
-    }),
-    execute: async (toolCallId, params) => {
-      const body = JSON.stringify({ sessionId, verdict: params.verdict, summary: params.summary, report_html: params.report_html });
-      const url = new URL(gwUrl + "/api/internal/verification-result");
-      const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
-      await new Promise((resolve, reject) => {
-        const req = mod.request(url, {
-          method: "POST",
-          headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-          ...(url.protocol === "https:" ? { rejectUnauthorized: false } : {}),
-        }, (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { if (res.statusCode && res.statusCode >= 400) { reject(new Error("verification_result delivery failed (HTTP " + res.statusCode + "): " + d)); } else { resolve(d); } }); });
-        req.on("error", reject);
-        req.write(body);
-        req.end();
-      });
-      return { content: [{ type: "text", text: "Result recorded. You may now proceed with cleanup." }] };
-    }
-  });
-}
-`;
-}
 
 /** Patterns that indicate a transient/infrastructure failure worth retrying. */
 const TRANSIENT_ERROR_PATTERNS = [
@@ -130,16 +96,9 @@ export class VerificationHarness {
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
 
 	/**
-	 * Write a verification_result extension file for the given session.
-	 * Returns the path to the generated extension file.
+	 * @deprecated The verification_result tool is now registered via the standard
+	 * goal tools extension. No generated extension file needed.
 	 */
-	writeVerificationResultExtension(sessionId: string): string {
-		const promptDir = path.join(this._stateDir, "session-prompts");
-		if (!fs.existsSync(promptDir)) fs.mkdirSync(promptDir, { recursive: true });
-		const extPath = path.join(promptDir, `verification-ext-${sessionId}.ts`);
-		fs.writeFileSync(extPath, generateVerificationResultExtension(sessionId));
-		return extPath;
-	}
 
 	/** Get all active (in-flight) verifications, optionally filtered by goalId */
 	getActiveVerifications(goalId?: string): ActiveVerification[] {
@@ -1282,13 +1241,11 @@ export class VerificationHarness {
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		this.pendingResults.set(sessionId, resultResolver);
 
-		// Write verification_result extension
-		const extPath = this.writeVerificationResultExtension(sessionId);
-
 		try {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
+			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const roleName = role.name || step.role || "reviewer";
-			const session = await this.sessionManager!.createSession(cwd, ["--extension", extPath], goalId, undefined, {
+			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
 				sandboxed: (goalId
@@ -1397,10 +1354,6 @@ export class VerificationHarness {
 			if (sessionId) {
 				this.pendingResults.delete(sessionId);
 				try {
-					const extFile = path.join(this._stateDir, "session-prompts", `verification-ext-${sessionId}.ts`);
-					if (fs.existsSync(extFile)) fs.unlinkSync(extFile);
-				} catch { /* ignore */ }
-				try {
 					await this.sessionManager!.terminateSession(sessionId);
 				} catch { /* ignore — session may already be terminated */ }
 				if (this.teamManager) {
@@ -1488,9 +1441,8 @@ export class VerificationHarness {
 			this.pendingResults.set(qaSessionId, resultResolver);
 
 			// Write verification_result extension
-			const extPath = this.writeVerificationResultExtension(qaSessionId);
-
-			const session = await this.sessionManager!.createSession(cwd, ["--extension", extPath], goalId, undefined, {
+			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
+			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
 				sandboxed: (goalId
@@ -1599,10 +1551,6 @@ export class VerificationHarness {
 		} finally {
 			if (qaSessionId) {
 				this.pendingResults.delete(qaSessionId);
-				try {
-					const extFile = path.join(this._stateDir, "session-prompts", `verification-ext-${qaSessionId}.ts`);
-					if (fs.existsSync(extFile)) fs.unlinkSync(extFile);
-				} catch { /* ignore */ }
 				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
 				if (this.teamManager) {
 					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
@@ -1629,9 +1577,6 @@ export class VerificationHarness {
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		this.pendingResults.set(subSessionId, resultResolver);
 
-		// Write verification_result extension
-		const extPath = this.writeVerificationResultExtension(subSessionId);
-
 		// Assemble system prompt to temp file
 		const systemPromptPath = assembleSystemPrompt(subSessionId, {
 			cwd,
@@ -1648,7 +1593,6 @@ export class VerificationHarness {
 			cwd,
 			args: [
 				...(allowedTools.length > 0 ? ["--tools", allowedTools.join(",")] : []),
-				"--extension", extPath,
 			],
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
@@ -1778,9 +1722,7 @@ export class VerificationHarness {
 				const promptFile = path.join(promptDir, `${subSessionId}.md`);
 				if (fs.existsSync(promptFile)) fs.unlinkSync(promptFile);
 			} catch { /* ignore */ }
-			try {
-				if (fs.existsSync(extPath)) fs.unlinkSync(extPath);
-			} catch { /* ignore */ }
+
 		}
 	}
 
