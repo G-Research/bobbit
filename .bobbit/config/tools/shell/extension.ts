@@ -304,7 +304,7 @@ export default function (pi: ExtensionAPI) {
 					case "logs": {
 						if (!id) return text("Error: 'id' is required for logs");
 						const logs = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail || 200}`) as any;
-						const output = logs.log?.join("\n") || "(no output)";
+						const output = logs.log?.map((e: any) => typeof e === "string" ? e : e.text ?? String(e)).join("\n") || "(no output)";
 						return text(`Logs for ${id}:\n${output}`);
 					}
 					case "kill": {

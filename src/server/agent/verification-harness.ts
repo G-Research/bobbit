@@ -41,8 +41,23 @@ const TRANSIENT_ERROR_PATTERNS = [
 	"connect ECONNREFUSED",
 ];
 
+/**
+ * Patterns that are transient for LLM reviews but NOT for agent-qa steps.
+ * "no verdict tag" for QA agents usually means the agent spent its entire budget
+ * fighting infrastructure issues — retrying will just burn more time/cost.
+ */
+const QA_NON_TRANSIENT_PATTERNS = [
+	"no <verdict> tag",
+];
+
 /** Check if an LLM review error output matches a transient failure pattern. */
 export function isTransientReviewError(output: string): boolean {
+	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
+}
+
+/** Check if an agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
+export function isTransientQaError(output: string): boolean {
+	if (QA_NON_TRANSIENT_PATTERNS.some(pattern => output.includes(pattern))) return false;
 	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
 }
 
@@ -236,7 +251,10 @@ export class VerificationHarness {
 
 			// If resume failed with a transient error and this is an llm-review or agent-qa step,
 			// re-run from scratch rather than giving up
-			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && isTransientReviewError(resumeResult.output)) {
+			const isTransient = step.type === "agent-qa"
+					? isTransientQaError(resumeResult?.output || "")
+					: isTransientReviewError(resumeResult?.output || "");
+			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && isTransient) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
 				let rerunResult: typeof resumeResult | null = null;
 				if (step.type === "agent-qa") {
@@ -439,7 +457,9 @@ export class VerificationHarness {
 		const agentVars: Record<string, string> = ctx.signal.metadata || {};
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
 
-		const maxAttempts = 3;
+		// QA agents are expensive (5-15 min each) — only retry once on true infrastructure failures,
+		// not on "no verdict tag" (which means the agent burned its budget without producing results).
+		const maxAttempts = 2;
 		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any } = { passed: false, output: "Re-run failed." };
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			result = await this.runAgentQaStep(
@@ -447,8 +467,8 @@ export class VerificationHarness {
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
 			);
-			if (result.passed || !isTransientReviewError(result.output) || attempt === maxAttempts) break;
-			await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt - 1)));
+			if (result.passed || !isTransientQaError(result.output) || attempt === maxAttempts) break;
+			await new Promise(r => setTimeout(r, 5000));
 		}
 
 		return { name: stepName, type: "agent-qa", passed: result.passed, output: result.output, duration_ms: Date.now() - startedAt };

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isTransientReviewError } from "../src/server/agent/verification-harness.js";
+import { isTransientReviewError, isTransientQaError } from "../src/server/agent/verification-harness.js";
 
 describe("isTransientReviewError", () => {
 	it("detects 'Agent process not running'", () => {
@@ -49,5 +49,29 @@ describe("isTransientReviewError", () => {
 
 	it("does NOT match a failing review with actual findings", () => {
 		assert.ok(!isTransientReviewError("[critical] src/foo.ts:42 — SQL injection\n<verdict>fail</verdict>"));
+	});
+});
+
+describe("isTransientQaError", () => {
+	it("detects infrastructure errors as transient", () => {
+		assert.ok(isTransientQaError("Agent QA failed: Agent process not running"));
+		assert.ok(isTransientQaError("Agent QA failed: ECONNRESET"));
+		assert.ok(isTransientQaError("Agent QA failed: process exited with code 1"));
+		assert.ok(isTransientQaError("connect ECONNREFUSED 127.0.0.1:3001"));
+	});
+
+	it("does NOT treat 'no verdict tag' as transient for QA agents", () => {
+		// QA agents that don't produce a verdict burned their budget fighting infrastructure —
+		// retrying will just waste more time/cost
+		assert.ok(!isTransientQaError("Agent QA failed: no <verdict> tag found."));
+	});
+
+	it("does NOT treat timeout as transient when no verdict was produced", () => {
+		// "timed out" is still transient for QA (the server may have been slow to start)
+		assert.ok(isTransientQaError("Agent QA timed out after 900s."));
+	});
+
+	it("does NOT match real QA failures", () => {
+		assert.ok(!isTransientQaError("QA testing found 3 critical issues.\n<verdict>fail</verdict>"));
 	});
 });
