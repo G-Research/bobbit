@@ -357,24 +357,17 @@ export async function waitForHealth(timeoutMs = 10_000): Promise<void> {
 
 /**
  * Wait for a session to reach the target status via WebSocket subscription.
- * Checks current status first via HTTP (fast path if already reached).
+ * Subscribes to WS first (which receives the current status on connect),
+ * then waits for matching event. This avoids the TOCTOU race of checking
+ * HTTP first and missing a status transition before WS is connected.
  */
 export async function waitForSessionStatus(
 	sessionId: string,
 	targetStatus: string,
 	timeoutMs = 15_000,
 ): Promise<void> {
-	// Check current status first via HTTP
-	try {
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
-		if (resp.ok) {
-			const data = await resp.json();
-			if (data.status === targetStatus) return;
-		}
-	} catch {
-		// Session may not exist yet
-	}
-
+	// Connect WS first — the server sends session_status on connect,
+	// so the current status is already buffered in messages[].
 	const conn = await connectWs(sessionId);
 	try {
 		await conn.waitFor(statusPredicate(targetStatus), timeoutMs);
