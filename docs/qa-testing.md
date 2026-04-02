@@ -81,7 +81,7 @@ The protocol has 9 steps:
 
 1. **Read config** — Load `qa_*` keys from `project.yaml`. Stop if `qa_start_command` is missing.
 
-2. **Create isolated environment** — Create a temp directory completely outside the repo (`mktemp -d`). Initialize a minimal `.bobbit/state/` inside it. This isolation is critical — the ephemeral server must never read or write the repo's `.bobbit/` or affect the production dev server.
+2. **Create isolated environment** — Create a temp directory completely outside the repo (`mktemp -d`). Initialize a minimal `.bobbit/state/` inside it, then seed it with realistic fixture data via `node "$REPO/scripts/qa-seed/seed.mjs" "$WORK_DIR"`. The seed populates the environment with a registered project, a goal with passed gates and verification history, archived sessions with tool call messages (including `verification_result`), tasks, and team state — so QA agents can immediately test dashboards, renderers, and verification UI without building state from scratch. See `scripts/qa-seed/README.md` for seed data details. This isolation is critical — the ephemeral server must never read or write the repo's `.bobbit/` or affect the production dev server.
 
 3. **Build** — Run `qa_build_command` from the repo directory. If the build fails, produce a failure report and skip to cleanup.
 

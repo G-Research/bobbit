@@ -50,6 +50,11 @@ Record the repo path:
 REPO=$(pwd)
 ```
 
+Seed with realistic test data (project, sessions, goals, gates, tasks, team, messages):
+```bash
+node "$REPO/scripts/qa-seed/seed.mjs" "$WORK_DIR"
+```
+
 Record the current branch and commit for the report:
 ```bash
 BRANCH=$(git rev-parse --abbrev-ref HEAD)

@@ -113,6 +113,8 @@ UI-only changes need only unit tests. Server changes need E2E too. Docker-depend
 
 **Add QA testing to a project**: Add `qa_*` keys to `project.yaml` — at minimum `qa_start_command` (how to start an isolated server). The `/qa-test` slash skill reads these keys and orchestrates the ephemeral environment lifecycle. QA testing runs as an optional `agent-qa` verification step on the implementation gate (enabled per-goal via toggle). The QA toggle in the goal creation form is automatically disabled with an explanatory tooltip when `qa_start_command` is not configured for the project. See [docs/qa-testing.md](docs/qa-testing.md) for full config reference and protocol details.
 
+**Seed QA ephemeral environment**: The `/qa-test` skill automatically seeds the ephemeral server with realistic fixture data (1 project, 1 goal with gates, 3 archived sessions with tool call messages, team state). The seed script at `scripts/qa-seed/seed.mjs` generates this data. Run manually: `node scripts/qa-seed/seed.mjs <WORK_DIR>`. See `scripts/qa-seed/README.md` for details on the seeded data format.
+
 **Workflow verify step descriptions**: Verify steps in workflow YAML support an optional `description` field. When set on an optional step, it renders as an ⓘ tooltip next to the step's toggle in the goal creation form. Example:
 ```yaml
 - name: agent-qa
