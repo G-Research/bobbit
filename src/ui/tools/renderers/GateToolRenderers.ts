@@ -91,7 +91,7 @@ export class GateSignalRenderer implements ToolRenderer {
 
 		if (!result) {
 			return {
-				content: html`<div>${renderHeader(state, ShieldCheck, html`Signaling <span class="font-mono text-xs">${gateId}</span>…`)}</div>`,
+				content: html`<div>${renderHeader(state, ShieldCheck, html`Signaling <span class="font-mono">${gateId}</span>…`)}</div>`,
 				isCustom: false,
 			};
 		}
@@ -104,8 +104,8 @@ export class GateSignalRenderer implements ToolRenderer {
 			return {
 				content: html`<div>
 					${renderHeader(state, ShieldCheck, skipped
-						? html`Aborted signal for <span class="font-mono text-xs">${gateId}</span>`
-						: html`Failed to signal <span class="font-mono text-xs">${gateId}</span>`)}
+						? html`Aborted signal for <span class="font-mono">${gateId}</span>`
+						: html`Failed to signal <span class="font-mono">${gateId}</span>`)}
 					<div class="mt-1 text-xs ${textCls}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -121,7 +121,7 @@ export class GateSignalRenderer implements ToolRenderer {
 		if (signalStatus === "passed" || signalStatus === "failed") {
 			return {
 				content: html`<div>
-					${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono text-xs">${gateId}</span> — ${signalStatus}`)}
+					${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono">${gateId}</span> — ${signalStatus}`)}
 					<gate-verification-live
 						.goalId=${goalId2}
 						.gateId=${gateId}
@@ -137,7 +137,7 @@ export class GateSignalRenderer implements ToolRenderer {
 		const steps = data?.signal?.steps || [];
 		return {
 			content: html`<div>
-				${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono text-xs">${gateId}</span>`)}
+				${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono">${gateId}</span>`)}
 				<gate-verification-live
 					.goalId=${goalId2}
 					.gateId=${gateId}
@@ -159,7 +159,7 @@ export class GateStatusRenderer implements ToolRenderer {
 
 		if (!result) {
 			return {
-				content: html`<div>${renderHeader(state, ShieldCheck, html`Checking gate <span class="font-mono text-xs">${gateId}</span>…`)}</div>`,
+				content: html`<div>${renderHeader(state, ShieldCheck, html`Checking gate <span class="font-mono">${gateId}</span>…`)}</div>`,
 				isCustom: false,
 			};
 		}
@@ -170,8 +170,8 @@ export class GateStatusRenderer implements ToolRenderer {
 			return {
 				content: html`<div>
 					${renderHeader(state, ShieldCheck, skipped
-						? html`Aborted check of gate <span class="font-mono text-xs">${gateId}</span>`
-						: html`Failed to check gate <span class="font-mono text-xs">${gateId}</span>`)}
+						? html`Aborted check of gate <span class="font-mono">${gateId}</span>`
+						: html`Failed to check gate <span class="font-mono">${gateId}</span>`)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -179,7 +179,7 @@ export class GateStatusRenderer implements ToolRenderer {
 		}
 
 		if (!data) {
-			return { content: html`<div>${renderHeader(state, ShieldCheck, html`Gate <span class="font-mono text-xs">${gateId}</span>`)}</div>`, isCustom: false };
+			return { content: html`<div>${renderHeader(state, ShieldCheck, html`Gate <span class="font-mono">${gateId}</span>`)}</div>`, isCustom: false };
 		}
 
 		const gateName = data.name || data.gateId || gateId;
@@ -200,7 +200,7 @@ export class GateStatusRenderer implements ToolRenderer {
 
 		return {
 			content: html`<div>
-				${renderHeader(state, ShieldCheck, html`Gate <span class="font-mono text-xs">${gateName}</span>${statusSuffix}`)}
+				${renderHeader(state, ShieldCheck, html`Gate <span class="font-mono">${gateName}</span>${statusSuffix}`)}
 				${deps.length ? html`<div class="text-xs text-muted-foreground mt-1">Depends on: ${deps.join(", ")}</div>` : ""}
 				${latestSignal ? html`
 					<gate-verification-live
