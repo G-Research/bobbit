@@ -55,10 +55,34 @@ export class VerificationOutputModal extends LitElement {
 			// Parse initialOutput as stdout
 			if (this.initialOutput) {
 				this._chunks = [{ stream: "stdout", text: this.initialOutput }];
+			} else if (this.goalId && this.signalId) {
+				// Bootstrap from API if no initial output provided
+				this._fetchBootstrapOutput();
 			}
 			this.requestUpdate();
 			// Auto-scroll after render
 			requestAnimationFrame(() => this._scrollToBottom());
+		}
+	}
+
+	private async _fetchBootstrapOutput(): Promise<void> {
+		try {
+			const token = localStorage.getItem("gateway.token") || "";
+			const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+			const res = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
+			if (!res.ok) return;
+			const data = await res.json();
+			const verifications: Array<any> = data.verifications || [];
+			const match = verifications.find((v: any) => v.signalId === this.signalId);
+			if (!match) return;
+			const step = match.steps?.[this.stepIndex];
+			if (step?.output && this._chunks.length === 0) {
+				this._chunks = [{ stream: "stdout", text: step.output }];
+				this.requestUpdate();
+				requestAnimationFrame(() => this._scrollToBottom());
+			}
+		} catch {
+			// Non-fatal — live WS events will still work
 		}
 	}
 

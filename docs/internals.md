@@ -520,6 +520,33 @@ These are applied unconditionally in `buildDockerRunArgs()` and cannot be overri
 
 ---
 
+## Viewer WebSocket
+
+The `/ws/viewer` endpoint provides a read-only, sessionless WebSocket connection for the goal dashboard to receive live gate verification events.
+
+### Why a separate endpoint?
+
+The main `/ws/:sessionId` endpoint binds a WebSocket to a specific agent session. When the user navigates to the goal dashboard, no session is active — the `RemoteAgent` disconnects. Without a connected WebSocket, `gate_verification_step_output` events from the server never reach the browser, so the verification output modal stays empty. The viewer endpoint solves this by keeping a lightweight connection open while the dashboard is mounted.
+
+### Protocol
+
+1. Client opens `ws(s)://<host>/ws/viewer`
+2. Client sends `{ type: "auth", token: "<gateway-token>" }` — same auth as session connections
+3. Server validates the token and responds with `{ type: "auth_ok" }`. The connection is marked as authenticated but is **not** associated with any session
+4. Server broadcasts via `broadcastToGoal()`, which has a fallback path that sends to all authenticated clients with no session ID — this is how events reach the viewer
+5. All client-to-server messages after auth are ignored (read-only)
+
+### Client lifecycle
+
+- **Connect on mount**: `loadDashboardData()` in `goal-dashboard.ts` opens the viewer WS after setting the current goal ID
+- **Dispatch events**: Incoming messages are dispatched as `gate-verification-event` CustomEvents on `document`, matching the same pattern `RemoteAgent` uses — so `VerificationOutputModal` and `handleLiveVerificationEvent` work without modification
+- **Disconnect on unmount**: `clearDashboardState()` closes the connection and clears the reconnect timer
+- **Auto-reconnect**: On unexpected close, reconnects after a 3s delay (only if the dashboard is still mounted). Brief gaps are acceptable because the dashboard also polls gate status periodically
+
+### Server handling
+
+The upgrade handler in `server.ts` matches `/ws/viewer` alongside `/ws/:sessionId`. The WS handler in `handler.ts` recognizes the `__viewer__` sentinel session ID: after successful auth, it sends `auth_ok` and returns immediately without calling `sessionManager.addClient()` or syncing session state. No changes to `broadcastToGoal()` were needed — the existing fallback path already sends to authenticated clients with no session association.
+
 ## Goals, workflows, tasks & gates
 
 See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architecture.
