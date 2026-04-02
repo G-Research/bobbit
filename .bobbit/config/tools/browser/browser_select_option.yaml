@@ -1,0 +1,92 @@
+name: browser_select_option
+description: "Select option in a dropdown"
+summary: "Select one or more options in a <select> dropdown by value."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Browser
+docs: |-
+  Values are matched against option value attributes. For multi-select, pass multiple values. Use browser_eval for label-based selection.
+detail_docs: >-
+  ## Purpose
+
+
+  Select one or more options in a `<select>` HTML dropdown element. Values are
+  matched against the `value` attribute of `<option>` elements. For single
+  selects, pass one value; for multi-selects, pass multiple values.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `selector` | string | **Yes** | CSS selector identifying the `<select>`
+  element. |
+
+  | `values` | string[] | **Yes** | Array of option values to select. Matched
+  against `<option value="...">`. |
+
+
+  ## When to Use
+
+
+  - **Form testing** — select options in dropdown fields as part of form
+  fill flows.
+
+  - **Filter controls** — change filter/sort dropdowns to test different views.
+
+  - **Multi-select** — select multiple options in `<select multiple>` elements.
+
+
+  ## When NOT to Use
+
+
+  - **Custom dropdown components** — non-native dropdowns (React Select,
+  Material UI, etc.) use divs, not `<select>`. Use `browser_click` on the
+  trigger and options instead.
+
+  - **Selecting by visible text** — this tool matches by `value` attribute.
+  To select by label text, use `browser_eval` with custom JavaScript:
+  `browser_eval(expression="document.querySelector('select').selectedIndex = 2")`
+
+
+  ## Examples
+
+
+  ```
+
+  # Select a single option
+
+  browser_select_option(selector="#country", values=["US"])
+
+
+  # Select multiple options in a multi-select
+
+  browser_select_option(selector="#tags", values=["bug", "urgent", "frontend"])
+
+
+  # Select by a form field name
+
+  browser_select_option(selector="select[name='role']", values=["admin"])
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **Matches `value` attribute, not label** — `<option value="us">United
+  States</option>` is selected with `values=["us"]`, not
+  `values=["United States"]`.
+
+  - **First match only** — if the selector matches multiple `<select>` elements,
+  the first one in DOM order is used.
+
+  - **Fires change event** — the `change` event is dispatched, triggering any
+  associated JavaScript handlers.
+
+  - **Does not work with custom dropdowns** — only native HTML `<select>`
+  elements. For custom components, use `browser_click`.
