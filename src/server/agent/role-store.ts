@@ -2,8 +2,42 @@ import fs from "node:fs";
 import path from "node:path";
 import { stringify, parse } from "yaml";
 
-/** Grant policy controlling what happens when an agent uses an ungranted MCP tool. */
-export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask' | 'always-allow' | 'never';
+/** Grant policy controlling what happens when an agent uses an ungranted tool. */
+export type GrantPolicy = 'allow' | 'ask' | 'never';
+
+/** Legacy grant policy values accepted during migration. */
+type LegacyGrantPolicy = 'always-allow' | 'ask-once' | 'always-ask' | 'never-ask';
+
+/** Normalize legacy grant policy values to the new three-value set. */
+export function normalizeGrantPolicy(value: string): GrantPolicy {
+	switch (value) {
+		case 'always-allow': return 'allow';
+		case 'ask-once': return 'ask';
+		case 'always-ask': return 'ask';
+		case 'never-ask': return 'never';
+		case 'allow': return 'allow';
+		case 'ask': return 'ask';
+		case 'never': return 'never';
+		default: return 'allow';
+	}
+}
+
+/** Check if a value is a valid grant policy (old or new). */
+function isGrantPolicyValue(value: unknown): value is GrantPolicy | LegacyGrantPolicy {
+	return typeof value === 'string' && ['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask'].includes(value);
+}
+
+/** Normalize all values in a toolPolicies record. */
+function normalizeToolPolicies(policies: Record<string, unknown> | undefined): Record<string, GrantPolicy> | undefined {
+	if (!policies || typeof policies !== 'object') return undefined;
+	const result: Record<string, GrantPolicy> = {};
+	for (const [key, value] of Object.entries(policies)) {
+		if (isGrantPolicyValue(value)) {
+			result[key] = normalizeGrantPolicy(value);
+		}
+	}
+	return Object.keys(result).length > 0 ? result : undefined;
+}
 
 export interface Role {
 	/** Unique identifier — lowercase alphanumeric + hyphens, immutable after creation */
@@ -26,11 +60,11 @@ export interface Role {
 	updatedAt: number;
 }
 
-/** Compute allowedTools from toolPolicies: collect all keys where value is "always-allow" */
+/** Compute allowedTools from toolPolicies: collect all keys where value is "allow" */
 function deriveAllowedTools(toolPolicies?: Record<string, GrantPolicy>): string[] {
 	if (!toolPolicies) return [];
 	return Object.entries(toolPolicies)
-		.filter(([, v]) => v === 'always-allow')
+		.filter(([, v]) => v === 'allow')
 		.map(([k]) => k);
 }
 
@@ -68,7 +102,7 @@ export class RoleStore {
 				const data = parse(raw);
 				if (data && typeof data === "object" && data.name) {
 					const toolPolicies: Record<string, GrantPolicy> | undefined =
-						data.toolPolicies && typeof data.toolPolicies === "object" ? data.toolPolicies : undefined;
+						normalizeToolPolicies(data.toolPolicies);
 					const allowedTools: string[] = Array.isArray(data.allowedTools) ? data.allowedTools : [];
 					const policyMigrated: boolean = !!data._policyMigrated;
 
@@ -91,7 +125,7 @@ export class RoleStore {
 						let migrated = false;
 						for (const tool of allowedTools) {
 							if (!(tool in policies)) {
-								policies[tool] = 'always-allow';
+								policies[tool] = 'allow';
 								migrated = true;
 							}
 						}
@@ -146,13 +180,17 @@ export class RoleStore {
 	}
 
 	put(role: Role): void {
+		// Normalize any legacy policy values
+		if (role.toolPolicies) {
+			role.toolPolicies = normalizeToolPolicies(role.toolPolicies) ?? {};
+		}
 		// Ensure toolPolicies is populated from allowedTools if missing
 		// (prevents data loss when a role is created with allowedTools but no toolPolicies)
 		if (role.allowedTools.length > 0 && (!role.toolPolicies || Object.keys(role.toolPolicies).length === 0)) {
 			role.toolPolicies = role.toolPolicies || {};
 			for (const tool of role.allowedTools) {
 				if (!role.toolPolicies[tool]) {
-					role.toolPolicies[tool] = 'always-allow';
+					role.toolPolicies[tool] = 'allow';
 				}
 			}
 		}
@@ -194,20 +232,20 @@ export class RoleStore {
 			cleaned.allowedTools = deriveAllowedTools(updates.toolPolicies);
 		}
 
-		// If allowedTools is updated directly (backward compat), merge into toolPolicies as "always-allow"
+		// If allowedTools is updated directly (backward compat), merge into toolPolicies as "allow"
 		if ('allowedTools' in updates && updates.allowedTools !== undefined && !('toolPolicies' in updates)) {
 			const newPolicies: Record<string, GrantPolicy> = { ...(existing.toolPolicies ?? {}) };
-			// Remove existing "always-allow" entries that are no longer in the new allowedTools
+			// Remove existing "allow" entries that are no longer in the new allowedTools
 			const newAllowed = new Set(updates.allowedTools);
 			for (const [tool, policy] of Object.entries(newPolicies)) {
-				if (policy === 'always-allow' && !newAllowed.has(tool)) {
+				if (policy === 'allow' && !newAllowed.has(tool)) {
 					delete newPolicies[tool];
 				}
 			}
 			// Add new allowedTools entries
 			for (const tool of updates.allowedTools) {
 				if (!(tool in newPolicies)) {
-					newPolicies[tool] = 'always-allow';
+					newPolicies[tool] = 'allow';
 				}
 			}
 			cleaned.toolPolicies = Object.keys(newPolicies).length > 0 ? newPolicies : undefined;

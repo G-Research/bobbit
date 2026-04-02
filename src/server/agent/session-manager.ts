@@ -23,7 +23,7 @@ import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolStubExtensions, writeLeakedToolStubs, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
 import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -118,8 +118,14 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
-	/** True if a tool_permission_needed broadcast was already sent this turn (prevents duplicates) */
-	permissionBroadcastSent?: boolean;
+	/** Pending grant request from the guard extension's long-poll */
+	pendingGrantRequest?: {
+		resolve: (result: { granted: boolean; tools?: string[] }) => void;
+		reject: (err: Error) => void;
+		toolName: string;
+		toolGroup: string;
+		timer: ReturnType<typeof setTimeout>;
+	};
 	/** Tools granted via "one-time" mode — revoked on agent_end */
 	oneTimeGrantedTools?: string[];
 	/** Whether post-start setup (model, thinking, metadata) has completed */
@@ -538,14 +544,14 @@ export class SessionManager {
 	}
 
 	/** Build tool restrictions text including available-but-ungranted tools (MCP + builtin/extension).
-	 *  Only tools with `ask-once` or `always-ask` policy are listed — `never-ask`/`never` are hidden,
-	 *  and `always-allow` tools should already be in allowedTools. */
+	 *  Only tools with `ask` policy are listed — `never` tools are hidden,
+	 *  and `allow` tools should already be in allowedTools. */
 	private buildToolRestrictionsText(allowedTools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }): string {
 		const toolList = allowedTools.join(", ");
 		let text = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools that are not listed above or mentioned below.`;
 
 		// Collect all available-but-not-granted tools (MCP + builtin/extension)
-		// so the agent knows it can attempt them (the stub will error and trigger
+		// so the agent knows it can attempt them (the guard extension blocks and triggers
 		// a permission grant prompt in the UI).
 		const ungrantedTools: Array<{ name: string; description: string }> = [];
 		const allowedLower = new Set(allowedTools.map(a => a.toLowerCase()));
@@ -555,7 +561,7 @@ export class SessionManager {
 			for (const t of this.mcpManager.getToolInfos()) {
 				if (allowedLower.has(t.name.toLowerCase())) continue;
 				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
-				if (policy === 'ask-once' || policy === 'always-ask') {
+				if (policy === 'ask') {
 					ungrantedTools.push({ name: t.name, description: t.description });
 				}
 			}
@@ -568,7 +574,7 @@ export class SessionManager {
 				if (allowedLower.has(t.name.toLowerCase())) continue;
 				if (t.name.toLowerCase().startsWith("mcp__")) continue; // already handled above
 				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
-				if (policy === 'ask-once' || policy === 'always-ask') {
+				if (policy === 'ask') {
 					ungrantedTools.push({ name: t.name, description: t.description });
 				}
 			}
@@ -583,21 +589,20 @@ export class SessionManager {
 	}
 
 	/**
-	 * Build the full set of CLI args for tool activation, including stubs, MCP proxies,
-	 * and builtin/extension activation. Stubs are loaded first (pi-coding-agent uses
-	 * first-registered-wins), then real extensions.
+	 * Build the full set of CLI args for tool activation, including guard extensions,
+	 * MCP proxies, and builtin/extension activation.
 	 *
 	 * Returns the args array to prepend to bridgeOptions.args.
 	 */
 	/**
 	 * Resolve the effective allowed tools for a role.
 	 * If the role has explicit allowedTools, use those.
-	 * Otherwise, compute from the full policy cascade (honouring the always-allow default).
+	 * Otherwise, compute from the full policy cascade (honouring the allow default).
 	 */
 	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): string[] {
 		if (!role) return [];
 		if (role.allowedTools.length > 0) return role.allowedTools;
-		// Sparse toolPolicies — use the full cascade so system default (always-allow) applies
+		// Sparse toolPolicies — use the full cascade so system default (allow) applies
 		if (this.toolManager) {
 			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
 		}
@@ -605,32 +610,34 @@ export class SessionManager {
 	}
 
 	private buildToolActivationArgs(
+		sessionId: string,
 		allowedTools: string[],
-		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+		role: { toolPolicies?: Record<string, GrantPolicy>; allowedTools?: string[] } | undefined,
 		cwd: string,
 	): string[] {
-		// 1. Generate stubs for restricted-but-visible tools (loaded first)
-		const stubArgs: string[] = [];
-		if (this.toolManager) {
-			const stubPaths = writeToolStubExtensions(this.toolManager, allowedTools, role, this.groupPolicyStore);
-			for (const p of stubPaths) stubArgs.push("--extension", p);
-		}
-
-		// 2. MCP proxy/stub extensions
+		// MCP proxy extensions
 		const mcpExtPaths = this.mcpManager
 			? writeMcpProxyExtensions(this.mcpManager, allowedTools, role, this.toolManager, this.groupPolicyStore)
 			: undefined;
 
-		// 3. Builtin + bobbit-extension activation
+		// Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(allowedTools, this.toolManager, cwd, mcpExtPaths);
 
-		// 4. Block leaked tools from shared extensions (loaded before real extensions)
-		if (activation.leakedTools && activation.leakedTools.length > 0) {
-			const leakPaths = writeLeakedToolStubs(activation.leakedTools);
-			for (const p of leakPaths) stubArgs.push("--extension", p);
+		const args = [...activation.args];
+
+		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
+		const roleAllowed = new Set((role?.allowedTools || []).map(t => t.toLowerCase()));
+		const sessionGrants = allowedTools.filter(t => !roleAllowed.has(t.toLowerCase()));
+
+		// Tool guard extension for 'ask' policy tools
+		const guardPath = this.toolManager
+			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants)
+			: undefined;
+		if (guardPath) {
+			args.push("--extension", guardPath);
 		}
 
-		return [...stubArgs, ...activation.args];
+		return args;
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
@@ -892,83 +899,6 @@ export class SessionManager {
 			session.lastTurnErrored = event.message.stopReason === "error";
 		}
 
-		// Detect tool permission errors and prompt the user to grant access.
-		// Works for ALL tool types: MCP, builtin, and bobbit-extension tools.
-		// Two detection paths:
-		// 1. tool_execution_end with isError (if the runtime propagates it)
-		// 2. message_end with toolResult containing our sentinel error text
-		{
-			let deniedToolName: string | undefined;
-
-			if (event.type === "tool_execution_end") {
-				if (event.isError && event.toolName) {
-					deniedToolName = event.toolName;
-				}
-			}
-
-			if (event.type === "message_end" && event.message?.role === "toolResult") {
-				const text = Array.isArray(event.message.content)
-					? event.message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("")
-					: typeof event.message.content === "string" ? event.message.content : "";
-				const match = text.match(/^Error: Tool (\S+) is not allowed for your current role\./);
-				if (match) {
-					deniedToolName = match[1];
-				}
-			}
-
-			if (deniedToolName && !session.permissionBroadcastSent) {
-				// Look up tool info from MCP manager first, then fall back to toolManager
-				let toolName: string | undefined;
-				let toolGroup: string | undefined;
-
-				const mcpInfos = this.mcpManager?.getToolInfos();
-				const mcpTool = mcpInfos?.find(t => t.name === deniedToolName);
-				if (mcpTool) {
-					toolName = mcpTool.name;
-					toolGroup = mcpTool.group;
-				} else if (this.toolManager) {
-					const toolInfo = this.toolManager.getToolByName(deniedToolName);
-					if (toolInfo) {
-						toolName = toolInfo.name;
-						toolGroup = toolInfo.group;
-					}
-				}
-
-				if (toolName && toolGroup && session.allowedTools && !session.allowedTools.some(t => t.toLowerCase() === deniedToolName!.toLowerCase())) {
-					// Use explicit role or fall back to "general" (implicit default)
-					const roleName = session.role || "general";
-					const role = this.roleManager?.getRole(roleName);
-
-					// Resolve grant policy for this tool
-					const policy = resolveGrantPolicy(deniedToolName, toolGroup, role, this.toolManager, this.groupPolicyStore);
-
-					if (policy === 'never-ask' || policy === 'never') {
-						// Guard: should not happen (stubs shouldn't exist for never-ask tools)
-						console.warn(`[session-manager] Unexpected denial for never-ask tool "${deniedToolName}" in session ${session.id}`);
-					} else {
-						// Mark as sent to prevent duplicate broadcasts from multiple detection paths
-						session.permissionBroadcastSent = true;
-						broadcast(session.clients, {
-							type: "tool_permission_needed",
-							toolName,
-							group: toolGroup,
-							roleName: role?.name ?? roleName,
-							roleLabel: role?.label ?? roleName,
-							lastPromptText: session.lastPromptText,
-							grantPolicy: policy,
-						});
-						// Abort the agent turn to prevent it from chatting about the denial
-						session.rpcClient.abort().catch(() => {});
-					}
-				} else if (deniedToolName) {
-					console.warn(
-						`[session-manager] Tool denial detected for "${deniedToolName}" in session ${session.id} ` +
-						`but grant not triggered: toolFound=${!!toolName}, allowedTools=${JSON.stringify(session.allowedTools?.slice(0, 5))}, role=${session.role}`
-					);
-				}
-			}
-		}
-
 		// When a steered user message appears in chat, remove the dispatched pill
 		if (event.type === "message_end" && event.message?.role === "user") {
 			if (session.promptQueue.removeDispatched()) {
@@ -980,7 +910,6 @@ export class SessionManager {
 			session.status = "streaming";
 			session.lastTurnErrored = false;
 			session.turnHadToolCalls = false;
-			session.permissionBroadcastSent = false;
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
@@ -1146,53 +1075,26 @@ export class SessionManager {
 
 		if (newTools.length === 0) return role.allowedTools;
 
-		// Enforce grant policy server-side: resolve the effective policy for the
-		// primary tool and override client-provided mode to prevent bypass.
-		// Also reject never-ask tools entirely.
-		if (this.toolManager || this.mcpManager) {
-			const filtered = newTools.filter(t => {
-				const toolGroup = this.mcpManager?.getToolInfos().find(i => i.name === t)?.group
-					?? this.toolManager?.getToolByName(t)?.group;
-				const policy = resolveGrantPolicy(t, toolGroup, role, this.toolManager!, this.groupPolicyStore);
-				return policy !== 'never-ask' && policy !== 'never';
-			});
-			if (filtered.length === 0) {
-				console.warn(`[session-manager] Grant rejected: all requested tools have never-ask policy`);
-				return role.allowedTools;
-			}
-			newTools.length = 0;
-			newTools.push(...filtered);
-
-			// Override mode based on server-resolved policy for the primary tool
-			const primaryGroup = this.mcpManager?.getToolInfos().find(i => i.name === toolName)?.group
-				?? this.toolManager?.getToolByName(toolName)?.group;
-			const primaryPolicy = resolveGrantPolicy(toolName, primaryGroup, role, this.toolManager ?? undefined, this.groupPolicyStore);
-			if (primaryPolicy === 'always-ask') {
-				mode = 'one-time';
-			} else if (primaryPolicy === 'ask-once') {
-				mode = 'session-only';
-			}
-			// 'always-allow' → keep client mode (defaults to persistent)
-		}
+		let resultTools: string[];
 
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
 			session.oneTimeGrantedTools = [...(session.oneTimeGrantedTools || []), ...newTools];
 			await this._restartSessionWithUpdatedRole(session);
-			return session.allowedTools;
+			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
 			await this._restartSessionWithUpdatedRole(session);
-			return session.allowedTools;
+			resultTools = session.allowedTools;
 
 		} else {
 			// Persistent grant (default): update toolPolicies on role YAML (allowedTools is derived automatically)
 			const updatedPolicies = { ...role.toolPolicies };
 			for (const t of newTools) {
-				updatedPolicies[t] = 'always-allow' as GrantPolicy;
+				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
 			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
 			// Re-read role to get updated derived allowedTools
@@ -1200,12 +1102,73 @@ export class SessionManager {
 			session.allowedTools = updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
 			await this._restartSessionWithUpdatedRole(session);
 
-			// Note: prompt replay after grant is handled client-side. The
-			// tool_permission_needed message includes lastPromptText, and
-			// the client re-sends it after receiving the session_status: idle
-			// broadcast from the restart.
-			return updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
+			resultTools = updatedRole ? updatedRole.allowedTools : [...role.allowedTools, ...newTools];
 		}
+
+		// Resolve pending grant request from guard extension
+		if (session.pendingGrantRequest) {
+			clearTimeout(session.pendingGrantRequest.timer);
+			const pending = session.pendingGrantRequest;
+			session.pendingGrantRequest = undefined;
+			pending.resolve({ granted: true, tools: session.allowedTools });
+		}
+
+		return resultTools;
+	}
+
+	/**
+	 * Called by the guard extension's long-poll endpoint. Creates a pending
+	 * grant request, broadcasts to UI clients, and returns a promise that
+	 * resolves when the user grants/denies or after a 5-minute timeout.
+	 */
+	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<{ granted: boolean; tools?: string[] }> {
+		const session = this.sessions.get(sessionId);
+		if (!session) throw new Error("Session not found");
+
+		// If a previous grant request is still pending, resolve it as denied
+		if (session.pendingGrantRequest) {
+			clearTimeout(session.pendingGrantRequest.timer);
+			session.pendingGrantRequest.resolve({ granted: false });
+			session.pendingGrantRequest = undefined;
+		}
+
+		// Create promise that will be resolved by grantToolPermission
+		const promise = new Promise<{ granted: boolean; tools?: string[] }>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				session.pendingGrantRequest = undefined;
+				resolve({ granted: false });
+			}, 5 * 60 * 1000); // 5 minute timeout
+
+			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer };
+		});
+
+		// Broadcast to UI clients
+		const roleName = session.role || "general";
+		const role = this.roleManager?.getRole(roleName);
+		broadcast(session.clients, {
+			type: "tool_permission_needed",
+			toolName,
+			group: toolGroup,
+			roleName: role?.name ?? roleName,
+			roleLabel: role?.label ?? roleName,
+			lastPromptText: session.lastPromptText,
+		});
+
+		return promise;
+	}
+
+	/**
+	 * Called when the user clicks "Deny" in the UI grant dialog.
+	 * Resolves the pending grant request with `{ granted: false }` so the
+	 * guard extension's long-poll returns immediately instead of waiting 5 min.
+	 */
+	denyToolPermission(sessionId: string, _toolName: string): void {
+		const session = this.sessions.get(sessionId);
+		if (!session?.pendingGrantRequest) return;
+		clearTimeout(session.pendingGrantRequest.timer);
+		const pending = session.pendingGrantRequest;
+		session.pendingGrantRequest = undefined;
+		pending.resolve({ granted: false });
 	}
 
 	/**
@@ -1490,7 +1453,7 @@ export class SessionManager {
 				effectiveAllowed = effectiveAllowed.filter(t => t !== "bash_bg");
 			}
 			if (effectiveAllowed.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(effectiveAllowed, role, ps.cwd);
+				const toolArgs = this.buildToolActivationArgs(ps.id, effectiveAllowed, role, ps.cwd);
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -2419,7 +2382,7 @@ export class SessionManager {
 
 		// Apply tool activation args based on role's allowedTools
 		if (effectiveAllowed.length > 0) {
-			const toolArgs = this.buildToolActivationArgs(effectiveAllowed, fullRole, session.cwd);
+			const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed, fullRole, session.cwd);
 			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
 			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -2562,7 +2525,7 @@ export class SessionManager {
 			const role = this.roleManager.getRole(session.role);
 			const effective = this.resolveEffectiveAllowedTools(role);
 			if (effective.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(effective, role, session.cwd);
+				const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd);
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
@@ -2728,6 +2691,13 @@ export class SessionManager {
 			if (ps.delegateOf === id && !this.sessions.has(ps.id)) {
 				this.getSessionStore(ps.projectId).archive(ps.id);
 			}
+		}
+
+		// Resolve any pending grant request so the guard's long-poll returns immediately
+		if (session.pendingGrantRequest) {
+			clearTimeout(session.pendingGrantRequest.timer);
+			session.pendingGrantRequest.resolve({ granted: false });
+			session.pendingGrantRequest = undefined;
 		}
 
 		session.unsubscribe();
@@ -3101,7 +3071,7 @@ export class SessionManager {
 				const role = this.roleManager.getRole(session.role);
 				const effective = this.resolveEffectiveAllowedTools(role);
 				if (effective.length > 0) {
-					const toolArgs = this.buildToolActivationArgs(effective, role, session.cwd);
+					const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd);
 					bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 				} else if (this.mcpManager) {
 					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);

@@ -1,5 +1,5 @@
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
-export type GrantPolicy = 'always-ask' | 'ask-once' | 'never-ask' | 'always-allow' | 'never';
+export type GrantPolicy = 'allow' | 'ask' | 'never';
 
 /** A message waiting in the server-side prompt queue */
 export interface QueuedMessage {
@@ -36,7 +36,8 @@ export type ClientMessage =
 	| { type: "task_update"; taskId: string; updates: { title?: string; spec?: string; state?: string; assignedSessionId?: string; dependsOn?: string[] } }
 	| { type: "task_delete"; taskId: string }
 	| { type: "summarize_goal_title"; goalTitle: string }
-	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" };
+	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" }
+	| { type: "deny_tool_permission"; toolName: string };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
@@ -72,4 +73,4 @@ export type ServerMessage =
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "pr_status_changed"; goalId: string }
-	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; grantPolicy?: GrantPolicy | null };
+	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string };

@@ -382,6 +382,10 @@ export function handleWebSocketConnection(
 					});
 					break;
 				}
+				case "deny_tool_permission": {
+					sessionManager.denyToolPermission(sessionId, msg.toolName);
+					break;
+				}
 				case "ping":
 					send(ws, { type: "pong" });
 					break;

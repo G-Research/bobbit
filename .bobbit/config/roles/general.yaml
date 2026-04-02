@@ -3,8 +3,8 @@ label: General
 accessory: none
 allowedTools: []
 toolPolicies:
-  Gates: ask-once
-  Tasks: ask-once
+  Gates: ask
+  Tasks: ask
 _policyMigrated: true
 createdAt: 0
 updatedAt: 1775083871266

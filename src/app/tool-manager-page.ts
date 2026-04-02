@@ -198,10 +198,9 @@ let editTab: "access" | "context" | "renderer" = "access";
 
 /** Human-readable labels for policy values */
 const POLICY_LABELS: Record<string, string> = {
-	"always-allow": "Always Allow",
-	"ask-once": "Ask Once Per Session",
-	"always-ask": "Ask Every Time",
-	"never-ask": "Never (Hidden)",
+	"allow": "Allow",
+	"ask": "Ask",
+	"never": "Never",
 };
 
 /** Resolve effective policy for a tool using the layered resolution order */
@@ -225,7 +224,7 @@ function resolveEffectivePolicy(toolName: string, toolGroup: string, roleToolPol
 	// 4. Group default
 	if (groupPolicies[toolGroup]) return groupPolicies[toolGroup];
 	// 5. System fallback
-	return "always-allow";
+	return "allow";
 }
 
 /** Describe where a resolved policy came from */
@@ -584,11 +583,10 @@ function renderListView(): TemplateResult {
 									groupPolicies = await fetchGroupPolicies();
 									renderApp();
 								}}>
-								<option value="" ?selected=${!currentGroupPolicy}>Always Allow (default)</option>
-								<option value="always-allow" ?selected=${currentGroupPolicy === "always-allow"}>Always Allow</option>
-								<option value="ask-once" ?selected=${currentGroupPolicy === "ask-once"}>Ask Once Per Session</option>
-								<option value="always-ask" ?selected=${currentGroupPolicy === "always-ask"}>Ask Every Time</option>
-								<option value="never-ask" ?selected=${currentGroupPolicy === "never-ask"}>Never (Hidden)</option>
+								<option value="" ?selected=${!currentGroupPolicy}>Allow (default)</option>
+								<option value="allow" ?selected=${currentGroupPolicy === "allow"}>Allow</option>
+								<option value="ask" ?selected=${currentGroupPolicy === "ask"}>Ask</option>
+								<option value="never" ?selected=${currentGroupPolicy === "never"}>Never</option>
 							</select>
 						</div>
 						<div class="tool-group-items">
@@ -607,18 +605,16 @@ function renderListView(): TemplateResult {
 
 const POLICY_OPTIONS = [
 	{ value: "", label: "Use group default" },
-	{ value: "always-allow", label: "Always Allow" },
-	{ value: "ask-once", label: "Ask Once Per Session" },
-	{ value: "always-ask", label: "Ask Every Time" },
-	{ value: "never-ask", label: "Never (Hidden)" },
+	{ value: "allow", label: "Allow" },
+	{ value: "ask", label: "Ask" },
+	{ value: "never", label: "Never" },
 ];
 
 const ROLE_POLICY_OPTIONS = [
 	{ value: "", label: "Use default" },
-	{ value: "always-allow", label: "Always Allow" },
-	{ value: "ask-once", label: "Ask Once" },
-	{ value: "always-ask", label: "Always Ask" },
-	{ value: "never-ask", label: "Never" },
+	{ value: "allow", label: "Allow" },
+	{ value: "ask", label: "Ask" },
+	{ value: "never", label: "Never" },
 ];
 
 function renderAccessTab(): TemplateResult {
@@ -626,7 +622,7 @@ function renderAccessTab(): TemplateResult {
 
 	const toolName = selectedTool.name;
 	const toolGroup = selectedTool.group || "Other";
-	const groupDefault = groupPolicies[toolGroup] || "always-allow";
+	const groupDefault = groupPolicies[toolGroup] || "allow";
 	const groupDefaultLabel = POLICY_LABELS[groupDefault] || groupDefault;
 
 	return html`
