@@ -612,7 +612,7 @@ export class SessionManager {
 	private buildToolActivationArgs(
 		sessionId: string,
 		allowedTools: string[],
-		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+		role: { toolPolicies?: Record<string, GrantPolicy>; allowedTools?: string[] } | undefined,
 		cwd: string,
 	): string[] {
 		// MCP proxy extensions
@@ -625,9 +625,13 @@ export class SessionManager {
 
 		const args = [...activation.args];
 
+		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
+		const roleAllowed = new Set((role?.allowedTools || []).map(t => t.toLowerCase()));
+		const sessionGrants = allowedTools.filter(t => !roleAllowed.has(t.toLowerCase()));
+
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, [])
+			? writeToolGuardExtension(sessionId, this.toolManager, this.mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
