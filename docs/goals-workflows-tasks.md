@@ -239,7 +239,7 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 
 **Test environments:** Respects `BOBBIT_LLM_REVIEW_SKIP` — when set, `agent-qa` steps auto-pass without spawning an agent.
 
-**Resume support:** If the server restarts during an `agent-qa` step, `_rerunAgentQaStep()` re-executes the step on the next verification cycle.
+**Resume support:** If the server restarts during an `agent-qa` step, the harness re-executes the step from scratch on the next verification cycle.
 
 The `agent-qa` step typically runs at phase 2 in the `feature` and `bug-fix` workflows — after command checks (phase 0) and LLM reviews (phase 1) have passed. See [QA Testing](qa-testing.md) for project configuration and the `/qa-test` skill protocol.
 

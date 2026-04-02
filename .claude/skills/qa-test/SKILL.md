@@ -203,7 +203,11 @@ Instead of signaling a gate directly, emit structured output tags that the verif
    </qa_report>
    ```
 
-The verification harness will extract these tags from your output automatically. Do NOT call `gate_signal()` — the harness handles gate signaling based on your verdict.
+The verification harness will extract these tags from your output automatically.
+
+**When invoked by the `agent-qa` verification harness:** Do NOT call `gate_signal()` — the harness handles gate signaling based on your verdict.
+
+**When invoked standalone** (e.g. a team lead spawns you for the `qa-testing` gate): After emitting the tags above, also call `gate_signal()` with the report as content and metadata `{scenarios_passed, scenarios_failed, budget_used}`.
 
 ## Step 9: Cleanup
 
