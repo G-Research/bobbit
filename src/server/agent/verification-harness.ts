@@ -975,7 +975,7 @@ export class VerificationHarness {
 									if (qaResult.artifact) {
 										artifact = qaResult.artifact;
 									}
-									const isTransient = isTransientReviewError(qaResult.output);
+									const isTransient = isTransientQaError(qaResult.output);
 									if (qaResult.passed || !isTransient || attempt === maxAttempts) break;
 									const delayMs = 2000 * Math.pow(2, attempt - 1);
 									console.log(`[verification] Agent QA "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
