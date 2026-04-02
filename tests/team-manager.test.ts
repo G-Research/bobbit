@@ -818,6 +818,49 @@ describe("TeamManager", () => {
 			cleanup();
 		});
 
+		it("should populate baseSha on TeamAgent after spawn", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
+
+			const result = await team.spawnRole("goal-1", "coder", "Implement feature X");
+			assert.ok(result.sessionId);
+
+			// The TeamAgent record should have baseSha set (resolved from git rev-parse HEAD)
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent, "agent record should exist");
+			assert.ok(agent!.baseSha, "baseSha should be populated");
+			assert.match(agent!.baseSha!, /^[0-9a-f]{40}$/, "baseSha should be a 40-char hex SHA");
+		});
+
+		it("should populate branch on TeamAgent after spawn", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
+
+			const result = await team.spawnRole("goal-1", "coder", "Implement feature");
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent, "agent record should exist");
+			assert.ok(agent!.branch, "branch should be populated");
+			assert.equal(typeof agent!.branch, "string");
+		});
+
 		it("should create a worktree and session for a coder role", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal({
@@ -966,6 +1009,53 @@ describe("TeamManager", () => {
 			assert.equal(goal.state, "complete");
 			// Team state persists (team lead stays alive for reporting)
 			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
+		});
+
+		it("findAgentBySessionId should return the agent record", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
+
+			const result = await team.spawnRole("goal-1", "coder", "Test find agent");
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent, "should find agent by session ID");
+			assert.equal(agent!.sessionId, result.sessionId);
+			assert.equal(agent!.role, "coder");
+			assert.equal(agent!.task, "Test find agent");
+
+			// Non-existent session should return undefined
+			const missing = team.findAgentBySessionId("nonexistent");
+			assert.equal(missing, undefined);
+		});
+
+		it("should persist baseSha in TeamAgent across state", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				repoPath,
+				cwd: repoPath,
+				worktreePath: repoPath,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
+
+			const result = await team.spawnRole("goal-1", "coder", "Persist test");
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent?.baseSha, "baseSha should be set");
+
+			// Verify the baseSha matches a real git commit in the worktree
+			const actualSha = execSync("git rev-parse HEAD", { cwd: result.worktreePath, encoding: "utf-8" }).trim();
+			assert.equal(agent!.baseSha, actualSha, "baseSha should match the actual HEAD SHA");
 		});
 
 		it("should handle all valid roles: coder, reviewer, tester", async () => {
