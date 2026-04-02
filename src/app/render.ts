@@ -465,6 +465,7 @@ let _cachedWorkflows: Workflow[] = [];
 let _workflowsLoaded = false;
 let _selectedWorkflowId = "general";
 let _goalSandboxed = false;
+let _assistantEnabledOptionalSteps: string[] = [];
 
 /** Set the selected workflow ID from outside the render module (e.g. from a goal proposal). */
 export function setSelectedWorkflowId(id: string): void {
@@ -482,6 +483,189 @@ function ensureSandboxStatusLoaded(): void {
 	if (state.sandboxStatus || _sandboxStatusFetching) return;
 	_sandboxStatusFetching = true;
 	fetchSandboxStatus().then(s => { _sandboxStatusFetching = false; if (s) { state.sandboxStatus = s; renderApp(); } });
+}
+
+// ============================================================================
+// SHARED GOAL FORM
+// ============================================================================
+
+interface GoalFormConfig {
+	// Field values
+	title: string;
+	spec: string;
+	cwd: string;
+	workflowId: string;
+	sandboxed: boolean;
+	specEditMode: boolean;
+	enabledOptionalSteps: string[];
+	linkedProjectId?: string;
+
+	// Field change callbacks
+	onTitleChange: (e: Event) => void;
+	onSpecChange: (e: Event) => void;
+	onCwdChange: (value: string) => void;
+	onCwdSelect: (value: string) => void;
+	onWorkflowChange: (e: Event) => void;
+	onSandboxChange: (e: Event) => void;
+	onSpecEditToggle: () => void;
+	onOptionalStepsChange: (steps: string[]) => void;
+
+	// CWD combobox state
+	cwdDropdownOpen: boolean;
+	cwdHighlightIndex: number;
+	onCwdToggle: (open: boolean) => void;
+	onCwdHighlight: (index: number) => void;
+
+	// Action callbacks
+	onCreate: () => void;
+	onDismiss?: () => void;
+
+	// UI state
+	saving?: boolean;
+	createDisabled?: boolean;
+}
+
+function renderGoalForm(config: GoalFormConfig) {
+	return html`
+		<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+			<div>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Title</label>
+				${Input({
+					type: "text",
+					value: config.title,
+					placeholder: "Goal title",
+					onInput: config.onTitleChange,
+				})}
+			</div>
+			${(() => {
+				const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
+				if (linkedProject) {
+					return html`
+				<div class="flex gap-4">
+					<div class="min-w-0" style="width:30%;">
+						<label class="text-xs text-muted-foreground mb-1 block font-medium">Project</label>
+						<div class="text-sm text-foreground/80 truncate">${linkedProject.name}</div>
+					</div>
+					<div class="min-w-0" style="width:70%;">
+						<label class="text-xs text-muted-foreground mb-1 block font-medium">Working Directory</label>
+						<div class="text-sm text-foreground/80 truncate font-mono" title=${linkedProject.rootPath}>${linkedProject.rootPath}</div>
+					</div>
+				</div>
+				<p class="text-[11px] text-muted-foreground opacity-70 -mt-2">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(linkedProject.rootPath, config.title)}</code></p>`;
+				}
+				return html`
+			<div>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
+				${cwdCombobox({
+					value: config.cwd,
+					onInput: config.onCwdChange,
+					onSelect: config.onCwdSelect,
+					dropdownOpen: config.cwdDropdownOpen,
+					onToggle: config.onCwdToggle,
+					highlightedIndex: config.cwdHighlightIndex,
+					onHighlight: config.onCwdHighlight,
+				})}
+				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(config.cwd, config.title)}</code></p>
+			</div>`;
+			})()}
+			${state.sandboxStatus?.configured ? html`
+			<div>
+				<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
+					<input type="checkbox" class="toggle-switch" .checked=${config.sandboxed}
+						?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+						@change=${config.onSandboxChange} />
+					<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
+					<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+						? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+						: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
+						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+				</label>
+			</div>
+			` : ""}
+			${_cachedWorkflows.length > 0 ? html`
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
+					<select
+						class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
+						.value=${config.workflowId}
+						@change=${config.onWorkflowChange}
+					>
+						${_cachedWorkflows.map((wf) => html`
+							<option value=${wf.id} ?selected=${config.workflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
+						`)}
+					</select>
+				</div>
+			` : ""}
+			${(() => {
+				const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
+				if (!wf) return "";
+				const optionalSteps: Array<{name: string; label: string}> = [];
+				for (const gate of wf.gates) {
+					if (gate.verify) {
+						for (const step of gate.verify) {
+							if (step.optional) {
+								optionalSteps.push({ name: step.name, label: step.label || step.name });
+							}
+						}
+					}
+				}
+				if (optionalSteps.length === 0) return "";
+				return html`
+					<div class="flex flex-col gap-2">
+						<label class="text-xs text-muted-foreground font-medium">Optional Steps</label>
+						${optionalSteps.map(os => html`
+							<label class="flex items-center gap-2 text-sm cursor-pointer">
+								<input type="checkbox" class="toggle-switch"
+									.checked=${config.enabledOptionalSteps.includes(os.name)}
+									@change=${(e: Event) => {
+										const checked = (e.target as HTMLInputElement).checked;
+										const updated = checked
+											? (config.enabledOptionalSteps.includes(os.name) ? config.enabledOptionalSteps : [...config.enabledOptionalSteps, os.name])
+											: config.enabledOptionalSteps.filter(n => n !== os.name);
+										config.onOptionalStepsChange(updated);
+									}}
+								/>
+								<span>${os.label}</span>
+							</label>
+						`)}
+					</div>
+				`;
+			})()}
+			<div class="flex-1 flex flex-col min-h-0">
+				<div class="flex items-center justify-between mb-1.5">
+					<label class="text-xs text-muted-foreground font-medium">Spec</label>
+					<button
+						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+						title="Toggle edit/preview mode"
+						@click=${config.onSpecEditToggle}
+					>
+						${config.specEditMode ? "Preview" : "Edit"}
+					</button>
+				</div>
+				${config.specEditMode
+					? html`<textarea
+							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+							.value=${config.spec}
+							@input=${config.onSpecChange}
+						></textarea>`
+					: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
+							<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>
+						</div>`
+				}
+			</div>
+		</div>
+		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
+			<div class="flex items-center justify-end gap-2">
+				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
+				${Button({
+					variant: "default",
+					onClick: config.onCreate,
+					disabled: config.createDisabled ?? !config.title.trim(),
+					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
+				})}
+			</div>
+		</div>
+	`;
 }
 
 function goalPreviewPanel() {
@@ -505,6 +689,8 @@ function goalPreviewPanel() {
 		_selectedWorkflowId = "general";
 		const sandboxed = _goalSandboxed;
 		_goalSandboxed = false;
+		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
+		_assistantEnabledOptionalSteps = [];
 		// Clean up persisted draft
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
@@ -522,6 +708,7 @@ function goalPreviewPanel() {
 			reattemptOf: reattemptGoalId || undefined,
 			sandboxed,
 			projectId,
+			enabledOptionalSteps,
 		});
 
 		// If this is a re-attempt, archive the old goal and link the new one
@@ -548,142 +735,63 @@ function goalPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Title</label>
-					${Input({
-						type: "text",
-						value: state.previewTitle,
-						placeholder: "Goal title",
-						onInput: (e: Event) => {
-							state.previewTitle = (e.target as HTMLInputElement).value;
-							state.previewTitleEdited = true;
-							const sid = activeSessionId();
-							if (sid) saveGoalDraft(sid);
-							// Debounced goal title summarization (1s)
-							if ((state as any)._goalTitleDebounceTimer) {
-								clearTimeout((state as any)._goalTitleDebounceTimer);
-							}
-							const trimmedTitle = (e.target as HTMLInputElement).value.trim();
-							if (trimmedTitle.length >= 3 && trimmedTitle !== (state as any)._lastSummarizedGoalTitle && state.remoteAgent) {
-								(state as any)._goalTitleDebounceTimer = setTimeout(() => {
-									(state as any)._lastSummarizedGoalTitle = trimmedTitle;
-									state.remoteAgent?.summarizeGoalTitle(trimmedTitle);
-									(state as any)._goalTitleDebounceTimer = null;
-								}, 1000);
-							}
-						},
-					})}
-				</div>
-				${(() => {
-					const linkedProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
-					if (linkedProject) {
-						return html`
-				<div class="flex gap-4">
-					<div class="min-w-0" style="width:30%;">
-						<label class="text-xs text-muted-foreground mb-1 block font-medium">Project</label>
-						<div class="text-sm text-foreground/80 truncate">${linkedProject.name}</div>
-					</div>
-					<div class="min-w-0" style="width:70%;">
-						<label class="text-xs text-muted-foreground mb-1 block font-medium">Working Directory</label>
-						<div class="text-sm text-foreground/80 truncate font-mono" title=${linkedProject.rootPath}>${linkedProject.rootPath}</div>
-					</div>
-				</div>
-				<p class="text-[11px] text-muted-foreground opacity-70 -mt-2">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(linkedProject.rootPath, state.previewTitle)}</code></p>`;
+			${renderGoalForm({
+				title: state.previewTitle,
+				spec: state.previewSpec,
+				cwd: state.previewCwd,
+				workflowId: _selectedWorkflowId,
+				sandboxed: _goalSandboxed,
+				specEditMode: state.previewSpecEditMode,
+				enabledOptionalSteps: _assistantEnabledOptionalSteps,
+				linkedProjectId: state.previewProjectId || undefined,
+				onTitleChange: (e: Event) => {
+					state.previewTitle = (e.target as HTMLInputElement).value;
+					state.previewTitleEdited = true;
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+					// Debounced goal title summarization (1s)
+					if ((state as any)._goalTitleDebounceTimer) {
+						clearTimeout((state as any)._goalTitleDebounceTimer);
 					}
-					return html`
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
-					${cwdCombobox({
-						value: state.previewCwd,
-						onInput: (v) => {
-							state.previewCwd = v;
-							state.previewCwdEdited = true;
-							const sid = activeSessionId();
-							if (sid) saveGoalDraft(sid);
-							renderApp();
-						},
-						onSelect: (v) => {
-							state.previewCwd = v;
-							state.previewCwdEdited = true;
-							const sid = activeSessionId();
-							if (sid) saveGoalDraft(sid);
-							renderApp();
-						},
-						dropdownOpen: state.cwdDropdownOpen,
-						onToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
-						highlightedIndex: state.cwdHighlightIndex,
-						onHighlight: (i) => { state.cwdHighlightIndex = i; },
-					})}
-					<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(state.previewCwd, state.previewTitle)}</code></p>
-				</div>`;
-				})()}
-				${state.sandboxStatus?.configured ? html`
-				<div>
-					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
-						<input type="checkbox" class="toggle-switch" .checked=${_goalSandboxed}
-							?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
-							@change=${(e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
-						<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
-						<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
-							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-							: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
-							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-					</label>
-				</div>
-				` : ""}
-				${_cachedWorkflows.length > 0 ? html`
-					<div>
-						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
-						<select
-							class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
-							.value=${_selectedWorkflowId}
-							@change=${(e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); }}
-						>
-							${_cachedWorkflows.map((wf) => html`
-								<option value=${wf.id} ?selected=${_selectedWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
-							`)}
-						</select>
-					</div>
-				` : ""}
-				<div class="flex-1 flex flex-col min-h-0">
-					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">Spec</label>
-						<button
-							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Toggle edit/preview mode"
-							@click=${() => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); }}
-						>
-							${state.previewSpecEditMode ? "Preview" : "Edit"}
-						</button>
-					</div>
-					${state.previewSpecEditMode
-						? html`<textarea
-								class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-								.value=${state.previewSpec}
-								@input=${(e: Event) => {
-									state.previewSpec = (e.target as HTMLTextAreaElement).value;
-									state.previewSpecEdited = true;
-									const sid = activeSessionId();
-									if (sid) saveGoalDraft(sid);
-								}}
-							></textarea>`
-						: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
-								<markdown-block .content=${state.previewSpec || "_No spec content yet_"}></markdown-block>
-							</div>`
+					const trimmedTitle = (e.target as HTMLInputElement).value.trim();
+					if (trimmedTitle.length >= 3 && trimmedTitle !== (state as any)._lastSummarizedGoalTitle && state.remoteAgent) {
+						(state as any)._goalTitleDebounceTimer = setTimeout(() => {
+							(state as any)._lastSummarizedGoalTitle = trimmedTitle;
+							state.remoteAgent?.summarizeGoalTitle(trimmedTitle);
+							(state as any)._goalTitleDebounceTimer = null;
+						}, 1000);
 					}
-				</div>
-			</div>
-			<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
-				<div class="flex items-center justify-end gap-2">
-					${Button({
-						variant: "default",
-						onClick: handleCreateGoal,
-						disabled: !state.previewTitle.trim(),
-						children: html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
-					})}
-				</div>
-			</div>
+				},
+				onSpecChange: (e: Event) => {
+					state.previewSpec = (e.target as HTMLTextAreaElement).value;
+					state.previewSpecEdited = true;
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+				},
+				onCwdChange: (v) => {
+					state.previewCwd = v;
+					state.previewCwdEdited = true;
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+					renderApp();
+				},
+				onCwdSelect: (v) => {
+					state.previewCwd = v;
+					state.previewCwdEdited = true;
+					const sid = activeSessionId();
+					if (sid) saveGoalDraft(sid);
+					renderApp();
+				},
+				onWorkflowChange: (e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+				onSandboxChange: (e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
+				onSpecEditToggle: () => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); },
+				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
+				cwdDropdownOpen: state.cwdDropdownOpen,
+				cwdHighlightIndex: state.cwdHighlightIndex,
+				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
+				onCwdHighlight: (i) => { state.cwdHighlightIndex = i; },
+				onCreate: handleCreateGoal,
+			})}
 		</div>
 	`;
 }
@@ -1808,148 +1916,32 @@ function goalProposalPanel() {
 		renderApp();
 	};
 
-	return html`
-		<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-			<div>
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Title</label>
-				${Input({
-					type: "text",
-					value: _proposalTitle,
-					placeholder: "Goal title",
-					onInput: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
-				})}
-			</div>
-			${(() => {
-				const linkedProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
-				if (linkedProject) {
-					return html`
-				<div class="flex gap-4">
-					<div class="min-w-0" style="width:30%;">
-						<label class="text-xs text-muted-foreground mb-1 block font-medium">Project</label>
-						<div class="text-sm text-foreground/80 truncate">${linkedProject.name}</div>
-					</div>
-					<div class="min-w-0" style="width:70%;">
-						<label class="text-xs text-muted-foreground mb-1 block font-medium">Working Directory</label>
-						<div class="text-sm text-foreground/80 truncate font-mono" title=${linkedProject.rootPath}>${linkedProject.rootPath}</div>
-					</div>
-				</div>
-				<p class="text-[11px] text-muted-foreground opacity-70 -mt-2">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(linkedProject.rootPath, _proposalTitle)}</code></p>`;
-				}
-				return html`
-			<div>
-				<div class="flex items-center justify-between mb-1.5">
-					<label class="text-xs text-muted-foreground font-medium">Working Directory</label>
-					${state.sandboxStatus?.configured ? html`
-						<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
-							<span class="text-[11px] text-muted-foreground">Sandbox (Docker)</span>
-							<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
-								? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-								: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
-								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-							<input type="checkbox" class="toggle-switch" .checked=${_proposalSandboxed}
-								?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
-								@change=${(e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
-						</label>
-					` : ""}
-				</div>
-				${cwdCombobox({
-					value: _proposalCwd,
-					onInput: (v) => { _proposalCwd = v; renderApp(); },
-					onSelect: (v) => { _proposalCwd = v; renderApp(); },
-					dropdownOpen: _proposalCwdDropdownOpen,
-					onToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
-					highlightedIndex: _proposalCwdHighlightIndex,
-					onHighlight: (i) => { _proposalCwdHighlightIndex = i; },
-				})}
-				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(_proposalCwd, _proposalTitle)}</code></p>
-			</div>`;
-			})()}
-			${_cachedWorkflows.length > 0 ? html`
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
-					<select
-						class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
-						.value=${_proposalWorkflowId}
-						@change=${(e: Event) => { _proposalWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); }}
-					>
-						${_cachedWorkflows.map((wf) => html`
-							<option value=${wf.id} ?selected=${_proposalWorkflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
-						`)}
-					</select>
-				</div>
-			` : ""}
-			${(() => {
-				const wf = _cachedWorkflows.find(w => w.id === _proposalWorkflowId);
-				if (!wf) return "";
-				const optionalSteps: Array<{name: string; label: string}> = [];
-				for (const gate of wf.gates) {
-					if (gate.verify) {
-						for (const step of gate.verify) {
-							if (step.optional) {
-								optionalSteps.push({ name: step.name, label: step.label || step.name });
-							}
-						}
-					}
-				}
-				if (optionalSteps.length === 0) return "";
-				return html`
-					<div class="flex flex-col gap-2">
-						<label class="text-xs text-muted-foreground font-medium">Optional Steps</label>
-						${optionalSteps.map(os => html`
-							<label class="flex items-center gap-2 text-sm cursor-pointer">
-								<input type="checkbox" class="toggle-switch"
-									.checked=${_proposalEnabledOptionalSteps.includes(os.name)}
-									@change=${(e: Event) => {
-										const checked = (e.target as HTMLInputElement).checked;
-										if (checked && !_proposalEnabledOptionalSteps.includes(os.name)) {
-											_proposalEnabledOptionalSteps = [..._proposalEnabledOptionalSteps, os.name];
-										} else if (!checked) {
-											_proposalEnabledOptionalSteps = _proposalEnabledOptionalSteps.filter(n => n !== os.name);
-										}
-										renderApp();
-									}}
-								/>
-								<span>${os.label}</span>
-							</label>
-						`)}
-					</div>
-				`;
-			})()}
-			<div class="flex-1 flex flex-col min-h-0">
-				<div class="flex items-center justify-between mb-1.5">
-					<label class="text-xs text-muted-foreground font-medium">Spec</label>
-					<button
-						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-						title="Toggle edit/preview mode"
-						@click=${() => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); }}
-					>
-						${_proposalSpecEditMode ? "Preview" : "Edit"}
-					</button>
-				</div>
-				${_proposalSpecEditMode
-					? html`<textarea
-							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-							.value=${_proposalSpec}
-							@input=${(e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; }}
-						></textarea>`
-					: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
-							<markdown-block .content=${_proposalSpec || "_No spec content yet_"}></markdown-block>
-						</div>`
-				}
-			</div>
-		</div>
-		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
-			<div class="flex items-center justify-end gap-2">
-				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
-				${Button({
-					variant: "default",
-					onClick: handleCreateGoal,
-					disabled: !_proposalTitle.trim() || _proposalSaving,
-					children: _proposalSaving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
-				})}
-			</div>
-		</div>
-	`;
+	return renderGoalForm({
+		title: _proposalTitle,
+		spec: _proposalSpec,
+		cwd: _proposalCwd,
+		workflowId: _proposalWorkflowId,
+		sandboxed: _proposalSandboxed,
+		specEditMode: _proposalSpecEditMode,
+		enabledOptionalSteps: _proposalEnabledOptionalSteps,
+		linkedProjectId: state.previewProjectId || undefined,
+		onTitleChange: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
+		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
+		onCwdChange: (v) => { _proposalCwd = v; renderApp(); },
+		onCwdSelect: (v) => { _proposalCwd = v; renderApp(); },
+		onWorkflowChange: (e: Event) => { _proposalWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+		onSandboxChange: (e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
+		onSpecEditToggle: () => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); },
+		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
+		cwdDropdownOpen: _proposalCwdDropdownOpen,
+		cwdHighlightIndex: _proposalCwdHighlightIndex,
+		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
+		onCwdHighlight: (i) => { _proposalCwdHighlightIndex = i; },
+		onCreate: handleCreateGoal,
+		onDismiss: handleDismiss,
+		saving: _proposalSaving,
+		createDisabled: !_proposalTitle.trim() || _proposalSaving,
+	});
 }
 
 // ============================================================================
