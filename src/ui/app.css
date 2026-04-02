@@ -1971,6 +1971,109 @@ html {
 	animation: blob-compact-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
 }
 
+/* ===== Stamp overlay (hand-held, T-shape with red rubber face) ===== */
+.bobbit-blob__stamp {
+	display: none;
+}
+.bobbit-stamp .bobbit-blob__stamp {
+	display: block;
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	transform-origin: 5px 8px;
+	transform: scale(4);
+	margin: 8px 18px 28px 18px;
+	image-rendering: pixelated;
+	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
+	box-shadow:
+		9px 3px 0 #000, 10px 3px 0 #000,
+		8px 4px 0 #000, 9px 4px 0 #8b4513, 10px 4px 0 #cd853f, 11px 4px 0 #000,
+		8px 5px 0 #000, 9px 5px 0 #6b7280, 10px 5px 0 #9ca3af, 11px 5px 0 #000,
+		7px 6px 0 #000, 8px 6px 0 #ef4444, 9px 6px 0 #ef4444, 10px 6px 0 #ef4444, 11px 6px 0 #ef4444, 12px 6px 0 #000,
+		7px 7px 0 #000, 8px 7px 0 #000, 9px 7px 0 #000, 10px 7px 0 #000, 11px 7px 0 #000, 12px 7px 0 #000;
+	animation:
+		blob-busy-move-rigid 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,
+		magnifier-depth-busy 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__stamp {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+	transform: scale(4) translateX(-7px);
+}
+.bobbit-blob--exit .bobbit-blob__stamp {
+	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+.bobbit-blob--exit-roll .bobbit-blob__stamp {
+	animation: blob-exit-roll-rigid 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
+}
+.bobbit-blob--enter .bobbit-blob__stamp {
+	animation: blob-enter-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+.bobbit-blob--enter-roll .bobbit-blob__stamp {
+	animation: blob-enter-roll-rigid 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
+}
+.bobbit-blob--compact-shake .bobbit-blob__stamp {
+	animation: blob-compact-shake-rigid 0.8s ease-in-out forwards !important;
+}
+.bobbit-blob--compacting .bobbit-blob__stamp {
+	animation: blob-compact-squash-rigid 3s ease-in-out infinite !important;
+}
+.bobbit-blob--compact-pop .bobbit-blob__stamp {
+	animation: blob-compact-pop-rigid 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+
+/* ===== Clipboard overlay (hand-held, brown board with silver clip) ===== */
+.bobbit-blob__clipboard {
+	display: none;
+}
+.bobbit-clipboard .bobbit-blob__clipboard {
+	display: block;
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	transform-origin: 5px 8px;
+	transform: scale(4);
+	margin: 8px 18px 28px 18px;
+	image-rendering: pixelated;
+	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
+	box-shadow:
+		9px 2px 0 #000,
+		8px 3px 0 #000, 9px 3px 0 #d1d5db, 10px 3px 0 #000,
+		7px 4px 0 #000, 8px 4px 0 #8b4513, 9px 4px 0 #a0522d, 10px 4px 0 #8b4513, 11px 4px 0 #000,
+		7px 5px 0 #000, 8px 5px 0 #a0522d, 9px 5px 0 #8b4513, 10px 5px 0 #a0522d, 11px 5px 0 #000,
+		7px 6px 0 #000, 8px 6px 0 #8b4513, 9px 6px 0 #a0522d, 10px 6px 0 #8b4513, 11px 6px 0 #000,
+		7px 7px 0 #000, 8px 7px 0 #000, 9px 7px 0 #000, 10px 7px 0 #000, 11px 7px 0 #000;
+	animation:
+		blob-busy-move-rigid 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,
+		magnifier-depth-busy 10s steps(1) infinite;
+}
+.bobbit-blob--idle .bobbit-blob__clipboard {
+	animation: magnifier-depth-idle 10s steps(1) infinite;
+	transform: scale(4) translateX(-7px);
+}
+.bobbit-blob--exit .bobbit-blob__clipboard {
+	animation: blob-exit-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+.bobbit-blob--exit-roll .bobbit-blob__clipboard {
+	animation: blob-exit-roll-rigid 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
+}
+.bobbit-blob--enter .bobbit-blob__clipboard {
+	animation: blob-enter-rigid 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+.bobbit-blob--enter-roll .bobbit-blob__clipboard {
+	animation: blob-enter-roll-rigid 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
+}
+.bobbit-blob--compact-shake .bobbit-blob__clipboard {
+	animation: blob-compact-shake-rigid 0.8s ease-in-out forwards !important;
+}
+.bobbit-blob--compacting .bobbit-blob__clipboard {
+	animation: blob-compact-squash-rigid 3s ease-in-out infinite !important;
+}
+.bobbit-blob--compact-pop .bobbit-blob__clipboard {
+	animation: blob-compact-pop-rigid 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+
 /* Disney 12-principles bounce:
    anticipation → launch → hang → land → settle → breathe → wiggle */
 @keyframes blob-bounce {
