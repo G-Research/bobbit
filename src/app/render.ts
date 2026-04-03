@@ -465,6 +465,7 @@ let _cachedWorkflows: Workflow[] = [];
 let _workflowsLoaded = false;
 let _selectedWorkflowId = "general";
 let _goalSandboxed = false;
+let _goalAutoStartTeam = true;
 let _assistantEnabledOptionalSteps: string[] = [];
 
 /** Set the selected workflow ID from outside the render module (e.g. from a goal proposal). */
@@ -528,6 +529,8 @@ interface GoalFormConfig {
 	onSandboxChange: (e: Event) => void;
 	onSpecEditToggle: () => void;
 	onOptionalStepsChange: (steps: string[]) => void;
+	autoStartTeam: boolean;
+	onAutoStartTeamChange: (e: Event) => void;
 
 	// CWD combobox state
 	cwdDropdownOpen: boolean;
@@ -601,6 +604,15 @@ function renderGoalForm(config: GoalFormConfig) {
 				</label>
 			</div>
 			` : ""}
+			<div>
+				<label class="flex items-center gap-1.5 cursor-pointer">
+					<input type="checkbox" class="toggle-switch" .checked=${config.autoStartTeam}
+						@change=${config.onAutoStartTeamChange} />
+					<span class="text-xs text-muted-foreground font-medium">Auto-start team</span>
+					<span title="Automatically start the team lead when the worktree is ready"
+						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+				</label>
+			</div>
 			${_cachedWorkflows.length > 0 ? html`
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
@@ -720,6 +732,8 @@ function goalPreviewPanel() {
 		_selectedWorkflowId = "general";
 		const sandboxed = _goalSandboxed;
 		_goalSandboxed = false;
+		const autoStartTeam = _goalAutoStartTeam;
+		_goalAutoStartTeam = true;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		_assistantEnabledOptionalSteps = [];
 		// Clean up persisted draft
@@ -740,6 +754,7 @@ function goalPreviewPanel() {
 			sandboxed,
 			projectId,
 			enabledOptionalSteps,
+			autoStartTeam,
 		});
 
 		// If this is a re-attempt, archive the old goal and link the new one
@@ -817,6 +832,8 @@ function goalPreviewPanel() {
 				onSandboxChange: (e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 				onSpecEditToggle: () => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); },
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
+				autoStartTeam: _goalAutoStartTeam,
+				onAutoStartTeamChange: (e: Event) => { _goalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
 				cwdDropdownOpen: state.cwdDropdownOpen,
 				cwdHighlightIndex: state.cwdHighlightIndex,
 				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
@@ -1874,6 +1891,7 @@ let _proposalCwdDropdownOpen = false;
 let _proposalCwdHighlightIndex = -1;
 let _proposalSaving = false;
 let _proposalSandboxed = false;
+let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
 
@@ -1910,12 +1928,15 @@ function goalProposalPanel() {
 		try {
 			const sandboxed = _proposalSandboxed;
 			_proposalSandboxed = false;
+			const autoStartTeam = _proposalAutoStartTeam;
+			_proposalAutoStartTeam = true;
 			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 				spec: _proposalSpec,
 				workflowId: _proposalWorkflowId || undefined,
 				sandboxed,
 				projectId: state.previewProjectId || undefined,
 				enabledOptionalSteps: _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined,
+				autoStartTeam,
 			});
 			state.activeGoalProposal = null;
 			_proposalEnabledOptionalSteps = [];
@@ -1934,6 +1955,7 @@ function goalProposalPanel() {
 		state.activeGoalProposal = null;
 		_proposalInitializedFrom = null;
 		_proposalEnabledOptionalSteps = [];
+		_proposalAutoStartTeam = true;
 		// Persist dismiss so it survives reconnect
 		const sid = activeSessionId();
 		if (sid && dismissed) markProposalDismissed(sid, dismissed);
@@ -1964,6 +1986,8 @@ function goalProposalPanel() {
 		onSandboxChange: (e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 		onSpecEditToggle: () => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); },
 		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
+		autoStartTeam: _proposalAutoStartTeam,
+		onAutoStartTeamChange: (e: Event) => { _proposalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
 		cwdDropdownOpen: _proposalCwdDropdownOpen,
 		cwdHighlightIndex: _proposalCwdHighlightIndex,
 		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
