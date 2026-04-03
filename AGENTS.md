@@ -153,6 +153,10 @@ Quick pointers for the most common issues:
 
 Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
+### Committing with a dirty working copy
+
+When asked to commit, other unstaged/staged changes may exist from in-progress work by another agent or the user. **Never discard, stash, or reset those changes.** Instead, stage only the files you modified (`git add <your-files>`) and commit them. If your changes overlap with the existing modifications and you cannot cleanly separate them, ask the user for instructions.
+
 ### Worktrees
 
 Dev server runs from **primary worktree** on `master`. Goal/agent sessions use separate worktrees under `<project-root>-wt-goal\`.
