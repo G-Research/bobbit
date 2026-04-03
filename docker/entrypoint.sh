@@ -134,5 +134,29 @@ install_playwright_browsers() {
 }
 install_playwright_browsers || true
 
+# Build project artifacts (dist/) so agents can run tests without building first.
+# Only runs if a build script exists in package.json and dist/ doesn't already exist.
+# Uses a marker file to avoid re-building on container restart.
+build_project() {
+    if [ -f /workspace/.bobbit-build-done ]; then
+        return 0
+    fi
+    if [ ! -f /workspace/package.json ]; then
+        return 0
+    fi
+    # Check if package.json has a "build" script
+    if ! node -e "const p=require('/workspace/package.json'); if(!p.scripts?.build) process.exit(1)" 2>/dev/null; then
+        return 0
+    fi
+    echo "[bobbit-entrypoint] Building project artifacts..."
+    if (cd /workspace && npm run build 2>&1 | tail -5); then
+        touch /workspace/.bobbit-build-done
+        echo "[bobbit-entrypoint] Build complete"
+    else
+        echo "[bobbit-entrypoint] WARNING: build failed — agents may need to build manually"
+    fi
+}
+build_project || true
+
 # Execute the command
 exec "$@"

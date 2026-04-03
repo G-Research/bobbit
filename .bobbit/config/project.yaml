@@ -7,7 +7,7 @@ test_e2e_command: npm run build >/dev/null 2>&1 && npx playwright test
   --grep-invert 'mcp-integration|session-lifecycle-ui' --config
   playwright-e2e.config.ts --reporter=json 2>/dev/null | node
   scripts/test-filter.mjs
-worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund && npm run build
+worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
 config_directories: '[{"path":"C:\\tmp\\.bobbit","types":["skills"]},{"path":"C:\\Users\\jsubr\\.claude\\AGENTS.md","types":["agents"]}]'
 sandbox: docker
 sandbox_image: bobbit-agent
