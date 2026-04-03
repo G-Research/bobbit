@@ -6,9 +6,9 @@
  *
  * What it does:
  *   1. Reads the project registry to find registered project IDs
- *   2. Scans each project's sessions.json for entries whose projectId
- *      doesn't match that project — these are misrouted entries
- *   3. Removes (or optionally moves) misrouted entries
+ *   2. Scans each project's sessions.json and goals.json for entries whose
+ *      projectId doesn't match that project — these are misrouted entries
+ *   3. Removes misrouted entries
  *
  * Usage:
  *   node scripts/cleanup-orphaned-sessions.mjs [--bobbit-dir <path>] [--dry-run]
@@ -42,117 +42,82 @@ console.log(`Registered projects: ${projects.length}`);
 for (const p of projects) {
 	console.log(`  ${p.id} — ${p.name} (${p.rootPath})`);
 }
-console.log();
 
 let totalRemoved = 0;
 
-// For each project, check its sessions.json for misrouted entries
-for (const project of projects) {
-	const sessionsFile = join(project.rootPath, ".bobbit", "state", "sessions.json");
-	if (!existsSync(sessionsFile)) continue;
-
-	let data;
+/**
+ * Parse a store file. Both GoalStore and SessionStore serialize as a flat
+ * JSON array: [ { id, projectId, ... }, ... ]
+ */
+function loadStoreArray(filePath) {
+	if (!existsSync(filePath)) return null;
 	try {
-		data = JSON.parse(readFileSync(sessionsFile, "utf-8"));
+		const data = JSON.parse(readFileSync(filePath, "utf-8"));
+		return Array.isArray(data) ? data : [];
 	} catch (err) {
-		console.warn(`  Could not parse ${sessionsFile}: ${err.message}`);
-		continue;
+		console.warn(`  Could not parse ${filePath}: ${err.message}`);
+		return null;
 	}
-
-	const live = data.sessions || [];
-	const archived = data.archived || [];
-
-	// Misrouted = has a projectId that doesn't match this project
-	const misroutedLive = live.filter(
-		(s) => s.projectId && s.projectId !== project.id,
-	);
-	const misroutedArchived = archived.filter(
-		(s) => s.projectId && s.projectId !== project.id,
-	);
-	// Also find entries whose projectId is not registered at all (truly orphaned)
-	const orphanedLive = live.filter(
-		(s) => s.projectId && !registeredIds.has(s.projectId),
-	);
-	const orphanedArchived = archived.filter(
-		(s) => s.projectId && !registeredIds.has(s.projectId),
-	);
-
-	const misrouted = misroutedLive.length + misroutedArchived.length;
-	const orphaned = orphanedLive.length + orphanedArchived.length;
-
-	if (misrouted === 0 && orphaned === 0) {
-		console.log(`✓ ${project.name}: clean (${live.length} live, ${archived.length} archived)`);
-		continue;
-	}
-
-	console.log(`✗ ${project.name}: ${misrouted} misrouted, ${orphaned} orphaned`);
-
-	for (const s of misroutedLive) {
-		const registered = registeredIds.has(s.projectId);
-		console.log(`    LIVE  ${s.id} "${s.title || "(untitled)"}" → projectId=${s.projectId} (${registered ? "registered" : "UNREGISTERED"})`);
-	}
-	for (const s of misroutedArchived) {
-		const registered = registeredIds.has(s.projectId);
-		console.log(`    ARCH  ${s.id} "${s.title || "(untitled)"}" → projectId=${s.projectId} (${registered ? "registered" : "UNREGISTERED"})`);
-	}
-
-	if (dryRun) {
-		console.log(`    [dry-run] Would remove ${misrouted} entries`);
-		totalRemoved += misrouted;
-		continue;
-	}
-
-	// Remove misrouted entries
-	data.sessions = live.filter((s) => !s.projectId || s.projectId === project.id);
-	data.archived = archived.filter((s) => !s.projectId || s.projectId === project.id);
-	writeFileSync(sessionsFile, JSON.stringify(data, null, 2));
-	console.log(`    Removed ${misrouted} misrouted entries from ${sessionsFile}`);
-	totalRemoved += misrouted;
 }
 
-// Also check for misrouted goals
-console.log();
+// ── Sessions ────────────────────────────────────────────────────
+console.log("\n── Sessions ──");
 for (const project of projects) {
-	const goalsFile = join(project.rootPath, ".bobbit", "state", "goals.json");
-	if (!existsSync(goalsFile)) continue;
+	const filePath = join(project.rootPath, ".bobbit", "state", "sessions.json");
+	const entries = loadStoreArray(filePath);
+	if (entries === null) continue;
 
-	let data;
-	try {
-		data = JSON.parse(readFileSync(goalsFile, "utf-8"));
-	} catch (err) {
-		console.warn(`  Could not parse ${goalsFile}: ${err.message}`);
+	const misrouted = entries.filter((s) => s.projectId && s.projectId !== project.id);
+
+	if (misrouted.length === 0) {
+		console.log(`✓ ${project.name}: clean (${entries.length} entries)`);
 		continue;
 	}
 
-	const live = data.goals || [];
-	const archived = data.archived || [];
-
-	const misroutedLive = live.filter((g) => g.projectId && g.projectId !== project.id);
-	const misroutedArchived = archived.filter((g) => g.projectId && g.projectId !== project.id);
-	const misrouted = misroutedLive.length + misroutedArchived.length;
-
-	if (misrouted === 0) {
-		console.log(`✓ ${project.name} goals: clean (${live.length} live, ${archived.length} archived)`);
-		continue;
-	}
-
-	console.log(`✗ ${project.name} goals: ${misrouted} misrouted`);
-	for (const g of [...misroutedLive, ...misroutedArchived]) {
-		const registered = registeredIds.has(g.projectId);
-		console.log(`    ${g.archived ? "ARCH" : "LIVE"}  ${g.id} "${g.title || "(untitled)"}" → projectId=${g.projectId} (${registered ? "registered" : "UNREGISTERED"})`);
+	console.log(`✗ ${project.name}: ${misrouted.length} misrouted out of ${entries.length}`);
+	for (const s of misrouted) {
+		const reg = registeredIds.has(s.projectId) ? "registered" : "UNREGISTERED";
+		console.log(`    ${s.archived ? "ARCH" : "LIVE"}  ${s.id} "${s.title || "(untitled)"}" → projectId=${s.projectId} (${reg})`);
 	}
 
 	if (dryRun) {
-		console.log(`    [dry-run] Would remove ${misrouted} entries`);
-		totalRemoved += misrouted;
+		console.log(`    [dry-run] Would remove ${misrouted.length} entries`);
+	} else {
+		const clean = entries.filter((s) => !s.projectId || s.projectId === project.id);
+		writeFileSync(filePath, JSON.stringify(clean, null, 2));
+		console.log(`    Removed ${misrouted.length} entries`);
+	}
+	totalRemoved += misrouted.length;
+}
+
+// ── Goals ───────────────────────────────────────────────────────
+console.log("\n── Goals ──");
+for (const project of projects) {
+	const filePath = join(project.rootPath, ".bobbit", "state", "goals.json");
+	const entries = loadStoreArray(filePath);
+	if (entries === null) continue;
+
+	const misrouted = entries.filter((g) => g.projectId && g.projectId !== project.id);
+
+	if (misrouted.length === 0) {
+		console.log(`✓ ${project.name}: clean (${entries.length} entries)`);
 		continue;
 	}
 
-	data.goals = live.filter((g) => !g.projectId || g.projectId === project.id);
-	data.archived = archived.filter((g) => !g.projectId || g.projectId === project.id);
-	writeFileSync(goalsFile, JSON.stringify(data, null, 2));
-	console.log(`    Removed ${misrouted} misrouted entries from ${goalsFile}`);
-	totalRemoved += misrouted;
+	console.log(`✗ ${project.name}: ${misrouted.length} misrouted out of ${entries.length}`);
+	for (const g of misrouted) {
+		const reg = registeredIds.has(g.projectId) ? "registered" : "UNREGISTERED";
+		console.log(`    ${g.archived ? "ARCH" : "LIVE"}  ${g.id} "${g.title || "(untitled)"}" → projectId=${g.projectId} (${reg})`);
+	}
+
+	if (dryRun) {
+		console.log(`    [dry-run] Would remove ${misrouted.length} entries`);
+	} else {
+		const clean = entries.filter((g) => !g.projectId || g.projectId === project.id);
+		writeFileSync(filePath, JSON.stringify(clean, null, 2));
+		console.log(`    Removed ${misrouted.length} entries`);
+	}
+	totalRemoved += misrouted.length;
 }
 
 console.log();
