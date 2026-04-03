@@ -954,6 +954,11 @@ async function handleApiRoute(
 			return;
 		}
 		try {
+			// Terminate all live sessions belonging to the removed project
+			const liveSessions = sessionManager.listSessions().filter(s => s.projectId === projectId);
+			for (const s of liveSessions) {
+				try { await sessionManager.terminateSession(s.id); } catch {}
+			}
 			projectContextManager.remove(projectId);
 			projectRegistry.remove(projectId);
 			json({ ok: true });
@@ -1051,10 +1056,11 @@ async function handleApiRoute(
 			}
 		}
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
+		const registeredProjectIds = new Set(projectRegistry.list().map(p => p.id));
 		let sessions = sessionManager.listSessions().map((s) => ({
 			...s,
 			colorIndex: colorStore.get(s.id),
-		}));
+		})).filter(s => !s.projectId || registeredProjectIds.has(s.projectId));
 		if (filterProjectId) {
 			sessions = sessions.filter(s => s.projectId === filterProjectId);
 		}
