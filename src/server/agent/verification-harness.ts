@@ -517,7 +517,7 @@ export class VerificationHarness {
 	constructor(
 		stateDir: string,
 		/** @deprecated Resolve per-goal via projectContextManager instead. */
-		private gateStore: GateStore,
+		private gateStore: GateStore | undefined,
 		private broadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
 		private preferencesStore?: PreferencesStore,
@@ -544,7 +544,8 @@ export class VerificationHarness {
 			throw new Error(`Cannot resolve gate store: goal "${goalId}" not found in any project`);
 		}
 		// Fallback for non-PCM path (tests without project context)
-		return this.gateStore;
+		if (this.gateStore) return this.gateStore;
+		throw new Error(`Cannot resolve gate store: no project context manager and no fallback gate store`);
 	}
 
 	/** Register a callback to notify the team lead agent when verification completes. */

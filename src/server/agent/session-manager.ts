@@ -309,8 +309,8 @@ export class SessionManager {
 		throw new Error(`Cannot resolve store for session ${id}: no projectId and no test store`);
 	}
 
-	/** Resolve the correct SessionStore for any session by ID (in-memory or persisted). */
-	private resolveStoreForId(id: string): SessionStore {
+	/** Resolve the correct SessionStore for any session by ID (in-memory or persisted). Returns null if not found. */
+	private resolveStoreForId(id: string): SessionStore | null {
 		// Try in-memory first (fast path)
 		const session = this.sessions.get(id);
 		if (session?.projectId) {
@@ -321,10 +321,10 @@ export class SessionManager {
 			for (const ctx of this.projectContextManager.all()) {
 				if (ctx.sessionStore.get(id)) return ctx.sessionStore;
 			}
-			throw new Error(`Cannot resolve store for session ${id}: not found in any project`);
+			return null;
 		}
 		if (this._testStore) return this._testStore;
-		throw new Error(`Cannot resolve store for session ${id}: no project context manager or test store`);
+		return null;
 	}
 
 	/** Resolve the correct CostTracker for a session based on its project. */
@@ -334,11 +334,7 @@ export class SessionManager {
 			if (ctx) return ctx.costTracker;
 		}
 		if (this._testCostTracker) return this._testCostTracker;
-		if (this.projectContextManager) {
-			// Fallback: use default project cost tracker if session has no projectId
-			return this.projectContextManager.getDefault().costTracker;
-		}
-		throw new Error("No cost tracker available");
+		throw new Error("Cannot resolve cost tracker: session has no projectId");
 	}
 
 	/** Resolve the correct SearchIndex for a session based on its project. */
@@ -538,12 +534,19 @@ export class SessionManager {
 		return true;
 	}
 
-	/** @deprecated Use project-scoped cost tracker resolution instead. Will be removed once server.ts callers are updated. */
-	getCostTracker(): CostTracker {
-		if (this.projectContextManager) {
-			return this.projectContextManager.getDefault().costTracker;
+	/** Get a CostTracker for a specific project. If no projectId is provided, scans all projects. */
+	getCostTracker(projectId?: string): CostTracker {
+		if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.costTracker;
 		}
 		if (this._testCostTracker) return this._testCostTracker;
+		if (this.projectContextManager) {
+			// For cost aggregation endpoints that don't have a single project scope,
+			// return the default project's cost tracker. Cost data is stored per-project
+			// but the CostTracker.getAllCosts() aggregates across sessions it tracks.
+			return this.projectContextManager.getDefault().costTracker;
+		}
 		throw new Error("No cost tracker available");
 	}
 
@@ -1840,7 +1843,7 @@ export class SessionManager {
 		const id = randomUUID();
 		// Resolve projectId from parent session
 		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
-			?? this.resolveStoreForId(parentSessionId).get(parentSessionId)?.projectId;
+			?? this.resolveStoreForId(parentSessionId)?.get(parentSessionId)?.projectId;
 		const ctx = this.buildPipelineContext(parentProjectId);
 
 		// ── Sandbox propagation from parent ──
@@ -2345,8 +2348,9 @@ export class SessionManager {
 		const session = this.sessions.get(id);
 		if (!session) {
 			// Store-only session (dormant/delegate) — update store directly
-			this.resolveStoreForId(id).update(id, updates);
-			return true;
+			const store = this.resolveStoreForId(id);
+			if (store) store.update(id, updates);
+			return !!store;
 		}
 		if (updates.role !== undefined) session.role = updates.role;
 		if (updates.teamGoalId !== undefined) session.teamGoalId = updates.teamGoalId;
@@ -2738,7 +2742,7 @@ export class SessionManager {
 		if (existing && existing.status !== "terminated") return; // already alive
 
 		// Try to restore from persisted data
-		const persisted = this.resolveStoreForId(sessionId).get(sessionId);
+		const persisted = this.resolveStoreForId(sessionId)?.get(sessionId);
 		if (!persisted) {
 			throw new Error(`Cannot restore session ${sessionId}: no persisted data found`);
 		}
@@ -2847,23 +2851,26 @@ export class SessionManager {
 
 	/** Get persisted session metadata by ID (live or dormant). */
 	getPersistedSession(id: string): PersistedSession | undefined {
-		return this.resolveStoreForId(id).get(id);
+		return this.resolveStoreForId(id)?.get(id);
 	}
 
 	/** Get an archived session's metadata. */
 	getArchivedSession(id: string): PersistedSession | undefined {
-		const ps = this.resolveStoreForId(id).get(id);
+		const ps = this.resolveStoreForId(id)?.get(id);
 		return ps?.archived ? ps : undefined;
 	}
 
 	/** Archive a session directly in the store (for dormant/store-only sessions). */
 	storeArchive(id: string): boolean {
-		return this.resolveStoreForId(id).archive(id);
+		const store = this.resolveStoreForId(id);
+		if (!store) return false;
+		return store.archive(id);
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */
 	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string }): boolean {
 		const store = this.resolveStoreForId(id);
+		if (!store) return false;
 		const ps = store.get(id);
 		if (!ps?.archived) return false;
 		store.update(id, updates);
@@ -2872,7 +2879,7 @@ export class SessionManager {
 
 	/** Parse the .jsonl file for an archived session and return messages. */
 	getArchivedMessages(id: string): unknown[] {
-		const ps = this.resolveStoreForId(id).get(id);
+		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived || !ps.agentSessionFile) return [];
 		try {
 			if (!fs.existsSync(ps.agentSessionFile)) return [];
@@ -2957,7 +2964,7 @@ export class SessionManager {
 
 	/** Permanently purge a single archived session immediately. */
 	async purgeArchivedSession(id: string): Promise<boolean> {
-		const ps = this.resolveStoreForId(id).get(id);
+		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived) return false;
 		await this.purgeOneSession(ps);
 		return true;
@@ -3027,7 +3034,7 @@ export class SessionManager {
 		}
 
 		// Remove from store
-		this.resolveStoreForId(ps.id).purge(ps.id);
+		this.resolveStoreForId(ps.id)?.purge(ps.id);
 	}
 
 	/** Start the archive purge schedule — call after restoreSessions(). */
@@ -3050,7 +3057,7 @@ export class SessionManager {
 
 		// If session is dormant (failed restore), try to revive it
 		if (session.status === "terminated") {
-			const ps = this.resolveStoreForId(sessionId).get(sessionId);
+			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 			if (ps && fs.existsSync(ps.agentSessionFile)) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
 				this.restoreSession(ps)

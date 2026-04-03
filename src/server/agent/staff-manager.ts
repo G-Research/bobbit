@@ -87,6 +87,7 @@ export class StaffManager {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: id },
 				sandboxed: sessionManager.isSandboxEnabled,
+				projectId,
 			});
 			session.staffId = id;
 			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });

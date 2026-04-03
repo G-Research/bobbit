@@ -428,7 +428,7 @@ export function createGateway(config: GatewayConfig) {
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
-	verificationHarness = new VerificationHarness(stateDir, undefined as any, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -1472,6 +1472,9 @@ async function handleApiRoute(
 			const matched = projectRegistry.findByCwd(cwd);
 			if (matched) resolvedProjectId = matched.id;
 		}
+		// Default to the server's own project when no project could be resolved from CWD or explicit param.
+		// This is the correct API contract: sessions created without a project context belong to the default project.
+		if (!resolvedProjectId) resolvedProjectId = projectContextManager.getDefaultProjectId();
 
 		try {
 			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId });
@@ -1585,10 +1588,9 @@ async function handleApiRoute(
 				const matched = projectRegistry.findByCwd(cwd);
 				if (matched) targetProjectId = matched.id;
 			}
-			if (!targetProjectId) {
-				json({ error: "Cannot create goal: no project found for the given directory" }, 400);
-				return;
-			}
+			// Default to the server's own project when no project could be resolved.
+			// This is the correct API contract: goals created without explicit project belong to the default project.
+			if (!targetProjectId) targetProjectId = projectContextManager.getDefaultProjectId();
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
@@ -2588,9 +2590,13 @@ async function handleApiRoute(
 
 		// GET /api/tasks/:id
 		if (req.method === "GET") {
-			const task = getTaskManagerForTask(id).getTask(id);
-			if (!task) { json({ error: "Task not found" }, 404); return; }
-			json(task);
+			try {
+				const task = getTaskManagerForTask(id).getTask(id);
+				if (!task) { json({ error: "Task not found" }, 404); return; }
+				json(task);
+			} catch {
+				json({ error: "Task not found" }, 404);
+			}
 			return;
 		}
 
@@ -2631,9 +2637,13 @@ async function handleApiRoute(
 
 		// DELETE /api/tasks/:id
 		if (req.method === "DELETE") {
-			const ok = getTaskManagerForTask(id).deleteTask(id);
-			if (!ok) { json({ error: "Task not found" }, 404); return; }
-			json({ ok: true });
+			try {
+				const ok = getTaskManagerForTask(id).deleteTask(id);
+				if (!ok) { json({ error: "Task not found" }, 404); return; }
+				json({ ok: true });
+			} catch {
+				json({ error: "Task not found" }, 404);
+			}
 			return;
 		}
 	}
@@ -3899,7 +3909,8 @@ async function handleApiRoute(
 	const sessionCostBreakdownMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost\/breakdown$/);
 	if (sessionCostBreakdownMatch && req.method === "GET") {
 		const sessionId = sessionCostBreakdownMatch[1];
-		const costTracker = sessionManager.getCostTracker();
+		const sessionForCost = sessionManager.getSession(sessionId);
+		const costTracker = sessionManager.getCostTracker(sessionForCost?.projectId);
 		const allCosts = costTracker.getAllCosts();
 		const sessionCost = allCosts.get(sessionId);
 		if (!sessionCost) {
@@ -3935,7 +3946,8 @@ async function handleApiRoute(
 	const sessionCostMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost$/);
 	if (sessionCostMatch && req.method === "GET") {
 		const id = sessionCostMatch[1];
-		const cost = sessionManager.getCostTracker().getSessionCost(id);
+		const sessionForCost = sessionManager.getSession(id);
+		const cost = sessionManager.getCostTracker(sessionForCost?.projectId).getSessionCost(id);
 		if (!cost) {
 			json({ error: "No cost data for this session" }, 404);
 			return;
@@ -3954,7 +3966,7 @@ async function handleApiRoute(
 			return;
 		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
-		const costTracker = sessionManager.getCostTracker();
+		const costTracker = sessionManager.getCostTracker(goal.projectId);
 		const allCosts = costTracker.getAllCosts();
 
 		// Build per-session breakdown with metadata
@@ -3999,7 +4011,7 @@ async function handleApiRoute(
 			return;
 		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
-		const cost = sessionManager.getCostTracker().getGoalCost(goalId, sessionIds);
+		const cost = sessionManager.getCostTracker(goal.projectId).getGoalCost(goalId, sessionIds);
 		json(cost);
 		return;
 	}
@@ -4017,7 +4029,8 @@ async function handleApiRoute(
 			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
 			return;
 		}
-		const cost = sessionManager.getCostTracker().getSessionCost(task.assignedSessionId);
+		const taskSession = sessionManager.getSession(task.assignedSessionId);
+		const cost = sessionManager.getCostTracker(taskSession?.projectId).getSessionCost(task.assignedSessionId);
 		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
 		return;
 	}
@@ -4188,7 +4201,7 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = body.cwd || config.defaultCwd;
-		const projectId = (typeof body.projectId === "string") ? body.projectId : undefined;
+		const projectId = (typeof body.projectId === "string") ? body.projectId : projectContextManager.getDefaultProjectId();
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,

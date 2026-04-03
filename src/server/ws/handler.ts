@@ -409,7 +409,9 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "task_update": {
-					const tm = resolveTaskManagerForTask(sessionManager, msg.taskId);
+					let tm: TaskManager;
+					try { tm = resolveTaskManagerForTask(sessionManager, msg.taskId); }
+					catch { send(ws, { type: "error", message: `Task ${msg.taskId} not found`, code: "TASK_NOT_FOUND" }); break; }
 					const updates = { ...msg.updates, state: msg.updates.state as TaskState | undefined };
 					const updated = tm.updateTask(msg.taskId, updates);
 					if (updated) {
@@ -421,7 +423,9 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "task_delete": {
-					const tm = resolveTaskManagerForTask(sessionManager, msg.taskId);
+					let tm: TaskManager;
+					try { tm = resolveTaskManagerForTask(sessionManager, msg.taskId); }
+					catch { send(ws, { type: "error", message: `Task ${msg.taskId} not found`, code: "TASK_NOT_FOUND" }); break; }
 					const task = tm.getTask(msg.taskId);
 					if (task) {
 						tm.deleteTask(msg.taskId);

@@ -285,6 +285,33 @@ test.describe("Project isolation — no default fallback", () => {
 		}
 	});
 
+	test("session creation without projectId defaults to the default project", async () => {
+		const defaultProject = await getDefaultProject();
+
+		// Create a session without passing projectId — should default to the server's project
+		const resp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({}),
+		});
+		expect(resp.status).toBe(201);
+		const data = await resp.json();
+		const sessionId = data.id;
+
+		try {
+			// Verify the session got the default project's ID
+			const detailResp = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(detailResp.status).toBe(200);
+			const detail = await detailResp.json();
+			expect(detail.projectId).toBe(defaultProject.id);
+
+			// Verify it appears in the default project's filtered list
+			const sessionsDefault = await listSessions(defaultProject.id);
+			expect(sessionsDefault.some((s: any) => s.id === sessionId)).toBe(true);
+		} finally {
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("session list filtering by non-existent project returns empty", async () => {
 		const projectB = await registerProject(`isolation-filter-${Date.now()}`);
 
