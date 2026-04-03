@@ -66,7 +66,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// Resource limits — prevent containers from consuming all host resources
 	baseHostArgs.push(`--memory=${config.memoryLimit ?? "4g"}`);
 	baseHostArgs.push(`--cpus=${config.cpuLimit ?? "2"}`);
-	baseHostArgs.push(`--pids-limit=${String(config.pidsLimit ?? "256")}`);
+	baseHostArgs.push(`--pids-limit=${String(config.pidsLimit ?? "512")}`);
 
 	// Attach to a restricted Docker network for sandboxed containers
 	if (sandboxNetwork) {

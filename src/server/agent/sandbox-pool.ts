@@ -277,6 +277,22 @@ export class SandboxPool {
 			// Checkout the default branch
 			await git(["checkout", this._defaultBranch], worktreePath, 30_000);
 
+			// Fix origin URL: `git clone --local` sets origin to the local host path,
+			// which is inaccessible from inside a Docker container. Replace it with the
+			// real upstream remote URL so push/fetch/PR work identically to non-sandbox.
+			try {
+				const { stdout: realOrigin } = await execFileAsync(
+					"git", ["remote", "get-url", "origin"],
+					{ cwd: this.options.repoPath, timeout: 5_000 },
+				);
+				const upstreamUrl = realOrigin.trim();
+				if (upstreamUrl && upstreamUrl !== this.options.repoPath) {
+					await git(["remote", "set-url", "origin", upstreamUrl], worktreePath, 5_000);
+				}
+			} catch {
+				// No upstream remote — local-only repo, push won't work but that's expected
+			}
+
 			// Run worktree setup command if configured
 			if (this.options.worktreeSetupCommand) {
 				try {

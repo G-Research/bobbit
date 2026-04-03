@@ -13,9 +13,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update && apt-get install -y gh && apt-get clean
 
-# Install Playwright system dependencies (Chromium libs) so that browser tools
-# and E2E tests (`npx playwright test`) work inside sandbox containers.
-# Must run as root before switching to the node user.
+# Install Playwright system dependencies (Chromium libs).
+# Use a recent version to get broad library coverage — the actual browser binary
+# is installed later by the entrypoint to match the project's @playwright/test version.
 RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -37,12 +37,10 @@ RUN chmod +x /usr/local/bin/bobbit-entrypoint.sh
 USER node
 
 # Configure git for Windows host compatibility (CRLF line endings).
+# Mark /workspace as safe (it's bind-mounted with different ownership).
 # Commit identity comes from the mounted repo's .git/config (the human developer).
-RUN git config --global core.autocrlf true
-
-# Install Chromium browser for Playwright (user-space, no root needed).
-# The system libs were installed above; this downloads the browser binary.
-RUN npx -y playwright@1.52.0 install chromium 2>/dev/null
+RUN git config --global core.autocrlf true \
+    && git config --global --add safe.directory /workspace
 
 # npm cache directory (persisted via volume for faster installs)
 RUN mkdir -p /home/node/.npm-cache

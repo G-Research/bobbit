@@ -98,5 +98,29 @@ prepare_node_modules || true
 # Source the env file if it exists (for NODE_PATH)
 [ -f /home/node/.bobbit-env ] && . /home/node/.bobbit-env
 
+# Install Playwright browser binary matching the project's @playwright/test version.
+# System libs are pre-installed in the Docker image; this only downloads the browser.
+# Runs once — subsequent starts skip if the binary already exists.
+install_playwright_browsers() {
+    # Only if the project uses Playwright
+    if [ ! -f /workspace/node_modules/@playwright/test/package.json ] && \
+       [ ! -f /workspace/node_modules/playwright/package.json ]; then
+        return 0
+    fi
+
+    # Check if chromium is already installed for this version
+    local pw_version
+    pw_version=$(node -e "try{console.log(require('/workspace/node_modules/@playwright/test/package.json').version)}catch{}" 2>/dev/null)
+    if [ -z "$pw_version" ]; then
+        pw_version=$(node -e "try{console.log(require('/workspace/node_modules/playwright/package.json').version)}catch{}" 2>/dev/null)
+    fi
+    if [ -z "$pw_version" ]; then return 0; fi
+
+    # npx playwright install is idempotent — skips if already installed
+    echo "[bobbit-entrypoint] Ensuring Playwright $pw_version chromium browser..."
+    npx -y playwright@"$pw_version" install chromium 2>/dev/null || true
+}
+install_playwright_browsers || true
+
 # Execute the command
 exec "$@"
