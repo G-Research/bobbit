@@ -1391,7 +1391,8 @@ export class SessionManager {
 		// Delegate sessions: dormant entries only — restored on-demand via addClient()
 		for (const ps of delegates) {
 			if (!ps.agentSessionFile || !fs.existsSync(ps.agentSessionFile)) {
-				try { this.getSessionStore(ps.projectId).remove(ps.id); } catch { /* project gone */ }
+				// Archive instead of remove — preserves metadata and search index refs
+				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
 			this.addDormantSession(ps);
@@ -1452,23 +1453,23 @@ export class SessionManager {
 			return;
 		}
 		if (!ps.agentSessionFile) {
+			// No session file — can't restore the process, but archive to
+			// preserve metadata (title, goal, timestamps) and search index refs.
 			if (ps.worktreePath && ps.branch) {
-				// Code may be recoverable — the branch exists in git
 				console.warn(
 					`[session-manager] Session ${ps.id} has no agentSessionFile but has worktree ` +
 					`(branch: ${ps.branch}, path: ${ps.worktreePath}). ` +
 					`Code may be recoverable. Archiving session — branch "${ps.branch}" preserved in git.`,
 				);
-				sessionStore.archive(ps.id);
 			} else {
-				console.log(`[session-manager] Removing ${ps.id} — no agent session file and no worktree`);
-				sessionStore.remove(ps.id);
+				console.log(`[session-manager] Archiving ${ps.id} — no agent session file (metadata preserved)`);
 			}
+			sessionStore.archive(ps.id);
 			return;
 		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
-			console.log(`[session-manager] Removing ${ps.id} — agent session file missing: ${ps.agentSessionFile}`);
-			sessionStore.remove(ps.id);
+			console.log(`[session-manager] Archiving ${ps.id} — agent session file missing: ${ps.agentSessionFile} (metadata preserved)`);
+			sessionStore.archive(ps.id);
 			return;
 		}
 		try {
@@ -2855,14 +2856,10 @@ export class SessionManager {
 		// resolveStoreForSession can look up the session's projectId.
 		const terminateStore = this.resolveStoreForSession(id);
 		this.sessions.delete(id);
-		// Archive the session — keep metadata for 7 days.
-		// But sessions with no agentSessionFile are unrestorable, so just remove them.
-		const persisted = terminateStore.get(id);
-		if (persisted?.agentSessionFile) {
-			terminateStore.archive(id);
-		} else {
-			terminateStore.remove(id);
-		}
+		// Always archive — even without an agentSessionFile the metadata
+		// (title, goal association, timestamps) is valuable and the search
+		// index may reference this session.  Purge will clean it up later.
+		terminateStore.archive(id);
 		// Don't remove color or session prompt — they're needed for archived view
 		return true;
 	}
@@ -3010,13 +3007,7 @@ export class SessionManager {
 	/** Internal: purge a single archived session — delete files, worktree, store entry. */
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
 		// Remove from search index
-		try {
-			const purgeSearchIndex = this.resolveSearchIndex(ps);
-			purgeSearchIndex.removeMessagesForSession(ps.id);
-			purgeSearchIndex.removeSession(ps.id);
-		} catch (err) {
-			console.error(`[session-manager] Failed to remove session ${ps.id} from search index:`, err);
-		}
+		this.cleanupSearchForSession(ps.id, ps.projectId);
 
 		// Delete .jsonl file
 		try {
@@ -3053,6 +3044,22 @@ export class SessionManager {
 
 		// Remove from store
 		this.resolveStoreForId(ps.id)?.purge(ps.id);
+	}
+
+	/** Remove search index entries for a session. Used when removing a session from the store. */
+	private cleanupSearchForSession(sessionId: string, projectId?: string): void {
+		try {
+			const searchIndex = projectId
+				? this.projectContextManager?.getOrCreate(projectId)?.searchIndex
+				: null;
+			const idx = searchIndex || this._testSearchIndex;
+			if (idx) {
+				idx.removeMessagesForSession(sessionId);
+				idx.removeSession(sessionId);
+			}
+		} catch {
+			// Non-critical — don't break the removal flow
+		}
 	}
 
 	/** Start the archive purge schedule — call after restoreSessions(). */
