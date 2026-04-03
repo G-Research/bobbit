@@ -138,6 +138,9 @@ test.describe("Sandbox Docker — /proc/1/environ", () => {
 test.describe("Sandbox Docker — shared team repo", () => {
 	test.skip(!dockerAvailable, "Docker not available");
 
+	// Docker + git clone operations need generous timeouts
+	test.setTimeout(120_000);
+
 	// Use a unique goal ID per test run to avoid collisions
 	const goalId = `test-${Date.now()}`;
 	// We'll use the current repo as the source for createTeamRepo
