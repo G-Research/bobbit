@@ -159,6 +159,7 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 - Steps are grouped by `phase` (integer, default 0) and phases execute sequentially
 - Within each phase, steps run in parallel
 - If any step in a phase fails, remaining phases are skipped (status: `"skipped"`)
+- Skipped steps carry `skipped: true` on `GateSignalStep`, persisted in `gates.json` — this lets the UI show the correct dash icon after reload (without it, skipped steps would appear as passed or failed based on the `passed` field alone)
 - `gate_verification_phase_started` WebSocket event fires before each phase
 - Step events include `phase` field; skipped steps show `"Skipped — earlier phase failed"`
 - Check `ActiveVerification.currentPhase` via `GET /api/goals/:goalId/verifications/active`
