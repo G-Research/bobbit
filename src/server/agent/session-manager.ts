@@ -2770,10 +2770,12 @@ export class SessionManager {
 		}
 		session.clients.clear();
 
+		// Resolve the store BEFORE removing from in-memory map, so
+		// resolveStoreForSession can look up the session's projectId.
+		const terminateStore = this.resolveStoreForSession(id);
 		this.sessions.delete(id);
 		// Archive the session — keep metadata for 7 days.
 		// But sessions with no agentSessionFile are unrestorable, so just remove them.
-		const terminateStore = this.resolveStoreForSession(id);
 		const persisted = terminateStore.get(id);
 		if (persisted?.agentSessionFile) {
 			terminateStore.archive(id);
