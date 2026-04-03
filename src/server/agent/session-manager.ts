@@ -36,7 +36,7 @@ import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
-import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
+import { bobbitStateDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 
 import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
 import {
@@ -1455,19 +1455,27 @@ export class SessionManager {
 			return;
 		}
 		if (!ps.agentSessionFile) {
-			// No session file — can't restore the process, but archive to
-			// preserve metadata (title, goal, timestamps) and search index refs.
-			if (ps.worktreePath && ps.branch) {
-				console.warn(
-					`[session-manager] Session ${ps.id} has no agentSessionFile but has worktree ` +
-					`(branch: ${ps.branch}, path: ${ps.worktreePath}). ` +
-					`Code may be recoverable. Archiving session — branch "${ps.branch}" preserved in git.`,
-				);
+			// No session file path — persistSessionMetadata never completed.
+			// Try to recover by scanning the sessions dir for a matching .jsonl.
+			const recovered = this.recoverSessionFile(ps);
+			if (recovered) {
+				console.log(`[session-manager] Recovered session file for ${ps.id}: ${recovered}`);
+				sessionStore.update(ps.id, { agentSessionFile: recovered });
+				ps = { ...ps, agentSessionFile: recovered };
+				// Fall through to normal restore below
 			} else {
-				console.log(`[session-manager] Archiving ${ps.id} — no agent session file (metadata preserved)`);
+				if (ps.worktreePath && ps.branch) {
+					console.warn(
+						`[session-manager] Session ${ps.id} has no agentSessionFile but has worktree ` +
+						`(branch: ${ps.branch}, path: ${ps.worktreePath}). ` +
+						`Code may be recoverable. Archiving session — branch "${ps.branch}" preserved in git.`,
+					);
+				} else {
+					console.log(`[session-manager] Archiving ${ps.id} — no agent session file (metadata preserved)`);
+				}
+				sessionStore.archive(ps.id);
+				return;
 			}
-			sessionStore.archive(ps.id);
-			return;
 		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
 			console.log(`[session-manager] Archiving ${ps.id} — agent session file missing: ${ps.agentSessionFile} (metadata preserved)`);
@@ -3070,6 +3078,54 @@ export class SessionManager {
 		} catch {
 			// Non-critical — don't break the removal flow
 		}
+	}
+
+	/**
+	 * Try to recover a session's .jsonl file when agentSessionFile is empty.
+	 * The agent CLI stores files as: <sessionsDir>/<cwd-slug>/<timestamp>_<uuid>.jsonl
+	 * We scan the CWD-derived directory for a .jsonl created close to the session's createdAt.
+	 */
+	private recoverSessionFile(ps: PersistedSession): string | null {
+		try {
+			const sessionsDir = path.join(globalAgentDir(), "sessions");
+			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
+			// For sandboxed sessions, the CWD stored in ps.cwd is the host path (set during setup).
+			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
+			const cwdDir = path.join(sessionsDir, cwdSlug);
+			if (!fs.existsSync(cwdDir)) return null;
+
+			const files = fs.readdirSync(cwdDir).filter(f => f.endsWith(".jsonl"));
+			if (files.length === 0) return null;
+
+			// Parse timestamp from filename: 2026-04-03T15-15-12-009Z_<uuid>.jsonl
+			// Find the file whose timestamp is closest to (and within 60s of) ps.createdAt
+			const TOLERANCE_MS = 60_000;
+			let bestFile: string | null = null;
+			let bestDelta = Infinity;
+
+			for (const file of files) {
+				const tsMatch = file.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
+				if (!tsMatch) continue;
+				// Convert filename timestamp back to ISO: replace hyphens in time part with colons
+				const isoStr = tsMatch[1]
+					.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "$1-$2-$3T$4:$5:$6.$7Z");
+				const fileTime = new Date(isoStr).getTime();
+				if (isNaN(fileTime)) continue;
+
+				const delta = Math.abs(fileTime - ps.createdAt);
+				if (delta < TOLERANCE_MS && delta < bestDelta) {
+					bestDelta = delta;
+					bestFile = file;
+				}
+			}
+
+			if (bestFile) {
+				return path.join(cwdDir, bestFile).replace(/\\/g, "/");
+			}
+		} catch {
+			// Recovery is best-effort — don't break restore flow
+		}
+		return null;
 	}
 
 	/** Start the archive purge schedule — call after restoreSessions(). */
