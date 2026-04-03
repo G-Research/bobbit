@@ -61,7 +61,7 @@ test.describe("Sandbox Docker — /proc/1/environ", () => {
 		}
 	});
 
-	test("git credential helper uses GITHUB_TOKEN from docker exec -e", async () => {
+	test("git credential helper uses GITHUB_TOKEN from docker exec -e", { timeout: 180_000 }, async () => {
 		// Start a bare node:20-slim container (same base as our Dockerfile).
 		// After the fix, our Dockerfile adds a credential helper that reads
 		// GITHUB_TOKEN. This test asserts the credential helper works — it
