@@ -882,6 +882,113 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Project Detection & Browse ────────────────────────────────────
+
+	// POST /api/projects/detect
+	if (url.pathname === "/api/projects/detect" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body.path !== "string") {
+			json({ error: "Missing path" }, 400);
+			return;
+		}
+		const dirPath = path.resolve(body.path);
+		const exists = fs.existsSync(dirPath);
+		let hasBobbit = false;
+		let isEmpty = true;
+		let hasPackageJson = false;
+		let hasCargoToml = false;
+		let hasGoMod = false;
+		let name = path.basename(dirPath);
+
+		if (exists) {
+			try {
+				const stat = fs.statSync(dirPath);
+				if (stat.isDirectory()) {
+					const entries = fs.readdirSync(dirPath);
+					isEmpty = entries.length === 0;
+					hasBobbit = entries.includes(".bobbit");
+					hasPackageJson = entries.includes("package.json");
+					hasCargoToml = entries.includes("Cargo.toml");
+					hasGoMod = entries.includes("go.mod");
+
+					// Try to read name from package.json
+					if (hasPackageJson) {
+						try {
+							const pkg = JSON.parse(fs.readFileSync(path.join(dirPath, "package.json"), "utf-8"));
+							if (typeof pkg.name === "string" && pkg.name) {
+								name = pkg.name;
+							}
+						} catch {
+							// Ignore parse errors — fall back to directory basename
+						}
+					}
+				} else {
+					// Path exists but is not a directory
+					json({ error: "Path is not a directory" }, 400);
+					return;
+				}
+			} catch {
+				// stat failed — treat as non-existent
+				json({ exists: false, hasBobbit: false, isEmpty: true, hasPackageJson: false, hasCargoToml: false, hasGoMod: false, name });
+				return;
+			}
+		}
+
+		json({ exists, hasBobbit, isEmpty, hasPackageJson, hasCargoToml, hasGoMod, name });
+		return;
+	}
+
+	// GET /api/browse-directory
+	if (url.pathname === "/api/browse-directory" && req.method === "GET") {
+		const rawPath = url.searchParams.get("path");
+		const dirPath = rawPath ? path.resolve(rawPath) : config.defaultCwd;
+
+		if (!fs.existsSync(dirPath)) {
+			json({ error: "Directory not found" }, 404);
+			return;
+		}
+
+		try {
+			const stat = fs.statSync(dirPath);
+			if (!stat.isDirectory()) {
+				json({ error: "Path is not a directory" }, 400);
+				return;
+			}
+		} catch {
+			json({ error: "Cannot access path" }, 400);
+			return;
+		}
+
+		const entries: Array<{ name: string; path: string }> = [];
+		try {
+			const items = fs.readdirSync(dirPath);
+			for (const item of items) {
+				// Skip hidden directories and node_modules
+				if (item.startsWith(".") || item === "node_modules") continue;
+				const fullPath = path.join(dirPath, item);
+				try {
+					const stat = fs.lstatSync(fullPath);
+					if (stat.isDirectory() && !stat.isSymbolicLink()) {
+						entries.push({ name: item, path: fullPath });
+					}
+				} catch {
+					// Skip entries we can't stat
+				}
+			}
+		} catch {
+			json({ error: "Cannot read directory" }, 500);
+			return;
+		}
+
+		entries.sort((a, b) => a.name.localeCompare(b.name));
+
+		const parsed = path.parse(dirPath);
+		const parent = parsed.root === dirPath ? null : path.dirname(dirPath);
+
+		json({ current: dirPath, parent, entries });
+		return;
+	}
+
 	// ── Project CRUD ──────────────────────────────────────────────────
 
 	// GET /api/projects
@@ -3268,8 +3375,10 @@ async function handleApiRoute(
 			const session = sessionManager.getSession(id);
 			if (session) {
 				session.delegateOf = body.delegateOf || undefined;
+				sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
+			} else {
+				sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
 			}
-			sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
 		}
 
 		if (typeof body.teamLeadSessionId === "string") {

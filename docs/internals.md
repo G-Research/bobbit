@@ -123,9 +123,17 @@ Two resolution modes:
 
 ### Project assistant
 
-The project assistant (`project-assistant.ts`) guides users through registering a new project directory. It explores the directory (package.json, build files, git config, CI config) and emits a `<project_proposal>` XML block with discovered settings: name, root_path, build_command, test_command, typecheck_command, and system_prompt_context.
+The project assistant guides users through registering a new project directory. It operates in two modes, selected automatically by the smart Add Project flow based on directory detection (`POST /api/projects/detect`):
 
-Registered as assistant type `"project"` in the assistant registry.
+**Detection mode** (assistant type `"project"`): For directories with existing content but no `.bobbit/`. The assistant explores the directory (package.json, build files, git config, CI config, README) and emits a `<project_proposal>` XML block with discovered settings: name, root_path, build_command, test_command, typecheck_command, test_unit_command, test_e2e_command, system_prompt_context, and worktree_setup_command.
+
+**Scaffolding mode** (assistant type `"project-scaffolding"`): For empty or non-existent directories. The assistant asks what the project is about, suggests tech stacks, and helps scaffold the project structure (directory layout, basic files, README). After the user accepts the proposal, the assistant uses bash/write tools to create the project files, then emits the same `<project_proposal>` block format.
+
+On proposal acceptance, the client-side handler registers the project via `POST /api/projects` and then writes all config fields to `project.yaml` via `PUT /api/projects/:id/config`. This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
+
+**Auto-import path**: If `POST /api/projects/detect` reports `.bobbit/` already exists, the UI skips the assistant entirely and registers the project immediately with the auto-detected name (from `package.json` or directory basename). Existing `.bobbit/config/` settings are preserved as-is.
+
+**Directory browsing**: The smart Add Project dialog includes a Browse button backed by `GET /api/browse-directory?path=<base>`. This endpoint returns directory-only listings (skips files, hidden dirs, `node_modules`, and symlinks). Defaults to the server's CWD when no path is provided.
 
 ### Per-project config
 
