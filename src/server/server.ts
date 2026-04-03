@@ -517,8 +517,6 @@ export function createGateway(config: GatewayConfig) {
 					const isRepo = await isGitRepo(config.defaultCwd);
 					if (isRepo) {
 						const repoPath = await getRepoRoot(config.defaultCwd);
-						const gwToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
-						const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
 						const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
 						const setupCmd = projectConfigStore.get("worktree_setup_command") || "";
 
@@ -555,8 +553,6 @@ export function createGateway(config: GatewayConfig) {
 							repoPath,
 							healthCheckIntervalMs: 30_000,
 							worktreeSetupCommand: setupCmd,
-							gatewayUrl: gwUrl,
-							gatewayToken: gwToken,
 							sandboxMounts: poolMounts,
 							sandboxCredentials: poolCredentials,
 							sandboxNetwork,
