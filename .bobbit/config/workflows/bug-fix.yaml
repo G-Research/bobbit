@@ -183,9 +183,10 @@ gates:
 
           ## Critical Rules
 
-          1. **Save screenshots to absolute paths in $WORK_DIR** — never use relative paths.
-             Relative paths save to the master repo root, not your worktree. Example:
-             `browser_screenshot(savePath="/tmp/qa-work-xxx/screenshot-01.png")`
+          1. **Capture screenshots inline** — call `browser_screenshot()` without `savePath`.
+             The tool response includes base64 image data directly. Use this data to embed
+             screenshots in your HTML report as `data:image/png;base64,<data>` URIs.
+             No need to save to disk or read back.
 
           2. **Verify your port is unique** — check `cat .bobbit/state/gateway-url` to see
              the dev server port. Your ephemeral server MUST use a different port. If port
