@@ -196,16 +196,6 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 		}
 	}
 
-	// Exclude native browser_* tools for sandboxed sessions — playwright isn't in the Docker image;
-	// MCP playwright extension provides equivalent functionality.
-	if (plan.sandboxed && effectiveAllowedTools) {
-		const sandboxExcluded = new Set([
-			"browser_navigate", "browser_screenshot", "browser_click",
-			"browser_type", "browser_eval", "browser_wait",
-		]);
-		effectiveAllowedTools = effectiveAllowedTools.filter(t => !sandboxExcluded.has(t));
-	}
-
 	plan.effectiveAllowedTools = effectiveAllowedTools;
 }
 

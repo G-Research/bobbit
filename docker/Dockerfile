@@ -13,6 +13,12 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update && apt-get install -y gh && apt-get clean
 
+# Install Playwright system dependencies (Chromium libs) so that browser tools
+# and E2E tests (`npx playwright test`) work inside sandbox containers.
+# Must run as root before switching to the node user.
+RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Install pi-coding-agent and its dependencies inside the image.
 # This avoids bind-mounting node_modules from the host, which is 20x slower
 # on Docker Desktop (Windows/macOS) due to cross-OS filesystem bridging.
@@ -33,6 +39,10 @@ USER node
 # Configure git for Windows host compatibility (CRLF line endings).
 # Commit identity comes from the mounted repo's .git/config (the human developer).
 RUN git config --global core.autocrlf true
+
+# Install Chromium browser for Playwright (user-space, no root needed).
+# The system libs were installed above; this downloads the browser binary.
+RUN npx -y playwright@1.52.0 install chromium 2>/dev/null
 
 # npm cache directory (persisted via volume for faster installs)
 RUN mkdir -p /home/node/.npm-cache
