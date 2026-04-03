@@ -37,6 +37,7 @@ const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 ];
 
 const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
+	{ id: "general", label: "General" },
 	{ id: "project", label: "Commands & Sandbox" },
 	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
@@ -1933,33 +1934,40 @@ function renderProjectScopeTab(projectId: string) {
 				${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
 			</div>
 
-			${(() => {
-				const isDefault = state.projects?.[0]?.id === projectId;
-				if (isDefault) return "";
-				return html`
-					<hr class="border-border" />
-					<div class="flex flex-col gap-2">
-						<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Danger Zone</div>
-						<div class="flex items-center gap-3">
-							<button
-								class="px-4 py-2 text-sm rounded-md bg-destructive text-destructive-foreground
-									hover:bg-destructive/90 transition-colors"
-								@click=${async () => {
-									const ok = confirm("Remove project '" + (project?.name || "") + "' from this server? This won't delete any files on disk.");
-									if (!ok) return;
-									const success = await removeProject(projectId);
-									if (success) {
-										state.projects = await fetchProjects();
-										setHashRoute("settings", "system/general", true);
-										renderApp();
-									}
-								}}
-							>Remove Project</button>
-							<span class="text-xs text-muted-foreground">Unregister this project. No files will be deleted.</span>
-						</div>
-					</div>
-				`;
-			})()}
+		</div>
+	`;
+}
+
+function renderProjectGeneralTab(projectId: string) {
+	const project = (state.projects || []).find((p: any) => p.id === projectId);
+	const isDefault = state.projects?.[0]?.id === projectId;
+
+	return html`
+		<div class="flex flex-col gap-6">
+			<div class="flex flex-col gap-1">
+				<h3 class="text-sm font-medium text-foreground">${project?.name || "Project"}</h3>
+				<p class="text-xs text-muted-foreground font-mono">${project?.rootPath || ""}</p>
+			</div>
+			${!isDefault ? html`
+				<hr class="border-border" />
+				<div class="flex items-center gap-3">
+					<button
+						class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
+							hover:bg-destructive hover:text-destructive-foreground hover:border-destructive transition-colors"
+						@click=${async () => {
+							const ok = confirm("Remove project '" + (project?.name || "") + "' from this server? This won't delete any files on disk.");
+							if (!ok) return;
+							const success = await removeProject(projectId);
+							if (success) {
+								state.projects = await fetchProjects();
+								setHashRoute("settings", "system/general", true);
+								renderApp();
+							}
+						}}
+					>Remove Project</button>
+					<span class="text-xs text-muted-foreground">Unregister this project. No files will be deleted.</span>
+				</div>
+			` : ""}
 		</div>
 	`;
 }
@@ -2152,6 +2160,7 @@ export function renderSettingsPage() {
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
 				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" || currentTab === "appearance" ? "max-w-3xl" : "max-w-xl"}">
 					${isProjectScope ? html`
+						${currentTab === "general" ? renderProjectGeneralTab(currentScope) : ""}
 						${currentTab === "appearance" ? renderAppearanceTab(currentScope) : ""}
 						${currentTab === "project" ? renderProjectScopeTab(currentScope) : ""}
 						${currentTab === "models" ? renderProjectScopeModelsTab(currentScope) : ""}

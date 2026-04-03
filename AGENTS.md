@@ -79,7 +79,7 @@ UI-only changes need only unit tests. Server changes need E2E too. Docker-depend
 
 **Add a project**: Register via `POST /api/projects` (name + rootPath) or the "Add Project" button in the sidebar, which opens the project assistant. The assistant explores the directory and emits a `<project_proposal>` block. On acceptance, `.bobbit/config/` and `.bobbit/state/` are scaffolded in the project directory. Projects can optionally have a `palette` (one of 10 built-in palettes) and accent colors (`colorLight`/`colorDark`) — see [docs/internals.md](docs/internals.md#per-project-palette) for details. See [docs/internals.md](docs/internals.md#multi-project-architecture) for the full architecture.
 
-**Remove a project**: To remove a non-default project, go to its per-project settings page (any tab) and click "Remove Project" in the Danger Zone section. This calls `DELETE /api/projects/:id`, which unregisters the project from the server without deleting any files on disk. The button is hidden for the default project (the server's own CWD). After removal, the UI navigates back to system settings and refreshes the sidebar.
+**Remove a project**: To remove a non-default project, go to its per-project settings page → General tab and click "Remove Project" in the Danger Zone section. This calls `DELETE /api/projects/:id`, which unregisters the project from the server without deleting any files on disk. The button is hidden for the default project (the server's own CWD). After removal, the UI navigates back to system settings and refreshes the sidebar.
 
 **Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts` switch, add `RpcBridge` method if needed. Examples: `set_model`, `set_thinking_level`.
 
