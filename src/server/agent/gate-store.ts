@@ -8,6 +8,7 @@ export interface GateSignalStep {
 	name: string;
 	type: "command" | "llm-review" | "agent-qa";
 	passed: boolean;
+	skipped?: boolean;
 	output: string;
 	duration_ms: number;
 	expect?: "success" | "failure";

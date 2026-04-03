@@ -133,7 +133,7 @@ export class GateVerificationLive extends LitElement {
 				const steps: VerificationStep[] = (signal.verification.steps || []).map((s: any) => ({
 					name: s.name,
 					type: s.type,
-					status: s.passed === true ? "passed" as const : s.passed === false ? "failed" as const : "running" as const,
+					status: s.skipped ? "skipped" as const : s.passed === true ? "passed" as const : s.passed === false ? "failed" as const : "running" as const,
 					durationMs: s.duration_ms ?? 0,
 					output: s.output,
 					startedAt: s.duration_ms ? Date.now() - s.duration_ms : 0,

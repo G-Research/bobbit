@@ -39,7 +39,8 @@ function shouldReconcile(overallStatus, goalId, gateId, signalId) {
  */
 function mapGateSignalStep(gateStep) {
 	let status;
-	if (gateStep.passed === true) status = "passed";
+	if (gateStep.skipped) status = "skipped";
+	else if (gateStep.passed === true) status = "passed";
 	else if (gateStep.passed === false) status = "failed";
 	else status = "running";
 

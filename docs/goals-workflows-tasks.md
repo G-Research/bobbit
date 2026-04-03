@@ -142,7 +142,7 @@ Verification is async. On signal, the verification status is `"running"`. On com
 
 Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within each phase, steps run in **parallel** (preserving pre-phase behavior for phase-0 steps).
 
-If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped steps are recorded with status `"skipped"` and output `"Skipped — earlier phase failed"`.
+If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped steps are recorded with `skipped: true` on `GateSignalStep` and output `"Skipped — earlier phase failed"`. The `skipped` flag persists to disk so the UI can distinguish skipped steps from passed/failed ones after page reload.
 
 This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
 
@@ -178,6 +178,7 @@ interface GateSignalStep {
   name: string;
   type: string;
   passed: boolean;
+  skipped?: boolean;         // true when step was skipped (optional not enabled, or earlier phase failed)
   output: string;            // Short summary
   duration_ms: number;
   artifact?: {
@@ -204,7 +205,7 @@ Verify steps can be marked `optional: true` with a human-readable `label` for th
 **How it works:**
 - Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
 - At goal creation, the UI shows a checkbox for each optional step in the selected workflow. The goal assistant can pre-toggle steps via `<options>step name 1, step name 2</options>` in its proposal.
-- During verification, the harness checks each step before phase grouping. If `step.optional === true` and the step's `name` is not in the goal's `enabledOptionalSteps`, the step is skipped with `{ passed: true, output: "Skipped — not enabled for this goal" }`.
+- During verification, the harness checks each step before phase grouping. If `step.optional === true` and the step's `name` is not in the goal's `enabledOptionalSteps`, the step is skipped with `{ passed: true, skipped: true, output: "Skipped — not enabled for this goal" }`.
 - Skipped optional steps do not block the gate and do not affect phase pass/fail logic.
 
 **Example in workflow YAML:**

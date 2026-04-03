@@ -137,7 +137,7 @@ export function renderStatusPills(entries: DelegateCardEntry[]): TemplateResult 
 
 /** Render the full card list with optional failure warning */
 export function renderDelegateCardList(entries: DelegateCardEntry[]): TemplateResult {
-	const failCount = entries.filter((d) => d.status !== "completed" && d.status !== "running" && d.status !== "starting").length;
+	const failCount = entries.filter((d) => d.status !== "completed" && d.status !== "running" && d.status !== "starting" && d.status !== "skipped" && d.status !== "waiting").length;
 	return html`
 		<div class="space-y-1">
 			${entries.map((d) => renderDelegateCard(d))}
