@@ -4,7 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
-import type { PersistedGoal } from "./goal-store.js";
+import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
@@ -58,7 +58,7 @@ export function formatElapsed(sinceMs: number): string {
 
 /** Resolve the absolute path to the team-lead extension (raw .ts, loaded by jiti). */
 const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
-import type { TaskManager } from "./task-manager.js";
+import { TaskManager } from "./task-manager.js";
 
 
 export interface TeamAgent {
@@ -113,7 +113,7 @@ export interface TeamManagerConfig {
 	taskManager: TaskManager;
 	/** Role store for looking up role definitions (prompts, accessories, tools) */
 	roleStore?: RoleStore;
-	/** Gate store for checking gate status on completion and building dependency context */
+	/** @deprecated Gate store — resolve per-goal via projectContextManager instead. */
 	gateStore?: GateStore;
 	/** Personality manager for resolving personality names to prompt fragments */
 	personalityManager?: PersonalityManager;
@@ -128,7 +128,10 @@ export class TeamManager {
 	private config: TeamManagerConfig;
 	private taskManager: TaskManager;
 	private teams = new Map<string, TeamEntry>();
-	private store: TeamStore;
+	/** Local team store — used only in the non-PCM (test) path. */
+	private localStore: TeamStore | null;
+	/** Local GoalManager — used only in the non-PCM (test) path. */
+	private _localGoalManager: GoalManager | null = null;
 	/** Timers for the idle-nudge mechanism (goalId → timer). */
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
 	private verificationHarness?: VerificationHarness;
@@ -146,28 +149,33 @@ export class TeamManager {
 		this.config = config;
 		this.taskManager = config.taskManager;
 		if (config.projectContextManager) {
-			const defaultCtx = config.projectContextManager.getDefault();
-			this.store = defaultCtx.teamStore;
+			this.localStore = null;
 		} else {
-			this.store = new TeamStore(stateDir ?? bobbitStateDir());
+			const dir = stateDir ?? bobbitStateDir();
+			this.localStore = new TeamStore(dir);
+			// Non-PCM test path: create a local GoalManager from the same stateDir
+			this._localGoalManager = new GoalManager(new GoalStore(dir));
 		}
 		this.restoreTeams();
 	}
 
-	private resolveTeamStore(goalId?: string): TeamStore {
-		if (goalId && this.config.projectContextManager) {
+	private resolveTeamStore(goalId: string): TeamStore {
+		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.teamStore;
+			throw new Error(`Cannot resolve team store: goal "${goalId}" not found in any project`);
 		}
-		return this.store;
+		return this.localStore!;
 	}
 
-	private resolveGateStore(goalId?: string): GateStore | undefined {
-		if (goalId && this.config.projectContextManager) {
+	private resolveGateStore(goalId: string): GateStore | undefined {
+		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.gateStore;
+			throw new Error(`Cannot resolve gate store: goal "${goalId}" not found in any project`);
 		}
-		return this.config.gateStore;
+		// No PCM configured (test path) — no gate store available
+		return undefined;
 	}
 
 	/** Set the broadcastToGoal function (called after WebSocket server is created). */
@@ -245,7 +253,7 @@ export class TeamManager {
 				persisted.push(...ctx.teamStore.getAll());
 			}
 		} else {
-			persisted = this.store.getAll();
+			persisted = this.localStore!.getAll();
 		}
 		for (const p of persisted) {
 			const entry: TeamEntry = {
@@ -371,7 +379,7 @@ export class TeamManager {
 			const lines = activeWorkers.map((agent) => {
 				const s = this.sessionManager.getSession(agent.sessionId);
 				const status = s?.status ?? "unknown";
-				const tasks = this.taskManager.getTasksForSession(agent.sessionId);
+				const tasks = this.resolveTasksForSession(goalId, agent.sessionId);
 				const taskInfo = tasks.length > 0
 					? `task "${tasks[0].title}" (${tasks[0].state})`
 					: "no assigned task";
@@ -419,7 +427,28 @@ export class TeamManager {
 	}
 
 	private get goalManager(): GoalManager {
-		return this.sessionManager.goalManager;
+		// PCM-active paths should use resolveGoalManager() instead.
+		// This getter is only for the non-PCM test path.
+		if (this.config.projectContextManager) {
+			throw new Error("goalManager getter must not be called when PCM is active; use resolveGoalManager(goalId) instead");
+		}
+		// Support mock SessionManagers that expose goalManager directly (test path)
+		if ((this.sessionManager as any).goalManager) return (this.sessionManager as any).goalManager;
+		if (this._localGoalManager) return this._localGoalManager;
+		throw new Error("goalManager getter requires PCM or local GoalManager");
+	}
+
+	/**
+	 * Resolve tasks for a session using the correct project's TaskManager.
+	 * When PCM is active, resolves via the goal's project context.
+	 */
+	private resolveTasksForSession(goalId: string, sessionId: string): ReturnType<TaskManager["getTasksForSession"]> {
+		if (this.config.projectContextManager) {
+			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return new TaskManager(ctx.taskStore).getTasksForSession(sessionId);
+			return []; // Goal not found in any project — no tasks to return
+		}
+		return this.taskManager.getTasksForSession(sessionId);
 	}
 
 	/** Resolve a goal across all project contexts. */
@@ -427,8 +456,9 @@ export class TeamManager {
 		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.goalStore.get(goalId);
+			return undefined; // Don't fall back to default project
 		}
-		return this.goalManager.getGoal(goalId);
+		return this.goalManager.getGoal(goalId); // non-PCM test path only
 	}
 
 	/** Get a GoalManager scoped to the project owning the given goal. */
@@ -436,8 +466,9 @@ export class TeamManager {
 		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.goalManager;
+			throw new Error(`Cannot resolve GoalManager: goal "${goalId}" not found in any project`);
 		}
-		return this.goalManager;
+		return this.goalManager; // non-PCM test path only
 	}
 
 	/**
@@ -547,8 +578,9 @@ export class TeamManager {
 	 */
 	buildDependencyContext(goalId: string, workflowGateId?: string, explicitInputIds?: string[]): string {
 		const goal = this.resolveGoal(goalId);
+		if (!goal?.workflow) return "";
 		const resolvedGateStore = this.resolveGateStore(goalId);
-		if (!goal?.workflow || !resolvedGateStore) return "";
+		if (!resolvedGateStore) return "";
 
 		// Determine which gate IDs to inject content from
 		let inputIds: string[];
@@ -653,7 +685,7 @@ export class TeamManager {
 		// Enforce gate dependency check: upstream gates must be passed before spawning for a gate
 		const resolvedWorkflowGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
 		const spawnGateStore = this.resolveGateStore(goalId);
-		if (resolvedWorkflowGateId && spawnGateStore && goal.workflow) {
+		if (resolvedWorkflowGateId && goal.workflow && spawnGateStore) {
 			const wfGate = goal.workflow.gates.find(g => g.id === resolvedWorkflowGateId);
 			if (wfGate?.dependsOn?.length) {
 				const gateStates = spawnGateStore.getGatesForGoal(goalId);
@@ -848,7 +880,7 @@ export class TeamManager {
 		}
 
 		// Look up tasks assigned to the worker
-		const tasks = this.taskManager.getTasksForSession(workerSessionId);
+		const tasks = this.resolveTasksForSession(goalId, workerSessionId);
 
 		let message: string;
 		if (tasks.length > 0) {
@@ -941,11 +973,8 @@ export class TeamManager {
 			const projectCtx = goalId && this.config.projectContextManager
 				? this.config.projectContextManager.getContextForGoal(goalId)
 				: null;
-			const store = projectCtx
-				? projectCtx.sessionStore
-				: (this.sessionManager as any).store;
-			if (store) {
-				store.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
+			if (projectCtx) {
+				projectCtx.sessionStore.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
 			}
 		}
 
@@ -1065,17 +1094,15 @@ export class TeamManager {
 
 		// Enforce gate requirements before allowing completion
 		const completeGateStore = this.resolveGateStore(goalId);
-		if (completeGateStore) {
-			const goal = this.resolveGoal(goalId);
-			const skipReqs = goal?.skipGateRequirements;
+		const goal = this.resolveGoal(goalId);
+		const skipReqs = goal?.skipGateRequirements;
 
-			if (goal?.workflow && (!skipReqs || !skipReqs.includes("workflow"))) {
-				const gateStates = completeGateStore.getGatesForGoal(goalId);
-				const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
-				const failedGates = goal.workflow.gates.filter(g => !passedIds.has(g.id));
-				if (failedGates.length > 0) {
-					throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
-				}
+		if (goal?.workflow && completeGateStore && (!skipReqs || !skipReqs.includes("workflow"))) {
+			const gateStates = completeGateStore.getGatesForGoal(goalId);
+			const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
+			const failedGates = goal.workflow.gates.filter(g => !passedIds.has(g.id));
+			if (failedGates.length > 0) {
+				throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
 			}
 		}
 
@@ -1137,11 +1164,8 @@ export class TeamManager {
 				const projectCtx = this.config.projectContextManager
 					? this.config.projectContextManager.getContextForGoal(goalId)
 					: null;
-				const store = projectCtx
-					? projectCtx.sessionStore
-					: (this.sessionManager as any).store;
-				if (store) {
-					store.update(entry.teamLeadSessionId, {
+				if (projectCtx) {
+					projectCtx.sessionStore.update(entry.teamLeadSessionId, {
 						repoPath: goal.repoPath,
 						branch: goal.branch,
 						worktreePath: goal.worktreePath,

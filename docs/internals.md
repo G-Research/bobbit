@@ -86,6 +86,20 @@ Key responsibilities:
 
 All API endpoints and WebSocket handlers resolve the correct per-project store through `ProjectContextManager` rather than accessing stores directly. Managers (`GoalManager`, `TaskManager`) accept store instances directly — they no longer create stores internally. `StaffManager` accepts `ProjectContextManager` and resolves the correct per-project `StaffStore` on each operation, matching the aggregation pattern used by goals and sessions.
 
+#### Store resolution pattern
+
+Store resolution **never falls back to a default project**. Every operation resolves its store through one of these paths:
+
+1. **Entity-based resolution** — `getContextForGoal(goalId)`, `getContextForSession(sessionId)`: scans all project contexts to find the owning project. Returns `null` if not found; callers throw or return 404.
+2. **Explicit projectId** — `getOrCreate(projectId)`: used when the caller already knows the target project (e.g. from a session's `projectId` field).
+3. **Creation-time defaulting** — API endpoints for creating sessions, goals, and staff agents default to the server CWD project when no `projectId` is provided. This is the API contract for creation, not a store-resolution fallback — once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2.
+
+The `getDefault()` and `getDefaultProjectId()` methods are **deprecated**. They exist only for bootstrapping (constructing managers at startup) and the creation-time defaulting described above. New code must not use them for runtime store resolution.
+
+`SessionManager` does not hold default store fields (`this.store`, `this.costTracker`, etc.). All store access goes through PCM resolution. `TeamManager`, `StaffManager`, and `VerificationHarness` follow the same pattern — they resolve stores per-goal or per-entity via PCM, with no fallback store references. `resolveStoreForId()` returns `null` instead of falling back, and callers use optional chaining.
+
+This design prevents a class of data corruption bugs where missing `projectId` values silently route data to the wrong project's store.
+
 **Per-project config directory scoping:** Config directories (for MCP servers, skills, and AGENTS.md/agent files) are resolved per-project. When a session is created for a project, the pipeline resolves that project's `ProjectConfigStore` to discover its custom config directories. This means each project can define its own MCP servers, slash skills, and agent instruction files via `config_directories` in its `project.yaml`, and sessions in that project will use them. MCP discovery additionally scans all registered projects so that MCP servers defined in any project are available to all sessions (with the primary project's configs taking priority on name conflicts).
 
 ### State migration
@@ -103,7 +117,7 @@ The migration is idempotent and handles missing files gracefully (fresh installs
 
 **What stays global**: `projects.json`, auth token, gateway URL, preferences, session colors, PR status.
 
-**Known limitations**: Cost tracking uses the default project's `CostTracker` for all sessions. `active-verifications.json` stays in the central state dir (transient operational state).
+**Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).
 
 ### Config resolution (3-tier hierarchy)
 

@@ -51,7 +51,7 @@ export class ProjectContextManager {
     return ctx;
   }
 
-  /** Get the default project context (server CWD project). Throws if not initialized. */
+  /** @deprecated Use explicit projectId resolution instead. The default project should not be used as a fallback. */
   getDefault(): ProjectContext {
     if (!this.defaultProjectId) {
       throw new Error("Default project context not initialized — call initAll() first");
@@ -63,7 +63,7 @@ export class ProjectContextManager {
     return ctx;
   }
 
-  /** Get the default project ID. */
+  /** @deprecated Use explicit projectId resolution instead. The default project should not be used as a fallback. */
   getDefaultProjectId(): string {
     if (!this.defaultProjectId) {
       throw new Error("Default project not initialized — call initAll() first");
