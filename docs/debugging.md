@@ -139,7 +139,7 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 - Server CWD auto-registered as default project via `ensureDefaultProject()` on startup
 - `GET /api/projects` to list all registered projects
 - Sessions/goals not appearing? Check `projectId` field matches the expected project. Verify the correct project's `sessions.json` / `goals.json` contains the record
-- Sidebar not grouping? Only groups when multiple projects are registered
+- Sidebar not grouping? Project folder rows are always shown — check that `state.projects` is populated and `renderProjectHeader()` is being called
 - Project registration failing? `rootPath` must be absolute and exist on disk; duplicate paths are rejected
 - Search not filtering by project? Verify `?projectId=` query param is passed; each project has its own `search.db`
 - Config not cascading? Check all three `.bobbit/config/` directories (global, server, project) and verify `resolveScalarConfig()` / `resolveEntities()` return expected scope
