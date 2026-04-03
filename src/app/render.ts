@@ -247,10 +247,8 @@ function renderMobileLanding() {
 								</div>`
 							: html`
 								${(() => {
-									const multiProject = state.projects.length > 1;
-									if (multiProject) {
-										// Group goals and sessions by project
-										const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions }>();
+									// Group goals and sessions by project
+									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions }>();
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [] });
 										const defaultId = state.projects[0]?.id || "";
 										for (const g of liveGoals) {
@@ -314,7 +312,7 @@ function renderMobileLanding() {
 																>${icon(Plus, "sm")}</button>
 																<button
 																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e); }}
+																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 																	title="New session with role"
 																>${icon(ChevronDown, "sm")}</button>
 																${renderRolePickerDropdown()}
@@ -329,63 +327,6 @@ function renderMobileLanding() {
 												</div>` : ""}
 											`;
 										})}`;
-									}
-									// Single project — flat layout
-									return html`
-										${liveGoals.map((goal, i) => html`
-											${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-											${renderGoalGroup(goal)}
-										`)}
-										${liveGoals.length > 0 ? html`
-											<div class="border-t border-border/30 my-1 mx-2"></div>
-											<div class="flex flex-col gap-0.5">
-												<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
-													@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
-													<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${isUngroupedExpanded ? "▾" : "▸"}</span>
-													<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
-												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
-													<div class="flex items-center relative">
-														<button
-															class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-															@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(); }}
-															title="New session"
-														>${state.creatingSession && !state.creatingSessionForGoalId
-															? html`<svg class="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
-															: icon(Plus, "sm")}</button>
-														<button
-															class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-															@click=${toggleRolePicker}
-															title="New session with role"
-														>${icon(ChevronDown, "sm")}</button>
-														${renderRolePickerDropdown()}
-													</div>
-												</div>
-												${isUngroupedExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${ungroupedSessions.map(renderSessionRow)}</div>` : ""}
-											</div>
-										` : ungroupedSessions.length > 0 ? html`
-											<div class="flex flex-col gap-0.5">
-												<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5">
-													<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium flex items-center gap-1.5" style="padding-left:${INDENT}px;"><span class="shrink-0">${icon(MessagesSquare, "sm")}</span> Sessions</span>
-													<div class="flex items-center relative">
-														<button
-															class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-															@click=${() => createAndConnectSession()}
-															title="New session"
-														>${state.creatingSession && !state.creatingSessionForGoalId
-															? html`<svg class="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
-															: icon(Plus, "sm")}</button>
-														<button
-															class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-															@click=${toggleRolePicker}
-															title="New session with role"
-														>${icon(ChevronDown, "sm")}</button>
-														${renderRolePickerDropdown()}
-													</div>
-												</div>
-												<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${ungroupedSessions.map(renderSessionRow)}</div>
-											</div>
-										` : ""}
-									`;
 								})()}
 								${renderStaffSidebarSection()}
 								${(() => {
