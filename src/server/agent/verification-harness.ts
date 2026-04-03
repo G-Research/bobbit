@@ -788,6 +788,25 @@ export class VerificationHarness {
 			});
 			const sortedPhases = [...phaseGroups.keys()].sort((a, b) => a - b);
 
+			// Sync the goal worktree with the latest commits from origin before running
+			// verification steps. This is essential for sandbox mode where the agent commits
+			// inside a separate container clone and pushes to origin — the goal worktree
+			// must pull those changes so command steps (typecheck, tests) run against the
+			// actual code changes, not the pre-change baseline.
+			if (goalBranch) {
+				try {
+					const { execFile: execFileCb } = await import("node:child_process");
+					const { promisify } = await import("node:util");
+					const execFileAsync = promisify(execFileCb);
+					await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+					await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
+					console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+				} catch (err) {
+					// Non-fatal — local-only workflows (no remote) will fail fetch but still have commits locally
+					console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+				}
+			}
+
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
 			let phaseFailed = false;
 
