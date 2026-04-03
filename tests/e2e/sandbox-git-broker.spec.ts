@@ -7,7 +7,7 @@
  * without requiring real Docker containers or sandbox pools.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
 
 let goalId: string;
 

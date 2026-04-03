@@ -1214,10 +1214,19 @@ export class TeamManager {
 			const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 			if (!sandboxed) return false;
 
+			// Defensive: skip if agent and team lead share the same directory
+			if (agent.worktreePath === teamLeadCwd) return false;
+
+			// Validate branch name to prevent git option injection (e.g. --upload-pack=...)
+			if (!/^[a-zA-Z0-9/_.\-]+$/.test(branch)) {
+				console.error(`[git-broker] Invalid branch name rejected: "${branch}"`);
+				return false;
+			}
+
 			// Validate both paths still exist (agent may have been dismissed)
 			if (!fs.existsSync(agent.worktreePath) || !fs.existsSync(teamLeadCwd)) return false;
 
-			await execFile("git", ["fetch", agent.worktreePath, branch], {
+			await execFile("git", ["fetch", "--", agent.worktreePath, branch], {
 				cwd: teamLeadCwd,
 				timeout: 30_000,
 			});
