@@ -1212,7 +1212,7 @@ export function showProjectDialog(): void {
 				<div class="flex items-center gap-2">
 					${browseParent != null ? html`
 						<button
-							class="px-2 py-1 text-xs rounded border border-border hover:bg-secondary/50 transition-colors"
+							class="px-2 py-1 text-xs text-foreground rounded border border-border hover:bg-secondary/50 transition-colors"
 							@click=${() => navigateBrowse(browseParent!)}
 							data-testid="browse-up"
 						>Up</button>
@@ -1227,7 +1227,7 @@ export function showProjectDialog(): void {
 							? html`<div class="px-3 py-2 text-xs text-muted-foreground">No subdirectories</div>`
 							: browseEntries.map(entry => html`
 								<button
-									class="w-full text-left px-3 py-1.5 text-sm hover:bg-secondary/50 transition-colors flex items-center gap-2 border-b border-border last:border-0"
+									class="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-secondary/50 transition-colors flex items-center gap-2 border-b border-border last:border-0"
 									@click=${() => navigateBrowse(entry.path)}
 									data-testid="browse-entry"
 								>
