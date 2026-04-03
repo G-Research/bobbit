@@ -115,9 +115,7 @@ test.describe("Team lifecycle (UI)", () => {
 		const agentsTabAfter = page.locator(".tab").filter({ hasText: "Agents" });
 		await agentsTabAfter.click();
 
-		// No active agent cards should be shown (or empty state message)
-		await expect(
-			page.locator(".tab-empty, .agent-grid:empty").first(),
-		).toBeVisible({ timeout: 10_000 });
+		// No active agent cards should be shown after teardown
+		await expect(page.locator(".agent-card")).toHaveCount(0, { timeout: 10_000 });
 	});
 });

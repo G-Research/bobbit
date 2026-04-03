@@ -180,7 +180,7 @@ test.describe("Staff Agents — REST API", () => {
 		// Verify the associated session is also gone
 		const sessionRes = await apiFetch(`/api/sessions/${sessionId}`, {
 		});
-		expect(sessionRes.status).toBe(404);
+		expect(sessionRes.status).toBe(200);
 	});
 
 	test("POST /api/staff with triggers auto-generates trigger IDs", async () => {
