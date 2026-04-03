@@ -75,7 +75,7 @@ test.describe("Sandbox Token Scoping", () => {
 
 		// Always-allowed
 		expect(isSandboxAllowed("/api/health", "GET", scope)).toBe(true);
-		expect(isSandboxAllowed("/api/internal/mcp-call", "POST", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/internal/mcp-call", "POST", scope)).toBe(false);
 		expect(isSandboxAllowed("/api/preview", "POST", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/personalities", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions", "POST", scope)).toBe(true);

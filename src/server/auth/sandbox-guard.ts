@@ -15,7 +15,8 @@ export function isSandboxAllowed(
 
 	// ── Always-allowed endpoints ───────────────────────────────────────
 	if (pathname === "/api/health" && m === "GET") return true;
-	if (pathname === "/api/internal/mcp-call" && m === "POST") return true;
+	// MCP calls are blocked — sandbox agents must not trigger host-side execution.
+	// if (pathname === "/api/internal/mcp-call" && m === "POST") return true;
 	if (pathname === "/api/internal/verification-result" && m === "POST") return true;
 	if (pathname === "/api/preview" && m === "POST") return true;
 	if (pathname === "/api/personalities" && (m === "GET" || m === "POST")) return true;
