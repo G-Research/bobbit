@@ -16,6 +16,33 @@ const rl = createInterface({ input: process.stdin });
 /** Track conversation messages for get_messages */
 const conversationMessages = [];
 
+/** Session file path — created on first prompt, returned by get_state */
+let sessionFilePath = null;
+
+/** Ensure the session .jsonl file exists and return its path */
+function ensureSessionFile() {
+	if (sessionFilePath) return sessionFilePath;
+	const cwd = process.argv.includes("--cwd")
+		? process.argv[process.argv.indexOf("--cwd") + 1]
+		: process.cwd();
+	// Mimic the real agent's path: <agentDir>/sessions/<cwd-slug>/<timestamp>_<uuid>.jsonl
+	const agentDir = process.env.BOBBIT_AGENT_DIR || path.join(process.env.HOME || process.env.USERPROFILE || "/tmp", ".bobbit", "agent");
+	const slug = cwd.replace(/[^a-zA-Z0-9]/g, "-").replace(/-+/g, "-").substring(0, 60) || "--workspace--";
+	const dir = path.join(agentDir, "sessions", slug);
+	fs.mkdirSync(dir, { recursive: true });
+	const ts = new Date().toISOString().replace(/[:.]/g, "-");
+	const uuid = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	sessionFilePath = path.join(dir, `${ts}_${uuid}.jsonl`);
+	fs.writeFileSync(sessionFilePath, "");
+	return sessionFilePath;
+}
+
+/** Append a message entry to the session .jsonl file */
+function appendToSessionFile(entry) {
+	const filePath = ensureSessionFile();
+	fs.appendFileSync(filePath, JSON.stringify(entry) + "\n");
+}
+
 /** Send a JSONL message to stdout */
 function send(msg) {
 	process.stdout.write(JSON.stringify(msg) + "\n");
@@ -326,9 +353,14 @@ rl.on("line", async (line) => {
 			emit({ type: "session_status", status: "idle" });
 			break;
 
-		case "get_state":
-			send({ type: "response", id: msg.id, success: true, data: { status: "idle" } });
+		case "get_state": {
+			// Write all conversation messages to the session file (mimics real agent)
+			const sf = ensureSessionFile();
+			const lines = conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
+			fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
+			send({ type: "response", id: msg.id, success: true, data: { status: "idle", sessionFile: sf } });
 			break;
+		}
 
 		case "get_messages":
 			send({ type: "response", id: msg.id, success: true, data: conversationMessages });

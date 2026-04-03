@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
@@ -32,6 +33,30 @@ export function containerToHostSessionPath(containerPath: string, homeDir?: stri
 	const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
 	const agentDir = homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir();
 	return path.join(agentDir, relative).replace(/\\/g, "/");
+}
+
+/**
+ * Like containerToHostSessionPath but also tries the legacy .pi/agent/ path
+ * if the primary remapped path doesn't exist on disk. Handles the case where
+ * globalAgentDir() changed between when the file was written and now.
+ */
+export function containerToHostSessionPathWithFallback(containerPath: string): string {
+	const primary = containerToHostSessionPath(containerPath);
+	if (primary === containerPath) return primary; // wasn't a container path
+	if (fs.existsSync(primary)) return primary;
+
+	// Try legacy .pi/agent/ path
+	const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
+	const legacyDir = path.join(os.homedir(), ".pi", "agent");
+	const legacyPath = path.join(legacyDir, relative).replace(/\\/g, "/");
+	if (fs.existsSync(legacyPath)) return legacyPath;
+
+	// Try .bobbit/agent/ explicitly (in case globalAgentDir returned .pi)
+	const newDir = path.join(os.homedir(), ".bobbit", "agent");
+	const newPath = path.join(newDir, relative).replace(/\\/g, "/");
+	if (fs.existsSync(newPath)) return newPath;
+
+	return primary; // fall back to primary even though it doesn't exist
 }
 
 /**

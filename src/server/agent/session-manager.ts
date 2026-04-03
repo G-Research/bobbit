@@ -11,7 +11,7 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchIndex } from "../search/search-index.js";
 import { extractTextFromMessage } from "../search/message-extractor.js";
-import { RpcBridge, type RpcBridgeOptions, containerToHostSessionPath, hostToContainerSessionPath } from "./rpc-bridge.js";
+import { RpcBridge, type RpcBridgeOptions, containerToHostSessionPath, containerToHostSessionPathWithFallback, hostToContainerSessionPath } from "./rpc-bridge.js";
 import { validateSandboxMounts } from "./sandbox-mounts.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -1499,6 +1499,15 @@ export class SessionManager {
 				return;
 			}
 		}
+		// Remap stale container paths that were stored without host conversion
+		if (!fs.existsSync(ps.agentSessionFile) && ps.agentSessionFile.startsWith("/home/node/.bobbit/agent/")) {
+			const remapped = containerToHostSessionPathWithFallback(ps.agentSessionFile);
+			if (remapped !== ps.agentSessionFile && fs.existsSync(remapped)) {
+				console.log(`[session-manager] Remapped container path for ${ps.id}: ${ps.agentSessionFile} → ${remapped}`);
+				sessionStore.update(ps.id, { agentSessionFile: remapped });
+				ps = { ...ps, agentSessionFile: remapped };
+			}
+		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
 			console.log(`[session-manager] Archiving ${ps.id} — agent session file missing: ${ps.agentSessionFile} (metadata preserved)`);
 			sessionStore.archive(ps.id);
@@ -1697,6 +1706,7 @@ export class SessionManager {
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			projectId: ps.projectId,
+			sandboxed: ps.sandboxed,
 		};
 
 		// Skip cost tracking during session restore (switch_session replays
@@ -2940,8 +2950,18 @@ export class SessionManager {
 		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived || !ps.agentSessionFile) return [];
 		try {
-			if (!fs.existsSync(ps.agentSessionFile)) return [];
-			const content = fs.readFileSync(ps.agentSessionFile, "utf-8");
+			let filePath = ps.agentSessionFile;
+			// Remap stale container paths that were stored without host conversion
+			if (!fs.existsSync(filePath) && filePath.startsWith("/home/node/.bobbit/agent/")) {
+				const remapped = containerToHostSessionPathWithFallback(filePath);
+				if (remapped !== filePath && fs.existsSync(remapped)) {
+					filePath = remapped;
+					// Fix the persisted path so future lookups are fast
+					try { this.resolveStoreForId(id)?.update(id, { agentSessionFile: remapped }); } catch { /* best-effort */ }
+				}
+			}
+			if (!fs.existsSync(filePath)) return [];
+			const content = fs.readFileSync(filePath, "utf-8");
 			const lines = content.trim().split("\n");
 			const messages: unknown[] = [];
 			for (const line of lines) {
