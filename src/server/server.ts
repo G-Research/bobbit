@@ -4088,8 +4088,13 @@ async function handleApiRoute(
 	}
 
 	// GET /api/preview?sessionId=xxx — get preview HTML for a session
+	const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 	if (url.pathname === "/api/preview" && req.method === "GET") {
 		const sessionId = url.searchParams.get("sessionId");
+		if (sessionId && !VALID_SESSION_ID.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
 		const previewPath = sessionId
 			? path.join(bobbitStateDir(), `preview-${sessionId}.html`)
 			: path.join(bobbitStateDir(), "preview.html");
@@ -4107,6 +4112,10 @@ async function handleApiRoute(
 	if (url.pathname === "/api/preview" && req.method === "POST") {
 		const body = await readBody(req);
 		const sessionId = url.searchParams.get("sessionId");
+		if (sessionId && !VALID_SESSION_ID.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
 		const previewPath = sessionId
 			? path.join(bobbitStateDir(), `preview-${sessionId}.html`)
 			: path.join(bobbitStateDir(), "preview.html");

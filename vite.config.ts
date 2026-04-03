@@ -157,6 +157,9 @@ export default defineConfig({
 	},
 	server: {
 		host,
+		fs: {
+			deny: [".bobbit/state", ".bobbit/config", "node_modules/.vite"],
+		},
 		// Serve vite dev server over HTTPS using the same self-signed cert
 		...(tlsAvailable
 			? {
