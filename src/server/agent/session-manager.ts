@@ -108,6 +108,8 @@ export interface SessionInfo {
 	allowedTools?: string[];
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
+	/** In-flight persistSessionMetadata promise (awaited before terminate) */
+	pendingMetadataPersist?: Promise<void>;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
 	/** Whether tool calls were executed during the current/last turn */
@@ -1792,10 +1794,10 @@ export class SessionManager {
 
 			// Fire-and-forget: create worktree then complete pipeline
 			executeWorktreeAsync(plan, session, ctx).then(() => {
-				// Persist session metadata now that the agent is running
-				this.persistSessionMetadata(session).catch((err) => {
+				// Persist session metadata now that the agent is running (tracked for terminate)
+				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
-				});
+				}).finally(() => { session.pendingMetadataPersist = undefined; });
 			}).catch((err) => {
 				handleSetupFailure(session, plan, err, ctx);
 			});
@@ -1831,10 +1833,10 @@ export class SessionManager {
 		const session = await executePlan(plan, ctx);
 		if (projectId) session.projectId = projectId;
 
-		// Persist session metadata (fire-and-forget)
-		this.persistSessionMetadata(session).catch((err) => {
+		// Persist session metadata (fire-and-forget, but tracked for terminate)
+		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 			console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-		});
+		}).finally(() => { session.pendingMetadataPersist = undefined; });
 
 		return session;
 	}
@@ -1893,10 +1895,10 @@ export class SessionManager {
 		const session = await executePlan(plan, ctx);
 		if (parentProjectId) session.projectId = parentProjectId;
 
-		// Persist with all structural fields (delegateOf is in the initial put)
-		this.persistSessionMetadata(session).catch((err) => {
+		// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
+		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
-		});
+		}).finally(() => { session.pendingMetadataPersist = undefined; });
 
 		// Send delegate prompt with 30s timeout
 		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
@@ -2222,10 +2224,10 @@ export class SessionManager {
 			projectId: extProjectId,
 		});
 
-		// Then update with agentSessionFile
-		this.persistSessionMetadata(session).catch((err) => {
+		// Then update with agentSessionFile (tracked for terminate)
+		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist external session ${id}:`, err);
-		});
+		}).finally(() => { session.pendingMetadataPersist = undefined; });
 
 		console.log(`[session-manager] Registered external session ${id}: ${opts.title}`);
 
@@ -2814,6 +2816,14 @@ export class SessionManager {
 			clearTimeout(session.pendingGrantRequest.timer);
 			session.pendingGrantRequest.resolve({ granted: false });
 			session.pendingGrantRequest = undefined;
+		}
+
+		// Wait for in-flight metadata persist so the agentSessionFile path is
+		// saved before we archive.  Without this, a quick terminate can race
+		// the fire-and-forget persist, leaving agentSessionFile as "" and the
+		// session's .jsonl history unreachable.
+		if (session.pendingMetadataPersist) {
+			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
 		}
 
 		session.unsubscribe();
