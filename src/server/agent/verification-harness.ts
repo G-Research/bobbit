@@ -198,7 +198,7 @@ export class VerificationHarness {
 	 * Returns undefined if not found (goal deleted, workflow missing, etc.).
 	 */
 	private _findStepDefinition(goalId: string, gateId: string, stepName: string): VerifyStep | undefined {
-		const goal = this.sessionManager?.goalManager?.getGoal(goalId);
+		const goal = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 		if (!goal?.workflow?.gates) return undefined;
 		const gate = goal.workflow.gates.find((g: any) => g.id === gateId);
 		if (!gate?.verify) return undefined;
@@ -216,7 +216,7 @@ export class VerificationHarness {
 		goalSpec?: string;
 		allGateStates: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>;
 	} | null {
-		const goal = this.sessionManager?.goalManager?.getGoal(goalId);
+		const goal = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 		if (!goal) return null;
 
 		const gateStore = this.resolveGateStore(goalId);
@@ -516,7 +516,8 @@ export class VerificationHarness {
 
 	constructor(
 		stateDir: string,
-		private gateStore: GateStore,
+		/** @deprecated Resolve per-goal via projectContextManager instead. */
+		private gateStore: GateStore | undefined,
 		private broadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
 		private preferencesStore?: PreferencesStore,
@@ -540,8 +541,11 @@ export class VerificationHarness {
 		if (this.projectContextManager) {
 			const ctx = this.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.gateStore;
+			throw new Error(`Cannot resolve gate store: goal "${goalId}" not found in any project`);
 		}
-		return this.gateStore;
+		// Fallback for non-PCM path (tests without project context)
+		if (this.gateStore) return this.gateStore;
+		throw new Error(`Cannot resolve gate store: no project context manager and no fallback gate store`);
 	}
 
 	/** Register a callback to notify the team lead agent when verification completes. */
@@ -702,8 +706,7 @@ export class VerificationHarness {
 
 			// --- Optional step skipping ---
 			// Look up enabledOptionalSteps from the goal
-			const goalForOptional = this.sessionManager?.goalManager?.getGoal(signal.goalId)
-				?? (this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId));
+			const goalForOptional = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
 			const enabledOptional = goalForOptional?.enabledOptionalSteps ?? [];
 
 			// Partition steps into active and skipped
@@ -1268,14 +1271,12 @@ export class VerificationHarness {
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const roleName = role.name || step.role || "reviewer";
 			const isSandboxed = (goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
 			// When sandboxed, claim a pool slot checked out to the goal branch so
 			// the reviewer sees the actual implementation — not master.
 			const goalForClaim = goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
-					?? this.sessionManager!.goalManager.getGoal(goalId))
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
 				: undefined;
 			const sandboxClaim = isSandboxed && goalForClaim?.branch
 				? { branch: goalForClaim.branch }
@@ -1283,7 +1284,9 @@ export class VerificationHarness {
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
-				sandboxed: isSandboxed,
+				sandboxed: (goalId
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
+				: undefined) ?? this.sessionManager!.isSandboxEnabled,
 				sandboxClaim,
 				sessionId,
 			});
@@ -1479,14 +1482,12 @@ export class VerificationHarness {
 
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const qaIsSandboxed = (goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
 			// When sandboxed, claim a pool slot checked out to the goal branch so
 			// the QA agent tests the actual implementation — not master.
 			const qaGoalForClaim = goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
-					?? this.sessionManager!.goalManager.getGoal(goalId))
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
 				: undefined;
 			const qaSandboxClaim = qaIsSandboxed && qaGoalForClaim?.branch
 				? { branch: qaGoalForClaim.branch }
@@ -1494,7 +1495,9 @@ export class VerificationHarness {
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
-				sandboxed: qaIsSandboxed,
+				sandboxed: (goalId
+					? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
+					: undefined) ?? this.sessionManager!.isSandboxEnabled,
 				sandboxClaim: qaSandboxClaim,
 				sessionId: qaSessionId,
 			});

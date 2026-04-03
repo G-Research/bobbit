@@ -270,9 +270,8 @@ export function createGateway(config: GatewayConfig) {
 	triggerEngine.start();
 	const teamManager = new TeamManager(sessionManager, {
 		colorStore,
-		taskManager: sessionManager.taskManager,
+		taskManager: new TaskManager(projectContextManager.getDefault().taskStore),
 		roleStore,
-		gateStore: projectContextManager.getDefault().gateStore,
 		personalityManager,
 		projectContextManager,
 	});
@@ -429,7 +428,7 @@ export function createGateway(config: GatewayConfig) {
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
-	verificationHarness = new VerificationHarness(stateDir, projectContextManager.getDefault().gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -518,8 +517,6 @@ export function createGateway(config: GatewayConfig) {
 					const isRepo = await isGitRepo(config.defaultCwd);
 					if (isRepo) {
 						const repoPath = await getRepoRoot(config.defaultCwd);
-						const gwToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
-						const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
 						const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
 						const setupCmd = projectConfigStore.get("worktree_setup_command") || "";
 
@@ -556,8 +553,6 @@ export function createGateway(config: GatewayConfig) {
 							repoPath,
 							healthCheckIntervalMs: 30_000,
 							worktreeSetupCommand: setupCmd,
-							gatewayUrl: gwUrl,
-							gatewayToken: gwToken,
 							sandboxMounts: poolMounts,
 							sandboxCredentials: poolCredentials,
 							sandboxNetwork,
@@ -725,17 +720,18 @@ async function handleApiRoute(
 		return projectConfigStore;
 	}
 
-	/** Get a GoalManager for the project that owns the given goal. Falls back to default. */
+	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
 	function getGoalManagerForGoal(goalId: string): GoalManager {
-		const ctx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) throw new Error(`Goal "${goalId}" not found in any project`);
 		return ctx.goalManager;
 	}
 
-	/** Get a TaskManager for the project that owns the given goal. Falls back to default. */
+	/** Get a TaskManager for the project that owns the given goal. Throws if not found. */
 	const taskManagerCache = new Map<string, TaskManager>();
 	function getTaskManagerForGoal(goalId: string): TaskManager {
 		const ctx = projectContextManager.getContextForGoal(goalId);
-		if (!ctx) return sessionManager.taskManager;
+		if (!ctx) throw new Error(`Goal "${goalId}" not found in any project`);
 		const projectId = ctx.project.id;
 		let tm = taskManagerCache.get(projectId);
 		if (!tm) {
@@ -745,14 +741,14 @@ async function handleApiRoute(
 		return tm;
 	}
 
-	/** Get a TaskManager for a task by looking up which goal it belongs to. Falls back to default. */
+	/** Get a TaskManager for a task by looking up which goal it belongs to. Throws if not found. */
 	function getTaskManagerForTask(taskId: string): TaskManager {
 		// Search all project contexts for the task
 		for (const ctx of projectContextManager.all()) {
 			const task = ctx.taskStore.get(taskId);
 			if (task) return getTaskManagerForGoal(task.goalId);
 		}
-		return sessionManager.taskManager;
+		throw new Error(`Task "${taskId}" not found in any project`);
 	}
 
 	// GET /api/health — unauthenticated so the client can probe localhost mode
@@ -1472,6 +1468,9 @@ async function handleApiRoute(
 			const matched = projectRegistry.findByCwd(cwd);
 			if (matched) resolvedProjectId = matched.id;
 		}
+		// Default to the server's own project when no project could be resolved from CWD or explicit param.
+		// This is the correct API contract: sessions created without a project context belong to the default project.
+		if (!resolvedProjectId) resolvedProjectId = projectContextManager.getDefaultProjectId();
 
 		try {
 			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId });
@@ -1586,6 +1585,8 @@ async function handleApiRoute(
 				const matched = projectRegistry.findByCwd(cwd);
 				if (matched) targetProjectId = matched.id;
 			}
+			// Default to the server's own project when no project could be resolved.
+			// This is the correct API contract: goals created without explicit project belong to the default project.
 			if (!targetProjectId) targetProjectId = projectContextManager.getDefaultProjectId();
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
@@ -2356,7 +2357,8 @@ async function handleApiRoute(
 		const goalId = goalGatesMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const gateCtx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
+		const gateCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateCtx) { json({ error: "Goal not found in any project" }, 404); return; }
 		const gateStore = gateCtx.gateStore;
 		const gates = gateStore.getGatesForGoal(goalId);
 		// Enrich with workflow gate definitions
@@ -2372,7 +2374,9 @@ async function handleApiRoute(
 	const gateDetailMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)$/);
 	if (gateDetailMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateDetailMatch;
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateDetailCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateDetailCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateDetailCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		const goal = getGoalAcrossProjects(goalId);
@@ -2389,7 +2393,9 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateSignalCtx.gateStore;
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
 
@@ -2559,7 +2565,9 @@ async function handleApiRoute(
 	const gateSignalsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signals$/);
 	if (gateSignalsMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateSignalsMatch;
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateSignalsCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateSignalsCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateSignalsCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ signals: gate.signals });
@@ -2579,7 +2587,9 @@ async function handleApiRoute(
 	const gateContentMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/content$/);
 	if (gateContentMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateContentMatch;
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateContentCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateContentCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateContentCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ content: gate.currentContent, version: gate.currentContentVersion });
@@ -2609,9 +2619,13 @@ async function handleApiRoute(
 
 		// GET /api/tasks/:id
 		if (req.method === "GET") {
-			const task = getTaskManagerForTask(id).getTask(id);
-			if (!task) { json({ error: "Task not found" }, 404); return; }
-			json(task);
+			try {
+				const task = getTaskManagerForTask(id).getTask(id);
+				if (!task) { json({ error: "Task not found" }, 404); return; }
+				json(task);
+			} catch {
+				json({ error: "Task not found" }, 404);
+			}
 			return;
 		}
 
@@ -2652,9 +2666,13 @@ async function handleApiRoute(
 
 		// DELETE /api/tasks/:id
 		if (req.method === "DELETE") {
-			const ok = getTaskManagerForTask(id).deleteTask(id);
-			if (!ok) { json({ error: "Task not found" }, 404); return; }
-			json({ ok: true });
+			try {
+				const ok = getTaskManagerForTask(id).deleteTask(id);
+				if (!ok) { json({ error: "Task not found" }, 404); return; }
+				json({ ok: true });
+			} catch {
+				json({ error: "Task not found" }, 404);
+			}
 			return;
 		}
 	}
@@ -3110,7 +3128,8 @@ async function handleApiRoute(
 		const inputIds = Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined;
 		if (wfGateId) {
 			const goal = getGoalAcrossProjects(goalId);
-			const goalGateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+			const goalGateCtx = projectContextManager.getContextForGoal(goalId);
+			const goalGateStore = goalGateCtx?.gateStore;
 			if (goal?.workflow && goalGateStore) {
 				const wfGate = goal.workflow.gates.find((g: any) => g.id === wfGateId);
 				if (wfGate?.dependsOn?.length) {
@@ -3919,7 +3938,13 @@ async function handleApiRoute(
 	const sessionCostBreakdownMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost\/breakdown$/);
 	if (sessionCostBreakdownMatch && req.method === "GET") {
 		const sessionId = sessionCostBreakdownMatch[1];
-		const costTracker = sessionManager.getCostTracker();
+		const live = sessionManager.getSession(sessionId);
+		const sessionForCost = live ?? sessionManager.getPersistedSession(sessionId);
+		if (!sessionForCost?.projectId) {
+			json({ error: "Session not found or has no project" }, 404);
+			return;
+		}
+		const costTracker = sessionManager.getCostTracker(sessionForCost.projectId);
 		const allCosts = costTracker.getAllCosts();
 		const sessionCost = allCosts.get(sessionId);
 		if (!sessionCost) {
@@ -3955,7 +3980,13 @@ async function handleApiRoute(
 	const sessionCostMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost$/);
 	if (sessionCostMatch && req.method === "GET") {
 		const id = sessionCostMatch[1];
-		const cost = sessionManager.getCostTracker().getSessionCost(id);
+		const liveSession = sessionManager.getSession(id);
+		const sessionForCost = liveSession ?? sessionManager.getPersistedSession(id);
+		if (!sessionForCost?.projectId) {
+			json({ error: "Session not found or has no project" }, 404);
+			return;
+		}
+		const cost = sessionManager.getCostTracker(sessionForCost.projectId).getSessionCost(id);
 		if (!cost) {
 			json({ error: "No cost data for this session" }, 404);
 			return;
@@ -3973,8 +4004,12 @@ async function handleApiRoute(
 			json({ error: "Goal not found" }, 404);
 			return;
 		}
+		if (!goal.projectId) {
+			json({ aggregate: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 }, sessions: [] });
+			return;
+		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
-		const costTracker = sessionManager.getCostTracker();
+		const costTracker = sessionManager.getCostTracker(goal.projectId);
 		const allCosts = costTracker.getAllCosts();
 
 		// Build per-session breakdown with metadata
@@ -4018,8 +4053,12 @@ async function handleApiRoute(
 			json({ error: "Goal not found" }, 404);
 			return;
 		}
+		if (!goal.projectId) {
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			return;
+		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
-		const cost = sessionManager.getCostTracker().getGoalCost(goalId, sessionIds);
+		const cost = sessionManager.getCostTracker(goal.projectId).getGoalCost(goalId, sessionIds);
 		json(cost);
 		return;
 	}
@@ -4037,7 +4076,13 @@ async function handleApiRoute(
 			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
 			return;
 		}
-		const cost = sessionManager.getCostTracker().getSessionCost(task.assignedSessionId);
+		const taskSessionLive = sessionManager.getSession(task.assignedSessionId);
+		const taskSession = taskSessionLive ?? sessionManager.getPersistedSession(task.assignedSessionId);
+		if (!taskSession?.projectId) {
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			return;
+		}
+		const cost = sessionManager.getCostTracker(taskSession.projectId).getSessionCost(task.assignedSessionId);
 		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
 		return;
 	}
@@ -4080,8 +4125,16 @@ async function handleApiRoute(
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const body = await readBody(req);
 		if (!body?.command) { json({ error: "command is required" }, 400); return; }
-		const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId);
-		json(info, 201);
+		try {
+			const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId, session.sandboxed);
+			json(info, 201);
+		} catch (err: any) {
+			if (err?.message?.includes("Sandboxed session without containerId")) {
+				json({ error: "Sandboxed session cannot run host processes" }, 403);
+			} else {
+				throw err;
+			}
+		}
 		return;
 	}
 
@@ -4208,7 +4261,7 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = body.cwd || config.defaultCwd;
-		const projectId = (typeof body.projectId === "string") ? body.projectId : undefined;
+		const projectId = (typeof body.projectId === "string") ? body.projectId : projectContextManager.getDefaultProjectId();
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,
@@ -4381,7 +4434,7 @@ async function handleApiRoute(
 			const persistedSession = mcpSession ? null : (
 				// Search across all project stores for persisted session
 				projectContextManager.getContextForSession(mcpSessionId)?.sessionStore.get(mcpSessionId)
-				?? sessionManager.getSessionStore().get(mcpSessionId)
+				?? null
 			);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);

@@ -44,8 +44,6 @@ export interface DockerRunConfig {
 	// ── Sandbox config ───────────────────────────────────────────────────
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
-	gatewayUrl?: string;
-	gatewayToken?: string;
 	/** Docker network to attach the container to (e.g. "bobbit-sandbox-net"). */
 	sandboxNetwork?: string;
 }
@@ -58,7 +56,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		label, labelVersion, labelPrefix, worktreePath,
 		mountWorktreeRoot,
 		sandboxMounts, sandboxCredentials,
-		gatewayUrl, gatewayToken, sandboxNetwork,
+		sandboxNetwork,
 	} = config;
 
 	const toolsDir = TOOLS_DIR;
@@ -145,13 +143,10 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	}
 
 	// ── Environment variables ──────────────────────────────────────────
-	if (gatewayUrl) {
-		args.push("-e", `BOBBIT_GATEWAY_URL=${gatewayUrl}`);
-	}
-	if (gatewayToken) {
-		args.push("-e", `BOBBIT_TOKEN=${gatewayToken}`);
-	}
-
+	// NOTE: BOBBIT_GATEWAY_URL and BOBBIT_TOKEN are intentionally NOT set here.
+	// PID 1 (sleep infinity) does not need them, and exposing them would leak
+	// the gateway auth token via /proc/1/environ. The agent process receives
+	// its scoped sandbox token via `docker exec -e` in rpc-bridge.ts.
 	args.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
 	args.push("-e", "NODE_OPTIONS=--no-warnings");
 	args.push("-e", "PI_CODING_AGENT_DIR=/home/node/.bobbit/agent");

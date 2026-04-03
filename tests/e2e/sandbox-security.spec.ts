@@ -127,6 +127,39 @@ test.describe("Sandbox Security Boundaries", () => {
 		await adminFetch(gateway.baseURL, `/api/sessions/${data.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
+	// ── Cross-session bg-processes restriction ─────────────────────────
+
+	test("cannot run bg-processes on another session", async ({ gateway }) => {
+		// Create a second session (simulates a non-sandboxed host session)
+		const res2 = await adminFetch(gateway.baseURL, "/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: nonGitCwd() }),
+		});
+		expect(res2.status).toBe(201);
+		const otherSession = (await res2.json()).id;
+
+		// Sandbox token should NOT be able to run bg-processes on the other session
+		const res = await sandboxFetch(gateway.baseURL, `/api/sessions/${otherSession}/bg-processes`, scopedToken, {
+			method: "POST",
+			body: JSON.stringify({ command: "echo pwned" }),
+		});
+		expect(res.status).toBe(403);
+
+		// Clean up
+		await adminFetch(gateway.baseURL, `/api/sessions/${otherSession}`, { method: "DELETE" }).catch(() => {});
+	});
+
+	test("cannot create non-delegate sessions", async ({ gateway }) => {
+		// A sandbox token should NOT be able to create a standalone (non-delegate) session.
+		// The server rejects this with 403 (sandbox guard) or 400 (missing delegateOf).
+		// Either way, the session must NOT be created.
+		const res = await sandboxFetch(gateway.baseURL, "/api/sessions", scopedToken, {
+			method: "POST",
+			body: JSON.stringify({ cwd: "/tmp" }),
+		});
+		expect([400, 403]).toContain(res.status);
+	});
+
 	// ── Token persistence check ────────────────────────────────────────
 
 	test("sandbox token not persisted to disk", async ({ gateway }) => {

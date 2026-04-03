@@ -46,8 +46,6 @@ export interface SandboxPoolOptions {
 	healthCheckIntervalMs: number;
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
-	gatewayUrl: string;
-	gatewayToken: string;
 	sandboxNetwork?: string;
 	worktreeSetupCommand?: string;
 }
@@ -307,7 +305,17 @@ export class SandboxPool {
 				return undefined;
 			}
 
-
+			// Defense-in-depth: mask /proc/1/environ so even if env vars are
+			// accidentally re-added to docker run, they can't be read by the agent
+			try {
+				await execFileAsync("docker", ["exec", containerId, "chmod", "0400", "/proc/1/environ"], {
+					timeout: 5_000,
+					env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+				});
+			} catch (err) {
+				// Non-fatal — /proc may not support chmod on all platforms
+				console.warn(`[sandbox-pool] Failed to mask /proc/1/environ for ${containerId.substring(0, 12)} (non-fatal):`, err);
+			}
 
 			const slot: PoolSlot = {
 				containerId,
@@ -341,8 +349,6 @@ export class SandboxPool {
 			worktreePath,
 			sandboxMounts: this.options.sandboxMounts,
 			sandboxCredentials: this.options.sandboxCredentials,
-			gatewayUrl: this.options.gatewayUrl,
-			gatewayToken: this.options.gatewayToken,
 			sandboxNetwork: this.options.sandboxNetwork,
 		});
 	}
