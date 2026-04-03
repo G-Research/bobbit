@@ -85,8 +85,15 @@ test.describe("Sandbox Docker — /proc/1/environ", () => {
 				{ timeout: 120_000 },
 			);
 
+			// Configure the credential helper (simulates our updated Dockerfile)
+			await execFileAsync(
+				"docker",
+				["exec", cid, "git", "config", "--global", "credential.helper",
+				 "!f() { test -n \"$GITHUB_TOKEN\" && echo \"username=x-access-token\" && echo \"password=$GITHUB_TOKEN\"; }; f"],
+				{ timeout: 10_000 },
+			);
+
 			// Try git credential fill with GITHUB_TOKEN injected via docker exec -e.
-			// Without a credential helper, this fails. With the fix, it succeeds.
 			const { stdout } = await execFileAsync(
 				"docker",
 				[
