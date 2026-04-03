@@ -113,7 +113,7 @@ export interface TeamManagerConfig {
 	taskManager: TaskManager;
 	/** Role store for looking up role definitions (prompts, accessories, tools) */
 	roleStore?: RoleStore;
-	/** Gate store for checking gate status on completion and building dependency context */
+	/** @deprecated Gate store — resolve per-goal via projectContextManager instead. */
 	gateStore?: GateStore;
 	/** Personality manager for resolving personality names to prompt fragments */
 	personalityManager?: PersonalityManager;
@@ -128,7 +128,8 @@ export class TeamManager {
 	private config: TeamManagerConfig;
 	private taskManager: TaskManager;
 	private teams = new Map<string, TeamEntry>();
-	private store: TeamStore;
+	/** Local team store — used only in the non-PCM (test) path. */
+	private localStore: TeamStore | null;
 	/** Timers for the idle-nudge mechanism (goalId → timer). */
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
 	private verificationHarness?: VerificationHarness;
@@ -146,28 +147,29 @@ export class TeamManager {
 		this.config = config;
 		this.taskManager = config.taskManager;
 		if (config.projectContextManager) {
-			const defaultCtx = config.projectContextManager.getDefault();
-			this.store = defaultCtx.teamStore;
+			this.localStore = null;
 		} else {
-			this.store = new TeamStore(stateDir ?? bobbitStateDir());
+			this.localStore = new TeamStore(stateDir ?? bobbitStateDir());
 		}
 		this.restoreTeams();
 	}
 
-	private resolveTeamStore(goalId?: string): TeamStore {
-		if (goalId && this.config.projectContextManager) {
+	private resolveTeamStore(goalId: string): TeamStore {
+		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.teamStore;
+			throw new Error(`Cannot resolve team store: goal "${goalId}" not found in any project`);
 		}
-		return this.store;
+		return this.localStore!;
 	}
 
-	private resolveGateStore(goalId?: string): GateStore | undefined {
-		if (goalId && this.config.projectContextManager) {
+	private resolveGateStore(goalId: string): GateStore {
+		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.gateStore;
+			throw new Error(`Cannot resolve gate store: goal "${goalId}" not found in any project`);
 		}
-		return this.config.gateStore;
+		throw new Error(`Cannot resolve gate store: no projectContextManager configured`);
 	}
 
 	/** Set the broadcastToGoal function (called after WebSocket server is created). */
@@ -245,7 +247,7 @@ export class TeamManager {
 				persisted.push(...ctx.teamStore.getAll());
 			}
 		} else {
-			persisted = this.store.getAll();
+			persisted = this.localStore!.getAll();
 		}
 		for (const p of persisted) {
 			const entry: TeamEntry = {
@@ -547,8 +549,8 @@ export class TeamManager {
 	 */
 	buildDependencyContext(goalId: string, workflowGateId?: string, explicitInputIds?: string[]): string {
 		const goal = this.resolveGoal(goalId);
+		if (!goal?.workflow) return "";
 		const resolvedGateStore = this.resolveGateStore(goalId);
-		if (!goal?.workflow || !resolvedGateStore) return "";
 
 		// Determine which gate IDs to inject content from
 		let inputIds: string[];
@@ -653,7 +655,7 @@ export class TeamManager {
 		// Enforce gate dependency check: upstream gates must be passed before spawning for a gate
 		const resolvedWorkflowGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
 		const spawnGateStore = this.resolveGateStore(goalId);
-		if (resolvedWorkflowGateId && spawnGateStore && goal.workflow) {
+		if (resolvedWorkflowGateId && goal.workflow) {
 			const wfGate = goal.workflow.gates.find(g => g.id === resolvedWorkflowGateId);
 			if (wfGate?.dependsOn?.length) {
 				const gateStates = spawnGateStore.getGatesForGoal(goalId);
@@ -1065,17 +1067,15 @@ export class TeamManager {
 
 		// Enforce gate requirements before allowing completion
 		const completeGateStore = this.resolveGateStore(goalId);
-		if (completeGateStore) {
-			const goal = this.resolveGoal(goalId);
-			const skipReqs = goal?.skipGateRequirements;
+		const goal = this.resolveGoal(goalId);
+		const skipReqs = goal?.skipGateRequirements;
 
-			if (goal?.workflow && (!skipReqs || !skipReqs.includes("workflow"))) {
-				const gateStates = completeGateStore.getGatesForGoal(goalId);
-				const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
-				const failedGates = goal.workflow.gates.filter(g => !passedIds.has(g.id));
-				if (failedGates.length > 0) {
-					throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
-				}
+		if (goal?.workflow && (!skipReqs || !skipReqs.includes("workflow"))) {
+			const gateStates = completeGateStore.getGatesForGoal(goalId);
+			const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
+			const failedGates = goal.workflow.gates.filter(g => !passedIds.has(g.id));
+			if (failedGates.length > 0) {
+				throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
 			}
 		}
 
