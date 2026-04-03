@@ -446,6 +446,7 @@ export class TeamManager {
 		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return new TaskManager(ctx.taskStore).getTasksForSession(sessionId);
+			return []; // Goal not found in any project — no tasks to return
 		}
 		return this.taskManager.getTasksForSession(sessionId);
 	}

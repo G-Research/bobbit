@@ -4386,7 +4386,7 @@ async function handleApiRoute(
 			const persistedSession = mcpSession ? null : (
 				// Search across all project stores for persisted session
 				projectContextManager.getContextForSession(mcpSessionId)?.sessionStore.get(mcpSessionId)
-				?? sessionManager.getSessionStore().get(mcpSessionId)
+				?? null
 			);
 			if (!mcpSession && !persistedSession) {
 				json({ error: `Session "${mcpSessionId}" not found` }, 403);
