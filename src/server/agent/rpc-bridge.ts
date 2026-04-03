@@ -1,11 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR } from "./tool-manager.js";
-import { buildDockerRunArgs } from "./docker-args.js";
 
 /** Redact sensitive env vars (-e KEY=VALUE) from Docker arg arrays for logging. */
 function redactDockerArgs(args: string[]): string {
@@ -59,21 +57,15 @@ export interface RpcBridgeOptions {
 	systemPromptPath?: string;
 	/** Extra environment variables */
 	env?: Record<string, string>;
-	/** When true, run the agent inside a Docker container */
+	/** Whether this session runs in a Docker sandbox (affects timeouts). */
 	sandboxed?: boolean;
-	/** Docker image to use (default: "bobbit-agent") */
-	sandboxImage?: string;
-	/** Env vars to inject into the container */
+	/** Env vars to inject into the container (API keys, etc.) */
 	sandboxCredentials?: Record<string, string>;
-	/** Additional bind mounts (validated by session-manager before reaching here) */
-	sandboxMounts?: string[];
 	/** Gateway URL for the agent to call back */
 	gatewayUrl?: string;
 	/** Auth token for the agent */
 	gatewayToken?: string;
-	/** Docker network to attach the container to (e.g. "bobbit-sandbox-net"). */
-	sandboxNetwork?: string;
-	/** Container ID to use with docker exec (pool mode) */
+	/** Container ID to use with docker exec (from sandbox pool) */
 	containerId?: string;
 }
 
@@ -120,8 +112,6 @@ export class RpcBridge {
 
 		if (this.options.containerId) {
 			this.process = this.spawnDockerExec(this.options.containerId, cliPath, args);
-		} else if (this.options.sandboxed) {
-			this.process = this.spawnDocker(cliPath, args);
 		} else {
 			// Trust our self-signed CA cert if available; fall back to disabling TLS verification
 			const caCertPath = path.join(bobbitStateDir(), "tls", "ca.crt");
@@ -176,9 +166,8 @@ export class RpcBridge {
 		// Brief pause for process initialization.
 		// Pool containers (containerId) are already running — stdin is buffered,
 		// so writes before the process reads are safe. No delay needed.
-		// Cold docker run needs time for container + node startup (~2-3s).
 		// Bare node processes need a brief init pause.
-		const startupDelay = this.options.containerId ? 0 : this.options.sandboxed ? 3000 : 50;
+		const startupDelay = this.options.containerId ? 0 : 50;
 		if (startupDelay > 0) {
 			await new Promise((r) => setTimeout(r, startupDelay));
 		}
@@ -299,55 +288,6 @@ export class RpcBridge {
 	}
 
 	/**
-	 * Build and spawn the Docker container for sandboxed execution.
-	 * The agent process runs inside the container with restricted filesystem/network.
-	 */
-	private spawnDocker(_cliPath: string, agentArgs: string[]): ChildProcess {
-		const projectDir = this.options.cwd || process.cwd();
-		const image = this.options.sandboxImage || "bobbit-agent";
-
-		// Build session-specific env vars
-		const sessionEnv: Record<string, string> = {};
-		if (this.options.env?.BOBBIT_SESSION_ID) {
-			sessionEnv.BOBBIT_SESSION_ID = this.options.env.BOBBIT_SESSION_ID;
-		}
-		if (this.options.env?.BOBBIT_GOAL_ID) {
-			sessionEnv.BOBBIT_GOAL_ID = this.options.env.BOBBIT_GOAL_ID;
-		}
-
-		// Use a project-dir hash as label for named cache volumes
-		const projectDirHash = crypto.createHash("sha256").update(projectDir).digest("hex").substring(0, 12);
-
-		const dockerArgs = buildDockerRunArgs({
-			mode: "cold",
-			image,
-			workspaceDir: projectDir,
-			label: projectDirHash,
-			sandboxMounts: this.options.sandboxMounts,
-			sandboxCredentials: this.options.sandboxCredentials,
-			gatewayUrl: this.options.gatewayUrl,
-			gatewayToken: this.options.gatewayToken,
-			sandboxNetwork: this.options.sandboxNetwork,
-			sessionEnv,
-			systemPromptPath: this.options.systemPromptPath,
-		});
-
-		// Command: node + agent CLI path remapped to container
-		dockerArgs.push("node", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js");
-
-		// Remap agent args: replace host paths with container paths
-		dockerArgs.push(...this.remapArgsForContainer(agentArgs, false));
-
-		console.log(`[rpc-bridge] Docker sandbox args: ${redactDockerArgs(dockerArgs)}`);
-
-		return spawn("docker", dockerArgs, {
-			stdio: ["pipe", "pipe", "pipe"],
-			cwd: this.options.cwd,
-			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-		});
-	}
-
-	/**
 	 * Spawn an agent process inside an already-running pool container via docker exec.
 	 * The container already has all bind mounts and env vars configured.
 	 */
@@ -381,7 +321,7 @@ export class RpcBridge {
 		execArgs.push(
 			containerId,
 			"node", "--disable-warning=DEP0123", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
-			...this.remapArgsForContainer(agentArgs, true),
+			...this.remapArgsForContainer(agentArgs),
 		);
 
 		console.log(`[rpc-bridge] Docker exec args: ${redactDockerArgs(execArgs)}`);
@@ -395,11 +335,9 @@ export class RpcBridge {
 
 	/**
 	 * Remap agent CLI args from host paths to container paths.
-	 * @param agentArgs - The agent CLI arguments with host paths
-	 * @param isPoolMode - When true, system prompt maps to /tmp/session-prompts/<filename>;
-	 *                     when false, maps to /tmp/system-prompt (single-file mount).
+	 * All sandbox sessions use pool containers with session-prompts/ mounted.
 	 */
-	private remapArgsForContainer(agentArgs: string[], isPoolMode: boolean): string[] {
+	private remapArgsForContainer(agentArgs: string[]): string[] {
 		const toolsDir = TOOLS_DIR;
 		const mcpExtDir = path.join(bobbitDir(), "state", "mcp-extensions");
 		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
@@ -409,21 +347,14 @@ export class RpcBridge {
 		for (let i = 0; i < agentArgs.length; i++) {
 			const arg = agentArgs[i];
 			if (arg === "--cwd") {
-				// SandboxPool: each slot's worktree is mounted as /workspace.
-				// Cold docker run: project dir is mounted as /workspace.
-				// In both cases, CWD maps to /workspace.
+				// Each pool slot's worktree is mounted as /workspace
 				remappedArgs.push("--cwd", "/workspace");
 				i++; // skip the next arg (the host cwd path)
 			} else if (arg === "--system-prompt") {
-				if (isPoolMode) {
-					// Pool mode: session-prompts/ dir is mounted at /tmp/session-prompts/
-					const hostPath = agentArgs[i + 1] || "";
-					const filename = path.basename(hostPath);
-					remappedArgs.push("--system-prompt", `/tmp/session-prompts/${filename}`);
-				} else {
-					// Docker-run mode: single file mounted at /tmp/system-prompt
-					remappedArgs.push("--system-prompt", "/tmp/system-prompt");
-				}
+				// session-prompts/ dir is mounted at /tmp/session-prompts/
+				const hostPath = agentArgs[i + 1] || "";
+				const filename = path.basename(hostPath);
+				remappedArgs.push("--system-prompt", `/tmp/session-prompts/${filename}`);
 				i++; // skip the next arg (the host prompt path)
 			} else {
 				const normalized = arg.replace(/\\/g, "/");

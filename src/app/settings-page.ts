@@ -20,7 +20,7 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
-import { gatewayFetch, fetchSandboxStatus } from "./api.js";
+import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects } from "./api.js";
 import { openOAuthDialog } from "./dialogs.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
@@ -1932,6 +1932,34 @@ function renderProjectScopeTab(projectId: string) {
 				${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved successfully.</span>` : ""}
 				${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
 			</div>
+
+			${(() => {
+				const isDefault = state.projects?.[0]?.id === projectId;
+				if (isDefault) return "";
+				return html`
+					<hr class="border-border" />
+					<div class="flex flex-col gap-2">
+						<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Danger Zone</div>
+						<div class="flex items-center gap-3">
+							<button
+								class="px-4 py-2 text-sm rounded-md bg-destructive text-destructive-foreground
+									hover:bg-destructive/90 transition-colors"
+								@click=${async () => {
+									const ok = confirm("Remove project '" + (project?.name || "") + "' from this server? This won't delete any files on disk.");
+									if (!ok) return;
+									const success = await removeProject(projectId);
+									if (success) {
+										state.projects = await fetchProjects();
+										setHashRoute("settings", "system/general", true);
+										renderApp();
+									}
+								}}
+							>Remove Project</button>
+							<span class="text-xs text-muted-foreground">Unregister this project. No files will be deleted.</span>
+						</div>
+					</div>
+				`;
+			})()}
 		</div>
 	`;
 }

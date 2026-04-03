@@ -125,7 +125,7 @@ export default function (pi: ExtensionAPI) {
 			savePath: Type.Optional(Type.String({ description: "File path to save the screenshot to (png). Optional." })),
 			fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page. Default false." })),
 		}),
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const p = await withAbort(ensurePage(), signal);
 
 			let buffer: Buffer;
@@ -136,16 +136,17 @@ export default function (pi: ExtensionAPI) {
 				buffer = await withAbort(p.screenshot({ type: "png", fullPage: params.fullPage ?? false }), signal) as Buffer;
 			}
 
+			let savedTo: string | undefined;
 			if (params.savePath) {
-				const abs = path.resolve(params.savePath);
+				const abs = path.isAbsolute(params.savePath) ? params.savePath : path.resolve(ctx.cwd, params.savePath);
 				fs.mkdirSync(path.dirname(abs), { recursive: true });
 				fs.writeFileSync(abs, buffer);
+				savedTo = abs;
 			}
 
 			const base64 = buffer.toString("base64");
 			const url = await p.url();
 			const title = await p.title();
-			const savedTo = params.savePath ? path.resolve(params.savePath) : undefined;
 
 			return {
 				content: [

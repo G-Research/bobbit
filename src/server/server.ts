@@ -4273,10 +4273,31 @@ async function handleApiRoute(
 			json({ error: "No pending verification for this session" }, 404);
 			return;
 		}
+		// Support report_html_file: server reads file directly (avoids tool output limits for large reports)
+		if (typeof body.report_html === "string" && typeof body.report_html_file === "string") {
+			json({ error: "Provide either report_html or report_html_file, not both" }, 400);
+			return;
+		}
+		let reportHtml: string | undefined = typeof body.report_html === "string" ? body.report_html : undefined;
+		if (!reportHtml && typeof body.report_html_file === "string") {
+			try {
+				const filePath = body.report_html_file;
+				const stat = fs.statSync(filePath);
+				const MAX_REPORT_SIZE = 10 * 1024 * 1024; // 10 MB
+				if (stat.size > MAX_REPORT_SIZE) {
+					json({ error: `Report file too large (${stat.size} bytes, max ${MAX_REPORT_SIZE})` }, 400);
+					return;
+				}
+				reportHtml = fs.readFileSync(filePath, "utf-8");
+			} catch (e: any) {
+				json({ error: `Failed to read report file: ${e.message}` }, 400);
+				return;
+			}
+		}
 		resolver({
 			verdict: body.verdict === "pass",
 			summary: body.summary,
-			reportHtml: typeof body.report_html === "string" ? body.report_html : undefined,
+			reportHtml,
 		});
 		json({ ok: true });
 		return;

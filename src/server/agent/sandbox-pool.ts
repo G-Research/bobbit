@@ -151,7 +151,8 @@ export class SandboxPool {
 
 	/**
 	 * Claim an idle slot. Optionally check out a branch.
-	 * Returns null if no idle slots available (caller falls back to cold docker run).
+	 * If no idle slots are available, creates one on-demand (slower but
+	 * identical in behavior to a pre-warmed slot).
 	 */
 	async claim(sessionId: string, opts?: ClaimOptions): Promise<ClaimResult | null> {
 		// Find an idle slot
@@ -159,7 +160,11 @@ export class SandboxPool {
 		for (const s of this.slots.values()) {
 			if (s.state === "idle") { slot = s; break; }
 		}
-		if (!slot) return null;
+		if (!slot) {
+			console.log(`[sandbox-pool] Pool exhausted — creating on-demand slot for session ${sessionId.slice(0, 8)}`);
+			slot = await this._createSlot();
+			if (!slot) return null;
+		}
 
 		slot.state = "claimed";
 		slot.sessions.add(sessionId);
@@ -252,9 +257,9 @@ export class SandboxPool {
 
 	// ── Slot lifecycle ─────────────────────────────────────────────────────
 
-	/** Create a new pool slot: worktree + container. */
-	private async _createSlot(): Promise<void> {
-		if (this._shutdownRequested) return;
+	/** Create a new pool slot: worktree + container. Returns the slot, or undefined on failure. */
+	private async _createSlot(): Promise<PoolSlot | undefined> {
+		if (this._shutdownRequested) return undefined;
 
 		const slotId = crypto.randomUUID().slice(0, 8);
 		const slotName = `pool-${slotId}`;
@@ -299,7 +304,7 @@ export class SandboxPool {
 			if (!containerId) {
 				console.warn(`[sandbox-pool] docker run returned empty container ID for ${slotName}`);
 				await this._removeWorktree(worktreePath);
-				return;
+				return undefined;
 			}
 
 
@@ -316,17 +321,18 @@ export class SandboxPool {
 			};
 			this.slots.set(containerId, slot);
 			console.log(`[sandbox-pool] Created slot ${slot.shortId} at ${slotName}`);
+			return slot;
 		} catch (err) {
 			console.warn(`[sandbox-pool] Failed to create slot ${slotName}:`, err);
 			// Clean up worktree if container creation failed
 			await this._removeWorktree(worktreePath);
+			return undefined;
 		}
 	}
 
 	/** Build docker run args for a pool container with a specific worktree. */
 	private _buildDockerArgs(worktreePath: string): string[] {
 		return buildDockerRunArgs({
-			mode: "pool",
 			image: this.options.image,
 			workspaceDir: worktreePath,
 			label: this.label,

@@ -163,6 +163,84 @@ test.describe("POST /api/internal/verification-result", () => {
 		harness.pendingResults.delete("test-session-html");
 	});
 
+	test("reads report_html_file from disk when provided", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const fs = await import("node:fs");
+		const path = await import("node:path");
+		const os = await import("node:os");
+
+		// Write a temp HTML file
+		const tmpFile = path.join(os.tmpdir(), `qa-report-test-${Date.now()}.html`);
+		const htmlContent = "<html><body><h1>Report from file</h1><img src='data:image/png;base64,abc123'></body></html>";
+		fs.writeFileSync(tmpFile, htmlContent);
+
+		const promise = new Promise<any>((resolve) => {
+			harness.pendingResults.set("test-session-file", resolve);
+		});
+
+		const res = await apiFetch("/api/internal/verification-result", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: "test-session-file",
+				verdict: "pass",
+				summary: "QA passed via file",
+				report_html_file: tmpFile,
+			}),
+		});
+
+		expect(res.status).toBe(200);
+
+		const result = await promise;
+		expect(result.verdict).toBe(true);
+		expect(result.reportHtml).toBe(htmlContent);
+
+		harness.pendingResults.delete("test-session-file");
+		fs.unlinkSync(tmpFile);
+	});
+
+	test("report_html_file returns 400 for nonexistent file", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		harness.pendingResults.set("test-session-nofile", () => {});
+
+		const res = await apiFetch("/api/internal/verification-result", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: "test-session-nofile",
+				verdict: "pass",
+				summary: "ok",
+				report_html_file: "/tmp/nonexistent-qa-report-12345.html",
+			}),
+		});
+
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body.error).toContain("Failed to read report file");
+
+		harness.pendingResults.delete("test-session-nofile");
+	});
+
+	test("rejects when both report_html and report_html_file are provided", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		harness.pendingResults.set("test-session-both", () => {});
+
+		const res = await apiFetch("/api/internal/verification-result", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: "test-session-both",
+				verdict: "pass",
+				summary: "ok",
+				report_html: "<h1>Inline</h1>",
+				report_html_file: "/tmp/should-not-be-read.html",
+			}),
+		});
+
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body.error).toContain("not both");
+
+		harness.pendingResults.delete("test-session-both");
+	});
+
 	test("ignores non-string report_html", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 

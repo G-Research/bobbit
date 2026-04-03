@@ -5,6 +5,9 @@ provider:
   type: bobbit-extension
   extension: extension.ts
 group: Gates
+docs: |
+  Submit verdict, summary, and optional HTML report. Required params: `verdict` ("pass"/"fail"), `summary` (detailed markdown).
+  For HTML reports with screenshots: use `report_html_file` (absolute path, server reads directly, up to 10MB) OR `report_html` (inline string for small reports). Never both.
 detail_docs: |
   ## Summary Format
 
@@ -42,6 +45,17 @@ detail_docs: |
   2 critical issues must be resolved before merge.
   ```
 
+  ## HTML Report (QA agents)
+
+  QA agents can attach a self-contained HTML report with embedded screenshots. Two mutually exclusive options:
+
+  - **`report_html`** — inline HTML string. Use for small reports without screenshots.
+  - **`report_html_file`** — absolute path to an HTML file on disk. The server reads it directly (up to 10 MB). **Preferred for reports with embedded base64 screenshots**, which are too large for inline parameters.
+
+  Provide one or the other, never both — the tool will reject the call if both are set.
+
+  The report appears as a "View Report" button on the goal dashboard, opening in a new tab.
+
   ### Notes
-  - `report_html` is only for QA agents with screenshots; most reviewers should focus on `summary`
-  - Use headings, bullet lists, and code blocks for readability
+  - Most reviewers only need `summary` — the HTML report fields are primarily for QA agents
+  - Use headings, bullet lists, and code blocks in `summary` for readability

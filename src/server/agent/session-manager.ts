@@ -424,7 +424,6 @@ export class SessionManager {
 		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
 		if (sandboxConfig !== "docker") return false;
 
-		const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
 		const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
 		const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
 		let credentials: Record<string, string> = {};
@@ -439,10 +438,10 @@ export class SessionManager {
 		}
 
 		// Validate mounts unless skipped (e.g. during restore — already validated at creation)
-		const validatedMounts = opts?.skipMountValidation ? mounts : validateSandboxMounts(mounts, "[session-manager]");
+		if (!opts?.skipMountValidation) validateSandboxMounts(mounts, "[session-manager]");
 
 		// Ensure the restricted Docker network exists
-		const sandboxNetwork = await this.ensureSandboxNetwork();
+		await this.ensureSandboxNetwork();
 
 		// Read gateway URL and generate scoped token for the container
 		try {
@@ -464,14 +463,11 @@ export class SessionManager {
 		}
 
 		bridgeOptions.sandboxed = true;
-		bridgeOptions.sandboxImage = sandboxImage;
 		// Auto-resolve API credentials from host auth system, then overlay manual overrides
 		const autoCredentials = resolveHostApiCredentials(this.preferencesStore);
 		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
-		bridgeOptions.sandboxMounts = validatedMounts;
-		bridgeOptions.sandboxNetwork = sandboxNetwork;
 
-		// Claim a pre-warmed slot from the sandbox pool
+		// Claim a slot from the sandbox pool (creates on-demand if exhausted)
 		if (this.sandboxPool) {
 			const result = await this.sandboxPool.claim(sessionId, opts?.sandboxClaim);
 			if (result) {
@@ -479,8 +475,12 @@ export class SessionManager {
 				// Override CWD to the pool slot's worktree
 				bridgeOptions.cwd = result.worktreePath;
 			} else {
-				console.warn("[session-manager] Sandbox pool exhausted, falling back to cold docker run");
+				// Pool creates on-demand slots when exhausted, so null means
+				// slot creation itself failed (Docker unavailable, disk full, etc.)
+				throw new Error("Failed to create sandbox container — Docker may be unavailable");
 			}
+		} else {
+			throw new Error("Sandbox mode requires Docker pool — pool not initialized");
 		}
 
 		return true;
