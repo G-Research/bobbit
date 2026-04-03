@@ -112,7 +112,7 @@ Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it using `
 
 **Available browser tools:**
 - `browser_navigate(url=...)` — navigate to your ephemeral server
-- `browser_screenshot(savePath="...")` — take screenshots (always use absolute paths in $WORK_DIR)
+- `browser_screenshot()` — take screenshots (returns base64 in tool response — no need to save to disk)
 - `browser_snapshot()` — get ARIA accessibility tree (best for understanding page structure and finding elements)
 - `browser_click(selector=...)` — click elements
 - `browser_type(selector=..., text=...)` — type into inputs
@@ -147,18 +147,13 @@ For each scenario from your task prompt (respecting `qa_max_scenarios`):
 3. **After**: Take a screenshot documenting the result
 4. **Verdict**: Record PASS, FAIL, or SKIPPED with a clear explanation
 
-Use `browser_screenshot(savePath="$WORK_DIR/screenshot-N.png")` to save screenshots — always use **absolute paths** in `$WORK_DIR`, never relative paths (relative paths resolve against the master repo root, not your worktree).
+Call `browser_screenshot()` (no `savePath` needed). The tool response includes a `{ type: "image", data: "<base64>" }` content block — note this base64 string for each screenshot. You will embed these directly in the HTML report in Step 7.
 
 Track elapsed time. If `qa_max_duration_minutes` is exceeded, stop testing immediately and proceed to report generation with partial results.
 
 ## Step 7: Produce HTML Report
 
-Write a self-contained HTML report. Screenshots should be embedded as base64 data URIs. Use the **absolute paths** from Step 6:
-```bash
-base64 -w0 "$WORK_DIR/screenshot-1.png"
-```
-
-On Windows/MSYS, use `base64 -w 0` (with space) or `cat "$WORK_DIR/screenshot-1.png" | base64 | tr -d '\n'`.
+Write a self-contained HTML report. Embed screenshots using the base64 data returned directly by `browser_screenshot()` in Step 6 — each tool response contains `{ type: "image", data: "<base64>" }`. Use this data in `<img>` tags as `data:image/png;base64,<data>` URIs. No need to save screenshots to disk or read them back.
 
 The report structure:
 
