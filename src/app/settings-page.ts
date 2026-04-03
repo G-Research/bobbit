@@ -1848,7 +1848,6 @@ function renderProjectScopeTab(projectId: string) {
 		return html`<div class="text-sm text-muted-foreground">Loading project configuration…</div>`;
 	}
 
-	const project = (state.projects || []).find((p: any) => p.id === projectId);
 	const resolved = cached.resolved;
 	const raw = cached.raw;
 
@@ -1870,28 +1869,6 @@ function renderProjectScopeTab(projectId: string) {
 
 	return html`
 		<div class="flex flex-col gap-4">
-			<!-- Working Directory -->
-			<div class="flex flex-col gap-2">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Working Directory</div>
-				<div class="flex items-center gap-3">
-					<span class="${labelClass}">Root Path</span>
-					<input
-						type="text"
-						class="${inputClass} text-foreground"
-						.value=${project?.rootPath || ""}
-						@input=${(e: Event) => {
-							pendingChanges._rootPath = (e.target as HTMLInputElement).value;
-						}}
-					/>
-					<div class="w-7 shrink-0"></div>
-				</div>
-				<p class="text-xs text-muted-foreground">
-					The directory used when creating new sessions and goals for this project.
-				</p>
-			</div>
-
-			<hr class="border-border" />
-
 			<div class="flex flex-col gap-2">
 				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
 				${commandKeys.map((key) => {
@@ -1959,14 +1936,57 @@ function renderProjectGeneralTab(projectId: string) {
 	const project = (state.projects || []).find((p: any) => p.id === projectId);
 	const isDefault = state.projects?.[0]?.id === projectId;
 
+	// Reuse the per-project pending changes map for rootPath edits
+	if (!_projectScopePending.has(projectId)) _projectScopePending.set(projectId, {});
+	const pendingChanges = _projectScopePending.get(projectId)!;
+
+	const inputClass = "flex-1 min-w-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring";
+
 	return html`
 		<div class="flex flex-col gap-6">
 			<div class="flex flex-col gap-1">
 				<h3 class="text-sm font-medium text-foreground">${project?.name || "Project"}</h3>
-				<p class="text-xs text-muted-foreground font-mono">${project?.rootPath || ""}</p>
 			</div>
+
+			<!-- Working Directory -->
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Working Directory</div>
+				<div class="flex items-center gap-3">
+					<input
+						type="text"
+						class="${inputClass} text-foreground"
+						.value=${pendingChanges._rootPath ?? project?.rootPath ?? ""}
+						@input=${(e: Event) => {
+							pendingChanges._rootPath = (e.target as HTMLInputElement).value;
+						}}
+					/>
+				</div>
+				<p class="text-xs text-muted-foreground">
+					The directory used when creating new sessions and goals for this project.
+				</p>
+			</div>
+			<!-- Save -->
+			${pendingChanges._rootPath !== undefined ? html`
+				<div class="flex items-center gap-3 pt-2 border-t border-border">
+					<button
+						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
+							hover:bg-primary/90 transition-colors disabled:opacity-50"
+						?disabled=${projectScopeSaveStatus === "saving"}
+						@click=${() => {
+							saveProjectScopeConfig(projectId, { _rootPath: pendingChanges._rootPath });
+							delete pendingChanges._rootPath;
+						}}
+					>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
+					${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved.</span>` : ""}
+					${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+				</div>
+			` : ""}
+
 			${!isDefault ? html`
 				<hr class="border-border" />
+				<div class="flex flex-col gap-1">
+					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Danger Zone</div>
+				</div>
 				<div class="flex items-center gap-3">
 					<button
 						class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
