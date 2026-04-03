@@ -40,7 +40,9 @@ USER node
 # Mark /workspace as safe (it's bind-mounted with different ownership).
 # Commit identity comes from the mounted repo's .git/config (the human developer).
 RUN git config --global core.autocrlf true \
-    && git config --global --add safe.directory /workspace
+    && git config --global --add safe.directory /workspace \
+    && git config --global credential.helper \
+    '!f() { test -n "$GITHUB_TOKEN" && echo "username=x-access-token" && echo "password=$GITHUB_TOKEN"; }; f'
 
 # npm cache directory (persisted via volume for faster installs)
 RUN mkdir -p /home/node/.npm-cache

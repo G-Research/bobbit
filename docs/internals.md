@@ -514,6 +514,29 @@ All containers (pool and cold mode) receive resource limits via `docker-args.ts`
 
 These are applied unconditionally in `buildDockerRunArgs()` and cannot be overridden by project config.
 
+### Git authentication (GITHUB_TOKEN)
+
+Sandbox containers include a git credential helper so agents can `git push` and use `gh pr create` without manual authentication. The token flows from the host into the container at runtime — the Docker image contains only the credential helper script, never the token itself.
+
+**Injection path:**
+
+1. `resolveHostApiCredentials()` in `session-manager.ts` auto-detects a GitHub token on the host — checking `GITHUB_TOKEN` env var, `gh auth token` CLI, and `~/.config/gh/hosts.yml`
+2. The token is passed to the agent process via `docker exec -e GITHUB_TOKEN=xxx` (not `docker run -e`, because pooled containers start before credentials are known)
+3. The Dockerfile configures a global git credential helper:
+   ```
+   git config --global credential.helper \
+     '!f() { test -n "$GITHUB_TOKEN" && echo "username=x-access-token" && echo "password=$GITHUB_TOKEN"; }; f'
+   ```
+   When git requests HTTPS credentials, this helper reads `$GITHUB_TOKEN` from the current process environment and returns it as a password with the `x-access-token` username (GitHub's convention for token auth).
+4. `gh` CLI also honours `GITHUB_TOKEN` natively — no extra configuration needed.
+
+**Configuration:** The `sandbox_github_token` setting in `project.yaml` (defaults to `true`) controls whether the host token is injected. Set to `false` to disable injection — the credential helper will be present but inert (it checks `test -n "$GITHUB_TOKEN"` before returning credentials).
+
+**Security notes:**
+- The token is injected per-process via `docker exec -e`, not stored on the container filesystem
+- The credential helper is a shell function, not a persisted script with embedded secrets
+- If `GITHUB_TOKEN` is unset in the container's environment, the helper is a no-op and git falls back to its normal credential flow (which will fail in the sandbox since there is no TTY)
+
 ### Security summary
 
 - Container sees only `/workspace`, `/agent-modules` (ro), `/tools` (ro), `~/.bobbit/agent/sessions/`
