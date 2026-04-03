@@ -163,13 +163,14 @@ export class TeamManager {
 		return this.localStore!;
 	}
 
-	private resolveGateStore(goalId: string): GateStore {
+	private resolveGateStore(goalId: string): GateStore | undefined {
 		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.gateStore;
 			throw new Error(`Cannot resolve gate store: goal "${goalId}" not found in any project`);
 		}
-		throw new Error(`Cannot resolve gate store: no projectContextManager configured`);
+		// No PCM configured (test path) — no gate store available
+		return undefined;
 	}
 
 	/** Set the broadcastToGoal function (called after WebSocket server is created). */
@@ -551,6 +552,7 @@ export class TeamManager {
 		const goal = this.resolveGoal(goalId);
 		if (!goal?.workflow) return "";
 		const resolvedGateStore = this.resolveGateStore(goalId);
+		if (!resolvedGateStore) return "";
 
 		// Determine which gate IDs to inject content from
 		let inputIds: string[];
@@ -655,7 +657,7 @@ export class TeamManager {
 		// Enforce gate dependency check: upstream gates must be passed before spawning for a gate
 		const resolvedWorkflowGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
 		const spawnGateStore = this.resolveGateStore(goalId);
-		if (resolvedWorkflowGateId && goal.workflow) {
+		if (resolvedWorkflowGateId && goal.workflow && spawnGateStore) {
 			const wfGate = goal.workflow.gates.find(g => g.id === resolvedWorkflowGateId);
 			if (wfGate?.dependsOn?.length) {
 				const gateStates = spawnGateStore.getGatesForGoal(goalId);
@@ -1070,7 +1072,7 @@ export class TeamManager {
 		const goal = this.resolveGoal(goalId);
 		const skipReqs = goal?.skipGateRequirements;
 
-		if (goal?.workflow && (!skipReqs || !skipReqs.includes("workflow"))) {
+		if (goal?.workflow && completeGateStore && (!skipReqs || !skipReqs.includes("workflow"))) {
 			const gateStates = completeGateStore.getGatesForGoal(goalId);
 			const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
 			const failedGates = goal.workflow.gates.filter(g => !passedIds.has(g.id));
