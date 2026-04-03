@@ -42,10 +42,11 @@ function findNordLynxIp(): string | null {
 }
 
 function parseArgs(argv: string[]): CliArgs {
+	const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : NaN;
 	const result: CliArgs = {
 		host: "",  // resolved after parsing
-		port: 3001,
-		portExplicit: false,
+		port: !isNaN(envPort) ? envPort : 3001,
+		portExplicit: !isNaN(envPort),
 		cwd: process.cwd(),
 		newToken: false,
 		showToken: false,

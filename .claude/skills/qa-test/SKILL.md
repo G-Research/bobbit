@@ -232,7 +232,7 @@ Call the `verification_result` tool to deliver your findings:
 
 2. **summary** (REQUIRED): Concise summary of what you tested and what you found.
 
-3. **report_html** (REQUIRED): Your self-contained HTML report with embedded base64 screenshots.
+3. **report_html_file** (REQUIRED): Absolute path to your HTML report file (e.g. `$WORK_DIR/validation-report.html`). The server reads it directly — this handles large reports with embedded base64 screenshots without hitting tool output limits. Do NOT use `report_html` (inline string) — always use `report_html_file`.
 
 This tool call is how the verification system receives your results. Without it, your testing work is lost.
 
