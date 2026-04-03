@@ -46,8 +46,6 @@ export interface SandboxPoolOptions {
 	healthCheckIntervalMs: number;
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
-	gatewayUrl: string;
-	gatewayToken: string;
 	sandboxNetwork?: string;
 	worktreeSetupCommand?: string;
 }
@@ -341,8 +339,6 @@ export class SandboxPool {
 			worktreePath,
 			sandboxMounts: this.options.sandboxMounts,
 			sandboxCredentials: this.options.sandboxCredentials,
-			gatewayUrl: this.options.gatewayUrl,
-			gatewayToken: this.options.gatewayToken,
 			sandboxNetwork: this.options.sandboxNetwork,
 		});
 	}
