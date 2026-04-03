@@ -321,16 +321,21 @@ export class SandboxPool {
 				return undefined;
 			}
 
-			// Defense-in-depth: mask /proc/1/environ so even if env vars are
-			// accidentally re-added to docker run, they can't be read by the agent
+			// Defense-in-depth: try to mask /proc/1/environ so even if env vars are
+			// accidentally re-added to docker run, they can't be read by the agent.
+			// This uses bind-mount of /dev/null (same technique Docker uses for masked
+			// paths). Falls back to chmod, but procfs ignores chmod on most kernels.
 			try {
-				await execFileAsync("docker", ["exec", containerId, "chmod", "0400", "/proc/1/environ"], {
+				await execFileAsync("docker", [
+					"exec", containerId, "sh", "-c",
+					"mount --bind /dev/null /proc/1/environ 2>/dev/null || chmod 0400 /proc/1/environ 2>/dev/null || true",
+				], {
 					timeout: 5_000,
 					env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 				});
-			} catch (err) {
-				// Non-fatal — /proc may not support chmod on all platforms
-				console.warn(`[sandbox-pool] Failed to mask /proc/1/environ for ${containerId.substring(0, 12)} (non-fatal):`, err);
+			} catch {
+				// Non-fatal — the primary defense is not passing sensitive env vars
+				// to `docker run` (they go via `docker exec -e` instead).
 			}
 
 			const slot: PoolSlot = {

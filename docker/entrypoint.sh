@@ -76,14 +76,26 @@ prepare_node_modules() {
         if [ -d /workspace/node_modules ] && [ ! -L /workspace/node_modules ]; then
             mv /workspace/node_modules /workspace/.node_modules_host 2>/dev/null || true
         fi
-        ln -sfn "${cache_dir}/node_modules" /workspace/node_modules 2>/dev/null || {
-            # Symlink failed (e.g. cross-device) — fall back to NODE_PATH
-            # Restore original if we moved it
-            if [ -d /workspace/.node_modules_host ]; then
-                mv /workspace/.node_modules_host /workspace/node_modules 2>/dev/null || true
-            fi
+        # Only symlink if mv succeeded (node_modules is gone or already a symlink).
+        # If mv failed, node_modules is still a real directory — ln -sfn would create
+        # a symlink INSIDE it (node_modules/node_modules → container path) which leaks
+        # to the host via bind mount and breaks npm on the host.
+        if [ ! -d /workspace/node_modules ] || [ -L /workspace/node_modules ]; then
+            ln -sfn "${cache_dir}/node_modules" /workspace/node_modules 2>/dev/null || {
+                # Symlink failed (e.g. cross-device) — restore and fall back to NODE_PATH
+                if [ -d /workspace/.node_modules_host ]; then
+                    mv /workspace/.node_modules_host /workspace/node_modules 2>/dev/null || true
+                fi
+                export NODE_PATH="${cache_dir}/node_modules${NODE_PATH:+:$NODE_PATH}"
+            }
+        else
+            # mv failed — fall back to NODE_PATH (safe, no host-side mutation)
             export NODE_PATH="${cache_dir}/node_modules${NODE_PATH:+:$NODE_PATH}"
-        }
+        fi
+        # Clean up stale symlink from previous buggy runs
+        if [ -L /workspace/node_modules/node_modules ]; then
+            rm -f /workspace/node_modules/node_modules 2>/dev/null || true
+        fi
     else
         export NODE_PATH="${cache_dir}/node_modules${NODE_PATH:+:$NODE_PATH}"
     fi
