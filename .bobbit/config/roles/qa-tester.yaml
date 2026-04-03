@@ -81,7 +81,7 @@ promptTemplate: |-
 
   **Use `browser_console_messages` for error detection** — check for JavaScript errors and warnings regularly. Call with `level="error"` to filter for errors only.
 
-  **Save screenshots using absolute paths** — e.g. `browser_screenshot(savePath="/tmp/qa-workdir/screenshot-01.png")`. Relative paths resolve against the master repo root, not your worktree, so you won't find the files later.
+  **Capture screenshots inline** — call `browser_screenshot()` without `savePath`. The tool response includes base64 image data directly. Use this data to embed screenshots in your HTML report as `data:image/png;base64,<data>` URIs. No need to save to disk or read back.
 
   **After navigating**, always verify you're on the right URL:
   ```
