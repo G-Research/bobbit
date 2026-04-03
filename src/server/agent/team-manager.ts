@@ -1,5 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
@@ -1185,6 +1186,48 @@ export class TeamManager {
 		this.resolveTeamStore(goalId).remove(goalId);
 
 		console.log(`[team-manager] Tore down team for goal ${goalId}`);
+	}
+
+	/**
+	 * Fetch a sandboxed agent's branch into the team lead's clone so the
+	 * team lead can merge without the agent having pushed to a remote.
+	 * Best-effort — never throws; returns false on any failure.
+	 */
+	async brokerGitFetch(goalId: string, agentSessionId: string, branch: string): Promise<boolean> {
+		try {
+			const entry = this.teams.get(goalId);
+			if (!entry) return false;
+
+			// Find the agent's worktree path
+			const agent = entry.agents.find(a => a.sessionId === agentSessionId);
+			if (!agent?.worktreePath) return false;
+
+			// Find the team lead's working directory
+			if (!entry.teamLeadSessionId) return false;
+			const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
+			const teamLeadCwd = teamLeadSession?.cwd;
+			if (!teamLeadCwd) return false;
+
+			// Skip for non-sandboxed — worktrees share .git objects already
+			const goal = this.resolveGoal(goalId);
+			if (!goal) return false;
+			const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
+			if (!sandboxed) return false;
+
+			// Validate both paths still exist (agent may have been dismissed)
+			if (!fs.existsSync(agent.worktreePath) || !fs.existsSync(teamLeadCwd)) return false;
+
+			await execFile("git", ["fetch", agent.worktreePath, branch], {
+				cwd: teamLeadCwd,
+				timeout: 30_000,
+			});
+
+			console.log(`[git-broker] Fetched branch "${branch}" from agent ${agentSessionId} into team lead ${entry.teamLeadSessionId}`);
+			return true;
+		} catch (err) {
+			console.error("[git-broker] fetch failed:", err);
+			return false;
+		}
 	}
 
 	/**
