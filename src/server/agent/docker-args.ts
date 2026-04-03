@@ -1,13 +1,9 @@
 /**
- * Shared Docker argument builder for sandbox containers.
+ * Docker argument builder for sandbox pool containers.
  *
- * Consolidates the duplicated docker-run argument logic from:
- *   - sandbox-pool.ts `_buildDockerArgs()`
- *   - rpc-bridge.ts `spawnDocker()`
- *
- * Two modes:
- *   - "pool": `docker run -d ... sleep infinity` — pre-warmed container
- *   - "cold": `docker run --rm -i ...` — one-shot container for a single session
+ * Builds `docker run -d ... sleep infinity` args for detached containers
+ * managed by the sandbox pool. All sandbox sessions use pool containers
+ * (pre-warmed or created on-demand).
  */
 
 import fs from "node:fs";
@@ -19,13 +15,11 @@ import { TOOLS_DIR } from "./tool-manager.js";
 // ── Config ─────────────────────────────────────────────────────────────────
 
 export interface DockerRunConfig {
-	mode: "pool" | "cold";
-
 	image: string;
 	/** Host path to mount as /workspace. */
 	workspaceDir: string;
 
-	// ── Labels (pool mode) ───────────────────────────────────────────────
+	// ── Labels ───────────────────────────────────────────────────────────
 	/** Label value for `bobbit-pool=` or `bobbit-sandbox=`. */
 	label?: string;
 	/** Label version string (e.g. "2" for sandbox-pool). */
@@ -35,7 +29,7 @@ export interface DockerRunConfig {
 	/** Worktree path label for sandbox-pool containers. */
 	worktreePath?: string;
 
-	// ── Extra mounts (pool mode) ─────────────────────────────────────────
+	// ── Extra mounts ─────────────────────────────────────────────────────
 	/** Whether to mount a sibling -wt/ directory as /worktrees. */
 	mountWorktreeRoot?: boolean;
 
@@ -54,24 +48,17 @@ export interface DockerRunConfig {
 	gatewayToken?: string;
 	/** Docker network to attach the container to (e.g. "bobbit-sandbox-net"). */
 	sandboxNetwork?: string;
-
-	// ── Session env (cold mode) ──────────────────────────────────────────
-	sessionEnv?: Record<string, string>;
-
-	// ── System prompt (cold mode) ────────────────────────────────────────
-	systemPromptPath?: string;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
 
 export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	const {
-		mode, image, workspaceDir,
+		image, workspaceDir,
 		label, labelVersion, labelPrefix, worktreePath,
 		mountWorktreeRoot,
 		sandboxMounts, sandboxCredentials,
 		gatewayUrl, gatewayToken, sandboxNetwork,
-		sessionEnv, systemPromptPath,
 	} = config;
 
 	const toolsDir = TOOLS_DIR;
@@ -92,12 +79,10 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		baseHostArgs.push("--add-host=169.254.169.254:0.0.0.0");
 	}
 
-	const args: string[] = mode === "pool"
-		? ["run", "-d", ...baseHostArgs]
-		: ["run", "--rm", "-i", ...baseHostArgs];
+	const args: string[] = ["run", "-d", ...baseHostArgs];
 
-	// ── Labels (pool mode only) ────────────────────────────────────────
-	if (mode === "pool" && label && labelPrefix) {
+	// ── Labels ─────────────────────────────────────────────────────────
+	if (label && labelPrefix) {
 		args.push("--label", `${labelPrefix}=${label}`);
 		if (labelVersion) {
 			args.push("--label", `${labelPrefix}-version=${labelVersion}`);
@@ -143,12 +128,10 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		args.push("-v", `bobbit-npm-cache-${label}:/home/node/.npm-cache`);
 	}
 
-	// Session prompts directory (pool mode mounts the whole dir; cold mode mounts individual file)
-	if (mode === "pool") {
-		const sessionPromptsDir = path.join(bobbitDir(), "state", "session-prompts");
-		fs.mkdirSync(sessionPromptsDir, { recursive: true });
-		args.push("-v", `${toDockerPath(sessionPromptsDir)}:/tmp/session-prompts`);
-	}
+	// Session prompts directory
+	const sessionPromptsDir = path.join(bobbitDir(), "state", "session-prompts");
+	fs.mkdirSync(sessionPromptsDir, { recursive: true });
+	args.push("-v", `${toDockerPath(sessionPromptsDir)}:/tmp/session-prompts`);
 
 	// User-configured mounts
 	if (sandboxMounts) {
@@ -167,14 +150,6 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	}
 	if (gatewayToken) {
 		args.push("-e", `BOBBIT_TOKEN=${gatewayToken}`);
-	}
-
-	// Session-specific env vars (cold mode)
-	if (sessionEnv) {
-		for (const [key, value] of Object.entries(sessionEnv)) {
-			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-			args.push("-e", `${key}=${value}`);
-		}
 	}
 
 	args.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
@@ -202,18 +177,8 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		// MCP extensions dir doesn't exist — skip
 	}
 
-	// ── System prompt (cold mode only) ─────────────────────────────────
-	if (mode === "cold" && systemPromptPath) {
-		args.push("-v", `${toDockerPath(systemPromptPath)}:/tmp/system-prompt:ro`);
-	}
-
 	// ── Image + command ────────────────────────────────────────────────
-	if (mode === "pool") {
-		args.push(image, "sleep", "infinity");
-	} else {
-		// Cold mode: caller appends node + cli.js + agent args after this
-		args.push(image);
-	}
+	args.push(image, "sleep", "infinity");
 
 	return args;
 }

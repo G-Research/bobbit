@@ -424,7 +424,6 @@ export class SessionManager {
 		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
 		if (sandboxConfig !== "docker") return false;
 
-		const sandboxImage = this.projectConfigStore.get("sandbox_image") || "bobbit-agent";
 		const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
 		const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
 		let credentials: Record<string, string> = {};
@@ -439,10 +438,10 @@ export class SessionManager {
 		}
 
 		// Validate mounts unless skipped (e.g. during restore — already validated at creation)
-		const validatedMounts = opts?.skipMountValidation ? mounts : validateSandboxMounts(mounts, "[session-manager]");
+		if (!opts?.skipMountValidation) validateSandboxMounts(mounts, "[session-manager]");
 
 		// Ensure the restricted Docker network exists
-		const sandboxNetwork = await this.ensureSandboxNetwork();
+		await this.ensureSandboxNetwork();
 
 		// Read gateway URL and generate scoped token for the container
 		try {
@@ -464,12 +463,9 @@ export class SessionManager {
 		}
 
 		bridgeOptions.sandboxed = true;
-		bridgeOptions.sandboxImage = sandboxImage;
 		// Auto-resolve API credentials from host auth system, then overlay manual overrides
 		const autoCredentials = resolveHostApiCredentials(this.preferencesStore);
 		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
-		bridgeOptions.sandboxMounts = validatedMounts;
-		bridgeOptions.sandboxNetwork = sandboxNetwork;
 
 		// Claim a slot from the sandbox pool (creates on-demand if exhausted)
 		if (this.sandboxPool) {

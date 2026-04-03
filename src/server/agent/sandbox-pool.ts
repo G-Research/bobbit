@@ -333,7 +333,6 @@ export class SandboxPool {
 	/** Build docker run args for a pool container with a specific worktree. */
 	private _buildDockerArgs(worktreePath: string): string[] {
 		return buildDockerRunArgs({
-			mode: "pool",
 			image: this.options.image,
 			workspaceDir: worktreePath,
 			label: this.label,
