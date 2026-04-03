@@ -128,6 +128,28 @@ test.describe("Project isolation — no default fallback", () => {
 			// Verify the session doesn't appear in any project's list (it was fully removed)
 			const allSessions = await listSessions();
 			expect(allSessions.some((s: any) => s.id === sessionId)).toBe(false);
+
+			// Verify no cross-contamination: archived/removed session must NOT appear
+			// in the default project's archived list
+			const archivedDefaultResp = await apiFetch(`/api/sessions?projectId=${defaultProject.id}&include=archived`);
+			expect(archivedDefaultResp.status).toBe(200);
+			const archivedDefaultBody = await archivedDefaultResp.json();
+			const archivedDefault = archivedDefaultBody.sessions ?? archivedDefaultBody;
+			expect(archivedDefault.some((s: any) => s.id === sessionId)).toBe(false);
+
+			// If the session was archived (has agentSessionFile), verify it's in project B
+			const archivedBResp = await apiFetch(`/api/sessions?projectId=${projectB.id}&include=archived`);
+			expect(archivedBResp.status).toBe(200);
+			const archivedBBody = await archivedBResp.json();
+			const archivedB = archivedBBody.sessions ?? archivedBBody;
+			const archivedInB = archivedB.some((s: any) => s.id === sessionId);
+			// Session may have been removed (no agentSessionFile) rather than archived
+			// — either way, it must not be in the default project
+			if (archivedInB) {
+				// If it was archived, verify it has the correct projectId
+				const archivedSession = archivedB.find((s: any) => s.id === sessionId);
+				expect(archivedSession.projectId).toBe(projectB.id);
+			}
 		} finally {
 			await removeProject(projectB.id);
 		}

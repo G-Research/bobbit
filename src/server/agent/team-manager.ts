@@ -58,7 +58,7 @@ export function formatElapsed(sinceMs: number): string {
 
 /** Resolve the absolute path to the team-lead extension (raw .ts, loaded by jiti). */
 const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
-import type { TaskManager } from "./task-manager.js";
+import { TaskManager } from "./task-manager.js";
 
 
 export interface TeamAgent {
@@ -379,7 +379,7 @@ export class TeamManager {
 			const lines = activeWorkers.map((agent) => {
 				const s = this.sessionManager.getSession(agent.sessionId);
 				const status = s?.status ?? "unknown";
-				const tasks = this.taskManager.getTasksForSession(agent.sessionId);
+				const tasks = this.resolveTasksForSession(goalId, agent.sessionId);
 				const taskInfo = tasks.length > 0
 					? `task "${tasks[0].title}" (${tasks[0].state})`
 					: "no assigned task";
@@ -430,12 +430,24 @@ export class TeamManager {
 		// PCM-active paths should use resolveGoalManager() instead.
 		// This getter is only for the non-PCM test path.
 		if (this.config.projectContextManager) {
-			return this.config.projectContextManager.getDefault().goalManager;
+			throw new Error("goalManager getter must not be called when PCM is active; use resolveGoalManager(goalId) instead");
 		}
 		// Support mock SessionManagers that expose goalManager directly (test path)
 		if ((this.sessionManager as any).goalManager) return (this.sessionManager as any).goalManager;
 		if (this._localGoalManager) return this._localGoalManager;
 		throw new Error("goalManager getter requires PCM or local GoalManager");
+	}
+
+	/**
+	 * Resolve tasks for a session using the correct project's TaskManager.
+	 * When PCM is active, resolves via the goal's project context.
+	 */
+	private resolveTasksForSession(goalId: string, sessionId: string): ReturnType<TaskManager["getTasksForSession"]> {
+		if (this.config.projectContextManager) {
+			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return new TaskManager(ctx.taskStore).getTasksForSession(sessionId);
+		}
+		return this.taskManager.getTasksForSession(sessionId);
 	}
 
 	/** Resolve a goal across all project contexts. */
@@ -867,7 +879,7 @@ export class TeamManager {
 		}
 
 		// Look up tasks assigned to the worker
-		const tasks = this.taskManager.getTasksForSession(workerSessionId);
+		const tasks = this.resolveTasksForSession(goalId, workerSessionId);
 
 		let message: string;
 		if (tasks.length > 0) {
