@@ -2657,6 +2657,18 @@ async function handleApiRoute(
 					teamManager.notifyTeamLeadOfTaskCompletion(task.goalId, task.title, body.state);
 				}
 
+				// Broker git fetch: when a sandboxed agent sets headSha, fetch their branch into the team lead's clone
+				if (body.headSha) {
+					const updatedTask = tm.getTask(id);
+					if (updatedTask?.goalId && updatedTask?.branch && updatedTask?.assignedSessionId) {
+						const broker = (teamManager as any).brokerGitFetch as ((goalId: string, sessionId: string, branch: string) => Promise<boolean>) | undefined;
+						if (broker) {
+							broker.call(teamManager, updatedTask.goalId, updatedTask.assignedSessionId, updatedTask.branch)
+								.catch((err: unknown) => console.error("[git-broker] fetch failed:", err));
+						}
+					}
+				}
+
 				json({ ok: true });
 			} catch (err: any) {
 				json({ error: err.message }, 400);
