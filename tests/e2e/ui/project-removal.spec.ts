@@ -38,7 +38,7 @@ test.describe("Remove Project button", () => {
 		const project = await createProject("Removable Project");
 
 		await openApp(page);
-		await navigateToHash(page, `#/settings/${project.id}/project`);
+		await navigateToHash(page, `#/settings/${project.id}/general`);
 
 		// Verify the Remove Project button is visible
 		const removeBtn = page.getByRole("button", { name: "Remove Project" });
@@ -70,7 +70,7 @@ test.describe("Remove Project button", () => {
 		expect(defaultProject).toBeDefined();
 
 		await openApp(page);
-		await navigateToHash(page, `#/settings/${defaultProject.id}/project`);
+		await navigateToHash(page, `#/settings/${defaultProject.id}/general`);
 
 		// Wait for settings content to load
 		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
