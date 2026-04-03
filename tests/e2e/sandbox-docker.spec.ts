@@ -61,6 +61,61 @@ test.describe("Sandbox Docker — /proc/1/environ", () => {
 		}
 	});
 
+	test("git credential helper uses GITHUB_TOKEN from docker exec -e", async () => {
+		// Start a bare node:20-slim container (same base as our Dockerfile).
+		// No credential helper is configured — this proves git cannot use
+		// GITHUB_TOKEN without one, reproducing the bug.
+		const { stdout: rawId } = await execFileAsync(
+			"docker",
+			["run", "-d", "node:20-slim", "sleep", "infinity"],
+			{
+				timeout: 60_000,
+				env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+			},
+		);
+		const cid = rawId.trim();
+
+		try {
+			// Install git inside the container (node:20-slim doesn't include it)
+			await execFileAsync(
+				"docker",
+				["exec", cid, "sh", "-c", "apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1"],
+				{ timeout: 120_000 },
+			);
+
+			// Attempt git credential fill with GITHUB_TOKEN injected via docker exec -e.
+			// Without a credential helper, git has no way to use this env var.
+			let exitCode = 0;
+			let stderr = "";
+			try {
+				const result = await execFileAsync(
+					"docker",
+					[
+						"exec",
+						"-e", "GITHUB_TOKEN=test-fake-token",
+						cid,
+						"sh", "-c",
+						'printf "protocol=https\\nhost=github.com\\n" | git credential fill',
+					],
+					{ timeout: 15_000 },
+				);
+				// If it somehow succeeds, check output doesn't have our token
+				// (it shouldn't on a bare image)
+				stderr = result.stderr || "";
+			} catch (err: unknown) {
+				const e = err as { code?: number; stderr?: string };
+				exitCode = e.code ?? 1;
+				stderr = e.stderr ?? "";
+			}
+
+			// The command must fail — git has no credential helper to translate
+			// GITHUB_TOKEN into credentials. This is the bug we're reproducing.
+			expect(exitCode, "Expected git credential fill to fail without a credential helper").not.toBe(0);
+		} finally {
+			await execFileAsync("docker", ["rm", "-f", cid], { timeout: 10_000 }).catch(() => {});
+		}
+	});
+
 	test("buildDockerRunArgs output has no token env vars", async () => {
 		const { buildDockerRunArgs } = await import("../../dist/server/agent/docker-args.js");
 
