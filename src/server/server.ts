@@ -4274,6 +4274,10 @@ async function handleApiRoute(
 			return;
 		}
 		// Support report_html_file: server reads file directly (avoids tool output limits for large reports)
+		if (typeof body.report_html === "string" && typeof body.report_html_file === "string") {
+			json({ error: "Provide either report_html or report_html_file, not both" }, 400);
+			return;
+		}
 		let reportHtml: string | undefined = typeof body.report_html === "string" ? body.report_html : undefined;
 		if (!reportHtml && typeof body.report_html_file === "string") {
 			try {

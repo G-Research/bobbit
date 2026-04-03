@@ -219,17 +219,14 @@ test.describe("POST /api/internal/verification-result", () => {
 		harness.pendingResults.delete("test-session-nofile");
 	});
 
-	test("inline report_html takes precedence over report_html_file", async ({ gateway }) => {
+	test("rejects when both report_html and report_html_file are provided", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
-
-		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-precedence", resolve);
-		});
+		harness.pendingResults.set("test-session-both", () => {});
 
 		const res = await apiFetch("/api/internal/verification-result", {
 			method: "POST",
 			body: JSON.stringify({
-				sessionId: "test-session-precedence",
+				sessionId: "test-session-both",
 				verdict: "pass",
 				summary: "ok",
 				report_html: "<h1>Inline</h1>",
@@ -237,12 +234,11 @@ test.describe("POST /api/internal/verification-result", () => {
 			}),
 		});
 
-		expect(res.status).toBe(200);
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body.error).toContain("not both");
 
-		const result = await promise;
-		expect(result.reportHtml).toBe("<h1>Inline</h1>");
-
-		harness.pendingResults.delete("test-session-precedence");
+		harness.pendingResults.delete("test-session-both");
 	});
 
 	test("ignores non-string report_html", async ({ gateway }) => {

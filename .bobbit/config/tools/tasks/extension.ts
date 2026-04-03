@@ -214,12 +214,16 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], { description: "Whether verification passed or failed" }),
 			summary: Type.String({ description: "Detailed markdown summary of findings — what was reviewed, specific issues found (with file:line references), and verdict rationale" }),
-			report_html: Type.Optional(Type.String({ description: "Self-contained HTML report with embedded screenshots (for QA agents). For large reports, use report_html_file instead." })),
-			report_html_file: Type.Optional(Type.String({ description: "Absolute path to an HTML report file on disk. The server reads it directly — use this for large reports with embedded base64 screenshots that exceed tool output limits." })),
+			report_html: Type.Optional(Type.String({ description: "Self-contained HTML report with embedded screenshots (for QA agents). For large reports, use report_html_file instead. Cannot be combined with report_html_file." })),
+			report_html_file: Type.Optional(Type.String({ description: "Absolute path to an HTML report file on disk. The server reads it directly — use this for large reports with embedded base64 screenshots that exceed tool output limits. Cannot be combined with report_html." })),
 		}),
 		async execute(_id, params) {
+			if (params.report_html && params.report_html_file) {
+				return err("Provide either report_html or report_html_file, not both.");
+			}
 			try {
-				const body: Record<string, unknown> = { sessionId, verdict: params.verdict, summary: params.summary, report_html: params.report_html };
+				const body: Record<string, unknown> = { sessionId, verdict: params.verdict, summary: params.summary };
+				if (params.report_html) body.report_html = params.report_html;
 				if (params.report_html_file) body.report_html_file = params.report_html_file;
 				return ok(await api("POST", "/api/internal/verification-result", body));
 			} catch (e: any) { return err(e.message); }
