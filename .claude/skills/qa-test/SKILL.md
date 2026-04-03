@@ -250,6 +250,8 @@ Do NOT emit `<verdict>` or `<qa_report>` XML tags — use the `verification_resu
 
 - **NEVER** share state with the repo's `.bobbit/` directory
 - **NEVER** use `bash` with `&` for the server — always use `bash_bg`
+- **NEVER** run unit tests, integration tests, or `npm test`. You are a QA tester driving a real browser, not a developer. If you cannot get the ephemeral server running, submit a FAIL verdict explaining the infrastructure issue and stop. Do not fall back to running the project's test suite.
+- **NEVER** read source code (`.ts`, `.js`, `.tsx`, `.jsx` files). You are testing the product as a user. The only files you may read are config files needed for server setup.
 - **ALWAYS** clean up, even on failure
 - **ALWAYS** embed screenshots as base64 in the report (self-contained)
 - **RESPECT** the time and scenario budgets — partial results are better than no results
