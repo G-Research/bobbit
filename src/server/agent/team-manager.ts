@@ -430,8 +430,9 @@ export class TeamManager {
 		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.goalStore.get(goalId);
+			return undefined; // Don't fall back to default project
 		}
-		return this.goalManager.getGoal(goalId);
+		return this.goalManager.getGoal(goalId); // non-PCM test path only
 	}
 
 	/** Get a GoalManager scoped to the project owning the given goal. */
@@ -439,8 +440,9 @@ export class TeamManager {
 		if (this.config.projectContextManager) {
 			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.goalManager;
+			throw new Error(`Cannot resolve GoalManager: goal "${goalId}" not found in any project`);
 		}
-		return this.goalManager;
+		return this.goalManager; // non-PCM test path only
 	}
 
 	/**
@@ -945,11 +947,8 @@ export class TeamManager {
 			const projectCtx = goalId && this.config.projectContextManager
 				? this.config.projectContextManager.getContextForGoal(goalId)
 				: null;
-			const store = projectCtx
-				? projectCtx.sessionStore
-				: (this.sessionManager as any).store;
-			if (store) {
-				store.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
+			if (projectCtx) {
+				projectCtx.sessionStore.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch });
 			}
 		}
 
@@ -1139,11 +1138,8 @@ export class TeamManager {
 				const projectCtx = this.config.projectContextManager
 					? this.config.projectContextManager.getContextForGoal(goalId)
 					: null;
-				const store = projectCtx
-					? projectCtx.sessionStore
-					: (this.sessionManager as any).store;
-				if (store) {
-					store.update(entry.teamLeadSessionId, {
+				if (projectCtx) {
+					projectCtx.sessionStore.update(entry.teamLeadSessionId, {
 						repoPath: goal.repoPath,
 						branch: goal.branch,
 						worktreePath: goal.worktreePath,

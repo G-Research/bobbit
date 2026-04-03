@@ -3910,7 +3910,11 @@ async function handleApiRoute(
 	if (sessionCostBreakdownMatch && req.method === "GET") {
 		const sessionId = sessionCostBreakdownMatch[1];
 		const sessionForCost = sessionManager.getSession(sessionId);
-		const costTracker = sessionManager.getCostTracker(sessionForCost?.projectId);
+		if (!sessionForCost?.projectId) {
+			json({ error: "Session not found or has no project" }, 404);
+			return;
+		}
+		const costTracker = sessionManager.getCostTracker(sessionForCost.projectId);
 		const allCosts = costTracker.getAllCosts();
 		const sessionCost = allCosts.get(sessionId);
 		if (!sessionCost) {
@@ -3947,7 +3951,11 @@ async function handleApiRoute(
 	if (sessionCostMatch && req.method === "GET") {
 		const id = sessionCostMatch[1];
 		const sessionForCost = sessionManager.getSession(id);
-		const cost = sessionManager.getCostTracker(sessionForCost?.projectId).getSessionCost(id);
+		if (!sessionForCost?.projectId) {
+			json({ error: "Session not found or has no project" }, 404);
+			return;
+		}
+		const cost = sessionManager.getCostTracker(sessionForCost.projectId).getSessionCost(id);
 		if (!cost) {
 			json({ error: "No cost data for this session" }, 404);
 			return;
@@ -4030,7 +4038,11 @@ async function handleApiRoute(
 			return;
 		}
 		const taskSession = sessionManager.getSession(task.assignedSessionId);
-		const cost = sessionManager.getCostTracker(taskSession?.projectId).getSessionCost(task.assignedSessionId);
+		if (!taskSession?.projectId) {
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			return;
+		}
+		const cost = sessionManager.getCostTracker(taskSession.projectId).getSessionCost(task.assignedSessionId);
 		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
 		return;
 	}

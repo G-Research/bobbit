@@ -534,7 +534,7 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Get a CostTracker for a specific project. If no projectId is provided, scans all projects. */
+	/** Get a CostTracker for a specific project. Requires explicit projectId when PCM is active. */
 	getCostTracker(projectId?: string): CostTracker {
 		if (projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
@@ -542,10 +542,7 @@ export class SessionManager {
 		}
 		if (this._testCostTracker) return this._testCostTracker;
 		if (this.projectContextManager) {
-			// For cost aggregation endpoints that don't have a single project scope,
-			// return the default project's cost tracker. Cost data is stored per-project
-			// but the CostTracker.getAllCosts() aggregates across sessions it tracks.
-			return this.projectContextManager.getDefault().costTracker;
+			throw new Error("Cannot resolve cost tracker: projectId is required");
 		}
 		throw new Error("No cost tracker available");
 	}
