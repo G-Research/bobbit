@@ -471,7 +471,7 @@ export class SessionManager {
 		bridgeOptions.sandboxMounts = validatedMounts;
 		bridgeOptions.sandboxNetwork = sandboxNetwork;
 
-		// Claim a pre-warmed slot from the sandbox pool
+		// Claim a slot from the sandbox pool (creates on-demand if exhausted)
 		if (this.sandboxPool) {
 			const result = await this.sandboxPool.claim(sessionId, opts?.sandboxClaim);
 			if (result) {
@@ -479,8 +479,12 @@ export class SessionManager {
 				// Override CWD to the pool slot's worktree
 				bridgeOptions.cwd = result.worktreePath;
 			} else {
-				console.warn("[session-manager] Sandbox pool exhausted, falling back to cold docker run");
+				// Pool creates on-demand slots when exhausted, so null means
+				// slot creation itself failed (Docker unavailable, disk full, etc.)
+				throw new Error("Failed to create sandbox container — Docker may be unavailable");
 			}
+		} else {
+			throw new Error("Sandbox mode requires Docker pool — pool not initialized");
 		}
 
 		return true;
