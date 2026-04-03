@@ -86,6 +86,9 @@ export interface SessionSetupPlan {
 	reattemptGoalId?: string;
 	sandboxClaim?: ClaimOptions;
 
+	// Project association
+	projectId?: string;
+
 	// Delegate-specific
 	instructions?: string;
 	context?: Record<string, string>;
@@ -385,6 +388,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		sandboxed: plan.sandboxed,
 		delegateOf: plan.delegateOf,
 		reattemptGoalId: plan.reattemptGoalId,
+		projectId: plan.projectId,
 	});
 }
 
