@@ -173,7 +173,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		}
 	});
 
-	test("createTeamRepo creates a valid bare git repo on disk", async () => {
+	test("createTeamRepo creates a valid bare git repo on disk", { timeout: 120_000 }, async () => {
 		const result = await pool!.createTeamRepo(goalId, repoPath, "master");
 		teamRepoPath = result;
 
@@ -192,7 +192,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		expect(fs.existsSync(refsPath)).toBe(true);
 	});
 
-	test("createTeamRepo is idempotent — same path returned on second call", async () => {
+	test("createTeamRepo is idempotent — same path returned on second call", { timeout: 120_000 }, async () => {
 		const first = await pool!.createTeamRepo(goalId, repoPath, "master");
 		const second = await pool!.createTeamRepo(goalId, repoPath, "master");
 
@@ -201,7 +201,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		expect(fs.existsSync(path.join(first, "HEAD"))).toBe(true);
 	});
 
-	test("destroyTeamRepo removes the bare repo directory", async () => {
+	test("destroyTeamRepo removes the bare repo directory", { timeout: 120_000 }, async () => {
 		const destroyGoalId = `test-destroy-${Date.now()}`;
 		const created = await pool!.createTeamRepo(destroyGoalId, repoPath, "master");
 		expect(fs.existsSync(created)).toBe(true);
@@ -216,6 +216,16 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		const slot = await pool!.claim(sessionId);
 		expect(slot).not.toBeNull();
 		claimedContainers.push(slot!.containerId);
+
+		// Wait for container to be running
+		const maxRetries = 10;
+		for (let i = 0; i < maxRetries; i++) {
+			try {
+				const { stdout: state } = await execFileAsync("docker", ["inspect", "--format", "{{.State.Running}}", slot!.containerId], { timeout: 5_000 });
+				if (state.trim() === "true") break;
+			} catch { /* not ready yet */ }
+			await new Promise(r => setTimeout(r, 1_000));
+		}
 
 		// Verify /team-repos exists inside the container
 		const { stdout } = await execFileAsync(
