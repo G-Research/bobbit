@@ -504,6 +504,21 @@ function renderSandboxSection(
 							>${icon(RotateCcw, "xs")}</button>
 						</div>
 					</div>
+
+					<div class="flex items-center gap-3">
+						<span class="${labelClass}">GitHub Token</span>
+						<label class="flex items-center gap-2 cursor-pointer">
+							<input
+								type="checkbox"
+								class="accent-primary"
+								.checked=${(pendingChanges.sandbox_github_token ?? resolved.sandbox_github_token?.value ?? "true") === "true"}
+								@change=${(e: Event) => {
+									pendingChanges.sandbox_github_token = (e.target as HTMLInputElement).checked ? "true" : "false";
+								}}
+							/>
+							<span class="text-xs text-muted-foreground">Auto-inject host GitHub token (for <code class="text-[10px]">gh pr create</code>, git push via HTTPS)</span>
+						</label>
+					</div>
 				</div>
 			` : ""}
 		</div>
@@ -1838,7 +1853,7 @@ function renderProjectScopeTab(projectId: string) {
 	// Keys to show in the Commands & Sandbox tab
 	const HIDDEN_KEYS = new Set([
 		"default_thinking_level", "sandbox", "sandbox_image",
-		"sandbox_credentials", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
+		"sandbox_credentials", "sandbox_github_token", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
 		"config_directories", "skill_directories",
 	]);
 

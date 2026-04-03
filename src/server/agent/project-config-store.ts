@@ -24,6 +24,7 @@ const DEFAULTS: Record<string, string> = {
 	sandbox: "none",                    // "none" | "docker"
 	sandbox_image: "bobbit-agent",      // Docker image name
 	sandbox_credentials: "",            // JSON object: '{"GITHUB_TOKEN":"ghp_xxx"}'
+	sandbox_github_token: "true",       // "true" | "false" — auto-inject GITHUB_TOKEN from host
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
 	sandbox_pool_size: "2",             // Pre-warmed containers (0 = disable pooling)
 	sandbox_pool_max_idle: "300",       // Seconds before excess idle containers culled

@@ -510,7 +510,7 @@ export class SessionManager {
 
 		bridgeOptions.sandboxed = true;
 		// Auto-resolve API credentials from host auth system, then overlay manual overrides
-		const autoCredentials = resolveHostApiCredentials(this.preferencesStore);
+		const autoCredentials = resolveHostApiCredentials(this.preferencesStore, this.projectConfigStore);
 		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
 
 		// Claim a slot from the sandbox pool (creates on-demand if exhausted)
@@ -1391,7 +1391,7 @@ export class SessionManager {
 		// Delegate sessions: dormant entries only — restored on-demand via addClient()
 		for (const ps of delegates) {
 			if (!ps.agentSessionFile || !fs.existsSync(ps.agentSessionFile)) {
-				this.getSessionStore(ps.projectId).remove(ps.id);
+				try { this.getSessionStore(ps.projectId).remove(ps.id); } catch { /* project gone */ }
 				continue;
 			}
 			this.addDormantSession(ps);
@@ -1438,13 +1438,19 @@ export class SessionManager {
 			} catch (err) {
 				// If terminate fails (e.g. session wasn't fully restored), archive directly
 				console.warn(`[session-manager] Failed to terminate orphan ${id}, archiving:`, err);
-				this.getSessionStore(projectId).archive(id);
+				try { this.getSessionStore(projectId).archive(id); } catch { /* project gone */ }
 			}
 		}
 	}
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
-		const sessionStore = this.getSessionStore(ps.projectId);
+		let sessionStore: SessionStore;
+		try {
+			sessionStore = this.getSessionStore(ps.projectId);
+		} catch {
+			console.warn(`[session-manager] Skipping session ${ps.id} — project "${ps.projectId}" no longer registered`);
+			return;
+		}
 		if (!ps.agentSessionFile) {
 			if (ps.worktreePath && ps.branch) {
 				// Code may be recoverable — the branch exists in git
@@ -2798,7 +2804,7 @@ export class SessionManager {
 			: (this._testStore?.getLive() ?? []);
 		for (const ps of allLiveForTerminate) {
 			if (ps.delegateOf === id && !this.sessions.has(ps.id)) {
-				this.getSessionStore(ps.projectId).archive(ps.id);
+				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 			}
 		}
 
@@ -3335,7 +3341,7 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * Returns a map of env var names → values to inject into the sandbox container.
  * Manual sandbox_credentials always take precedence (merged on top by caller).
  */
-function resolveHostApiCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null): Record<string, string> {
+function resolveHostApiCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// 1. Read auth.json
@@ -3378,8 +3384,9 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 	}
 
 	// Auto-detect GITHUB_TOKEN for gh CLI (PR creation, git push via HTTPS).
-	// Check host env first, then try `gh auth token` to extract from gh's keyring.
-	if (!result["GITHUB_TOKEN"]) {
+	// Gated by sandbox_github_token setting (defaults to true).
+	const ghTokenEnabled = (projectConfig?.get("sandbox_github_token") ?? "true") !== "false";
+	if (ghTokenEnabled && !result["GITHUB_TOKEN"]) {
 		const hostGhToken = process.env["GITHUB_TOKEN"] || process.env["GH_TOKEN"];
 		if (hostGhToken) {
 			result["GITHUB_TOKEN"] = hostGhToken;
