@@ -488,7 +488,7 @@ function ensureQaConfigLoaded(projectId: string): void {
 	fetch(`/api/projects/${projectId}/qa-testing-config`)
 		.then(r => r.json())
 		.then(data => {
-			_qaConfigCache.set(projectId, !!data.config?.qa_start_command);
+			_qaConfigCache.set(projectId, !!data.config);
 			_qaConfigFetching = false;
 			renderApp();
 		})
