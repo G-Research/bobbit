@@ -822,8 +822,26 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onProjectProposal = async (fields: Record<string, string>) => {
-			const { registerProject } = await import("./api.js");
-			await registerProject(fields.name, fields.root_path, undefined);
+			const { registerProject, fetchProjects, gatewayFetch } = await import("./api.js");
+			const project = await registerProject(fields.name, fields.root_path, undefined);
+			if (project) {
+				// Write detected config to project.yaml
+				const configFields: Record<string, string> = {};
+				const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
+					'test_unit_command', 'test_e2e_command',
+					'system_prompt_context', 'worktree_setup_command'];
+				for (const key of CONFIG_KEYS) {
+					if (fields[key]) configFields[key] = fields[key];
+				}
+				if (Object.keys(configFields).length > 0) {
+					await gatewayFetch(`/api/projects/${project.id}/config`, {
+						method: 'PUT',
+						body: JSON.stringify(configFields),
+					});
+				}
+				// Refresh project list
+				state.projects = await fetchProjects();
+			}
 			renderApp();
 		};
 

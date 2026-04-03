@@ -294,6 +294,32 @@ export async function fetchProjects(): Promise<Project[]> {
   }
 }
 
+export async function detectProject(dirPath: string): Promise<{
+  exists: boolean;
+  hasBobbit: boolean;
+  isEmpty: boolean;
+  hasPackageJson: boolean;
+  name: string;
+}> {
+  const res = await gatewayFetch('/api/projects/detect', {
+    method: 'POST',
+    body: JSON.stringify({ path: dirPath }),
+  });
+  if (!res.ok) throw new Error('Detection failed');
+  return res.json();
+}
+
+export async function browseDirectory(dirPath?: string): Promise<{
+  current: string;
+  parent: string | null;
+  entries: Array<{ name: string; path: string }>;
+}> {
+  const params = dirPath ? `?path=${encodeURIComponent(dirPath)}` : '';
+  const res = await gatewayFetch(`/api/browse-directory${params}`);
+  if (!res.ok) throw new Error('Browse failed');
+  return res.json();
+}
+
 export async function registerProject(name: string, rootPath: string, color?: string): Promise<Project | null> {
   try {
     const body: Record<string, string> = { name, rootPath };
