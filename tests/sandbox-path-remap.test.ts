@@ -60,4 +60,28 @@ describe('sandbox session path remapping', () => {
 	it('should export CONTAINER_AGENT_DIR constant', () => {
 		assert.strictEqual(CONTAINER_AGENT_DIR, '/home/node/.bobbit/agent/');
 	});
+
+	it('should remap /workspace/C:/... container paths to host paths', () => {
+		const containerPath = '/workspace/C:/Users/joe/.pi/agent/sessions/--workspace--/abc.jsonl';
+		const hostPath = containerToHostSessionPath(containerPath);
+		assert.strictEqual(hostPath, 'C:/Users/joe/.pi/agent/sessions/--workspace--/abc.jsonl');
+	});
+
+	it('should remap /workspace/D:/... container paths to host paths', () => {
+		const containerPath = '/workspace/D:/Projects/.bobbit/agent/sessions/--ws--/abc.jsonl';
+		const hostPath = containerToHostSessionPath(containerPath);
+		assert.strictEqual(hostPath, 'D:/Projects/.bobbit/agent/sessions/--ws--/abc.jsonl');
+	});
+
+	it('should not remap /workspace/ paths without Windows drive letter', () => {
+		const containerPath = '/workspace/some/relative/path.jsonl';
+		const result = containerToHostSessionPath(containerPath);
+		assert.strictEqual(result, containerPath, 'non-Windows /workspace/ paths should pass through');
+	});
+
+	it('should remap legacy .pi/agent/ host paths to container legacy mount', () => {
+		const hostPath = '/home/testuser/.pi/agent/sessions/--workspace--/abc.jsonl';
+		const result = hostToContainerSessionPath(hostPath, TEST_HOME);
+		assert.strictEqual(result, '/home/node/.pi/agent/sessions/--workspace--/abc.jsonl');
+	});
 });

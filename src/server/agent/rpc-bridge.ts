@@ -29,10 +29,21 @@ export const CONTAINER_AGENT_DIR = "/home/node/.bobbit/agent/";
  * @param homeDir - override os.homedir() for testing
  */
 export function containerToHostSessionPath(containerPath: string, homeDir?: string): string {
-	if (!containerPath.startsWith(CONTAINER_AGENT_DIR)) return containerPath;
-	const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
-	const agentDir = homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir();
-	return path.join(agentDir, relative).replace(/\\/g, "/");
+	if (containerPath.startsWith(CONTAINER_AGENT_DIR)) {
+		const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
+		const agentDir = homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir();
+		return path.join(agentDir, relative).replace(/\\/g, "/");
+	}
+
+	// Handle paths like /workspace/C:/Users/... where the agent inside Docker
+	// resolved a Windows-style home dir relative to /workspace (the CWD mount).
+	// On Linux, "C:/Users/..." is a relative path (directory named "C:"),
+	// so resolve() prepends /workspace. Strip the prefix to recover the host path.
+	if (containerPath.startsWith("/workspace/") && /^[A-Z]:[\\/]/.test(containerPath.substring("/workspace/".length))) {
+		return containerPath.substring("/workspace/".length).replace(/\\/g, "/");
+	}
+
+	return containerPath;
 }
 
 /**
@@ -44,6 +55,18 @@ export function containerToHostSessionPathWithFallback(containerPath: string): s
 	const primary = containerToHostSessionPath(containerPath);
 	if (primary === containerPath) return primary; // wasn't a container path
 	if (fs.existsSync(primary)) return primary;
+
+	// For /workspace/C:/... paths, the primary conversion already stripped the prefix.
+	// Try legacy .pi → .bobbit and vice versa.
+	if (containerPath.startsWith("/workspace/")) {
+		// primary is the Windows path — try swapping .pi ↔ .bobbit
+		const normalized = primary.replace(/\\/g, "/");
+		const piSwap = normalized.replace(/\/\.pi\/agent\//, "/.bobbit/agent/");
+		if (piSwap !== normalized && fs.existsSync(piSwap)) return piSwap;
+		const bobbitSwap = normalized.replace(/\/\.bobbit\/agent\//, "/.pi/agent/");
+		if (bobbitSwap !== normalized && fs.existsSync(bobbitSwap)) return bobbitSwap;
+		return primary;
+	}
 
 	// Try legacy .pi/agent/ path
 	const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
@@ -63,12 +86,24 @@ export function containerToHostSessionPathWithFallback(containerPath: string): s
  * Remap a host path back to the container-internal path. Inverse of containerToHostSessionPath.
  * @param homeDir - override os.homedir() for testing
  */
+/** Container-side legacy agent directory (mounted read-only for session restore) */
+export const CONTAINER_LEGACY_AGENT_DIR = "/home/node/.pi/agent/";
+
 export function hostToContainerSessionPath(hostPath: string, homeDir?: string): string {
+	const home = homeDir ?? os.homedir();
 	const hostAgentDir = (homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir()).replace(/\\/g, "/") + "/";
 	const normalized = hostPath.replace(/\\/g, "/");
-	if (!normalized.startsWith(hostAgentDir)) return hostPath;
-	const relative = normalized.substring(hostAgentDir.length);
-	return CONTAINER_AGENT_DIR + relative;
+	if (normalized.startsWith(hostAgentDir)) {
+		const relative = normalized.substring(hostAgentDir.length);
+		return CONTAINER_AGENT_DIR + relative;
+	}
+	// Legacy .pi/agent/ paths map to the read-only legacy mount inside the container
+	const legacyDir = path.join(home, ".pi", "agent").replace(/\\/g, "/") + "/";
+	if (normalized.startsWith(legacyDir)) {
+		const relative = normalized.substring(legacyDir.length);
+		return CONTAINER_LEGACY_AGENT_DIR + relative;
+	}
+	return hostPath;
 }
 
 export interface RpcBridgeOptions {
