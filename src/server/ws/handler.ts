@@ -476,23 +476,18 @@ export function handleWebSocketConnection(
 	});
 }
 
-/** Resolve the correct TaskManager for a goal (uses per-project store if available). */
+/** Resolve the correct TaskManager for a goal (uses per-project store). Throws if not found. */
 function resolveTaskManagerForGoal(sessionManager: SessionManager, goalId?: string): TaskManager {
 	const pcm = sessionManager.getProjectContextManager();
 	if (goalId && pcm) {
 		const ctx = pcm.getContextForGoal(goalId);
 		if (ctx) return new TaskManager(ctx.taskStore);
 	}
-	return sessionManager.taskManager;
+	throw new Error(`Cannot resolve TaskManager: goal "${goalId}" not found in any project`);
 }
 
-/** Resolve the correct TaskManager for a task ID (finds via goalId lookup). */
+/** Resolve the correct TaskManager for a task ID (finds via goalId lookup). Throws if not found. */
 function resolveTaskManagerForTask(sessionManager: SessionManager, taskId: string): TaskManager {
-	// Try default first
-	const task = sessionManager.taskManager.getTask(taskId);
-	if (task) return sessionManager.taskManager;
-
-	// Search across projects
 	const pcm = sessionManager.getProjectContextManager();
 	if (pcm) {
 		for (const ctx of pcm.all()) {
@@ -500,5 +495,5 @@ function resolveTaskManagerForTask(sessionManager: SessionManager, taskId: strin
 			if (candidateTm.getTask(taskId)) return candidateTm;
 		}
 	}
-	return sessionManager.taskManager;
+	throw new Error(`Cannot resolve TaskManager: task "${taskId}" not found in any project`);
 }

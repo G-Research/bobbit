@@ -270,9 +270,8 @@ export function createGateway(config: GatewayConfig) {
 	triggerEngine.start();
 	const teamManager = new TeamManager(sessionManager, {
 		colorStore,
-		taskManager: sessionManager.taskManager,
+		taskManager: new TaskManager(projectContextManager.getDefault().taskStore),
 		roleStore,
-		gateStore: projectContextManager.getDefault().gateStore,
 		personalityManager,
 		projectContextManager,
 	});
@@ -429,7 +428,7 @@ export function createGateway(config: GatewayConfig) {
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
-	verificationHarness = new VerificationHarness(stateDir, projectContextManager.getDefault().gateStore, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
+	verificationHarness = new VerificationHarness(stateDir, undefined as any, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -725,17 +724,18 @@ async function handleApiRoute(
 		return projectConfigStore;
 	}
 
-	/** Get a GoalManager for the project that owns the given goal. Falls back to default. */
+	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
 	function getGoalManagerForGoal(goalId: string): GoalManager {
-		const ctx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) throw new Error(`Goal "${goalId}" not found in any project`);
 		return ctx.goalManager;
 	}
 
-	/** Get a TaskManager for the project that owns the given goal. Falls back to default. */
+	/** Get a TaskManager for the project that owns the given goal. Throws if not found. */
 	const taskManagerCache = new Map<string, TaskManager>();
 	function getTaskManagerForGoal(goalId: string): TaskManager {
 		const ctx = projectContextManager.getContextForGoal(goalId);
-		if (!ctx) return sessionManager.taskManager;
+		if (!ctx) throw new Error(`Goal "${goalId}" not found in any project`);
 		const projectId = ctx.project.id;
 		let tm = taskManagerCache.get(projectId);
 		if (!tm) {
@@ -745,14 +745,14 @@ async function handleApiRoute(
 		return tm;
 	}
 
-	/** Get a TaskManager for a task by looking up which goal it belongs to. Falls back to default. */
+	/** Get a TaskManager for a task by looking up which goal it belongs to. Throws if not found. */
 	function getTaskManagerForTask(taskId: string): TaskManager {
 		// Search all project contexts for the task
 		for (const ctx of projectContextManager.all()) {
 			const task = ctx.taskStore.get(taskId);
 			if (task) return getTaskManagerForGoal(task.goalId);
 		}
-		return sessionManager.taskManager;
+		throw new Error(`Task "${taskId}" not found in any project`);
 	}
 
 	// GET /api/health — unauthenticated so the client can probe localhost mode
@@ -1585,7 +1585,10 @@ async function handleApiRoute(
 				const matched = projectRegistry.findByCwd(cwd);
 				if (matched) targetProjectId = matched.id;
 			}
-			if (!targetProjectId) targetProjectId = projectContextManager.getDefaultProjectId();
+			if (!targetProjectId) {
+				json({ error: "Cannot create goal: no project found for the given directory" }, 400);
+				return;
+			}
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
@@ -2323,7 +2326,8 @@ async function handleApiRoute(
 		const goalId = goalGatesMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const gateCtx = projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault();
+		const gateCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateCtx) { json({ error: "Goal not found in any project" }, 404); return; }
 		const gateStore = gateCtx.gateStore;
 		const gates = gateStore.getGatesForGoal(goalId);
 		// Enrich with workflow gate definitions
@@ -2339,7 +2343,9 @@ async function handleApiRoute(
 	const gateDetailMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)$/);
 	if (gateDetailMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateDetailMatch;
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateDetailCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateDetailCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateDetailCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		const goal = getGoalAcrossProjects(goalId);
@@ -2356,7 +2362,9 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateSignalCtx.gateStore;
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
 
@@ -2526,7 +2534,9 @@ async function handleApiRoute(
 	const gateSignalsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signals$/);
 	if (gateSignalsMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateSignalsMatch;
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateSignalsCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateSignalsCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateSignalsCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ signals: gate.signals });
@@ -2546,7 +2556,9 @@ async function handleApiRoute(
 	const gateContentMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/content$/);
 	if (gateContentMatch && req.method === "GET") {
 		const [, goalId, gateId] = gateContentMatch;
-		const gateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+		const gateContentCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateContentCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateContentCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		json({ content: gate.currentContent, version: gate.currentContentVersion });
@@ -3077,7 +3089,8 @@ async function handleApiRoute(
 		const inputIds = Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined;
 		if (wfGateId) {
 			const goal = getGoalAcrossProjects(goalId);
-			const goalGateStore = (projectContextManager.getContextForGoal(goalId) ?? projectContextManager.getDefault()).gateStore;
+			const goalGateCtx = projectContextManager.getContextForGoal(goalId);
+			const goalGateStore = goalGateCtx?.gateStore;
 			if (goal?.workflow && goalGateStore) {
 				const wfGate = goal.workflow.gates.find((g: any) => g.id === wfGateId);
 				if (wfGate?.dependsOn?.length) {
