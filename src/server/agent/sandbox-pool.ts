@@ -1,15 +1,19 @@
 /**
- * SandboxPool — Pre-warmed Docker containers with dedicated git worktrees.
+ * SandboxPool — Pre-warmed Docker containers with dedicated git clones.
  *
- * Each pool slot is a (container, worktree) pair:
- *   - The worktree is a git worktree checked out on master
- *   - The container has that worktree bind-mounted as /workspace
+ * Each pool slot is a (container, clone) pair:
+ *   - The clone is a local git clone checked out on the default branch
+ *   - The container has that clone bind-mounted as /workspace
  *
  * On claim, the caller can request a branch checkout (for goals/members).
- * On release, the worktree resets to master and the slot returns to idle.
+ * On release, the slot is destroyed (container killed, clone deleted).
  *
- * This ensures every sandboxed session sees only its own /workspace —
- * no access to the primary project dir or other sessions' worktrees.
+ * Design: slots are cheap to create (~3-5s — git clone --local + docker create).
+ * The worktree setup command is skipped for pool slots because the container
+ * entrypoint handles cross-platform dependency installation via its own cache.
+ * This keeps the pool simple: no readoption, no idle culling, no health checks
+ * trying to keep long-lived containers alive. Fresh containers on every cycle
+ * eliminates the entire class of "dead container handed out" race conditions.
  */
 
 import { execFile as execFileCb } from "node:child_process";
@@ -18,7 +22,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
-import { resolveShell } from "./shell-util.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -29,25 +32,23 @@ type SlotState = "warming" | "idle" | "claimed";
 interface PoolSlot {
 	containerId: string;
 	shortId: string;             // first 12 chars of containerId
-	worktreePath: string;        // host path to this slot's worktree
+	worktreePath: string;        // host path to this slot's clone directory
 	state: SlotState;
 	sessions: Set<string>;       // session IDs using this slot
-	branch: string;              // current branch (master when idle)
-	createdAt: number;
-	lastActivity: number;
+	branch: string;              // current branch (default branch when idle)
 }
 
 export interface SandboxPoolOptions {
 	poolSize: number;
-	maxIdleSeconds: number;
+	maxIdleSeconds: number;      // kept for API compat — unused in simplified pool
 	image: string;
 	projectDir: string;          // primary project dir (repo root)
 	repoPath: string;            // git repo root (may differ from projectDir)
-	healthCheckIntervalMs: number;
+	healthCheckIntervalMs: number; // kept for API compat — unused in simplified pool
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
 	sandboxNetwork?: string;
-	worktreeSetupCommand?: string;
+	worktreeSetupCommand?: string; // kept for API compat — intentionally not run for pool slots
 }
 
 export interface ClaimResult {
@@ -58,7 +59,7 @@ export interface ClaimResult {
 export interface ClaimOptions {
 	/** Create a new branch with this name */
 	branch?: string;
-	/** Base ref to branch from (default: HEAD on master) */
+	/** Base ref to branch from (default: HEAD on default branch) */
 	from?: string;
 }
 
@@ -94,11 +95,10 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 
 export class SandboxPool {
 	private slots = new Map<string, PoolSlot>(); // keyed by containerId
-	private _healthCheckTimer: ReturnType<typeof setInterval> | null = null;
-	private _replenishing = false;
 	private _shutdownRequested = false;
+	private _replenishing = false;
 	readonly label: string;
-	private _poolDir: string;    // host path to pool worktrees directory
+	private _poolDir: string;    // host path to pool clone directories
 	private _defaultBranch = "master";
 
 	constructor(readonly options: SandboxPoolOptions) {
@@ -109,7 +109,7 @@ export class SandboxPool {
 		);
 	}
 
-	/** Initialize the pool: clean up, re-adopt, pre-warm, start health checks. */
+	/** Initialize the pool: kill old containers, pre-warm fresh ones. */
 	async init(): Promise<void> {
 		console.log(`[sandbox-pool] Initializing (size=${this.options.poolSize}, image=${this.options.image}, label=bobbit-sandbox=${this.label})`);
 
@@ -123,41 +123,48 @@ export class SandboxPool {
 		// Ensure pool directory exists
 		fs.mkdirSync(this._poolDir, { recursive: true });
 
-		// Clean up stopped orphans from previous runs
-		await this._cleanupStopped();
+		// Kill ALL containers from previous runs — no readoption. Fresh slots are
+		// cheap (~3-5s) and eliminate stale-container bugs entirely.
+		await this._killAllPreviousContainers();
 
-		// Re-adopt running containers from a previous gateway
-		await this._readopt();
-
-		// Start periodic health checks
-		this._healthCheckTimer = setInterval(() => {
-			this._healthCheck().catch(err => console.warn("[sandbox-pool] Health check error:", err));
-		}, this.options.healthCheckIntervalMs);
+		// Clean up stale clone directories on disk (background — can be slow on Windows
+		// with hundreds of deep node_modules trees, don't block server startup)
+		this._cleanupStaleCloneDirs();
 
 		// Pre-warm to target size (background — don't block server startup)
-		const idleCount = this._countByState("idle");
-		const needed = Math.max(0, this.options.poolSize - idleCount);
-		if (needed > 0) {
-			console.log(`[sandbox-pool] Pre-warming ${needed} slot(s) in background...`);
-			Promise.all(Array.from({ length: needed }, () => this._createSlot()))
-				.then(() => console.log(`[sandbox-pool] Ready — ${this._statsString()}`))
-				.catch(err => console.error("[sandbox-pool] Pre-warming failed:", err));
-		} else {
-			console.log(`[sandbox-pool] Ready — ${this._statsString()}`);
-		}
+		console.log(`[sandbox-pool] Pre-warming ${this.options.poolSize} slot(s) in background...`);
+		Promise.all(Array.from({ length: this.options.poolSize }, () => this._createSlot()))
+			.then(() => console.log(`[sandbox-pool] Ready — ${this._statsString()}`))
+			.catch(err => console.error("[sandbox-pool] Pre-warming failed:", err));
 	}
 
 	/**
 	 * Claim an idle slot. Optionally check out a branch.
-	 * If no idle slots are available, creates one on-demand (slower but
-	 * identical in behavior to a pre-warmed slot).
+	 * If no idle slots are available, creates one on-demand.
+	 * Validates the container is alive before handing it out.
 	 */
 	async claim(sessionId: string, opts?: ClaimOptions): Promise<ClaimResult | null> {
-		// Find an idle slot
+		// Find an idle slot, verifying the container is actually alive.
+		// Dead containers are evicted and we retry with the next idle slot.
 		let slot: PoolSlot | undefined;
-		for (const s of this.slots.values()) {
-			if (s.state === "idle") { slot = s; break; }
+		const maxRetries = 3;
+		for (let attempt = 0; attempt < maxRetries; attempt++) {
+			slot = undefined;
+			for (const s of this.slots.values()) {
+				if (s.state === "idle") { slot = s; break; }
+			}
+			if (!slot) break; // no idle slots left — fall through to on-demand creation
+
+			// Liveness probe: verify the container is still running
+			if (!(await this._isContainerAlive(slot))) {
+				console.warn(`[sandbox-pool] Idle slot ${slot.shortId} has a dead container — evicting and retrying`);
+				await this._destroySlot(slot);
+				slot = undefined;
+				continue;
+			}
+			break; // slot is alive
 		}
+
 		if (!slot) {
 			console.log(`[sandbox-pool] Pool exhausted — creating on-demand slot for session ${sessionId.slice(0, 8)}`);
 			slot = await this._createSlot();
@@ -166,7 +173,6 @@ export class SandboxPool {
 
 		slot.state = "claimed";
 		slot.sessions.add(sessionId);
-		slot.lastActivity = Date.now();
 
 		// Checkout the requested branch
 		if (opts?.branch) {
@@ -174,13 +180,13 @@ export class SandboxPool {
 				await this._checkoutBranch(slot, opts.branch, opts.from);
 			} catch (err) {
 				console.error(`[sandbox-pool] Branch checkout failed for slot ${slot.shortId}:`, err);
-				// Reset and return to idle — don't hand out a broken slot
+				// Destroy broken slot — don't try to reset, just kill it
 				slot.sessions.delete(sessionId);
-				await this._resetSlot(slot);
+				await this._destroySlot(slot);
 				return null;
 			}
 		} else {
-			// Pull latest master for regular sessions
+			// Pull latest default branch for regular sessions
 			try {
 				await git(["pull", "--ff-only", "origin", this._defaultBranch], slot.worktreePath, 30_000);
 			} catch {
@@ -196,7 +202,7 @@ export class SandboxPool {
 		return { containerId: slot.containerId, worktreePath: slot.worktreePath };
 	}
 
-	/** Release a session from its slot. Resets worktree when all sessions are done. */
+	/** Release a session from its slot. Destroys the slot when all sessions are done. */
 	async release(sessionId: string, containerId: string): Promise<void> {
 		const slot = this.slots.get(containerId);
 		if (!slot) return;
@@ -204,9 +210,12 @@ export class SandboxPool {
 		slot.sessions.delete(sessionId);
 		if (slot.sessions.size > 0) return; // other sessions still using this slot
 
-		// Reset worktree and return to idle
-		await this._resetSlot(slot);
-		console.log(`[sandbox-pool] Released slot ${slot.shortId} — ${this._statsString()}`);
+		// Destroy the slot — fresh containers on every cycle
+		await this._destroySlot(slot);
+		console.log(`[sandbox-pool] Released and destroyed slot ${containerId.slice(0, 12)} — ${this._statsString()}`);
+
+		// Replenish in background
+		this._replenish().catch(() => {});
 	}
 
 	/** Get pool statistics. */
@@ -220,10 +229,9 @@ export class SandboxPool {
 		};
 	}
 
-	/** Graceful shutdown: drain sessions, stop containers. */
+	/** Graceful shutdown: drain sessions, stop containers, clean up directories. */
 	async shutdown(): Promise<void> {
 		this._shutdownRequested = true;
-		this.dispose();
 
 		// Wait briefly for claimed containers to drain
 		const drainTimeout = 10_000;
@@ -232,30 +240,20 @@ export class SandboxPool {
 			await new Promise(r => setTimeout(r, 500));
 		}
 
-		// Stop all containers
-		const stopPromises = [...this.slots.values()].map(async (slot) => {
-			try {
-				await execFileAsync("docker", ["stop", "-t", "5", slot.containerId], {
-					timeout: 15_000,
-					env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-				});
-			} catch { /* container may already be stopped */ }
-		});
-		await Promise.allSettled(stopPromises);
+		// Destroy all slots (kill container + remove directory)
+		const destroyPromises = [...this.slots.values()].map(slot => this._destroySlot(slot));
+		await Promise.allSettled(destroyPromises);
 		this.slots.clear();
 	}
 
-	/** Clear health check timer. */
+	/** No-op — kept for API compatibility. Simplified pool has no timers. */
 	dispose(): void {
-		if (this._healthCheckTimer) {
-			clearInterval(this._healthCheckTimer);
-			this._healthCheckTimer = null;
-		}
+		// Nothing to dispose — simplified pool has no periodic timers
 	}
 
 	// ── Slot lifecycle ─────────────────────────────────────────────────────
 
-	/** Create a new pool slot: worktree + container. Returns the slot, or undefined on failure. */
+	/** Create a new pool slot: clone repo + create container. Returns the slot, or undefined on failure. */
 	private async _createSlot(): Promise<PoolSlot | undefined> {
 		if (this._shutdownRequested) return undefined;
 
@@ -264,9 +262,9 @@ export class SandboxPool {
 		const worktreePath = path.join(this._poolDir, slotName);
 
 		try {
-			// Clone the repo into the slot directory (not a worktree — avoids
-			// absolute path issues in Docker containers where worktree .git
-			// pointers don't resolve). Uses --local for speed (hard-links objects).
+			// Clone the repo into the slot directory (not a git worktree — avoids
+			// absolute path issues in Docker where .git pointers don't resolve).
+			// Uses --local for speed (hard-links objects).
 			await execFileAsync("git", [
 				"clone", "--local", "--no-checkout",
 				this.options.repoPath, worktreePath,
@@ -279,7 +277,7 @@ export class SandboxPool {
 
 			// Fix origin URL: `git clone --local` sets origin to the local host path,
 			// which is inaccessible from inside a Docker container. Replace it with the
-			// real upstream remote URL so push/fetch/PR work identically to non-sandbox.
+			// real upstream remote URL so push/fetch/PR work inside the container.
 			try {
 				const { stdout: realOrigin } = await execFileAsync(
 					"git", ["remote", "get-url", "origin"],
@@ -293,21 +291,13 @@ export class SandboxPool {
 				// No upstream remote — local-only repo, push won't work but that's expected
 			}
 
-			// Run worktree setup command if configured
-			if (this.options.worktreeSetupCommand) {
-				try {
-					const shell = resolveShell();
-					await execFileAsync(shell, ["-c", this.options.worktreeSetupCommand], {
-						cwd: worktreePath,
-						timeout: 120_000,
-						env: { ...process.env, SOURCE_REPO: this.options.repoPath },
-					});
-				} catch (setupErr) {
-					console.warn(`[sandbox-pool] Worktree setup failed for ${slotName} (non-fatal):`, setupErr);
-				}
-			}
+			// NOTE: worktreeSetupCommand is intentionally NOT run for pool slots.
+			// The container entrypoint (bobbit-entrypoint.sh) handles cross-platform
+			// dependency installation with its own cache. Running npm ci on the host
+			// would install host-platform (e.g. Windows) native modules that the Linux
+			// container replaces anyway — wasted work.
 
-			// Create Docker container with this worktree mounted as /workspace
+			// Create Docker container with this clone mounted as /workspace
 			const dockerArgs = this._buildDockerArgs(worktreePath);
 			const { stdout } = await execFileAsync("docker", dockerArgs, {
 				timeout: 30_000,
@@ -317,14 +307,11 @@ export class SandboxPool {
 			const containerId = stdout.trim();
 			if (!containerId) {
 				console.warn(`[sandbox-pool] docker run returned empty container ID for ${slotName}`);
-				await this._removeWorktree(worktreePath);
+				await this._removeCloneDir(worktreePath);
 				return undefined;
 			}
 
-			// Defense-in-depth: try to mask /proc/1/environ so even if env vars are
-			// accidentally re-added to docker run, they can't be read by the agent.
-			// This uses bind-mount of /dev/null (same technique Docker uses for masked
-			// paths). Falls back to chmod, but procfs ignores chmod on most kernels.
+			// Defense-in-depth: mask /proc/1/environ so env vars can't be read by the agent
 			try {
 				await execFileAsync("docker", [
 					"exec", containerId, "sh", "-c",
@@ -345,21 +332,18 @@ export class SandboxPool {
 				state: "idle",
 				sessions: new Set(),
 				branch: this._defaultBranch,
-				createdAt: Date.now(),
-				lastActivity: Date.now(),
 			};
 			this.slots.set(containerId, slot);
 			console.log(`[sandbox-pool] Created slot ${slot.shortId} at ${slotName}`);
 			return slot;
 		} catch (err) {
 			console.warn(`[sandbox-pool] Failed to create slot ${slotName}:`, err);
-			// Clean up worktree if container creation failed
-			await this._removeWorktree(worktreePath);
+			await this._removeCloneDir(worktreePath);
 			return undefined;
 		}
 	}
 
-	/** Build docker run args for a pool container with a specific worktree. */
+	/** Build docker run args for a pool container. */
 	private _buildDockerArgs(worktreePath: string): string[] {
 		return buildDockerRunArgs({
 			image: this.options.image,
@@ -374,21 +358,18 @@ export class SandboxPool {
 		});
 	}
 
-	/** Checkout a branch in a slot's worktree. */
+	/** Checkout a branch in a slot's clone. */
 	private async _checkoutBranch(slot: PoolSlot, branch: string, from?: string): Promise<void> {
 		const wt = slot.worktreePath;
 
 		// Fetch latest from origin
 		await git(["fetch", "origin"], wt, 30_000);
 
-		// Try to checkout the branch. It may already exist on the remote
-		// (e.g. goal branches are created and pushed before team starts).
+		// Try to checkout the branch — may already exist on the remote
 		try {
 			if (from) {
-				// Branch from a specific ref (e.g. origin/goal-branch for members)
 				await git(["checkout", "-b", branch, from], wt, 15_000);
 			} else {
-				// Try creating a new branch from HEAD
 				await git(["checkout", "-b", branch], wt, 15_000);
 			}
 		} catch {
@@ -396,12 +377,11 @@ export class SandboxPool {
 			try {
 				await git(["checkout", branch], wt, 15_000);
 			} catch {
-				// Branch exists locally but maybe diverged — force track remote
 				await git(["checkout", "-B", branch, `origin/${branch}`], wt, 15_000);
 			}
 		}
 
-		// Pull latest from remote (in case branch existed and has updates)
+		// Pull latest from remote
 		try {
 			await git(["pull", "--ff-only", "origin", branch], wt, 30_000);
 		} catch {
@@ -418,38 +398,25 @@ export class SandboxPool {
 		// Push if this is a new branch (non-fatal)
 		try {
 			await git(["push", "-u", "origin", branch], wt, 30_000);
-		} catch {
-			// Push may fail — not fatal
-		}
+		} catch { /* push may fail — not fatal */ }
 	}
 
-	/** Reset a slot's clone back to the default branch and clean up. */
-	private async _resetSlot(slot: PoolSlot): Promise<void> {
-		const wt = slot.worktreePath;
+	/** Quick liveness probe — returns true if the container is running. */
+	private async _isContainerAlive(slot: PoolSlot): Promise<boolean> {
 		try {
-			// Discard all changes and return to the default branch
-			await git(["checkout", "--force", this._defaultBranch], wt, 15_000);
-			await git(["clean", "-fdx"], wt, 30_000);
-			await git(["fetch", "origin"], wt, 30_000);
-			await git(["reset", "--hard", `origin/${this._defaultBranch}`], wt, 15_000);
-
-			// Delete the branch that was checked out (clean up local refs)
-			if (slot.branch && slot.branch !== this._defaultBranch) {
-				try {
-					await git(["branch", "-D", slot.branch], wt, 5_000);
-				} catch { /* branch may not exist locally */ }
-			}
-
-			slot.branch = this._defaultBranch;
-			slot.state = "idle";
-			slot.lastActivity = Date.now();
-		} catch (err) {
-			console.warn(`[sandbox-pool] Failed to reset slot ${slot.shortId}, removing:`, err);
-			await this._destroySlot(slot);
+			const { stdout } = await execFileAsync("docker", [
+				"inspect", "--format", "{{.State.Running}}", slot.containerId,
+			], {
+				timeout: 5_000,
+				env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+			});
+			return stdout.trim() === "true";
+		} catch {
+			return false; // container doesn't exist or inspect failed
 		}
 	}
 
-	/** Destroy a slot entirely (stop container, remove worktree). */
+	/** Destroy a slot entirely (kill container, remove clone directory). */
 	private async _destroySlot(slot: PoolSlot): Promise<void> {
 		this.slots.delete(slot.containerId);
 		try {
@@ -458,118 +425,35 @@ export class SandboxPool {
 				env: { ...process.env, MSYS_NO_PATHCONV: "1" },
 			});
 		} catch { /* already gone */ }
-		await this._removeWorktree(slot.worktreePath);
+		await this._removeCloneDir(slot.worktreePath);
 	}
 
-	/** Remove a pool slot's cloned repo from disk. */
-	private async _removeWorktree(worktreePath: string): Promise<void> {
-		try {
-			fs.rmSync(worktreePath, { recursive: true, force: true });
-		} catch { /* best effort */ }
+	/** Remove a pool slot's cloned repo from disk. Retries on Windows lock failures. */
+	private async _removeCloneDir(clonePath: string): Promise<void> {
+		const maxAttempts = 3;
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				await fs.promises.rm(clonePath, { recursive: true, force: true });
+				return;
+			} catch (err: any) {
+				// EBUSY/EPERM/ENOTEMPTY are common on Windows (locked files, antivirus)
+				if (attempt < maxAttempts && (err?.code === "EBUSY" || err?.code === "EPERM" || err?.code === "ENOTEMPTY")) {
+					await new Promise(r => setTimeout(r, 500 * attempt));
+					continue;
+				}
+				console.warn(`[sandbox-pool] Failed to remove ${path.basename(clonePath)} after ${attempt} attempt(s): ${err?.code || err}`);
+			}
+		}
 	}
 
 	// ── Pool maintenance ───────────────────────────────────────────────────
 
-	/** Re-adopt containers from a previous gateway run, killing any we can't adopt. */
-	private async _readopt(): Promise<void> {
-		try {
-			const { stdout } = await execFileAsync("docker", [
-				"ps", "--filter", `label=bobbit-sandbox=${this.label}`,
-				"--filter", "status=running",
-				"--format", "{{.ID}}",
-			], {
-				timeout: 10_000,
-				env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-			});
-
-			const containerIds = stdout.trim().split("\n").filter(Boolean);
-			if (containerIds.length === 0) return;
-
-			const orphaned: string[] = [];
-			for (const containerId of containerIds) {
-				if (this.slots.has(containerId)) continue;
-
-				// Validate: check the worktree mount and label
-				const valid = await this._validateSlot(containerId);
-				if (valid) {
-					console.log(`[sandbox-pool] Re-adopted container ${containerId.slice(0, 12)}`);
-				} else {
-					orphaned.push(containerId);
-				}
-			}
-
-			// Kill containers we couldn't re-adopt (e.g. validation failed due to
-			// path format mismatches, missing worktrees, or stale containers from
-			// a previous run that was force-killed without graceful shutdown).
-			if (orphaned.length > 0) {
-				console.log(`[sandbox-pool] Removing ${orphaned.length} orphaned running container(s)...`);
-				for (const id of orphaned) {
-					try {
-						await execFileAsync("docker", ["rm", "-f", id], {
-							timeout: 10_000,
-							env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-						});
-						console.log(`[sandbox-pool] Removed orphaned container ${id.slice(0, 12)}`);
-					} catch { /* already gone */ }
-				}
-			}
-		} catch { /* no running containers */ }
-	}
-
-	/** Validate a container and add it as an idle slot. */
-	private async _validateSlot(containerId: string): Promise<boolean> {
-		try {
-			const { stdout } = await execFileAsync("docker", [
-				"inspect", containerId,
-				"--format", '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}',
-			], {
-				timeout: 10_000,
-				env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-			});
-
-			const mountSource = stdout.trim();
-			if (!mountSource) return false;
-
-			// The mount source should be under our pool directory.
-			// On Windows, Docker inspect may return paths in various formats
-			// (e.g. "C:\Users\..." vs "/c/Users/..." vs "C:/Users/..."),
-			// so normalize both sides to lowercase forward-slash paths.
-			const normalizedMount = mountSource.replace(/\\/g, "/").toLowerCase();
-			const normalizedPoolDir = this._poolDir.replace(/\\/g, "/").toLowerCase();
-			if (!normalizedMount.startsWith(normalizedPoolDir)) return false;
-
-			// Resolve the actual host path for fs.existsSync — use the original
-			// mount source but also try our pool dir prefix for Windows path mismatches.
-			const worktreePath = fs.existsSync(mountSource)
-				? mountSource
-				: path.join(this._poolDir, mountSource.replace(/\\/g, "/").slice(this._poolDir.replace(/\\/g, "/").length));
-			if (!fs.existsSync(worktreePath)) return false;
-
-			const slot: PoolSlot = {
-				containerId,
-				shortId: containerId.substring(0, 12),
-				worktreePath,
-				state: "idle",
-				sessions: new Set(),
-				branch: this._defaultBranch,
-				createdAt: Date.now(),
-				lastActivity: Date.now(),
-			};
-			this.slots.set(containerId, slot);
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
-	/** Remove stopped containers from previous runs. */
-	private async _cleanupStopped(): Promise<void> {
+	/** Kill all containers from previous gateway runs. No readoption — start fresh. */
+	private async _killAllPreviousContainers(): Promise<void> {
 		try {
 			const { stdout } = await execFileAsync("docker", [
 				"ps", "-a",
 				"--filter", `label=bobbit-sandbox=${this.label}`,
-				"--filter", "status=exited",
-				"--filter", "status=created",
 				"--format", "{{.ID}}",
 			], {
 				timeout: 10_000,
@@ -579,15 +463,36 @@ export class SandboxPool {
 			const ids = stdout.trim().split("\n").filter(Boolean);
 			if (ids.length === 0) return;
 
-			console.log(`[sandbox-pool] Removing ${ids.length} stopped container(s)...`);
-			for (const id of ids) {
-				try {
-					await execFileAsync("docker", ["rm", "-f", id], {
-						timeout: 10_000,
-						env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-					});
-				} catch { /* already gone */ }
-			}
+			console.log(`[sandbox-pool] Removing ${ids.length} container(s) from previous run...`);
+			await Promise.allSettled(ids.map(id =>
+				execFileAsync("docker", ["rm", "-f", id], {
+					timeout: 10_000,
+					env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+				}).catch(() => {}),
+			));
+		} catch { /* no containers */ }
+	}
+
+	/** Remove stale clone directories that have no matching container (async, non-blocking). */
+	private _cleanupStaleCloneDirs(): void {
+		try {
+			if (!fs.existsSync(this._poolDir)) return;
+			const entries = fs.readdirSync(this._poolDir)
+				.filter(e => e.startsWith("pool-"));
+			if (entries.length === 0) return;
+			console.log(`[sandbox-pool] Cleaning up ${entries.length} stale clone dir(s) in background...`);
+			// Delete sequentially via async chain to avoid blocking the event loop.
+			// Each rm is awaited individually so Node can interleave other work.
+			(async () => {
+				let removed = 0;
+				for (const entry of entries) {
+					try {
+						await fs.promises.rm(path.join(this._poolDir, entry), { recursive: true, force: true });
+						removed++;
+					} catch { /* best effort */ }
+				}
+				console.log(`[sandbox-pool] Cleaned up ${removed}/${entries.length} stale clone dir(s)`);
+			})().catch(() => {});
 		} catch { /* ignore */ }
 	}
 
@@ -603,64 +508,6 @@ export class SandboxPool {
 			}
 		} finally {
 			this._replenishing = false;
-		}
-	}
-
-	/** Periodic health check: remove dead containers, cull excess idle. */
-	private async _healthCheck(): Promise<void> {
-		if (this._shutdownRequested) return;
-
-		const ids = [...this.slots.keys()];
-		if (ids.length === 0) return;
-
-		// Batch inspect all containers
-		try {
-			const { stdout } = await execFileAsync("docker", [
-				"inspect", "--format", "{{.Id}} {{.State.Running}}", ...ids,
-			], {
-				timeout: 15_000,
-				env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-			});
-
-			const lines = stdout.trim().split("\n");
-			for (const line of lines) {
-				const [fullId, running] = line.split(" ");
-				if (!fullId) continue;
-				const slot = this.slots.get(fullId) || [...this.slots.values()].find(s => fullId.startsWith(s.containerId));
-				if (slot && running !== "true") {
-					console.warn(`[sandbox-pool] Container ${slot.shortId} is dead, removing slot`);
-					await this._destroySlot(slot);
-				}
-			}
-		} catch {
-			// Inspect failure — individual containers may have been removed
-		}
-
-		// Cull excess idle slots
-		this._cullExcessIdle();
-
-		// Replenish if needed
-		await this._replenish();
-	}
-
-	/** Remove excess idle slots past the max idle time. */
-	private _cullExcessIdle(): void {
-		const idleSlots = [...this.slots.values()]
-			.filter(s => s.state === "idle")
-			.sort((a, b) => a.lastActivity - b.lastActivity);
-
-		const excess = idleSlots.length - this.options.poolSize;
-		if (excess <= 0) return;
-
-		const now = Date.now();
-		const maxIdleMs = this.options.maxIdleSeconds * 1000;
-
-		for (let i = 0; i < excess; i++) {
-			const slot = idleSlots[i];
-			if (now - slot.lastActivity > maxIdleMs) {
-				console.log(`[sandbox-pool] Culling excess idle slot ${slot.shortId}`);
-				this._destroySlot(slot).catch(() => {});
-			}
 		}
 	}
 
