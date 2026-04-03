@@ -1252,14 +1252,12 @@ export class VerificationHarness {
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const roleName = role.name || step.role || "reviewer";
 			const isSandboxed = (goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
 			// When sandboxed, claim a pool slot checked out to the goal branch so
 			// the reviewer sees the actual implementation — not master.
 			const goalForClaim = goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
-					?? this.sessionManager!.goalManager.getGoal(goalId))
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
 				: undefined;
 			const sandboxClaim = isSandboxed && goalForClaim?.branch
 				? { branch: goalForClaim.branch }
@@ -1465,14 +1463,12 @@ export class VerificationHarness {
 
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const qaIsSandboxed = (goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
 			// When sandboxed, claim a pool slot checked out to the goal branch so
 			// the QA agent tests the actual implementation — not master.
 			const qaGoalForClaim = goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
-					?? this.sessionManager!.goalManager.getGoal(goalId))
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
 				: undefined;
 			const qaSandboxClaim = qaIsSandboxed && qaGoalForClaim?.branch
 				? { branch: qaGoalForClaim.branch }
