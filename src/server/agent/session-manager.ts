@@ -1447,6 +1447,28 @@ export class SessionManager {
 	}
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
+		// Backfill missing projectId from goal association (pre-fix sessions)
+		if (!ps.projectId && ps.goalId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(ps.goalId);
+			if (ctx) {
+				ps = { ...ps, projectId: ctx.project.id };
+				try {
+					this.getSessionStore(ctx.project.id).update(ps.id, { projectId: ctx.project.id });
+					console.log(`[session-manager] Backfilled projectId for session ${ps.id} from goal ${ps.goalId}`);
+				} catch { /* best-effort */ }
+			}
+		}
+		// Backfill missing projectId for non-goal sessions: default to CWD project
+		if (!ps.projectId && !ps.goalId && this.projectContextManager) {
+			const defaultId = this.projectContextManager.getDefaultProjectId();
+			if (defaultId) {
+				ps = { ...ps, projectId: defaultId };
+				try {
+					this.getSessionStore(defaultId).update(ps.id, { projectId: defaultId });
+					console.log(`[session-manager] Backfilled projectId for session ${ps.id} (default project)`);
+				} catch { /* best-effort */ }
+			}
+		}
 		let sessionStore: SessionStore;
 		try {
 			sessionStore = this.getSessionStore(ps.projectId);
@@ -1794,6 +1816,7 @@ export class SessionManager {
 				workflowContext: opts?.workflowContext,
 				effectiveAllowedTools: opts?.allowedTools,
 				sandboxClaim: opts?.sandboxClaim,
+				projectId,
 				bridgeOptions: { cwd },
 			};
 
@@ -1835,6 +1858,7 @@ export class SessionManager {
 			reattemptGoalId: opts?.reattemptGoalId,
 			effectiveAllowedTools: opts?.allowedTools,
 			sandboxClaim: opts?.sandboxClaim,
+			projectId,
 			bridgeOptions: { cwd },
 		};
 
@@ -1897,6 +1921,7 @@ export class SessionManager {
 			instructions: opts.instructions,
 			context: opts.context,
 			effectiveAllowedTools: parentAllowedTools,
+			projectId: parentProjectId,
 			bridgeOptions: { cwd: opts.cwd },
 		};
 

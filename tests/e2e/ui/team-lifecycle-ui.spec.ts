@@ -115,7 +115,9 @@ test.describe("Team lifecycle (UI)", () => {
 		const agentsTabAfter = page.locator(".tab").filter({ hasText: "Agents" });
 		await agentsTabAfter.click();
 
-		// No active agent cards should be shown after teardown
-		await expect(page.locator(".agent-card")).toHaveCount(0, { timeout: 10_000 });
+		// All remaining agent cards should be archived/dismissed (none active)
+		await expect(
+			page.locator(".agent-card").filter({ hasNot: page.locator("text=Dismissed") }),
+		).toHaveCount(0, { timeout: 10_000 });
 	});
 });

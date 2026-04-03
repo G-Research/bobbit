@@ -177,10 +177,12 @@ test.describe("Staff Agents — REST API", () => {
 		});
 		expect(getRes.status).toBe(404);
 
-		// Verify the associated session is also gone
+		// Session is archived (not deleted) — verify it still exists but is archived
 		const sessionRes = await apiFetch(`/api/sessions/${sessionId}`, {
 		});
 		expect(sessionRes.status).toBe(200);
+		const sessionBody = await sessionRes.json();
+		expect(sessionBody.archived).toBe(true);
 	});
 
 	test("POST /api/staff with triggers auto-generates trigger IDs", async () => {
