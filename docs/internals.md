@@ -207,7 +207,7 @@ Selecting a palette seeds the color fields from `PALETTE_PRIMARY_COLORS`; the us
 
 ### Sidebar grouping
 
-When multiple projects are registered, the sidebar groups sessions and goals by project:
+The sidebar always groups sessions and goals under collapsible project folder rows — even with a single project. This unified code path avoids duplication between single-project and multi-project layouts.
 
 ```
 ├── Project A (collapsible)
@@ -220,7 +220,7 @@ When multiple projects are registered, the sidebar groups sessions and goals by 
 ├── [+ Add Project]
 ```
 
-Single-project mode minimizes visual noise — no project headers shown.
+When only one project is registered, its folder row defaults to expanded so there is no extra click required. Each project row shows a folder icon, project name, settings gear, and new-goal button.
 
 ### REST API
 

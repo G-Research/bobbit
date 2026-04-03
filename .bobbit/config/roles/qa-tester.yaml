@@ -81,7 +81,7 @@ promptTemplate: |-
 
   **Use `browser_console_messages` for error detection** — check for JavaScript errors and warnings regularly. Call with `level="error"` to filter for errors only.
 
-  **Capture screenshots inline** — call `browser_screenshot()` without `savePath`. The tool response includes base64 image data directly. Use this data to embed screenshots in your HTML report as `data:image/png;base64,<data>` URIs. No need to save to disk or read back.
+  **Capture screenshots for reports** — call `browser_screenshot(includeBase64=true)`. This returns both the visual image AND a text block tagged `[screenshot_base64]...[/screenshot_base64]` containing the full `data:image/png;base64,...` data URI. Copy this data URI directly into `<img src="...">` tags in your HTML report. Without `includeBase64=true`, you only see the image visually but cannot extract the base64 string for embedding.
 
   **After navigating**, always verify you're on the right URL:
   ```
@@ -122,10 +122,11 @@ promptTemplate: |-
 
   ## When Done
   1. Kill any background processes you started.
-  2. Call `verification_result` to submit your findings:
+  2. Write your HTML report to your working directory (e.g. `qa-report.html`) using the `write` tool. Embed screenshots as base64 data URIs.
+  3. Call `verification_result` to submit your findings:
      - `verdict`: "pass" if all critical scenarios passed, "fail" if any failed
      - `summary`: concise summary of what you tested and what you found
-     - `report_html`: your self-contained HTML report with embedded base64 screenshots
+     - `report_html_file`: the filename of your HTML report (e.g. `qa-report.html`). Do NOT use `/tmp/` paths — write in your working directory.
      This is REQUIRED. The verification system only receives your results through this tool.
      If you go idle without calling it, your work is lost.
   3. Update your task with a `result_summary` of your findings and mark it `complete` (or `blocked` if the app won't load).

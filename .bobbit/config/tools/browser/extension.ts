@@ -124,6 +124,7 @@ export default function (pi: ExtensionAPI) {
 			selector: Type.Optional(Type.String({ description: "CSS selector to screenshot a specific element. Omit for full page." })),
 			savePath: Type.Optional(Type.String({ description: "File path to save the screenshot to (png). Optional." })),
 			fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page. Default false." })),
+			includeBase64: Type.Optional(Type.Boolean({ description: "Include raw base64 string as text in the response. Use when you need to embed screenshots in HTML reports. Default false." })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const p = await withAbort(ensurePage(), signal);
@@ -148,15 +149,23 @@ export default function (pi: ExtensionAPI) {
 			const url = await p.url();
 			const title = await p.title();
 
+			const content: Array<{type: string, mimeType?: string, data?: string, text?: string}> = [
+				{
+					type: "image" as const,
+					mimeType: "image/png" as const,
+					data: base64,
+				},
+				{ type: "text", text: `Screenshot of ${url} (${title})${savedTo ? ` — saved to ${savedTo}` : ""}` },
+			];
+
+			// When includeBase64 is set, append the raw base64 string as text so the agent
+			// can programmatically embed it in HTML reports as a data URI.
+			if (params.includeBase64) {
+				content.push({ type: "text", text: `[screenshot_base64]\ndata:image/png;base64,${base64}\n[/screenshot_base64]` });
+			}
+
 			return {
-				content: [
-					{
-						type: "image" as const,
-						mimeType: "image/png" as const,
-						data: base64,
-					},
-					{ type: "text", text: `Screenshot of ${url} (${title})${savedTo ? ` — saved to ${savedTo}` : ""}` },
-				],
+				content,
 				details: {},
 			};
 		},

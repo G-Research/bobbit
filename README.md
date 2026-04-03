@@ -84,7 +84,7 @@ Most AI coding tools are either locked inside an IDE or limited to a terminal. B
 ## Features
 
 ### Multi-Project Support
-Register multiple project directories with a single Bobbit server. Each project gets its own `.bobbit/` directory for config and state. Config cascades hierarchically (global → server → project). Sessions, goals, and search are scoped per project, with cross-project search enabled by default. The sidebar groups work by project when multiple are registered.
+Register multiple project directories with a single Bobbit server. Each project gets its own `.bobbit/` directory for config and state. Config cascades hierarchically (global → server → project). Sessions, goals, and search are scoped per project, with cross-project search enabled by default. The sidebar always groups work under collapsible project folder rows. When only one project is registered, its row defaults to expanded.
 
 ### Sessions
 Each session is a running agent with its own conversation and persistence. Run multiple sessions in parallel, each working on different parts of your project. Connect from multiple devices at once.

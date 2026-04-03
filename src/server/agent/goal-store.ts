@@ -45,6 +45,8 @@ export interface PersistedGoal {
 	archivedAt?: number;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
+	/** Whether to automatically start the team after worktree setup (defaults to true) */
+	autoStartTeam?: boolean;
 	/** Names of optional verification steps enabled for this goal */
 	enabledOptionalSteps?: string[];
 }

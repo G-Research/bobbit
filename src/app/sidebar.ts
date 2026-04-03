@@ -870,7 +870,7 @@ function renderProjectContent(
 				</div>
 			` : ""}
 		</div>
-		${staff && state.projects.length > 1 ? renderStaffSidebarSection(staff) : ""}
+		${staff ? renderStaffSidebarSection(staff) : ""}
 	`;
 }
 
@@ -996,108 +996,38 @@ export function renderSidebar() {
 									filteredStaff = filteredStaff.filter(s => ids.has(s.id));
 								}
 							}
-							const multiProject = state.projects.length > 1;
+							// Group goals, sessions, and staff by project
+							const projectMap = new Map<string, { goals: Goal[]; sessions: GatewaySession[]; staff: typeof filteredStaff }>();
+							for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
+							// Fallback bucket for items without a projectId
+							const defaultId = state.projects[0]?.id || "";
+							for (const g of filteredGoals) {
+								const pid = g.projectId || defaultId;
+								const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+								bucket.goals.push(g);
+							}
+							for (const s of filteredUngrouped) {
+								const pid = s.projectId || defaultId;
+								const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+								bucket.sessions.push(s);
+							}
+							for (const s of filteredStaff) {
+								const pid = s.projectId || defaultId;
+								const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+								bucket.staff.push(s);
+							}
 							return html`
-							${multiProject ? (() => {
-								// Group goals, sessions, and staff by project
-								const projectMap = new Map<string, { goals: Goal[]; sessions: GatewaySession[]; staff: typeof filteredStaff }>();
-								for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
-								// Fallback bucket for items without a projectId
-								const defaultId = state.projects[0]?.id || "";
-								for (const g of filteredGoals) {
-									const pid = g.projectId || defaultId;
-									const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
-									bucket.goals.push(g);
-								}
-								for (const s of filteredUngrouped) {
-									const pid = s.projectId || defaultId;
-									const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
-									bucket.sessions.push(s);
-								}
-								for (const s of filteredStaff) {
-									const pid = s.projectId || defaultId;
-									const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
-									bucket.staff.push(s);
-								}
-								return html`${state.projects.map((project, i) => {
-									const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
-									const expanded = isProjectExpanded(project.id);
-									return html`
-										${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-										${renderProjectHeader(project, expanded)}
-										${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-											${renderProjectContent(project, data.goals, data.sessions, data.staff)}
-										</div>` : ""}
-									`;
-								})}`;
-							})() : html`${filteredGoals.map((goal, i) => html`
-								${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
-								${renderGoalGroup(goal)}
-							`)}`}
-							${multiProject ? "" : filteredGoals.length > 0 ? html`
-								<div class="border-t border-border/30 my-1 mx-2"></div>
-								<div class="flex flex-col gap-0.5">
-									<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
-										style="padding-left:${HEADER_CHEVRON_W}px;"
-										@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
-										<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
-										<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
-										<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
-										<div class="flex items-center relative">
-											<button
-												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
-												@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(); }}
-												title="New session"
-												?disabled=${state.creatingSession}
-											>
-												${state.creatingSession && !state.creatingSessionForGoalId
-													? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
-													: icon(Plus, "xs")}
-											</button>
-											<button
-												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-												@click=${toggleRolePicker}
-												title="New session with role"
-											>${icon(ChevronDown, "xs")}</button>
-											${renderRolePickerDropdown()}
-										</div>
-									</div>
-									${ungroupedExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${filteredUngrouped.map(renderSessionRow)}</div>` : ""}
-								</div>
-							` : html`
-								<div class="flex flex-col gap-0.5">
-									<div class="flex items-center gap-1 pl-0 pr-1 py-0.5">
-										<span class="flex-1 flex items-center gap-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="padding-left:${HEADER_CHEVRON_W}px;"><span class="shrink-0" style="margin-right:-3px;">${icon(MessagesSquare, "xs")}</span> Sessions</span>
-										<div class="flex items-center relative">
-											<button
-												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
-												@click=${() => createAndConnectSession()}
-												title="New session"
-												?disabled=${state.creatingSession}
-											>
-												${state.creatingSession && !state.creatingSessionForGoalId
-													? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
-													: icon(Plus, "xs")}
-											</button>
-											<button
-												class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-												@click=${toggleRolePicker}
-												title="New session with role"
-											>${icon(ChevronDown, "sm")}</button>
-											${renderRolePickerDropdown()}
-										</div>
-									</div>
-									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-									${filteredUngrouped.length === 0
-										? html`<div class="text-center py-6">
-												<p class="text-xs text-muted-foreground mb-2">No sessions</p>
-												<button class="text-xs text-primary hover:underline" title="Create a new session" @click=${() => createAndConnectSession()}>Create one</button>
-											</div>`
-										: filteredUngrouped.map(renderSessionRow)}
-								</div>
-								</div>
-							`}
-							${!multiProject ? (state.searchQuery ? renderStaffSidebarSection(filteredStaff) : renderStaffSidebarSection()) : ""}
+							${state.projects.map((project, i) => {
+								const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
+								const expanded = isProjectExpanded(project.id);
+								return html`
+									${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
+									${renderProjectHeader(project, expanded)}
+									${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+										${renderProjectContent(project, data.goals, data.sessions, data.staff)}
+									</div>` : ""}
+								`;
+							})}
 							${(() => {
 								// Archived section: archived goals + standalone archived sessions
 								// Goal-affiliated archived sessions render inside their goal groups.

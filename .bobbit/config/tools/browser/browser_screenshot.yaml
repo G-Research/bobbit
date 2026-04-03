@@ -7,7 +7,7 @@ provider:
 group: Browser
 renderer: src/ui/tools/renderers/ScreenshotRenderer.ts
 docs: |-
-  Viewport only by default; use `fullPage: true` for full scrollable page. Use `selector` to capture a specific element. Use `savePath` to save to a .png file on disk. Returns image inline in chat.
+  Viewport only by default; use `fullPage: true` for full scrollable page. Use `selector` to capture a specific element. Use `savePath` to save to a .png file on disk. Use `includeBase64: true` to get raw base64 as text for embedding in HTML reports. Returns image inline in chat.
 detail_docs: >-
   ## Purpose
 
@@ -32,6 +32,10 @@ detail_docs: >-
 
   | `fullPage` | boolean | No | When `true`, captures the full scrollable page,
   not just the visible viewport. Default: **false**. |
+
+  | `includeBase64` | boolean | No | When `true`, includes the raw base64 data
+  URI as a text content block tagged `[screenshot_base64]...[/screenshot_base64]`.
+  Use this when you need to embed screenshots in HTML reports. Default: **false**. |
 
 
   ## When to Use

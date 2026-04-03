@@ -1578,6 +1578,7 @@ async function handleApiRoute(
 		}
 		try {
 			const sandboxed = body.sandboxed === true;
+			const autoStartTeam = body.autoStartTeam !== false; // default true
 			let enabledOptionalSteps: string[] | undefined;
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
@@ -1614,19 +1615,36 @@ async function handleApiRoute(
 				targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
 				goal.reattemptOf = body.reattemptOf;
 			}
+			// Persist autoStartTeam flag
+			targetGoalManager.updateGoal(goal.id, { autoStartTeam });
+			goal.autoStartTeam = autoStartTeam;
 			// Initialize gate states for the workflow
 			if (goal.workflow) {
 				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
 			}
 			json(goal, 201);
 
-			// Fire-and-forget async worktree setup
+			// Fire-and-forget async worktree setup (and optionally start team)
 			if (goal.setupStatus === "preparing") {
-				targetGoalManager.setupWorktree(goal.id).then(() => {
-					broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-				}).catch((err) => {
-					broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
-				});
+				if (goal.autoStartTeam) {
+					targetGoalManager.setupWorktreeAndStartTeam(goal.id, () => teamManager.startTeam(goal.id)).then(() => {
+						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
+					}).catch((err) => {
+						const g = targetGoalManager.getGoal(goal.id);
+						if (g?.setupStatus === "ready") {
+							broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
+							console.error("[goal] Auto-start team failed (worktree ready):", err);
+						} else {
+							broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
+						}
+					});
+				} else {
+					targetGoalManager.setupWorktree(goal.id).then(() => {
+						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
+					}).catch((err) => {
+						broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
+					});
+				}
 			}
 		} catch (err) {
 			json({ error: String(err) }, 400);
@@ -1645,12 +1663,27 @@ async function handleApiRoute(
 			return;
 		}
 		json({ ok: true });
-		// Fire-and-forget async worktree setup
-		retryGoalManager.setupWorktree(goalId).then(() => {
-			broadcastToAll({ type: "goal_setup_complete", goalId });
-		}).catch((err) => {
-			broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
-		});
+		// Fire-and-forget async worktree setup (and optionally start team)
+		const retryGoal = retryGoalManager.getGoal(goalId);
+		if (retryGoal?.autoStartTeam) {
+			retryGoalManager.setupWorktreeAndStartTeam(goalId, () => teamManager.startTeam(goalId)).then(() => {
+				broadcastToAll({ type: "goal_setup_complete", goalId });
+			}).catch((err) => {
+				const g = retryGoalManager.getGoal(goalId);
+				if (g?.setupStatus === "ready") {
+					broadcastToAll({ type: "goal_setup_complete", goalId });
+					console.error("[goal] Auto-start team failed on retry (worktree ready):", err);
+				} else {
+					broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
+				}
+			});
+		} else {
+			retryGoalManager.setupWorktree(goalId).then(() => {
+				broadcastToAll({ type: "goal_setup_complete", goalId });
+			}).catch((err) => {
+				broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
+			});
+		}
 		return;
 	}
 
@@ -4445,7 +4478,19 @@ async function handleApiRoute(
 		let reportHtml: string | undefined = typeof body.report_html === "string" ? body.report_html : undefined;
 		if (!reportHtml && typeof body.report_html_file === "string") {
 			try {
-				const filePath = body.report_html_file;
+				let filePath = body.report_html_file;
+				// Resolve relative paths against the session's CWD
+				if (!path.isAbsolute(filePath)) {
+					const session = sessionManager.getSession(body.sessionId);
+					if (session) filePath = path.resolve(session.cwd, filePath);
+				}
+				// On Windows, POSIX paths from Git Bash (/tmp/...) resolve to C:\tmp\... which doesn't exist.
+				// Fall back to the system TEMP directory for /tmp/ paths.
+				if (process.platform === "win32" && !fs.existsSync(filePath) && body.report_html_file.startsWith("/tmp/")) {
+					const tempDir = process.env.TEMP || process.env.TMP || "C:\\Windows\\Temp";
+					const tempResolved = path.join(tempDir, body.report_html_file.slice(5));
+					if (fs.existsSync(tempResolved)) filePath = tempResolved;
+				}
 				const stat = fs.statSync(filePath);
 				const MAX_REPORT_SIZE = 10 * 1024 * 1024; // 10 MB
 				if (stat.size > MAX_REPORT_SIZE) {
