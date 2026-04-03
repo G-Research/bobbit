@@ -122,10 +122,11 @@ promptTemplate: |-
 
   ## When Done
   1. Kill any background processes you started.
-  2. Call `verification_result` to submit your findings:
+  2. Write your HTML report to your working directory (e.g. `qa-report.html`) using the `write` tool. Embed screenshots as base64 data URIs.
+  3. Call `verification_result` to submit your findings:
      - `verdict`: "pass" if all critical scenarios passed, "fail" if any failed
      - `summary`: concise summary of what you tested and what you found
-     - `report_html`: your self-contained HTML report with embedded base64 screenshots
+     - `report_html_file`: the filename of your HTML report (e.g. `qa-report.html`). Do NOT use `/tmp/` paths — write in your working directory.
      This is REQUIRED. The verification system only receives your results through this tool.
      If you go idle without calling it, your work is lost.
   3. Update your task with a `result_summary` of your findings and mark it `complete` (or `blocked` if the app won't load).

@@ -4429,7 +4429,19 @@ async function handleApiRoute(
 		let reportHtml: string | undefined = typeof body.report_html === "string" ? body.report_html : undefined;
 		if (!reportHtml && typeof body.report_html_file === "string") {
 			try {
-				const filePath = body.report_html_file;
+				let filePath = body.report_html_file;
+				// Resolve relative paths against the session's CWD
+				if (!path.isAbsolute(filePath)) {
+					const session = sessionManager.getSession(body.sessionId);
+					if (session) filePath = path.resolve(session.cwd, filePath);
+				}
+				// On Windows, POSIX paths from Git Bash (/tmp/...) resolve to C:\tmp\... which doesn't exist.
+				// Fall back to the system TEMP directory for /tmp/ paths.
+				if (process.platform === "win32" && !fs.existsSync(filePath) && body.report_html_file.startsWith("/tmp/")) {
+					const tempDir = process.env.TEMP || process.env.TMP || "C:\\Windows\\Temp";
+					const tempResolved = path.join(tempDir, body.report_html_file.slice(5));
+					if (fs.existsSync(tempResolved)) filePath = tempResolved;
+				}
 				const stat = fs.statSync(filePath);
 				const MAX_REPORT_SIZE = 10 * 1024 * 1024; // 10 MB
 				if (stat.size > MAX_REPORT_SIZE) {
