@@ -253,6 +253,28 @@ test.describe("Gate verification reconciliation", () => {
 		expect(result.steps[0].status).toBe("running");
 	});
 
+	test("maps skipped=true with passed=true to status skipped (optional step)", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() => {
+			return (window as any).mapGateSignalStep({
+				name: "QA Testing", type: "agent-qa", passed: true, skipped: true,
+				output: "Skipped — not enabled for this goal", duration_ms: 0,
+			});
+		});
+		expect(result.status).toBe("skipped");
+	});
+
+	test("maps skipped=true with passed=false to status skipped (phase failure)", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() => {
+			return (window as any).mapGateSignalStep({
+				name: "Code review", type: "llm-review", passed: false, skipped: true,
+				output: "Skipped — earlier phase failed", duration_ms: 0,
+			});
+		});
+		expect(result.status).toBe("skipped");
+	});
+
 	test("handles missing signal in gate data gracefully", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 
