@@ -556,6 +556,23 @@ Sandbox containers include a git credential helper so agents can `git push` and 
 | `sandbox-token.ts` | Scoped token store |
 | `sandbox-guard.ts` | Endpoint allowlist enforcement |
 
+### Sandbox git fetch broker
+
+In sandboxed mode, each agent container gets an independent `git clone --local` with its own object store. Commits made in one clone are not visible from another — unlike non-sandboxed worktrees which share the same `.git` directory. This means the team lead cannot `git merge` an agent's branch after the agent sets `headSha` on a task.
+
+To bridge this gap, the server acts as a git fetch broker. When a sandboxed agent sets `headSha` on a task via `PUT /api/goals/:goalId/tasks/:taskId`, the server automatically runs `git fetch -- <agent-clone-path> <branch>` in the team lead's working directory. This makes the agent's commits available for `git merge` without requiring `git push` to a remote — critical when `GITHUB_TOKEN` is not available on the host.
+
+The broker is implemented in `TeamManager.brokerGitFetch()` and invoked fire-and-forget from the task update handler. It never blocks or fails the API response.
+
+**Security:** Branch names are validated against `/^[a-zA-Z0-9/_.\-]+$/` to prevent git option injection, and `--` separates options from arguments in the `git fetch` call.
+
+**Edge cases:**
+- **Non-sandboxed agents**: skipped — worktrees share `.git` objects natively
+- **Dismissed agent** (worktree already removed): skipped via `fs.existsSync()` check
+- **Same directory** (agent and team lead share a clone): skipped defensively
+- **Best-effort**: failures are logged but never block the task update API response
+- **Idempotent**: re-fetching an already-fetched branch is harmless
+
 ### REST API
 
 | Endpoint | Method | Description |
