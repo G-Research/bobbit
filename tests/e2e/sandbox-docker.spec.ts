@@ -1,10 +1,10 @@
 /**
- * Docker container /proc/1/environ E2E test.
+ * Docker sandbox E2E tests.
  *
- * Verifies that containers created by buildDockerRunArgs() do NOT expose
- * sensitive gateway tokens (BOBBIT_TOKEN, BOBBIT_GATEWAY_URL) in PID 1's
- * environment. This is the primary defense against sandbox escape via
- * /proc/1/environ reading.
+ * Tests cover:
+ * 1. Container /proc/1/environ — no sensitive token exposure
+ * 2. Shared team repo — bare repo creation, mount visibility, remote setup,
+ *    post-commit hook, and cross-agent commit visibility
  *
  * Requires Docker — auto-skips when Docker is unavailable.
  */
@@ -12,6 +12,8 @@ import { test, expect } from "./in-process-harness.js";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -128,5 +130,221 @@ test.describe("Sandbox Docker — /proc/1/environ", () => {
 
 		// Sanity: other env vars are present
 		expect(joined).toContain("NODE_TLS_REJECT_UNAUTHORIZED=0");
+	});
+});
+
+// ── Shared team repo tests ─────────────────────────────────────────────────
+
+test.describe("Sandbox Docker — shared team repo", () => {
+	test.skip(!dockerAvailable, "Docker not available");
+
+	// Use a unique goal ID per test run to avoid collisions
+	const goalId = `test-${Date.now()}`;
+	// We'll use the current repo as the source for createTeamRepo
+	const repoPath = path.resolve(process.cwd());
+	let pool: InstanceType<typeof import("../../dist/server/agent/sandbox-pool.js").SandboxPool> | null = null;
+
+	// Track containers and paths for cleanup
+	const claimedContainers: string[] = [];
+	let teamRepoPath: string | null = null;
+
+	test.beforeAll(async () => {
+		const { SandboxPool } = await import("../../dist/server/agent/sandbox-pool.js");
+		pool = new SandboxPool({
+			poolSize: 0, // don't pre-warm — we create slots on demand
+			maxIdleSeconds: 300,
+			image: "node:20-slim",
+			projectDir: repoPath,
+			repoPath,
+			healthCheckIntervalMs: 30_000,
+		});
+		await pool.init();
+	});
+
+	test.afterAll(async () => {
+		// Clean up any claimed containers
+		for (const cid of claimedContainers) {
+			await execFileAsync("docker", ["rm", "-f", cid], { timeout: 10_000 }).catch(() => {});
+		}
+		// Destroy team repo if created
+		if (pool) {
+			await pool.destroyTeamRepo(goalId).catch(() => {});
+			await pool.shutdown();
+		}
+	});
+
+	test("createTeamRepo creates a valid bare git repo on disk", async () => {
+		const result = await pool!.createTeamRepo(goalId, repoPath, "master");
+		teamRepoPath = result;
+
+		// Verify the path contains the goal ID
+		expect(result).toContain(`team-${goalId}.git`);
+
+		// Verify the directory exists
+		expect(fs.existsSync(result)).toBe(true);
+
+		// Verify it's a valid bare git repo (has HEAD file)
+		const headPath = path.join(result, "HEAD");
+		expect(fs.existsSync(headPath)).toBe(true);
+
+		// Verify it has refs directory (bare repo structure)
+		const refsPath = path.join(result, "refs");
+		expect(fs.existsSync(refsPath)).toBe(true);
+	});
+
+	test("createTeamRepo is idempotent — same path returned on second call", async () => {
+		const first = await pool!.createTeamRepo(goalId, repoPath, "master");
+		const second = await pool!.createTeamRepo(goalId, repoPath, "master");
+
+		expect(first).toBe(second);
+		// Repo should still be valid
+		expect(fs.existsSync(path.join(first, "HEAD"))).toBe(true);
+	});
+
+	test("destroyTeamRepo removes the bare repo directory", async () => {
+		const destroyGoalId = `test-destroy-${Date.now()}`;
+		const created = await pool!.createTeamRepo(destroyGoalId, repoPath, "master");
+		expect(fs.existsSync(created)).toBe(true);
+
+		await pool!.destroyTeamRepo(destroyGoalId);
+		expect(fs.existsSync(created)).toBe(false);
+	});
+
+	test("pool directory is mounted at /team-repos inside container", { timeout: 120_000 }, async () => {
+		// Claim a slot — the pool dir should be mounted at /team-repos
+		const sessionId = "test-mount-vis-" + Date.now();
+		const slot = await pool!.claim(sessionId);
+		expect(slot).not.toBeNull();
+		claimedContainers.push(slot!.containerId);
+
+		// Verify /team-repos exists inside the container
+		const { stdout } = await execFileAsync(
+			"docker",
+			["exec", slot!.containerId, "ls", "-d", "/team-repos"],
+			{ timeout: 10_000 },
+		);
+		expect(stdout.trim()).toBe("/team-repos");
+
+		// If we already created a team repo, verify it's visible inside the container
+		if (teamRepoPath) {
+			const repoName = path.basename(teamRepoPath);
+			const { stdout: lsOut } = await execFileAsync(
+				"docker",
+				["exec", slot!.containerId, "ls", "/team-repos/"],
+				{ timeout: 10_000 },
+			);
+			expect(lsOut).toContain(repoName);
+		}
+
+		await pool!.release(sessionId, slot!.containerId);
+		// Remove from cleanup list since release destroys it
+		const idx = claimedContainers.indexOf(slot!.containerId);
+		if (idx !== -1) claimedContainers.splice(idx, 1);
+	});
+
+	test("claim with teamRepoPath configures team remote in the clone", { timeout: 120_000 }, async () => {
+		// Ensure team repo exists
+		const trPath = await pool!.createTeamRepo(goalId, repoPath, "master");
+		teamRepoPath = trPath;
+
+		const sessionId = "test-remote-" + Date.now();
+		const slot = await pool!.claim(sessionId, { teamRepoPath: trPath });
+		expect(slot).not.toBeNull();
+		claimedContainers.push(slot!.containerId);
+
+		// Verify the 'team' remote exists and points to the container-internal path
+		const teamUrl = await execFileAsync(
+			"git", ["remote", "get-url", "team"],
+			{ cwd: slot!.worktreePath, timeout: 5_000 },
+		);
+		const repoName = path.basename(trPath); // "team-<goalId>.git"
+		expect(teamUrl.stdout.trim()).toBe(`/team-repos/${repoName}`);
+
+		await pool!.release(sessionId, slot!.containerId);
+		const idx = claimedContainers.indexOf(slot!.containerId);
+		if (idx !== -1) claimedContainers.splice(idx, 1);
+	});
+
+	test("claim with teamRepoPath installs post-commit hook", { timeout: 120_000 }, async () => {
+		const trPath = await pool!.createTeamRepo(goalId, repoPath, "master");
+		teamRepoPath = trPath;
+
+		const sessionId = "test-hook-" + Date.now();
+		const slot = await pool!.claim(sessionId, { teamRepoPath: trPath });
+		expect(slot).not.toBeNull();
+		claimedContainers.push(slot!.containerId);
+
+		// Verify post-commit hook exists
+		const hookPath = path.join(slot!.worktreePath, ".git", "hooks", "post-commit");
+		expect(fs.existsSync(hookPath)).toBe(true);
+
+		// Verify hook content contains the push command
+		const hookContent = fs.readFileSync(hookPath, "utf-8");
+		expect(hookContent).toContain("#!/bin/sh");
+		expect(hookContent).toContain("git push team");
+		expect(hookContent).toContain("2>/dev/null &"); // non-blocking, non-fatal
+
+		await pool!.release(sessionId, slot!.containerId);
+		const idx = claimedContainers.indexOf(slot!.containerId);
+		if (idx !== -1) claimedContainers.splice(idx, 1);
+	});
+
+	test("cross-agent commit visibility via shared team repo", { timeout: 180_000 }, async () => {
+		const crossGoalId = `test-cross-${Date.now()}`;
+		const trPath = await pool!.createTeamRepo(crossGoalId, repoPath, "master");
+
+		// Claim two slots, both with teamRepoPath
+		const sessionA = "test-agent-a-" + Date.now();
+		const sessionB = "test-agent-b-" + Date.now();
+		const branchName = `test-branch-${Date.now()}`;
+
+		const slotA = await pool!.claim(sessionA, {
+			branch: branchName,
+			teamRepoPath: trPath,
+		});
+		expect(slotA).not.toBeNull();
+		claimedContainers.push(slotA!.containerId);
+
+		const slotB = await pool!.claim(sessionB, {
+			branch: branchName,
+			teamRepoPath: trPath,
+		});
+		expect(slotB).not.toBeNull();
+		claimedContainers.push(slotB!.containerId);
+
+		// In slot A: create a file, add, commit (hook auto-pushes to team repo)
+		const testFileName = "team-repo-test.txt";
+		const testContent = `cross-agent-test-${Date.now()}`;
+		fs.writeFileSync(path.join(slotA!.worktreePath, testFileName), testContent);
+
+		await execFileAsync("git", ["add", testFileName], {
+			cwd: slotA!.worktreePath, timeout: 5_000,
+		});
+		await execFileAsync("git", [
+			"-c", "user.name=Test", "-c", "user.email=test@test.com",
+			"commit", "-m", "test: cross-agent commit visibility",
+		], {
+			cwd: slotA!.worktreePath, timeout: 10_000,
+		});
+
+		// Give the background post-commit hook a moment to push
+		await new Promise(r => setTimeout(r, 3_000));
+
+		// In slot B: fetch from team remote and verify the commit is visible
+		await execFileAsync("git", ["fetch", "team"], {
+			cwd: slotB!.worktreePath, timeout: 15_000,
+		});
+
+		const { stdout: logOutput } = await execFileAsync(
+			"git", ["log", `team/${branchName}`, "--oneline", "-5"],
+			{ cwd: slotB!.worktreePath, timeout: 5_000 },
+		);
+		expect(logOutput).toContain("test: cross-agent commit visibility");
+
+		// Cleanup
+		await pool!.release(sessionA, slotA!.containerId);
+		await pool!.release(sessionB, slotB!.containerId);
+		claimedContainers.length = 0; // cleared by release
+		await pool!.destroyTeamRepo(crossGoalId);
 	});
 });
