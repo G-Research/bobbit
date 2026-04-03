@@ -3369,15 +3369,10 @@ async function handleApiRoute(
 			const session = sessionManager.getSession(id);
 			if (session) {
 				session.delegateOf = body.delegateOf || undefined;
-<<<<<<< Updated upstream
-			}
-			sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
-=======
 				sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
 			} else {
 				sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
 			}
->>>>>>> Stashed changes
 		}
 
 		if (typeof body.teamLeadSessionId === "string") {
