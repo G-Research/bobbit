@@ -1111,9 +1111,9 @@ export class VerificationHarness {
 
 		// Build the kickoff message (shared between both paths)
 		const kickoff = [
-			`Perform a code review for the gate verification step: "${step.name}".`,
+			`Perform the review for the gate verification step: "${step.name}".`,
 			"",
-			`Your working directory is already on branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`. Do NOT run git checkout/pull/fetch. Just read files and diffs directly.`,
+			`Your working directory is on branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`. Do NOT run git checkout/pull/fetch. Follow the review step instructions below — they define exactly what to check at this stage.`,
 			"",
 			step.prompt || "",
 			"",
@@ -1248,13 +1248,24 @@ export class VerificationHarness {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const roleName = role.name || step.role || "reviewer";
+			const isSandboxed = (goalId
+				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
+					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				: undefined) ?? this.sessionManager!.isSandboxEnabled;
+			// When sandboxed, claim a pool slot checked out to the goal branch so
+			// the reviewer sees the actual implementation — not master.
+			const goalForClaim = goalId
+				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
+					?? this.sessionManager!.goalManager.getGoal(goalId))
+				: undefined;
+			const sandboxClaim = isSandboxed && goalForClaim?.branch
+				? { branch: goalForClaim.branch }
+				: undefined;
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
-				sandboxed: (goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
-				: undefined) ?? this.sessionManager!.isSandboxEnabled,
+				sandboxed: isSandboxed,
+				sandboxClaim,
 				sessionId,
 			});
 
@@ -1447,15 +1458,25 @@ export class VerificationHarness {
 			const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 			this.pendingResults.set(qaSessionId, resultResolver);
 
-			// Write verification_result extension
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
+			const qaIsSandboxed = (goalId
+				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
+					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				: undefined) ?? this.sessionManager!.isSandboxEnabled;
+			// When sandboxed, claim a pool slot checked out to the goal branch so
+			// the QA agent tests the actual implementation — not master.
+			const qaGoalForClaim = goalId
+				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
+					?? this.sessionManager!.goalManager.getGoal(goalId))
+				: undefined;
+			const qaSandboxClaim = qaIsSandboxed && qaGoalForClaim?.branch
+				? { branch: qaGoalForClaim.branch }
+				: undefined;
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
-				sandboxed: (goalId
-					? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-						?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
-					: undefined) ?? this.sessionManager!.isSandboxEnabled,
+				sandboxed: qaIsSandboxed,
+				sandboxClaim: qaSandboxClaim,
 				sessionId: qaSessionId,
 			});
 			qaSessionId = session.id;
