@@ -112,7 +112,7 @@ Substitute `$PORT` and `$TOKEN` in the browser entry URL. Navigate to it using `
 
 **Available browser tools:**
 - `browser_navigate(url=...)` — navigate to your ephemeral server
-- `browser_screenshot()` — take screenshots (returns base64 in tool response — no need to save to disk)
+- `browser_screenshot(savePath=...)` — take screenshots and save to disk (ALWAYS use `savePath` — see below)
 - `browser_snapshot()` — get ARIA accessibility tree (best for understanding page structure and finding elements)
 - `browser_click(selector=...)` — click elements
 - `browser_type(selector=..., text=...)` — type into inputs
@@ -138,87 +138,108 @@ If the URL doesn't match your ephemeral server (check the port), re-navigate.
 - **Do NOT create test fixtures via API/curl.** If testing requires projects, goals, or entities, create them through the UI. If the UI can't do it, that's a finding, not a problem to solve with curl.
 - **If it works, move on.** One screenshot proving a feature works is enough. Don't verify CSS classes, DOM structure, or internal state.
 
+### Screenshot capture — CRITICAL
+
+**You CANNOT extract base64 data from `browser_screenshot()` tool responses.** The tool returns images as visual content blocks — you see the picture but cannot copy the underlying binary data. Therefore:
+
+**ALWAYS save screenshots to disk** using the `savePath` parameter:
+```
+browser_screenshot(savePath="$WORK_DIR/screenshots/scenario1-before.png")
+```
+
+Create the screenshots directory at the start of testing:
+```bash
+mkdir -p "$WORK_DIR/screenshots"
+```
+
+Use descriptive filenames: `scenario1-before.png`, `scenario1-after.png`, `scenario2-browse.png`, etc.
+
 ### Per-scenario flow
 
 For each scenario from your task prompt (respecting `qa_max_scenarios`):
 
-1. **Before**: Take a screenshot documenting the starting state
+1. **Before**: Take a screenshot with `savePath` documenting the starting state
 2. **Action**: Perform the user interaction (click, type, navigate, etc.)
-3. **After**: Take a screenshot documenting the result
+3. **After**: Take a screenshot with `savePath` documenting the result
 4. **Verdict**: Record PASS, FAIL, or SKIPPED with a clear explanation
-
-Call `browser_screenshot()` (no `savePath` needed). The tool response includes a `{ type: "image", data: "<base64>" }` content block — note this base64 string for each screenshot. You will embed these directly in the HTML report in Step 7.
 
 Track elapsed time. If `qa_max_duration_minutes` is exceeded, stop testing immediately and proceed to report generation with partial results.
 
 ## Step 7: Produce HTML Report
 
-Write a self-contained HTML report. Embed screenshots using the base64 data returned directly by `browser_screenshot()` in Step 6 — each tool response contains `{ type: "image", data: "<base64>" }`. Use this data in `<img>` tags as `data:image/png;base64,<data>` URIs. No need to save screenshots to disk or read them back.
+### Embedding screenshots
 
-The report structure:
+After all scenarios are complete, convert saved screenshots to base64 and build the report. Use this bash script to generate base64 data URIs from saved PNG files:
 
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>QA Testing Report</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 2rem; line-height: 1.6; }
-    h1 { border-bottom: 2px solid #333; padding-bottom: 0.5rem; }
-    .env-table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
-    .env-table td, .env-table th { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }
-    .scenario { border: 1px solid #ddd; border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; }
-    .pass { border-left: 4px solid #22c55e; }
-    .fail { border-left: 4px solid #ef4444; }
-    .skip { border-left: 4px solid #f59e0b; }
-    .screenshot { max-width: 100%; border: 1px solid #ccc; border-radius: 4px; margin: 0.5rem 0; }
-    .verdict { font-weight: bold; font-size: 1.1em; margin-top: 1rem; }
-    .verdict.pass { color: #16a34a; }
-    .verdict.fail { color: #dc2626; }
-    .summary { background: #f1f5f9; padding: 1.5rem; border-radius: 8px; margin: 2rem 0; }
-    .summary h2 { margin-top: 0; }
-    .gap-list { background: #fffbeb; padding: 1rem; border-radius: 8px; border-left: 4px solid #f59e0b; }
-  </style>
-</head>
-<body>
-  <h1>QA Testing Report</h1>
-  
-  <h2>Environment</h2>
-  <table class="env-table">
-    <tr><th>Branch</th><td>[branch name]</td></tr>
-    <tr><th>Commit</th><td>[commit hash]</td></tr>
-    <tr><th>Server</th><td>http://127.0.0.1:[port] (ephemeral, killed after validation)</td></tr>
-    <tr><th>Working Directory</th><td>[temp dir path]</td></tr>
-  </table>
-
-  <!-- For each scenario: -->
-  <div class="scenario pass|fail|skip">
-    <h3>Scenario N: [Title]</h3>
-    <ol>
-      <li>[Step description]
-        <br><img class="screenshot" src="data:image/png;base64,[...]" alt="[description]">
-      </li>
-      <!-- more steps -->
-    </ol>
-    <p class="verdict pass|fail">Result: PASS|FAIL — [explanation]</p>
-  </div>
-
-  <div class="gap-list">
-    <h2>Automated Test Coverage Gaps</h2>
-    <ul>
-      <li>[Identified gap with file/test references]</li>
-    </ul>
-  </div>
-
-  <div class="summary">
-    <h2>Summary</h2>
-    <p><strong>Passed:</strong> N | <strong>Failed:</strong> N | <strong>Skipped:</strong> N</p>
-    <p><strong>Budget used:</strong> Nm of Nm</p>
-  </div>
-</body>
-</html>
+```bash
+# Convert a screenshot to a base64 data URI (works on both Linux and macOS/Windows with Node)
+node -e "const fs=require('fs'); const b=fs.readFileSync('$WORK_DIR/screenshots/scenario1-before.png'); console.log('data:image/png;base64,'+b.toString('base64'))"
 ```
+
+For each screenshot file, run this command and embed the output as the `src` attribute of an `<img>` tag. The output will be a single long string starting with `data:image/png;base64,...`.
+
+**IMPORTANT**: The base64 output is very long (100KB+). Do NOT try to manually type or copy it. Instead, build the HTML report using a script that reads screenshots and generates the HTML:
+
+```bash
+node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = '$WORK_DIR/screenshots';
+const files = fs.readdirSync(dir).filter(f => f.endsWith('.png')).sort();
+const imgs = {};
+for (const f of files) {
+  const data = fs.readFileSync(path.join(dir, f));
+  imgs[f] = 'data:image/png;base64,' + data.toString('base64');
+}
+fs.writeFileSync('$WORK_DIR/screenshot-data.json', JSON.stringify(imgs));
+console.log('Processed', Object.keys(imgs).length, 'screenshots');
+"
+```
+
+Then use the generated `screenshot-data.json` to build your HTML report. Read the JSON, and for each scenario, reference the correct screenshot filename to get its data URI.
+
+A complete approach — write a Node script that generates the final HTML:
+
+```bash
+node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = '$WORK_DIR/screenshots';
+
+// Build base64 map
+const imgs = {};
+if (fs.existsSync(dir)) {
+  for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.png'))) {
+    imgs[f] = 'data:image/png;base64,' + fs.readFileSync(path.join(dir, f)).toString('base64');
+  }
+}
+
+// Read the scenario data you'll write earlier
+// (write a scenarios.json with your test results before this step)
+const scenarios = JSON.parse(fs.readFileSync('$WORK_DIR/scenarios.json', 'utf8'));
+
+// Build HTML...
+let html = '<!DOCTYPE html>...'; // construct your report HTML here using imgs[filename] for src attributes
+fs.writeFileSync('$WORK_DIR/validation-report.html', html);
+"
+```
+
+**Recommended workflow:**
+1. During testing, save all screenshots to `$WORK_DIR/screenshots/` with descriptive names
+2. After all scenarios, write a `$WORK_DIR/scenarios.json` with your test results (verdict, steps, screenshot filenames per scenario)
+3. Write a Node script that reads both the screenshots and scenario data, generates the complete HTML report with embedded base64 images, and saves it to `$WORK_DIR/validation-report.html`
+
+This ensures screenshots are properly embedded without you needing to handle base64 strings directly.
+
+The generated report should follow this structure (your Node script produces this):
+
+- HTML with inline CSS (self-contained, no external dependencies)
+- Environment table (branch, commit, server, working dir)
+- One `<div class="scenario pass|fail|skip">` per scenario containing:
+  - Steps as an ordered list with `<img class="screenshot" src="data:image/png;base64,...">` tags
+  - A verdict paragraph with PASS/FAIL/SKIPPED and explanation
+- Automated test coverage gaps section
+- Summary with pass/fail/skip counts
 
 Save the report to `$WORK_DIR/validation-report.html`.
 
@@ -253,6 +274,7 @@ Do NOT emit `<verdict>` or `<qa_report>` XML tags — use the `verification_resu
 - **NEVER** run unit tests, integration tests, or `npm test`. You are a QA tester driving a real browser, not a developer. If you cannot get the ephemeral server running, submit a FAIL verdict explaining the infrastructure issue and stop. Do not fall back to running the project's test suite.
 - **NEVER** read source code (`.ts`, `.js`, `.tsx`, `.jsx` files). You are testing the product as a user. The only files you may read are config files needed for server setup.
 - **ALWAYS** clean up, even on failure
-- **ALWAYS** embed screenshots as base64 in the report (self-contained)
+- **ALWAYS** save screenshots to disk with `savePath` and embed as base64 in the report via Node script (self-contained)
+- **NEVER** try to manually type base64 data — always use a script to read PNG files and generate the HTML
 - **RESPECT** the time and scenario budgets — partial results are better than no results
 - If $ARGUMENTS were provided, use them as scenario descriptions to validate
