@@ -409,7 +409,9 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "task_update": {
-					const tm = resolveTaskManagerForTask(sessionManager, msg.taskId);
+					let tm: TaskManager;
+					try { tm = resolveTaskManagerForTask(sessionManager, msg.taskId); }
+					catch { send(ws, { type: "error", message: `Task ${msg.taskId} not found`, code: "TASK_NOT_FOUND" }); break; }
 					const updates = { ...msg.updates, state: msg.updates.state as TaskState | undefined };
 					const updated = tm.updateTask(msg.taskId, updates);
 					if (updated) {
@@ -421,7 +423,9 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "task_delete": {
-					const tm = resolveTaskManagerForTask(sessionManager, msg.taskId);
+					let tm: TaskManager;
+					try { tm = resolveTaskManagerForTask(sessionManager, msg.taskId); }
+					catch { send(ws, { type: "error", message: `Task ${msg.taskId} not found`, code: "TASK_NOT_FOUND" }); break; }
 					const task = tm.getTask(msg.taskId);
 					if (task) {
 						tm.deleteTask(msg.taskId);
@@ -476,23 +480,18 @@ export function handleWebSocketConnection(
 	});
 }
 
-/** Resolve the correct TaskManager for a goal (uses per-project store if available). */
+/** Resolve the correct TaskManager for a goal (uses per-project store). Throws if not found. */
 function resolveTaskManagerForGoal(sessionManager: SessionManager, goalId?: string): TaskManager {
 	const pcm = sessionManager.getProjectContextManager();
 	if (goalId && pcm) {
 		const ctx = pcm.getContextForGoal(goalId);
 		if (ctx) return new TaskManager(ctx.taskStore);
 	}
-	return sessionManager.taskManager;
+	throw new Error(`Cannot resolve TaskManager: goal "${goalId}" not found in any project`);
 }
 
-/** Resolve the correct TaskManager for a task ID (finds via goalId lookup). */
+/** Resolve the correct TaskManager for a task ID (finds via goalId lookup). Throws if not found. */
 function resolveTaskManagerForTask(sessionManager: SessionManager, taskId: string): TaskManager {
-	// Try default first
-	const task = sessionManager.taskManager.getTask(taskId);
-	if (task) return sessionManager.taskManager;
-
-	// Search across projects
 	const pcm = sessionManager.getProjectContextManager();
 	if (pcm) {
 		for (const ctx of pcm.all()) {
@@ -500,5 +499,5 @@ function resolveTaskManagerForTask(sessionManager: SessionManager, taskId: strin
 			if (candidateTm.getTask(taskId)) return candidateTm;
 		}
 	}
-	return sessionManager.taskManager;
+	throw new Error(`Cannot resolve TaskManager: task "${taskId}" not found in any project`);
 }

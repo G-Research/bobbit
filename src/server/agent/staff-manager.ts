@@ -15,12 +15,10 @@ export class StaffManager {
 		this.pcm = pcm;
 	}
 
-	private getStore(projectId?: string): StaffStore {
-		if (projectId) {
-			const ctx = this.pcm.getOrCreate(projectId);
-			if (ctx) return ctx.staffStore;
-		}
-		return this.pcm.getDefault().staffStore;
+	private getStore(projectId: string): StaffStore {
+		const ctx = this.pcm.getOrCreate(projectId);
+		if (ctx) return ctx.staffStore;
+		throw new Error(`Cannot resolve staff store: project "${projectId}" not found`);
 	}
 
 	private findStoreForStaff(id: string): { store: StaffStore; staff: PersistedStaff; projectId: string } | null {
@@ -42,6 +40,9 @@ export class StaffManager {
 		const now = Date.now();
 		const id = randomUUID();
 		const projectId = opts?.projectId;
+		if (!projectId) {
+			throw new Error("Cannot create staff: projectId is required");
+		}
 
 		// Auto-assign UUIDs to triggers missing IDs
 		const triggers = (opts?.triggers ?? []).map((t) => ({
@@ -73,9 +74,8 @@ export class StaffManager {
 		const store = this.getStore(projectId);
 		store.put(staff);
 
-		const resolvedProjectId = projectId || this.pcm.getDefaultProjectId();
-		const searchIndex = this.pcm.getOrCreate(resolvedProjectId)?.searchIndex;
-		searchIndex?.indexStaff(staff, resolvedProjectId);
+		const searchIndex = this.pcm.getOrCreate(projectId)?.searchIndex;
+		searchIndex?.indexStaff(staff, projectId);
 
 		// Create the permanent session for this staff agent
 		try {
@@ -87,6 +87,7 @@ export class StaffManager {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: id },
 				sandboxed: sessionManager.isSandboxEnabled,
+				projectId,
 			});
 			session.staffId = id;
 			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
@@ -115,7 +116,8 @@ export class StaffManager {
 
 	listStaff(projectId?: string): PersistedStaff[] {
 		if (projectId) {
-			return this.getStore(projectId).getAll();
+			const ctx = this.pcm.getOrCreate(projectId);
+			return ctx ? ctx.staffStore.getAll() : [];
 		}
 		const all: PersistedStaff[] = [];
 		for (const ctx of this.pcm.all()) {
