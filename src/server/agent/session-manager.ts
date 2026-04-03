@@ -3377,5 +3377,24 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 		}
 	}
 
+	// Auto-detect GITHUB_TOKEN for gh CLI (PR creation, git push via HTTPS).
+	// Check host env first, then try `gh auth token` to extract from gh's keyring.
+	if (!result["GITHUB_TOKEN"]) {
+		const hostGhToken = process.env["GITHUB_TOKEN"] || process.env["GH_TOKEN"];
+		if (hostGhToken) {
+			result["GITHUB_TOKEN"] = hostGhToken;
+		} else {
+			try {
+				const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+				const token = execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).trim();
+				if (token) {
+					result["GITHUB_TOKEN"] = token;
+				}
+			} catch {
+				// gh not installed or not authenticated — skip
+			}
+		}
+	}
+
 	return result;
 }
