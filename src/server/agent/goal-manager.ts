@@ -173,6 +173,15 @@ export class GoalManager {
 	}
 
 	/**
+	 * Setup worktree then start team. Used when autoStartTeam is enabled.
+	 * Uses a callback to avoid circular dependency with TeamManager.
+	 */
+	async setupWorktreeAndStartTeam(goalId: string, startTeamFn: () => Promise<any>): Promise<void> {
+		await this.setupWorktree(goalId);
+		await startTeamFn();
+	}
+
+	/**
 	 * Retry setup for a goal in error state.
 	 * Returns true if retry was initiated, false if goal not found or not in error state.
 	 */
@@ -220,7 +229,7 @@ export class GoalManager {
 		return this.store.getAll();
 	}
 
-	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string; prUrl?: string; reattemptOf?: string; projectId?: string }): Promise<boolean> {
+	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string; prUrl?: string; reattemptOf?: string; projectId?: string; autoStartTeam?: boolean }): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
 

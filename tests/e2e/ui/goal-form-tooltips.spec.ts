@@ -40,8 +40,9 @@ test.describe("Step description tooltips", () => {
 	test("optional step shows ⓘ tooltip when description is set", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 
-		// Find the ⓘ icon — it should be a span with cursor-help class inside the goal form
-		const tooltipIcon = page.locator(".goal-preview-panel span.cursor-help").first();
+		// Find the ⓘ icon next to the QA Testing optional step (not the auto-start toggle tooltip)
+		const qaLabel = page.getByText("Enable QA Testing").first();
+		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
 		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
 
 		// Verify the icon text is ⓘ
@@ -54,7 +55,8 @@ test.describe("Step description tooltips", () => {
 	test("tooltip title matches the full workflow YAML description", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 
-		const tooltipIcon = page.locator(".goal-preview-panel span.cursor-help").first();
+		const qaLabel = page.getByText("Enable QA Testing").first();
+		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
 		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
 
 		// Check for multiple substrings from the expected description:
@@ -72,7 +74,8 @@ test.describe("Step description tooltips", () => {
 	test("tooltip icon has correct CSS classes", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 
-		const tooltipIcon = page.locator(".goal-preview-panel span.cursor-help").first();
+		const qaLabel = page.getByText("Enable QA Testing").first();
+		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
 		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
 
 		// Verify it follows the sandbox tooltip pattern: text-[9px], text-muted-foreground, cursor-help
