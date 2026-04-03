@@ -722,7 +722,7 @@ export class VerificationHarness {
 				const s = steps[idx];
 				const skipResult: GateSignalStep = {
 					name: s.name, type: s.type as GateSignalStep["type"],
-					passed: true, output: "Skipped — not enabled for this goal", duration_ms: 0,
+					passed: true, skipped: true, output: "Skipped — not enabled for this goal", duration_ms: 0,
 				};
 				allResults[idx] = skipResult;
 				const av = this.activeVerifications.get(signal.id);
@@ -802,6 +802,7 @@ export class VerificationHarness {
 							name: step.name,
 							type: step.type,
 							passed: false,
+							skipped: true,
 							output: "Skipped — earlier phase failed",
 							duration_ms: 0,
 							expect: step.expect,
