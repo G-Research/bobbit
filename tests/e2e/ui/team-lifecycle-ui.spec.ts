@@ -115,9 +115,9 @@ test.describe("Team lifecycle (UI)", () => {
 		const agentsTabAfter = page.locator(".tab").filter({ hasText: "Agents" });
 		await agentsTabAfter.click();
 
-		// No active agent cards should be shown (or empty state message)
+		// All remaining agent cards should be archived/dismissed (none active)
 		await expect(
-			page.locator(".tab-empty, .agent-grid:empty").first(),
-		).toBeVisible({ timeout: 10_000 });
+			page.locator(".agent-card").filter({ hasNot: page.locator("text=Dismissed") }),
+		).toHaveCount(0, { timeout: 10_000 });
 	});
 });
