@@ -28,6 +28,7 @@ Key behaviors:
 - The server CWD is always auto-registered as the "default" project on startup via `ensureDefaultProject()`.
 - `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed.
 - `remove()` only unregisters — it does not delete files. Callers guard against removing the default project.
+- The per-project settings page exposes a "Remove Project" button in a Danger Zone section (hidden for the default project). On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
 - Persistence is atomic (write to `.tmp` then rename).
 
 ### Per-project state isolation
