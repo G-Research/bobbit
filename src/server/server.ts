@@ -2661,11 +2661,8 @@ async function handleApiRoute(
 				if (body.headSha) {
 					const updatedTask = tm.getTask(id);
 					if (updatedTask?.goalId && updatedTask?.branch && updatedTask?.assignedSessionId) {
-						const broker = (teamManager as any).brokerGitFetch as ((goalId: string, sessionId: string, branch: string) => Promise<boolean>) | undefined;
-						if (broker) {
-							broker.call(teamManager, updatedTask.goalId, updatedTask.assignedSessionId, updatedTask.branch)
-								.catch((err: unknown) => console.error("[git-broker] fetch failed:", err));
-						}
+						teamManager.brokerGitFetch(updatedTask.goalId, updatedTask.assignedSessionId, updatedTask.branch)
+							.catch(err => console.error("[git-broker] fetch failed:", err));
 					}
 				}
 
