@@ -5,6 +5,9 @@ provider:
   type: bobbit-extension
   extension: extension.ts
 group: Gates
+docs: |
+  Submit verdict, summary, and optional HTML report. Required params: `verdict` ("pass"/"fail"), `summary` (detailed markdown).
+  For HTML reports with screenshots: use `report_html_file` (absolute path, server reads directly, up to 10MB) OR `report_html` (inline string for small reports). Never both.
 detail_docs: |
   ## Summary Format
 
