@@ -68,7 +68,10 @@ export class BgProcessManager {
 		}
 	}
 
-	create(sessionId: string, command: string, cwd: string, containerId?: string): BgProcessInfo {
+	create(sessionId: string, command: string, cwd: string, containerId?: string, sandboxed?: boolean): BgProcessInfo {
+		if (sandboxed && !containerId) {
+			throw new Error("Sandboxed session without containerId — refusing host-side execution");
+		}
 		const id = `bg-${nextId++}`;
 		const { shell: hostShell, args: hostArgs } = getShellConfig();
 

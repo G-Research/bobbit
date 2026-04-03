@@ -4125,8 +4125,16 @@ async function handleApiRoute(
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const body = await readBody(req);
 		if (!body?.command) { json({ error: "command is required" }, 400); return; }
-		const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId);
-		json(info, 201);
+		try {
+			const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId, session.sandboxed);
+			json(info, 201);
+		} catch (err: any) {
+			if (err?.message?.includes("Sandboxed session without containerId")) {
+				json({ error: "Sandboxed session cannot run host processes" }, 403);
+			} else {
+				throw err;
+			}
+		}
 		return;
 	}
 
