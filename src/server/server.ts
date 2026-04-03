@@ -3909,7 +3909,8 @@ async function handleApiRoute(
 	const sessionCostBreakdownMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost\/breakdown$/);
 	if (sessionCostBreakdownMatch && req.method === "GET") {
 		const sessionId = sessionCostBreakdownMatch[1];
-		const sessionForCost = sessionManager.getSession(sessionId);
+		const live = sessionManager.getSession(sessionId);
+		const sessionForCost = live ?? sessionManager.getPersistedSession(sessionId);
 		if (!sessionForCost?.projectId) {
 			json({ error: "Session not found or has no project" }, 404);
 			return;
@@ -3950,7 +3951,8 @@ async function handleApiRoute(
 	const sessionCostMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cost$/);
 	if (sessionCostMatch && req.method === "GET") {
 		const id = sessionCostMatch[1];
-		const sessionForCost = sessionManager.getSession(id);
+		const liveSession = sessionManager.getSession(id);
+		const sessionForCost = liveSession ?? sessionManager.getPersistedSession(id);
 		if (!sessionForCost?.projectId) {
 			json({ error: "Session not found or has no project" }, 404);
 			return;
@@ -3971,6 +3973,10 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) {
 			json({ error: "Goal not found" }, 404);
+			return;
+		}
+		if (!goal.projectId) {
+			json({ aggregate: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 }, sessions: [] });
 			return;
 		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
@@ -4018,6 +4024,10 @@ async function handleApiRoute(
 			json({ error: "Goal not found" }, 404);
 			return;
 		}
+		if (!goal.projectId) {
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			return;
+		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
 		const cost = sessionManager.getCostTracker(goal.projectId).getGoalCost(goalId, sessionIds);
 		json(cost);
@@ -4037,7 +4047,8 @@ async function handleApiRoute(
 			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
 			return;
 		}
-		const taskSession = sessionManager.getSession(task.assignedSessionId);
+		const taskSessionLive = sessionManager.getSession(task.assignedSessionId);
+		const taskSession = taskSessionLive ?? sessionManager.getPersistedSession(task.assignedSessionId);
 		if (!taskSession?.projectId) {
 			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
 			return;

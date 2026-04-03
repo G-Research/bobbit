@@ -2189,10 +2189,13 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
-		// Resolve project from goal
-		const extProjectId = opts.goalId
+		// Resolve project from goal, or fall back to default project for creation context
+		let extProjectId = opts.goalId
 			? this.projectContextManager?.getContextForGoal(opts.goalId)?.project.id
 			: undefined;
+		if (!extProjectId && this.projectContextManager) {
+			extProjectId = this.projectContextManager.getDefaultProjectId();
+		}
 		if (extProjectId) session.projectId = extProjectId;
 		const extStore = this.resolveStoreForSession(session.id);
 
@@ -2263,7 +2266,12 @@ export class SessionManager {
 		projectId?: string;
 	}> {
 		return Array.from(this.sessions.values()).map((s) => {
-			const ps = this.resolveStoreForSession(s.id).get(s.id);
+			let ps: PersistedSession | undefined;
+			try {
+				ps = this.resolveStoreForSession(s.id).get(s.id);
+			} catch {
+				// Session can't be resolved (no projectId, not in any store) — use in-memory data only
+			}
 			return {
 				id: s.id,
 				title: s.title,
