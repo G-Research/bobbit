@@ -172,8 +172,12 @@ export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	private agentCliPath?: string;
 	private systemPromptPath?: string;
-	private store: SessionStore;
-	private costTracker: CostTracker;
+	/** @internal Test-only session store (used when no PCM is available). */
+	private _testStore: SessionStore | null = null;
+	/** @internal Test-only cost tracker (used when no PCM is available). */
+	private _testCostTracker: CostTracker | null = null;
+	/** @internal Test-only search index (used when no PCM is available). */
+	private _testSearchIndex: SearchIndex | null = null;
 	private colorStore?: ColorStore;
 	private personalityManager?: PersonalityManager;
 	private roleManager?: RoleManager;
@@ -188,11 +192,11 @@ export class SessionManager {
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
+	/** @deprecated Use project-scoped resolution via PCM instead. Will be removed once server.ts/handler.ts callers are updated. */
 	goalManager: GoalManager;
+	/** @deprecated Use project-scoped resolution via PCM instead. Will be removed once server.ts/handler.ts callers are updated. */
 	taskManager: TaskManager;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
-	/** Full-text search index (SQLite FTS5). */
-	searchIndex: SearchIndex;
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
@@ -223,18 +227,20 @@ export class SessionManager {
 		this.projectContextManager = options?.projectContextManager ?? null;
 		if (this.projectContextManager) {
 			const defaultCtx = this.projectContextManager.getDefault();
-			this.store = defaultCtx.sessionStore;
-			this.costTracker = defaultCtx.costTracker;
+			// goalManager and taskManager are kept temporarily for backward compat
+			// with server.ts/handler.ts callers. They point to the default project
+			// and will be removed once those callers are updated.
 			this.goalManager = new GoalManager(defaultCtx.goalStore, options?.workflowStore);
 			this.taskManager = new TaskManager(defaultCtx.taskStore);
-			this.searchIndex = defaultCtx.searchIndex;
 		} else {
+			// Non-PCM path: used by test harnesses that don't set up a full
+			// ProjectContextManager. Stores are created from the explicit stateDir.
 			const stateDir = bobbitStateDir();
-			this.store = new SessionStore(stateDir);
-			this.costTracker = new CostTracker(stateDir);
+			this._testStore = new SessionStore(stateDir);
+			this._testCostTracker = new CostTracker(stateDir);
+			this._testSearchIndex = new SearchIndex(path.join(stateDir, "search.db"));
 			this.goalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
 			this.taskManager = new TaskManager(new TaskStore(stateDir));
-			this.searchIndex = new SearchIndex(path.join(stateDir, "search.db"));
 		}
 	}
 
@@ -242,20 +248,25 @@ export class SessionManager {
 		return this.projectContextManager;
 	}
 
-	/** Resolve the SessionStore for a given project. */
+	/** Resolve the SessionStore for a given project. Requires projectId when PCM is active. */
 	getSessionStore(projectId?: string): SessionStore {
-		if (projectId && this.projectContextManager) {
+		if (this.projectContextManager) {
+			if (!projectId) throw new Error("Cannot resolve session store: projectId is required");
 			const ctx = this.projectContextManager.getOrCreate(projectId);
-			if (ctx) return ctx.sessionStore;
+			if (!ctx) throw new Error(`Cannot resolve session store: project "${projectId}" not found`);
+			return ctx.sessionStore;
 		}
-		return this.store;
+		if (this._testStore) return this._testStore;
+		throw new Error("No project context manager or test store available");
 	}
 
-	/** Resolve the GoalStore for a given project. */
+	/** Resolve the GoalStore for a given project. Requires projectId when PCM is active. */
 	getGoalStoreForProject(projectId?: string): GoalStore {
-		if (projectId && this.projectContextManager) {
+		if (this.projectContextManager) {
+			if (!projectId) throw new Error("Cannot resolve goal store: projectId is required");
 			const ctx = this.projectContextManager.getOrCreate(projectId);
-			if (ctx) return ctx.goalStore;
+			if (!ctx) throw new Error(`Cannot resolve goal store: project "${projectId}" not found`);
+			return ctx.goalStore;
 		}
 		return this.goalManager.getGoalStore();
 	}
@@ -269,13 +280,16 @@ export class SessionManager {
 		return null;
 	}
 
-	/** Resolve SearchIndex for a project. */
+	/** Resolve SearchIndex for a project. Requires projectId when PCM is active. */
 	getSearchIndexForProject(projectId?: string): SearchIndex {
-		if (projectId && this.projectContextManager) {
+		if (this.projectContextManager) {
+			if (!projectId) throw new Error("Cannot resolve search index: projectId is required");
 			const ctx = this.projectContextManager.getOrCreate(projectId);
-			if (ctx) return ctx.searchIndex;
+			if (!ctx) throw new Error(`Cannot resolve search index: project "${projectId}" not found`);
+			return ctx.searchIndex;
 		}
-		return this.searchIndex;
+		if (this._testSearchIndex) return this._testSearchIndex;
+		throw new Error("No project context manager or test search index available");
 	}
 
 	/** Resolve the correct SessionStore for an in-memory session by ID. */
@@ -284,7 +298,15 @@ export class SessionManager {
 		if (session?.projectId) {
 			return this.getSessionStore(session.projectId);
 		}
-		return this.store;
+		// No projectId on session — scan all project contexts
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				if (ctx.sessionStore.get(id)) return ctx.sessionStore;
+			}
+			throw new Error(`Cannot resolve store for session ${id}: not found in any project`);
+		}
+		if (this._testStore) return this._testStore;
+		throw new Error(`Cannot resolve store for session ${id}: no projectId and no test store`);
 	}
 
 	/** Resolve the correct SessionStore for any session by ID (in-memory or persisted). */
@@ -299,8 +321,24 @@ export class SessionManager {
 			for (const ctx of this.projectContextManager.all()) {
 				if (ctx.sessionStore.get(id)) return ctx.sessionStore;
 			}
+			throw new Error(`Cannot resolve store for session ${id}: not found in any project`);
 		}
-		return this.store;
+		if (this._testStore) return this._testStore;
+		throw new Error(`Cannot resolve store for session ${id}: no project context manager or test store`);
+	}
+
+	/** Resolve the correct CostTracker for a session based on its project. */
+	private resolveCostTracker(session: { projectId?: string }): CostTracker {
+		if (session.projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(session.projectId);
+			if (ctx) return ctx.costTracker;
+		}
+		if (this._testCostTracker) return this._testCostTracker;
+		if (this.projectContextManager) {
+			// Fallback: use default project cost tracker if session has no projectId
+			return this.projectContextManager.getDefault().costTracker;
+		}
+		throw new Error("No cost tracker available");
 	}
 
 	/** Resolve the correct SearchIndex for a session based on its project. */
@@ -309,7 +347,11 @@ export class SessionManager {
 			const ctx = this.projectContextManager.getOrCreate(session.projectId);
 			if (ctx) return ctx.searchIndex;
 		}
-		return this.searchIndex;
+		if (this._testSearchIndex) return this._testSearchIndex;
+		if (this.projectContextManager) {
+			throw new Error("Cannot resolve search index: session has no projectId");
+		}
+		throw new Error("No search index available");
 	}
 
 	/** Resolve a goal across all project contexts. */
@@ -317,7 +359,9 @@ export class SessionManager {
 		if (this.projectContextManager) {
 			const ctx = this.projectContextManager.getContextForGoal(goalId);
 			if (ctx) return ctx.goalStore.get(goalId);
+			return undefined;
 		}
+		// Non-PCM fallback (test harness)
 		return this.goalManager.getGoalStore().get(goalId);
 	}
 
@@ -326,20 +370,28 @@ export class SessionManager {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
 	}
 
-	/** Build a PipelineContext from this manager's fields. */
+	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
 	buildPipelineContext(projectId?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
 		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
 		let resolvedGoalManager = this.goalManager;
 		let resolvedTaskManager = this.taskManager;
 		let resolvedProjectConfigStore = this.projectConfigStore ?? null;
+		let resolvedCostTracker: CostTracker;
 		if (projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
 			if (ctx) {
 				resolvedGoalManager = ctx.goalManager;
 				resolvedTaskManager = new TaskManager(ctx.taskStore);
 				resolvedProjectConfigStore = ctx.projectConfigStore;
+				resolvedCostTracker = ctx.costTracker;
+			} else {
+				throw new Error(`Cannot build pipeline context: project "${projectId}" not found`);
 			}
+		} else if (this._testCostTracker) {
+			resolvedCostTracker = this._testCostTracker;
+		} else {
+			throw new Error("Cannot build pipeline context: no project context manager or test cost tracker");
 		}
 		return {
 			agentCliPath: this.agentCliPath,
@@ -354,7 +406,7 @@ export class SessionManager {
 			sandboxPool: this.sandboxPool,
 			sandboxTokenStore: this.sandboxTokenStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
-			costTracker: this.costTracker,
+			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
@@ -486,8 +538,13 @@ export class SessionManager {
 		return true;
 	}
 
+	/** @deprecated Use project-scoped cost tracker resolution instead. Will be removed once server.ts callers are updated. */
 	getCostTracker(): CostTracker {
-		return this.costTracker;
+		if (this.projectContextManager) {
+			return this.projectContextManager.getDefault().costTracker;
+		}
+		if (this._testCostTracker) return this._testCostTracker;
+		throw new Error("No cost tracker available");
 	}
 
 
@@ -1253,7 +1310,8 @@ export class SessionManager {
 			: undefined;
 		if (costValue === undefined) return;
 
-		const cumulativeCost = this.costTracker.recordUsage(session.id, {
+		const sessionCostTracker = this.resolveCostTracker(session);
+		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
 			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
@@ -1281,22 +1339,23 @@ export class SessionManager {
 	async restoreSessions(): Promise<void> {
 		// Initialize search index (skip when ProjectContextManager is active —
 		// ProjectContext.open() already opens the index and wires callbacks)
-		if (!this.projectContextManager) {
+		if (!this.projectContextManager && this._testSearchIndex && this._testStore) {
 			try {
-				this.searchIndex.open();
-				if (this.searchIndex.needsRebuild()) {
+				this._testSearchIndex.open();
+				if (this._testSearchIndex.needsRebuild()) {
 					const goalStore = this.goalManager.getGoalStore();
-					this.searchIndex.rebuildFromStores(goalStore, this.store);
+					this._testSearchIndex.rebuildFromStores(goalStore, this._testStore);
 				}
 				// Wire index update callbacks
 				const goalStore = this.goalManager.getGoalStore();
+				const testSearchIndex = this._testSearchIndex;
 				goalStore.onIndexUpdate = (goal) => {
-					try { this.searchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
+					try { testSearchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
 				};
-				this.store.onIndexUpdate = (session) => {
+				this._testStore.onIndexUpdate = (session) => {
 					try {
 						const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
-						this.searchIndex.indexSession(session, goalTitle, session.projectId || "");
+						testSearchIndex.indexSession(session, goalTitle, session.projectId || "");
 					} catch (err) { console.error("[search] Failed to index session:", err); }
 				};
 			} catch (err) {
@@ -1306,7 +1365,7 @@ export class SessionManager {
 
 		const persisted = this.projectContextManager
 			? [...this.projectContextManager.getAllLiveSessions()]
-			: this.store.getLive();
+			: (this._testStore?.getLive() ?? []);
 		if (persisted.length === 0) return;
 
 		// Separate regular sessions from delegate sessions
@@ -1356,7 +1415,7 @@ export class SessionManager {
 		const orphans: { id: string; projectId?: string }[] = [];
 		const allLive = this.projectContextManager
 			? [...this.projectContextManager.getAllLiveSessions()]
-			: this.store.getLive();
+			: (this._testStore?.getLive() ?? []);
 		for (const ps of allLive) {
 			if (ps.nonInteractive && !resumingIds.has(ps.id)) {
 				orphans.push({ id: ps.id, projectId: ps.projectId });
@@ -2127,8 +2186,8 @@ export class SessionManager {
 		const extProjectId = opts.goalId
 			? this.projectContextManager?.getContextForGoal(opts.goalId)?.project.id
 			: undefined;
-		const extStore = extProjectId ? this.getSessionStore(extProjectId) : this.store;
 		if (extProjectId) session.projectId = extProjectId;
+		const extStore = this.resolveStoreForSession(session.id);
 
 		// Initial persist — structural fields (store.put must precede persistSessionMetadata
 		// since persistSessionMetadata now only does store.update)
@@ -2243,7 +2302,7 @@ export class SessionManager {
 		);
 		const allPersisted = this.projectContextManager
 			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getAll())
-			: this.store.getAll();
+			: (this._testStore?.getAll() ?? []);
 		for (const ps of allPersisted) {
 			if (ps.goalId === goalId) ids.add(ps.id);
 		}
@@ -2720,7 +2779,7 @@ export class SessionManager {
 		// Also archive persisted-but-not-in-memory delegate sessions
 		const allLiveForTerminate = this.projectContextManager
 			? [...this.projectContextManager.getAllLiveSessions()]
-			: this.store.getLive();
+			: (this._testStore?.getLive() ?? []);
 		for (const ps of allLiveForTerminate) {
 			if (ps.delegateOf === id && !this.sessions.has(ps.id)) {
 				this.getSessionStore(ps.projectId).archive(ps.id);
@@ -2867,7 +2926,7 @@ export class SessionManager {
 	}> {
 		const allArchived = this.projectContextManager
 			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
-			: this.store.getArchived();
+			: (this._testStore?.getArchived() ?? []);
 		return allArchived.map((ps) => ({
 			id: ps.id,
 			title: ps.title,
@@ -2910,7 +2969,7 @@ export class SessionManager {
 		const cutoff = Date.now() - SEVEN_DAYS_MS;
 		const archived = this.projectContextManager
 			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
-			: this.store.getArchived();
+			: (this._testStore?.getArchived() ?? []);
 		for (const ps of archived) {
 			if (ps.archivedAt && ps.archivedAt < cutoff) {
 				try {
@@ -3198,16 +3257,16 @@ export class SessionManager {
 		// Flush any debounced store writes before exit
 		if (this.projectContextManager) {
 			for (const ctx of this.projectContextManager.all()) ctx.sessionStore.flush();
-		} else {
-			this.store.flush();
+		} else if (this._testStore) {
+			this._testStore.flush();
 		}
 
 		// Close search index
 		try {
 			if (this.projectContextManager) {
 				// ProjectContextManager.closeAll() handles search index closing
-			} else {
-				this.searchIndex.close();
+			} else if (this._testSearchIndex) {
+				this._testSearchIndex.close();
 			}
 		} catch (err) {
 			console.error("[search] Failed to close search index:", err);
