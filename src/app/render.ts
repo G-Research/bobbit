@@ -485,7 +485,7 @@ let _qaConfigFetching = false;
 function ensureQaConfigLoaded(projectId: string): void {
 	if (_qaConfigCache.has(projectId) || _qaConfigFetching) return;
 	_qaConfigFetching = true;
-	fetch(`/api/projects/${projectId}/qa-testing-config`)
+	gatewayFetch(`/api/projects/${projectId}/qa-testing-config`)
 		.then(r => r.json())
 		.then(data => {
 			_qaConfigCache.set(projectId, !!data.config);
