@@ -50,7 +50,7 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 	},
 	{
 		tag: "project_proposal",
-		fields: ["name", "root_path", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "system_prompt_context"],
+		fields: ["name", "root_path", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "system_prompt_context", "worktree_setup_command"],
 		requiredFields: ["name", "root_path"],
 		callbackName: "onProjectProposal",
 	},

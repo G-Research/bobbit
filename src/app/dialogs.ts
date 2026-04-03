@@ -1112,122 +1112,192 @@ export function showProjectDialog(): void {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
 
-	let nameValue = "";
 	let pathValue = "";
-	let colorValue = "";
-	let registering = false;
+	let loading = false;
 	let error = "";
+	let browsing = false;
+	let browseEntries: Array<{ name: string; path: string }> = [];
+	let browseCurrent = "";
+	let browseParent: string | null = null;
+	let browseLoading = false;
+	let browseError = "";
 
 	const cleanup = () => {
 		render(html``, container);
 		container.remove();
 	};
 
-	const doRegister = async () => {
+	const doContinue = async () => {
 		const trimmedPath = pathValue.trim();
 		if (!trimmedPath) return;
-		registering = true;
+		loading = true;
 		error = "";
 		renderDialog();
+
 		try {
-			const { registerProject, fetchProjects } = await import("./api.js");
-			const project = await registerProject(
-				nameValue.trim() || trimmedPath.split(/[\\/]/).filter(Boolean).pop() || "project",
-				trimmedPath,
-				colorValue || undefined,
-			);
-			if (project) {
-				state.projects = await fetchProjects();
-				renderApp();
+			const { detectProject, registerProject, fetchProjects } = await import("./api.js");
+			const detection = await detectProject(trimmedPath);
+
+			if (detection.hasBobbit) {
+				// Path A: Auto-import
+				const project = await registerProject(detection.name, trimmedPath, undefined);
+				if (project) {
+					state.projects = await fetchProjects();
+					renderApp();
+					cleanup();
+				} else {
+					loading = false;
+					renderDialog();
+				}
+			} else if (detection.exists && !detection.isEmpty && !detection.hasBobbit) {
+				// Path B: Project assistant (detection mode)
 				cleanup();
+				await createProjectAssistantSession(trimmedPath, false);
 			} else {
-				registering = false;
-				renderDialog();
+				// Path C: Project assistant (scaffolding mode)
+				cleanup();
+				await createProjectAssistantSession(trimmedPath, true);
 			}
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
-			registering = false;
+			loading = false;
 			renderDialog();
 		}
 	};
 
-	const COLORS = [
-		"#3b82f6", "#22c55e", "#ef4444", "#f59e0b", "#8b5cf6",
-		"#ec4899", "#06b6d4", "#f97316",
-	];
-
-	const autoName = () => {
-		if (!nameValue && pathValue.trim()) {
-			nameValue = pathValue.trim().split(/[\\/]/).filter(Boolean).pop() || "";
+	const openBrowser = async () => {
+		browsing = true;
+		browseLoading = true;
+		browseError = "";
+		renderDialog();
+		try {
+			const { browseDirectory } = await import("./api.js");
+			const result = await browseDirectory(pathValue.trim() || undefined);
+			browseEntries = result.entries;
+			browseCurrent = result.current;
+			browseParent = result.parent;
+		} catch (err) {
+			browseError = err instanceof Error ? err.message : String(err);
 		}
+		browseLoading = false;
+		renderDialog();
+	};
+
+	const navigateBrowse = async (dirPath: string) => {
+		browseLoading = true;
+		browseError = "";
+		renderDialog();
+		try {
+			const { browseDirectory } = await import("./api.js");
+			const result = await browseDirectory(dirPath);
+			browseEntries = result.entries;
+			browseCurrent = result.current;
+			browseParent = result.parent;
+		} catch (err) {
+			browseError = err instanceof Error ? err.message : String(err);
+		}
+		browseLoading = false;
+		renderDialog();
+	};
+
+	const selectBrowsed = () => {
+		pathValue = browseCurrent;
+		browsing = false;
+		renderDialog();
 	};
 
 	const renderDialog = () => {
+		const browseContent = browsing ? html`
+			<div class="flex flex-col gap-2" data-testid="directory-browser">
+				<div class="flex items-center gap-2">
+					${browseParent != null ? html`
+						<button
+							class="px-2 py-1 text-xs rounded border border-border hover:bg-secondary/50 transition-colors"
+							@click=${() => navigateBrowse(browseParent!)}
+							data-testid="browse-up"
+						>Up</button>
+					` : ""}
+					<span class="text-xs text-muted-foreground truncate flex-1" title="${browseCurrent}">${browseCurrent}</span>
+				</div>
+				${browseLoading ? html`<p class="text-xs text-muted-foreground">Loading…</p>` : ""}
+				${browseError ? html`<p class="text-xs text-red-500">${browseError}</p>` : ""}
+				${!browseLoading && !browseError ? html`
+					<div class="max-h-[200px] overflow-y-auto border border-border rounded">
+						${browseEntries.length === 0
+							? html`<div class="px-3 py-2 text-xs text-muted-foreground">No subdirectories</div>`
+							: browseEntries.map(entry => html`
+								<button
+									class="w-full text-left px-3 py-1.5 text-sm hover:bg-secondary/50 transition-colors flex items-center gap-2 border-b border-border last:border-0"
+									@click=${() => navigateBrowse(entry.path)}
+									data-testid="browse-entry"
+								>
+									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+									<span class="truncate">${entry.name}</span>
+								</button>
+							`)}
+					</div>
+				` : ""}
+				<div class="flex gap-2 justify-end">
+					${Button({ variant: "ghost", size: "sm" as any, onClick: () => { browsing = false; renderDialog(); }, children: "Cancel" })}
+					${Button({ variant: "default", size: "sm" as any, onClick: selectBrowsed, children: "Select", disabled: !browseCurrent })}
+				</div>
+			</div>
+		` : "";
+
 		render(
 			Dialog({
 				isOpen: true,
 				onClose: cleanup,
-				width: "min(440px, 92vw)",
+				width: "min(480px, 92vw)",
 				height: "auto",
 				backdropClassName: "bg-black/50 backdrop-blur-sm",
 				children: html`
 					${DialogContent({
 						children: html`
-							${DialogHeader({ title: "Register Project" })}
+							${DialogHeader({ title: "Add Project" })}
 							<div class="mt-4 flex flex-col gap-4">
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Project Directory</label>
-									${Input({
-										type: "text",
-										placeholder: "/path/to/project",
-										value: pathValue,
-										onInput: (e: Event) => { pathValue = (e.target as HTMLInputElement).value; },
-										onKeyDown: (e: KeyboardEvent) => {
-											if (e.key === "Enter") { e.preventDefault(); autoName(); doRegister(); }
-											if (e.key === "Escape") cleanup();
-											if (e.key === "Tab") autoName();
-										},
-									})}
-								</div>
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Project Name</label>
-									${Input({
-										type: "text",
-										placeholder: "Auto-fills from directory name",
-										value: nameValue,
-										onInput: (e: Event) => { nameValue = (e.target as HTMLInputElement).value; },
-									})}
-								</div>
-								<div>
-									<label class="text-xs text-muted-foreground mb-1.5 block">Color (optional)</label>
-									<div class="flex gap-2">
-										${COLORS.map(c => html`
-											<button
-												class="w-6 h-6 rounded-full border-2 transition-all ${colorValue === c ? "border-foreground scale-110" : "border-transparent hover:border-border"}"
-												style="background: ${c};"
-												@click=${() => { colorValue = colorValue === c ? "" : c; renderDialog(); }}
-											></button>
-										`)}
+								${!browsing ? html`
+									<div>
+										<label class="text-xs text-muted-foreground mb-1 block">Project Directory</label>
+										<div class="flex items-center gap-2">
+											<div class="flex-1">
+												${Input({
+													type: "text",
+													placeholder: "/path/to/project",
+													value: pathValue,
+													onInput: (e: Event) => { pathValue = (e.target as HTMLInputElement).value; renderDialog(); },
+													onKeyDown: (e: KeyboardEvent) => {
+														if (e.key === "Enter") { e.preventDefault(); doContinue(); }
+														if (e.key === "Escape") cleanup();
+													},
+												})}
+											</div>
+											${Button({
+												variant: "ghost",
+												onClick: openBrowser,
+												children: "Browse",
+											})}
+										</div>
 									</div>
-								</div>
+								` : browseContent}
 								${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
 							</div>
 						`,
 					})}
-					${DialogFooter({
+					${!browsing ? DialogFooter({
 						className: "px-6 pb-4",
 						children: html`
 							<div class="flex gap-2 justify-end">
 								${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
 								${Button({
 									variant: "default",
-									onClick: () => { autoName(); doRegister(); },
-									disabled: !pathValue.trim() || registering,
-									children: registering ? "Registering…" : "Register Project",
+									onClick: doContinue,
+									disabled: !pathValue.trim() || loading,
+									children: loading ? "Detecting…" : "Continue",
 								})}
 							</div>
 						`,
-					})}
+					}) : ""}
 				`,
 			}),
 			container,
@@ -1235,9 +1305,35 @@ export function showProjectDialog(): void {
 
 		requestAnimationFrame(() => {
 			const input = container.querySelector("input");
-			if (input) input.focus();
+			if (input && !browsing) input.focus();
 		});
 	};
 
 	renderDialog();
+}
+
+async function createProjectAssistantSession(dirPath: string, scaffolding: boolean): Promise<void> {
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	renderApp();
+	try {
+		const bodyObj: Record<string, any> = {
+			assistantType: scaffolding ? "project-scaffolding" : "project",
+			cwd: dirPath,
+		};
+		const res = await gatewayFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify(bodyObj),
+		});
+		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		const { id } = await res.json();
+		const { connectToSession } = await import("./session-manager.js");
+		await connectToSession(id, false, { assistantType: "project" });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		showConnectionError("Failed to create project assistant", msg);
+	} finally {
+		state.creatingSession = false;
+		renderApp();
+	}
 }
