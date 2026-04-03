@@ -4,7 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
-import type { PersistedGoal } from "./goal-store.js";
+import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
@@ -130,6 +130,8 @@ export class TeamManager {
 	private teams = new Map<string, TeamEntry>();
 	/** Local team store — used only in the non-PCM (test) path. */
 	private localStore: TeamStore | null;
+	/** Local GoalManager — used only in the non-PCM (test) path. */
+	private _localGoalManager: GoalManager | null = null;
 	/** Timers for the idle-nudge mechanism (goalId → timer). */
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
 	private verificationHarness?: VerificationHarness;
@@ -149,7 +151,10 @@ export class TeamManager {
 		if (config.projectContextManager) {
 			this.localStore = null;
 		} else {
-			this.localStore = new TeamStore(stateDir ?? bobbitStateDir());
+			const dir = stateDir ?? bobbitStateDir();
+			this.localStore = new TeamStore(dir);
+			// Non-PCM test path: create a local GoalManager from the same stateDir
+			this._localGoalManager = new GoalManager(new GoalStore(dir));
 		}
 		this.restoreTeams();
 	}
@@ -422,7 +427,15 @@ export class TeamManager {
 	}
 
 	private get goalManager(): GoalManager {
-		return this.sessionManager.goalManager;
+		// PCM-active paths should use resolveGoalManager() instead.
+		// This getter is only for the non-PCM test path.
+		if (this.config.projectContextManager) {
+			return this.config.projectContextManager.getDefault().goalManager;
+		}
+		// Support mock SessionManagers that expose goalManager directly (test path)
+		if ((this.sessionManager as any).goalManager) return (this.sessionManager as any).goalManager;
+		if (this._localGoalManager) return this._localGoalManager;
+		throw new Error("goalManager getter requires PCM or local GoalManager");
 	}
 
 	/** Resolve a goal across all project contexts. */

@@ -198,7 +198,7 @@ export class VerificationHarness {
 	 * Returns undefined if not found (goal deleted, workflow missing, etc.).
 	 */
 	private _findStepDefinition(goalId: string, gateId: string, stepName: string): VerifyStep | undefined {
-		const goal = this.sessionManager?.goalManager?.getGoal(goalId);
+		const goal = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 		if (!goal?.workflow?.gates) return undefined;
 		const gate = goal.workflow.gates.find((g: any) => g.id === gateId);
 		if (!gate?.verify) return undefined;
@@ -216,7 +216,7 @@ export class VerificationHarness {
 		goalSpec?: string;
 		allGateStates: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>;
 	} | null {
-		const goal = this.sessionManager?.goalManager?.getGoal(goalId);
+		const goal = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 		if (!goal) return null;
 
 		const gateStore = this.resolveGateStore(goalId);
@@ -706,8 +706,7 @@ export class VerificationHarness {
 
 			// --- Optional step skipping ---
 			// Look up enabledOptionalSteps from the goal
-			const goalForOptional = this.sessionManager?.goalManager?.getGoal(signal.goalId)
-				?? (this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId));
+			const goalForOptional = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
 			const enabledOptional = goalForOptional?.enabledOptionalSteps ?? [];
 
 			// Partition steps into active and skipped
@@ -1256,8 +1255,7 @@ export class VerificationHarness {
 				rolePrompt: combinedPrompt,
 				roleName,
 				sandboxed: (goalId
-				? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-					?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled,
 				sessionId,
 			});
@@ -1454,8 +1452,7 @@ export class VerificationHarness {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
 				sandboxed: (goalId
-					? (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-						?? this.sessionManager!.goalManager.getGoal(goalId)?.sandboxed)
+					? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 					: undefined) ?? this.sessionManager!.isSandboxEnabled,
 				sessionId: qaSessionId,
 			});

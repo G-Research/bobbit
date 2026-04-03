@@ -192,10 +192,10 @@ export class SessionManager {
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
-	/** @deprecated Use project-scoped resolution via PCM instead. Will be removed once server.ts/handler.ts callers are updated. */
-	goalManager: GoalManager;
-	/** @deprecated Use project-scoped resolution via PCM instead. Will be removed once server.ts/handler.ts callers are updated. */
-	taskManager: TaskManager;
+	/** @internal Non-PCM test path only. */
+	private _testGoalManager: GoalManager | null = null;
+	/** @internal Non-PCM test path only. */
+	private _testTaskManager: TaskManager | null = null;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
@@ -226,12 +226,7 @@ export class SessionManager {
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
 		if (this.projectContextManager) {
-			const defaultCtx = this.projectContextManager.getDefault();
-			// goalManager and taskManager are kept temporarily for backward compat
-			// with server.ts/handler.ts callers. They point to the default project
-			// and will be removed once those callers are updated.
-			this.goalManager = new GoalManager(defaultCtx.goalStore, options?.workflowStore);
-			this.taskManager = new TaskManager(defaultCtx.taskStore);
+			// All store resolution goes through PCM — no default fields needed.
 		} else {
 			// Non-PCM path: used by test harnesses that don't set up a full
 			// ProjectContextManager. Stores are created from the explicit stateDir.
@@ -239,8 +234,8 @@ export class SessionManager {
 			this._testStore = new SessionStore(stateDir);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchIndex(path.join(stateDir, "search.db"));
-			this.goalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
-			this.taskManager = new TaskManager(new TaskStore(stateDir));
+			this._testGoalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
+			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
 	}
 
@@ -268,7 +263,8 @@ export class SessionManager {
 			if (!ctx) throw new Error(`Cannot resolve goal store: project "${projectId}" not found`);
 			return ctx.goalStore;
 		}
-		return this.goalManager.getGoalStore();
+		if (this._testGoalManager) return this._testGoalManager.getGoalStore();
+		throw new Error("No project context manager or test goal manager available");
 	}
 
 	/** Resolve the GateStore for a goal. */
@@ -358,7 +354,7 @@ export class SessionManager {
 			return undefined;
 		}
 		// Non-PCM fallback (test harness)
-		return this.goalManager.getGoalStore().get(goalId);
+		return this._testGoalManager?.getGoalStore().get(goalId);
 	}
 
 	/** Whether Docker sandbox mode is enabled in project config. */
@@ -370,8 +366,8 @@ export class SessionManager {
 	buildPipelineContext(projectId?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
 		const resolvedSearchIndex = this.getSearchIndexForProject(projectId);
-		let resolvedGoalManager = this.goalManager;
-		let resolvedTaskManager = this.taskManager;
+		let resolvedGoalManager: GoalManager;
+		let resolvedTaskManager: TaskManager;
 		let resolvedProjectConfigStore = this.projectConfigStore ?? null;
 		let resolvedCostTracker: CostTracker;
 		if (projectId && this.projectContextManager) {
@@ -384,10 +380,12 @@ export class SessionManager {
 			} else {
 				throw new Error(`Cannot build pipeline context: project "${projectId}" not found`);
 			}
-		} else if (this._testCostTracker) {
+		} else if (this._testCostTracker && this._testGoalManager && this._testTaskManager) {
 			resolvedCostTracker = this._testCostTracker;
+			resolvedGoalManager = this._testGoalManager;
+			resolvedTaskManager = this._testTaskManager;
 		} else {
-			throw new Error("Cannot build pipeline context: no project context manager or test cost tracker");
+			throw new Error("Cannot build pipeline context: no project context manager or test stores");
 		}
 		return {
 			agentCliPath: this.agentCliPath,
@@ -1320,8 +1318,17 @@ export class SessionManager {
 		});
 
 		// Look up taskId from assigned tasks for this session
-		const assignedTasks = this.taskManager.getTasksForSession(session.id);
-		const taskId = assignedTasks.length > 0 ? assignedTasks[0].id : undefined;
+		let taskId: string | undefined;
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				const tm = new TaskManager(ctx.taskStore);
+				const tasks = tm.getTasksForSession(session.id);
+				if (tasks.length > 0) { taskId = tasks[0].id; break; }
+			}
+		} else {
+			const tasks = this._testTaskManager?.getTasksForSession(session.id) ?? [];
+			taskId = tasks.length > 0 ? tasks[0].id : undefined;
+		}
 
 		broadcast(session.clients, {
 			type: "cost_update",
@@ -1339,15 +1346,15 @@ export class SessionManager {
 	async restoreSessions(): Promise<void> {
 		// Initialize search index (skip when ProjectContextManager is active —
 		// ProjectContext.open() already opens the index and wires callbacks)
-		if (!this.projectContextManager && this._testSearchIndex && this._testStore) {
+		if (!this.projectContextManager && this._testSearchIndex && this._testStore && this._testGoalManager) {
 			try {
 				this._testSearchIndex.open();
 				if (this._testSearchIndex.needsRebuild()) {
-					const goalStore = this.goalManager.getGoalStore();
+					const goalStore = this._testGoalManager.getGoalStore();
 					this._testSearchIndex.rebuildFromStores(goalStore, this._testStore);
 				}
 				// Wire index update callbacks
-				const goalStore = this.goalManager.getGoalStore();
+				const goalStore = this._testGoalManager.getGoalStore();
 				const testSearchIndex = this._testSearchIndex;
 				goalStore.onIndexUpdate = (goal) => {
 					try { testSearchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
