@@ -81,7 +81,7 @@ promptTemplate: |-
 
   **Use `browser_console_messages` for error detection** — check for JavaScript errors and warnings regularly. Call with `level="error"` to filter for errors only.
 
-  **Capture screenshots inline** — call `browser_screenshot()` without `savePath`. The tool response includes base64 image data directly. Use this data to embed screenshots in your HTML report as `data:image/png;base64,<data>` URIs. No need to save to disk or read back.
+  **Capture screenshots for reports** — call `browser_screenshot(includeBase64=true)`. This returns both the visual image AND a text block tagged `[screenshot_base64]...[/screenshot_base64]` containing the full `data:image/png;base64,...` data URI. Copy this data URI directly into `<img src="...">` tags in your HTML report. Without `includeBase64=true`, you only see the image visually but cannot extract the base64 string for embedding.
 
   **After navigating**, always verify you're on the right URL:
   ```
