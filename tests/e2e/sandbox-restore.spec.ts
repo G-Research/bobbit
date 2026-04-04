@@ -77,9 +77,8 @@ test.describe("sandbox session restore", () => {
 
 			expect(capturedArgs).toBeDefined();
 			// New signature: (bridgeOptions, sessionId, opts)
-			// opts should have: skipMountValidation, projectId, goalId
+			// opts should have: projectId, goalId
 			const opts = capturedArgs![2] as any;
-			expect(opts.skipMountValidation).toBe(true);
 			expect(opts.projectId).toBe(projectId);
 			expect(opts.goalId).toBe("test-goal-123");
 		} finally {
@@ -114,7 +113,6 @@ test.describe("sandbox session restore", () => {
 
 			expect(capturedArgs).toBeDefined();
 			const opts = capturedArgs![2] as any;
-			expect(opts.skipMountValidation).toBe(true);
 			expect(opts.projectId).toBe(projectId);
 		} finally {
 			sm.applySandboxWiring = original;
@@ -149,7 +147,6 @@ test.describe("sandbox session restore", () => {
 
 			expect(capturedArgs).toBeDefined();
 			const opts = capturedArgs![2] as any;
-			expect(opts.skipMountValidation).toBe(true);
 			expect(opts.projectId).toBe(projectId);
 			// No teamGoalId → goalId should be undefined (not from team)
 			expect(opts.goalId).toBeUndefined();
