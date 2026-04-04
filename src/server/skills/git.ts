@@ -8,6 +8,26 @@ import { resolveShell } from "../agent/shell-util.js";
 
 const execFile = promisify(execFileCb);
 
+/**
+ * Resolve the remote primary branch (e.g. origin/main or origin/master).
+ * Uses `git symbolic-ref refs/remotes/origin/HEAD` which is set by `git clone`.
+ * Falls back to "HEAD" if detection fails.
+ */
+async function resolveRemotePrimary(repoPath: string): Promise<string> {
+	try {
+		const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
+			cwd: repoPath,
+			timeout: 5_000,
+		});
+		// Returns e.g. "refs/remotes/origin/main\n" — extract "origin/main"
+		const ref = stdout.trim().replace("refs/remotes/", "");
+		if (ref) return ref;
+	} catch {
+		// symbolic-ref may fail if origin/HEAD is not set (e.g. bare init, no clone)
+	}
+	return "HEAD";
+}
+
 /** Read worktree_setup_command from project config (if set). Returns undefined if not configured. */
 function readWorktreeSetupCommand(): string | undefined {
 	try {
@@ -69,8 +89,23 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	const safeName = branchName.replace(/\//g, "-");
 	const worktreePath = path.join(wtRoot, safeName);
 
+	// Resolve the start point — default to the remote primary branch so worktrees
+	// are never based on a stale local checkout.
+	let startPoint = opts?.startPoint;
+	if (!startPoint) {
+		startPoint = await resolveRemotePrimary(repoPath);
+	}
+
+	// Fetch the start point to ensure it's up to date
+	try {
+		const remote = startPoint.startsWith("origin/") ? startPoint.replace("origin/", "") : startPoint;
+		await execFile("git", ["fetch", "origin", remote], { cwd: repoPath, timeout: 30_000 });
+	} catch {
+		// Fetch failure is non-fatal — may be offline, or startPoint is a local ref
+	}
+
 	// Create branch and worktree in one step (async, no shell, prevents injection)
-	await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, opts?.startPoint ?? "HEAD"], {
+	await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, startPoint], {
 		cwd: repoPath,
 	});
 
