@@ -117,11 +117,13 @@ export class GateSignalRenderer implements ToolRenderer {
 		const goalId2 = data?.signal?.goalId || data?.goalId || "";
 		const signalStatus = data?.signal?.status || "";
 
-		// Already completed — show static result
+		// Already completed — show static result.
+		// Don't duplicate the status in the header — the live component shows
+		// its own reconciled status (which may differ from this stale snapshot).
 		if (signalStatus === "passed" || signalStatus === "failed") {
 			return {
 				content: html`<div>
-					${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono">${gateId}</span> — ${signalStatus}`)}
+					${renderHeader(state, ShieldCheck, html`Signaled <span class="font-mono">${gateId}</span>`)}
 					<gate-verification-live
 						.goalId=${goalId2}
 						.gateId=${gateId}
@@ -193,8 +195,10 @@ export class GateStatusRenderer implements ToolRenderer {
 		const signalId = latestSignal?.id || "";
 		const signalStatus = latestSignal?.verification?.status || "";
 
-		// Header: "Gate implementation — passed"
-		const statusSuffix = gateStatus !== "pending"
+		// Show gate-level status only when no live verification is rendered —
+		// the <gate-verification-live> component shows its own reconciled status
+		// which may differ from the (stale) gate status in the tool result.
+		const statusSuffix = (gateStatus !== "pending" && !latestSignal)
 			? html` — <span class="${gateStatus === "passed" ? "text-green-600 dark:text-green-400" : gateStatus === "failed" ? "text-red-600 dark:text-red-400" : ""}">${gateStatus}</span>`
 			: "";
 
