@@ -137,6 +137,9 @@ export class SandboxPool {
 		);
 	}
 
+	/** Host path to the pool directory (used to resolve team repo paths on restore). */
+	get poolDir(): string { return this._poolDir; }
+
 	/** Initialize the pool: kill old containers, pre-warm fresh ones. */
 	async init(): Promise<void> {
 		console.log(`[sandbox-pool] Initializing (size=${this.options.poolSize}, image=${this.options.image}, label=bobbit-sandbox=${this.label})`);
@@ -226,6 +229,9 @@ export class SandboxPool {
 		if (opts?.teamRepoPath) {
 			try {
 				setupTeamRemote(slot.worktreePath, opts.teamRepoPath);
+				// Fetch existing commits from the team bare repo — recovers work
+				// pushed by a previous container's post-commit hook (e.g. after restart)
+				await git(["fetch", "team"], slot.worktreePath, 30_000);
 			} catch (err) {
 				console.warn(`[sandbox-pool] Failed to set up team remote for slot ${slot.shortId}:`, err);
 				// Non-fatal — the slot is still usable, just without auto-push
