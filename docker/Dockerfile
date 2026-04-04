@@ -13,11 +13,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update && apt-get install -y gh && apt-get clean
 
-# Install Playwright system dependencies (Chromium libs).
-# Use a recent version to get broad library coverage — the actual browser binary
-# is installed later by the entrypoint to match the project's @playwright/test version.
-ARG PLAYWRIGHT_VERSION=1.52.0
-RUN npx -y playwright@${PLAYWRIGHT_VERSION} install-deps chromium 2>/dev/null \
+# Install Playwright system dependencies (Chromium libs) as root.
+# Uses a fixed version for broad library coverage. The actual browser binary
+# version is controlled by PLAYWRIGHT_VERSION below.
+RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install pi-coding-agent and its dependencies inside the image.
@@ -37,10 +36,6 @@ RUN chmod +x /usr/local/bin/bobbit-entrypoint.sh
 # on the host, matching typical developer user IDs.
 USER node
 
-# Install actual Chromium binary as the node user (stored in /home/node/.cache/ms-playwright/).
-# The entrypoint may update this at runtime if the project uses a different Playwright version.
-RUN npx -y playwright@${PLAYWRIGHT_VERSION} install chromium
-
 # Configure git for Windows host compatibility (CRLF line endings).
 # Mark /workspace as safe (it's bind-mounted with different ownership).
 # Commit identity comes from the mounted repo's .git/config (the human developer).
@@ -57,6 +52,13 @@ ENV npm_config_cache=/home/node/.npm-cache
 # package-lock.json hash. Survives container restarts when the home dir is
 # a named volume, eliminating reinstalls on subsequent starts.
 RUN mkdir -p /home/node/.node_modules_cache
+
+# ── Playwright browser binary ──────────────────────────────────────────────
+# ARG placed late so version bumps only rebuild this layer, not pi-agent etc.
+# Must match the project's @playwright/test version to avoid re-download at
+# container startup. The entrypoint handles mismatches at runtime as a fallback.
+ARG PLAYWRIGHT_VERSION=1.58.2
+RUN npx -y playwright@${PLAYWRIGHT_VERSION} install chromium
 
 WORKDIR /workspace
 
