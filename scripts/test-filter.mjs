@@ -117,4 +117,6 @@ if (failures.length > 0) {
   }
 }
 
-process.exit(failed > 0 ? 1 : 0);
+// Set exitCode instead of calling process.exit() — process.exit() can
+// cause issues with unflushed stdout in piped contexts on Windows/Git Bash.
+process.exitCode = failed > 0 ? 1 : 0;
