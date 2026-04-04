@@ -251,7 +251,13 @@ process.on("unhandledRejection", (reason) => {
 	console.error("[gateway] Unhandled rejection:", reason);
 });
 
-process.on("uncaughtException", (err) => {
+process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
+	// EPIPE from writing to a dead child process stdin — not fatal, the session
+	// will see a "process exited" error and handle it. Don't crash the gateway.
+	if (err.code === "EPIPE") {
+		console.warn("[gateway] EPIPE (ignored — child process stdin closed)");
+		return;
+	}
 	console.error("[gateway] Uncaught exception:", err);
 	process.exit(1);
 });

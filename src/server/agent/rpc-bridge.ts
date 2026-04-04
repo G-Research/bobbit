@@ -182,6 +182,14 @@ export class RpcBridge {
 			}
 		});
 
+		// Absorb EPIPE on stdin — the agent process may exit while we still have
+		// queued writes. Without this handler, the error surfaces as an uncaught
+		// exception and crashes the gateway.
+		this.process.stdin!.on("error", (err: NodeJS.ErrnoException) => {
+			if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") return;
+			console.warn(`[rpc-bridge] stdin error: ${err.code || err.message}`);
+		});
+
 		this.process.on("exit", (code, signal) => {
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
