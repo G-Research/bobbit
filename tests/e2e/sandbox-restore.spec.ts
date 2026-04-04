@@ -2,8 +2,8 @@
  * Sandbox Session Restore E2E Tests
  *
  * Verifies that when a sandboxed session is restored after server restart,
- * the correct `sandboxClaim` (with branch and teamRepoPath) is reconstructed
- * from persisted session fields and passed to `applySandboxWiring`.
+ * the correct arguments are passed to `applySandboxWiring` using the
+ * per-project sandbox model (ProjectSandbox/SandboxManager).
  *
  * No Docker required — tests intercept at the `applySandboxWiring` boundary.
  */
@@ -41,14 +41,14 @@ function getDefaultProjectId(sm: any): string | undefined {
 test.describe("sandbox session restore", () => {
 	test.describe.configure({ mode: 'serial' });
 
-	test("restores sandboxed session with branch and teamRepoPath", async ({ gateway }) => {
+	test("restores sandboxed session with projectId and goalId", async ({ gateway }) => {
 		const sm = gateway.sessionManager as any;
 		const projectId = getDefaultProjectId(sm);
 		const ps = makePersistedSession(
 			{
 				sandboxed: true,
 				branch: "goal/test-branch",
-				teamGoalId: "test-goal-123",
+				goalId: "test-goal-123",
 				projectId,
 			},
 			gateway.bobbitDir,
@@ -57,13 +57,6 @@ test.describe("sandbox session restore", () => {
 		// Inject into the session store
 		const store = sm.getSessionStore(projectId);
 		store.put(ps);
-
-		// Create the fake team repo directory at the expected pool path
-		let teamRepoDir: string | undefined;
-		if (sm.sandboxPool) {
-			teamRepoDir = path.join(sm.sandboxPool.poolDir, "team-test-goal-123.git");
-			fs.mkdirSync(teamRepoDir, { recursive: true });
-		}
 
 		// Spy on applySandboxWiring
 		const original = sm.applySandboxWiring.bind(sm);
@@ -83,24 +76,18 @@ test.describe("sandbox session restore", () => {
 			await sm.restoreSession(ps).catch(() => {});
 
 			expect(capturedArgs).toBeDefined();
-			// Args: (bridgeOptions, sessionId, opts)
+			// New signature: (bridgeOptions, sessionId, opts)
+			// opts should have: skipMountValidation, projectId, goalId
 			const opts = capturedArgs![2] as any;
 			expect(opts.skipMountValidation).toBe(true);
-			expect(opts.sandboxClaim).toBeDefined();
-			expect(opts.sandboxClaim.branch).toBe("goal/test-branch");
-
-			if (teamRepoDir) {
-				expect(opts.sandboxClaim.teamRepoPath).toBe(teamRepoDir);
-			}
+			expect(opts.projectId).toBe(projectId);
+			expect(opts.goalId).toBe("test-goal-123");
 		} finally {
 			sm.applySandboxWiring = original;
-			if (teamRepoDir) {
-				fs.rmSync(teamRepoDir, { recursive: true, force: true });
-			}
 		}
 	});
 
-	test("restores sandboxed session without branch — no sandboxClaim", async ({ gateway }) => {
+	test("restores sandboxed session without branch — still passes projectId", async ({ gateway }) => {
 		const sm = gateway.sessionManager as any;
 		const projectId = getDefaultProjectId(sm);
 		const ps = makePersistedSession(
@@ -128,14 +115,13 @@ test.describe("sandbox session restore", () => {
 			expect(capturedArgs).toBeDefined();
 			const opts = capturedArgs![2] as any;
 			expect(opts.skipMountValidation).toBe(true);
-			// No branch → no sandboxClaim (or undefined)
-			expect(opts.sandboxClaim).toBeUndefined();
+			expect(opts.projectId).toBe(projectId);
 		} finally {
 			sm.applySandboxWiring = original;
 		}
 	});
 
-	test("sandboxed session with branch but no teamGoalId — branch only", async ({ gateway }) => {
+	test("sandboxed session with branch but no teamGoalId", async ({ gateway }) => {
 		const sm = gateway.sessionManager as any;
 		const projectId = getDefaultProjectId(sm);
 		const ps = makePersistedSession(
@@ -164,50 +150,9 @@ test.describe("sandbox session restore", () => {
 			expect(capturedArgs).toBeDefined();
 			const opts = capturedArgs![2] as any;
 			expect(opts.skipMountValidation).toBe(true);
-			expect(opts.sandboxClaim).toBeDefined();
-			expect(opts.sandboxClaim.branch).toBe("some-branch");
-			// No teamGoalId → no teamRepoPath
-			expect(opts.sandboxClaim.teamRepoPath).toBeUndefined();
-		} finally {
-			sm.applySandboxWiring = original;
-		}
-	});
-
-	test("team repo missing from disk — graceful degradation", async ({ gateway }) => {
-		const sm = gateway.sessionManager as any;
-		const projectId = getDefaultProjectId(sm);
-		const ps = makePersistedSession(
-			{
-				sandboxed: true,
-				branch: "goal/test",
-				teamGoalId: "missing-goal",
-				projectId,
-			},
-			gateway.bobbitDir,
-		);
-
-		const store = sm.getSessionStore(projectId);
-		store.put(ps);
-
-		// Do NOT create the team repo directory — it should degrade gracefully
-
-		const original = sm.applySandboxWiring.bind(sm);
-		let capturedArgs: unknown[] | undefined;
-		sm.applySandboxWiring = async (...args: unknown[]) => {
-			capturedArgs = args;
-			return false;
-		};
-
-		try {
-			await sm.restoreSession(ps).catch(() => {});
-
-			expect(capturedArgs).toBeDefined();
-			const opts = capturedArgs![2] as any;
-			expect(opts.skipMountValidation).toBe(true);
-			expect(opts.sandboxClaim).toBeDefined();
-			expect(opts.sandboxClaim.branch).toBe("goal/test");
-			// Team repo doesn't exist on disk → no teamRepoPath
-			expect(opts.sandboxClaim.teamRepoPath).toBeUndefined();
+			expect(opts.projectId).toBe(projectId);
+			// No teamGoalId → goalId should be undefined (not from team)
+			expect(opts.goalId).toBeUndefined();
 		} finally {
 			sm.applySandboxWiring = original;
 		}

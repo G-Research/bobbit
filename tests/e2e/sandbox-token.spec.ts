@@ -1,5 +1,5 @@
 /**
- * E2E tests for scoped sandbox tokens.
+ * E2E tests for scoped sandbox tokens (per-project model).
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken } from "./e2e-setup.js";
@@ -33,45 +33,69 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(resp.status).toBe(401);
 	});
 
-	test("SandboxTokenStore register/lookup/remove lifecycle", async () => {
+	test("SandboxTokenStore per-project register/lookup/remove lifecycle", async () => {
 		const { SandboxTokenStore } = await import("../../dist/server/auth/sandbox-token.js");
 		const store = new SandboxTokenStore();
 
-		const token = store.register("s1", "g1");
+		// Register returns a token for the project
+		const token = store.register("project-1");
 		expect(token).toHaveLength(64);
-		expect(store.register("s1", "g1")).toBe(token); // idempotent
+		// Idempotent — same token on second call
+		expect(store.register("project-1")).toBe(token);
 
+		// Lookup returns scope with projectId
 		const scope = store.lookup(token);
 		expect(scope).toBeTruthy();
-		expect(scope!.sessionId).toBe("s1");
-		expect(scope!.goalId).toBe("g1");
-		expect(store.getTokenForSession("s1")).toBe(token);
+		expect(scope!.projectId).toBe("project-1");
+		expect(scope!.sessionIds).toBeInstanceOf(Set);
+		expect(scope!.goalIds).toBeInstanceOf(Set);
 
-		store.remove("s1");
+		// Reverse lookup by projectId
+		expect(store.getTokenForProject("project-1")).toBe(token);
+
+		// Remove the project
+		store.remove("project-1");
 		expect(store.lookup(token)).toBeUndefined();
-		expect(store.getTokenForSession("s1")).toBeUndefined();
+		expect(store.getTokenForProject("project-1")).toBeUndefined();
 	});
 
-	test("SandboxTokenStore child management", async () => {
+	test("SandboxTokenStore session and goal tracking", async () => {
 		const { SandboxTokenStore } = await import("../../dist/server/auth/sandbox-token.js");
 		const store = new SandboxTokenStore();
 
-		const token = store.register("parent");
-		store.addChild("parent", "child1");
-		store.addChild("parent", "child2");
+		const token = store.register("project-1");
+
+		// Add sessions to the project scope
+		store.addSession("project-1", "session-1");
+		store.addSession("project-1", "session-2");
+
+		// Add goals to the project scope
+		store.addGoal("project-1", "goal-1");
 
 		const scope = store.lookup(token)!;
-		expect(scope.childSessionIds.has("child1")).toBe(true);
-		expect(scope.childSessionIds.has("child2")).toBe(true);
-		expect(scope.childSessionIds.has("stranger")).toBe(false);
+		expect(scope.sessionIds.has("session-1")).toBe(true);
+		expect(scope.sessionIds.has("session-2")).toBe(true);
+		expect(scope.sessionIds.has("stranger")).toBe(false);
+		expect(scope.goalIds.has("goal-1")).toBe(true);
+		expect(scope.goalIds.has("other-goal")).toBe(false);
 
-		// addChild on unknown parent is a no-op
-		store.addChild("nonexistent", "orphan");
+		// Remove a session
+		store.removeSession("project-1", "session-1");
+		const scope2 = store.lookup(token)!;
+		expect(scope2.sessionIds.has("session-1")).toBe(false);
+		expect(scope2.sessionIds.has("session-2")).toBe(true);
+
+		// addSession on unknown project is a no-op
+		store.addSession("nonexistent", "orphan");
 	});
 
-	test("sandbox guard allows correct endpoints", async () => {
+	test("sandbox guard allows correct endpoints (per-project model)", async () => {
 		const { isSandboxAllowed } = await import("../../dist/server/auth/sandbox-guard.js");
-		const scope = { sessionId: "s1", goalId: "g1", childSessionIds: new Set(["child1"]) };
+		const scope = {
+			projectId: "p1",
+			goalIds: new Set(["g1"]),
+			sessionIds: new Set(["s1", "child1"]),
+		};
 
 		// Always-allowed
 		expect(isSandboxAllowed("/api/health", "GET", scope)).toBe(true);
@@ -80,13 +104,13 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/personalities", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions", "POST", scope)).toBe(true);
 
-		// Own session
+		// Own session (tracked under project)
 		expect(isSandboxAllowed("/api/sessions/s1", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions/s1", "PATCH", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions/s1", "DELETE", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions/s1/wait", "POST", scope)).toBe(true);
 
-		// Child session
+		// Child session (also tracked under project)
 		expect(isSandboxAllowed("/api/sessions/child1", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions/child1/wait", "POST", scope)).toBe(true);
 
@@ -104,9 +128,13 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/tasks/t1", "DELETE", scope)).toBe(false);
 	});
 
-	test("sandbox guard blocks dangerous endpoints", async () => {
+	test("sandbox guard blocks dangerous endpoints (per-project model)", async () => {
 		const { isSandboxAllowed } = await import("../../dist/server/auth/sandbox-guard.js");
-		const scope = { sessionId: "s1", goalId: "g1", childSessionIds: new Set<string>() };
+		const scope = {
+			projectId: "p1",
+			goalIds: new Set(["g1"]),
+			sessionIds: new Set(["s1"]),
+		};
 
 		// Web proxy endpoints removed — should now be blocked
 		expect(isSandboxAllowed("/api/web-proxy/search", "POST", scope)).toBe(false);
@@ -134,9 +162,13 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/goals/other-goal/gates", "GET", scope)).toBe(false);
 	});
 
-	test("no goalId blocks all goal endpoints", async () => {
+	test("no goalIds blocks all goal endpoints", async () => {
 		const { isSandboxAllowed } = await import("../../dist/server/auth/sandbox-guard.js");
-		const scope = { sessionId: "s1", childSessionIds: new Set<string>() };
+		const scope = {
+			projectId: "p1",
+			goalIds: new Set<string>(),
+			sessionIds: new Set(["s1"]),
+		};
 
 		expect(isSandboxAllowed("/api/goals/any/gates", "GET", scope)).toBe(false);
 		expect(isSandboxAllowed("/api/goals/any/tasks", "GET", scope)).toBe(false);

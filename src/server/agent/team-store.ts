@@ -14,8 +14,6 @@ export interface PersistedTeamEntry {
 		createdAt: number;
 	}>;
 	maxConcurrent: number;
-	/** Host path to the shared bare repo for sandboxed teams. */
-	teamRepoPath?: string;
 }
 
 export class TeamStore {

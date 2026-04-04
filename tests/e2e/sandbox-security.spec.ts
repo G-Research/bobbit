@@ -5,6 +5,9 @@
  * HTTP middleware (sandbox-guard.ts). No Docker required — tests use
  * the in-process gateway's live SandboxTokenStore to register scoped
  * tokens and make real HTTP requests against the gateway.
+ *
+ * Uses the per-project token model: one token per project, sessions
+ * are tracked under the project scope via addSession().
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, nonGitCwd } from "./e2e-setup.js";
@@ -29,6 +32,7 @@ test.describe("Sandbox Security Boundaries", () => {
 	let scopedToken: string;
 	let sessionId: string;
 	const goalId = "test-goal-id";
+	const projectId = "test-project-for-security";
 
 	test.beforeAll(async ({ gateway }) => {
 		// Create a real session via admin token
@@ -40,8 +44,10 @@ test.describe("Sandbox Security Boundaries", () => {
 		const data = await res.json();
 		sessionId = data.id;
 
-		// Register a sandbox-scoped token in the LIVE gateway's SandboxTokenStore
-		scopedToken = gateway.sessionManager.sandboxTokenStore.register(sessionId, goalId);
+		// Register a sandbox-scoped token using the per-project model
+		scopedToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
+		gateway.sessionManager.sandboxTokenStore.addSession(projectId, sessionId);
+		gateway.sessionManager.sandboxTokenStore.addGoal(projectId, goalId);
 	});
 
 	test.afterAll(async ({ gateway }) => {
