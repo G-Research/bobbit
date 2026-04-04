@@ -35,17 +35,18 @@ function createMockGateStore() {
 	};
 }
 
-function createMockGoalStore(opts: { sandboxed?: boolean } = {}) {
+function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string } = {}) {
 	return {
 		get: (_id: string) => ({
 			id: _id,
 			sandboxed: opts.sandboxed ?? false,
+			branch: opts.branch,
 			enabledOptionalSteps: [],
 		}),
 	};
 }
 
-function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string } = {}) {
+function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; branch?: string } = {}) {
 	const gateStore = createMockGateStore();
 	const goalStore = createMockGoalStore(opts);
 	const pId = opts.projectId ?? "test-project-id";
@@ -112,6 +113,7 @@ function createHarness(opts: {
 	teamLeadSessionId?: string;
 	containerId?: string;
 	projectId?: string;
+	branch?: string;
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
 	const broadcastFn = (goalId: string, event: any) => {
@@ -119,7 +121,7 @@ function createHarness(opts: {
 	};
 
 	const pId = opts.projectId ?? "test-project-id";
-	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId });
+	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, branch: opts.branch });
 
 	const harness = new VerificationHarness(
 		path.join(TEST_DIR, "state"),
@@ -214,12 +216,14 @@ describe("runCommandStep spawn behavior", () => {
 // ---------------------------------------------------------------------------
 
 describe("container resolution in verifyGateSignal", () => {
-	// Capture the containerId argument passed to runCommandStep by patching the prototype
+	// Capture the containerId and cwd arguments passed to runCommandStep by patching the prototype
 	let capturedContainerIds: Array<string | undefined>;
+	let capturedCwds: Array<string>;
 	let originalRunCommandStep: any;
 
 	beforeEach(() => {
 		capturedContainerIds = [];
+		capturedCwds = [];
 		originalRunCommandStep = (VerificationHarness.prototype as any).runCommandStep;
 		(VerificationHarness.prototype as any).runCommandStep = function (
 			_command: string,
@@ -231,6 +235,7 @@ describe("container resolution in verifyGateSignal", () => {
 			containerId?: string,
 		) {
 			capturedContainerIds.push(containerId);
+			capturedCwds.push(_cwd);
 			return Promise.resolve({ passed: true, output: "mocked-ok" });
 		};
 	});
@@ -266,11 +271,12 @@ describe("container resolution in verifyGateSignal", () => {
 		};
 	}
 
-	it("passes containerId when goal is sandboxed and ProjectSandbox has a container", async () => {
+	it("passes containerId and container worktree cwd when goal is sandboxed", async () => {
 		const goalId = "goal-sandbox-1";
 		const { harness } = createHarness({
 			sandboxed: true,
 			containerId: "docker-container-abc",
+			branch: "goal/my-feature",
 		});
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
@@ -283,6 +289,27 @@ describe("container resolution in verifyGateSignal", () => {
 			"docker-container-abc",
 			"Should pass the project container's containerId",
 		);
+		assert.equal(
+			capturedCwds[0],
+			"/workspace-wt/goal/my-feature",
+			"Should use the container worktree path, not the host cwd",
+		);
+	});
+
+	it("falls back to /workspace when sandboxed goal has no branch", async () => {
+		const goalId = "goal-sandbox-no-branch";
+		const { harness } = createHarness({
+			sandboxed: true,
+			containerId: "docker-container-abc",
+			// No branch specified
+		});
+		const signal = makeSignal(goalId, "test-gate");
+		const gate = makeGate("test-gate");
+
+		await harness.verifyGateSignal(signal, gate, os.tmpdir());
+
+		assert.equal(capturedContainerIds[0], "docker-container-abc");
+		assert.equal(capturedCwds[0], "/workspace", "Should fall back to /workspace when no branch");
 	});
 
 	it("falls back to host execution when sandboxed but no ProjectSandbox available", async () => {

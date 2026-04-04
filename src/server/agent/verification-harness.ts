@@ -939,9 +939,13 @@ export class VerificationHarness {
 							};
 
 							// For sandboxed goals, resolve the project container ID
-							// so the command runs inside the container (where the code lives)
+							// so the command runs inside the container (where the code lives).
+							// Also resolve the container-internal worktree path so the command
+							// runs on the goal's branch, not /workspace (the main branch).
 							let commandContainerId: string | undefined;
-							const isSandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId)?.sandboxed;
+							let commandCwd = cwd;
+							const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+							const isSandboxedGoal = sandboxedGoal?.sandboxed;
 							if (isSandboxedGoal && this.sessionManager) {
 								const sandboxMgr = this.sessionManager.getSandboxManager();
 								const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
@@ -950,6 +954,14 @@ export class VerificationHarness {
 									if (projectSandbox) {
 										try {
 											commandContainerId = await projectSandbox.getContainerId();
+											// Resolve the container worktree path for this goal's branch.
+											// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
+											const goalBranchName = sandboxedGoal?.branch;
+											if (goalBranchName) {
+												commandCwd = `/workspace-wt/${goalBranchName}`;
+											} else {
+												commandCwd = "/workspace";
+											}
 										} catch {
 											// Container unavailable — fall through to warning
 										}
@@ -967,7 +979,7 @@ export class VerificationHarness {
 								}
 							}
 
-							result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
+							result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -1853,9 +1865,9 @@ export class VerificationHarness {
 			const { shell: shellBin, args: shellArgs } = process.platform === "win32" && GIT_BASH
 				? { shell: GIT_BASH, args: ["--login", "-c"] }
 				: getShellConfig();
-			// For sandboxed goals, run the command inside the team lead's container
+			// For sandboxed goals, run the command inside the project container
 			const child = containerId
-				? spawn("docker", ["exec", "-w", "/workspace", containerId, "/bin/sh", "-c", command], {
+				? spawn("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", command], {
 					stdio: ["ignore", "pipe", "pipe"],
 					timeout: timeoutSec * 1000,
 					env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
