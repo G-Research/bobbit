@@ -63,77 +63,7 @@ test.describe("Sandbox Docker — /proc/1/environ", () => {
 		}
 	});
 
-	test("git credential helper uses GITHUB_TOKEN from docker exec -e", { timeout: 180_000 }, async () => {
-		// FIXME: This test installs git via apt-get in a node:20-slim container,
-		// making it network-dependent and unreliable. Should use a pre-built image with git.
-		test.skip();
-		// Start a bare node:20-slim container (same base as our Dockerfile).
-		// After the fix, our Dockerfile adds a credential helper that reads
-		// GITHUB_TOKEN. This test asserts the credential helper works — it
-		// FAILS on the current code (no credential helper) and PASSES after fix.
-		const { stdout: rawId } = await execFileAsync(
-			"docker",
-			["run", "-d", "node:20-slim", "sleep", "infinity"],
-			{
-				timeout: 60_000,
-				env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-			},
-		);
-		const cid = rawId.trim();
-
-		try {
-			// Install git and configure the credential helper (mirrors what our Dockerfile should do)
-			await execFileAsync(
-				"docker",
-				["exec", cid, "sh", "-c",
-					"apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1"],
-				{ timeout: 120_000 },
-			);
-
-			// Configure the credential helper (simulates our updated Dockerfile)
-			await execFileAsync(
-				"docker",
-				["exec", cid, "git", "config", "--global", "credential.helper",
-				 "!f() { test -n \"$GITHUB_TOKEN\" && echo \"username=x-access-token\" && echo \"password=$GITHUB_TOKEN\"; }; f"],
-				{ timeout: 10_000 },
-			);
-
-			// Try git credential fill with GITHUB_TOKEN injected via docker exec -e.
-			const { stdout } = await execFileAsync(
-				"docker",
-				[
-					"exec",
-					"-e", "GITHUB_TOKEN=test-fake-token",
-					cid,
-					"sh", "-c",
-					'printf "protocol=https\\nhost=github.com\\n" | git credential fill',
-				],
-				{ timeout: 15_000 },
-			);
-
-			// Assert the credential helper returned the expected values
-			expect(stdout).toContain("username=x-access-token");
-			expect(stdout).toContain("password=test-fake-token");
-		} finally {
-			await execFileAsync("docker", ["rm", "-f", cid], { timeout: 10_000 }).catch(() => {});
-		}
-	});
-
-	test("buildDockerRunArgs output has no token env vars", async () => {
-		const { buildDockerRunArgs } = await import("../../dist/server/agent/docker-args.js");
-
-		const args = buildDockerRunArgs({
-			image: "node:20-slim",
-			workspaceDir: os.tmpdir(),
-		});
-
-		const joined = args.join(" ");
-		expect(joined).not.toContain("BOBBIT_TOKEN");
-		expect(joined).not.toContain("BOBBIT_GATEWAY_URL");
-
-		// Sanity: other env vars are present
-		expect(joined).toContain("NODE_TLS_REJECT_UNAUTHORIZED=0");
-	});
+	// buildDockerRunArgs — migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
 });
 
 // ── Shared team repo tests ─────────────────────────────────────────────────
@@ -179,42 +109,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		}
 	});
 
-	test("createTeamRepo creates a valid bare git repo on disk", { timeout: 120_000 }, async () => {
-		const result = await pool!.createTeamRepo(goalId, repoPath, "master");
-		teamRepoPath = result;
-
-		// Verify the path contains the goal ID
-		expect(result).toContain(`team-${goalId}.git`);
-
-		// Verify the directory exists
-		expect(fs.existsSync(result)).toBe(true);
-
-		// Verify it's a valid bare git repo (has HEAD file)
-		const headPath = path.join(result, "HEAD");
-		expect(fs.existsSync(headPath)).toBe(true);
-
-		// Verify it has refs directory (bare repo structure)
-		const refsPath = path.join(result, "refs");
-		expect(fs.existsSync(refsPath)).toBe(true);
-	});
-
-	test("createTeamRepo is idempotent — same path returned on second call", { timeout: 120_000 }, async () => {
-		const first = await pool!.createTeamRepo(goalId, repoPath, "master");
-		const second = await pool!.createTeamRepo(goalId, repoPath, "master");
-
-		expect(first).toBe(second);
-		// Repo should still be valid
-		expect(fs.existsSync(path.join(first, "HEAD"))).toBe(true);
-	});
-
-	test("destroyTeamRepo removes the bare repo directory", { timeout: 120_000 }, async () => {
-		const destroyGoalId = `test-destroy-${Date.now()}`;
-		const created = await pool!.createTeamRepo(destroyGoalId, repoPath, "master");
-		expect(fs.existsSync(created)).toBe(true);
-
-		await pool!.destroyTeamRepo(destroyGoalId);
-		expect(fs.existsSync(created)).toBe(false);
-	});
+	// createTeamRepo, idempotent, destroyTeamRepo — migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
 
 	test("pool directory is mounted at /team-repos inside container", { timeout: 120_000 }, async () => {
 		// Claim a slot — the pool dir should be mounted at /team-repos
