@@ -3806,7 +3806,10 @@ async function handleApiRoute(
 			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch {}
 
 			const limit = 50;
-			const rangeSpec = hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
+			const direction = url.searchParams.get('direction'); // 'behind' to show incoming commits
+			const rangeSpec = direction === 'behind' && hasUpstream
+				? 'HEAD..@{u}'
+				: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 
 			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" --shortstat ${rangeSpec}`, cwd, 10000);
 			const lines = out.split('\n');
