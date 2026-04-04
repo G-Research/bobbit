@@ -566,6 +566,14 @@ This mirrors the non-sandboxed workflow where agents share a `.git` object store
 
 **Non-sandboxed teams** are unaffected — they use git worktrees with a shared object store, which already provides instant commit visibility.
 
+### Verification command execution
+
+When a gate's verification workflow includes `command` steps (e.g. running tests), the verification harness needs access to the team's latest code. For non-sandboxed goals, this code lives in the host worktree. For sandboxed goals, the team's commits only exist inside the shared team bare repo and the containers' `/workspace` directories — the host worktree does not have them.
+
+To solve this, `runCommandStep` in `verification-harness.ts` accepts an optional `containerId`. At the call site, the harness checks `goal.sandboxed`; if true, it resolves the team lead's container ID via `teamManager.getTeamState()` → `sessionManager.getSession()` → `.containerId`. When a container ID is available, the command runs via `docker exec -w /workspace <containerId> /bin/sh -c <command>` instead of spawning on the host.
+
+**Fallback:** If the goal is sandboxed but the team lead's container is not running (team dismissed, container crashed), the harness falls back to host execution. A warning is emitted to both server logs (`console.warn`) and the verification step's output stream so the user can see why results may be stale.
+
 ### Security summary
 
 - Container sees only `/workspace`, `/agent-modules` (ro), `/tools` (ro), `~/.bobbit/agent/sessions/`

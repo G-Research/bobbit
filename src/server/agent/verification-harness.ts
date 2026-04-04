@@ -933,10 +933,36 @@ export class VerificationHarness {
 								}
 							}
 
-							result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure, {
+							const streamCtx = {
 								goalId: signal.goalId, gateId: signal.gateId,
 								signalId: signal.id, stepIndex: index,
-							}, errorPattern);
+							};
+
+							// For sandboxed goals, resolve the team lead's container ID
+							// so the command runs inside the container (where the code lives)
+							let commandContainerId: string | undefined;
+							const isSandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId)?.sandboxed;
+							if (isSandboxedGoal && this.teamManager && this.sessionManager) {
+								const teamState = this.teamManager.getTeamState(signal.goalId);
+								if (teamState?.teamLeadSessionId) {
+									const tlSession = this.sessionManager.getSession(teamState.teamLeadSessionId);
+									if (tlSession?.containerId) {
+										commandContainerId = tlSession.containerId;
+									}
+								}
+								if (!commandContainerId) {
+									const warning = `[verification] Sandboxed goal ${signal.goalId} but no team lead container found — falling back to host execution`;
+									console.warn(warning);
+									this.broadcastFn(streamCtx.goalId, {
+										type: "gate_verification_step_output",
+										goalId: streamCtx.goalId, gateId: streamCtx.gateId,
+										signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
+										stream: "stderr", text: warning + "\n", ts: Date.now(),
+									});
+								}
+							}
+
+							result = await this.runCommandStep(cmd, cwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -1835,6 +1861,7 @@ export class VerificationHarness {
 		expectFailure: boolean,
 		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
 		errorPattern?: string,
+		containerId?: string,
 	): Promise<{ passed: boolean; output: string }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
@@ -1843,12 +1870,19 @@ export class VerificationHarness {
 			const { shell: shellBin, args: shellArgs } = process.platform === "win32" && GIT_BASH
 				? { shell: GIT_BASH, args: ["--login", "-c"] }
 				: getShellConfig();
-			const child = spawn(shellBin, [...shellArgs, command], {
-				cwd: normalizedCwd,
-				timeout: timeoutSec * 1000,
-				stdio: ["ignore", "pipe", "pipe"],
-				...(process.platform === "win32" ? { windowsHide: true } : {}),
-			});
+			// For sandboxed goals, run the command inside the team lead's container
+			const child = containerId
+				? spawn("docker", ["exec", "-w", "/workspace", containerId, "/bin/sh", "-c", command], {
+					stdio: ["ignore", "pipe", "pipe"],
+					timeout: timeoutSec * 1000,
+					env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+				})
+				: spawn(shellBin, [...shellArgs, command], {
+					cwd: normalizedCwd,
+					timeout: timeoutSec * 1000,
+					stdio: ["ignore", "pipe", "pipe"],
+					...(process.platform === "win32" ? { windowsHide: true } : {}),
+				});
 			let stdout = "";
 			let stderr = "";
 			child.stdout.on("data", (d: Buffer) => {
