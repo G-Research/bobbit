@@ -155,3 +155,80 @@ export async function cleanupWorktree(
 		}
 	}
 }
+
+/**
+ * Recover a worktree whose directory is missing but whose branch still exists.
+ *
+ * This happens when a worktree directory is deleted (e.g. by cleanup, crash,
+ * or manual removal) but the branch is preserved locally or on the remote.
+ *
+ * Steps:
+ * 1. Prune stale worktree references (git tracks worktrees and will refuse
+ *    to create one if it thinks the old one still exists)
+ * 2. Fetch from origin to ensure we have the latest branch ref
+ * 3. Re-create the worktree, checking out the existing branch
+ * 4. Run the worktree setup command if configured
+ *
+ * @returns The worktree path, or null if recovery failed
+ */
+export async function recoverWorktree(
+	repoPath: string,
+	branchName: string,
+	worktreePath: string,
+	opts?: { setupCommand?: string },
+): Promise<string | null> {
+	if (!fs.existsSync(repoPath)) {
+		console.warn(`[git] Cannot recover worktree: repoPath does not exist: ${repoPath}`);
+		return null;
+	}
+
+	try {
+		// Prune stale worktree entries — git may still have a record of the old one
+		await execFile("git", ["worktree", "prune"], { cwd: repoPath });
+
+		// Fetch to make sure we have the branch ref
+		try {
+			await execFile("git", ["fetch", "origin", branchName], {
+				cwd: repoPath,
+				timeout: 30_000,
+			});
+		} catch {
+			// Fetch failure is non-fatal — branch may exist locally
+		}
+
+		// Check if the branch exists locally
+		let branchExists = false;
+		try {
+			await execFile("git", ["rev-parse", "--verify", branchName], { cwd: repoPath });
+			branchExists = true;
+		} catch {
+			// Try the remote tracking branch
+			try {
+				await execFile("git", ["rev-parse", "--verify", `origin/${branchName}`], { cwd: repoPath });
+			} catch {
+				console.warn(`[git] Cannot recover worktree: branch "${branchName}" not found locally or on remote`);
+				return null;
+			}
+		}
+
+		// Create the worktree — use existing branch (no -b) or track from remote
+		if (branchExists) {
+			await execFile("git", ["worktree", "add", worktreePath, branchName], { cwd: repoPath });
+		} else {
+			// Create local branch tracking the remote
+			await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, `origin/${branchName}`], { cwd: repoPath });
+		}
+
+		// Run setup command if configured
+		if (!process.env.BOBBIT_SKIP_NPM_CI) {
+			const cmd = opts?.setupCommand !== undefined ? opts.setupCommand : (readWorktreeSetupCommand() ?? "");
+			await setupWorktreeDeps(repoPath, worktreePath, cmd);
+		}
+
+		console.log(`[git] Recovered worktree for branch "${branchName}" at ${worktreePath}`);
+		return worktreePath;
+	} catch (err) {
+		console.error(`[git] Failed to recover worktree for branch "${branchName}":`, err);
+		return null;
+	}
+}
