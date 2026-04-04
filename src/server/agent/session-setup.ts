@@ -419,13 +419,23 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		});
 	}
 
-	// Step 7: spawn agent
+	// Step 7: persist BEFORE spawning — if the spawn fails (e.g. Docker ENOENT),
+	// the session metadata is still saved so the user doesn't lose the session.
+	// The agentSessionFile is empty until spawnAgent populates it.
+	const preSpawnSession = {
+		id: plan.id, title: plan.title || "New session",
+		cwd: plan.bridgeOptions.cwd || plan.cwd, createdAt: Date.now(),
+		sandboxed: plan.sandboxed, projectId: plan.projectId,
+	} as any;
+	persistOnce(preSpawnSession, plan, ctx.store);
+
+	// Step 8: spawn agent
 	const session = await spawnAgent(plan, ctx);
 
-	// Step 8: persist once with all structural fields
+	// Step 9: update persistence with full session data (agentSessionFile, etc.)
 	persistOnce(session, plan, ctx.store);
 
-	// Step 9: post-spawn setup (model, thinking level)
+	// Step 10: post-spawn setup (model, thinking level)
 	await postSpawn(session, plan, ctx);
 
 	return session;
