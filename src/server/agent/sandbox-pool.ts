@@ -94,6 +94,31 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
 	}
 }
 
+// ── Team remote setup (extracted for testability) ──────────────────────────
+
+/**
+ * Configure a 'team' git remote and post-commit hook in a clone directory.
+ * The remote URL uses the container-internal /team-repos/ path so it resolves
+ * correctly inside Docker via bind-mount.
+ */
+export function setupTeamRemote(worktreePath: string, teamRepoPath: string): void {
+	const repoName = path.basename(teamRepoPath); // "team-<goalId>.git"
+	const containerRepoPath = `/team-repos/${repoName}`;
+
+	// Add team remote — URL is the container-internal path.
+	// Written directly to .git/config to avoid MSYS path mangling on Windows
+	// (Git Bash converts /team-repos/... to C:/Program Files/Git/team-repos/...).
+	const gitConfigPath = path.join(worktreePath, ".git", "config");
+	const remoteSection = `\n[remote "team"]\n\turl = ${containerRepoPath}\n\tfetch = +refs/heads/*:refs/remotes/team/*\n`;
+	fs.appendFileSync(gitConfigPath, remoteSection);
+
+	// Install non-blocking post-commit hook
+	const hookDir = path.join(worktreePath, ".git", "hooks");
+	fs.mkdirSync(hookDir, { recursive: true });
+	const hookScript = '#!/bin/sh\nbranch=$(git symbolic-ref --short HEAD 2>/dev/null)\n[ -n "$branch" ] && git push team "$branch" 2>/dev/null &\n';
+	fs.writeFileSync(path.join(hookDir, "post-commit"), hookScript, { mode: 0o755 });
+}
+
 // ── SandboxPool ────────────────────────────────────────────────────────────
 
 export class SandboxPool {
@@ -200,23 +225,7 @@ export class SandboxPool {
 		// Set up team remote and post-commit hook for shared team repo
 		if (opts?.teamRepoPath) {
 			try {
-				const repoName = path.basename(opts.teamRepoPath); // "team-<goalId>.git"
-				const containerRepoPath = `/team-repos/${repoName}`;
-
-				// Add team remote — URL is the container-internal path.
-				// Written directly to .git/config to avoid MSYS path mangling on Windows
-				// (Git Bash converts /team-repos/... to C:/Program Files/Git/team-repos/...).
-				// The container sees the same .git/config via bind-mount and the
-				// /team-repos/ path resolves correctly inside the container.
-				const gitConfigPath = path.join(slot.worktreePath, ".git", "config");
-				const remoteSection = `\n[remote "team"]\n\turl = ${containerRepoPath}\n\tfetch = +refs/heads/*:refs/remotes/team/*\n`;
-				fs.appendFileSync(gitConfigPath, remoteSection);
-
-				// Install non-blocking post-commit hook
-				const hookDir = path.join(slot.worktreePath, ".git", "hooks");
-				fs.mkdirSync(hookDir, { recursive: true });
-				const hookScript = '#!/bin/sh\nbranch=$(git symbolic-ref --short HEAD 2>/dev/null)\n[ -n "$branch" ] && git push team "$branch" 2>/dev/null &\n';
-				fs.writeFileSync(path.join(hookDir, "post-commit"), hookScript, { mode: 0o755 });
+				setupTeamRemote(slot.worktreePath, opts.teamRepoPath);
 			} catch (err) {
 				console.warn(`[sandbox-pool] Failed to set up team remote for slot ${slot.shortId}:`, err);
 				// Non-fatal — the slot is still usable, just without auto-push

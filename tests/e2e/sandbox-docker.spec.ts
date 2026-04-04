@@ -1,17 +1,15 @@
 /**
- * Docker sandbox E2E tests.
+ * Docker sandbox E2E tests — cross-agent commit visibility.
  *
- * Tests cover:
- * 1. Container /proc/1/environ — no sensitive token exposure
- * 2. Shared team repo — bare repo creation, mount visibility, remote setup,
- *    post-commit hook, and cross-agent commit visibility
+ * This is the only test that genuinely requires Docker containers.
+ * All other sandbox tests (args, team repo CRUD, remote setup, hook,
+ * mount args) have been migrated to tests/sandbox-team-repo.test.ts.
  *
  * Requires Docker — auto-skips when Docker is unavailable.
  */
 import { test, expect } from "./in-process-harness.js";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -26,47 +24,7 @@ try {
 	/* Docker not available */
 }
 
-test.describe("Sandbox Docker — /proc/1/environ", () => {
-	test.skip(!dockerAvailable, "Docker not available");
-
-	test("/proc/1/environ does not contain gateway tokens", async () => {
-		const { buildDockerRunArgs } = await import("../../dist/server/agent/docker-args.js");
-
-		const args = buildDockerRunArgs({
-			image: "node:20-slim",
-			workspaceDir: os.tmpdir(),
-		});
-
-		// Start container
-		const { stdout: rawId } = await execFileAsync("docker", args, {
-			timeout: 60_000,
-			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-		});
-		const cid = rawId.trim();
-
-		try {
-			// Read PID 1 environment — null-separated key=value pairs
-			const { stdout: environ } = await execFileAsync(
-				"docker",
-				["exec", cid, "cat", "/proc/1/environ"],
-				{ timeout: 10_000 },
-			);
-
-			// Primary assertions: no gateway tokens in PID 1 env
-			expect(environ).not.toContain("BOBBIT_TOKEN");
-			expect(environ).not.toContain("BOBBIT_GATEWAY_URL");
-
-			// Sanity: expected env vars ARE present (proves we read the right thing)
-			expect(environ).toContain("NODE_TLS_REJECT_UNAUTHORIZED=0");
-		} finally {
-			await execFileAsync("docker", ["rm", "-f", cid], { timeout: 10_000 }).catch(() => {});
-		}
-	});
-
-	// buildDockerRunArgs — migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
-});
-
-// ── Shared team repo tests ─────────────────────────────────────────────────
+// /proc/1/environ, buildDockerRunArgs, pool mount — migrated to tests/sandbox-team-repo.test.ts
 
 test.describe("Sandbox Docker — shared team repo", () => {
 	test.skip(!dockerAvailable, "Docker not available");
@@ -109,77 +67,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		}
 	});
 
-	// createTeamRepo, idempotent, destroyTeamRepo — migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
-
-	test("pool directory is mounted at /team-repos inside container", { timeout: 120_000 }, async () => {
-		// Claim a slot — the pool dir should be mounted at /team-repos
-		const sessionId = "test-mount-vis-" + Date.now();
-		const slot = await pool!.claim(sessionId);
-		expect(slot).not.toBeNull();
-		claimedContainers.push(slot!.containerId);
-
-		// Verify /team-repos mount exists via docker inspect (avoids container lifecycle issues)
-		const { stdout: inspectOut } = await execFileAsync(
-			"docker",
-			["inspect", "--format", "{{json .Mounts}}", slot!.containerId],
-			{
-				timeout: 10_000,
-				env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-			},
-		);
-		expect(inspectOut).toContain("/team-repos");
-
-		await pool!.release(sessionId, slot!.containerId);
-		// Remove from cleanup list since release destroys it
-		const idx = claimedContainers.indexOf(slot!.containerId);
-		if (idx !== -1) claimedContainers.splice(idx, 1);
-	});
-
-	test("claim with teamRepoPath configures team remote in the clone", { timeout: 120_000 }, async () => {
-		// Ensure team repo exists
-		const trPath = await pool!.createTeamRepo(goalId, repoPath, "master");
-		teamRepoPath = trPath;
-
-		const sessionId = "test-remote-" + Date.now();
-		const slot = await pool!.claim(sessionId, { teamRepoPath: trPath });
-		expect(slot).not.toBeNull();
-		claimedContainers.push(slot!.containerId);
-
-		// Verify the 'team' remote exists and points to the container-internal path.
-		// Read directly from .git/config to avoid MSYS path mangling on Windows.
-		const gitConfig = fs.readFileSync(path.join(slot!.worktreePath, ".git", "config"), "utf-8");
-		const repoName = path.basename(trPath); // "team-<goalId>.git"
-		expect(gitConfig).toContain(`[remote "team"]`);
-		expect(gitConfig).toContain(`/team-repos/${repoName}`);
-
-		await pool!.release(sessionId, slot!.containerId);
-		const idx = claimedContainers.indexOf(slot!.containerId);
-		if (idx !== -1) claimedContainers.splice(idx, 1);
-	});
-
-	test("claim with teamRepoPath installs post-commit hook", { timeout: 120_000 }, async () => {
-		const trPath = await pool!.createTeamRepo(goalId, repoPath, "master");
-		teamRepoPath = trPath;
-
-		const sessionId = "test-hook-" + Date.now();
-		const slot = await pool!.claim(sessionId, { teamRepoPath: trPath });
-		expect(slot).not.toBeNull();
-		claimedContainers.push(slot!.containerId);
-
-		// Verify post-commit hook exists
-		const hookPath = path.join(slot!.worktreePath, ".git", "hooks", "post-commit");
-		expect(fs.existsSync(hookPath)).toBe(true);
-
-		// Verify hook content contains the push command
-		const hookContent = fs.readFileSync(hookPath, "utf-8");
-		expect(hookContent).toContain("#!/bin/sh");
-		expect(hookContent).toContain("git push team");
-		expect(hookContent).toContain("2>/dev/null &"); // non-blocking, non-fatal
-
-		await pool!.release(sessionId, slot!.containerId);
-		const idx = claimedContainers.indexOf(slot!.containerId);
-		if (idx !== -1) claimedContainers.splice(idx, 1);
-	});
+	// All other tests migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
 
 	test("cross-agent commit visibility via shared team repo", { timeout: 180_000 }, async () => {
 		const crossGoalId = `test-cross-${Date.now()}`;
