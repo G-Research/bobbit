@@ -128,21 +128,28 @@ async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: str
 }
 
 // ── Async git helpers (avoid blocking event loop) ──
-async function execGit(cmd: string, cwd: string, timeout = 5000): Promise<string> {
+async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+	if (containerId) {
+		// Run inside Docker container
+		const { stdout } = await execFileAsync("docker", [
+			"exec", "-w", cwd, containerId, "/bin/sh", "-c", cmd,
+		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+		return stdout.trim();
+	}
 	const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout });
 	return stdout.trim();
 }
-async function execGitSafe(cmd: string, cwd: string, fallback = ""): Promise<string> {
-	try { return await execGit(cmd, cwd); } catch { return fallback; }
+async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?: string): Promise<string> {
+	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
 }
 
 // ── Git diff helper (shared between session and goal endpoints) ──
 const DIFF_MAX_BYTES = 500 * 1024; // 500KB
 
-async function getGitDiff(cwd: string, file?: string): Promise<string> {
+async function getGitDiff(cwd: string, file?: string, containerId?: string): Promise<string> {
 	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
 	let hasHead = true;
-	try { await execGit("git rev-parse --verify HEAD", cwd); } catch { hasHead = false; }
+	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId); } catch { hasHead = false; }
 
 	let diff = "";
 	if (file) {
@@ -150,7 +157,18 @@ async function getGitDiff(cwd: string, file?: string): Promise<string> {
 		if (file.includes("..") || path.isAbsolute(file) || /^[a-zA-Z]:/.test(file)) {
 			throw new Error("INVALID_PATH");
 		}
-		if (hasHead) {
+		if (containerId) {
+			// Run git diff inside container
+			if (hasHead) {
+				diff = await execGitSafe(`git diff HEAD -- ${file}`, cwd, "", containerId);
+			} else {
+				diff = await execGitSafe(`git diff --cached -- ${file}`, cwd, "", containerId)
+					+ await execGitSafe(`git diff -- ${file}`, cwd, "", containerId);
+			}
+			if (!diff.trim()) {
+				diff = await execGitSafe(`git diff --no-index /dev/null -- ${file}`, cwd, "", containerId);
+			}
+		} else if (hasHead) {
 			const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--", file], opts);
 			diff = stdout;
 		} else {
@@ -158,8 +176,8 @@ async function getGitDiff(cwd: string, file?: string): Promise<string> {
 			const { stdout: s2 } = await execFileAsync("git", ["diff", "--", file], opts);
 			diff = s1 + s2;
 		}
-		// Try untracked if empty
-		if (!diff.trim()) {
+		// Try untracked if empty (host path only — container path handled above)
+		if (!diff.trim() && !containerId) {
 			try {
 				const devNull = process.platform === "win32" ? "NUL" : "/dev/null";
 				const { stdout } = await execFileAsync("git", ["diff", "--no-index", devNull, "--", file], opts);
@@ -170,7 +188,14 @@ async function getGitDiff(cwd: string, file?: string): Promise<string> {
 			}
 		}
 	} else {
-		if (hasHead) {
+		if (containerId) {
+			if (hasHead) {
+				diff = await execGitSafe("git diff HEAD", cwd, "", containerId);
+			} else {
+				diff = await execGitSafe("git diff --cached", cwd, "", containerId)
+					+ await execGitSafe("git diff", cwd, "", containerId);
+			}
+		} else if (hasHead) {
 			const { stdout } = await execFileAsync("git", ["diff", "HEAD"], opts);
 			diff = stdout;
 		} else {
@@ -2876,37 +2901,55 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+
+		// Resolve container ID for sandboxed goals
+		let cid: string | undefined;
+		if (goal.sandboxed) {
+			try {
+				const goalCtx = projectContextManager.getContextForGoal(goalId);
+				const sandbox = goalCtx ? sessionManager.getSandboxManager()?.get(goalCtx.project.id) : undefined;
+				cid = sandbox ? await sandbox.getContainerId() : undefined;
+			} catch { /* container unavailable — fall through */ }
+		}
+
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		if (url.searchParams.get('fetch') === 'true') {
-			try { await execAsync('git fetch --quiet', { cwd, encoding: 'utf-8', timeout: 15000 }); } catch { /* best-effort */ }
+			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
 		}
 		try {
 			let branch = "";
-			try { branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd); }
+			try { branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid); }
 			catch { json({ error: "Not a git repository" }, 400); return; }
 			let primaryBranch = "master";
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
 				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
 			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
 			const isOnPrimary = branch === primaryBranch;
 			let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
 			if (!isOnPrimary) {
 				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
-				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, "0"), 10) || 0;
-				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, "0"), 10) || 0;
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, "0", cid), 10) || 0;
+				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, "0", cid), 10) || 0;
 				mergedIntoPrimary = aheadOfPrimary === 0;
 			}
 			// Don't use execGit here — its trim() strips the leading space from
 			// porcelain status lines like " M file.txt", corrupting the first filename.
 			let statusRaw = "";
 			try {
-				const { stdout } = await execAsync('git -c core.filemode=false status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
-				statusRaw = stdout.replace(/\s+$/, '');
+				if (cid) {
+					const { stdout } = await execFileAsync("docker", [
+						"exec", "-w", cwd, cid, "/bin/sh", "-c", "git -c core.filemode=false status --porcelain",
+					], { encoding: "utf-8", timeout: 5000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+					statusRaw = stdout.replace(/\s+$/, '');
+				} else {
+					const { stdout } = await execAsync('git -c core.filemode=false status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
+					statusRaw = stdout.replace(/\s+$/, '');
+				}
 			} catch {}
 			const statusLines = statusRaw ? statusRaw.split("\n") : [];
 			const status = statusLines.map(line => {
@@ -2915,12 +2958,12 @@ async function handleApiRoute(
 			});
 
 			let hasUpstream = false;
-			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch { /* no upstream */ }
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid); hasUpstream = true; } catch { /* no upstream */ }
 
 			let ahead = 0, behind = 0;
 			if (hasUpstream) {
-				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0'), 10) || 0;
-				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0'), 10) || 0;
+				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0', cid), 10) || 0;
+				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0', cid), 10) || 0;
 			}
 
 			const clean = statusLines.length === 0;
@@ -2960,10 +3003,21 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+
+		// Resolve container ID for sandboxed goals
+		let cid: string | undefined;
+		if (goal.sandboxed) {
+			try {
+				const goalCtx = projectContextManager.getContextForGoal(goalId);
+				const sandbox = goalCtx ? sessionManager.getSandboxManager()?.get(goalCtx.project.id) : undefined;
+				cid = sandbox ? await sandbox.getContainerId() : undefined;
+			} catch { /* container unavailable */ }
+		}
+
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
 		try {
-			const diff = await getGitDiff(cwd, file);
+			const diff = await getGitDiff(cwd, file, cid);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
@@ -3627,24 +3681,25 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = session.cwd;
+		const cid = session.sandboxed ? session.containerId : undefined;
 
 		// Optional: run git fetch first when ?fetch=true is passed
 		if (url.searchParams.get('fetch') === 'true') {
-			try { await execAsync('git fetch --quiet', { cwd, encoding: 'utf-8', timeout: 15000 }); } catch { /* best-effort */ }
+			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
 		}
 
 		try {
 			let branch = '';
-			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd); }
+			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd, 5000, cid); }
 			catch { json({ error: "Not a git repository" }, 400); return; }
 
 			let primaryBranch = 'master';
 			try {
-				const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd);
+				const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd, 5000, cid);
 				primaryBranch = remoteHead.replace('refs/remotes/origin/', '');
 			} catch {
-				try { await execGit('git rev-parse --verify refs/heads/master', cwd); primaryBranch = 'master'; }
-				catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd); primaryBranch = 'main'; } catch { /* keep default */ } }
+				try { await execGit('git rev-parse --verify refs/heads/master', cwd, 5000, cid); primaryBranch = 'master'; }
+				catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd, 5000, cid); primaryBranch = 'main'; } catch { /* keep default */ } }
 			}
 
 			const isOnPrimary = branch === primaryBranch;
@@ -3652,8 +3707,16 @@ async function handleApiRoute(
 			// porcelain status lines like " M file.txt", corrupting the first filename.
 			let statusRaw = "";
 			try {
-				const { stdout } = await execAsync('git -c core.filemode=false status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
-				statusRaw = stdout.replace(/\s+$/, '');
+				if (cid) {
+					// Run inside container — execGit trims, so use raw exec
+					const { stdout } = await execFileAsync("docker", [
+						"exec", "-w", cwd, cid, "/bin/sh", "-c", "git -c core.filemode=false status --porcelain",
+					], { encoding: "utf-8", timeout: 5000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+					statusRaw = stdout.replace(/\s+$/, '');
+				} else {
+					const { stdout } = await execAsync('git -c core.filemode=false status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
+					statusRaw = stdout.replace(/\s+$/, '');
+				}
 			} catch {}
 			const statusLines = statusRaw ? statusRaw.split("\n") : [];
 			const status = statusLines.map(line => {
@@ -3662,20 +3725,20 @@ async function handleApiRoute(
 			});
 
 			let hasUpstream = false;
-			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch { /* no upstream */ }
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid); hasUpstream = true; } catch { /* no upstream */ }
 
 			let ahead = 0, behind = 0;
 			if (hasUpstream) {
-				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0'), 10) || 0;
-				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0'), 10) || 0;
+				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0', cid), 10) || 0;
+				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0', cid), 10) || 0;
 			}
 
 			let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
 			if (!isOnPrimary) {
 				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
-				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, '0'), 10) || 0;
-				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, '0'), 10) || 0;
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, '0', cid), 10) || 0;
+				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, '0', cid), 10) || 0;
 				mergedIntoPrimary = aheadOfPrimary === 0;
 			}
 
@@ -3714,10 +3777,11 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
 		try {
-			const diff = await getGitDiff(cwd, file);
+			const diff = await getGitDiff(cwd, file, cid);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
