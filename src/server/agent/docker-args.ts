@@ -64,8 +64,8 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	const baseHostArgs = ["--add-host=host.docker.internal:host-gateway"];
 
 	// Resource limits — prevent containers from consuming all host resources
-	baseHostArgs.push(`--memory=${config.memoryLimit ?? "4g"}`);
-	baseHostArgs.push(`--cpus=${config.cpuLimit ?? "2"}`);
+	baseHostArgs.push(`--memory=${config.memoryLimit ?? "32g"}`);
+	baseHostArgs.push(`--cpus=${config.cpuLimit ?? "12"}`);
 	baseHostArgs.push(`--pids-limit=${String(config.pidsLimit ?? "512")}`);
 
 	// Attach to a restricted Docker network for sandboxed containers

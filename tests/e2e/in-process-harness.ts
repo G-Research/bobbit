@@ -20,13 +20,18 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
+
+// Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
+// (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
+// local overlay FS instead. On the host, keep them in PROJECT_ROOT as before.
+const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : PROJECT_ROOT;
 
 export interface GatewayInfo {
 	port: number;
@@ -45,7 +50,7 @@ export interface GatewayInfo {
  */
 export const test = base.extend<{}, { gateway: GatewayInfo }>({
 	gateway: [async ({}, use, workerInfo) => {
-		const bobbitDir = join(PROJECT_ROOT, `.e2e-inproc-${workerInfo.workerIndex}`);
+		const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-inproc-${workerInfo.workerIndex}`);
 
 		// Clean slate
 		rmSync(bobbitDir, { recursive: true, force: true });

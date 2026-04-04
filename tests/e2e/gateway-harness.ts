@@ -22,6 +22,11 @@ const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
 
+// Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
+// (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
+// local overlay FS instead. On the host, keep them in PROJECT_ROOT as before.
+const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : PROJECT_ROOT;
+
 /** Always serve the UI — the overhead is negligible (static files) and
  *  fullstack browser tests need it. API-only tests simply don't use it. */
 
@@ -46,7 +51,7 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 		});
 		srv.on("error", rej);
 	});
-	const bobbitDir = join(PROJECT_ROOT, `.e2e-worker-${port}`);
+	const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-worker-${port}`);
 
 	// Clean slate
 	rmSync(bobbitDir, { recursive: true, force: true });

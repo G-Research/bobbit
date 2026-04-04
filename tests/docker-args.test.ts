@@ -8,8 +8,8 @@ describe("buildDockerRunArgs", () => {
 			mode: "pool", image: "test", workspaceDir: "/tmp/test",
 			label: "test", labelPrefix: "bobbit-sandbox",
 		});
-		assert.ok(args.includes("--memory=4g"));
-		assert.ok(args.includes("--cpus=2"));
+		assert.ok(args.includes("--memory=32g"));
+		assert.ok(args.includes("--cpus=12"));
 		assert.ok(args.includes("--pids-limit=512"));
 	});
 
