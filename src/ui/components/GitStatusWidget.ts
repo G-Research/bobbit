@@ -208,6 +208,7 @@ export class GitStatusWidget extends LitElement {
             return html`<div class="text-muted-foreground">
                 <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
                 of origin/${this.primaryBranch}
+                ${this.ahead > 0 ? this._renderPushButton() : nothing}
                 ${!this.prState ? this._renderAskPrButton() : nothing}
             </div>`;
         }
