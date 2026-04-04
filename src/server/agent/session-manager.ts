@@ -1562,7 +1562,26 @@ export class SessionManager {
 
 		// ── Restore Docker sandbox wiring ──
 		if (ps.sandboxed) {
-			await this.applySandboxWiring(bridgeOptions, ps.id, { skipMountValidation: true });
+			// Reconstruct sandbox claim from persisted session state so the new
+			// container gets the correct branch and team remote (if applicable).
+			let sandboxClaim: ClaimOptions | undefined;
+			if (ps.branch) {
+				sandboxClaim = { branch: ps.branch };
+				// Reconnect team bare repo for team sessions
+				if (ps.teamGoalId && this.sandboxPool) {
+					const teamRepoPath = path.join(
+						this.sandboxPool.poolDir,
+						`team-${ps.teamGoalId}.git`
+					);
+					if (fs.existsSync(teamRepoPath)) {
+						sandboxClaim.teamRepoPath = teamRepoPath;
+					}
+				}
+			}
+			await this.applySandboxWiring(bridgeOptions, ps.id, {
+				skipMountValidation: true,
+				sandboxClaim,
+			});
 		}
 
 		// Restore extension args for goal/team sessions
