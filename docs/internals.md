@@ -537,6 +537,35 @@ Sandbox containers include a git credential helper so agents can `git push` and 
 - The credential helper is a shell function, not a persisted script with embedded secrets
 - If `GITHUB_TOKEN` is unset in the container's environment, the helper is a no-op and git falls back to its normal credential flow (which will fail in the sandbox since there is no TTY)
 
+### Shared team repo
+
+When a sandboxed team starts, agents need to share git commits without pushing to a remote (which requires `GITHUB_TOKEN`). To solve this, `SandboxPool.createTeamRepo()` creates a bare git clone at `<poolDir>/team-<goalId>.git`. Because the pool directory is already bind-mounted into every container at `/team-repos`, the shared repo is immediately accessible to all team members — no additional mounts needed.
+
+**Per-agent setup (on `claim()`):**
+
+Each agent's clone is configured with a `team` remote and a post-commit hook:
+
+1. The `team` remote URL (`/team-repos/team-<goalId>.git`) is written directly to `.git/config` rather than using `git remote add`. This avoids MSYS path mangling on Windows, which would rewrite `/team-repos/...` to `C:/...` when running git commands through a MinGW shell.
+2. A `.git/hooks/post-commit` hook auto-pushes to the shared repo in the background after every commit:
+   ```bash
+   #!/bin/sh
+   branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+   [ -n "$branch" ] && git push team "$branch" 2>/dev/null &
+   ```
+   The hook is non-blocking (backgrounded `&`) and non-fatal (stderr suppressed) — a failed push never breaks the commit.
+
+**Fetching another agent's work:**
+
+```bash
+git fetch team && git merge team/<branch>
+```
+
+This mirrors the non-sandboxed workflow where agents share a `.git` object store via worktrees and can fetch/merge locally.
+
+**Cleanup:** `destroyTeamRepo()` removes the bare repo from the pool directory. Called from `completeTeam()` and `teardownTeam()` after all agent containers are dismissed.
+
+**Non-sandboxed teams** are unaffected — they use git worktrees with a shared object store, which already provides instant commit visibility.
+
 ### Security summary
 
 - Container sees only `/workspace`, `/agent-modules` (ro), `/tools` (ro), `~/.bobbit/agent/sessions/`
