@@ -330,8 +330,10 @@ export class RpcBridge {
 	 */
 	private remapArgsForContainer(agentArgs: string[]): string[] {
 		const toolsDir = TOOLS_DIR;
-		const mcpExtDir = path.join(bobbitDir(), "state", "mcp-extensions");
+		const stateDir = bobbitStateDir();
+		const mcpExtDir = path.join(stateDir, "mcp-extensions");
 		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
+		const normalizedStateDir = stateDir.replace(/\\/g, "/");
 		const normalizedMcpExtDir = mcpExtDir.replace(/\\/g, "/");
 		const remappedArgs: string[] = [];
 
@@ -355,9 +357,13 @@ export class RpcBridge {
 					const relative = normalized.substring(normalizedToolsDir.length);
 					remappedArgs.push(`/tools${relative}`);
 				} else if (normalized.startsWith(normalizedMcpExtDir)) {
-					// Remap MCP extension paths
+					// Remap MCP extension paths: .bobbit/state/mcp-extensions/... → /mcp-extensions/...
 					const relative = normalized.substring(normalizedMcpExtDir.length);
 					remappedArgs.push(`/mcp-extensions${relative}`);
+				} else if (normalized.startsWith(normalizedStateDir)) {
+					// Remap state dir paths (tool-guard, etc.): .bobbit/state/... → /bobbit-state/...
+					const relative = normalized.substring(normalizedStateDir.length);
+					remappedArgs.push(`/bobbit-state${relative}`);
 				} else {
 					remappedArgs.push(arg);
 				}
