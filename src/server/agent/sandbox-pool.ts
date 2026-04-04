@@ -204,10 +204,13 @@ export class SandboxPool {
 				const containerRepoPath = `/team-repos/${repoName}`;
 
 				// Add team remote — URL is the container-internal path.
-				// Written to .git/config on the host clone, but since /workspace
-				// is bind-mounted, the container sees the same .git/config and the
+				// Written directly to .git/config to avoid MSYS path mangling on Windows
+				// (Git Bash converts /team-repos/... to C:/Program Files/Git/team-repos/...).
+				// The container sees the same .git/config via bind-mount and the
 				// /team-repos/ path resolves correctly inside the container.
-				await git(["remote", "add", "team", containerRepoPath], slot.worktreePath, 5_000);
+				const gitConfigPath = path.join(slot.worktreePath, ".git", "config");
+				const remoteSection = `\n[remote "team"]\n\turl = ${containerRepoPath}\n\tfetch = +refs/heads/*:refs/remotes/team/*\n`;
+				fs.appendFileSync(gitConfigPath, remoteSection);
 
 				// Install non-blocking post-commit hook
 				const hookDir = path.join(slot.worktreePath, ".git", "hooks");

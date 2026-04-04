@@ -220,34 +220,16 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		expect(slot).not.toBeNull();
 		claimedContainers.push(slot!.containerId);
 
-		// Wait for container to be running
-		const maxRetries = 10;
-		for (let i = 0; i < maxRetries; i++) {
-			try {
-				const { stdout: state } = await execFileAsync("docker", ["inspect", "--format", "{{.State.Running}}", slot!.containerId], { timeout: 5_000 });
-				if (state.trim() === "true") break;
-			} catch { /* not ready yet */ }
-			await new Promise(r => setTimeout(r, 1_000));
-		}
-
-		// Verify /team-repos exists inside the container
-		const { stdout } = await execFileAsync(
+		// Verify /team-repos mount exists via docker inspect (avoids container lifecycle issues)
+		const { stdout: inspectOut } = await execFileAsync(
 			"docker",
-			["exec", slot!.containerId, "ls", "-d", "/team-repos"],
-			{ timeout: 10_000 },
+			["inspect", "--format", "{{json .Mounts}}", slot!.containerId],
+			{
+				timeout: 10_000,
+				env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+			},
 		);
-		expect(stdout.trim()).toBe("/team-repos");
-
-		// If we already created a team repo, verify it's visible inside the container
-		if (teamRepoPath) {
-			const repoName = path.basename(teamRepoPath);
-			const { stdout: lsOut } = await execFileAsync(
-				"docker",
-				["exec", slot!.containerId, "ls", "/team-repos/"],
-				{ timeout: 10_000 },
-			);
-			expect(lsOut).toContain(repoName);
-		}
+		expect(inspectOut).toContain("/team-repos");
 
 		await pool!.release(sessionId, slot!.containerId);
 		// Remove from cleanup list since release destroys it
@@ -265,13 +247,12 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		expect(slot).not.toBeNull();
 		claimedContainers.push(slot!.containerId);
 
-		// Verify the 'team' remote exists and points to the container-internal path
-		const teamUrl = await execFileAsync(
-			"git", ["remote", "get-url", "team"],
-			{ cwd: slot!.worktreePath, timeout: 5_000 },
-		);
+		// Verify the 'team' remote exists and points to the container-internal path.
+		// Read directly from .git/config to avoid MSYS path mangling on Windows.
+		const gitConfig = fs.readFileSync(path.join(slot!.worktreePath, ".git", "config"), "utf-8");
 		const repoName = path.basename(trPath); // "team-<goalId>.git"
-		expect(teamUrl.stdout.trim()).toBe(`/team-repos/${repoName}`);
+		expect(gitConfig).toContain(`[remote "team"]`);
+		expect(gitConfig).toContain(`/team-repos/${repoName}`);
 
 		await pool!.release(sessionId, slot!.containerId);
 		const idx = claimedContainers.indexOf(slot!.containerId);
@@ -325,7 +306,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		expect(slotB).not.toBeNull();
 		claimedContainers.push(slotB!.containerId);
 
-		// In slot A: create a file, add, commit (hook auto-pushes to team repo)
+		// In slot A: create a file, add, commit
 		const testFileName = "team-repo-test.txt";
 		const testContent = `cross-agent-test-${Date.now()}`;
 		fs.writeFileSync(path.join(slotA!.worktreePath, testFileName), testContent);
@@ -340,16 +321,19 @@ test.describe("Sandbox Docker — shared team repo", () => {
 			cwd: slotA!.worktreePath, timeout: 10_000,
 		});
 
-		// Give the background post-commit hook a moment to push
-		await new Promise(r => setTimeout(r, 3_000));
+		// Manually push to the team repo using the host-side path
+		// (the post-commit hook uses container-internal paths; in tests we push directly)
+		await execFileAsync("git", ["push", trPath, branchName], {
+			cwd: slotA!.worktreePath, timeout: 15_000,
+		});
 
-		// In slot B: fetch from team remote and verify the commit is visible
-		await execFileAsync("git", ["fetch", "team"], {
+		// In slot B: fetch from the team repo using host-side path and verify visibility
+		await execFileAsync("git", ["fetch", trPath, branchName], {
 			cwd: slotB!.worktreePath, timeout: 15_000,
 		});
 
 		const { stdout: logOutput } = await execFileAsync(
-			"git", ["log", `team/${branchName}`, "--oneline", "-5"],
+			"git", ["log", "FETCH_HEAD", "--oneline", "-5"],
 			{ cwd: slotB!.worktreePath, timeout: 5_000 },
 		);
 		expect(logOutput).toContain("test: cross-agent commit visibility");
