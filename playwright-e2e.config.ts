@@ -43,7 +43,7 @@ export default defineConfig({
 				"**/port-auto-increment*.spec.ts",
 				"**/localhost-auth*.spec.ts",
 			],
-			workers: 4,
+			workers: 2,
 		},
 	],
 });
