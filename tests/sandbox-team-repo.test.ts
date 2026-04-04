@@ -128,3 +128,24 @@ describe("buildDockerRunArgs (no Docker)", () => {
 		assert.ok(joined.includes("NODE_TLS_REJECT_UNAUTHORIZED=0"));
 	});
 });
+
+describe("SandboxPool._buildDockerArgs mounts pool dir (no Docker)", () => {
+	it("args include -v poolDir:/team-repos bind mount", async () => {
+		const { SandboxPool } = await import("../dist/server/agent/sandbox-pool.js");
+		const pool = new SandboxPool({
+			poolSize: 0,
+			maxIdleSeconds: 300,
+			image: "node:20-slim",
+			projectDir: tmpRepo,
+			repoPath: tmpRepo,
+			healthCheckIntervalMs: 30_000,
+		});
+		// Access private _buildDockerArgs via bracket notation
+		const args: string[] = (pool as any)._buildDockerArgs(os.tmpdir());
+		const vIdx = args.indexOf("-v", args.indexOf("-v") + 1); // find the pool-dir -v (not workspace)
+		// Find the -v entry that maps to /team-repos
+		const teamMount = args.find((a: string) => a.includes("/team-repos") || a.includes("\\team-repos"));
+		assert.ok(teamMount, `Expected a -v mount containing /team-repos, got args: ${args.join(" ")}`);
+		assert.ok(teamMount!.endsWith(":/team-repos"), `Mount should end with :/team-repos, got: ${teamMount}`);
+	});
+});
