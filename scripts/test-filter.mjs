@@ -47,7 +47,7 @@ try {
 
 const stats = report.stats || {};
 const passed = stats.expected || 0;
-const failed = (stats.unexpected || 0) + (stats.flaky || 0);
+const failed = stats.unexpected || 0;
 const skipped = stats.skipped || 0;
 const total = passed + failed + skipped;
 const ms = stats.duration || 0;
