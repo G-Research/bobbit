@@ -14,6 +14,7 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
 	timeout: 30_000,
 	retries: 2,
+
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	projects: [
@@ -43,7 +44,7 @@ export default defineConfig({
 				"**/port-auto-increment*.spec.ts",
 				"**/localhost-auth*.spec.ts",
 			],
-			workers: 2,
+			workers: 4,
 		},
 	],
 });
