@@ -445,7 +445,9 @@ function renderGoalBadge(goalId: string) {
 	// Fall back to gate status
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
-	const hasTeam = state.gatewaySessions.some(s => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead" && s.status !== "terminated");
+	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !s.delegateOf);
+	const hasTeam = goalAgents.some(s => s.role === "team-lead" && s.status !== "terminated");
+	const anyAgentWorking = goalAgents.some(s => s.status === "streaming" || s.status === "busy" || s.isCompacting);
 	const allPassed = gs.passed === gs.total;
 	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : "#3b82f6";
 	const baseStyle = `font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
@@ -462,14 +464,17 @@ function renderGoalBadge(goalId: string) {
 		)}</span>`;
 	}
 	if (!allPassed && hasTeam) {
-		// Wave animation on the whole counter until all gates pass
-		const label = `(${gs.passed}/${gs.total})`;
-		const chars = label.split("");
-		const totalDur = 1.2;
-		const stagger = totalDur / chars.length;
-		return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">${chars.map((ch, i) =>
-			html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
-		)}</span>`;
+		// Wave animation only when agents are actively working or verifications are running
+		if (anyAgentWorking) {
+			const label = `(${gs.passed}/${gs.total})`;
+			const chars = label.split("");
+			const totalDur = 1.2;
+			const stagger = totalDur / chars.length;
+			return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">${chars.map((ch, i) =>
+				html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
+			)}</span>`;
+		}
+		return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
 	}
 	return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
 }
