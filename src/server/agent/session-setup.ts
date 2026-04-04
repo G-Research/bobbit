@@ -88,6 +88,10 @@ export interface SessionSetupPlan {
 	// Project association
 	projectId?: string;
 
+	// Sandbox worktree: branch to create inside the container
+	sandboxBranch?: string;
+	sandboxBaseBranch?: string;
+
 	// Delegate-specific
 	instructions?: string;
 	context?: Record<string, string>;
@@ -116,7 +120,7 @@ export interface PipelineContext {
 	sessions: Map<string, SessionInfo>;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 	buildToolRestrictionsText: (tools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }) => string;
-	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { skipMountValidation?: boolean; projectId?: string; goalId?: string }) => Promise<boolean>;
+	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }) => Promise<boolean>;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
@@ -408,7 +412,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// Step 6: sandbox wiring (needs final CWD)
 	if (plan.sandboxed) {
 		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId }),
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
@@ -462,7 +466,7 @@ export async function executeWorktreeAsync(
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
 		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId }),
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
@@ -474,7 +478,7 @@ export async function executeWorktreeAsync(
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools;
 
-	// Store container ID from pool claim
+	// Store container ID from project sandbox
 	if (plan.bridgeOptions.containerId) {
 		session.containerId = plan.bridgeOptions.containerId;
 	}
@@ -563,7 +567,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		session.sandboxed = true;
 	}
 
-	// Store container ID from pool claim
+	// Store container ID from project sandbox
 	if (plan.bridgeOptions.containerId) {
 		session.containerId = plan.bridgeOptions.containerId;
 	}

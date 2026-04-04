@@ -477,7 +477,7 @@ export class SessionManager {
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
-		opts?: { skipMountValidation?: boolean; projectId?: string; goalId?: string }
+		opts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }
 	): Promise<boolean> {
 		if (!this.projectConfigStore) return false;
 		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
@@ -525,9 +525,18 @@ export class SessionManager {
 
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.containerId = containerId;
-		// CWD: use existing bridgeOptions.cwd if already set (container-internal worktree path),
-		// otherwise default to /workspace (the main clone inside the container)
-		if (!bridgeOptions.cwd || !bridgeOptions.cwd.startsWith("/")) {
+
+		// Create a worktree inside the container when a branch is specified.
+		// This is the primary code path for goal agents (team lead + members).
+		if (opts?.sandboxBranch) {
+			const worktreePath = await sandbox.createWorktree(
+				opts.sandboxBranch,
+				opts.sandboxBranch,
+				opts.sandboxBaseBranch,
+			);
+			bridgeOptions.cwd = worktreePath;
+		} else if (!bridgeOptions.cwd || !bridgeOptions.cwd.startsWith("/")) {
+			// Regular (non-goal) sessions default to /workspace
 			bridgeOptions.cwd = "/workspace";
 		}
 
@@ -1556,8 +1565,12 @@ export class SessionManager {
 
 		// ── Restore Docker sandbox wiring ──
 		if (ps.sandboxed) {
+			// On restore, the worktree already exists inside the container —
+			// pass the container-internal cwd directly (no branch = no worktree creation).
+			if (ps.cwd?.startsWith("/workspace")) {
+				bridgeOptions.cwd = ps.cwd;
+			}
 			await this.applySandboxWiring(bridgeOptions, ps.id, {
-				skipMountValidation: true,
 				projectId: ps.projectId,
 				goalId: ps.goalId,
 			});
@@ -1763,7 +1776,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -1830,6 +1843,8 @@ export class SessionManager {
 				workflowContext: opts?.workflowContext,
 				effectiveAllowedTools: opts?.allowedTools,
 				projectId,
+				sandboxBranch: opts?.sandboxBranch,
+				sandboxBaseBranch: opts?.sandboxBaseBranch,
 				bridgeOptions: { cwd },
 			};
 
@@ -1871,6 +1886,8 @@ export class SessionManager {
 			reattemptGoalId: opts?.reattemptGoalId,
 			effectiveAllowedTools: opts?.allowedTools,
 			projectId,
+			sandboxBranch: opts?.sandboxBranch,
+			sandboxBaseBranch: opts?.sandboxBaseBranch,
 			bridgeOptions: { cwd },
 		};
 
@@ -2881,6 +2898,20 @@ export class SessionManager {
 			this.sandboxTokenStore.removeSession(session.projectId, id);
 		}
 
+		// Clean up sandbox worktree inside the container
+		if (session.sandboxed && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+			try {
+				const sandbox = this.sandboxManager.get(session.projectId);
+				if (sandbox) {
+					// Extract worktree name from container path: /workspace-wt/<name>
+					const worktreeName = session.cwd.replace("/workspace-wt/", "");
+					await sandbox.removeWorktree(worktreeName);
+				}
+			} catch (err) {
+				console.warn(`[session-manager] Failed to remove sandbox worktree for ${id}:`, err);
+			}
+		}
+
 		// Clean up model name file
 		try {
 			const modelNameFile = path.join(bobbitStateDir(), "model-name-" + id + ".txt");
@@ -3070,8 +3101,8 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
 		}
 
-		// Clean up worktree
-		if (ps.worktreePath && ps.repoPath) {
+		// Clean up worktree (skip for sandboxed sessions — container worktrees are cleaned via ProjectSandbox)
+		if (ps.worktreePath && ps.repoPath && !ps.sandboxed) {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
 				await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);

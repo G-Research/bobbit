@@ -524,7 +524,7 @@ export class TeamManager {
 
 		// Create the team lead session with the team tools extension.
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.
-		// When sandboxed, claim a pool slot and checkout the goal branch.
+		// When sandboxed, create a worktree inside the per-project container for the goal branch.
 		const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 
 		const session = await this.sessionManager.createSession(
@@ -536,6 +536,8 @@ export class TeamManager {
 				rolePrompt: teamLeadPrompt,
 				env: { BOBBIT_GOAL_ID: goalId },
 				sandboxed,
+				// For sandboxed goals, create a worktree at the goal branch inside the container
+				sandboxBranch: sandboxed && goal.branch ? goal.branch : undefined,
 			},
 		);
 
@@ -771,13 +773,18 @@ export class TeamManager {
 			}
 
 			// Create the session with the role agent's cwd.
-			// For sandboxed members, claim a pool slot and checkout their branch from the goal branch.
+			// For sandboxed members, create a worktree inside the per-project container.
 			const session = await this.sessionManager.createSession(
 				agentCwd,
 				undefined,
 				goalId,
 				undefined,
-				{ rolePrompt, roleName: role, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: memberSandboxed },
+				{
+					rolePrompt, roleName: role, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: memberSandboxed,
+					// Pass branch info so applySandboxWiring creates the worktree inside the container
+					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
+					sandboxBaseBranch: memberSandboxed && branchName && goal.branch ? `origin/${goal.branch}` : undefined,
+				},
 			);
 
 			// Assign a unique color and title
@@ -787,7 +794,7 @@ export class TeamManager {
 			this.sessionManager.setTitle(session.id, `${roleLabel}: ${roleName}`);
 			session.titleGenerated = true;
 			const roleAccessory = storedRoleDef.accessory;
-			// For sandboxed pool sessions, the actual worktree is session.cwd (set by pool claim)
+			// For sandboxed sessions, the actual worktree is session.cwd (set by ProjectSandbox.createWorktree)
 			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxed ? session.cwd : undefined);
 			this.sessionManager.updateSessionMeta(session.id, {
 				role,
@@ -797,12 +804,21 @@ export class TeamManager {
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
 			});
 
-			// Resolve baseSha from the agent's working directory
+			// Resolve baseSha from the agent's working directory.
+			// For sandboxed sessions, run git inside the container.
 			let baseSha: string | undefined;
 			try {
 				const effectiveCwd = actualWorktreePath || session.cwd || agentCwd;
-				const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: effectiveCwd, timeout: 5_000 });
-				baseSha = stdout.trim() || undefined;
+				if (memberSandboxed && this.sessionManager.getSandboxManager()) {
+					const sandbox = this.sessionManager.getSandboxManager()!.get(goal.projectId || "");
+					if (sandbox) {
+						const output = await sandbox.exec(["git", "rev-parse", "HEAD"], { cwd: effectiveCwd });
+						baseSha = output.trim() || undefined;
+					}
+				} else {
+					const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: effectiveCwd, timeout: 5_000 });
+					baseSha = stdout.trim() || undefined;
+				}
 			} catch { /* non-fatal — baseSha stays undefined */ }
 
 			// Track the agent
