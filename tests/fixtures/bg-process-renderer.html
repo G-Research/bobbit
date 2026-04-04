@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+</style>
+</head>
+<body>
+
+<div id="renderer-output"></div>
+<div id="ansi-test"></div>
+
+<script>
+/**
+ * Minimal ANSI-to-HTML converter matching src/ui/utils/ansi.ts behavior.
+ */
+const COLORS_16 = [
+  "#000", "#c00", "#0a0", "#c50", "#00c", "#c0c", "#0cc", "#ccc",
+  "#555", "#f55", "#5f5", "#ff5", "#55f", "#f5f", "#5ff", "#fff",
+];
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function hasAnsi(input) {
+  return /\x1b\[/.test(input);
+}
+
+function ansiToHtml(input) {
+  if (!input) return "";
+  if (!input.includes("\x1b") && !input.includes("\u001b")) return escapeHtml(input);
+
+  const result = [];
+  let fg = null;
+  let spanOpen = false;
+  const re = /\x1b\[([0-9;]*)m/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = re.exec(input)) !== null) {
+    if (match.index > lastIndex) {
+      const text = input.slice(lastIndex, match.index);
+      if (fg) {
+        if (spanOpen) result.push("</span>");
+        result.push(`<span style="color:${fg}">`);
+        spanOpen = true;
+      } else if (spanOpen) {
+        result.push("</span>");
+        spanOpen = false;
+      }
+      result.push(escapeHtml(text));
+    }
+    lastIndex = re.lastIndex;
+
+    const codes = match[1] ? match[1].split(";").map(Number) : [0];
+    for (const c of codes) {
+      if (c === 0) { fg = null; }
+      else if (c >= 30 && c <= 37) { fg = COLORS_16[c - 30]; }
+      else if (c === 39) { fg = null; }
+    }
+  }
+
+  if (lastIndex < input.length) {
+    const text = input.slice(lastIndex);
+    if (fg) {
+      if (spanOpen) result.push("</span>");
+      result.push(`<span style="color:${fg}">`);
+      spanOpen = true;
+    } else if (spanOpen) {
+      result.push("</span>");
+      spanOpen = false;
+    }
+    result.push(escapeHtml(text));
+  }
+  if (spanOpen) result.push("</span>");
+  return result.join("");
+}
+
+/**
+ * Minimal console-block custom element matching the real ConsoleBlock's rendering.
+ */
+class ConsoleBlock extends HTMLElement {
+  constructor() {
+    super();
+    this._content = "";
+  }
+
+  get content() { return this._content; }
+  set content(val) {
+    this._content = val;
+    this._render();
+  }
+
+  connectedCallback() {
+    this._render();
+  }
+
+  _render() {
+    const text = this._content || "";
+    if (hasAnsi(text)) {
+      this.innerHTML = `<pre class="console-ansi">${ansiToHtml(text)}</pre>`;
+    } else {
+      this.innerHTML = `<pre class="console-plain">${escapeHtml(text)}</pre>`;
+    }
+  }
+}
+
+if (!customElements.get("console-block")) {
+  customElements.define("console-block", ConsoleBlock);
+}
+
+/**
+ * Simulate BgProcessRenderer output structure (post-implementation).
+ * The renderer should produce a <console-block> element with the output content.
+ */
+function renderBgProcess(output) {
+  const container = document.createElement("div");
+  container.className = "bg-process-result";
+
+  // This is what the updated BgProcessRenderer should produce:
+  // <console-block .content=${output || "(no output)"}></console-block>
+  const block = document.createElement("console-block");
+  block.content = output || "(no output)";
+  container.appendChild(block);
+  return container;
+}
+
+// Test 1: Render with ANSI color codes
+const ansiOutput = "\x1b[32mgreen text\x1b[0m normal \x1b[31mred text\x1b[0m";
+const rendered = renderBgProcess(ansiOutput);
+document.getElementById("renderer-output").appendChild(rendered);
+
+// Test 2: Render with no ANSI codes
+const plainOutput = "just plain text";
+const plainRendered = renderBgProcess(plainOutput);
+plainRendered.id = "plain-output";
+document.getElementById("renderer-output").appendChild(plainRendered);
+
+// Test 3: Render with no output
+const emptyRendered = renderBgProcess("");
+emptyRendered.id = "empty-output";
+document.getElementById("renderer-output").appendChild(emptyRendered);
+
+// Expose for test assertions
+window.__testData = {
+  ansiOutput,
+  plainOutput,
+  hasAnsi,
+  ansiToHtml,
+};
+</script>
+</body>
+</html>
