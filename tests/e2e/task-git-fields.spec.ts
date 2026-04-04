@@ -141,6 +141,7 @@ test.describe("Task git fields — new baseSha/headSha/branch fields", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("Task git fields — team spawn auto-population", () => {
+	test.describe.configure({ mode: 'serial' });
 	let goalId: string;
 
 	test.beforeAll(async () => {

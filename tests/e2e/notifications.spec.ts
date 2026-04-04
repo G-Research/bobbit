@@ -38,6 +38,7 @@ test.afterAll(async () => {
 });
 
 test.describe("task_changed WS notifications", () => {
+	test.describe.configure({ mode: 'serial' });
 	let taskId: string;
 
 	test("task_create via WS broadcasts task_changed event", async () => {

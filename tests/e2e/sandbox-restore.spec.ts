@@ -39,6 +39,8 @@ function getDefaultProjectId(sm: any): string | undefined {
 }
 
 test.describe("sandbox session restore", () => {
+	test.describe.configure({ mode: 'serial' });
+
 	test("restores sandboxed session with branch and teamRepoPath", async ({ gateway }) => {
 		const sm = gateway.sessionManager as any;
 		const projectId = getDefaultProjectId(sm);

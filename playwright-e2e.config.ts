@@ -14,7 +14,6 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
 	timeout: 30_000,
 	retries: 2,
-
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	projects: [
