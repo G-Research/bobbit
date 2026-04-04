@@ -146,6 +146,9 @@ export class TeamManager {
 	/** Track last notification time per worker session to debounce rapid agent_end events. */
 	private lastNotifyTime = new Map<string, number>();
 
+	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
+	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
+
 	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string) {
 		this.sessionManager = sessionManager;
 		this.config = config;
@@ -480,6 +483,22 @@ export class TeamManager {
 	 * Creates a Team Lead session and returns it.
 	 */
 	async startTeam(goalId: string): Promise<SessionInfo> {
+		// Prevent concurrent startTeam calls for the same goal (race condition guard).
+		// If another call is already in flight, return its result instead of creating a second team lead.
+		const inflight = this.startTeamLocks.get(goalId);
+		if (inflight) {
+			return inflight;
+		}
+		const promise = this._startTeamImpl(goalId);
+		this.startTeamLocks.set(goalId, promise);
+		try {
+			return await promise;
+		} finally {
+			this.startTeamLocks.delete(goalId);
+		}
+	}
+
+	private async _startTeamImpl(goalId: string): Promise<SessionInfo> {
 		const goal = this.resolveGoal(goalId);
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
