@@ -67,7 +67,7 @@ let _pickerPersonalities = new Set<string>();
 let _pickerCwd = "";
 let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
-let _pickerWorktree = false;
+let _pickerWorktree = true;
 let _pickerSandbox = false;
 /** Goal ID context for the picker (if launched from a goal). */
 let _pickerGoalId: string | undefined;
@@ -112,7 +112,7 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 	_pickerCwd = opts?.projectCwd || "";
 	_pickerCwdDropdownOpen = false;
 	_pickerCwdHighlightIndex = -1;
-	_pickerWorktree = false;
+	_pickerWorktree = true;
 	_pickerGoalId = goalId;
 	_pickerProjectId = opts?.projectId;
 	_pickerProjectName = opts?.projectName;
@@ -154,7 +154,7 @@ export function renderRolePickerDropdown() {
 		state.rolePickerOpen = false;
 		const personalities = [..._pickerPersonalities];
 		const cwd = _pickerCwd || undefined;
-		const worktree = _pickerWorktree || undefined;
+		const worktree = _pickerWorktree;
 		const sandboxed = _pickerSandbox || undefined;
 		const projectId = _pickerProjectId;
 		_pickerCwd = "";
@@ -381,7 +381,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 			state.rolePickerOpen = false;
 			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
-			const worktree = _pickerWorktree || undefined;
+			const worktree = _pickerWorktree;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
 			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
@@ -406,7 +406,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 			state.rolePickerOpen = false;
 			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
-			const worktree = _pickerWorktree || undefined;
+			const worktree = _pickerWorktree;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
 			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);

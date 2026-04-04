@@ -1218,7 +1218,7 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		if (roleId) body.roleId = roleId;
 		if (personalities && personalities.length > 0) body.personalities = personalities;
 		if (cwd) body.cwd = cwd;
-		if (worktree) body.worktree = true;
+		if (worktree !== undefined) body.worktree = worktree;
 		if (sandboxed) body.sandboxed = true;
 		if (projectId) body.projectId = projectId;
 		const res = await gatewayFetch("/api/sessions", {
