@@ -3186,6 +3186,36 @@ export class SessionManager {
 		return null;
 	}
 
+	/**
+	 * Clean up orphaned session worktrees that have no matching active session.
+	 * Best-effort — logs warnings but never throws.
+	 */
+	async cleanupOrphanedSessionWorktrees(repoPath: string): Promise<void> {
+		try {
+			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const blocks = stdout.split("\n\n");
+			for (const block of blocks) {
+				const branchMatch = block.match(/^branch refs\/heads\/(session\/.+)$/m);
+				if (!branchMatch) continue;
+				const branch = branchMatch[1];
+				const pathMatch = block.match(/^worktree (.+)$/m);
+				if (!pathMatch) continue;
+				const wtPath = pathMatch[1];
+				// Check if any active session uses this worktree
+				const isActive = [...this.sessions.values()].some(
+					s => s.worktreePath === wtPath || s.cwd === wtPath
+				);
+				if (!isActive) {
+					console.log(`[session-manager] Cleaning up orphaned session worktree: ${wtPath} (branch: ${branch})`);
+					const { cleanupWorktree } = await import("../skills/git.js");
+					await cleanupWorktree(repoPath, wtPath, branch, true).catch(() => {});
+				}
+			}
+		} catch (err) {
+			console.warn("[session-manager] Failed to clean up orphaned session worktrees:", err);
+		}
+	}
+
 	/** Start the archive purge schedule — call after restoreSessions(). */
 	startPurgeSchedule(): void {
 		// Purge on startup
