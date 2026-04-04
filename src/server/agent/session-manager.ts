@@ -3242,6 +3242,20 @@ export class SessionManager {
 		try {
 			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
 			const blocks = stdout.split("\n\n");
+
+			// Build a set of branches owned by live (non-archived) persisted sessions.
+			// Prior to the fix, pool worktree directories were renamed on claim but
+			// `git worktree repair` could fail — git tracked the OLD path while
+			// the session stored the NEW path. Matching by branch prevents the
+			// cleanup from deleting worktrees that are actually in use.
+			const persistedBranches = new Set<string>();
+			const allPersisted = this.projectContextManager
+				? [...this.projectContextManager.getAllLiveSessions()]
+				: (this._testStore?.getLive() ?? []);
+			for (const ps of allPersisted) {
+				if (ps.branch) persistedBranches.add(ps.branch);
+			}
+
 			for (const block of blocks) {
 				const branchMatch = block.match(/^branch refs\/heads\/(session\/.+)$/m);
 				if (!branchMatch) continue;
@@ -3254,10 +3268,10 @@ export class SessionManager {
 				// every session worktree is considered "orphaned" and deleted on restart.
 				const normalize = (p: string | undefined) => p?.replace(/\\/g, "/").toLowerCase();
 				const normalizedWtPath = normalize(wtPath);
-				// Check if any active session uses this worktree
+				// Check if any active session uses this worktree (by path or branch)
 				const isActive = [...this.sessions.values()].some(
 					s => normalize(s.worktreePath) === normalizedWtPath || normalize(s.cwd) === normalizedWtPath
-				);
+				) || persistedBranches.has(branch);
 				if (!isActive) {
 					console.log(`[session-manager] Cleaning up orphaned session worktree: ${wtPath} (branch: ${branch})`);
 					const { cleanupWorktree } = await import("../skills/git.js");
