@@ -6,7 +6,9 @@
  * 2. Falls back to host shell when sandboxed but no container available
  * 3. Uses host shell as normal for non-sandboxed goals
  *
- * Also tests the call-site container resolution logic in verifyGateSignal.
+ * Also tests the call-site container resolution logic in verifyGateSignal,
+ * which now uses SandboxManager → ProjectSandbox.getContainerId() instead
+ * of looking up the team lead session's containerId.
  */
 import { describe, it, mock, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -43,16 +45,19 @@ function createMockGoalStore(opts: { sandboxed?: boolean } = {}) {
 	};
 }
 
-function createMockProjectContextManager(opts: { sandboxed?: boolean } = {}) {
+function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string } = {}) {
 	const gateStore = createMockGateStore();
 	const goalStore = createMockGoalStore(opts);
+	const pId = opts.projectId ?? "test-project-id";
 	return {
 		getContextForGoal: (_goalId: string) => ({
 			goalStore,
 			gateStore,
+			project: { id: pId },
 		}),
 		_gateStore: gateStore,
 		_goalStore: goalStore,
+		_projectId: pId,
 	};
 }
 
@@ -66,17 +71,31 @@ function createMockTeamManager(opts: { teamLeadSessionId?: string } = {}) {
 	};
 }
 
-function createMockSessionManager(opts: {
-	teamLeadSessionId?: string;
-	containerId?: string;
-} = {}) {
+/**
+ * Create a mock SandboxManager that returns a ProjectSandbox with the given containerId.
+ */
+function createMockSandboxManager(opts: { containerId?: string; projectId?: string } = {}) {
+	const pId = opts.projectId ?? "test-project-id";
+	const projectSandbox = opts.containerId
+		? {
+			getContainerId: async () => opts.containerId!,
+			getStatus: () => ({ containerId: opts.containerId, status: "ready", projectId: pId }),
+		}
+		: undefined;
+
 	return {
-		getSession: (id: string) =>
-			id === opts.teamLeadSessionId && opts.containerId
-				? { id, containerId: opts.containerId }
-				: id === opts.teamLeadSessionId
-					? { id } // session exists but no containerId
-					: undefined,
+		get: (requestedProjectId: string) =>
+			requestedProjectId === pId ? projectSandbox : undefined,
+	};
+}
+
+function createMockSessionManager(opts: {
+	containerId?: string;
+	projectId?: string;
+} = {}) {
+	const sandboxMgr = createMockSandboxManager(opts);
+	return {
+		getSandboxManager: () => sandboxMgr,
 		terminateSession: mock.fn(async () => true),
 	};
 }
@@ -92,13 +111,15 @@ function createHarness(opts: {
 	sandboxed?: boolean;
 	teamLeadSessionId?: string;
 	containerId?: string;
+	projectId?: string;
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
 	const broadcastFn = (goalId: string, event: any) => {
 		broadcastCalls.push({ goalId, event });
 	};
 
-	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed });
+	const pId = opts.projectId ?? "test-project-id";
+	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId });
 
 	const harness = new VerificationHarness(
 		path.join(TEST_DIR, "state"),
@@ -107,8 +128,8 @@ function createHarness(opts: {
 		createMockRoleStore() as any,
 		undefined, // preferencesStore
 		createMockSessionManager({
-			teamLeadSessionId: opts.teamLeadSessionId,
 			containerId: opts.containerId,
+			projectId: pId,
 		}) as any,
 		createMockTeamManager({
 			teamLeadSessionId: opts.teamLeadSessionId,
@@ -189,7 +210,7 @@ describe("runCommandStep spawn behavior", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: Call-site container resolution logic
+// Tests: Container resolution via SandboxManager → ProjectSandbox
 // ---------------------------------------------------------------------------
 
 describe("container resolution in verifyGateSignal", () => {
@@ -245,11 +266,10 @@ describe("container resolution in verifyGateSignal", () => {
 		};
 	}
 
-	it("passes containerId when goal is sandboxed with active team lead container", async () => {
+	it("passes containerId when goal is sandboxed and ProjectSandbox has a container", async () => {
 		const goalId = "goal-sandbox-1";
 		const { harness } = createHarness({
 			sandboxed: true,
-			teamLeadSessionId: "tl-session-1",
 			containerId: "docker-container-abc",
 		});
 		const signal = makeSignal(goalId, "test-gate");
@@ -261,16 +281,15 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.equal(
 			capturedContainerIds[0],
 			"docker-container-abc",
-			"Should pass the team lead's containerId",
+			"Should pass the project container's containerId",
 		);
 	});
 
-	it("falls back to host execution when sandboxed but no container available", async () => {
+	it("falls back to host execution when sandboxed but no ProjectSandbox available", async () => {
 		const goalId = "goal-sandbox-no-container";
 		const { harness, broadcastCalls } = createHarness({
 			sandboxed: true,
-			teamLeadSessionId: "tl-session-2",
-			// No containerId — session exists but container is gone
+			// No containerId — ProjectSandbox not available for this project
 		});
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
@@ -294,7 +313,7 @@ describe("container resolution in verifyGateSignal", () => {
 		);
 
 		// Verify warning was emitted
-		const warnMsg = warnings.find(w => w.includes("no team lead container found"));
+		const warnMsg = warnings.find(w => w.includes("no project container found") || w.includes("falling back to host"));
 		assert.ok(warnMsg, `Expected a console.warn about missing container, got: ${JSON.stringify(warnings)}`);
 
 		// Verify warning was broadcast via step output stream
@@ -302,43 +321,15 @@ describe("container resolution in verifyGateSignal", () => {
 			c => c.event.type === "gate_verification_step_output" && c.event.stream === "stderr",
 		);
 		const warningBroadcast = stderrEvents.find(e =>
-			e.event.text.includes("no team lead container found"),
+			e.event.text.includes("no project container found") || e.event.text.includes("falling back to host"),
 		);
 		assert.ok(warningBroadcast, "Warning should be broadcast as stderr output");
-	});
-
-	it("falls back to host execution when sandboxed but no team state exists", async () => {
-		const goalId = "goal-sandbox-no-team";
-		const { harness } = createHarness({
-			sandboxed: true,
-			// No teamLeadSessionId — team doesn't exist
-		});
-		const signal = makeSignal(goalId, "test-gate");
-		const gate = makeGate("test-gate");
-
-		const originalWarn = console.warn;
-		const warnings: string[] = [];
-		console.warn = (...args: any[]) => { warnings.push(args.join(" ")); };
-
-		try {
-			await harness.verifyGateSignal(signal, gate, os.tmpdir());
-		} finally {
-			console.warn = originalWarn;
-		}
-
-		assert.equal(capturedContainerIds.length, 1);
-		assert.equal(capturedContainerIds[0], undefined, "Should fall back to host execution");
-		assert.ok(
-			warnings.some(w => w.includes("no team lead container found")),
-			"Should warn about missing container",
-		);
 	});
 
 	it("does not attempt docker exec for non-sandboxed goals", async () => {
 		const goalId = "goal-non-sandbox";
 		const { harness, broadcastCalls } = createHarness({
 			sandboxed: false,
-			teamLeadSessionId: "tl-session-3",
 			containerId: "docker-container-xyz", // container exists but goal is not sandboxed
 		});
 		const signal = makeSignal(goalId, "test-gate");

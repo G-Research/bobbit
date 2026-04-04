@@ -17,29 +17,31 @@ import { TOOLS_DIR } from "./tool-manager.js";
 
 export interface DockerRunConfig {
 	image: string;
-	/** Host path to mount as /workspace. */
+	/** Host path to mount as /workspace (used for bind-mount mode when projectId is not set). */
 	workspaceDir: string;
 
 	// ── Labels ───────────────────────────────────────────────────────────
-	/** Label value for `bobbit-pool=` or `bobbit-sandbox=`. */
+	/** Label value for the label prefix. */
 	label?: string;
 	/** Label version string (e.g. "2" for sandbox-pool). */
 	labelVersion?: string;
-	/** Label prefix — e.g. "bobbit-pool" or "bobbit-sandbox". */
+	/** Label prefix — e.g. "bobbit-project" or "bobbit-sandbox". */
 	labelPrefix?: string;
 	/** Worktree path label for sandbox-pool containers. */
 	worktreePath?: string;
 
-	// ── Extra mounts ─────────────────────────────────────────────────────
-	/** Whether to mount a sibling -wt/ directory as /worktrees. */
-	mountWorktreeRoot?: boolean;
+	// ── Per-project container ────────────────────────────────────────────
+	/** Project ID — when set, uses a named Docker volume instead of bind mount for /workspace. */
+	projectId?: string;
+	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
+	stateDir?: string;
 
 	// ── Resource limits ──────────────────────────────────────────────────
-	/** Container memory limit (default: "4g"). */
+	/** Container memory limit (default: "32g"). */
 	memoryLimit?: string;
-	/** Container CPU limit (default: "2"). */
+	/** Container CPU limit (default: "12"). */
 	cpuLimit?: string;
-	/** Container PID limit (default: "256"). */
+	/** Container PID limit (default: "512"). */
 	pidsLimit?: string;
 
 	// ── Sandbox config ───────────────────────────────────────────────────
@@ -55,7 +57,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	const {
 		image, workspaceDir,
 		label, labelVersion, labelPrefix, worktreePath,
-		mountWorktreeRoot,
+		projectId, stateDir,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
 	} = config;
@@ -67,7 +69,10 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// Resource limits — prevent containers from consuming all host resources
 	baseHostArgs.push(`--memory=${config.memoryLimit ?? "32g"}`);
 	baseHostArgs.push(`--cpus=${config.cpuLimit ?? "12"}`);
-	baseHostArgs.push(`--pids-limit=${String(config.pidsLimit ?? "512")}`);
+	const pidsLimit = config.pidsLimit ?? "512";
+	if (pidsLimit !== "0") {
+		baseHostArgs.push(`--pids-limit=${pidsLimit}`);
+	}
 
 	// Attach to a restricted Docker network for sandboxed containers
 	if (sandboxNetwork) {
@@ -78,7 +83,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		baseHostArgs.push("--add-host=169.254.169.254:0.0.0.0");
 	}
 
-	const args: string[] = ["run", "-d", ...baseHostArgs];
+	const args: string[] = ["run", "-d", "--restart=unless-stopped", ...baseHostArgs];
 
 	// ── Labels ─────────────────────────────────────────────────────────
 	if (label && labelPrefix) {
@@ -91,17 +96,21 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		}
 	}
 
-	// ── Bind mounts ────────────────────────────────────────────────────
-	args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);
+	// ── Bind mounts / volumes ──────────────────────────────────────────
+	if (projectId) {
+		// Per-project container: named Docker volume for /workspace (survives container recreation)
+		args.push("-v", `bobbit-workspace-${projectId}:/workspace`);
+	} else if (workspaceDir) {
+		// Legacy pool mode: bind-mount host directory as /workspace
+		args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);
+	}
 	// pi-coding-agent is baked into the Docker image (avoids 20x slower
 	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
 	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
-	// Mount sibling worktree root
-	if (mountWorktreeRoot) {
-		const wtRoot = workspaceDir.replace(/\\/g, "/").replace(/\/$/, "") + "-wt";
-		fs.mkdirSync(wtRoot, { recursive: true });
-		args.push("-v", `${toDockerPath(wtRoot)}:/worktrees`);
+	// Bind mount host state directory for session logs persistence
+	if (stateDir) {
+		args.push("-v", `${toDockerPath(stateDir)}:/bobbit-state`);
 	}
 
 	// Host agent sessions dir (~/.bobbit/agent/sessions/) — mount ONLY sessions, not the
@@ -119,12 +128,6 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		}
 	} catch {
 		// models.json doesn't exist — agent will rely on env vars for model discovery
-	}
-
-	// Persistent named volumes for caches
-	if (label) {
-		args.push("-v", `bobbit-nm-cache-${label}:/home/node/.node_modules_cache`);
-		args.push("-v", `bobbit-npm-cache-${label}:/home/node/.npm-cache`);
 	}
 
 	// Session prompts directory

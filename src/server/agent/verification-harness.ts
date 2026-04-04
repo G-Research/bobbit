@@ -938,20 +938,25 @@ export class VerificationHarness {
 								signalId: signal.id, stepIndex: index,
 							};
 
-							// For sandboxed goals, resolve the team lead's container ID
+							// For sandboxed goals, resolve the project container ID
 							// so the command runs inside the container (where the code lives)
 							let commandContainerId: string | undefined;
 							const isSandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId)?.sandboxed;
-							if (isSandboxedGoal && this.teamManager && this.sessionManager) {
-								const teamState = this.teamManager.getTeamState(signal.goalId);
-								if (teamState?.teamLeadSessionId) {
-									const tlSession = this.sessionManager.getSession(teamState.teamLeadSessionId);
-									if (tlSession?.containerId) {
-										commandContainerId = tlSession.containerId;
+							if (isSandboxedGoal && this.sessionManager) {
+								const sandboxMgr = this.sessionManager.getSandboxManager();
+								const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
+								if (sandboxMgr && goalCtx) {
+									const projectSandbox = sandboxMgr.get(goalCtx.project.id);
+									if (projectSandbox) {
+										try {
+											commandContainerId = await projectSandbox.getContainerId();
+										} catch {
+											// Container unavailable — fall through to warning
+										}
 									}
 								}
 								if (!commandContainerId) {
-									const warning = `[verification] Sandboxed goal ${signal.goalId} but no team lead container found — falling back to host execution`;
+									const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
 									console.warn(warning);
 									this.broadcastFn(streamCtx.goalId, {
 										type: "gate_verification_step_output",
@@ -1296,21 +1301,10 @@ export class VerificationHarness {
 			const isSandboxed = (goalId
 				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
-			// When sandboxed, claim a pool slot checked out to the goal branch so
-			// the reviewer sees the actual implementation — not master.
-			const goalForClaim = goalId
-				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
-				: undefined;
-			const sandboxClaim = isSandboxed && goalForClaim?.branch
-				? { branch: goalForClaim.branch }
-				: undefined;
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
-				sandboxed: (goalId
-				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-				: undefined) ?? this.sessionManager!.isSandboxEnabled,
-				sandboxClaim,
+				sandboxed: isSandboxed,
 				sessionId,
 			});
 
@@ -1507,21 +1501,10 @@ export class VerificationHarness {
 			const qaIsSandboxed = (goalId
 				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
-			// When sandboxed, claim a pool slot checked out to the goal branch so
-			// the QA agent tests the actual implementation — not master.
-			const qaGoalForClaim = goalId
-				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
-				: undefined;
-			const qaSandboxClaim = qaIsSandboxed && qaGoalForClaim?.branch
-				? { branch: qaGoalForClaim.branch }
-				: undefined;
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
-				sandboxed: (goalId
-					? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-					: undefined) ?? this.sessionManager!.isSandboxEnabled,
-				sandboxClaim: qaSandboxClaim,
+				sandboxed: qaIsSandboxed,
 				sessionId: qaSessionId,
 			});
 			qaSessionId = session.id;

@@ -11,8 +11,7 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchIndex } from "../search/search-index.js";
 import { extractTextFromMessage } from "../search/message-extractor.js";
-import { RpcBridge, type RpcBridgeOptions, containerToHostSessionPath, containerToHostSessionPathWithFallback, hostToContainerSessionPath } from "./rpc-bridge.js";
-import { validateSandboxMounts } from "./sandbox-mounts.js";
+import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -38,7 +37,7 @@ import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 
-import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
+import type { SandboxManager } from "./sandbox-manager.js";
 import {
 	type SessionSetupPlan,
 	type PipelineContext,
@@ -190,7 +189,7 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
-	sandboxPool: SandboxPool | null = null;
+	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
@@ -211,8 +210,8 @@ export class SessionManager {
 		this._verificationHarness = harness;
 	}
 
-	setSandboxPool(pool: SandboxPool | null): void {
-		this.sandboxPool = pool;
+	setSandboxManager(manager: SandboxManager | null): void {
+		this.sandboxManager = manager;
 	}
 
 	constructor(options?: SessionManagerOptions) {
@@ -364,6 +363,11 @@ export class SessionManager {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
 	}
 
+	/** Get the sandbox manager (used by team-manager and verification-harness). */
+	getSandboxManager(): SandboxManager | null {
+		return this.sandboxManager;
+	}
+
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
 	buildPipelineContext(projectId?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
@@ -399,7 +403,7 @@ export class SessionManager {
 			taskManager: resolvedTaskManager,
 			personalityManager: this.personalityManager ?? null,
 			projectConfigStore: resolvedProjectConfigStore,
-			sandboxPool: this.sandboxPool,
+			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			costTracker: resolvedCostTracker,
@@ -462,75 +466,86 @@ export class SessionManager {
 	 * Apply Docker sandbox wiring to bridge options.
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
 	 * Returns true if sandbox was applied, false if sandbox is not configured.
+	 *
+	 * With the new per-project sandbox architecture, this:
+	 * - Gets the ProjectSandbox for the project
+	 * - Gets the container ID
+	 * - Sets up credentials and token (one per project, not per session)
+	 * - Sets bridgeOptions.containerId
+	 * - The CWD is the container-internal worktree path (set by caller or /workspace)
 	 */
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
-		opts?: { skipMountValidation?: boolean; sandboxClaim?: ClaimOptions }
+		opts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }
 	): Promise<boolean> {
 		if (!this.projectConfigStore) return false;
 		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
 		if (sandboxConfig !== "docker") return false;
 
-		const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
-		const mountsRaw = this.projectConfigStore.get("sandbox_mounts") || "";
-		let credentials: Record<string, string> = {};
-		try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch (err) {
-			console.error(`[session-manager] Invalid sandbox_credentials JSON: ${err}`);
-			throw new Error(`Invalid sandbox_credentials config: ${credentialsRaw}`);
-		}
-		let mounts: string[] = [];
-		try { mounts = mountsRaw ? JSON.parse(mountsRaw) : []; } catch (err) {
-			console.error(`[session-manager] Invalid sandbox_mounts JSON: ${err}`);
-			throw new Error(`Invalid sandbox_mounts config: ${mountsRaw}`);
+		// Resolve project ID
+		const projectId = opts?.projectId;
+		if (!projectId) {
+			throw new Error("Sandbox mode requires a projectId");
 		}
 
-		// Validate mounts unless skipped (e.g. during restore — already validated at creation)
-		if (!opts?.skipMountValidation) validateSandboxMounts(mounts, "[session-manager]");
+		// Get the ProjectSandbox for this project
+		if (!this.sandboxManager) {
+			throw new Error("Sandbox mode requires SandboxManager — not initialized");
+		}
+		const sandbox = this.sandboxManager.get(projectId);
+		if (!sandbox) {
+			throw new Error(`No sandbox initialized for project ${projectId}`);
+		}
 
-		// Ensure the restricted Docker network exists
-		await this.ensureSandboxNetwork();
+		const containerId = await sandbox.getContainerId();
 
 		// Read gateway URL and generate scoped token for the container
 		try {
 			const gwUrl = fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
 			bridgeOptions.gatewayUrl = gwUrl;
 
-			// Generate a scoped sandbox token instead of using the admin token
+			// Generate/reuse a scoped sandbox token for the project (not per-session)
 			if (this.sandboxTokenStore) {
-				const goalId = bridgeOptions.env?.BOBBIT_GOAL_ID;
-				const scopedToken = this.sandboxTokenStore.register(sessionId, goalId);
+				const scopedToken = this.sandboxTokenStore.register(projectId);
+				this.sandboxTokenStore.addSession(projectId, sessionId);
+				if (opts?.goalId) {
+					this.sandboxTokenStore.addGoal(projectId, opts.goalId);
+				} else if (bridgeOptions.env?.BOBBIT_GOAL_ID) {
+					this.sandboxTokenStore.addGoal(projectId, bridgeOptions.env.BOBBIT_GOAL_ID);
+				}
 				bridgeOptions.gatewayToken = scopedToken;
 			} else {
 				const adminToken = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
 				bridgeOptions.gatewayToken = adminToken;
 			}
-
 		} catch (err) {
 			throw new Error(`Cannot read gateway credentials for sandbox: ${err}`);
 		}
 
 		bridgeOptions.sandboxed = true;
+		bridgeOptions.containerId = containerId;
+
+		// Create a worktree inside the container when a branch is specified.
+		// This is the primary code path for goal agents (team lead + members).
+		if (opts?.sandboxBranch) {
+			const worktreePath = await sandbox.createWorktree(
+				opts.sandboxBranch,
+				opts.sandboxBranch,
+				opts.sandboxBaseBranch,
+			);
+			bridgeOptions.cwd = worktreePath;
+		} else if (!bridgeOptions.cwd || !bridgeOptions.cwd.startsWith("/")) {
+			// Regular (non-goal) sessions default to /workspace
+			bridgeOptions.cwd = "/workspace";
+		}
+
 		// Auto-resolve API credentials from host auth system, then overlay manual overrides
+		const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
+		let credentials: Record<string, string> = {};
+		try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
 		const autoCredentials = resolveHostApiCredentials(this.preferencesStore, this.projectConfigStore);
 		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
-		
-
-		// Claim a slot from the sandbox pool (creates on-demand if exhausted)
-		if (this.sandboxPool) {
-			const result = await this.sandboxPool.claim(sessionId, opts?.sandboxClaim);
-			if (result) {
-				bridgeOptions.containerId = result.containerId;
-				// Override CWD to the pool slot's worktree
-				bridgeOptions.cwd = result.worktreePath;
-			} else {
-				// Pool creates on-demand slots when exhausted, so null means
-				// slot creation itself failed (Docker unavailable, disk full, etc.)
-				throw new Error("Failed to create sandbox container — Docker may be unavailable");
-			}
-		} else {
-			throw new Error("Sandbox mode requires Docker pool — pool not initialized");
-		}
 
 		return true;
 	}
@@ -1500,19 +1515,6 @@ export class SessionManager {
 				return;
 			}
 		}
-		// Remap stale container paths that were stored without host conversion.
-		// Handles both /home/node/.bobbit/agent/... and /workspace/C:/Users/... patterns.
-		if (!fs.existsSync(ps.agentSessionFile) && (
-			ps.agentSessionFile.startsWith("/home/node/.bobbit/agent/") ||
-			ps.agentSessionFile.startsWith("/workspace/")
-		)) {
-			const remapped = containerToHostSessionPathWithFallback(ps.agentSessionFile);
-			if (remapped !== ps.agentSessionFile && fs.existsSync(remapped)) {
-				console.log(`[session-manager] Remapped container path for ${ps.id}: ${ps.agentSessionFile} → ${remapped}`);
-				sessionStore.update(ps.id, { agentSessionFile: remapped });
-				ps = { ...ps, agentSessionFile: remapped };
-			}
-		}
 		if (!fs.existsSync(ps.agentSessionFile)) {
 			console.log(`[session-manager] Archiving ${ps.id} — agent session file missing: ${ps.agentSessionFile} (metadata preserved)`);
 			sessionStore.archive(ps.id);
@@ -1563,25 +1565,14 @@ export class SessionManager {
 
 		// ── Restore Docker sandbox wiring ──
 		if (ps.sandboxed) {
-			// Reconstruct sandbox claim from persisted session state so the new
-			// container gets the correct branch and team remote (if applicable).
-			let sandboxClaim: ClaimOptions | undefined;
-			if (ps.branch) {
-				sandboxClaim = { branch: ps.branch };
-				// Reconnect team bare repo for team sessions
-				if (ps.teamGoalId && this.sandboxPool) {
-					const teamRepoPath = path.join(
-						this.sandboxPool.poolDir,
-						`team-${ps.teamGoalId}.git`
-					);
-					if (fs.existsSync(teamRepoPath)) {
-						sandboxClaim.teamRepoPath = teamRepoPath;
-					}
-				}
+			// On restore, the worktree already exists inside the container —
+			// pass the container-internal cwd directly (no branch = no worktree creation).
+			if (ps.cwd?.startsWith("/workspace")) {
+				bridgeOptions.cwd = ps.cwd;
 			}
 			await this.applySandboxWiring(bridgeOptions, ps.id, {
-				skipMountValidation: true,
-				sandboxClaim,
+				projectId: ps.projectId,
+				goalId: ps.goalId,
 			});
 		}
 
@@ -1754,7 +1745,9 @@ export class SessionManager {
 		await rpcClient.start();
 
 		// Resume the agent's previous session file
-		const switchSessionPath = ps.sandboxed ? hostToContainerSessionPath(ps.agentSessionFile) : ps.agentSessionFile;
+		// Session files are now stored on the host via bind-mounted state dir.
+		// No path translation needed — the agent session file is always a host path.
+		const switchSessionPath = ps.agentSessionFile;
 		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: switchSessionPath },
@@ -1783,7 +1776,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; sandboxClaim?: ClaimOptions; projectId?: string; sessionId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -1849,8 +1842,9 @@ export class SessionManager {
 				personalityFragments: opts?.personalities,
 				workflowContext: opts?.workflowContext,
 				effectiveAllowedTools: opts?.allowedTools,
-				sandboxClaim: opts?.sandboxClaim,
 				projectId,
+				sandboxBranch: opts?.sandboxBranch,
+				sandboxBaseBranch: opts?.sandboxBaseBranch,
 				bridgeOptions: { cwd },
 			};
 
@@ -1891,8 +1885,9 @@ export class SessionManager {
 			workflowContext: opts?.workflowContext,
 			reattemptGoalId: opts?.reattemptGoalId,
 			effectiveAllowedTools: opts?.allowedTools,
-			sandboxClaim: opts?.sandboxClaim,
 			projectId,
+			sandboxBranch: opts?.sandboxBranch,
+			sandboxBaseBranch: opts?.sandboxBaseBranch,
 			bridgeOptions: { cwd },
 		};
 
@@ -2178,9 +2173,9 @@ export class SessionManager {
 					return;
 				}
 
-				const agentSessionFile = session.sandboxed
-					? containerToHostSessionPath(stateResp.data.sessionFile)
-					: stateResp.data.sessionFile;
+				// Session files are stored on host disk (bind-mounted state dir).
+				// No path translation needed.
+				const agentSessionFile = stateResp.data.sessionFile;
 
 				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
 				return; // success
@@ -2592,10 +2587,8 @@ export class SessionManager {
 
 		// Restore conversation from session file
 		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-			const rolePersisted = roleStore.get(id);
-			const roleSwitchPath = rolePersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: roleSwitchPath },
+				{ type: "switch_session", sessionPath: agentSessionFile },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -2735,10 +2728,8 @@ export class SessionManager {
 		await rpcClient.start();
 
 		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-			const persoPersisted = persoStore.get(id);
-			const persoSwitchPath = persoPersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: persoSwitchPath },
+				{ type: "switch_session", sessionPath: agentSessionFile },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -2897,21 +2888,28 @@ export class SessionManager {
 		await session.rpcClient.stop();
 		session.status = "terminated";
 
-		// Release pooled container back to the pool
-		if (session.containerId && this.sandboxPool) {
-			this.sandboxPool.release(session.id, session.containerId).catch(err => {
-				console.warn(`[session-manager] Sandbox pool release failed for ${session.id}:`, err);
-			});
-		}
-
 		// Clean up background processes
 		if ((this as any).bgProcessManager) {
 			(this as any).bgProcessManager.cleanup(id);
 		}
 
-		// Clean up sandbox token
-		if (this.sandboxTokenStore) {
-			this.sandboxTokenStore.remove(id);
+		// Clean up sandbox token — remove session from project scope (not the whole project token)
+		if (this.sandboxTokenStore && session.projectId) {
+			this.sandboxTokenStore.removeSession(session.projectId, id);
+		}
+
+		// Clean up sandbox worktree inside the container
+		if (session.sandboxed && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+			try {
+				const sandbox = this.sandboxManager.get(session.projectId);
+				if (sandbox) {
+					// Extract worktree name from container path: /workspace-wt/<name>
+					const worktreeName = session.cwd.replace("/workspace-wt/", "");
+					await sandbox.removeWorktree(worktreeName);
+				}
+			} catch (err) {
+				console.warn(`[session-manager] Failed to remove sandbox worktree for ${id}:`, err);
+			}
 		}
 
 		// Clean up model name file
@@ -2975,18 +2973,6 @@ export class SessionManager {
 		if (!ps?.archived || !ps.agentSessionFile) return [];
 		try {
 			let filePath = ps.agentSessionFile;
-			// Remap stale container paths that were stored without host conversion
-			if (!fs.existsSync(filePath) && (
-				filePath.startsWith("/home/node/.bobbit/agent/") ||
-				filePath.startsWith("/workspace/")
-			)) {
-				const remapped = containerToHostSessionPathWithFallback(filePath);
-				if (remapped !== filePath && fs.existsSync(remapped)) {
-					filePath = remapped;
-					// Fix the persisted path so future lookups are fast
-					try { this.resolveStoreForId(id)?.update(id, { agentSessionFile: remapped }); } catch { /* best-effort */ }
-				}
-			}
 			if (!fs.existsSync(filePath)) return [];
 			const content = fs.readFileSync(filePath, "utf-8");
 			const lines = content.trim().split("\n");
@@ -3115,8 +3101,8 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
 		}
 
-		// Clean up worktree
-		if (ps.worktreePath && ps.repoPath) {
+		// Clean up worktree (skip for sandboxed sessions — container worktrees are cleaned via ProjectSandbox)
+		if (ps.worktreePath && ps.repoPath && !ps.sandboxed) {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
 				await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
@@ -3369,8 +3355,7 @@ export class SessionManager {
 
 			// Resume session if we have the session file
 			if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-				const abortPersisted = abortStore.get(id);
-				const abortSwitchPath = abortPersisted?.sandboxed ? hostToContainerSessionPath(agentSessionFile) : agentSessionFile;
+				const abortSwitchPath = agentSessionFile;
 				const switchResp = await rpcClient.sendCommand(
 					{ type: "switch_session", sessionPath: abortSwitchPath },
 					15_000,

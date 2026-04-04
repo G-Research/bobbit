@@ -30,9 +30,9 @@ export function isSandboxAllowed(
 	if (sessionMatch) {
 		const targetId = sessionMatch[1];
 		const subpath = sessionMatch[2] || "";
-		const isOwnOrChild = targetId === scope.sessionId || scope.childSessionIds.has(targetId);
+		const isOwnSession = scope.sessionIds.has(targetId);
 
-		if (!isOwnOrChild) return false;
+		if (!isOwnSession) return false;
 
 		// bg-processes: allowed for own session (spawns via docker exec inside container)
 		if (subpath.startsWith("/bg-processes")) return true;
@@ -46,12 +46,12 @@ export function isSandboxAllowed(
 	}
 
 	// ── Goal-scoped endpoints ─────────────────────────────────────────
-	if (scope.goalId) {
+	if (scope.goalIds.size > 0) {
 		const goalMatch = pathname.match(/^\/api\/goals\/([^/]+)(\/.*)?$/);
 		if (goalMatch) {
 			const targetGoalId = goalMatch[1];
 			const subpath = goalMatch[2] || "";
-			if (targetGoalId !== scope.goalId) return false;
+			if (!scope.goalIds.has(targetGoalId)) return false;
 
 			if (subpath.startsWith("/team")) return true;
 			if (subpath.startsWith("/gates")) return true;

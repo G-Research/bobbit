@@ -75,10 +75,11 @@ export class BgProcessManager {
 		const id = `bg-${nextId++}`;
 		const { shell: hostShell, args: hostArgs } = getShellConfig();
 
-		// Inside the container: always /bin/sh, workspace at /workspace
+		// Inside the container: always /bin/sh, use the caller's cwd
+		// (which is the container-internal worktree path for sandboxed sessions)
 		const shell = containerId ? "/bin/sh" : hostShell;
 		const args = containerId ? ["-c"] : hostArgs;
-		const containerCwd = containerId ? "/workspace" : cwd;
+		const containerCwd = cwd;
 
 		const child = containerId
 			? spawn("docker", ["exec", "-w", containerCwd, containerId, shell, ...args, command], {

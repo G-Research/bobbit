@@ -28,7 +28,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
-import type { SandboxPool, ClaimOptions } from "./sandbox-pool.js";
+import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts } from "./system-prompt.js";
 import type { GrantPolicy } from "./role-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -84,10 +84,13 @@ export interface SessionSetupPlan {
 	personalityFragments?: Array<{ label: string; promptFragment: string }>;
 	workflowContext?: string;
 	reattemptGoalId?: string;
-	sandboxClaim?: ClaimOptions;
 
 	// Project association
 	projectId?: string;
+
+	// Sandbox worktree: branch to create inside the container
+	sandboxBranch?: string;
+	sandboxBaseBranch?: string;
 
 	// Delegate-specific
 	instructions?: string;
@@ -108,7 +111,7 @@ export interface PipelineContext {
 	taskManager: TaskManager;
 	personalityManager: PersonalityManager | null;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
-	sandboxPool: SandboxPool | null;
+	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	costTracker: CostTracker;
@@ -117,7 +120,7 @@ export interface PipelineContext {
 	sessions: Map<string, SessionInfo>;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 	buildToolRestrictionsText: (tools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }) => string;
-	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { skipMountValidation?: boolean; sandboxClaim?: ClaimOptions }) => Promise<boolean>;
+	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }) => Promise<boolean>;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
@@ -409,7 +412,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// Step 6: sandbox wiring (needs final CWD)
 	if (plan.sandboxed) {
 		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { sandboxClaim: plan.sandboxClaim }),
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
@@ -463,7 +466,7 @@ export async function executeWorktreeAsync(
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
 		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { sandboxClaim: plan.sandboxClaim }),
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
@@ -475,7 +478,7 @@ export async function executeWorktreeAsync(
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools;
 
-	// Store container ID from pool claim
+	// Store container ID from project sandbox
 	if (plan.bridgeOptions.containerId) {
 		session.containerId = plan.bridgeOptions.containerId;
 	}
@@ -489,14 +492,6 @@ export async function executeWorktreeAsync(
 	if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== plan.cwd) {
 		session.cwd = plan.bridgeOptions.cwd;
 		ctx.store.update(session.id, { cwd: session.cwd });
-	}
-
-	// Persist branch for sandboxed sessions so restore can reconstruct sandboxClaim.
-	// Non-sandboxed sessions get branch from plan.branch (set during worktree creation),
-	// but sandboxed sessions handle branch checkout inside pool.claim() — the branch
-	// must be explicitly persisted here.
-	if (plan.sandboxed && plan.sandboxClaim?.branch && !plan.branch) {
-		ctx.store.update(session.id, { branch: plan.sandboxClaim.branch });
 	}
 
 	// Task assignment
@@ -572,14 +567,9 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		session.sandboxed = true;
 	}
 
-	// Store container ID from pool claim
+	// Store container ID from project sandbox
 	if (plan.bridgeOptions.containerId) {
 		session.containerId = plan.bridgeOptions.containerId;
-	}
-
-	// Persist branch for sandboxed sessions (same as executePlan path)
-	if (plan.sandboxed && plan.sandboxClaim?.branch && !plan.branch) {
-		ctx.store.update(session.id, { branch: plan.sandboxClaim.branch });
 	}
 
 	// Task assignment
@@ -705,13 +695,8 @@ export function handleSetupFailure(
 		cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});
 	}
 
-	// 5. Release sandbox pool slot if claimed
-	if (session.containerId && ctx.sandboxPool) {
-		ctx.sandboxPool.release(session.id, session.containerId).catch(() => {});
-	}
-
-	// 6. Clean up sandbox token
-	if (ctx.sandboxTokenStore) {
-		ctx.sandboxTokenStore.remove(session.id);
+	// 5. Clean up sandbox token for this session
+	if (ctx.sandboxTokenStore && plan.projectId) {
+		ctx.sandboxTokenStore.removeSession(plan.projectId, session.id);
 	}
 }
