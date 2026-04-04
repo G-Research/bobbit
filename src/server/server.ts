@@ -611,6 +611,17 @@ export function createGateway(config: GatewayConfig) {
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
+
+			// Clean up orphaned session worktrees (best-effort, non-blocking)
+			for (const ctx of projectContextManager.all()) {
+				try {
+					const repoPath = ctx.project.rootPath;
+					if (await isGitRepo(repoPath)) {
+						await sessionManager.cleanupOrphanedSessionWorktrees(repoPath);
+					}
+				} catch { /* best-effort */ }
+			}
+
 			sessionManager.startPurgeSchedule();
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
@@ -1451,8 +1462,21 @@ async function handleApiRoute(
 		}
 
 		// ── Worktree support ──
+		// Every non-assistant, non-goal session automatically gets its own worktree branch.
+		// Goal sessions have their own worktree logic via goalManager.setupWorktreeAndStartTeam().
 		let worktreeOpts: { repoPath: string } | undefined;
-		if (body?.worktree && !assistantType) {
+		if (!assistantType && !goalId) {
+			// Auto-worktree for all regular sessions
+			try {
+				if (await isGitRepo(cwd)) {
+					const repoPath = await getRepoRoot(cwd);
+					worktreeOpts = { repoPath };
+				}
+			} catch {
+				// Not a git repo or git not available — silently ignore
+			}
+		} else if (body?.worktree && !assistantType) {
+			// Explicit worktree request (e.g. goal sessions using body.worktree flag)
 			try {
 				if (await isGitRepo(cwd)) {
 					const repoPath = await getRepoRoot(cwd);
@@ -1511,8 +1535,17 @@ async function handleApiRoute(
 		// This is the correct API contract: sessions created without a project context belong to the default project.
 		if (!resolvedProjectId) resolvedProjectId = projectContextManager.getDefaultProjectId();
 
+		// ── Sandbox auto-branch ──
+		// For sandboxed non-goal, non-assistant sessions, generate a branch so they get
+		// a container worktree instead of defaulting to /workspace.
+		let autoSandboxBranch: string | undefined;
+		if (sandboxed && !goalId && !assistantType) {
+			const shortId = randomUUID().slice(0, 8);
+			autoSandboxBranch = `session/s-${shortId}`;
+		}
+
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId });
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId, ...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}) });
 
 			// Set assistant role metadata if no explicit role was provided
 			if (!createOpts?.role && assistantType) {
