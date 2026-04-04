@@ -3,15 +3,13 @@
  * instead of waiting 10-30s for `git worktree add` + `npm ci` + `git push`.
  *
  * On startup, the pool fills to `targetSize` (default 2) in the background.
- * When a session claims a worktree, the pool renames the branch/directory
+ * When a session claims a worktree, the pool renames the branch
  * and starts replenishing immediately.
  *
  * If the pool is empty, callers fall back to the normal `createWorktree()` path.
  */
 
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { createWorktree, cleanupWorktree, type WorktreeResult } from "../skills/git.js";
@@ -68,7 +66,9 @@ export class WorktreePool {
 		// Kick off background replenishment immediately
 		this.replenish();
 
-		// 1. Rename the git branch
+		// Rename the git branch (needed for push / upstream tracking).
+		// The directory stays at its pool path — renaming directories causes
+		// git worktree tracking mismatches that break sessions on restart.
 		try {
 			await execFile("git", ["branch", "-m", entry.branchName, targetBranch], {
 				cwd: entry.worktreePath,
@@ -80,45 +80,16 @@ export class WorktreePool {
 			return null;
 		}
 
-		// 2. Move the directory to match the branch-name convention
-		const wtRoot = path.resolve(this.repoPath, "..", `${path.basename(this.repoPath)}-wt`);
-		const safeName = targetBranch.replace(/\//g, "-");
-		const newPath = path.join(wtRoot, safeName);
-		let finalPath = entry.worktreePath;
-
-		if (newPath !== entry.worktreePath) {
-			try {
-				fs.renameSync(entry.worktreePath, newPath);
-				finalPath = newPath;
-			} catch (err) {
-				// Directory rename failed — worktree still works at old path
-				console.warn(`[worktree-pool] Directory rename failed, using original path:`, err);
-			}
-
-			// If directory was moved, tell git about the new location
-			if (finalPath === newPath) {
-				try {
-					await execFile("git", ["worktree", "repair"], {
-						cwd: this.repoPath,
-						timeout: 10_000,
-					});
-				} catch (err) {
-					// repair failure is non-fatal — git may still find it
-					console.warn(`[worktree-pool] git worktree repair failed (non-fatal):`, err);
-				}
-			}
-		}
-
-		// 3. Push the renamed branch to origin (fire-and-forget, non-blocking)
+		// Push the renamed branch to origin (fire-and-forget, non-blocking)
 		execFile("git", ["push", "-u", "origin", targetBranch], {
-			cwd: finalPath,
+			cwd: entry.worktreePath,
 			timeout: 30_000,
 		}).catch(() => {
 			// Push failure is non-fatal (offline, auth issues, etc.)
 		});
 
-		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${finalPath} (pool: ${this.pool.length}/${this.targetSize})`);
-		return { worktreePath: finalPath, branchName: targetBranch };
+		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${entry.worktreePath} (pool: ${this.pool.length}/${this.targetSize})`);
+		return { worktreePath: entry.worktreePath, branchName: targetBranch };
 	}
 
 	/** Fill pool up to targetSize in the background. */
