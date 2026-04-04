@@ -3220,9 +3220,14 @@ export class SessionManager {
 				const pathMatch = block.match(/^worktree (.+)$/m);
 				if (!pathMatch) continue;
 				const wtPath = pathMatch[1];
+				// Normalize paths for comparison — git uses forward slashes on Windows,
+				// but session store uses OS-native backslashes. Without normalization,
+				// every session worktree is considered "orphaned" and deleted on restart.
+				const normalize = (p: string | undefined) => p?.replace(/\\/g, "/").toLowerCase();
+				const normalizedWtPath = normalize(wtPath);
 				// Check if any active session uses this worktree
 				const isActive = [...this.sessions.values()].some(
-					s => s.worktreePath === wtPath || s.cwd === wtPath
+					s => normalize(s.worktreePath) === normalizedWtPath || normalize(s.cwd) === normalizedWtPath
 				);
 				if (!isActive) {
 					console.log(`[session-manager] Cleaning up orphaned session worktree: ${wtPath} (branch: ${branch})`);
