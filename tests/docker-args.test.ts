@@ -10,7 +10,7 @@ describe("buildDockerRunArgs", () => {
 		});
 		assert.ok(args.includes("--memory=4g"));
 		assert.ok(args.includes("--cpus=2"));
-		assert.ok(args.includes("--pids-limit=256"));
+		assert.ok(args.includes("--pids-limit=512"));
 	});
 
 	it("allows custom resource limits", () => {

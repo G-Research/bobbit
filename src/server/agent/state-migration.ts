@@ -269,7 +269,11 @@ export function migrateToPerProjectState(
 		path.join(defaultProject.rootPath, ".bobbit", "state"),
 	);
 	const centralResolved = path.resolve(centralStateDir);
-	if (centralResolved !== defaultProjectStateDir) {
+	// Use case-insensitive comparison on Windows (drive letter casing can vary)
+	const pathsEqual = process.platform === "win32"
+		? centralResolved.toLowerCase() === defaultProjectStateDir.toLowerCase()
+		: centralResolved === defaultProjectStateDir;
+	if (!pathsEqual) {
 		renameForBackup(centralGoalsFile);
 		renameForBackup(centralSessionsFile);
 		renameForBackup(centralTasksFile);
