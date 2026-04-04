@@ -135,51 +135,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		if (idx !== -1) claimedContainers.splice(idx, 1);
 	});
 
-	test("claim with teamRepoPath configures team remote in the clone", { timeout: 120_000 }, async () => {
-		// Ensure team repo exists
-		const trPath = await pool!.createTeamRepo(goalId, repoPath, "master");
-		teamRepoPath = trPath;
-
-		const sessionId = "test-remote-" + Date.now();
-		const slot = await pool!.claim(sessionId, { teamRepoPath: trPath });
-		expect(slot).not.toBeNull();
-		claimedContainers.push(slot!.containerId);
-
-		// Verify the 'team' remote exists and points to the container-internal path.
-		// Read directly from .git/config to avoid MSYS path mangling on Windows.
-		const gitConfig = fs.readFileSync(path.join(slot!.worktreePath, ".git", "config"), "utf-8");
-		const repoName = path.basename(trPath); // "team-<goalId>.git"
-		expect(gitConfig).toContain(`[remote "team"]`);
-		expect(gitConfig).toContain(`/team-repos/${repoName}`);
-
-		await pool!.release(sessionId, slot!.containerId);
-		const idx = claimedContainers.indexOf(slot!.containerId);
-		if (idx !== -1) claimedContainers.splice(idx, 1);
-	});
-
-	test("claim with teamRepoPath installs post-commit hook", { timeout: 120_000 }, async () => {
-		const trPath = await pool!.createTeamRepo(goalId, repoPath, "master");
-		teamRepoPath = trPath;
-
-		const sessionId = "test-hook-" + Date.now();
-		const slot = await pool!.claim(sessionId, { teamRepoPath: trPath });
-		expect(slot).not.toBeNull();
-		claimedContainers.push(slot!.containerId);
-
-		// Verify post-commit hook exists
-		const hookPath = path.join(slot!.worktreePath, ".git", "hooks", "post-commit");
-		expect(fs.existsSync(hookPath)).toBe(true);
-
-		// Verify hook content contains the push command
-		const hookContent = fs.readFileSync(hookPath, "utf-8");
-		expect(hookContent).toContain("#!/bin/sh");
-		expect(hookContent).toContain("git push team");
-		expect(hookContent).toContain("2>/dev/null &"); // non-blocking, non-fatal
-
-		await pool!.release(sessionId, slot!.containerId);
-		const idx = claimedContainers.indexOf(slot!.containerId);
-		if (idx !== -1) claimedContainers.splice(idx, 1);
-	});
+	// claim team remote + post-commit hook — migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
 
 	test("cross-agent commit visibility via shared team repo", { timeout: 180_000 }, async () => {
 		const crossGoalId = `test-cross-${Date.now()}`;

@@ -74,6 +74,45 @@ describe("SandboxPool team repo (no Docker)", () => {
 	});
 });
 
+describe("setupTeamRemote (no Docker)", () => {
+	let cloneDir: string;
+
+	before(() => {
+		// Create a minimal git repo to act as the clone
+		cloneDir = path.join(os.tmpdir(), `team-remote-test-${Date.now()}`);
+		fs.mkdirSync(cloneDir, { recursive: true });
+		fs.writeFileSync(path.join(cloneDir, "README.md"), "# test\n");
+		execFileSync("git", ["init"], { cwd: cloneDir, stdio: "pipe" });
+		execFileSync("git", ["add", "."], { cwd: cloneDir, stdio: "pipe" });
+		execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=t@t.com", "commit", "-m", "init"], { cwd: cloneDir, stdio: "pipe" });
+	});
+
+	after(() => {
+		fs.rmSync(cloneDir, { recursive: true, force: true });
+	});
+
+	it("configures team remote in .git/config", async () => {
+		const { setupTeamRemote } = await import("../dist/server/agent/sandbox-pool.js");
+		const fakeTeamRepoPath = "/some/path/team-goal-123.git";
+
+		setupTeamRemote(cloneDir, fakeTeamRepoPath);
+
+		const gitConfig = fs.readFileSync(path.join(cloneDir, ".git", "config"), "utf-8");
+		assert.ok(gitConfig.includes('[remote "team"]'));
+		assert.ok(gitConfig.includes("/team-repos/team-goal-123.git"));
+	});
+
+	it("installs post-commit hook with push command", async () => {
+		const hookPath = path.join(cloneDir, ".git", "hooks", "post-commit");
+		assert.ok(fs.existsSync(hookPath));
+
+		const hookContent = fs.readFileSync(hookPath, "utf-8");
+		assert.ok(hookContent.includes("#!/bin/sh"));
+		assert.ok(hookContent.includes("git push team"));
+		assert.ok(hookContent.includes("2>/dev/null &"));
+	});
+});
+
 describe("buildDockerRunArgs (no Docker)", () => {
 	it("output has no token env vars", async () => {
 		const { buildDockerRunArgs } = await import("../dist/server/agent/docker-args.js");
