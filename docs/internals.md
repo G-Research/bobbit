@@ -566,6 +566,21 @@ This mirrors the non-sandboxed workflow where agents share a `.git` object store
 
 **Non-sandboxed teams** are unaffected — they use git worktrees with a shared object store, which already provides instant commit visibility.
 
+### Session persistence across restarts
+
+Sandbox containers are disposable — `sandboxPool.init()` kills all previous containers on server startup. However, session state (conversation history, branch, goal association) persists in `sessions.json`, so sandboxed sessions survive restarts by claiming fresh containers configured to match the previous environment.
+
+**Restore flow:**
+
+1. `restoreSession()` reads the persisted session fields (`branch`, `teamGoalId`, `sandboxed`)
+2. If the session has a `branch`, it reconstructs a `ClaimOptions` object:
+   - `branch` — ensures the new container checks out the correct branch instead of defaulting to `master`
+   - `teamRepoPath` — resolved from `SandboxPool.poolDir` + `teamGoalId` if the team bare repo still exists on disk. The `poolDir` accessor on `SandboxPool` enables this path resolution during restore.
+3. The reconstructed `sandboxClaim` is passed to `applySandboxWiring()` → `pool.claim()`, which starts a new container on the correct branch with the team remote configured
+4. `claim()` calls `setupTeamRemote()` followed by `git fetch team` to recover commits that the previous container had pushed to the shared bare repo
+
+**Graceful degradation:** If `branch` is not persisted (e.g. a session created before this feature), restore falls back to the previous behavior (no claim, container starts on `master`). If the team bare repo directory no longer exists, the claim includes the branch but omits `teamRepoPath` — the session restores on the correct branch but without a team remote.
+
 ### Verification command execution
 
 When a gate's verification workflow includes `command` steps (e.g. running tests), the verification harness needs access to the team's latest code. For non-sandboxed goals, this code lives in the host worktree. For sandboxed goals, the team's commits only exist inside the shared team bare repo and the containers' `/workspace` directories — the host worktree does not have them.
