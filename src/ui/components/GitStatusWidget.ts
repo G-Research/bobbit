@@ -151,34 +151,16 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderRemoteStatus() {
-        // Remote tracking branch status — only show when there's something to report
-        if (this.isOnPrimary) {
-            // On primary: show ahead/behind remote
-            if (this.ahead > 0 && this.behind > 0) {
-                return html`<div class="text-muted-foreground">
-                    Remote: <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>,
-                    <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span>
-                    ${this._renderPullButton()}
-                </div>`;
-            }
-            if (this.ahead > 0) {
-                return html`<div class="text-muted-foreground">
-                    <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed</span> to remote
-                    ${this._renderPushButton()}
-                </div>`;
-            }
-            if (this.behind > 0) {
-                return html`<div class="text-muted-foreground">
-                    <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote
-                    ${this._renderPullButton()}
-                </div>`;
-            }
-            return nothing; // up to date — don't clutter
-        }
+        // Feature branches: remote is auto-pushed, no UI needed
+        if (!this.isOnPrimary) return nothing;
 
-        // Feature branch: only show unpushed warning
-        if (!this.hasUpstream) {
-            return html`<div class="text-amber-600 dark:text-amber-400">Not pushed to remote ${this._renderPushButton()}</div>`;
+        // On primary branch only: show ahead/behind remote (edge case)
+        if (this.ahead > 0 && this.behind > 0) {
+            return html`<div class="text-muted-foreground">
+                Remote: <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>,
+                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span>
+                ${this._renderPullButton()}
+            </div>`;
         }
         if (this.ahead > 0) {
             return html`<div class="text-muted-foreground">
@@ -186,7 +168,13 @@ export class GitStatusWidget extends LitElement {
                 ${this._renderPushButton()}
             </div>`;
         }
-        return nothing; // pushed and up to date — hide
+        if (this.behind > 0) {
+            return html`<div class="text-muted-foreground">
+                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote
+                ${this._renderPullButton()}
+            </div>`;
+        }
+        return nothing;
     }
 
     private _renderPrimaryStatus() {

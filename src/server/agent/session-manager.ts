@@ -11,7 +11,7 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchIndex } from "../search/search-index.js";
 import { extractTextFromMessage } from "../search/message-extractor.js";
-import { RpcBridge, type RpcBridgeOptions, containerPathToHost } from "./rpc-bridge.js";
+import { RpcBridge, type RpcBridgeOptions, containerPathToHost, hostPathToContainer } from "./rpc-bridge.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -2639,7 +2639,11 @@ export class SessionManager {
 		let agentSessionFile: string | undefined;
 		try {
 			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
+			if (stateResp.success) {
+				agentSessionFile = session.sandboxed
+					? containerPathToHost(stateResp.data?.sessionFile)
+					: stateResp.data?.sessionFile;
+			}
 		} catch {
 			const persisted = this.resolveStoreForSession(id).get(id);
 			agentSessionFile = persisted?.agentSessionFile;
@@ -2731,8 +2735,9 @@ export class SessionManager {
 		await rpcClient.start();
 
 		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
+			const switchPath = session.sandboxed ? hostPathToContainer(agentSessionFile) : agentSessionFile;
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: agentSessionFile },
+				{ type: "switch_session", sessionPath: switchPath },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -3316,15 +3321,18 @@ export class SessionManager {
 		// Graceful abort didn't work — force kill and restart the agent
 		console.log(`[session-manager] Force-aborting session ${id} — killing agent process`);
 
-		// Get the agent session file before killing so we can restore
+		// Get the agent session file before killing so we can restore.
+		// getState() returns container-internal path for sandboxed sessions — translate to host.
 		let agentSessionFile: string | undefined;
 		try {
 			const stateResp = await session.rpcClient.getState();
 			if (stateResp.success) {
-				agentSessionFile = stateResp.data?.sessionFile;
+				agentSessionFile = session.sandboxed
+					? containerPathToHost(stateResp.data?.sessionFile)
+					: stateResp.data?.sessionFile;
 			}
 		} catch {
-			// Process may be unresponsive — try the persisted store
+			// Process may be unresponsive — try the persisted store (already host path)
 			const persisted = this.resolveStoreForSession(id).get(id);
 			agentSessionFile = persisted?.agentSessionFile;
 		}
@@ -3388,7 +3396,7 @@ export class SessionManager {
 
 			// Resume session if we have the session file
 			if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-				const abortSwitchPath = agentSessionFile;
+				const abortSwitchPath = session.sandboxed ? hostPathToContainer(agentSessionFile) : agentSessionFile;
 				const switchResp = await rpcClient.sendCommand(
 					{ type: "switch_session", sessionPath: abortSwitchPath },
 					15_000,

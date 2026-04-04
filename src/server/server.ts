@@ -3799,6 +3799,14 @@ async function handleApiRoute(
 				ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
 				clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
 			});
+
+			// Auto-push: for feature branches with unpushed commits, push in background
+			if (!isOnPrimary && ahead > 0 && hasUpstream) {
+				execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			} else if (!isOnPrimary && !hasUpstream && branch && /^session\//.test(branch)) {
+				// Session branches without upstream: set up tracking and push
+				execAsync(`git push -u origin ${branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			}
 		} catch (err) {
 			json({ error: String(err) }, 500);
 		}
