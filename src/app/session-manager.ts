@@ -1197,11 +1197,13 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 // TERMINATE
 // ============================================================================
 
-export async function terminateSession(sessionId: string): Promise<void> {
+export async function terminateSession(sessionId: string, opts?: { goalId?: string; isTeamLead?: boolean }): Promise<void> {
+	// Resolve session info eagerly — callers can pass pre-resolved values to
+	// avoid stale lookups (e.g. the sidebar already knows the goalId at render time).
 	const session = state.gatewaySessions.find((s) => s.id === sessionId);
 	const sessionTitle = session?.title || "this session";
-	const isTeamLead = session?.role === "team-lead";
-	const goalId = session?.goalId || session?.teamGoalId;
+	const isTeamLead = opts?.isTeamLead ?? session?.role === "team-lead";
+	const goalId = opts?.goalId ?? session?.goalId ?? session?.teamGoalId;
 	const confirmed = await confirmAction(
 		isTeamLead && goalId ? "End Team" : "Terminate Session",
 		isTeamLead && goalId

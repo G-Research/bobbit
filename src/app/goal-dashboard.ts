@@ -7,7 +7,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, type GateState, type GateSignal } from "./api.js";
 import { setHashRoute } from "./routing.js";
-import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
+import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 
@@ -885,15 +885,38 @@ async function handleStartTeam(goalId: string): Promise<void> {
 }
 
 async function handleEndTeam(goalId: string): Promise<void> {
-	teamStopping = true;
-	renderApp();
-	const ok = await teardownTeam(goalId);
-	teamStopping = false;
-	if (ok) {
-		teamActive = false;
-		agents = [];
+	// Find the team lead session so we can route through terminateSession(),
+	// which handles confirmation, active-session disconnect, and local cleanup.
+	const teamLeadSession = state.gatewaySessions.find(
+		(s) => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead",
+	);
+	if (teamLeadSession) {
+		teamStopping = true;
+		renderApp();
+		await terminateSession(teamLeadSession.id, { goalId, isTeamLead: true });
+		teamStopping = false;
+		// Re-check: if the team lead session is gone, the teardown succeeded.
+		// If the user cancelled the confirmation, the session still exists.
+		const stillExists = state.gatewaySessions.some(
+			(s) => s.id === teamLeadSession.id,
+		);
+		if (!stillExists) {
+			teamActive = false;
+			agents = [];
+		}
+		renderApp();
+	} else {
+		// Fallback: no team lead session found, tear down directly
+		teamStopping = true;
+		renderApp();
+		const ok = await teardownTeam(goalId);
+		teamStopping = false;
+		if (ok) {
+			teamActive = false;
+			agents = [];
+		}
+		renderApp();
 	}
-	renderApp();
 }
 
 // ============================================================================

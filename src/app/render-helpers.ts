@@ -21,7 +21,7 @@ import { statusBobbit } from "./session-colors.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, teardownTeam, refreshSessions, deleteGoal } from "./api.js";
+import { startTeam, deleteGoal } from "./api.js";
 
 // ============================================================================
 // FORMATTING
@@ -365,24 +365,14 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
 
 	const goalId = session.goalId || session.teamGoalId;
-	const handleStopTeam = async (e: Event) => {
-		e.stopPropagation();
-		if (!goalId) return;
-		teamLoading.add(goalId);
-		renderApp();
-		await teardownTeam(goalId);
-		teamLoading.delete(goalId);
-		await refreshSessions();
-		renderApp();
-	};
 
 	const buttons = html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); }}
 			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
-			@click=${handleStopTeam}
-			title="Stop Team">${icon(Trash2, "xs")}</button>
+			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); }}
+			title="End team (Ctrl+Shift+D)">${icon(Trash2, "xs")}</button>
 	`;
 
 	const chevron = html`<span
