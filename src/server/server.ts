@@ -623,6 +623,18 @@ export function createGateway(config: GatewayConfig) {
 			}
 
 			sessionManager.startPurgeSchedule();
+
+			// Initialize worktree pool for the default project's repo
+			// (pre-creates worktrees in the background so new sessions start instantly)
+			try {
+				const defaultCtx = projectContextManager.getDefault();
+				const defaultRepoPath = defaultCtx.project.rootPath;
+				if (await isGitRepo(defaultRepoPath)) {
+					const setupCmd = defaultCtx.projectConfigStore.get("worktree_setup_command") || undefined;
+					sessionManager.initWorktreePool(defaultRepoPath, setupCmd);
+				}
+			} catch { /* best-effort */ }
+
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
 			teamManager.resubscribeTeamEvents();
@@ -676,6 +688,7 @@ export function createGateway(config: GatewayConfig) {
 			clearInterval(cleanupInterval);
 			triggerEngine.stop();
 			wss.close();
+			await sessionManager.getWorktreePool()?.drain();
 			await sessionManager.shutdown();
 			projectContextManager.closeAll();
 			if (sandboxManager) {

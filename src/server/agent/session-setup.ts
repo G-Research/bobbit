@@ -449,15 +449,22 @@ export async function executeWorktreeAsync(
 	plan: SessionSetupPlan,
 	session: SessionInfo,
 	ctx: PipelineContext,
+	preBuiltWorktreePath?: string,
 ): Promise<void> {
-	// Create worktree with retry
-	const worktreeCwd = await withRetry(
-		async () => {
-			const result = await createWorktree(plan.repoPath!, plan.branch!);
-			return result.worktreePath;
-		},
-		{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
-	);
+	// Use pre-built worktree from pool, or create one from scratch
+	let worktreeCwd: string;
+	if (preBuiltWorktreePath) {
+		worktreeCwd = preBuiltWorktreePath;
+		console.log(`[session-setup] Using pre-built worktree for session ${session.id}: ${worktreeCwd}`);
+	} else {
+		worktreeCwd = await withRetry(
+			async () => {
+				const result = await createWorktree(plan.repoPath!, plan.branch!);
+				return result.worktreePath;
+			},
+			{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
+		);
+	}
 
 	// Update session and plan with worktree CWD
 	session.cwd = worktreeCwd;
