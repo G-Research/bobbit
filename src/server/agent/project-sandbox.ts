@@ -16,6 +16,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
 
@@ -254,6 +255,10 @@ export class ProjectSandbox {
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
 		fs.mkdirSync(stateDir, { recursive: true });
 
+		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
+		const totalMemGB = Math.max(4, Math.floor(os.totalmem() / (1024 ** 3)) - 2);
+		const totalCpus = Math.max(2, os.cpus().length - 2);
+
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused — named volume instead
@@ -261,6 +266,9 @@ export class ProjectSandbox {
 			labelPrefix: "bobbit-project",
 			projectId,
 			stateDir,
+			memoryLimit: `${totalMemGB}g`,
+			cpuLimit: `${totalCpus}`,
+			pidsLimit: "0",  // unlimited — long-lived container runs many agents
 			sandboxMounts,
 			sandboxCredentials,
 			sandboxNetwork,
