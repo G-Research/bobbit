@@ -1,5 +1,7 @@
 import { html, LitElement, nothing } from "lit";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { customElement, property, state } from "lit/decorators.js";
+import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 
 export interface BgProcessInfo {
 	id: string;
@@ -180,7 +182,7 @@ export class BgProcessPill extends LitElement {
 							: html`<div class="h-[180px] overflow-y-auto bg-background rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output">${this.logs.length > 0
 										? this.logs.map((entry) => html`<div class="whitespace-pre-wrap">${entry.ts
 											? html`<span class="text-muted-foreground select-none">${this._fmtTime(entry.ts)} </span>`
-											: nothing}${entry.text}</div>`)
+											: nothing}${hasAnsi(entry.text) ? unsafeHTML(ansiToHtml(entry.text)) : entry.text}</div>`)
 										: html`<div class="text-muted-foreground text-center py-1">(no output yet)</div>`}</div>
 							`}
 					</div>

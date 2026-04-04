@@ -575,6 +575,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onConnectionStatusChange = (status: ConnectionStatus) => {
 			state.connectionStatus = status;
+			// Re-fetch git status and bg processes after reconnect (e.g. server restart)
+			if (status === "connected") {
+				refreshGitStatusForSession(sessionId);
+				refreshBgProcessesForSession(sessionId);
+			}
 			renderApp();
 		};
 
