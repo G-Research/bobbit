@@ -334,7 +334,8 @@ export class GitStatusWidget extends LitElement {
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.mergingPrimary}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleMergePrimary(); }}
-        >${this.mergingPrimary ? 'Merging\u2026' : 'Merge master'}</button>${this.mergePrimaryError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
+            title="Rebase this branch on top of origin/master"
+        >${this.mergingPrimary ? 'Rebasing\u2026' : 'Rebase on master'}</button>${this.mergePrimaryError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
     }
 
     private _handleMergePrimary() {

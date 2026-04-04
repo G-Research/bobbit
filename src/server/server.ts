@@ -4026,7 +4026,7 @@ async function handleApiRoute(
 				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
 			await execAsync(`git fetch origin ${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
-			const { stdout } = await execAsync(`git merge origin/${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			const { stdout } = await execAsync(`git rebase origin/${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			json({ ok: true, output: stdout.trim() });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);

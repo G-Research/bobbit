@@ -425,6 +425,75 @@ export function toDockerPath(p: string): string {
 	return p.replace(/\\/g, "/");
 }
 
+// ── Container ↔ Host path translation ──────────────────────────────────────
+
+/**
+ * Mount-table entry: maps a container-internal prefix to a host-side path.
+ * Built dynamically from the same values used by docker-args.ts bind mounts.
+ */
+interface MountMapping {
+	containerPrefix: string;
+	hostPath: string;
+}
+
+/**
+ * Build the mount table that describes container ↔ host path mappings.
+ * This is the single source of truth — both containerPathToHost() and
+ * hostPathToContainer() derive from it.
+ */
+function buildMountTable(): MountMapping[] {
+	const stateDir = bobbitStateDir();
+	const agentSessionsDir = path.join(globalAgentDir(), "sessions");
+	const sessionPromptsDir = path.join(stateDir, "session-prompts");
+	const mcpExtDir = path.join(stateDir, "mcp-extensions");
+
+	// Order matters: most specific prefixes first so /home/node/.bobbit/agent/sessions
+	// matches before a hypothetical /home/node/.bobbit/agent would.
+	return [
+		{ containerPrefix: CONTAINER_AGENT_DIR + "sessions", hostPath: agentSessionsDir },
+		{ containerPrefix: "/tmp/session-prompts", hostPath: sessionPromptsDir },
+		{ containerPrefix: "/mcp-extensions", hostPath: mcpExtDir },
+		{ containerPrefix: "/bobbit-state", hostPath: stateDir },
+		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
+	];
+}
+
+/**
+ * Translate a container-internal path back to its host-side equivalent.
+ * Uses the known bind-mount mappings from docker-args.ts.
+ *
+ * Returns the original path unchanged if it doesn't match any known mount.
+ * On Windows, the returned path uses OS-native separators.
+ */
+export function containerPathToHost(containerPath: string): string {
+	const normalized = containerPath.replace(/\\/g, "/");
+	for (const { containerPrefix, hostPath } of buildMountTable()) {
+		if (normalized.startsWith(containerPrefix)) {
+			const relative = normalized.substring(containerPrefix.length);
+			return path.join(hostPath, ...relative.split("/").filter(Boolean));
+		}
+	}
+	return containerPath;
+}
+
+/**
+ * Translate a host-side path to its container-internal equivalent.
+ * Inverse of containerPathToHost().
+ *
+ * Returns the original path unchanged if it doesn't match any known mount.
+ */
+export function hostPathToContainer(hostPath: string): string {
+	const normalized = hostPath.replace(/\\/g, "/");
+	for (const { containerPrefix, hostPath: hp } of buildMountTable()) {
+		const normalizedHost = hp.replace(/\\/g, "/");
+		if (normalized.startsWith(normalizedHost)) {
+			const relative = normalized.substring(normalizedHost.length);
+			return containerPrefix + relative;
+		}
+	}
+	return hostPath;
+}
+
 /**
  * Resolve the parent directory of @mariozechner/pi-coding-agent package.
  * This is the directory that will be mounted as /node_modules in Docker,
