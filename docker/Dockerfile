@@ -16,7 +16,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Install Playwright system dependencies (Chromium libs).
 # Use a recent version to get broad library coverage — the actual browser binary
 # is installed later by the entrypoint to match the project's @playwright/test version.
-RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
+RUN npx -y playwright@1.58.2 install-deps chromium 2>/dev/null \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install pi-coding-agent and its dependencies inside the image.
@@ -38,7 +38,7 @@ USER node
 
 # Install actual Chromium binary as the node user (stored in /home/node/.cache/ms-playwright/).
 # The entrypoint may update this at runtime if the project uses a different Playwright version.
-RUN npx -y playwright@1.52.0 install chromium
+RUN npx -y playwright@1.58.2 install chromium
 
 # Configure git for Windows host compatibility (CRLF line endings).
 # Mark /workspace as safe (it's bind-mounted with different ownership).
