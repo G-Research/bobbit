@@ -1901,8 +1901,9 @@ export class VerificationHarness {
 					}
 				}
 			});
-			child.on("close", (code) => {
+			child.on("close", (code, signal) => {
 				const output = (stdout + "\n" + stderr).trim().slice(-5000);
+				console.log(`[verification-harness] Command close: code=${code}, signal=${signal}, outputLen=${output.length}`);
 				const exitedNonZero = code !== 0;
 				if (expectFailure) {
 					if (!exitedNonZero) {
