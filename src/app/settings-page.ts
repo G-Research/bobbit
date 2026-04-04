@@ -1380,7 +1380,14 @@ const PROJECT_KEY_LABELS: Record<string, string> = {
 	test_unit_command: "Test (Unit)",
 	test_e2e_command: "Test (E2E)",
 	worktree_setup_command: "Worktree Setup",
+	system_prompt_context: "System Prompt",
 	skill_directories: "Skill Dirs",
+	qa_start_command: "QA Start",
+	qa_build_command: "QA Build",
+	qa_health_check: "QA Health Check",
+	qa_browser_entry: "QA Browser Entry",
+	qa_max_duration_minutes: "QA Max Duration",
+	qa_max_scenarios: "QA Max Scenarios",
 };
 
 function projectKeyLabel(key: string): string {
@@ -1856,9 +1863,15 @@ function renderProjectScopeTab(projectId: string) {
 		"default_thinking_level", "sandbox", "sandbox_image",
 		"sandbox_credentials", "sandbox_github_token", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
 		"config_directories", "skill_directories",
+		// Rendered in dedicated sections below
+		"system_prompt_context",
+		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
+		"qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
 	]);
 
 	const commandKeys = Object.keys(resolved).filter(k => !HIDDEN_KEYS.has(k));
+	const QA_KEYS = ["qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry", "qa_max_duration_minutes", "qa_max_scenarios"];
+	const qaKeys = QA_KEYS.filter(k => k in resolved);
 	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
 	const inputClass = `w-full min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
 		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
@@ -1902,6 +1915,78 @@ function renderProjectScopeTab(projectId: string) {
 					`;
 				})}
 			</div>
+
+			<!-- System Prompt Context -->
+			${(() => {
+				const spcEntry = resolved["system_prompt_context"];
+				if (!spcEntry) return "";
+				const isInherited = spcEntry.source !== "project";
+				const displayValue = raw["system_prompt_context"] ?? "";
+				return html`
+					<hr class="border-border" />
+					<div class="flex flex-col gap-2">
+						<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">System Prompt Context</div>
+						<div class="text-xs text-muted-foreground">Injected into agent system prompts when working on this project.</div>
+						<div class="relative">
+							<textarea
+								class="${inputClass} min-h-[80px] resize-y ${isInherited ? "text-muted-foreground" : "text-foreground"}"
+								placeholder=${isInherited ? spcEntry.value : "Describe tech stack, directory layout, conventions…"}
+								.value=${displayValue}
+								@input=${(e: Event) => {
+									pendingChanges["system_prompt_context"] = (e.target as HTMLTextAreaElement).value;
+								}}
+							></textarea>
+							${isInherited ? html`<span class="absolute right-2 top-2 text-[10px] text-muted-foreground/60 pointer-events-none">(inherited)</span>` : ""}
+						</div>
+						${!isInherited ? html`
+							<button
+								class="self-start p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors text-xs"
+								title="Reset to inherited value"
+								@click=${() => resetProjectScopeField(projectId, "system_prompt_context")}
+							>Reset to inherited</button>
+						` : ""}
+					</div>
+				`;
+			})()}
+
+			<!-- QA Testing -->
+			${qaKeys.length > 0 ? html`
+				<hr class="border-border" />
+				<div class="flex flex-col gap-2">
+					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">QA Testing</div>
+					<div class="text-xs text-muted-foreground">Configure ephemeral QA environments for automated testing.</div>
+					${qaKeys.map((key) => {
+						const entry = resolved[key];
+						if (!entry) return "";
+						const isInherited = entry.source !== "project";
+						const displayValue = raw[key] ?? "";
+						return html`
+							<div class="flex items-center gap-3">
+								<span class="${labelClass}">${projectKeyLabel(key)}</span>
+								<div class="flex-1 min-w-0 relative">
+									<input
+										type="text"
+										class="${inputClass} ${isInherited ? "text-muted-foreground" : "text-foreground"}"
+										placeholder=${isInherited ? entry.value : ""}
+										.value=${displayValue}
+										@input=${(e: Event) => {
+											pendingChanges[key] = (e.target as HTMLInputElement).value;
+										}}
+									/>
+									${isInherited ? html`<span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none">(inherited)</span>` : ""}
+								</div>
+								${!isInherited ? html`
+									<button
+										class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+										title="Reset to inherited value"
+										@click=${() => resetProjectScopeField(projectId, key)}
+									>${icon(X, "xs")}</button>
+								` : html`<div class="w-7 shrink-0"></div>`}
+							</div>
+						`;
+					})}
+				</div>
+			` : ""}
 
 			<hr class="border-border" />
 
