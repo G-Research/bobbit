@@ -389,7 +389,10 @@ export class SandboxPool {
 		// Mount the pool directory so team shared repos are accessible inside containers.
 		// New subdirs created on the host (e.g. team-<goalId>.git) are immediately
 		// visible inside running containers — standard Docker bind-mount behavior.
-		args.push("-v", `${toDockerPath(this._poolDir)}:/team-repos`);
+		// Insert before the last 3 elements (image, "sleep", "infinity") so the
+		// -v flag is in the correct position for docker run.
+		const insertIdx = args.length - 3;
+		args.splice(insertIdx, 0, "-v", `${toDockerPath(this._poolDir)}:/team-repos`);
 
 		return args;
 	}
