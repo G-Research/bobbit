@@ -132,7 +132,7 @@ describe("buildDockerRunArgs (no Docker)", () => {
 describe("SandboxPool._buildDockerArgs mounts pool dir (no Docker)", () => {
 	it("args include -v poolDir:/team-repos bind mount", async () => {
 		const { SandboxPool } = await import("../dist/server/agent/sandbox-pool.js");
-		const pool = new SandboxPool({
+		const pool2 = new SandboxPool({
 			poolSize: 0,
 			maxIdleSeconds: 300,
 			image: "node:20-slim",
@@ -140,12 +140,54 @@ describe("SandboxPool._buildDockerArgs mounts pool dir (no Docker)", () => {
 			repoPath: tmpRepo,
 			healthCheckIntervalMs: 30_000,
 		});
-		// Access private _buildDockerArgs via bracket notation
-		const args: string[] = (pool as any)._buildDockerArgs(os.tmpdir());
-		const vIdx = args.indexOf("-v", args.indexOf("-v") + 1); // find the pool-dir -v (not workspace)
-		// Find the -v entry that maps to /team-repos
+		const args: string[] = (pool2 as any)._buildDockerArgs(os.tmpdir());
 		const teamMount = args.find((a: string) => a.includes("/team-repos") || a.includes("\\team-repos"));
 		assert.ok(teamMount, `Expected a -v mount containing /team-repos, got args: ${args.join(" ")}`);
 		assert.ok(teamMount!.endsWith(":/team-repos"), `Mount should end with :/team-repos, got: ${teamMount}`);
+	});
+});
+
+describe("Cross-agent commit visibility via shared bare repo (no Docker)", () => {
+	it("agent B sees agent A commit after push/fetch through bare repo", async () => {
+		const { setupTeamRemote } = await import("../dist/server/agent/sandbox-pool.js");
+
+		// Create a bare repo (simulates createTeamRepo output)
+		const bareRepo = path.join(os.tmpdir(), `bare-repo-test-${Date.now()}.git`);
+		execFileSync("git", ["clone", "--bare", tmpRepo, bareRepo], { stdio: "pipe" });
+
+		// Clone two working copies (simulates two agent worktrees)
+		const cloneA = path.join(os.tmpdir(), `clone-a-${Date.now()}`);
+		const cloneB = path.join(os.tmpdir(), `clone-b-${Date.now()}`);
+		execFileSync("git", ["clone", tmpRepo, cloneA], { stdio: "pipe" });
+		execFileSync("git", ["clone", tmpRepo, cloneB], { stdio: "pipe" });
+
+		try {
+			// Add team remote via git command (avoids path-encoding issues on Windows)
+			for (const dir of [cloneA, cloneB]) {
+				execFileSync("git", ["remote", "add", "team", bareRepo], { cwd: dir, stdio: "pipe" });
+			}
+
+			// Agent A: create file, commit, push to team repo
+			const branchName = `test-branch-${Date.now()}`;
+			execFileSync("git", ["checkout", "-b", branchName], { cwd: cloneA, stdio: "pipe" });
+			fs.writeFileSync(path.join(cloneA, "cross-agent.txt"), "hello from A");
+			execFileSync("git", ["add", "cross-agent.txt"], { cwd: cloneA, stdio: "pipe" });
+			execFileSync("git", [
+				"-c", "user.name=AgentA", "-c", "user.email=a@test.com",
+				"commit", "-m", "commit from agent A",
+			], { cwd: cloneA, stdio: "pipe" });
+			execFileSync("git", ["push", "team", branchName], { cwd: cloneA, stdio: "pipe" });
+
+			// Agent B: fetch from team repo, verify commit is visible
+			execFileSync("git", ["fetch", "team", branchName], { cwd: cloneB, stdio: "pipe" });
+			const log = execFileSync("git", ["log", "FETCH_HEAD", "--oneline", "-5"], {
+				cwd: cloneB, encoding: "utf-8",
+			});
+			assert.ok(log.includes("commit from agent A"), `Expected agent A's commit in log, got: ${log}`);
+		} finally {
+			fs.rmSync(bareRepo, { recursive: true, force: true });
+			fs.rmSync(cloneA, { recursive: true, force: true });
+			fs.rmSync(cloneB, { recursive: true, force: true });
+		}
 	});
 });
