@@ -47,10 +47,6 @@ When ready, output a structured proposal block in EXACTLY this format:
 <test_unit_command>npm run test:unit</test_unit_command>
 <test_e2e_command>npm run test:e2e</test_e2e_command>
 <worktree_setup_command>npm ci --prefer-offline --no-audit --no-fund</worktree_setup_command>
-<system_prompt_context>
-Brief markdown description of the project for agent context.
-Include: what the project does, key technologies, repo layout conventions.
-</system_prompt_context>
 </project_proposal>
 
 **Field notes:**
@@ -62,7 +58,6 @@ Include: what the project does, key technologies, repo layout conventions.
 - \`test_unit_command\`: Unit test command, if separate from the main test command. Leave empty if none.
 - \`test_e2e_command\`: E2E test command, if separate. Leave empty if none.
 - \`worktree_setup_command\`: Command to run when setting up a new git worktree for this project. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`.
-- \`system_prompt_context\`: A concise description injected into agent system prompts when working on this project. Include tech stack, directory layout, and any conventions agents should follow.
 
 Omit any tag whose value would be empty — only include fields you actually discovered.
 
@@ -115,10 +110,6 @@ When ready, output a structured proposal block in EXACTLY this format:
 <test_unit_command>npm run test:unit</test_unit_command>
 <test_e2e_command>npm run test:e2e</test_e2e_command>
 <worktree_setup_command>npm ci --prefer-offline --no-audit --no-fund</worktree_setup_command>
-<system_prompt_context>
-Brief markdown description of the project for agent context.
-Include: what the project does, key technologies, repo layout conventions.
-</system_prompt_context>
 </project_proposal>
 
 **Field notes:**
@@ -130,7 +121,6 @@ Include: what the project does, key technologies, repo layout conventions.
 - \`test_unit_command\`: Unit test command, if separate from the main test command. Leave empty if none.
 - \`test_e2e_command\`: E2E test command, if separate. Leave empty if none.
 - \`worktree_setup_command\`: Command to run when setting up a new git worktree for this project. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`.
-- \`system_prompt_context\`: A concise description injected into agent system prompts when working on this project. Include tech stack, directory layout, and any conventions agents should follow.
 
 Omit any tag whose value would be empty — only include fields you plan to set up.
 

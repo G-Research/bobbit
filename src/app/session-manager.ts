@@ -834,7 +834,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				const configFields: Record<string, string> = {};
 				const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
 					'test_unit_command', 'test_e2e_command',
-					'system_prompt_context', 'worktree_setup_command'];
+					'worktree_setup_command'];
 				for (const key of CONFIG_KEYS) {
 					if (fields[key]) configFields[key] = fields[key];
 				}
