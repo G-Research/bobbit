@@ -36,6 +36,10 @@ RUN chmod +x /usr/local/bin/bobbit-entrypoint.sh
 # on the host, matching typical developer user IDs.
 USER node
 
+# Install actual Chromium binary as the node user (stored in /home/node/.cache/ms-playwright/).
+# The entrypoint may update this at runtime if the project uses a different Playwright version.
+RUN npx -y playwright@1.52.0 install chromium
+
 # Configure git for Windows host compatibility (CRLF line endings).
 # Mark /workspace as safe (it's bind-mounted with different ownership).
 # Commit identity comes from the mounted repo's .git/config (the human developer).
