@@ -466,6 +466,14 @@ export async function executeWorktreeAsync(
 		);
 	}
 
+	// For sandboxed sessions, set sandboxBranch so applySandboxWiring() creates
+	// the worktree inside the container (via ProjectSandbox.createWorktree).
+	// The host worktree is still kept for server-side bookkeeping (worktreePath).
+	if (plan.sandboxed && !plan.sandboxBranch && plan.branch) {
+		plan.sandboxBranch = plan.branch;
+		// No baseBranch for regular sessions — they branch from HEAD
+	}
+
 	// Update session and plan with worktree CWD
 	session.cwd = worktreeCwd;
 	session.worktreePath = worktreeCwd;

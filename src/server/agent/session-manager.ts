@@ -3149,8 +3149,10 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
 		}
 
-		// Clean up worktree (skip for sandboxed sessions — container worktrees are cleaned via ProjectSandbox)
-		if (ps.worktreePath && ps.repoPath && !ps.sandboxed) {
+		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
+		// worktree for server bookkeeping, so we clean those up too.  Skip paths that
+		// are container-internal (start with /workspace) — those have no host counterpart.
+		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace")) {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
 				await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
