@@ -51,7 +51,7 @@ import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
-import { migrateToPerProjectState } from "./agent/state-migration.js";
+import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
@@ -223,6 +223,10 @@ export function createGateway(config: GatewayConfig) {
 
 	// Run one-time migration from centralized to per-project state
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
+
+	// Recover data lost by the original migration bug (unconditional rename
+	// when central dir == default project dir). Must run before stores load.
+	recoverPreMigrationData(stateDir);
 
 	// Initialize per-project contexts
 	const projectContextManager = new ProjectContextManager(projectRegistry);

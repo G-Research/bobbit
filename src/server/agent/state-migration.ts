@@ -10,6 +10,7 @@ import type { GateState } from "./gate-store.js";
 
 const MIGRATION_MARKER = ".migrated-to-per-project";
 const PRE_MIGRATION_SUFFIX = ".pre-migration";
+const RECOVERY_MARKER = ".pre-migration-recovered";
 
 /**
  * One-time migration from centralized state (`<server-cwd>/.bobbit/state/`)
@@ -297,4 +298,103 @@ export function migrateToPerProjectState(
 	} catch (err) {
 		console.error("[migration] Failed to write migration marker:", err);
 	}
+}
+
+/**
+ * Recovery pass: if `.pre-migration` backup files exist in the state dir,
+ * merge any entries missing from the current state files back in.
+ *
+ * This fixes data loss caused by the original migration code which
+ * unconditionally renamed central files even when central dir == default
+ * project dir — effectively deleting the sessions it just wrote.
+ *
+ * Runs once (writes a `.pre-migration-recovered` marker). Safe to re-run.
+ */
+export function recoverPreMigrationData(stateDir: string): void {
+	const recoveryMarker = path.join(stateDir, RECOVERY_MARKER);
+	if (fs.existsSync(recoveryMarker)) return;
+
+	const filesToRecover = [
+		{ name: "sessions.json", idField: "id" },
+		{ name: "goals.json", idField: "id" },
+		{ name: "tasks.json", idField: "id" },
+		{ name: "staff.json", idField: "id" },
+		{ name: "team-state.json", idField: "goalId" },
+	];
+
+	let totalRecovered = 0;
+
+	for (const { name, idField } of filesToRecover) {
+		const backupFile = path.join(stateDir, name + PRE_MIGRATION_SUFFIX);
+		const currentFile = path.join(stateDir, name);
+		if (!fs.existsSync(backupFile)) continue;
+
+		try {
+			const backup: Record<string, unknown>[] = JSON.parse(fs.readFileSync(backupFile, "utf-8"));
+			if (!Array.isArray(backup) || backup.length === 0) continue;
+
+			const current: Record<string, unknown>[] = fs.existsSync(currentFile)
+				? JSON.parse(fs.readFileSync(currentFile, "utf-8"))
+				: [];
+			if (!Array.isArray(current)) continue;
+
+			const existingIds = new Set(current.map(item => String(item[idField])));
+			let added = 0;
+			for (const item of backup) {
+				const id = String(item[idField]);
+				if (id && !existingIds.has(id)) {
+					current.push(item);
+					existingIds.add(id);
+					added++;
+				}
+			}
+
+			if (added > 0) {
+				fs.writeFileSync(currentFile, JSON.stringify(current, null, 2), "utf-8");
+				console.log(`[migration-recovery] Recovered ${added} entries into ${name}`);
+				totalRecovered += added;
+			}
+		} catch (err) {
+			console.warn(`[migration-recovery] Failed to recover ${name}: ${err}`);
+		}
+	}
+
+	// Gates use composite key
+	try {
+		const gatesBackup = path.join(stateDir, "gates.json" + PRE_MIGRATION_SUFFIX);
+		const gatesCurrent = path.join(stateDir, "gates.json");
+		if (fs.existsSync(gatesBackup)) {
+			const backup: GateState[] = JSON.parse(fs.readFileSync(gatesBackup, "utf-8"));
+			const current: GateState[] = fs.existsSync(gatesCurrent)
+				? JSON.parse(fs.readFileSync(gatesCurrent, "utf-8"))
+				: [];
+			if (Array.isArray(backup) && Array.isArray(current)) {
+				const existingKeys = new Set(current.map(g => `${g.goalId}::${g.gateId}`));
+				let added = 0;
+				for (const gate of backup) {
+					const key = `${gate.goalId}::${gate.gateId}`;
+					if (!existingKeys.has(key)) {
+						current.push(gate);
+						existingKeys.add(key);
+						added++;
+					}
+				}
+				if (added > 0) {
+					fs.writeFileSync(gatesCurrent, JSON.stringify(current, null, 2), "utf-8");
+					console.log(`[migration-recovery] Recovered ${added} entries into gates.json`);
+					totalRecovered += added;
+				}
+			}
+		}
+	} catch (err) {
+		console.warn(`[migration-recovery] Failed to recover gates.json: ${err}`);
+	}
+
+	if (totalRecovered > 0) {
+		console.log(`[migration-recovery] Total recovered: ${totalRecovered} entries`);
+	}
+
+	try {
+		fs.writeFileSync(recoveryMarker, new Date().toISOString(), "utf-8");
+	} catch { /* best effort */ }
 }
