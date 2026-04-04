@@ -106,9 +106,9 @@ export function handleWebSocketConnection(
 						ws.close(4004, "Invalid token");
 						return;
 					}
-					// Sandbox token must match the target session (own or child)
-					if (sessionId !== scope.sessionId && !scope.childSessionIds.has(sessionId)) {
-						console.log(`[gateway] Sandbox token denied for session ${sessionId} (scope: ${scope.sessionId})`);
+					// Sandbox token must match a session in the project scope
+					if (!scope.sessionIds.has(sessionId)) {
+						console.log(`[gateway] Sandbox token denied for session ${sessionId} (project: ${scope.projectId})`);
 						send(ws, { type: "auth_failed" });
 						ws.close(4003, "Session not in sandbox scope");
 						return;

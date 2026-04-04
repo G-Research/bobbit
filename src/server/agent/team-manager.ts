@@ -788,7 +788,7 @@ export class TeamManager {
 			session.titleGenerated = true;
 			const roleAccessory = storedRoleDef.accessory;
 			// For sandboxed pool sessions, the actual worktree is session.cwd (set by pool claim)
-			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxClaim ? session.cwd : undefined);
+			const actualWorktreePath = worktreeResult?.worktreePath || (memberSandboxed ? session.cwd : undefined);
 			this.sessionManager.updateSessionMeta(session.id, {
 				role,
 				teamGoalId: goalId,
