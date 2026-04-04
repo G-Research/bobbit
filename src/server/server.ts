@@ -40,7 +40,7 @@ import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
-import { SandboxPool } from "./agent/sandbox-pool.js";
+import { SandboxManager } from "./agent/sandbox-manager.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
@@ -294,8 +294,8 @@ export function createGateway(config: GatewayConfig) {
 	// Verification harness — assigned after wss is created (closure captures the reference)
 	let verificationHarness: VerificationHarness;
 
-	// Container pool — assigned in start() when sandbox=docker and pool_size>0
-	let sandboxPool: SandboxPool | null = null;
+	// Sandbox manager — assigned in start() when sandbox=docker
+	let sandboxManager: SandboxManager | null = null;
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
@@ -356,7 +356,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxPool, projectRegistry, sandboxScope, sandboxTokenStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, sandboxScope, sandboxTokenStore);
 
 			return;
 		}
@@ -498,10 +498,9 @@ export function createGateway(config: GatewayConfig) {
 			// Wire verification harness before session restore so orphan cleanup can skip resuming sessions
 			sessionManager.setVerificationHarness(verificationHarness);
 
-			// ── Sandbox pool initialization ──
+			// ── Sandbox initialization (per-project container) ──
 			const sandboxCfg = projectConfigStore.get("sandbox") || "none";
-			const poolSize = parseInt(projectConfigStore.get("sandbox_pool_size") || "2", 10);
-			if (sandboxCfg === "docker" && poolSize > 0) {
+			if (sandboxCfg === "docker") {
 				try {
 					const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
 
@@ -510,72 +509,80 @@ export function createGateway(config: GatewayConfig) {
 					if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
 						const buildResult = await buildSandboxImage(imageName, config.defaultCwd);
 						if (!buildResult.success) {
-							console.error(`[sandbox] Auto-build failed, continuing without sandbox pool`);
+							console.error(`[sandbox] Auto-build failed, continuing without sandbox`);
 						}
 					} else if (imageStatus.imageExists === true) {
 						// Ensure baked-in pi-coding-agent version matches host
 						await ensureImageAgentVersion(imageName, config.defaultCwd);
 					}
 
-					const { getRepoRoot, isGitRepo } = await import("./skills/git.js");
-					const isRepo = await isGitRepo(config.defaultCwd);
+					const { getRepoRoot, isGitRepo: isGitRepoFn } = await import("./skills/git.js");
+					const isRepo = await isGitRepoFn(config.defaultCwd);
 					if (isRepo) {
 						const repoPath = await getRepoRoot(config.defaultCwd);
-						const maxIdleSeconds = parseInt(projectConfigStore.get("sandbox_pool_max_idle") || "300", 10);
-						const setupCmd = projectConfigStore.get("worktree_setup_command") || "";
 
-						// Parse and validate mounts/credentials for pool containers
+						// Get repo URL for cloning inside the container
+						let repoUrl: string;
+						try {
+							const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoPath, timeout: 5000 });
+							repoUrl = stdout.trim();
+						} catch {
+							repoUrl = repoPath; // fallback to local path
+						}
+
+						// Parse mounts/credentials for the sandbox container
 						let poolMounts: string[] = [];
 						try {
 							const mountsRaw = projectConfigStore.get("sandbox_mounts") || "";
-							poolMounts = mountsRaw ? validateSandboxMounts(JSON.parse(mountsRaw), "[sandbox-pool]") : [];
-						} catch (err) { console.warn(`[sandbox-pool] Invalid sandbox_mounts JSON, ignoring: ${err}`); }
+							poolMounts = mountsRaw ? validateSandboxMounts(JSON.parse(mountsRaw), "[sandbox]") : [];
+						} catch (err) { console.warn(`[sandbox] Invalid sandbox_mounts JSON, ignoring: ${err}`); }
 
 						let poolCredentials: Record<string, string> = {};
 						try {
 							const credsRaw = projectConfigStore.get("sandbox_credentials") || "";
 							poolCredentials = credsRaw ? JSON.parse(credsRaw) : {};
-						} catch (err) { console.warn(`[sandbox-pool] Invalid sandbox_credentials JSON, ignoring: ${err}`); }
+						} catch (err) { console.warn(`[sandbox] Invalid sandbox_credentials JSON, ignoring: ${err}`); }
 
-						// Ensure the restricted Docker network exists before creating pool containers
+						// Ensure the restricted Docker network exists
 						let sandboxNetwork: string | undefined;
 						try {
 							sandboxNetwork = await sessionManager.ensureSandboxNetwork();
 						} catch (err) {
-							console.error("[sandbox-pool] Cannot create sandbox network — pool disabled:", err);
+							console.error("[sandbox] Cannot create sandbox network — sandbox disabled:", err);
 						}
 
-						if (!sandboxNetwork) {
-							console.warn("[sandbox-pool] Skipping pool initialization — no sandbox network available");
-						} else {
+						if (sandboxNetwork) {
+							const defaultProjectId = projectContextManager.getDefaultProjectId();
 
-						sandboxPool = new SandboxPool({
-							poolSize,
-							maxIdleSeconds,
-							image: imageName,
-							projectDir: config.defaultCwd,
-							repoPath,
-							healthCheckIntervalMs: 30_000,
-							worktreeSetupCommand: setupCmd,
-							sandboxMounts: poolMounts,
-							sandboxCredentials: poolCredentials,
-							sandboxNetwork,
-						});
-						await sandboxPool.init();
-						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
-						// Pre-warm spare containers in background — don't block server startup.
-						// Sessions restored below will create on-demand containers via claim() if needed.
-						sandboxPool.warmup();
-						} // end if (sandboxNetwork)
+							// Resolve GitHub token for git push inside container
+							const githubTokenEnabled = projectConfigStore.get("sandbox_github_token") !== "false";
+							let githubToken: string | undefined;
+							if (githubTokenEnabled) {
+								githubToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+							}
+
+							sandboxManager = new SandboxManager();
+							await sandboxManager.initForProject(defaultProjectId, {
+								projectId: defaultProjectId,
+								projectDir: config.defaultCwd,
+								repoUrl,
+								image: imageName,
+								sandboxNetwork,
+								sandboxMounts: poolMounts,
+								sandboxCredentials: poolCredentials,
+								githubToken,
+							});
+							console.log(`[sandbox] Initialized per-project sandbox for default project`);
+						}
 					} else {
-						console.log("[sandbox-pool] Not a git repo — sandbox pool disabled (worktrees require git)");
+						console.log("[sandbox] Not a git repo — sandbox disabled (worktrees require git)");
 					}
 				} catch (err) {
-					console.error("[sandbox-pool] Failed to initialize:", err);
-					sandboxPool = null;
+					console.error("[sandbox] Failed to initialize:", err);
+					sandboxManager = null;
 				}
 			}
-			sessionManager.setSandboxPool(sandboxPool);
+			sessionManager.setSandboxManager(sandboxManager);
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
@@ -635,8 +642,8 @@ export function createGateway(config: GatewayConfig) {
 			wss.close();
 			await sessionManager.shutdown();
 			projectContextManager.closeAll();
-			if (sandboxPool) {
-				await sandboxPool.shutdown();
+			if (sandboxManager) {
+				await sandboxManager.shutdownAll();
 			}
 			await sessionManager.cleanupSandboxNetwork();
 			server.close();
@@ -691,7 +698,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
-	sandboxPool: SandboxPool | null,
+	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
@@ -846,8 +853,8 @@ async function handleApiRoute(
 
 	// GET /api/sandbox-pool
 	if (url.pathname === "/api/sandbox-pool" && req.method === "GET") {
-		if (sandboxPool) {
-			const stats = sandboxPool.getStats();
+		if (sandboxManager) {
+			const stats = sandboxManager.getStats();
 			json({ ...stats, type: "sandbox" });
 		} else {
 			json({ enabled: false });
@@ -1316,7 +1323,7 @@ async function handleApiRoute(
 			// Sandbox guard: delegate parent must be own session or registered child
 			if (sandboxScope) {
 				const parentId = body.delegateOf;
-				if (parentId !== sandboxScope.sessionId && !sandboxScope.childSessionIds.has(parentId)) {
+				if (!sandboxScope.sessionIds.has(parentId)) {
 					json({ error: "Forbidden: delegate parent must be own session" }, 403);
 					return;
 				}
@@ -1331,7 +1338,7 @@ async function handleApiRoute(
 				});
 				// Register delegate as child in parent's sandbox scope
 				if (sandboxScope && sandboxTokenStore) {
-					sandboxTokenStore.addChild(sandboxScope.sessionId, session.id);
+					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
 				}
 				json({
 					id: session.id,
@@ -1444,10 +1451,10 @@ async function handleApiRoute(
 				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
 				return;
 			}
-			// Skip Docker check if sandbox pool has idle containers (Docker is obviously working).
+			// Skip Docker check if sandbox manager has ready containers.
 			// Otherwise use a cached result to avoid running `docker info` on every session creation.
-			const poolIdle = sessionManager.sandboxPool?.getStats().idle ?? 0;
-			if (poolIdle === 0) {
+			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
+			if (!hasReadyContainer) {
 				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
 					const dockerStatus = await checkDockerAvailability();
 					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
