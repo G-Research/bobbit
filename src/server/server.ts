@@ -563,6 +563,9 @@ export function createGateway(config: GatewayConfig) {
 						});
 						await sandboxPool.init();
 						console.log(`[sandbox-pool] Initialized with poolSize=${poolSize}`);
+						// Pre-warm spare containers in background — don't block server startup.
+						// Sessions restored below will create on-demand containers via claim() if needed.
+						sandboxPool.warmup();
 						} // end if (sandboxNetwork)
 					} else {
 						console.log("[sandbox-pool] Not a git repo — sandbox pool disabled (worktrees require git)");

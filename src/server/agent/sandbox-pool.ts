@@ -140,7 +140,8 @@ export class SandboxPool {
 	/** Host path to the pool directory (used to resolve team repo paths on restore). */
 	get poolDir(): string { return this._poolDir; }
 
-	/** Initialize the pool: kill old containers, pre-warm fresh ones. */
+	/** Initialize the pool: detect branch, ensure dirs, kill old containers.
+	 *  Call warmup() separately to pre-warm spare containers in the background. */
 	async init(): Promise<void> {
 		console.log(`[sandbox-pool] Initializing (size=${this.options.poolSize}, image=${this.options.image}, label=bobbit-sandbox=${this.label})`);
 
@@ -157,16 +158,23 @@ export class SandboxPool {
 		// Kill ALL containers from previous runs — no readoption. Fresh slots are
 		// cheap (~3-5s) and eliminate stale-container bugs entirely.
 		await this._killAllPreviousContainers();
+	}
 
-		// Clean up stale clone directories on disk (background — can be slow on Windows
-		// with hundreds of deep node_modules trees, don't block server startup)
-		this._cleanupStaleCloneDirs();
+	/** Pre-warm spare containers and clean up stale directories.
+	 *  Safe to call fire-and-forget — errors are caught and logged. */
+	async warmup(): Promise<void> {
+		try {
+			// Clean up stale clone directories on disk (can be slow on Windows
+			// with hundreds of deep node_modules trees)
+			this._cleanupStaleCloneDirs();
 
-		// Pre-warm to target size (background — don't block server startup)
-		console.log(`[sandbox-pool] Pre-warming ${this.options.poolSize} slot(s) in background...`);
-		Promise.all(Array.from({ length: this.options.poolSize }, () => this._createSlot()))
-			.then(() => console.log(`[sandbox-pool] Ready — ${this._statsString()}`))
-			.catch(err => console.error("[sandbox-pool] Pre-warming failed:", err));
+			// Pre-warm to target size
+			console.log(`[sandbox-pool] Pre-warming ${this.options.poolSize} slot(s) in background...`);
+			await Promise.all(Array.from({ length: this.options.poolSize }, () => this._createSlot()));
+			console.log(`[sandbox-pool] Ready — ${this._statsString()}`);
+		} catch (err) {
+			console.error("[sandbox-pool] Pre-warming failed:", err);
+		}
 	}
 
 	/**
