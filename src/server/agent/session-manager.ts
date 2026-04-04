@@ -1420,11 +1420,22 @@ export class SessionManager {
 			this.addDormantSession(ps);
 		}
 
-		// Stuck worktree recovery: warn about sessions with worktreePath set but directory missing.
+		// Recover worktrees whose directories are missing (e.g. deleted during cleanup/crash).
 		// Skip sandboxed sessions — their worktreePath is a container-internal path.
 		for (const ps of persisted) {
-			if (ps.worktreePath && !ps.sandboxed && !fs.existsSync(ps.worktreePath)) {
-				console.warn(`[session-manager] Session "${ps.title}" (${ps.id}) has worktreePath "${ps.worktreePath}" but directory does not exist`);
+			if (ps.worktreePath && ps.branch && ps.repoPath && !ps.sandboxed && !ps.archived && !fs.existsSync(ps.worktreePath)) {
+				console.log(`[session-manager] Recovering missing worktree for "${ps.title}" (${ps.id}), branch: ${ps.branch}`);
+				try {
+					const { recoverWorktree } = await import("../skills/git.js");
+					const recovered = await recoverWorktree(ps.repoPath, ps.branch, ps.worktreePath);
+					if (recovered) {
+						console.log(`[session-manager] Worktree recovered: ${recovered}`);
+					} else {
+						console.warn(`[session-manager] Could not recover worktree for "${ps.title}" (${ps.id}) — branch may be gone`);
+					}
+				} catch (err) {
+					console.warn(`[session-manager] Worktree recovery failed for "${ps.title}" (${ps.id}):`, err);
+				}
 			}
 		}
 
