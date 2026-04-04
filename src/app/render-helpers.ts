@@ -445,31 +445,29 @@ function renderGoalBadge(goalId: string) {
 	// Fall back to gate status
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
-	const hasTeam = state.gatewaySessions.some(s => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead" && s.status !== "terminated");
+	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !s.delegateOf);
+	const hasTeam = goalAgents.some(s => s.role === "team-lead" && s.status !== "terminated");
+	const anyAgentWorking = goalAgents.some(s => s.status === "streaming" || s.status === "busy" || s.isCompacting);
 	const allPassed = gs.passed === gs.total;
-	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : "#3b82f6";
+	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : anyAgentWorking ? "#3b82f6" : "#7a8ea8";
 	const baseStyle = `font-size:9px;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
 	if (gs.verifying && gs.verifyingCount > 0) {
-		// Show passed + verifyingCount as the displayed number, with the number blinking + wave on whole label
+		// Blinking number indicates verification in progress — surrounding chars stay static
 		const displayed = gs.passed + gs.verifyingCount;
-		const label = `(/${gs.total})`;
-		const chars = label.split("");
-		const totalDur = 1.2;
-		const stagger = totalDur / chars.length;
-		// Insert the blinking number after '(' — wave on surrounding chars, blink on number
-		return html`<span class="shrink-0 gate-wave gate-wave-subtle" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed — verifying ${gs.verifyingCount}"><span style="animation-delay:0s">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span>${chars.slice(1).map((ch, i) =>
-			html`<span style="animation-delay:${((i + 1) * stagger).toFixed(2)}s">${ch}</span>`
-		)}</span>`;
+		return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed — verifying ${gs.verifyingCount}"><span style="opacity:0.7">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span><span style="opacity:0.7">/${gs.total})</span></span>`;
 	}
 	if (!allPassed && hasTeam) {
-		// Wave animation on the whole counter until all gates pass
-		const label = `(${gs.passed}/${gs.total})`;
-		const chars = label.split("");
-		const totalDur = 1.2;
-		const stagger = totalDur / chars.length;
-		return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">${chars.map((ch, i) =>
-			html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
-		)}</span>`;
+		// Wave animation only when agents are actively working or verifications are running
+		if (anyAgentWorking) {
+			const label = `(${gs.passed}/${gs.total})`;
+			const chars = label.split("");
+			const totalDur = 1.2;
+			const stagger = totalDur / chars.length;
+			return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">${chars.map((ch, i) =>
+				html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
+			)}</span>`;
+		}
+		return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
 	}
 	return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
 }

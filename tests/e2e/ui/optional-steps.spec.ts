@@ -85,7 +85,7 @@ async function waitForGateStatus(
 		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
 		const data = await res.json();
 		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 500));
+		await new Promise(r => setTimeout(r, 50));
 	}
 	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
 	const data = await res.json();
