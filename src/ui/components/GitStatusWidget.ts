@@ -208,8 +208,8 @@ export class GitStatusWidget extends LitElement {
             return html`<div class="text-muted-foreground">
                 <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
                 of origin/${this.primaryBranch}
-                ${this.ahead > 0 ? this._renderPushButton() : nothing}
                 ${!this.prState ? this._renderAskPrButton() : nothing}
+                ${!this.prState ? this._renderPushToMasterButton() : nothing}
             </div>`;
         }
         if (this.behindPrimary > 0) {
@@ -363,6 +363,31 @@ export class GitStatusWidget extends LitElement {
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             @click=${(e: MouseEvent) => { e.stopPropagation(); this.dispatchEvent(new CustomEvent('ask-agent-pr', { bubbles: true, composed: true })); }}
         >Ask agent to raise PR</button>`;
+    }
+
+    @state() private pushingToMaster = false;
+    @state() private pushToMasterError = '';
+
+    private _renderPushToMasterButton() {
+        return html`<button
+            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
+            ?disabled=${this.pushingToMaster}
+            @click=${(e: MouseEvent) => { e.stopPropagation(); this._handlePushToMaster(); }}
+        >${this.pushingToMaster ? 'Pushing\u2026' : 'Push to master'}</button>${this.pushToMasterError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.pushToMasterError}</span>` : nothing}`;
+    }
+
+    private _handlePushToMaster() {
+        this.pushingToMaster = true;
+        this.pushToMasterError = '';
+        this.dispatchEvent(new CustomEvent('git-push-to-master', {
+            bubbles: true,
+            composed: true,
+        }));
+    }
+
+    public setPushToMasterResult(error?: string) {
+        this.pushingToMaster = false;
+        this.pushToMasterError = error || '';
     }
 
     private _renderPullButton() {

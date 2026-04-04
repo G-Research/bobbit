@@ -3937,7 +3937,22 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const { stdout } = await execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 });
+			const body = await readBody(req);
+			const target = body?.target; // 'master' to push directly to primary branch
+			let cmd = 'git push';
+			if (target === 'master') {
+				// Detect primary branch and push HEAD directly to it
+				let primaryBranch = "master";
+				try {
+					const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
+					primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
+				} catch {
+					try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
+					catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+				}
+				cmd = `git push origin HEAD:${primaryBranch}`;
+			}
+			const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout: 30000 });
 			json({ ok: true, output: stdout.trim() });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);

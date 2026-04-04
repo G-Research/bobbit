@@ -70,6 +70,7 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onGitPush?: () => Promise<string | undefined>;
 	@property({ attribute: false }) onGitFetch?: () => void;
 	@property({ attribute: false }) onGitMergePrimary?: () => Promise<string | undefined>;
+	@property({ attribute: false }) onGitPushToMaster?: () => Promise<string | undefined>;
 	@property({ attribute: false }) onAskAgentCommit?: () => void;
 	@property({ attribute: false }) onAskAgentPr?: () => void;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
@@ -876,6 +877,7 @@ export class AgentInterface extends LitElement {
 								@git-push=${this._handleGitPush}
 								@git-fetch=${this._handleGitFetch}
 								@git-merge-primary=${this._handleGitMergePrimary}
+								@git-push-to-master=${this._handleGitPushToMaster}
 								@ask-agent-commit=${this._handleAskAgentCommit}
 								@ask-agent-pr=${this._handleAskAgentPr}
 							></git-status-widget>` : nothing}
@@ -968,6 +970,17 @@ export class AgentInterface extends LitElement {
 			widget.setMergePrimaryResult(error);
 		} catch (err) {
 			widget.setMergePrimaryResult(err instanceof Error ? err.message : 'Network error');
+		}
+	}
+
+	private async _handleGitPushToMaster(e: Event): Promise<void> {
+		if (!this.onGitPushToMaster) return;
+		const widget = e.target as import('./GitStatusWidget.js').GitStatusWidget;
+		try {
+			const error = await this.onGitPushToMaster();
+			widget.setPushToMasterResult(error);
+		} catch (err) {
+			widget.setPushToMasterResult(err instanceof Error ? err.message : 'Network error');
 		}
 	}
 
