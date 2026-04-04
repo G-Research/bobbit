@@ -97,8 +97,16 @@ export class ProjectSandbox {
 		const containerId = await this.getContainerId();
 		const worktreePath = `/workspace-wt/${name}`;
 
-		// Ensure the parent directory exists
-		await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
+		// Ensure the parent directory exists (may need root if not created during init)
+		try {
+			await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
+		} catch {
+			// Permission denied — create as root and chown to node
+			await execFileAsync("docker", [
+				"exec", "-u", "root", containerId, "sh", "-c",
+				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
+			], { timeout: 10_000, env: DOCKER_ENV });
+		}
 
 		// Fetch latest before creating worktree
 		try {
@@ -292,12 +300,22 @@ export class ProjectSandbox {
 
 		this.containerId = containerId;
 
+		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
+		try {
+			await execFileAsync("docker", [
+				"exec", "-u", "root", containerId, "sh", "-c",
+				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
+			], { timeout: 10_000, env: DOCKER_ENV });
+		} catch {
+			// Non-fatal — createWorktree will retry
+		}
+
 		// Defense-in-depth: mask /proc/1/environ
 		try {
-			await this._dockerExec(containerId, [
-				"sh", "-c",
+			await execFileAsync("docker", [
+				"exec", "-u", "root", containerId, "sh", "-c",
 				"mount --bind /dev/null /proc/1/environ 2>/dev/null || chmod 0400 /proc/1/environ 2>/dev/null || true",
-			]);
+			], { timeout: 10_000, env: DOCKER_ENV });
 		} catch {
 			// Non-fatal — primary defense is not passing sensitive env vars to docker run
 		}
