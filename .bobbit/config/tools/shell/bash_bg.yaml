@@ -25,3 +25,12 @@ detail_docs: |
 
   Use for dev servers, file watchers, long builds, or any process that
   should run while the agent continues working.
+
+  **Polling discipline**: When waiting for a background process to finish
+  (e.g. a Docker build or long test run), do NOT spin-poll `logs` repeatedly.
+  Each poll consumes tokens and produces no new information if the output
+  hasn't changed. Instead, use `bash` with `sleep <N>` before checking logs,
+  or combine: `sleep 60 && echo "checking"` then check logs once. Pick a
+  sleep duration proportional to the expected wait (30-120s for builds,
+  5-10s for quick tasks). Never poll more than once per 30 seconds for
+  long-running processes.
