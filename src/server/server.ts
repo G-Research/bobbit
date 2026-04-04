@@ -3855,14 +3855,15 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: 'Session not found' }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ commits: [] }); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ commits: [] }); return; }
 		try {
 			let branch = '';
-			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd); }
+			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd, 5000, cid); }
 			catch { json({ commits: [] }); return; }
 
 			let hasUpstream = false;
-			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd); hasUpstream = true; } catch {}
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid); hasUpstream = true; } catch {}
 
 			const limit = 50;
 			const direction = url.searchParams.get('direction'); // 'behind' to show incoming commits
@@ -3872,14 +3873,14 @@ async function handleApiRoute(
 				// Compare against origin/<primary>
 				let primaryBranch = 'master';
 				try {
-					const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd);
+					const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd, 5000, cid);
 					primaryBranch = remoteHead.replace('refs/remotes/origin/', '');
 				} catch {
-					try { await execGit('git rev-parse --verify refs/heads/master', cwd); primaryBranch = 'master'; }
-					catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd); primaryBranch = 'main'; } catch {} }
+					try { await execGit('git rev-parse --verify refs/heads/master', cwd, 5000, cid); primaryBranch = 'master'; }
+					catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd, 5000, cid); primaryBranch = 'main'; } catch {} }
 				}
 				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd); primaryRef = `origin/${primaryBranch}`; } catch {}
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch {}
 				rangeSpec = direction === 'behind' ? `HEAD..${primaryRef}` : `${primaryRef}..HEAD`;
 			} else {
 				rangeSpec = direction === 'behind' && hasUpstream
@@ -3887,7 +3888,7 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" --shortstat ${rangeSpec}`, cwd, 10000);
+			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" --shortstat ${rangeSpec}`, cwd, 10000, cid);
 			const lines = out.split('\n');
 			const commits: Array<{sha: string; shortSha: string; message: string; author: string; timestamp: string; filesChanged: number; insertions: number; deletions: number}> = [];
 
@@ -3926,10 +3927,13 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged
 		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
-		const pr = await getCachedPrStatus(cwd, goalBranch, process.cwd());
+		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
+		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
+		const pr = await getCachedPrStatus(prCwd, goalBranch, process.cwd());
 		if (pr) {
 			const goalId = session.goalId;
 			if (goalId) prStatusStore.set(goalId, pr);
@@ -3944,10 +3948,11 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const { stdout } = await execAsync('git pull', { cwd, encoding: "utf-8", timeout: 30000 });
-			json({ ok: true, output: stdout.trim() });
+			const output = await execGit('git pull', cwd, 30000, cid);
+			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			json({ error: msg }, 500);
@@ -3961,10 +3966,11 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const { stdout } = await execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 });
-			json({ ok: true, output: stdout.trim() });
+			const output = await execGit('git push', cwd, 30000, cid);
+			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			json({ error: msg }, 500);
@@ -3978,30 +3984,31 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
 			// Detect primary branch
 			let primaryBranch = "master";
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
 				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
 			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
 
 			// Fetch latest master
-			await execAsync(`git fetch origin ${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
 			const primaryRef = `origin/${primaryBranch}`;
 
 			// Check we have commits ahead
-			const aheadCount = parseInt(await execGit(`git rev-list --count ${primaryRef}..HEAD`, cwd), 10) || 0;
+			const aheadCount = parseInt(await execGit(`git rev-list --count ${primaryRef}..HEAD`, cwd, 5000, cid), 10) || 0;
 			if (aheadCount === 0) { json({ error: "No commits ahead of master" }, 400); return; }
 
 			// Build commit message from branch commits
-			const logOutput = await execGit(`git log --format="%s" ${primaryRef}..HEAD`, cwd);
+			const logOutput = await execGit(`git log --format="%s" ${primaryRef}..HEAD`, cwd, 5000, cid);
 			const commitMessages = logOutput.trim().split("\n").filter(Boolean);
-			const branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd);
+			const branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid);
 			const summary = commitMessages.length === 1
 				? commitMessages[0]
 				: `Squash ${branch} (${commitMessages.length} commits)`;
@@ -4012,14 +4019,25 @@ async function handleApiRoute(
 
 			// Create squash commit on top of origin/master using plumbing (no checkout needed)
 			// 1. Create a tree that represents the merge result
-			const mergeTree = await execGit(`git merge-tree --write-tree ${primaryRef} HEAD`, cwd);
+			const mergeTree = await execGit(`git merge-tree --write-tree ${primaryRef} HEAD`, cwd, 5000, cid);
 			// 2. Create a commit object with that tree, parented on origin/master
-			const msgFile = path.join(cwd, ".git", "SQUASH_MSG");
-			fs.writeFileSync(msgFile, fullMessage, "utf-8");
-			const squashCommit = await execGit(`git commit-tree ${mergeTree} -p ${primaryRef} -F "${msgFile}"`, cwd);
-			fs.unlinkSync(msgFile);
+			// For sandboxed sessions, write temp file inside container
+			const msgFile = cid ? `/tmp/SQUASH_MSG_${Date.now()}` : path.join(cwd, ".git", "SQUASH_MSG");
+			if (cid) {
+				await execFileAsync("docker", [
+					"exec", "-w", cwd, cid, "/bin/sh", "-c", `cat > ${msgFile} << 'BOBBIT_EOF'\n${fullMessage}\nBOBBIT_EOF`,
+				], { encoding: "utf-8", timeout: 5000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+			} else {
+				fs.writeFileSync(msgFile, fullMessage, "utf-8");
+			}
+			const squashCommit = await execGit(`git commit-tree ${mergeTree} -p ${primaryRef} -F "${msgFile}"`, cwd, 5000, cid);
+			if (cid) {
+				await execGit(`rm -f ${msgFile}`, cwd, 5000, cid).catch(() => {});
+			} else {
+				fs.unlinkSync(msgFile);
+			}
 			// 3. Push that commit to master
-			await execAsync(`git push origin ${squashCommit}:refs/heads/${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execGit(`git push origin ${squashCommit}:refs/heads/${primaryBranch}`, cwd, 30000, cid);
 
 			json({ ok: true, output: `Squash pushed ${aheadCount} commit${aheadCount > 1 ? "s" : ""} to ${primaryBranch}` });
 		} catch (err: unknown) {
@@ -4040,20 +4058,21 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
 			// Detect primary branch
 			let primaryBranch = "master";
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
 				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
 			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
-			await execAsync(`git fetch origin ${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
-			const { stdout } = await execAsync(`git rebase origin/${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
-			json({ ok: true, output: stdout.trim() });
+			await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
+			const output = await execGit(`git rebase origin/${primaryBranch}`, cwd, 30000, cid);
+			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			json({ error: msg }, 500);
@@ -4067,7 +4086,8 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		const cwd = session.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const cid = session.sandboxed ? session.containerId : undefined;
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const body = await readBody(req);
 		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
@@ -4077,7 +4097,9 @@ async function handleApiRoute(
 		const sessAdminFlag = body?.admin ? " --admin" : "";
 		const sessMergeBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
 		try {
-			await execAsync(`gh pr merge --${method}${sessAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
+			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
+			await execAsync(`gh pr merge --${method}${sessAdminFlag}`, { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });
