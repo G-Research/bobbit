@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
@@ -21,65 +20,6 @@ function redactDockerArgs(args: string[]): string {
 export const CONTAINER_HOME = "/home/node";
 /** Container-side agent directory prefix (always forward slashes) */
 export const CONTAINER_AGENT_DIR = "/home/node/.bobbit/agent/";
-
-/**
- * Remap a container-internal path to the equivalent host path.
- * e.g. /home/node/.bobbit/agent/sessions/x/y.jsonl → <agentDir>/sessions/x/y.jsonl
- * Non-matching paths pass through unchanged.
- * @param homeDir - override os.homedir() for testing
- */
-export function containerToHostSessionPath(containerPath: string, homeDir?: string): string {
-	if (containerPath.startsWith(CONTAINER_AGENT_DIR)) {
-		const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
-		const agentDir = homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir();
-		return path.join(agentDir, relative).replace(/\\/g, "/");
-	}
-
-	// Handle paths like /workspace/C:/Users/... where the agent inside Docker
-	// resolved a Windows-style home dir relative to /workspace (the CWD mount).
-	// On Linux, "C:/Users/..." is a relative path (directory named "C:"),
-	// so resolve() prepends /workspace. Strip the prefix to recover the host path.
-	if (containerPath.startsWith("/workspace/") && /^[A-Z]:[\\/]/.test(containerPath.substring("/workspace/".length))) {
-		return containerPath.substring("/workspace/".length).replace(/\\/g, "/");
-	}
-
-	return containerPath;
-}
-
-/**
- * Like containerToHostSessionPath but also tries ~/.bobbit/agent/ explicitly
- * if the primary remapped path doesn't exist on disk (in case globalAgentDir()
- * was overridden via env var).
- */
-export function containerToHostSessionPathWithFallback(containerPath: string): string {
-	const primary = containerToHostSessionPath(containerPath);
-	if (primary === containerPath) return primary; // wasn't a container path
-	if (fs.existsSync(primary)) return primary;
-
-	// For container agent paths, try ~/.bobbit/agent/ explicitly
-	if (containerPath.startsWith(CONTAINER_AGENT_DIR)) {
-		const relative = containerPath.substring(CONTAINER_AGENT_DIR.length);
-		const newDir = path.join(os.homedir(), ".bobbit", "agent");
-		const newPath = path.join(newDir, relative).replace(/\\/g, "/");
-		if (fs.existsSync(newPath)) return newPath;
-	}
-
-	return primary; // fall back to primary even though it doesn't exist
-}
-
-/**
- * Remap a host path back to the container-internal path. Inverse of containerToHostSessionPath.
- * @param homeDir - override os.homedir() for testing
- */
-export function hostToContainerSessionPath(hostPath: string, homeDir?: string): string {
-	const hostAgentDir = (homeDir ? path.join(homeDir, ".bobbit", "agent") : globalAgentDir()).replace(/\\/g, "/") + "/";
-	const normalized = hostPath.replace(/\\/g, "/");
-	if (normalized.startsWith(hostAgentDir)) {
-		const relative = normalized.substring(hostAgentDir.length);
-		return CONTAINER_AGENT_DIR + relative;
-	}
-	return hostPath;
-}
 
 export interface RpcBridgeOptions {
 	/** Path to pi-coding-agent cli.js. Auto-resolved if omitted. */
@@ -398,8 +338,9 @@ export class RpcBridge {
 		for (let i = 0; i < agentArgs.length; i++) {
 			const arg = agentArgs[i];
 			if (arg === "--cwd") {
-				// Each pool slot's worktree is mounted as /workspace
-				remappedArgs.push("--cwd", "/workspace");
+				// Use the container-internal worktree path from bridgeOptions.cwd
+				const containerCwd = this.options.cwd || "/workspace";
+				remappedArgs.push("--cwd", containerCwd);
 				i++; // skip the next arg (the host cwd path)
 			} else if (arg === "--system-prompt") {
 				// session-prompts/ dir is mounted at /tmp/session-prompts/
