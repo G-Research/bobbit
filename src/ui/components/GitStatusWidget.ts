@@ -41,6 +41,7 @@ export class GitStatusWidget extends LitElement {
     @state() private _commits: Array<{sha:string;shortSha:string;message:string;author:string;timestamp:string;filesChanged:number;insertions:number;deletions:number}> = [];
     @state() private _commitsError: string | null = null;
     @state() private _commitsDirection: 'ahead' | 'behind' = 'ahead';
+    @state() private _commitsVs?: 'primary';
 
     private _modalEl: HTMLElement | null = null;
     private _commitsModalEl: HTMLElement | null = null;
@@ -60,6 +61,8 @@ export class GitStatusWidget extends LitElement {
     @state() private pullError = '';
     @state() private pushing = false;
     @state() private pushError = '';
+    @state() private mergingPrimary = false;
+    @state() private mergePrimaryError = '';
 
     private _dropdownEl: HTMLElement | null = null;
 
@@ -129,72 +132,93 @@ export class GitStatusWidget extends LitElement {
         }
     }
 
-    /** Terse pill indicator: ↑ unpushed, ↗ not merged to primary, ✓ all good */
-    private _pillIndicator() {
-        if (!this.isOnPrimary && this.mergedIntoPrimary && !this.unpushed) {
-            // All work is on primary — nothing to flag
-            return nothing;
+    /** Pill segments: ~N dirty, ↓N behind primary (red), ↑N ahead primary (blue) */
+    private _pillSegments() {
+        const segments = [];
+        // Dirty files
+        if (!this.clean && this.statusFiles.length > 0) {
+            segments.push(html`<span class="text-amber-600 dark:text-amber-400 shrink-0" style="font-weight:500">~${this.statusFiles.length}</span>`);
         }
-        if (this.unpushed) {
-            return html`<span class="text-amber-600 dark:text-amber-400 shrink-0">↑</span>`;
+        // Behind primary (red)
+        if (!this.isOnPrimary && this.behindPrimary > 0) {
+            segments.push(html`<span class="text-red-600 dark:text-red-400 shrink-0" style="font-weight:500">↓${this.behindPrimary}</span>`);
         }
-        if (!this.isOnPrimary && !this.mergedIntoPrimary) {
-            return html`<span class="text-blue-600 dark:text-blue-400 shrink-0">↗</span>`;
+        // Ahead of primary (blue)
+        if (!this.isOnPrimary && this.aheadOfPrimary > 0) {
+            segments.push(html`<span class="text-blue-600 dark:text-blue-400 shrink-0" style="font-weight:500">↑${this.aheadOfPrimary}</span>`);
         }
-        return nothing;
+        return segments;
     }
 
     private _renderRemoteStatus() {
+        // Remote tracking branch status — only show when there's something to report
         if (this.isOnPrimary) {
-            // On primary branch — show ahead/behind vs remote
+            // On primary: show ahead/behind remote
             if (this.ahead > 0 && this.behind > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400"><span style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>, <span style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote</span> ${this._renderPullButton()}`;
+                return html`<div class="text-muted-foreground">
+                    Remote: <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>,
+                    <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span>
+                    ${this._renderPullButton()}
+                </div>`;
             }
             if (this.ahead > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
+                return html`<div class="text-muted-foreground">
+                    <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed</span> to remote
+                    ${this._renderPushButton()}
+                </div>`;
             }
             if (this.behind > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span> ${this._renderPullButton()}`;
+                return html`<div class="text-muted-foreground">
+                    <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote
+                    ${this._renderPullButton()}
+                </div>`;
             }
-            return html`<span class="text-green-600 dark:text-green-400">up to date with remote</span>`;
+            return nothing; // up to date — don't clutter
         }
 
-        // On a feature branch
-        if (this.mergedIntoPrimary) {
-            return html`<span class="text-green-600 dark:text-green-400">merged into ${this.primaryBranch}</span>`;
-        }
+        // Feature branch: only show unpushed warning
         if (!this.hasUpstream) {
-            return html`<span class="text-amber-600 dark:text-amber-400">local only — not pushed</span>`;
+            return html`<div class="text-amber-600 dark:text-amber-400">Not pushed to remote ${this._renderPushButton()}</div>`;
         }
         if (this.ahead > 0) {
-            return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
+            return html`<div class="text-muted-foreground">
+                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed</span> to remote
+                ${this._renderPushButton()}
+            </div>`;
         }
-        return html`<span class="text-green-600 dark:text-green-400">pushed to remote branch</span>`;
+        return nothing; // pushed and up to date — hide
     }
 
     private _renderPrimaryStatus() {
-        if (this.isOnPrimary) return nothing;
-
-        const primary = this.primaryBranch;
-        if (this.mergedIntoPrimary && this.behindPrimary === 0) {
-            return nothing; // Already shown as "merged into master" in remote status
+        if (this.isOnPrimary) {
+            return html`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
         }
-        if (this.mergedIntoPrimary && this.behindPrimary > 0) {
-            return html`<div class="text-muted-foreground">
-                ${primary} is <span class="text-blue-600 dark:text-blue-400">${this.behindPrimary} commit${this.behindPrimary > 1 ? 's' : ''} ahead</span> of this branch
-            </div>`;
+        if (this.mergedIntoPrimary && this.behindPrimary === 0) {
+            return html`<div class="text-green-600 dark:text-green-400">Merged into origin/${this.primaryBranch}</div>`;
         }
         if (this.aheadOfPrimary > 0 && this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                vs ${primary}: <span class="text-blue-600 dark:text-blue-400">${this.aheadOfPrimary} ahead</span>, <span class="text-amber-600 dark:text-amber-400">${this.behindPrimary} behind</span>
+                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>,
+                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
+                origin/${this.primaryBranch}
+                ${this._renderMergePrimaryButton()}
             </div>`;
         }
         if (this.aheadOfPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                vs ${primary}: <span class="text-blue-600 dark:text-blue-400">${this.aheadOfPrimary} commit${this.aheadOfPrimary > 1 ? 's' : ''} not yet merged</span>
+                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
+                of origin/${this.primaryBranch}
+                ${!this.prState ? this._renderAskPrButton() : nothing}
             </div>`;
         }
-        return nothing;
+        if (this.behindPrimary > 0) {
+            return html`<div class="text-muted-foreground">
+                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
+                origin/${this.primaryBranch}
+                ${this._renderMergePrimaryButton()}
+            </div>`;
+        }
+        return html`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
     }
 
     /** Small PR status icon + number for the pill */
@@ -302,6 +326,42 @@ export class GitStatusWidget extends LitElement {
                 ` : nothing}
             </div>
         `;
+    }
+
+    private _renderMergePrimaryButton() {
+        return html`<button
+            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            ?disabled=${this.mergingPrimary}
+            @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleMergePrimary(); }}
+        >${this.mergingPrimary ? 'Merging\u2026' : 'Merge master'}</button>${this.mergePrimaryError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
+    }
+
+    private _handleMergePrimary() {
+        this.mergingPrimary = true;
+        this.mergePrimaryError = '';
+        this.dispatchEvent(new CustomEvent('git-merge-primary', {
+            bubbles: true,
+            composed: true,
+        }));
+    }
+
+    public setMergePrimaryResult(error?: string) {
+        this.mergingPrimary = false;
+        this.mergePrimaryError = error || '';
+    }
+
+    private _renderAskCommitButton() {
+        return html`<button
+            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500"
+            @click=${(e: MouseEvent) => { e.stopPropagation(); this.dispatchEvent(new CustomEvent('ask-agent-commit', { bubbles: true, composed: true })); }}
+        >Ask agent to commit</button>`;
+    }
+
+    private _renderAskPrButton() {
+        return html`<button
+            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            @click=${(e: MouseEvent) => { e.stopPropagation(); this.dispatchEvent(new CustomEvent('ask-agent-pr', { bubbles: true, composed: true })); }}
+        >Ask agent to raise PR</button>`;
     }
 
     private _renderPullButton() {
@@ -478,17 +538,21 @@ export class GitStatusWidget extends LitElement {
         }
     }
 
-    private async _fetchCommits(direction: 'ahead' | 'behind' = 'ahead') {
+    private async _fetchCommits(direction: 'ahead' | 'behind' = 'ahead', vs?: 'primary') {
         this._commitsLoading = true;
         this._commits = [];
         this._commitsError = null;
         this._commitsDirection = direction;
+        this._commitsVs = vs;
         this._showCommitsModal();
 
         const basePath = this.sessionId
             ? `/api/sessions/${this.sessionId}/commits`
             : `/api/goals/${this.goalId}/commits`;
-        const base = direction === 'behind' ? `${basePath}?direction=behind` : basePath;
+        const params = new URLSearchParams();
+        if (direction === 'behind') params.set('direction', 'behind');
+        if (vs) params.set('vs', vs);
+        const base = params.toString() ? `${basePath}?${params}` : basePath;
         try {
             const headers: Record<string, string> = {};
             if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
@@ -557,7 +621,7 @@ export class GitStatusWidget extends LitElement {
                 <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeCommitsModal()}></div>
                 <div style="position:relative;width:100%;max-width:600px;max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
                     <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
-                        <span class="text-sm font-medium text-foreground">${this._commits.length} ${this._commitsDirection === 'behind' ? 'Incoming' : 'Unpushed'} Commit${this._commits.length !== 1 ? 's' : ''}</span>
+                        <span class="text-sm font-medium text-foreground">${this._commits.length} ${this._commitsVs === 'primary' ? (this._commitsDirection === 'behind' ? 'Behind Master' : 'Ahead of Master') : (this._commitsDirection === 'behind' ? 'Incoming' : 'Unpushed')} Commit${this._commits.length !== 1 ? 's' : ''}</span>
                         <button
                             style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
                             class="hover:text-foreground hover:bg-muted/50"
@@ -600,22 +664,16 @@ export class GitStatusWidget extends LitElement {
         return new Date(timestamp).toLocaleDateString();
     }
 
-    /** Render the dropdown content into the portaled element */
     private _renderDropdownContent() {
         return html`
             <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
                 <span>⎇</span>
                 <span class="break-all">${this.branch}</span>
-                ${!this.isOnPrimary
-                    ? html`<span class="text-[10px] text-muted-foreground font-normal">(feature)</span>`
-                    : nothing}
             </div>
 
             <div class="flex flex-col gap-1 mb-2">
-                <div class="text-muted-foreground">
-                    Remote: ${this._renderRemoteStatus()}
-                </div>
                 ${this._renderPrimaryStatus()}
+                ${this._renderRemoteStatus()}
             </div>
 
             ${this._renderPrSection()}
@@ -623,7 +681,10 @@ export class GitStatusWidget extends LitElement {
             ${this.statusFiles.length > 0
                 ? html`
                       <div class="border-t border-border pt-2 mt-2">
-                          <div class="text-muted-foreground mb-1 font-medium">Changes</div>
+                          <div class="text-muted-foreground mb-1 flex items-center gap-2">
+                              <span class="text-amber-600 dark:text-amber-400">${this.statusFiles.length} uncommitted change${this.statusFiles.length !== 1 ? 's' : ''}</span>
+                              ${this._renderAskCommitButton()}
+                          </div>
                           <div class="flex flex-col gap-0.5 overflow-y-auto" style="max-height:200px">
                               ${this.statusFiles.map(
                                   (f) => html`
@@ -655,7 +716,11 @@ export class GitStatusWidget extends LitElement {
     render() {
         if (!this.branch && !this.loading) return nothing;
 
-        const summaryColor = this.clean ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400';
+        const segments = this._pillSegments();
+        // Show 'clean' only when no other indicators are present and no PR
+        const showClean = this.clean && segments.length === 0 && !this.prState
+            && (this.isOnPrimary || this.mergedIntoPrimary)
+            && (this.isOnPrimary || this.aheadOfPrimary === 0);
 
         return html`
             <button
@@ -667,10 +732,8 @@ export class GitStatusWidget extends LitElement {
                     ? html`<span class="animate-pulse shrink-0">⎇</span>`
                     : html`<span class="shrink-0">⎇</span>`}
                 <span class="truncate">${this.branch}</span>
-                ${this.summary
-                    ? html`<span class="${summaryColor} font-medium shrink-0">${this.summary}</span>`
-                    : nothing}
-                ${this._pillIndicator()}
+                ${showClean ? html`<span class="text-green-600 dark:text-green-400 font-medium shrink-0">clean</span>` : nothing}
+                ${segments}
                 ${this._prPillIcon()}
             </button>
         `;

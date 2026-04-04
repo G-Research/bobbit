@@ -3840,9 +3840,26 @@ async function handleApiRoute(
 
 			const limit = 50;
 			const direction = url.searchParams.get('direction'); // 'behind' to show incoming commits
-			const rangeSpec = direction === 'behind' && hasUpstream
-				? 'HEAD..@{u}'
-				: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
+			const vs = url.searchParams.get('vs'); // 'primary' to compare vs origin/master
+			let rangeSpec: string;
+			if (vs === 'primary') {
+				// Compare against origin/<primary>
+				let primaryBranch = 'master';
+				try {
+					const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd);
+					primaryBranch = remoteHead.replace('refs/remotes/origin/', '');
+				} catch {
+					try { await execGit('git rev-parse --verify refs/heads/master', cwd); primaryBranch = 'master'; }
+					catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd); primaryBranch = 'main'; } catch {} }
+				}
+				let primaryRef = primaryBranch;
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd); primaryRef = `origin/${primaryBranch}`; } catch {}
+				rangeSpec = direction === 'behind' ? `HEAD..${primaryRef}` : `${primaryRef}..HEAD`;
+			} else {
+				rangeSpec = direction === 'behind' && hasUpstream
+					? 'HEAD..@{u}'
+					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
+			}
 
 			const out = await execGit(`git log --format="%H|%h|%s|%an|%aI" --shortstat ${rangeSpec}`, cwd, 10000);
 			const lines = out.split('\n');
@@ -3921,6 +3938,33 @@ async function handleApiRoute(
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
 			const { stdout } = await execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 });
+			json({ ok: true, output: stdout.trim() });
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			json({ error: msg }, 500);
+		}
+		return;
+	}
+
+	// POST /api/sessions/:id/git-merge-primary — merge origin/master into current branch
+	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-merge-primary')) {
+		const id = url.pathname.split('/')[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const cwd = session.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		try {
+			// Detect primary branch
+			let primaryBranch = "master";
+			try {
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
+				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
+			} catch {
+				try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+			}
+			await execAsync(`git fetch origin ${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			const { stdout } = await execAsync(`git merge origin/${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			json({ ok: true, output: stdout.trim() });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);

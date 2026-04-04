@@ -69,6 +69,9 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onGitPull?: () => Promise<string | undefined>;
 	@property({ attribute: false }) onGitPush?: () => Promise<string | undefined>;
 	@property({ attribute: false }) onGitFetch?: () => void;
+	@property({ attribute: false }) onGitMergePrimary?: () => Promise<string | undefined>;
+	@property({ attribute: false }) onAskAgentCommit?: () => void;
+	@property({ attribute: false }) onAskAgentPr?: () => void;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
 	@property({ attribute: false }) onApiKeyRequired?: (provider: string) => Promise<boolean>;
 	// Optional callback called before sending a message
@@ -872,6 +875,9 @@ export class AgentInterface extends LitElement {
 								@git-pull=${this._handleGitPull}
 								@git-push=${this._handleGitPush}
 								@git-fetch=${this._handleGitFetch}
+								@git-merge-primary=${this._handleGitMergePrimary}
+								@ask-agent-commit=${this._handleAskAgentCommit}
+								@ask-agent-pr=${this._handleAskAgentPr}
 							></git-status-widget>` : nothing}
 						</div>
 						` : ''}
@@ -952,6 +958,25 @@ export class AgentInterface extends LitElement {
 		} catch (err) {
 			widget.setPullResult(err instanceof Error ? err.message : 'Network error');
 		}
+	}
+
+	private async _handleGitMergePrimary(e: Event): Promise<void> {
+		if (!this.onGitMergePrimary) return;
+		const widget = e.target as import('./GitStatusWidget.js').GitStatusWidget;
+		try {
+			const error = await this.onGitMergePrimary();
+			widget.setMergePrimaryResult(error);
+		} catch (err) {
+			widget.setMergePrimaryResult(err instanceof Error ? err.message : 'Network error');
+		}
+	}
+
+	private _handleAskAgentCommit(): void {
+		this.onAskAgentCommit?.();
+	}
+
+	private _handleAskAgentPr(): void {
+		this.onAskAgentPr?.();
 	}
 }
 

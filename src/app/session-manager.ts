@@ -960,6 +960,31 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					return err instanceof Error ? err.message : 'Network error';
 				}
 			};
+			state.chatPanel.agentInterface.onGitMergePrimary = async () => {
+				try {
+					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-merge-primary`, {
+						method: 'POST',
+					});
+					if (res.ok) {
+						refreshGitStatusForSession(sessionId);
+						return undefined;
+					}
+					const data = await res.json().catch(() => ({ error: 'Merge failed' }));
+					return data.error || 'Merge failed';
+				} catch (err) {
+					return err instanceof Error ? err.message : 'Network error';
+				}
+			};
+			state.chatPanel.agentInterface.onAskAgentCommit = () => {
+				if (state.remoteAgent) {
+					state.remoteAgent.prompt('Please commit your current changes with an appropriate commit message.');
+				}
+			};
+			state.chatPanel.agentInterface.onAskAgentPr = () => {
+				if (state.remoteAgent) {
+					state.remoteAgent.prompt('Please raise a pull request for the current branch with an appropriate title and description.');
+				}
+			};
 			state.chatPanel.agentInterface.onPrMerge = async (method: string, admin?: boolean) => {
 				const sd = state.gatewaySessions.find((s) => s.id === sessionId);
 				const mergeUrl = sd?.goalId
