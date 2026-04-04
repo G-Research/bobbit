@@ -22,6 +22,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
+import { toDockerPath } from "./rpc-bridge.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -61,6 +62,8 @@ export interface ClaimOptions {
 	branch?: string;
 	/** Base ref to branch from (default: HEAD on default branch) */
 	from?: string;
+	/** Host path to the shared bare repo for team collaboration */
+	teamRepoPath?: string;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -191,6 +194,32 @@ export class SandboxPool {
 				await git(["pull", "--ff-only", "origin", this._defaultBranch], slot.worktreePath, 30_000);
 			} catch {
 				// Pull failure is non-fatal — slot is usable on current HEAD
+			}
+		}
+
+		// Set up team remote and post-commit hook for shared team repo
+		if (opts?.teamRepoPath) {
+			try {
+				const repoName = path.basename(opts.teamRepoPath); // "team-<goalId>.git"
+				const containerRepoPath = `/team-repos/${repoName}`;
+
+				// Add team remote — URL is the container-internal path.
+				// Written directly to .git/config to avoid MSYS path mangling on Windows
+				// (Git Bash converts /team-repos/... to C:/Program Files/Git/team-repos/...).
+				// The container sees the same .git/config via bind-mount and the
+				// /team-repos/ path resolves correctly inside the container.
+				const gitConfigPath = path.join(slot.worktreePath, ".git", "config");
+				const remoteSection = `\n[remote "team"]\n\turl = ${containerRepoPath}\n\tfetch = +refs/heads/*:refs/remotes/team/*\n`;
+				fs.appendFileSync(gitConfigPath, remoteSection);
+
+				// Install non-blocking post-commit hook
+				const hookDir = path.join(slot.worktreePath, ".git", "hooks");
+				fs.mkdirSync(hookDir, { recursive: true });
+				const hookScript = '#!/bin/sh\nbranch=$(git symbolic-ref --short HEAD 2>/dev/null)\n[ -n "$branch" ] && git push team "$branch" 2>/dev/null &\n';
+				fs.writeFileSync(path.join(hookDir, "post-commit"), hookScript, { mode: 0o755 });
+			} catch (err) {
+				console.warn(`[sandbox-pool] Failed to set up team remote for slot ${slot.shortId}:`, err);
+				// Non-fatal — the slot is still usable, just without auto-push
 			}
 		}
 
@@ -345,7 +374,7 @@ export class SandboxPool {
 
 	/** Build docker run args for a pool container. */
 	private _buildDockerArgs(worktreePath: string): string[] {
-		return buildDockerRunArgs({
+		const args = buildDockerRunArgs({
 			image: this.options.image,
 			workspaceDir: worktreePath,
 			label: this.label,
@@ -356,6 +385,61 @@ export class SandboxPool {
 			sandboxCredentials: this.options.sandboxCredentials,
 			sandboxNetwork: this.options.sandboxNetwork,
 		});
+
+		// Mount the pool directory so team shared repos are accessible inside containers.
+		// New subdirs created on the host (e.g. team-<goalId>.git) are immediately
+		// visible inside running containers — standard Docker bind-mount behavior.
+		// Insert before the last 3 elements (image, "sleep", "infinity") so the
+		// -v flag is in the correct position for docker run.
+		const insertIdx = args.length - 3;
+		args.splice(insertIdx, 0, "-v", `${toDockerPath(this._poolDir)}:/team-repos`);
+
+		return args;
+	}
+
+	// ── Team shared repo ──────────────────────────────────────────────────
+
+	/**
+	 * Create a shared bare git repo for a sandboxed team.
+	 * Idempotent — returns existing path if already created.
+	 */
+	async createTeamRepo(goalId: string, sourceRepo: string, branch: string): Promise<string> {
+		const repoPath = path.join(this._poolDir, `team-${goalId}.git`);
+		if (fs.existsSync(repoPath)) return repoPath; // idempotent
+
+		await execFileAsync("git", ["clone", "--bare", sourceRepo, repoPath], {
+			timeout: 60_000,
+			cwd: this.options.repoPath,
+		});
+
+		// Fetch the goal branch into the bare repo
+		try {
+			await execFileAsync("git", ["fetch", "origin", branch], { cwd: repoPath, timeout: 30_000 });
+		} catch { /* branch may not exist on origin yet */ }
+
+		console.log(`[sandbox-pool] Created team repo for goal ${goalId} at ${repoPath}`);
+		return repoPath;
+	}
+
+	/**
+	 * Destroy the shared bare repo for a team. Retries on Windows lock failures.
+	 */
+	async destroyTeamRepo(goalId: string): Promise<void> {
+		const repoPath = path.join(this._poolDir, `team-${goalId}.git`);
+		const maxAttempts = 3;
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				await fs.promises.rm(repoPath, { recursive: true, force: true });
+				console.log(`[sandbox-pool] Destroyed team repo for goal ${goalId}`);
+				return;
+			} catch (err: any) {
+				if (attempt < maxAttempts && (err?.code === "EBUSY" || err?.code === "EPERM" || err?.code === "ENOTEMPTY")) {
+					await new Promise(r => setTimeout(r, 500 * attempt));
+					continue;
+				}
+				console.warn(`[sandbox-pool] Failed to remove team repo for goal ${goalId} after ${attempt} attempt(s): ${err?.code || err}`);
+			}
+		}
 	}
 
 	/** Checkout a branch in a slot's clone. */

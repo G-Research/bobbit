@@ -96,6 +96,8 @@ interface TeamEntry {
 	teamLeadSessionId: string | null;
 	agents: TeamAgent[];
 	maxConcurrent: number;
+	/** Host path to the shared bare repo for sandboxed teams. */
+	teamRepoPath?: string;
 	/** Unsubscribe from team lead RPC events (runtime-only, not persisted). */
 	unsubscribeTeamLeadEvents?: () => void;
 }
@@ -223,6 +225,7 @@ export class TeamManager {
 				createdAt: a.createdAt,
 			})),
 			maxConcurrent: entry.maxConcurrent,
+			teamRepoPath: entry.teamRepoPath,
 		};
 	}
 
@@ -269,6 +272,7 @@ export class TeamManager {
 					createdAt: a.createdAt,
 				})),
 				maxConcurrent: p.maxConcurrent,
+				teamRepoPath: p.teamRepoPath,
 			};
 			this.teams.set(p.goalId, entry);
 
@@ -507,8 +511,17 @@ export class TeamManager {
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.
 		// When sandboxed, claim a pool slot and checkout the goal branch.
 		const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
+
+		// Create shared team repo for sandboxed teams
+		let teamRepoPath: string | undefined;
+		if (sandboxed && this.sessionManager.sandboxPool && goal.repoPath && goal.branch) {
+			teamRepoPath = await this.sessionManager.sandboxPool.createTeamRepo(
+				goalId, goal.repoPath, goal.branch,
+			);
+		}
+
 		const sandboxClaim = sandboxed && goal.branch
-			? { branch: goal.branch }
+			? { branch: goal.branch, teamRepoPath }
 			: undefined;
 
 		const session = await this.sessionManager.createSession(
@@ -543,6 +556,7 @@ export class TeamManager {
 			teamLeadSessionId: session.id,
 			agents: [],
 			maxConcurrent: 12,
+			teamRepoPath,
 		};
 		this.teams.set(goalId, entry);
 		this.sessionToGoal.set(session.id, goalId);
@@ -758,7 +772,7 @@ export class TeamManager {
 			// Create the session with the role agent's cwd.
 			// For sandboxed members, claim a pool slot and checkout their branch from the goal branch.
 			const memberSandboxClaim = memberSandboxed && branchName && goal.branch
-				? { branch: branchName, from: `origin/${goal.branch}` }
+				? { branch: branchName, from: `origin/${goal.branch}`, teamRepoPath: entry.teamRepoPath }
 				: undefined;
 
 			const session = await this.sessionManager.createSession(
@@ -1120,6 +1134,11 @@ export class TeamManager {
 			}
 		}
 
+		// Clean up shared team repo after all agent containers are stopped
+		if (entry.teamRepoPath && this.sessionManager.sandboxPool) {
+			await this.sessionManager.sandboxPool.destroyTeamRepo(goalId);
+		}
+
 		// Keep the team lead session alive — do NOT terminate it.
 		// The team lead will await further instructions.
 
@@ -1155,6 +1174,11 @@ export class TeamManager {
 			} catch (err) {
 				console.error(`[team-manager] Error dismissing agent ${sessionId} during team teardown:`, err);
 			}
+		}
+
+		// Clean up shared team repo after all agent containers are stopped
+		if (entry.teamRepoPath && this.sessionManager.sandboxPool) {
+			await this.sessionManager.sandboxPool.destroyTeamRepo(goalId);
 		}
 
 		// Terminate the team lead session — persist worktree info first so purge can clean up

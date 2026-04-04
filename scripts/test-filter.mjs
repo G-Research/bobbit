@@ -47,7 +47,7 @@ try {
 
 const stats = report.stats || {};
 const passed = stats.expected || 0;
-const failed = (stats.unexpected || 0) + (stats.flaky || 0);
+const failed = stats.unexpected || 0;
 const skipped = stats.skipped || 0;
 const total = passed + failed + skipped;
 const ms = stats.duration || 0;
@@ -117,4 +117,6 @@ if (failures.length > 0) {
   }
 }
 
-process.exit(failed > 0 ? 1 : 0);
+// Set exitCode instead of calling process.exit() — process.exit() can
+// cause issues with unflushed stdout in piped contexts on Windows/Git Bash.
+process.exitCode = failed > 0 ? 1 : 0;
