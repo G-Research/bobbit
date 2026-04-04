@@ -119,21 +119,7 @@ test.describe("Sandbox Docker — /proc/1/environ", () => {
 		}
 	});
 
-	test("buildDockerRunArgs output has no token env vars", async () => {
-		const { buildDockerRunArgs } = await import("../../dist/server/agent/docker-args.js");
-
-		const args = buildDockerRunArgs({
-			image: "node:20-slim",
-			workspaceDir: os.tmpdir(),
-		});
-
-		const joined = args.join(" ");
-		expect(joined).not.toContain("BOBBIT_TOKEN");
-		expect(joined).not.toContain("BOBBIT_GATEWAY_URL");
-
-		// Sanity: other env vars are present
-		expect(joined).toContain("NODE_TLS_REJECT_UNAUTHORIZED=0");
-	});
+	// buildDockerRunArgs — migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
 });
 
 // ── Shared team repo tests ─────────────────────────────────────────────────
@@ -179,42 +165,7 @@ test.describe("Sandbox Docker — shared team repo", () => {
 		}
 	});
 
-	test("createTeamRepo creates a valid bare git repo on disk", { timeout: 120_000 }, async () => {
-		const result = await pool!.createTeamRepo(goalId, repoPath, "master");
-		teamRepoPath = result;
-
-		// Verify the path contains the goal ID
-		expect(result).toContain(`team-${goalId}.git`);
-
-		// Verify the directory exists
-		expect(fs.existsSync(result)).toBe(true);
-
-		// Verify it's a valid bare git repo (has HEAD file)
-		const headPath = path.join(result, "HEAD");
-		expect(fs.existsSync(headPath)).toBe(true);
-
-		// Verify it has refs directory (bare repo structure)
-		const refsPath = path.join(result, "refs");
-		expect(fs.existsSync(refsPath)).toBe(true);
-	});
-
-	test("createTeamRepo is idempotent — same path returned on second call", { timeout: 120_000 }, async () => {
-		const first = await pool!.createTeamRepo(goalId, repoPath, "master");
-		const second = await pool!.createTeamRepo(goalId, repoPath, "master");
-
-		expect(first).toBe(second);
-		// Repo should still be valid
-		expect(fs.existsSync(path.join(first, "HEAD"))).toBe(true);
-	});
-
-	test("destroyTeamRepo removes the bare repo directory", { timeout: 120_000 }, async () => {
-		const destroyGoalId = `test-destroy-${Date.now()}`;
-		const created = await pool!.createTeamRepo(destroyGoalId, repoPath, "master");
-		expect(fs.existsSync(created)).toBe(true);
-
-		await pool!.destroyTeamRepo(destroyGoalId);
-		expect(fs.existsSync(created)).toBe(false);
-	});
+	// createTeamRepo, idempotent, destroyTeamRepo — migrated to tests/sandbox-team-repo.test.ts (no Docker needed)
 
 	test("pool directory is mounted at /team-repos inside container", { timeout: 120_000 }, async () => {
 		// Claim a slot — the pool dir should be mounted at /team-repos
