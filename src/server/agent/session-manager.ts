@@ -11,7 +11,8 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchIndex } from "../search/search-index.js";
 import { extractTextFromMessage } from "../search/message-extractor.js";
-import { RpcBridge, type RpcBridgeOptions, containerPathToHost, hostPathToContainer } from "./rpc-bridge.js";
+import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -1408,17 +1409,21 @@ export class SessionManager {
 
 		// Delegate sessions: dormant entries only — restored on-demand via addClient()
 		for (const ps of delegates) {
-			if (!ps.agentSessionFile || !fs.existsSync(ps.agentSessionFile)) {
-				// Archive instead of remove — preserves metadata and search index refs
+			if (!ps.agentSessionFile) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
+			// Existence check deferred to addClient() revive — add as dormant unconditionally
+			// (the file is in the agent's coordinate system; checking it here would require
+			// async docker exec for sandbox sessions, and the file may not be needed until
+			// the user opens the session)
 			this.addDormantSession(ps);
 		}
 
-		// Stuck worktree recovery: warn about sessions with worktreePath set but directory missing
+		// Stuck worktree recovery: warn about sessions with worktreePath set but directory missing.
+		// Skip sandboxed sessions — their worktreePath is a container-internal path.
 		for (const ps of persisted) {
-			if (ps.worktreePath && !fs.existsSync(ps.worktreePath)) {
+			if (ps.worktreePath && !ps.sandboxed && !fs.existsSync(ps.worktreePath)) {
 				console.warn(`[session-manager] Session "${ps.title}" (${ps.id}) has worktreePath "${ps.worktreePath}" but directory does not exist`);
 			}
 		}
@@ -1515,8 +1520,10 @@ export class SessionManager {
 				return;
 			}
 		}
-		if (!fs.existsSync(ps.agentSessionFile)) {
-			console.log(`[session-manager] Archiving ${ps.id} — agent session file missing: ${ps.agentSessionFile} (metadata preserved)`);
+		const fileCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
+		if (!fileFound) {
+			console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
 			sessionStore.archive(ps.id);
 			return;
 		}
@@ -2173,12 +2180,10 @@ export class SessionManager {
 					return;
 				}
 
-				// The agent returns a container-internal path (e.g. /home/node/.bobbit/agent/sessions/...).
-				// Translate to the host-side equivalent so fs.existsSync works on restart.
-				const rawSessionFile = stateResp.data.sessionFile;
-				const agentSessionFile = session.sandboxed
-					? containerPathToHost(rawSessionFile)
-					: rawSessionFile;
+				// Store the path as returned by the agent — always in the agent's
+				// coordinate system (container path for sandbox, host path for local).
+				// The session-fs module handles routing reads/checks to the right place.
+				const agentSessionFile = stateResp.data.sessionFile;
 
 				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
 				return; // success
@@ -2588,8 +2593,9 @@ export class SessionManager {
 
 		await rpcClient.start();
 
-		// Restore conversation from session file
-		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
+		// Restore conversation from session file — path is already in agent coordinate system.
+		const roleFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
+		if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 			const switchResp = await rpcClient.sendCommand(
 				{ type: "switch_session", sessionPath: agentSessionFile },
 				15_000,
@@ -2639,11 +2645,7 @@ export class SessionManager {
 		let agentSessionFile: string | undefined;
 		try {
 			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) {
-				agentSessionFile = session.sandboxed
-					? containerPathToHost(stateResp.data?.sessionFile)
-					: stateResp.data?.sessionFile;
-			}
+			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
 		} catch {
 			const persisted = this.resolveStoreForSession(id).get(id);
 			agentSessionFile = persisted?.agentSessionFile;
@@ -2734,10 +2736,10 @@ export class SessionManager {
 
 		await rpcClient.start();
 
-		if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-			const switchPath = session.sandboxed ? hostPathToContainer(agentSessionFile) : agentSessionFile;
+		const persoFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
+		if (agentSessionFile && await sessionFileExists(persoFileCtx, agentSessionFile, this.sandboxManager)) {
 			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: switchPath },
+				{ type: "switch_session", sessionPath: agentSessionFile },
 				15_000,
 			);
 			if (!switchResp.success) {
@@ -2976,20 +2978,19 @@ export class SessionManager {
 	}
 
 	/** Parse the .jsonl file for an archived session and return messages. */
-	getArchivedMessages(id: string): unknown[] {
+	async getArchivedMessages(id: string): Promise<unknown[]> {
 		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived || !ps.agentSessionFile) return [];
 		try {
-			let filePath = ps.agentSessionFile;
-			if (!fs.existsSync(filePath)) return [];
-			const content = fs.readFileSync(filePath, "utf-8");
+			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			if (!content) return [];
 			const lines = content.trim().split("\n");
 			const messages: unknown[] = [];
 			for (const line of lines) {
 				if (!line.trim()) continue;
 				try {
 					const entry = JSON.parse(line);
-					// Extract chat messages (user and assistant messages)
 					if (entry.type === "message" && entry.message) {
 						messages.push(entry.message);
 					}
@@ -3094,12 +3095,11 @@ export class SessionManager {
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
 		// Delete .jsonl file
-		try {
-			if (ps.agentSessionFile && fs.existsSync(ps.agentSessionFile)) {
-				fs.unlinkSync(ps.agentSessionFile);
-			}
-		} catch (err) {
-			console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
+		if (ps.agentSessionFile) {
+			const purgeCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
+				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
+			});
 		}
 
 		// Delete session prompt file
@@ -3245,7 +3245,7 @@ export class SessionManager {
 		// If session is dormant (failed restore), try to revive it
 		if (session.status === "terminated") {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && fs.existsSync(ps.agentSessionFile)) {
+			if (ps && ps.agentSessionFile) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
 				this.restoreSession(ps)
 					.then(() => {
@@ -3322,17 +3322,12 @@ export class SessionManager {
 		console.log(`[session-manager] Force-aborting session ${id} — killing agent process`);
 
 		// Get the agent session file before killing so we can restore.
-		// getState() returns container-internal path for sandboxed sessions — translate to host.
+		// Path is in the agent's coordinate system — no translation needed.
 		let agentSessionFile: string | undefined;
 		try {
 			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) {
-				agentSessionFile = session.sandboxed
-					? containerPathToHost(stateResp.data?.sessionFile)
-					: stateResp.data?.sessionFile;
-			}
+			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
 		} catch {
-			// Process may be unresponsive — try the persisted store (already host path)
 			const persisted = this.resolveStoreForSession(id).get(id);
 			agentSessionFile = persisted?.agentSessionFile;
 		}
@@ -3394,11 +3389,11 @@ export class SessionManager {
 
 			await rpcClient.start();
 
-			// Resume session if we have the session file
-			if (agentSessionFile && fs.existsSync(agentSessionFile)) {
-				const abortSwitchPath = session.sandboxed ? hostPathToContainer(agentSessionFile) : agentSessionFile;
+			// Resume session if we have the session file — path in agent coordinate system
+			const abortFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
+			if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
 				const switchResp = await rpcClient.sendCommand(
-					{ type: "switch_session", sessionPath: abortSwitchPath },
+					{ type: "switch_session", sessionPath: agentSessionFile },
 					15_000,
 				);
 				if (!switchResp.success) {
