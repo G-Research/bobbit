@@ -317,9 +317,12 @@ export class RpcBridge {
 
 		console.log(`[rpc-bridge] Docker exec args: ${redactDockerArgs(execArgs)}`);
 
+		// NOTE: cwd for the host-side spawn must be a valid host path.
+		// this.options.cwd may be a container-internal path (e.g. /workspace-wt/branch)
+		// that doesn't exist on the host. The container cwd is set via --cwd in the
+		// remapped agent args, so the host spawn doesn't need a specific cwd.
 		return spawn("docker", execArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
-			cwd: this.options.cwd,
 			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 		});
 	}
