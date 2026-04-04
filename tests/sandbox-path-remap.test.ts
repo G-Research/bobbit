@@ -79,9 +79,9 @@ describe('sandbox session path remapping', () => {
 		assert.strictEqual(result, containerPath, 'non-Windows /workspace/ paths should pass through');
 	});
 
-	it('should remap legacy .pi/agent/ host paths to container legacy mount', () => {
+	it('should pass through legacy .pi/agent/ host paths unchanged (no longer remapped)', () => {
 		const hostPath = '/home/testuser/.pi/agent/sessions/--workspace--/abc.jsonl';
 		const result = hostToContainerSessionPath(hostPath, TEST_HOME);
-		assert.strictEqual(result, '/home/node/.pi/agent/sessions/--workspace--/abc.jsonl');
+		assert.strictEqual(result, hostPath, 'legacy .pi paths should pass through unchanged');
 	});
 });

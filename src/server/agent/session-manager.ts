@@ -1503,7 +1503,6 @@ export class SessionManager {
 		// Handles both /home/node/.bobbit/agent/... and /workspace/C:/Users/... patterns.
 		if (!fs.existsSync(ps.agentSessionFile) && (
 			ps.agentSessionFile.startsWith("/home/node/.bobbit/agent/") ||
-			ps.agentSessionFile.startsWith("/home/node/.pi/agent/") ||
 			ps.agentSessionFile.startsWith("/workspace/")
 		)) {
 			const remapped = containerToHostSessionPathWithFallback(ps.agentSessionFile);
@@ -2959,7 +2958,6 @@ export class SessionManager {
 			// Remap stale container paths that were stored without host conversion
 			if (!fs.existsSync(filePath) && (
 				filePath.startsWith("/home/node/.bobbit/agent/") ||
-				filePath.startsWith("/home/node/.pi/agent/") ||
 				filePath.startsWith("/workspace/")
 			)) {
 				const remapped = containerToHostSessionPathWithFallback(filePath);

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setProjectRoot, bobbitConfigDir, bobbitStateDir } from "./bobbit-dir.js";
+import { setProjectRoot, bobbitConfigDir, bobbitStateDir, migrateFromLegacyPiDir } from "./bobbit-dir.js";
 import { scaffoldBobbitDir } from "./scaffold.js";
 import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
@@ -142,17 +142,8 @@ async function main() {
 	// Set project root early — all stores resolve paths from this
 	setProjectRoot(args.cwd);
 
-	// Warn about legacy ~/.pi state BEFORE scaffolding (scaffold creates .bobbit/)
-	const legacyPiDir = path.join(os.homedir(), ".pi");
-	if (fs.existsSync(path.join(legacyPiDir, "gateway-sessions.json")) && !fs.existsSync(path.join(args.cwd, ".bobbit"))) {
-		console.warn(
-			`\n⚠  Found legacy state in ~/.pi/ but no .bobbit/ folder.\n` +
-			`   Bobbit now stores state in <project-root>/.bobbit/state/.\n` +
-			`   Global agent data has moved from ~/.pi/agent/ to ~/.bobbit/agent/.\n` +
-			`   Your existing sessions/goals will not be visible until migrated.\n` +
-			`   Copy files manually from ~/.pi/ to .bobbit/state/, or start fresh.\n`
-		);
-	}
+	// Migrate legacy ~/.pi/agent/ to ~/.bobbit/agent/ if needed
+	migrateFromLegacyPiDir();
 
 	// Scaffold .bobbit/ on first run (creates config, extensions, state dirs)
 	scaffoldBobbitDir(args.cwd);

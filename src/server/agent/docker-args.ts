@@ -7,7 +7,6 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -110,19 +109,6 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	const hostSessionsDir = path.join(hostAgentDir, "sessions");
 	fs.mkdirSync(hostSessionsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`);
-
-	// Also mount legacy ~/.pi/agent/sessions/ if it exists (read-only), so that
-	// switch_session can restore sessions created before the .pi → .bobbit migration.
-	// The agent writes new sessions to .bobbit; this mount only provides read access
-	// to historical session files.
-	const legacySessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
-	try {
-		if (fs.statSync(legacySessionsDir).isDirectory()) {
-			args.push("-v", `${toDockerPath(legacySessionsDir)}:/home/node/.pi/agent/sessions:ro`);
-		}
-	} catch {
-		// Legacy .pi/agent/sessions/ doesn't exist — no mount needed
-	}
 
 	// Mount models.json (read-only) so the agent can discover available models.
 	const hostModelsJson = path.join(hostAgentDir, "models.json");
