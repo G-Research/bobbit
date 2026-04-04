@@ -960,19 +960,17 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					return err instanceof Error ? err.message : 'Network error';
 				}
 			};
-			state.chatPanel.agentInterface.onGitPushToMaster = async () => {
+			state.chatPanel.agentInterface.onGitSquashPush = async () => {
 				try {
-					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-push`, {
+					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-squash-push`, {
 						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({ target: 'master' }),
 					});
 					if (res.ok) {
 						refreshGitStatusForSession(sessionId);
 						return undefined;
 					}
-					const data = await res.json().catch(() => ({ error: 'Push failed' }));
-					return data.error || 'Push failed';
+					const data = await res.json().catch(() => ({ error: 'Squash push failed' }));
+					return data.error || 'Squash push failed';
 				} catch (err) {
 					return err instanceof Error ? err.message : 'Network error';
 				}

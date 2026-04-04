@@ -209,7 +209,7 @@ export class GitStatusWidget extends LitElement {
                 <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
                 of origin/${this.primaryBranch}
                 ${!this.prState ? this._renderAskPrButton() : nothing}
-                ${!this.prState ? this._renderPushToMasterButton() : nothing}
+                ${!this.prState && this.viewerIsAdmin ? this._renderSquashPushButton() : nothing}
             </div>`;
         }
         if (this.behindPrimary > 0) {
@@ -365,29 +365,30 @@ export class GitStatusWidget extends LitElement {
         >Ask agent to raise PR</button>`;
     }
 
-    @state() private pushingToMaster = false;
-    @state() private pushToMasterError = '';
+    @state() private squashPushing = false;
+    @state() private squashPushError = '';
 
-    private _renderPushToMasterButton() {
+    private _renderSquashPushButton() {
         return html`<button
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
-            ?disabled=${this.pushingToMaster}
-            @click=${(e: MouseEvent) => { e.stopPropagation(); this._handlePushToMaster(); }}
-        >${this.pushingToMaster ? 'Pushing\u2026' : 'Push to master'}</button>${this.pushToMasterError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.pushToMasterError}</span>` : nothing}`;
+            ?disabled=${this.squashPushing}
+            @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleSquashPush(); }}
+            title="Squash all branch commits into one and push directly to master"
+        >${this.squashPushing ? 'Pushing\u2026' : 'Squash push'}</button>${this.squashPushError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.squashPushError}</span>` : nothing}`;
     }
 
-    private _handlePushToMaster() {
-        this.pushingToMaster = true;
-        this.pushToMasterError = '';
-        this.dispatchEvent(new CustomEvent('git-push-to-master', {
+    private _handleSquashPush() {
+        this.squashPushing = true;
+        this.squashPushError = '';
+        this.dispatchEvent(new CustomEvent('git-squash-push', {
             bubbles: true,
             composed: true,
         }));
     }
 
-    public setPushToMasterResult(error?: string) {
-        this.pushingToMaster = false;
-        this.pushToMasterError = error || '';
+    public setSquashPushResult(error?: string) {
+        this.squashPushing = false;
+        this.squashPushError = error || '';
     }
 
     private _renderPullButton() {

@@ -3937,26 +3937,73 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const body = await readBody(req);
-			const target = body?.target; // 'master' to push directly to primary branch
-			let cmd = 'git push';
-			if (target === 'master') {
-				// Detect primary branch and push HEAD directly to it
-				let primaryBranch = "master";
-				try {
-					const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
-					primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
-				} catch {
-					try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
-					catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
-				}
-				cmd = `git push origin HEAD:${primaryBranch}`;
-			}
-			const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout: 30000 });
+			const { stdout } = await execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 });
 			json({ ok: true, output: stdout.trim() });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			json({ error: msg }, 500);
+		}
+		return;
+	}
+
+	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to master
+	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-squash-push')) {
+		const id = url.pathname.split('/')[3];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const cwd = session.cwd;
+		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		try {
+			// Detect primary branch
+			let primaryBranch = "master";
+			try {
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd);
+				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
+			} catch {
+				try { await execGit("git rev-parse --verify refs/heads/master", cwd); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+			}
+
+			// Fetch latest master
+			await execAsync(`git fetch origin ${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			const primaryRef = `origin/${primaryBranch}`;
+
+			// Check we have commits ahead
+			const aheadCount = parseInt(await execGit(`git rev-list --count ${primaryRef}..HEAD`, cwd), 10) || 0;
+			if (aheadCount === 0) { json({ error: "No commits ahead of master" }, 400); return; }
+
+			// Build commit message from branch commits
+			const logOutput = await execGit(`git log --format="%s" ${primaryRef}..HEAD`, cwd);
+			const commitMessages = logOutput.trim().split("\n").filter(Boolean);
+			const branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd);
+			const summary = commitMessages.length === 1
+				? commitMessages[0]
+				: `Squash ${branch} (${commitMessages.length} commits)`;
+			const body = commitMessages.length > 1
+				? commitMessages.map(m => `- ${m}`).join("\n")
+				: "";
+			const fullMessage = body ? `${summary}\n\n${body}` : summary;
+
+			// Create squash commit on top of origin/master using plumbing (no checkout needed)
+			// 1. Create a tree that represents the merge result
+			const mergeTree = await execGit(`git merge-tree --write-tree ${primaryRef} HEAD`, cwd);
+			// 2. Create a commit object with that tree, parented on origin/master
+			const msgFile = path.join(cwd, ".git", "SQUASH_MSG");
+			fs.writeFileSync(msgFile, fullMessage, "utf-8");
+			const squashCommit = await execGit(`git commit-tree ${mergeTree} -p ${primaryRef} -F "${msgFile}"`, cwd);
+			fs.unlinkSync(msgFile);
+			// 3. Push that commit to master
+			await execAsync(`git push origin ${squashCommit}:refs/heads/${primaryBranch}`, { cwd, encoding: "utf-8", timeout: 30000 });
+
+			json({ ok: true, output: `Squash pushed ${aheadCount} commit${aheadCount > 1 ? "s" : ""} to ${primaryBranch}` });
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			// Check for merge conflicts from merge-tree
+			if (msg.includes("CONFLICT") || msg.includes("merge-tree")) {
+				json({ error: "Merge conflicts with master. Use 'Merge master' first to resolve." }, 409);
+			} else {
+				json({ error: msg }, 500);
+			}
 		}
 		return;
 	}
