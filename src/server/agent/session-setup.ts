@@ -491,6 +491,14 @@ export async function executeWorktreeAsync(
 		ctx.store.update(session.id, { cwd: session.cwd });
 	}
 
+	// Persist branch for sandboxed sessions so restore can reconstruct sandboxClaim.
+	// Non-sandboxed sessions get branch from plan.branch (set during worktree creation),
+	// but sandboxed sessions handle branch checkout inside pool.claim() — the branch
+	// must be explicitly persisted here.
+	if (plan.sandboxed && plan.sandboxClaim?.branch && !plan.branch) {
+		ctx.store.update(session.id, { branch: plan.sandboxClaim.branch });
+	}
+
 	// Task assignment
 	if (plan.taskId) {
 		try {
@@ -567,6 +575,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Store container ID from pool claim
 	if (plan.bridgeOptions.containerId) {
 		session.containerId = plan.bridgeOptions.containerId;
+	}
+
+	// Persist branch for sandboxed sessions (same as executePlan path)
+	if (plan.sandboxed && plan.sandboxClaim?.branch && !plan.branch) {
+		ctx.store.update(session.id, { branch: plan.sandboxClaim.branch });
 	}
 
 	// Task assignment
