@@ -40,6 +40,7 @@ export class GitStatusWidget extends LitElement {
     @state() private _commitsLoading = false;
     @state() private _commits: Array<{sha:string;shortSha:string;message:string;author:string;timestamp:string;filesChanged:number;insertions:number;deletions:number}> = [];
     @state() private _commitsError: string | null = null;
+    @state() private _commitsDirection: 'ahead' | 'behind' = 'ahead';
 
     private _modalEl: HTMLElement | null = null;
     private _commitsModalEl: HTMLElement | null = null;
@@ -147,13 +148,13 @@ export class GitStatusWidget extends LitElement {
         if (this.isOnPrimary) {
             // On primary branch — show ahead/behind vs remote
             if (this.ahead > 0 && this.behind > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400">${this.ahead} ahead, ${this.behind} behind remote</span> ${this._renderPullButton()}`;
+                return html`<span class="text-amber-600 dark:text-amber-400"><span style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>, <span style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote</span> ${this._renderPullButton()}`;
             }
             if (this.ahead > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits(); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
+                return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
             }
             if (this.behind > 0) {
-                return html`<span class="text-amber-600 dark:text-amber-400">${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span> ${this._renderPullButton()}`;
+                return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} commit${this.behind > 1 ? 's' : ''} behind remote</span> ${this._renderPullButton()}`;
             }
             return html`<span class="text-green-600 dark:text-green-400">up to date with remote</span>`;
         }
@@ -166,7 +167,7 @@ export class GitStatusWidget extends LitElement {
             return html`<span class="text-amber-600 dark:text-amber-400">local only — not pushed</span>`;
         }
         if (this.ahead > 0) {
-            return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits(); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
+            return html`<span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed commit${this.ahead > 1 ? 's' : ''}</span> ${this._renderPushButton()}`;
         }
         return html`<span class="text-green-600 dark:text-green-400">pushed to remote branch</span>`;
     }
@@ -477,15 +478,17 @@ export class GitStatusWidget extends LitElement {
         }
     }
 
-    private async _fetchCommits() {
+    private async _fetchCommits(direction: 'ahead' | 'behind' = 'ahead') {
         this._commitsLoading = true;
         this._commits = [];
         this._commitsError = null;
+        this._commitsDirection = direction;
         this._showCommitsModal();
 
-        const base = this.sessionId
+        const basePath = this.sessionId
             ? `/api/sessions/${this.sessionId}/commits`
             : `/api/goals/${this.goalId}/commits`;
+        const base = direction === 'behind' ? `${basePath}?direction=behind` : basePath;
         try {
             const headers: Record<string, string> = {};
             if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
@@ -525,7 +528,7 @@ export class GitStatusWidget extends LitElement {
         } else if (this._commitsError) {
             body = html`<div class="p-8" style="color:var(--destructive)">${this._commitsError}</div>`;
         } else if (this._commits.length === 0) {
-            body = html`<div class="p-8 text-muted-foreground">No unpushed commits</div>`;
+            body = html`<div class="p-8 text-muted-foreground">${this._commitsDirection === 'behind' ? 'No incoming commits' : 'No unpushed commits'}</div>`;
         } else {
             body = html`<div class="flex flex-col">
                 ${this._commits.map(c => html`
@@ -554,7 +557,7 @@ export class GitStatusWidget extends LitElement {
                 <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeCommitsModal()}></div>
                 <div style="position:relative;width:100%;max-width:600px;max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
                     <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
-                        <span class="text-sm font-medium text-foreground">${this._commits.length} Unpushed Commit${this._commits.length !== 1 ? 's' : ''}</span>
+                        <span class="text-sm font-medium text-foreground">${this._commits.length} ${this._commitsDirection === 'behind' ? 'Incoming' : 'Unpushed'} Commit${this._commits.length !== 1 ? 's' : ''}</span>
                         <button
                             style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
                             class="hover:text-foreground hover:bg-muted/50"
