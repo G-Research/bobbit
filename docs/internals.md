@@ -205,6 +205,28 @@ Selecting a palette seeds the color fields from `PALETTE_PRIMARY_COLORS`; the us
 - Worktrees for goals are created relative to the project's `rootPath`, not the server CWD.
 - Session CWD defaults to the project's `rootPath`.
 
+### Session worktrees
+
+Every non-goal, non-assistant session automatically gets its own git worktree branch. This eliminates conflicts between concurrent sessions that would otherwise all work on the same branch (usually master).
+
+**Which sessions get worktrees:**
+
+| Session type | Worktree? | Branch pattern |
+|---|---|---|
+| Regular (host) | Yes | `session/new-session-{uuid8}` |
+| Regular (sandbox) | Yes | `session/s-{uuid8}` |
+| Goal sessions | Yes (existing behavior) | `goal/<branch-name>` |
+| Team agent sessions | Yes (existing behavior) | Per-agent branch within goal |
+| Assistant sessions (goal, project, tool) | No | N/A — conversational only, no code edits |
+
+**Lifecycle:**
+
+1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, `git worktree add` creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container.
+2. **Working**: The agent works in the worktree directory. The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
+3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
+4. **Orphan cleanup**: On server startup, `cleanupOrphanedSessionWorktrees()` scans for `session/*` worktree branches that don't match any active session and removes them. This handles ungraceful shutdowns where cleanup didn't run.
+5. **Restore**: After a restart, existing session worktrees are reused — the server reconnects to the worktree on disk without recreating it.
+
 ### Sidebar grouping
 
 The sidebar always groups sessions and goals under collapsible project folder rows — even with a single project. This unified code path avoids duplication between single-project and multi-project layouts.
