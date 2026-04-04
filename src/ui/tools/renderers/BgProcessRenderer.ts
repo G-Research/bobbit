@@ -53,7 +53,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 				<div>
 					${renderCollapsibleHeader(state, SquareTerminal, summary, contentRef, chevronRef, false)}
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-						<pre class="text-xs whitespace-pre-wrap break-all px-3 py-1.5 font-mono overflow-x-auto text-muted-foreground">${output || "(no output)"}</pre>
+						<console-block .content=${output || "(no output)"}></console-block>
 					</div>
 				</div>
 			`,
