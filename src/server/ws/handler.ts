@@ -217,7 +217,7 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "get_messages": {
-					const messages = sessionManager.getArchivedMessages(sessionId);
+					const messages = await sessionManager.getArchivedMessages(sessionId);
 					send(ws, { type: "messages", data: messages });
 					break;
 				}

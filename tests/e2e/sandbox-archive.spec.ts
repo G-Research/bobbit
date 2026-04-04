@@ -52,10 +52,12 @@ test.describe("Sandbox session archive", () => {
 		}
 
 		// 5. Verify archived messages work with the real path
-		const msgs = sm.getArchivedMessages(id);
+		const msgs = await sm.getArchivedMessages(id);
 		expect(msgs.length).toBeGreaterThan(0);
 
-		// 6. Verify the path is a host path (not a container path)
+		// 6. The path is in the agent's coordinate system.
+		// For non-sandboxed sessions (this test runs without Docker),
+		// it should be a host path.
 		const normalizedPath = hostPath.replace(/\\/g, "/");
 		expect(normalizedPath).not.toContain("/home/node/");
 	});
