@@ -55,6 +55,7 @@ gates:
         run: "{{project.test_unit_command}}"
       - name: "E2E tests"
         type: command
+        timeout: 900
         run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
