@@ -181,7 +181,15 @@ export class RpcBridge {
 			this.process = spawn("node", [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
-				env: { ...process.env, BOBBIT_DIR: bobbitDir(), ...tlsEnv, ...this.options.env },
+				env: {
+					...process.env,
+					BOBBIT_DIR: bobbitDir(),
+					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
+					// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
+					PI_CODING_AGENT_DIR: globalAgentDir(),
+					...tlsEnv,
+					...this.options.env,
+				},
 			});
 		}
 
