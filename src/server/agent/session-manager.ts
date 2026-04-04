@@ -39,6 +39,7 @@ import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
+import { WorktreePool } from "./worktree-pool.js";
 import {
 	type SessionSetupPlan,
 	type PipelineContext,
@@ -190,6 +191,7 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
+	private worktreePool: WorktreePool | null = null;
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
@@ -568,6 +570,22 @@ export class SessionManager {
 
 	getMcpManager(): McpManager | null {
 		return this.mcpManager;
+	}
+
+	/**
+	 * Initialize the worktree pool for a repo. Pre-creates worktrees in the
+	 * background so new sessions can claim one instantly (~0ms) instead of
+	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
+	 */
+	initWorktreePool(repoPath: string, setupCommand?: string): void {
+		if (this.worktreePool) return;
+		this.worktreePool = new WorktreePool({ repoPath, targetSize: 2, setupCommand });
+		this.worktreePool.startFilling();
+	}
+
+	/** Get the worktree pool (for shutdown cleanup). */
+	getWorktreePool(): WorktreePool | null {
+		return this.worktreePool;
 	}
 
 	async initMcp(cwd: string): Promise<void> {
@@ -1869,8 +1887,19 @@ export class SessionManager {
 			// Persist immediately with all known structural fields
 			persistOnce(session, plan, ctx.store);
 
-			// Fire-and-forget: create worktree then complete pipeline
-			executeWorktreeAsync(plan, session, ctx).then(() => {
+			// Try to claim a pre-built worktree from the pool (instant)
+			const poolClaim = this.worktreePool
+				? await this.worktreePool.claim(branch).catch(() => null)
+				: null;
+
+			if (poolClaim) {
+				// Update plan/session with the claimed worktree's actual path
+				plan.worktreePath = poolClaim.worktreePath;
+				session.worktreePath = poolClaim.worktreePath;
+			}
+
+			// Fire-and-forget: finish pipeline (skip createWorktree if pool provided one)
+			executeWorktreeAsync(plan, session, ctx, poolClaim?.worktreePath).then(() => {
 				// Persist session metadata now that the agent is running (tracked for terminate)
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);

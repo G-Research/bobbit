@@ -76,7 +76,7 @@ export interface WorktreeResult {
  * @param opts.startPoint — git ref to base the new branch on (default `"HEAD"`).
  *   Pass e.g. `origin/my-branch` to start from a remote tracking branch.
  */
-export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string }): Promise<WorktreeResult> {
+export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string; skipPush?: boolean }): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
 	// "spawn git ENOENT" that looks like git isn't installed
 	if (!fs.existsSync(repoPath)) {
@@ -118,13 +118,15 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 
 	// Push the new branch and set upstream tracking so git-status can report ahead/behind
 	// and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
-	try {
-		await execFile("git", ["push", "-u", "origin", branchName], {
-			cwd: worktreePath,
-			timeout: 30_000, // 30s max for push
-		});
-	} catch {
-		// Push may fail (no remote, auth issues, offline) — not fatal
+	if (!opts?.skipPush) {
+		try {
+			await execFile("git", ["push", "-u", "origin", branchName], {
+				cwd: worktreePath,
+				timeout: 30_000, // 30s max for push
+			});
+		} catch {
+			// Push may fail (no remote, auth issues, offline) — not fatal
+		}
 	}
 
 	return { worktreePath, branchName };
