@@ -6,6 +6,7 @@
  * (pre-warmed or created on-demand).
  */
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
@@ -162,6 +163,19 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		}
 	}
 
+	// ── Git identity ───────────────────────────────────────────────────
+	// Inherit the host user's git identity so agents can commit without
+	// manual `git config` setup. Uses env vars (highest priority in git).
+	const gitIdentity = getHostGitIdentity();
+	if (gitIdentity.name) {
+		args.push("-e", `GIT_AUTHOR_NAME=${gitIdentity.name}`);
+		args.push("-e", `GIT_COMMITTER_NAME=${gitIdentity.name}`);
+	}
+	if (gitIdentity.email) {
+		args.push("-e", `GIT_AUTHOR_EMAIL=${gitIdentity.email}`);
+		args.push("-e", `GIT_COMMITTER_EMAIL=${gitIdentity.email}`);
+	}
+
 	// ── MCP extensions ─────────────────────────────────────────────────
 	const mcpExtDir = path.join(bobbitDir(), "state", "mcp-extensions");
 	try {
@@ -176,4 +190,22 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	args.push(image, "sleep", "infinity");
 
 	return args;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Cache the host git identity so we only shell out once per process. */
+let _gitIdentityCache: { name: string; email: string } | undefined;
+
+function getHostGitIdentity(): { name: string; email: string } {
+	if (_gitIdentityCache) return _gitIdentityCache;
+	const read = (key: string): string => {
+		try {
+			return execFileSync("git", ["config", "--global", key], {
+				encoding: "utf-8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+		} catch { return ""; }
+	};
+	_gitIdentityCache = { name: read("user.name"), email: read("user.email") };
+	return _gitIdentityCache;
 }
