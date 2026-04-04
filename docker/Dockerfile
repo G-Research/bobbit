@@ -27,10 +27,6 @@ RUN npm install -g @mariozechner/pi-coding-agent@${PI_AGENT_VERSION} --no-audit 
     && ln -sf $(npm root -g) /node_modules
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 
-# Entrypoint script for cross-platform node_modules preparation
-COPY entrypoint.sh /usr/local/bin/bobbit-entrypoint.sh
-RUN chmod +x /usr/local/bin/bobbit-entrypoint.sh
-
 # Run as non-root user. node:20-slim includes a 'node' user (uid=1000).
 # This ensures files created in /workspace via bind mount are owned by uid=1000
 # on the host, matching typical developer user IDs.
@@ -62,5 +58,4 @@ RUN npx -y playwright@${PLAYWRIGHT_VERSION} install chromium
 
 WORKDIR /workspace
 
-ENTRYPOINT ["bobbit-entrypoint.sh"]
 CMD ["sleep", "infinity"]
