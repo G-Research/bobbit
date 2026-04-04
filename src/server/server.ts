@@ -1139,8 +1139,23 @@ async function handleApiRoute(
 		if (req.method === "GET" && suffix === "resolved") {
 			const defaults = ctx.projectConfigStore.getDefaults();
 			const result: Record<string, { value: string; source: string }> = {};
+			// Include all default keys
 			for (const key of Object.keys(defaults)) {
 				result[key] = resolveScalarConfig(key, ctx.projectConfigStore, projectConfigStore, null, defaults);
+			}
+			// Also include custom keys from the project's own config that aren't in defaults
+			const rawConfig = ctx.projectConfigStore.getAll();
+			for (const key of Object.keys(rawConfig)) {
+				if (!(key in result)) {
+					result[key] = { value: rawConfig[key], source: "project" };
+				}
+			}
+			// Include custom keys from the server-level config that aren't already covered
+			const serverRaw = projectConfigStore.getAll();
+			for (const key of Object.keys(serverRaw)) {
+				if (!(key in result)) {
+					result[key] = { value: serverRaw[key], source: "server" };
+				}
 			}
 			json(result);
 			return;

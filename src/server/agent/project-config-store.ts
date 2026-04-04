@@ -21,6 +21,7 @@ const DEFAULTS: Record<string, string> = {
 	test_unit_command: "npm run test:unit",
 	test_e2e_command: "npm run test:e2e",
 	worktree_setup_command: "",  // Empty = no setup runs on new worktrees
+	system_prompt_context: "",   // Injected into agent system prompts for this project
 	default_thinking_level: "",  // Empty = use agent's built-in default ("medium")
 	sandbox: "none",                    // "none" | "docker"
 	sandbox_image: "bobbit-agent",      // Docker image name
@@ -29,6 +30,12 @@ const DEFAULTS: Record<string, string> = {
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
 	sandbox_pool_size: "2",             // Pre-warmed containers (0 = disable pooling)
 	sandbox_pool_max_idle: "300",       // Seconds before excess idle containers culled
+	qa_start_command: "",               // How to start an isolated server for QA
+	qa_build_command: "",               // Build command for QA (defaults to build_command)
+	qa_health_check: "",                // URL to check server health
+	qa_browser_entry: "",               // Browser entry point URL
+	qa_max_duration_minutes: "10",      // Max QA session duration
+	qa_max_scenarios: "5",              // Max QA scenarios to run
 };
 
 /**
