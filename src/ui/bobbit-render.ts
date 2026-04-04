@@ -334,6 +334,10 @@ export function renderBlobSpriteImg(isIdle: boolean): TemplateResult {
 		if (el && el instanceof HTMLImageElement) {
 			cleanup?.();
 			cleanup = startCanvasEyeAnimation(el, sequence, 10000);
+		} else {
+			// Element disconnected — stop the animation loop
+			cleanup?.();
+			cleanup = null;
 		}
 	};
 	return html`<img ${ref(onRef)} class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">`;
@@ -369,6 +373,9 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 		if (el && el instanceof HTMLImageElement) {
 			cleanup?.();
 			cleanup = startCanvasEyeAnimation(el, sequence, cycleDuration);
+		} else {
+			cleanup?.();
+			cleanup = null;
 		}
 	};
 
@@ -418,6 +425,9 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 		if (el && el instanceof HTMLImageElement) {
 			cleanup?.();
 			cleanup = startCanvasEyeAnimation(el, IDLE_EYE_SEQUENCE, 10000);
+		} else {
+			cleanup?.();
+			cleanup = null;
 		}
 	};
 
