@@ -1490,21 +1490,11 @@ async function handleApiRoute(
 		}
 
 		// ── Worktree support ──
-		// Every non-assistant, non-goal session automatically gets its own worktree branch.
+		// Non-assistant, non-goal sessions get a worktree by default unless explicitly opted out.
 		// Goal sessions have their own worktree logic via goalManager.setupWorktreeAndStartTeam().
 		let worktreeOpts: { repoPath: string } | undefined;
-		if (!assistantType && !goalId) {
-			// Auto-worktree for all regular sessions
-			try {
-				if (await isGitRepo(cwd)) {
-					const repoPath = await getRepoRoot(cwd);
-					worktreeOpts = { repoPath };
-				}
-			} catch {
-				// Not a git repo or git not available — silently ignore
-			}
-		} else if (body?.worktree && !assistantType) {
-			// Explicit worktree request (e.g. goal sessions using body.worktree flag)
+		const wantWorktree = body?.worktree !== undefined ? !!body.worktree : (!assistantType && !goalId);
+		if (wantWorktree && !assistantType) {
 			try {
 				if (await isGitRepo(cwd)) {
 					const repoPath = await getRepoRoot(cwd);
