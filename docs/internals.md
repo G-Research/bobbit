@@ -447,7 +447,25 @@ Tools exposed as `mcp__<server>__<tool>`. Transports: stdio (spawn) and HTTP (PO
 
 ## Docker sandbox
 
-Opt-in Docker isolation for agent sessions. Set `sandbox: "docker"` in `project.yaml`.
+Opt-in Docker isolation for agent sessions. Set `sandbox: "docker"` in `project.yaml`. Each project gets one long-lived Docker container — agents work inside it using standard git worktrees, the same isolation model as non-sandbox mode.
+
+### Architecture
+
+```
+HOST                                    CONTAINER (one per project, long-lived)
+────                                    ────────────────────────────────────────
+Bobbit server                           /workspace        (repo clone, native Linux)
+  │                                     /workspace-wt/
+  ├─ docker exec → team lead              ├─ goal-abc/     (worktree)
+  ├─ docker exec → agent-1                │   └─ agent-1/  (worktree)
+  └─ docker exec → agent-2                └─ goal-def/     (worktree)
+```
+
+- **One container per project**, created when sandbox is enabled, lives until disabled/removed
+- **Container clones its own repo** from the real remote — no host-side clone, no cross-OS bind mounts for workspace
+- **`npm ci`, Playwright install, and build happen inside the container** on native Linux filesystem
+- **Agents use git worktrees** inside the container — identical to non-sandbox mode
+- **One scoped token per project container** (not per-agent/session)
 
 ### Configuration
 
@@ -458,8 +476,6 @@ sandbox: "docker"                      # "none" (default) or "docker"
 sandbox_image: "bobbit-agent"          # must be pre-built
 sandbox_credentials: '{"GITHUB_TOKEN": "ghp_..."}'  # env vars for container
 sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
-sandbox_pool_size: 2                   # pre-warmed containers (0 = disable)
-sandbox_pool_max_idle: 300             # seconds before excess idle culled
 ```
 
 ### Docker image
@@ -472,20 +488,28 @@ Auto-built on startup if image missing but `docker/Dockerfile` exists (120s time
 
 ### How it works
 
-On `sandboxed: true` session creation:
+**Container lifecycle** is managed by `ProjectSandbox` (one instance per project) and `SandboxManager` (registry mapping projectId → ProjectSandbox).
 
-1. Session manager validates mounts, ensures `bobbit-sandbox-net` Docker network exists
-2. RpcBridge spawns agent inside Docker:
-   - **Pool mode** (`pool_size > 0`): `docker exec -i <containerId>` into pre-warmed container (~200ms)
-   - **Cold mode** (`pool_size == 0`): `docker run --rm` with project at `/workspace`, agent at `/agent-modules` (ro), tools at `/tools` (ro)
-3. Tool extensions read credentials from env vars (fallback to files for non-sandboxed)
-4. Container has direct internet access via the bridge network
+**Startup sequence:**
 
-Delegates inherit parent sandbox config. Container-internal paths remapped to host paths.
+1. `SandboxManager.initForProject(projectId, config)` creates a `ProjectSandbox` instance
+2. `ProjectSandbox.init()` searches for an existing container by label (`bobbit-project=<projectId>`):
+   - **Found running** → reconnect (reuse container ID)
+   - **Found stopped** → restart via `docker start`
+   - **Not found** → create new container with named Docker volume (`bobbit-workspace-<projectId>`)
+3. On first create, the container runs an init sequence: `git clone <repoUrl>`, `npm ci`, optional Playwright install, `npm run build`
+4. Container runs with `--restart=unless-stopped` so it survives Docker daemon restarts
 
-### Container pool
+**Agent spawn:**
 
-Pre-warmed containers eliminate 5–10s cold-start overhead. Lifecycle: pre-warm → claim (via `docker exec`) → replenish background → release when all sessions terminate → cull excess idle after `max_idle` seconds. Containers labeled `bobbit-pool=<project-hash>` for re-adoption on restart. Pool exhaustion falls back to cold `docker run`.
+1. `ProjectSandbox.createWorktree(name, branch, baseBranch?)` creates a git worktree at `/workspace-wt/<name>` inside the container via `docker exec`
+2. A post-commit hook is installed in each worktree for mandatory push-to-remote (durability)
+3. RpcBridge spawns the agent via `docker exec -i -w /workspace-wt/<name> <containerId>` — same mechanism as before, simpler arguments
+4. Delegates inherit parent sandbox config
+
+**Session termination:**
+
+1. `ProjectSandbox.removeWorktree(name)` removes the worktree inside the container via `docker exec git worktree remove`
 
 ### Network
 
@@ -499,7 +523,7 @@ Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with 
 
 ### Scoped tokens
 
-Each sandboxed session gets a unique 256-bit token restricting API access. Generated in `applySandboxWiring()`, in-memory only (regenerated on restart). Auth tries admin token first, then `SandboxTokenStore`.
+Each sandboxed project gets a single 256-bit token shared by all sessions in that project. Generated via `SandboxTokenStore.register(projectId)`, in-memory only (regenerated on restart). Sessions are added to the scope via `addSession(projectId, sessionId)`. Auth tries admin token first, then `SandboxTokenStore`.
 
 **Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`, `/api/personalities`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
@@ -507,12 +531,12 @@ Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 
 ### Resource limits
 
-All containers (pool and cold mode) receive resource limits via `docker-args.ts`:
-- `--memory=4g` — prevents runaway memory consumption
-- `--cpus=2` — limits CPU share
-- `--pids-limit=256` — prevents fork bombs
+Container resource limits are computed dynamically based on the host machine:
+- **Memory**: total system memory minus 2GB (minimum 4GB) — leaves headroom for the host OS and gateway
+- **CPU**: total CPU cores minus 2 (minimum 2) — prevents sandbox from starving the host
+- **PIDs**: unlimited — fork bombs are mitigated by the memory and CPU limits
 
-These are applied unconditionally in `buildDockerRunArgs()` and cannot be overridden by project config.
+These are computed in `ProjectSandbox` and passed to `buildDockerRunArgs()`.
 
 ### Git authentication (GITHUB_TOKEN)
 
@@ -537,64 +561,51 @@ Sandbox containers include a git credential helper so agents can `git push` and 
 - The credential helper is a shell function, not a persisted script with embedded secrets
 - If `GITHUB_TOKEN` is unset in the container's environment, the helper is a no-op and git falls back to its normal credential flow (which will fail in the sandbox since there is no TTY)
 
-### Shared team repo
+### Worktree management
 
-When a sandboxed team starts, agents need to share git commits without pushing to a remote (which requires `GITHUB_TOKEN`). To solve this, `SandboxPool.createTeamRepo()` creates a bare git clone at `<poolDir>/team-<goalId>.git`. Because the pool directory is already bind-mounted into every container at `/team-repos`, the shared repo is immediately accessible to all team members — no additional mounts needed.
+Sandboxed agents use standard git worktrees inside the project container — the same model as non-sandbox mode. No shared bare repos or team remotes are needed.
 
-**Per-agent setup (on `claim()`):**
+**Worktree creation** (`ProjectSandbox.createWorktree()`):
 
-Each agent's clone is configured with a `team` remote and a post-commit hook:
+1. Creates a worktree at `/workspace-wt/<name>` branching from the specified base
+2. Installs a post-commit hook that pushes to the remote after every commit (durability — ensures commits survive container loss)
+3. Called during agent spawn via `applySandboxWiring()`
 
-1. The `team` remote URL (`/team-repos/team-<goalId>.git`) is written directly to `.git/config` rather than using `git remote add`. This avoids MSYS path mangling on Windows, which would rewrite `/team-repos/...` to `C:/...` when running git commands through a MinGW shell.
-2. A `.git/hooks/post-commit` hook auto-pushes to the shared repo in the background after every commit:
-   ```bash
-   #!/bin/sh
-   branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-   [ -n "$branch" ] && git push team "$branch" 2>/dev/null &
-   ```
-   The hook is non-blocking (backgrounded `&`) and non-fatal (stderr suppressed) — a failed push never breaks the commit.
+**Worktree removal** (`ProjectSandbox.removeWorktree()`):
 
-**Fetching another agent's work:**
+1. Removes the worktree via `git worktree remove --force`
+2. Called during session termination
 
-```bash
-git fetch team && git merge team/<branch>
-```
-
-This mirrors the non-sandboxed workflow where agents share a `.git` object store via worktrees and can fetch/merge locally.
-
-**Cleanup:** `destroyTeamRepo()` removes the bare repo from the pool directory. Called from `completeTeam()` and `teardownTeam()` after all agent containers are dismissed.
-
-**Non-sandboxed teams** are unaffected — they use git worktrees with a shared object store, which already provides instant commit visibility.
+**Inter-agent coordination:** Because all agents share the same `/workspace` clone, they can fetch each other's branches directly (`git fetch origin <branch>`). The team lead merges agent branches locally, same as non-sandboxed teams.
 
 ### Session persistence across restarts
 
-Sandbox containers are disposable — `sandboxPool.init()` kills all previous containers on server startup. However, session state (conversation history, branch, goal association) persists in `sessions.json`, so sandboxed sessions survive restarts by claiming fresh containers configured to match the previous environment.
+Sandbox containers are long-lived and survive gateway restarts (via `--restart=unless-stopped`). Session state (conversation history, branch, goal association) persists in `sessions.json` on the host via the bind-mounted `.bobbit/state/` directory.
 
-**Restore flow:**
+**Recovery flow on gateway startup:**
 
-1. `restoreSession()` reads the persisted session fields (`branch`, `teamGoalId`, `sandboxed`)
-2. If the session has a `branch`, it reconstructs a `ClaimOptions` object:
-   - `branch` — ensures the new container checks out the correct branch instead of defaulting to `master`
-   - `teamRepoPath` — resolved from `SandboxPool.poolDir` + `teamGoalId` if the team bare repo still exists on disk. The `poolDir` accessor on `SandboxPool` enables this path resolution during restore.
-3. The reconstructed `sandboxClaim` is passed to `applySandboxWiring()` → `pool.claim()`, which starts a new container on the correct branch with the team remote configured
-4. `claim()` calls `setupTeamRemote()` followed by `git fetch team` to recover commits that the previous container had pushed to the shared bare repo
+1. `ProjectSandbox.init()` finds the existing container by label (`bobbit-project=<projectId>`)
+2. If running, reconnects. If stopped, restarts. If gone, recreates with the same named volume (`bobbit-workspace-<projectId>`) — git history in the volume is preserved
+3. If the volume was also lost (e.g. Docker Desktop reset), the container re-clones from the remote — committed work is recovered from the remote, uncommitted work is lost
+4. `restoreSession()` calls `applySandboxWiring()` which verifies the worktree still exists inside the container
 
-**Graceful degradation:** If `branch` is not persisted (e.g. a session created before this feature), restore falls back to the previous behavior (no claim, container starts on `master`). If the team bare repo directory no longer exists, the claim includes the branch but omits `teamRepoPath` — the session restores on the correct branch but without a team remote.
+**Durability layers:** (1) Post-commit hooks push every commit to the remote immediately. (2) Named Docker volume preserves `/workspace` across container recreation. (3) Session logs are bind-mounted to the host — never stored only inside the container.
 
 ### Verification command execution
 
 When a gate's verification workflow includes `command` steps (e.g. running tests), the verification harness needs access to the team's latest code. For non-sandboxed goals, this code lives in the host worktree. For sandboxed goals, the team's commits only exist inside the shared team bare repo and the containers' `/workspace` directories — the host worktree does not have them.
 
-To solve this, `runCommandStep` in `verification-harness.ts` accepts an optional `containerId`. At the call site, the harness checks `goal.sandboxed`; if true, it resolves the team lead's container ID via `teamManager.getTeamState()` → `sessionManager.getSession()` → `.containerId`. When a container ID is available, the command runs via `docker exec -w /workspace <containerId> /bin/sh -c <command>` instead of spawning on the host.
+To solve this, `runCommandStep` in `verification-harness.ts` accepts an optional `containerId`. At the call site, the harness checks `goal.sandboxed`; if true, it resolves the project container ID via `SandboxManager.get(projectId)` → `ProjectSandbox.getContainerId()`. When a container ID is available, the command runs via `docker exec -w /workspace <containerId> /bin/sh -c <command>` instead of spawning on the host.
 
 **Fallback:** If the goal is sandboxed but the team lead's container is not running (team dismissed, container crashed), the harness falls back to host execution. A warning is emitted to both server logs (`console.warn`) and the verification step's output stream so the user can see why results may be stale.
 
 ### Security summary
 
-- Container sees only `/workspace`, `/agent-modules` (ro), `/tools` (ro), `~/.bobbit/agent/sessions/`
+- Container sees `/workspace`, `/workspace-wt/`, `/agent-modules` (ro), `/tools` (ro), `/bobbit-state/`
 - Runs as `node` user (uid=1000), no Docker socket
 - Mount paths validated against blocklist (`/proc`, `/sys`, `/.ssh`, `/.aws`, etc.)
 - Credential keys sanitized (`^[A-Za-z_][A-Za-z0-9_]*$`)
+- One scoped token per project (not per-session) — all sessions in a project share access
 - `bash_bg` blocked (spawns on host); Docker args redacted in logs
 
 ### Key files
@@ -602,10 +613,11 @@ To solve this, `runCommandStep` in `verification-harness.ts` accepts an optional
 | File | Purpose |
 |---|---|
 | `docker/Dockerfile` | Image definition |
-| `sandbox-pool.ts` | Pool lifecycle |
+| `project-sandbox.ts` | Per-project container lifecycle and worktree management |
+| `sandbox-manager.ts` | Registry mapping projectId → ProjectSandbox |
 | `docker-args.ts` | Docker argument builder |
 | `sandbox-status.ts` | Docker availability check, auto-build |
-| `sandbox-token.ts` | Scoped token store |
+| `sandbox-token.ts` | Per-project scoped token store |
 | `sandbox-guard.ts` | Endpoint allowlist enforcement |
 
 ### REST API
@@ -614,7 +626,6 @@ To solve this, `runCommandStep` in `verification-harness.ts` accepts an optional
 |---|---|---|
 | `/api/sandbox-status` | GET | Docker availability + image status |
 | `/api/sandbox-image/build` | POST | Build image from Dockerfile |
-| `/api/sandbox-pool` | GET | Pool stats |
 
 ---
 
