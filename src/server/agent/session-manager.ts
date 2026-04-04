@@ -1,4 +1,4 @@
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -514,6 +514,7 @@ export class SessionManager {
 		// Auto-resolve API credentials from host auth system, then overlay manual overrides
 		const autoCredentials = resolveHostApiCredentials(this.preferencesStore, this.projectConfigStore);
 		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
+		
 
 		// Claim a slot from the sandbox pool (creates on-demand if exhausted)
 		if (this.sandboxPool) {
@@ -3530,13 +3531,13 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 	// Auto-detect GITHUB_TOKEN for gh CLI (PR creation, git push via HTTPS).
 	// Gated by sandbox_github_token setting (defaults to true).
 	const ghTokenEnabled = (projectConfig?.get("sandbox_github_token") ?? "true") !== "false";
+	
 	if (ghTokenEnabled && !result["GITHUB_TOKEN"]) {
 		const hostGhToken = process.env["GITHUB_TOKEN"] || process.env["GH_TOKEN"];
 		if (hostGhToken) {
 			result["GITHUB_TOKEN"] = hostGhToken;
 		} else {
 			try {
-				const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
 				const token = execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).trim();
 				if (token) {
 					result["GITHUB_TOKEN"] = token;
