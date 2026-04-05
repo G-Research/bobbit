@@ -597,8 +597,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel?.classList.remove("session-fade-in");
 		}, { once: true });
 
-		// Apply palette + accessory for the restored session
-		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
+		// Apply palette + accessory for the restored session (check archived too)
+		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId)
+			|| state.archivedSessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
 
 		// Reset session-scoped global state so it doesn't bleed from the previous session
@@ -641,8 +642,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		return;
 	}
 
-	// Apply per-project palette
-	const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
+	// Apply per-project palette (check archived sessions too — e.g. verification reviewers)
+	const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
 	applyProjectPalette(sessionForPalette?.projectId);
 
 	// Phase 2: async hydrate
@@ -1344,7 +1346,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			refreshSessions().then(() => {
 				if (isStale()) return;
 				// Re-apply accessory class after refreshSessions (may have new data)
-				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
+				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId)
+					|| state.archivedSessions.find((s) => s.id === sessionId);
 				const accClasses2 = ACCESSORY_IDS.map(id => id === "crown" ? "bobbit-crowned" : `bobbit-${id}`);
 				accClasses2.forEach((c) => document.documentElement.classList.remove(c));
 				const accId = sessionForRole?.accessory
