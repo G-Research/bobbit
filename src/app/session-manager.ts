@@ -471,6 +471,9 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	// Cache the outgoing session's panel + agent for fast switch-back
 	const outgoingId = state.selectedSessionId;
 	if (outgoingId && outgoingId !== sessionId && state.chatPanel && state.remoteAgent?.connected) {
+		// Flush any pending draft save for the outgoing session before caching
+		if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+		_flushDraft();
 		cacheSession(outgoingId, state.chatPanel, state.remoteAgent);
 		// Don't disconnect — the cached agent stays connected
 		state.remoteAgent = null;
@@ -551,6 +554,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Apply palette + accessory for the restored session
 		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
+
+		// Re-bind draft handlers to the restored session
+		_setupPromptDraftHandlers(sessionId);
 
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
 		refreshGitStatusForSession(sessionId);
