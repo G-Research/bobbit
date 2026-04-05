@@ -5,7 +5,7 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { live } from "lit/directives/live.js";
-import { Loader2, Mic, MicOff, Paperclip, Send, Square, Zap, X } from "lucide";
+import { GripVertical, Loader2, Mic, MicOff, Paperclip, Pencil, Send, Square, Zap, X } from "lucide";
 import { type Attachment, loadAttachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
@@ -63,6 +63,8 @@ export class MessageEditor extends LitElement {
 	@property() onFilesChange?: (files: Attachment[]) => void;
 	@property() onSteer?: (msg: QueuedMessage) => void;
 	@property() onRemoveQueued?: (id: string) => void;
+	@property() onEditQueued?: (msg: QueuedMessage) => void;
+	@property() onReorder?: (messageIds: string[]) => void;
 	@property() attachments: Attachment[] = [];
 	@property({ type: Array }) queuedMessages: QueuedMessage[] = [];
 	@property() maxFiles = 10;
@@ -87,8 +89,12 @@ export class MessageEditor extends LitElement {
 	@state() private _slashFilteredSkills: SlashSkillInfo[] = [];
 	@state() private _slashMenuOpen = false;
 	@state() private _slashSelectedIndex = 0;
+	@state() private _slashTokenStart = 0;
 	private _slashSkillsLoaded = false;
 	private _slashSkillsCwd?: string;
+
+	// Drag-to-reorder state
+	private _draggedPillId: string | null = null;
 
 	// Speech recognition
 	private speechRecognition: SpeechRecognition | null = null;
@@ -149,15 +155,19 @@ export class MessageEditor extends LitElement {
 	}
 
 	private _updateSlashAutocomplete() {
-		const text = this.value;
-		// Show autocomplete when input is "/" or "/partial-match"
-		const match = text.match(/^\/([a-zA-Z0-9-]*)$/);
+		const textarea = this.textareaRef.value;
+		if (!textarea) { this._slashMenuOpen = false; return; }
+		const cursorPos = textarea.selectionStart;
+		const textBeforeCursor = this.value.substring(0, cursorPos);
+		// Find the last "/" before cursor that's at a word boundary (after whitespace, newline, or at position 0)
+		const match = textBeforeCursor.match(/(^|[\s])\/([\w-]*)$/);
 		if (match) {
 			// Eagerly load skills if not yet loaded (handles race with cwd arrival)
 			if (!this._slashSkillsLoaded && this.cwd) {
 				this._loadSlashSkills().then(() => this._updateSlashAutocomplete());
 			}
-			const query = match[1].toLowerCase();
+			this._slashTokenStart = cursorPos - match[2].length - 1; // position of "/"
+			const query = match[2].toLowerCase();
 			this._slashFilteredSkills = query
 				? this._slashSkills.filter((s) => s.name.toLowerCase().includes(query))
 				: this._slashSkills;
@@ -169,26 +179,117 @@ export class MessageEditor extends LitElement {
 	}
 
 	private _selectSlashSkill(skill: SlashSkillInfo) {
-		// Insert the slash command name, adding a trailing space for arguments
-		this.value = `/${skill.name} `;
+		const textarea = this.textareaRef.value;
+		if (!textarea) return;
+		const before = this.value.substring(0, this._slashTokenStart);
+		const after = this.value.substring(textarea.selectionStart);
+		this.value = before + `/${skill.name} ` + after;
 		this._slashMenuOpen = false;
 		this.onInput?.(this.value);
-		// Focus textarea and move cursor to end
-		const textarea = this.textareaRef.value;
+		// Update textarea and move cursor after the inserted skill name
 		if (textarea) {
 			textarea.value = this.value;
+			const newPos = before.length + skill.name.length + 2; // "/" + name + " "
 			textarea.focus();
-			textarea.setSelectionRange(this.value.length, this.value.length);
+			textarea.setSelectionRange(newPos, newPos);
 		}
 	}
 
-	private _isCursorOnFirstLine(): boolean {
+	private _isCursorOnVisualTopRow(): boolean {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return true;
 		const pos = textarea.selectionStart;
-		// On first line if no newline before cursor position
-		return textarea.value.lastIndexOf("\n", pos - 1) === -1;
+		if (pos === 0) return true;
+
+		const style = getComputedStyle(textarea);
+		const mirror = document.createElement("div");
+		mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
+		mirror.textContent = textarea.value.substring(0, pos);
+		document.body.appendChild(mirror);
+		const cursorHeight = mirror.offsetHeight;
+		mirror.textContent = "X";
+		const singleRowHeight = mirror.offsetHeight;
+		document.body.removeChild(mirror);
+
+		return cursorHeight <= singleRowHeight;
 	}
+
+	private _isCursorOnVisualBottomRow(): boolean {
+		const textarea = this.textareaRef.value;
+		if (!textarea) return true;
+		const pos = textarea.selectionStart;
+		if (pos >= textarea.value.length) return true;
+
+		const style = getComputedStyle(textarea);
+		const mirror = document.createElement("div");
+		mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
+		mirror.textContent = textarea.value;
+		document.body.appendChild(mirror);
+		const fullHeight = mirror.offsetHeight;
+		mirror.textContent = textarea.value.substring(0, pos);
+		const cursorHeight = mirror.offsetHeight;
+		mirror.textContent = "X";
+		const singleRowHeight = mirror.offsetHeight;
+		document.body.removeChild(mirror);
+
+		return (fullHeight - cursorHeight) <= singleRowHeight;
+	}
+
+	private _getSlashMenuLeft(): number {
+		const textarea = this.textareaRef.value;
+		if (!textarea) return 0;
+		const style = getComputedStyle(textarea);
+		const mirror = document.createElement("span");
+		mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;font:${style.font};letter-spacing:${style.letterSpacing};`;
+		mirror.textContent = this.value.substring(
+			this.value.lastIndexOf("\n", this._slashTokenStart - 1) + 1,
+			this._slashTokenStart,
+		);
+		document.body.appendChild(mirror);
+		const leftOffset = mirror.offsetWidth;
+		document.body.removeChild(mirror);
+		return leftOffset;
+	}
+
+	private _handlePillDragStart = (e: DragEvent, msg: QueuedMessage) => {
+		this._draggedPillId = msg.id;
+		if (e.dataTransfer) {
+			e.dataTransfer.effectAllowed = "move";
+			e.dataTransfer.setData("text/plain", msg.id);
+		}
+		// Add visual feedback
+		const target = (e.target as HTMLElement).closest(".queue-pill") as HTMLElement;
+		if (target) target.style.opacity = "0.5";
+	};
+
+	private _handlePillDragOver = (e: DragEvent) => {
+		e.preventDefault();
+		if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+	};
+
+	private _handlePillDrop = (e: DragEvent, dropTargetId: string) => {
+		e.preventDefault();
+		if (!this._draggedPillId || this._draggedPillId === dropTargetId) return;
+
+		// Compute new order
+		const ids = this.queuedMessages.map((m) => m.id);
+		const dragIdx = ids.indexOf(this._draggedPillId);
+		const dropIdx = ids.indexOf(dropTargetId);
+		if (dragIdx === -1 || dropIdx === -1) return;
+
+		// Remove dragged and insert at drop position
+		ids.splice(dragIdx, 1);
+		ids.splice(dropIdx, 0, this._draggedPillId);
+
+		this.onReorder?.(ids);
+		this._draggedPillId = null;
+	};
+
+	private _handlePillDragEnd = (e: DragEvent) => {
+		const target = (e.target as HTMLElement).closest(".queue-pill") as HTMLElement;
+		if (target) target.style.opacity = "";
+		this._draggedPillId = null;
+	};
 
 	private handleTextareaInput = (e: Event) => {
 		const textarea = e.target as HTMLTextAreaElement;
@@ -229,7 +330,7 @@ export class MessageEditor extends LitElement {
 		} else if (e.key === "Escape" && this.isStreaming) {
 			e.preventDefault();
 			this.onAbort?.();
-		} else if (e.key === "ArrowUp" && this._history.length > 0 && this._isCursorOnFirstLine()) {
+		} else if (e.key === "ArrowUp" && this._history.length > 0 && this._isCursorOnVisualTopRow()) {
 			// Enter history browsing or go further back
 			if (this._historyIndex === -1) {
 				// First press — save current draft and show newest history entry
@@ -242,7 +343,7 @@ export class MessageEditor extends LitElement {
 			}
 			e.preventDefault();
 			this._applyHistoryEntry();
-		} else if (e.key === "ArrowDown" && this._historyIndex !== -1) {
+		} else if (e.key === "ArrowDown" && this._historyIndex !== -1 && this._isCursorOnVisualBottomRow()) {
 			e.preventDefault();
 			if (this._historyIndex < this._history.length - 1) {
 				this._historyIndex++;
@@ -676,19 +777,32 @@ export class MessageEditor extends LitElement {
 				${this.queuedMessages.length > 0 ? html`
 					<div class="px-3 pt-2 pb-1 flex flex-col gap-1.5">
 						${this.queuedMessages.map((msg) => html`
-							<div class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${msg.isSteered ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground">
-								<span class="flex-1 truncate font-mono">${msg.text}</span>
+							<div class="queue-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${msg.isSteered ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground"
+								data-pill-id="${msg.id}"
+								draggable="${!msg.isSteered}"
+								@dragstart=${(e: DragEvent) => this._handlePillDragStart(e, msg)}
+								@dragover=${this._handlePillDragOver}
+								@drop=${(e: DragEvent) => this._handlePillDrop(e, msg.id)}
+								@dragend=${this._handlePillDragEnd}
+							>
+								${!msg.isSteered ? html`<span class="drag-handle shrink-0 cursor-grab text-muted-foreground/50 hover:text-muted-foreground transition-colors">${icon(GripVertical, "xs")}</span>` : nothing}
+								<span class="pill-text flex-1 truncate font-mono">${msg.text}</span>
 								${msg.isSteered
-									? html`<span class="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[0.65rem] font-medium text-amber-600 dark:text-amber-400">${icon(Zap, "xs")} Sent</span>`
+									? html`<span class="sent-indicator shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[0.65rem] font-medium text-amber-600 dark:text-amber-400">${icon(Zap, "xs")} Sent</span>`
 									: html`
 										<button
 											@click=${() => this.onSteer?.(msg)}
-											class="shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.65rem] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
+											class="steer-btn shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.65rem] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
 											title="Send now — interrupts the current turn"
 										>${icon(Zap, "xs")} Steer</button>
 										<button
+											@click=${() => this.onEditQueued?.(msg)}
+											class="edit-btn shrink-0 p-0.5 rounded text-muted-foreground/50 hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer"
+											title="Edit message"
+										>${icon(Pencil, "xs")}</button>
+										<button
 											@click=${() => this.onRemoveQueued?.(msg.id)}
-											class="shrink-0 p-0.5 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
+											class="remove-btn shrink-0 p-0.5 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
 											title="Remove from queue"
 										>${icon(X, "xs")}</button>
 									`}
@@ -699,7 +813,7 @@ export class MessageEditor extends LitElement {
 
 				<!-- Slash skill autocomplete -->
 				${this._slashMenuOpen ? html`
-					<div class="border-b border-border max-h-48 overflow-y-auto">
+					<div class="slash-menu border-b border-border max-h-48 overflow-y-auto" style="margin-left: ${this._getSlashMenuLeft()}px">
 						${this._slashFilteredSkills.map((skill, i) => html`
 							<button
 								class="w-full text-left px-3 py-2 flex items-start gap-2 cursor-pointer transition-colors ${i === this._slashSelectedIndex ? "bg-accent text-accent-foreground" : "hover:bg-muted/50"}"
