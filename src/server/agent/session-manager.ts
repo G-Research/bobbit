@@ -1605,7 +1605,10 @@ export class SessionManager {
 						const sandbox = this.sandboxManager.get(ps.projectId);
 						if (sandbox) {
 							try {
-								await sandbox.createWorktree(ps.branch, ps.branch);
+								// Derive worktree name from the persisted cwd, not the branch name
+								// e.g. /workspace-wt/session/s-9241bb92 → session/s-9241bb92
+								const worktreeName = ps.cwd!.replace(/^\/workspace-wt\//, "");
+								await sandbox.createWorktree(worktreeName, ps.branch);
 								console.log(`[session-manager] Sandbox worktree recovered for ${ps.id}: ${ps.cwd}`);
 								recovered = true;
 							} catch (err) {
