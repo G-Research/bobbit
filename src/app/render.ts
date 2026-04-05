@@ -52,6 +52,7 @@ import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobi
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
 import { renderGoalDashboard } from "./goal-dashboard.js";
 import "./goal-dashboard.css";
+import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import { renderRoleManagerPage } from "./role-manager-page.js";
 import "./role-manager.css";
 import { renderToolManagerPage } from "./tool-manager-page.js";
@@ -2651,6 +2652,11 @@ export function doRenderApp(): void {
 			`;
 		}
 		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
+
+		// Show bouncing bobbit while connecting to a session
+		if (state.connectingSessionId) {
+			return html`<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>`;
+		}
 
 		if (desktop) {
 			if (!state.setupComplete && !isSetupWizardActive()) {
