@@ -59,8 +59,13 @@ theme-toggle button {
 	border-right: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
 	box-shadow:
 		1px 0 0 0 var(--color-border, rgba(255, 255, 255, 0.06)),
-		4px 0 8px -2px rgba(0, 0, 0, 0.15),
-		8px 0 24px -4px rgba(0, 0, 0, 0.1);
+		4px 0 8px -2px rgba(0, 0, 0, 0.08),
+		8px 0 24px -4px rgba(0, 0, 0, 0.05);
+}
+
+/* Subtle shadow under the top header bar */
+.header-shadow {
+	box-shadow: 0 1px 3px -1px rgba(0, 0, 0, 0.06), 0 1px 2px -1px rgba(0, 0, 0, 0.04);
 }
 
 /* ============================================================================
