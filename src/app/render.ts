@@ -247,9 +247,10 @@ function renderMobileLanding() {
 								</div>`
 							: html`
 								${(() => {
-									// Group goals and sessions by project
-									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions }>();
-										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [] });
+									// Group goals, sessions, and staff by project
+									const staffList = (state.staffList || []).filter(s => s.state !== "retired");
+									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
+										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
 										const defaultId = state.projects[0]?.id || "";
 										for (const g of liveGoals) {
 											const pid = g.projectId || defaultId;
@@ -261,8 +262,13 @@ function renderMobileLanding() {
 											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
 											bucket.sessions.push(s);
 										}
+										for (const s of staffList) {
+											const pid = s.projectId || defaultId;
+											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+											bucket.staff.push(s);
+										}
 										return html`${state.projects.map((project, i) => {
-											const data = projectMap.get(project.id) || { goals: [], sessions: [] };
+											const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
 											const expanded = isProjectExpanded(project.id);
 											const color = getProjectAccentColor(project);
 											return html`
@@ -324,11 +330,11 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>
+													${renderStaffSidebarSection(data.staff)}
 												</div>` : ""}
 											`;
 										})}`;
 								})()}
-								${renderStaffSidebarSection()}
 								${(() => {
 									const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
 									return state.showArchived ? html`
