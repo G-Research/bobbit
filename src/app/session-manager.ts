@@ -367,6 +367,12 @@ let _draftSessionId: string | null = null;
 let _draftTimer: ReturnType<typeof setTimeout> | null = null;
 let _draftAbort: AbortController | null = null;
 let _draftListenersInstalled = false;
+/** Monotonic counter — incremented on every send. Saved alongside the draft
+ *  so stale saves (from aborted-but-already-sent requests) can be detected
+ *  and ignored on load. */
+let _draftGen = 0;
+/** The generation at which the last send occurred. Any draft with gen < this is stale. */
+let _draftSendGen = 0;
 
 /** Immediately persist the given draft value (or delete if empty). */
 function _flushDraft(rawVal?: string): void {
@@ -378,7 +384,8 @@ function _flushDraft(rawVal?: string): void {
 	if (val.trim()) {
 		_draftAbort = new AbortController();
 		const sid = _draftSessionId;
-		saveDraftToServer(sid, 'prompt', val, _draftAbort.signal)
+		const gen = ++_draftGen;
+		saveDraftToServer(sid, 'prompt', { text: val, gen }, _draftAbort.signal)
 			.finally(() => { if (_draftAbort) _draftAbort = null; });
 	} else {
 		deleteDraftFromServer(_draftSessionId, 'prompt');
@@ -398,6 +405,8 @@ function _teardownDraftHandlers(): void {
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
 	if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
 	_draftSessionId = null;
+	_draftGen = 0;
+	_draftSendGen = 0;
 }
 
 function _setupPromptDraftHandlers(sessionId: string): void {
@@ -412,8 +421,26 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 			// Only apply if we're still on the same session
 			if (_draftSessionId !== sessionId) return;
 			const editor = document.querySelector("message-editor") as any;
-			if (editor && draft && typeof draft === 'string') {
-				editor.value = draft;
+			if (!editor) return;
+
+			// Handle both old format (plain string) and new format ({ text, gen })
+			let text: string | null = null;
+			if (typeof draft === 'string') {
+				// Legacy format — no gen, always apply
+				text = draft;
+			} else if (draft && typeof draft === 'object' && 'text' in (draft as any)) {
+				const d = draft as { text: string; gen?: number };
+				// If this draft's gen is <= the last send gen, it's stale (from
+				// a save that raced with a send). Ignore it.
+				if (d.gen != null && d.gen <= _draftSendGen) {
+					text = null;
+				} else {
+					text = d.text;
+				}
+			}
+
+			if (text) {
+				editor.value = text;
 			}
 		} catch { /* ignore */ }
 	})();
@@ -443,7 +470,15 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 		document.addEventListener("message-send", () => {
 			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
 			if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
-			if (_draftSessionId) deleteDraftFromServer(_draftSessionId, 'prompt');
+			if (_draftSessionId) {
+				// Increment gen and record the send generation. Then overwrite the
+				// draft with a tombstone at the new gen. Even if a stale save (from
+				// an aborted-but-already-sent request) arrives at the server after
+				// this, the load will see gen <= _draftSendGen and ignore it.
+				const gen = ++_draftGen;
+				_draftSendGen = gen;
+				saveDraftToServer(_draftSessionId, 'prompt', { text: "", gen });
+			}
 		});
 
 		_draftListenersInstalled = true;
