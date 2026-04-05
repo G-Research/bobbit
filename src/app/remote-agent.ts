@@ -600,6 +600,11 @@ export class RemoteAgent {
 		this.send({ type: "remove_queued", messageId });
 	}
 
+	/** Ask the server to reorder the queue. */
+	reorderQueue(messageIds: string[]): void {
+		this.send({ type: "reorder_queue", messageIds });
+	}
+
 	// ── Internal ─────────────────────────────────────────────────────
 
 	private send(msg: any): void {
