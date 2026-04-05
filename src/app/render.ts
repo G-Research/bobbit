@@ -2268,17 +2268,7 @@ export function doRenderApp(): void {
 						<theme-toggle></theme-toggle>
 					</div>
 				</div>
-				<div class="flex-1 flex flex-col items-center justify-center gap-6 p-8">
-					<div class="flex flex-col items-center gap-4 text-center">
-						<svg class="animate-spin text-muted-foreground" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
-						</svg>
-						<h2 class="text-lg font-medium text-foreground">Starting server</h2>
-						<p class="text-sm text-muted-foreground max-w-sm">
-							Waiting for the gateway to become ready…
-						</p>
-					</div>
-				</div>
+				<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>
 			</div>
 		`, app);
 		return;
