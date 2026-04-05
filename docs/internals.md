@@ -188,7 +188,7 @@ The deprecated `color` field is migrated on load: its value is copied to both `c
 
 **REST API**: `POST /api/projects` and `PUT /api/projects/:id` accept `palette`, `colorLight`, `colorDark` fields alongside existing project fields.
 
-**Palette switching (UI)**: Applied via the `data-palette` attribute on `<html>`, the same mechanism as the global palette picker. On session/goal navigation, the UI resolves `activeSession → projectId → project.palette`. If a palette exists, it is applied; otherwise the global default from user preferences is restored. The switch is handled alongside session connection logic so the entire UI — sidebar, content area, headers — shifts palette together.
+**Palette switching (UI)**: Applied via the `data-palette` attribute on `<html>`, the same mechanism as the global palette picker. On session/goal navigation, the UI resolves `activeSession → projectId → project.palette`. If a palette exists, it is applied; otherwise the global default from user preferences is restored. The switch is handled alongside session connection logic so the entire UI — sidebar, content area, headers — shifts palette together. In `connectToSession()`, the palette is applied twice: once immediately (using the session data already in `gatewaySessions`) and again after `refreshSessions()` completes. The second apply handles sessions (e.g. recently-spawned reviewer agents) that weren't yet in `gatewaySessions` at initial connect time — without it, `applyProjectPalette(undefined)` reverts to the global palette.
 
 **Sidebar accent colors**: Project header folder icons and names use `colorLight` in light mode and `colorDark` in dark mode, selected reactively based on the current theme.
 
@@ -526,7 +526,7 @@ Auto-built on startup if image missing but `docker/Dockerfile` exists (120s time
 
 1. `ProjectSandbox.createWorktree(name, branch, baseBranch?)` creates a git worktree at `/workspace-wt/<name>` inside the container via `docker exec`
 2. A post-commit hook is installed in each worktree for mandatory push-to-remote (durability)
-3. RpcBridge spawns the agent via `docker exec -i -w /workspace-wt/<name> <containerId>` — same mechanism as before, simpler arguments
+3. RpcBridge spawns the agent via `docker exec -i -w <containerCwd> <containerId>` — the `-w` flag sets the container process working directory so the agent CLI's `process.cwd()` resolves to the correct worktree path (without it, docker exec defaults to the container's WORKDIR `/workspace`, which is wrong for worktree sessions)
 4. Delegates inherit parent sandbox config
 
 **Session termination:**
@@ -597,6 +597,8 @@ Sandboxed agents use standard git worktrees inside the project container — the
 
 1. Removes the worktree via `git worktree remove --force`
 2. Called during session termination
+
+**Worktree pool freshness** (host-side, `worktree-pool.ts`): When a pooled worktree is acquired, it is fetched from origin and hard-reset to the remote primary branch before being assigned to a session. This prevents stale worktrees when the primary branch has advanced since the pool entry was created. The remote primary branch is resolved dynamically via `git symbolic-ref refs/remotes/origin/HEAD` (falls back to `origin/master` if the ref is not set). The fetch+reset is non-fatal — if it fails, the worktree is still usable but may be behind.
 
 **Inter-agent coordination:** Because all agents share the same `/workspace` clone, they can fetch each other's branches directly (`git fetch origin <branch>`). The team lead merges agent branches locally, same as non-sandboxed teams.
 

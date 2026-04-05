@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+/* Forest (default, no data-palette) */
+:root {
+  --primary: oklch(0.38 0.08 148);
+  --background: oklch(0.935 0.012 148);
+}
+
+/* Ocean (hue 230) */
+[data-palette="ocean"] {
+  --primary: oklch(0.38 0.08 230);
+  --background: oklch(0.935 0.012 230);
+}
+</style>
+</head>
+<body>
+<div id="status">Ready</div>
+<script>
+// Simulated app state
+window.__projects = [{ id: "proj-1", palette: "ocean" }];
+window.__gatewaySessions = []; // Initially empty — reviewer not yet fetched
+
+// Mirror of applyProjectPalette from src/app/session-manager.ts
+window.__applyProjectPalette = function(projectId) {
+    var project = window.__projects.find(function(p) { return p.id === projectId; });
+    var palette = project ? project.palette : undefined;
+    if (palette) {
+        document.documentElement.dataset.palette = palette;
+    } else {
+        // Simplified: no localStorage in this test, just delete
+        delete document.documentElement.dataset.palette;
+    }
+};
+
+// Simulate connectToSession's initial palette apply (session NOT in gatewaySessions yet)
+window.__simulateInitialConnect = function(sessionId) {
+    var session = window.__gatewaySessions.find(function(s) { return s.id === sessionId; });
+    // session is undefined → projectId is undefined → reverts to global
+    window.__applyProjectPalette(session ? session.projectId : undefined);
+};
+
+// Simulate refreshSessions populating the session
+window.__simulateRefresh = function(sessionId, projectId) {
+    window.__gatewaySessions.push({ id: sessionId, projectId: projectId });
+};
+
+// BUG: after refresh, current code does NOT re-apply the palette
+window.__simulatePostRefreshCurrentBehavior = function(sessionId) {
+    // Current code only re-applies accessory class, NOT palette — this is the bug
+};
+
+// What the fix would do
+window.__simulatePostRefreshFixedBehavior = function(sessionId) {
+    var session = window.__gatewaySessions.find(function(s) { return s.id === sessionId; });
+    window.__applyProjectPalette(session ? session.projectId : undefined);
+};
+</script>
+</body>
+</html>
