@@ -4525,6 +4525,18 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/abort — force-abort a streaming session (graceful + force-kill)
+	const abortMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/abort$/);
+	if (abortMatch && req.method === "POST") {
+		const id = abortMatch[1];
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (session.status !== "streaming") { json({ ok: true, status: session.status }); return; }
+		await sessionManager.forceAbort(id);
+		json({ ok: true, status: "idle" });
+		return;
+	}
+
 	// GET /api/sessions/:id/prompt-sections — return system prompt broken into labeled sections
 	const promptSectionsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-sections$/);
 	if (promptSectionsMatch && req.method === "GET") {
