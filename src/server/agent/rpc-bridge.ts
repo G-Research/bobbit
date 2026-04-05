@@ -130,6 +130,18 @@ export class RpcBridge {
 			console.warn(`[rpc-bridge] stdin error: ${err.code || err.message}`);
 		});
 
+		// Handle spawn errors (e.g. ENOENT when executable not found) — without this
+		// the error becomes an uncaught exception and crashes the gateway.
+		this.process.on("error", (err: NodeJS.ErrnoException) => {
+			console.error(`[rpc-bridge] Process error: ${err.code || err.message}${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`);
+			for (const [, p] of this.pending) {
+				clearTimeout(p.timeout);
+				p.reject(err);
+			}
+			this.pending.clear();
+			this.process = null;
+		});
+
 		this.process.on("exit", (code, signal) => {
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
