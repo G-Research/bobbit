@@ -275,20 +275,29 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bash_bg",
 		label: "Background Process",
-		description: "Manage background shell processes. Actions: create (start a process), logs (view output), kill (terminate), list (show all).",
+		description: "Manage background shell processes. Actions: create, logs, grep, head, slice, kill, list.",
 		parameters: Type.Object({
 			action: Type.Union([
 				Type.Literal("create"),
 				Type.Literal("logs"),
+				Type.Literal("grep"),
+				Type.Literal("head"),
+				Type.Literal("slice"),
 				Type.Literal("kill"),
 				Type.Literal("list"),
 			], { description: "Action to perform" }),
 			command: Type.Optional(Type.String({ description: "Shell command to run (for 'create')" })),
 			name: Type.Optional(Type.String({ description: "Short name for the process (max 3 words, required for 'create'). Example: 'dev server', 'color echo loop', 'test runner'" })),
-			id: Type.Optional(Type.String({ description: "Background process ID (for 'logs' and 'kill')" })),
-			tail: Type.Optional(Type.Number({ description: "Number of log lines to return (default: 200)" })),
+			id: Type.Optional(Type.String({ description: "Background process ID (for 'logs', 'grep', 'head', 'slice', 'kill')" })),
+			tail: Type.Optional(Type.Number({ description: "Number of log lines to return from end (default: 200, for 'logs')" })),
+			pattern: Type.Optional(Type.String({ description: "Search pattern — string or regex (for 'grep')" })),
+			context: Type.Optional(Type.Number({ description: "Lines of context around each match (default: 0, for 'grep')" })),
+			max_results: Type.Optional(Type.Number({ description: "Max matches to return (default: 50, for 'grep')" })),
+			lines: Type.Optional(Type.Number({ description: "Number of lines (default: 50, for 'head')" })),
+			from: Type.Optional(Type.Number({ description: "Start line, 1-indexed (for 'slice')" })),
+			to: Type.Optional(Type.Number({ description: "End line, inclusive (for 'slice')" })),
 		}),
-		async execute(_toolCallId, { action, command, name, id, tail }) {
+		async execute(_toolCallId, { action, command, name, id, tail, pattern, context, max_results, lines, from, to }) {
 			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
 
 			if (!sessionId || !baseUrl) {
@@ -308,6 +317,30 @@ export default function (pi: ExtensionAPI) {
 						const logs = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail || 200}`) as any;
 						const output = logs.log?.map((e: any) => typeof e === "string" ? e : e.text ?? String(e)).join("\n") || "(no output)";
 						return text(`Logs for ${id}:\n${output}`);
+					}
+					case "grep": {
+						if (!id) return text("Error: 'id' is required for grep");
+						if (!pattern) return text("Error: 'pattern' is required for grep");
+						const params = new URLSearchParams({ pattern });
+						if (context) params.set("context", String(context));
+						if (max_results) params.set("max", String(max_results));
+						const grepResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/grep?${params}`) as any;
+						if (grepResult.matches.length === 0) return text(`No matches for "${pattern}" in ${id} (${grepResult.total} total lines searched)`);
+						const matchLines = grepResult.matches.map((m: any) => `${String(m.line).padStart(5)}  ${m.text}`).join("\n");
+						return text(`${grepResult.total} match${grepResult.total !== 1 ? "es" : ""} for "${pattern}" in ${id}${grepResult.total > grepResult.matches.length ? ` (showing first ${grepResult.matches.length})` : ""}:\n${matchLines}`);
+					}
+					case "head": {
+						if (!id) return text("Error: 'id' is required for head");
+						const headResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/head?lines=${lines || 50}`) as any;
+						const headOutput = headResult.log?.map((e: any) => typeof e === "string" ? e : e.text ?? String(e)).join("\n") || "(no output)";
+						return text(`First ${headResult.log?.length ?? 0} of ${headResult.totalLines} lines from ${id}:\n${headOutput}`);
+					}
+					case "slice": {
+						if (!id) return text("Error: 'id' is required for slice");
+						if (!from || !to) return text("Error: 'from' and 'to' are required for slice (1-indexed line numbers)");
+						const sliceResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/slice?from=${from}&to=${to}`) as any;
+						const sliceOutput = sliceResult.log?.map((e: any, i: number) => `${String(from + i).padStart(5)}  ${typeof e === "string" ? e : e.text ?? String(e)}`).join("\n") || "(no output)";
+						return text(`Lines ${from}-${to} of ${sliceResult.totalLines} from ${id}:\n${sliceOutput}`);
 					}
 					case "kill": {
 						if (!id) return text("Error: 'id' is required for kill");

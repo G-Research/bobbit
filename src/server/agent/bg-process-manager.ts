@@ -217,6 +217,57 @@ export class BgProcessManager {
 		return { log: bg.log, stdout: bg.stdout, stderr: bg.stderr };
 	}
 
+	/** Search logs for a pattern (string or regex). Returns matching lines with context. */
+	grepLogs(sessionId: string, processId: string, pattern: string, contextLines = 0, maxResults = 50): { matches: { line: number; ts: number; text: string }[]; total: number } | null {
+		const bg = this.processes.get(sessionId)?.get(processId);
+		if (!bg) return null;
+
+		let regex: RegExp;
+		try {
+			regex = new RegExp(pattern, "i");
+		} catch {
+			// Fall back to literal match if invalid regex
+			regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+		}
+
+		const log = bg.log;
+		const matchIndices: number[] = [];
+		for (let i = 0; i < log.length; i++) {
+			if (regex.test(log[i].text)) matchIndices.push(i);
+		}
+
+		const total = matchIndices.length;
+		// Collect matches with context, deduplicating overlapping ranges
+		const seen = new Set<number>();
+		const matches: { line: number; ts: number; text: string }[] = [];
+		for (const idx of matchIndices.slice(0, maxResults)) {
+			const start = Math.max(0, idx - contextLines);
+			const end = Math.min(log.length - 1, idx + contextLines);
+			for (let i = start; i <= end; i++) {
+				if (!seen.has(i)) {
+					seen.add(i);
+					matches.push({ line: i + 1, ts: log[i].ts, text: log[i].text });
+				}
+			}
+		}
+
+		return { matches, total };
+	}
+
+	/** Get first N lines of logs. */
+	headLogs(sessionId: string, processId: string, lines = 50): { log: LogEntry[]; totalLines: number } | null {
+		const bg = this.processes.get(sessionId)?.get(processId);
+		if (!bg) return null;
+		return { log: bg.log.slice(0, lines), totalLines: bg.log.length };
+	}
+
+	/** Get a range of log lines (1-indexed). */
+	sliceLogs(sessionId: string, processId: string, from: number, to: number): { log: LogEntry[]; totalLines: number } | null {
+		const bg = this.processes.get(sessionId)?.get(processId);
+		if (!bg) return null;
+		return { log: bg.log.slice(Math.max(0, from - 1), to), totalLines: bg.log.length };
+	}
+
 	kill(sessionId: string, processId: string): boolean {
 		const bg = this.processes.get(sessionId)?.get(processId);
 		if (!bg || bg.status !== "running") return false;

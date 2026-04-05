@@ -1,5 +1,5 @@
 name: bash_bg
-description: "Manage background shell processes. Actions: create (start a process), logs (view output), kill (terminate), list (show all)."
+description: "Manage background shell processes. Actions: create, logs, grep, head, slice, kill, list."
 summary: "Start, monitor, and kill long-running background shell processes."
 provider:
   type: bobbit-extension
@@ -7,7 +7,7 @@ provider:
 group: Shell
 renderer: src/ui/tools/renderers/BgProcessRenderer.ts
 docs: |-
-  Actions: create (start a process), logs (view output), kill (terminate), list (show all). Use for dev servers, file watchers, long-running builds. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/kill), `tail` (log lines, default 200).
+  Actions: create (start a process), logs (tail output), grep (search logs), head (first N lines), slice (line range), kill (terminate), list (show all). Use for dev servers, file watchers, long-running builds. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/grep/head/slice/kill), `tail` (log lines, default 200), `pattern` (for grep — string or regex), `context` (grep context lines, default 0), `max_results` (grep max matches, default 50), `lines` (for head, default 50), `from`/`to` (1-indexed line range for slice).
 detail_docs: |
   Manage background shell processes that don't block the agent.
 
@@ -18,11 +18,16 @@ detail_docs: |
   - `list`: Show all background processes for this session.
 
   Parameters:
-  - `action` (required): One of "create", "logs", "kill", "list"
+  - `action` (required): One of "create", "logs", "grep", "head", "slice", "kill", "list"
   - `command` (for create): Shell command to run in the background
   - `name` (required for create): Short descriptive name, max 3 words (e.g. "dev server", "test runner", "color echo loop")
-  - `id` (for logs/kill): Background process ID (e.g. "bg-1")
-  - `tail` (for logs): Number of log lines to return (default: 200)
+  - `id` (for logs/grep/head/slice/kill): Background process ID (e.g. "bg-1")
+  - `tail` (for logs): Number of log lines to return from end (default: 200)
+  - `pattern` (for grep): Search pattern — string or regex, case-insensitive
+  - `context` (for grep): Lines of context around each match (default: 0)
+  - `max_results` (for grep): Max matches to return (default: 50)
+  - `lines` (for head): Number of lines from start (default: 50)
+  - `from` / `to` (for slice): 1-indexed line range to retrieve
 
   Use for dev servers, file watchers, long builds, or any process that
   should run while the agent continues working.

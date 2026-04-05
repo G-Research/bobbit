@@ -4447,6 +4447,43 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/sessions/:id/bg-processes/:pid/grep — search logs
+	const bgGrepMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/grep$/);
+	if (bgGrepMatch && req.method === "GET") {
+		const [, sessionId, processId] = bgGrepMatch;
+		const pattern = url.searchParams.get("pattern") || "";
+		if (!pattern) { json({ error: "pattern is required" }, 400); return; }
+		const context = parseInt(url.searchParams.get("context") || "0", 10);
+		const maxResults = parseInt(url.searchParams.get("max") || "50", 10);
+		const result = bgProcessManager.grepLogs(sessionId, processId, pattern, context, maxResults);
+		if (!result) { json({ error: "Process not found" }, 404); return; }
+		json(result);
+		return;
+	}
+
+	// GET /api/sessions/:id/bg-processes/:pid/head — first N lines
+	const bgHeadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/head$/);
+	if (bgHeadMatch && req.method === "GET") {
+		const [, sessionId, processId] = bgHeadMatch;
+		const lines = parseInt(url.searchParams.get("lines") || "50", 10);
+		const result = bgProcessManager.headLogs(sessionId, processId, lines);
+		if (!result) { json({ error: "Process not found" }, 404); return; }
+		json(result);
+		return;
+	}
+
+	// GET /api/sessions/:id/bg-processes/:pid/slice — line range (1-indexed)
+	const bgSliceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/slice$/);
+	if (bgSliceMatch && req.method === "GET") {
+		const [, sessionId, processId] = bgSliceMatch;
+		const from = parseInt(url.searchParams.get("from") || "1", 10);
+		const to = parseInt(url.searchParams.get("to") || "50", 10);
+		const result = bgProcessManager.sliceLogs(sessionId, processId, from, to);
+		if (!result) { json({ error: "Process not found" }, 404); return; }
+		json(result);
+		return;
+	}
+
 	// DELETE /api/sessions/:id/bg-processes/:pid — kill or remove a background process
 	const bgKillMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)$/);
 	if (bgKillMatch && req.method === "DELETE") {
