@@ -927,6 +927,21 @@ export class AgentInterface extends LitElement {
 									(session as any).removeQueued(id);
 								}
 							}}
+							.onEditQueued=${(msg: any) => {
+								if (typeof (session as any).removeQueued === 'function') {
+									(session as any).removeQueued(msg.id);
+								}
+								const editor = this._messageEditor;
+								if (editor) {
+									editor.value = msg.text;
+									editor.onInput?.(msg.text);
+								}
+							}}
+							.onReorder=${(messageIds: string[]) => {
+								if (typeof (session as any).reorderQueue === 'function') {
+									(session as any).reorderQueue(messageIds);
+								}
+							}}
 							.onModelSelect=${() => {
 								ModelSelector.open(state.model, (model) => session.setModel(model));
 							}}
