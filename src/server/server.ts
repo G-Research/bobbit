@@ -4484,6 +4484,17 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/sessions/:id/bg-processes/:pid/wait — block until exit or timeout
+	const bgWaitMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/wait$/);
+	if (bgWaitMatch && req.method === "GET") {
+		const [, sessionId, processId] = bgWaitMatch;
+		const timeout = parseInt(url.searchParams.get("timeout") || "300", 10);
+		const result = await bgProcessManager.waitForExit(sessionId, processId, timeout * 1000);
+		if (!result) { json({ error: "Process not found" }, 404); return; }
+		json(result);
+		return;
+	}
+
 	// DELETE /api/sessions/:id/bg-processes/:pid — kill or remove a background process
 	const bgKillMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)$/);
 	if (bgKillMatch && req.method === "DELETE") {

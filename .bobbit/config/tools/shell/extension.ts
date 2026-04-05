@@ -285,10 +285,12 @@ export default function (pi: ExtensionAPI) {
 				Type.Literal("slice"),
 				Type.Literal("kill"),
 				Type.Literal("list"),
+				Type.Literal("wait"),
 			], { description: "Action to perform" }),
 			command: Type.Optional(Type.String({ description: "Shell command to run (for 'create')" })),
 			name: Type.Optional(Type.String({ description: "Short name for the process (max 3 words, required for 'create'). Example: 'dev server', 'color echo loop', 'test runner'" })),
-			id: Type.Optional(Type.String({ description: "Background process ID (for 'logs', 'grep', 'head', 'slice', 'kill')" })),
+			id: Type.Optional(Type.String({ description: "Background process ID (for 'logs', 'grep', 'head', 'slice', 'kill', 'wait')" })),
+			timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default: 300, for 'wait')" })),
 			tail: Type.Optional(Type.Number({ description: "Number of log lines to return from end (default: 200, for 'logs')" })),
 			pattern: Type.Optional(Type.String({ description: "Search pattern — string or regex (for 'grep')" })),
 			context: Type.Optional(Type.Number({ description: "Lines of context around each match (default: 0, for 'grep')" })),
@@ -297,7 +299,7 @@ export default function (pi: ExtensionAPI) {
 			from: Type.Optional(Type.Number({ description: "Start line, 1-indexed (for 'slice')" })),
 			to: Type.Optional(Type.Number({ description: "End line, inclusive (for 'slice')" })),
 		}),
-		async execute(_toolCallId, { action, command, name, id, tail, pattern, context, max_results, lines, from, to }) {
+		async execute(_toolCallId, { action, command, name, id, tail, timeout, pattern, context, max_results, lines, from, to }) {
 			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
 
 			if (!sessionId || !baseUrl) {
@@ -346,6 +348,16 @@ export default function (pi: ExtensionAPI) {
 						if (!id) return text("Error: 'id' is required for kill");
 						await api("DELETE", `/api/sessions/${sessionId}/bg-processes/${id}`);
 						return text(`Background process ${id} killed.`);
+					}
+					case "wait": {
+						if (!id) return text("Error: 'id' is required for wait");
+						const waitSec = timeout || 300;
+						const waitResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/wait?timeout=${waitSec}`) as any;
+						const info = waitResult.info;
+						if (waitResult.timedOut) {
+							return text(`Process ${id} still running after ${waitSec}s (pid=${info.pid}, status=${info.status}). Use "logs", "grep", or "kill" to manage it.`);
+						}
+						return text(`Process ${id} exited with code ${info.exitCode}.\nUse bash_bg with action "grep" and id "${id}" to search output, or "logs" to see the tail.`);
 					}
 					case "list": {
 						const data = await api("GET", `/api/sessions/${sessionId}/bg-processes`) as any;

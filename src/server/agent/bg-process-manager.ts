@@ -314,6 +314,27 @@ export class BgProcessManager {
 		this.processes.delete(sessionId);
 	}
 
+	/** Wait for a process to exit or timeout. Returns the process info and whether it timed out. */
+	async waitForExit(sessionId: string, processId: string, timeoutMs: number): Promise<{ info: BgProcessInfo; timedOut: boolean } | null> {
+		const bg = this.processes.get(sessionId)?.get(processId);
+		if (!bg) return null;
+		if (bg.status === "exited") return { info: this.toInfo(bg), timedOut: false };
+
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				bg.child.removeListener("exit", onExit);
+				resolve({ info: this.toInfo(bg), timedOut: true });
+			}, timeoutMs);
+
+			const onExit = () => {
+				clearTimeout(timer);
+				// Small delay to let the exit handler update status
+				setTimeout(() => resolve({ info: this.toInfo(bg), timedOut: false }), 50);
+			};
+			bg.child.once("exit", onExit);
+		});
+	}
+
 	/** Remove exited processes from the map */
 	prune(sessionId: string): void {
 		const map = this.processes.get(sessionId);
