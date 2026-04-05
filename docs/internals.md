@@ -610,6 +610,7 @@ Sandbox containers are long-lived and survive gateway restarts (via `--restart=u
 2. If running, reconnects. If stopped, restarts. If gone, recreates with the same named volumes (`bobbit-workspace-<projectId>` for `/workspace`, `bobbit-worktrees-<projectId>` for `/workspace-wt`) — git history and agent worktrees in the volumes are preserved
 3. If the volumes were also lost (e.g. Docker Desktop reset), the container re-clones from the remote — committed work is recovered from the remote, uncommitted work is lost
 4. `restoreSession()` calls `applySandboxWiring()` which verifies the worktree still exists inside the container
+5. If the worktree is missing (e.g. volume was reset but the container was recreated), the server attempts to recreate it via `ProjectSandbox.createWorktree(branch, branch)` using the session's persisted branch. If recreation succeeds, restore continues normally. If it fails (branch deleted, no sandbox available), the session is archived — the server never launches an agent into a non-existent CWD.
 
 **Durability layers:** (1) Post-commit hooks push every commit to the remote immediately. (2) Named Docker volumes preserve `/workspace` and `/workspace-wt` across container recreation — agent worktrees survive even if the container is removed and recreated. (3) Session logs are bind-mounted to the host — never stored only inside the container.
 
