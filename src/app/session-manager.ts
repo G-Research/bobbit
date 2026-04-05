@@ -665,9 +665,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (idx >= 0) {
 				state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], isAborting: remote.isAborting };
 			}
-			// Set readOnly when archived status arrives (may come after initial connect)
-			if (status === "archived" && state.chatPanel?.agentInterface) {
-				state.chatPanel.agentInterface.readOnly = true;
+			// Only update active session's UI state — cached sessions must not corrupt current panel
+			if (activeSessionId() === sessionId) {
+				// Set readOnly when archived status arrives (may come after initial connect)
+				if (status === "archived" && state.chatPanel?.agentInterface) {
+					state.chatPanel.agentInterface.readOnly = true;
+				}
 			}
 			// Refresh git status when agent becomes idle (turn finished)
 			if (status === "idle") {
@@ -679,13 +682,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onConnectionStatusChange = (status: ConnectionStatus) => {
-			state.connectionStatus = status;
+			// Only update global connection status if this is the active session
+			if (activeSessionId() === sessionId) {
+				state.connectionStatus = status;
+			}
 			// Re-fetch git status and bg processes after reconnect (e.g. server restart)
 			if (status === "connected") {
 				refreshGitStatusForSession(sessionId);
 				refreshBgProcessesForSession(sessionId);
 			}
-			renderApp();
+			if (activeSessionId() === sessionId) renderApp();
 		};
 
 		remote.onCompactionChange = (isCompacting: boolean) => {
@@ -693,10 +699,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (idx >= 0) {
 				state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], isCompacting };
 			}
-			renderApp();
+			if (activeSessionId() === sessionId) renderApp();
 		};
 
-		remote.onWorkflowUpdate = () => renderApp();
+		remote.onWorkflowUpdate = () => { if (activeSessionId() === sessionId) renderApp(); };
 
 		remote.onGoalSetupEvent = async () => {
 			// Refresh sessions and goals to pick up setupStatus changes
@@ -726,7 +732,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onPreviewChanged = (sid, preview) => {
-			if (sid === sessionId) {
+			if (sid === sessionId && activeSessionId() === sessionId) {
 				state.isPreviewSession = preview;
 				if (preview) startPreviewPolling();
 				else stopPreviewPolling();
@@ -751,6 +757,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onGoalProposal = (proposal) => {
+			if (activeSessionId() !== sessionId) return;
 			if (state.assistantType === "goal") {
 				state.activeGoalProposal = proposal;
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
@@ -797,6 +804,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onRoleProposal = (proposal) => {
+			if (activeSessionId() !== sessionId) return;
 			state.activeRoleProposal = proposal;
 			if (!state.rolePreviewNameEdited) state.rolePreviewName = proposal.name;
 			if (!state.rolePreviewLabelEdited) state.rolePreviewLabel = proposal.label;
@@ -813,6 +821,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onToolProposal = (proposal) => {
+			if (activeSessionId() !== sessionId) return;
 			state.toolPreviewName = proposal.tool;
 			// Map action to checklist item
 			const actionToItem: Record<string, keyof typeof state.toolPreviewChecklist> = {
@@ -843,6 +852,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onPersonalityProposal = (proposal: { name: string; label: string; description: string; prompt_fragment: string }) => {
+			if (activeSessionId() !== sessionId) return;
 			state.activePersonalityProposal = proposal;
 			if (!state.personalityPreviewNameEdited) state.personalityPreviewName = proposal.name;
 			if (!state.personalityPreviewLabelEdited) state.personalityPreviewLabel = proposal.label;
@@ -857,6 +867,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onSetupProposal = (proposal) => {
+			if (activeSessionId() !== sessionId) return;
 			state.setupPreviewAction = proposal.action;
 			state.assistantHasProposal = true;
 
@@ -891,6 +902,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onWorkflowProposal = (proposal) => {
+			if (activeSessionId() !== sessionId) return;
 			state.workflowPreviewId = proposal.id || "";
 			state.workflowPreviewName = proposal.name || "";
 			state.workflowPreviewDescription = proposal.description || "";
@@ -918,6 +930,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onStaffProposal = (proposal) => {
+			if (activeSessionId() !== sessionId) return;
 			state.activeStaffProposal = proposal;
 			if (!state.staffPreviewNameEdited) state.staffPreviewName = proposal.name;
 			if (!state.staffPreviewDescriptionEdited) state.staffPreviewDescription = proposal.description;
@@ -932,6 +945,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onProjectProposal = async (fields: Record<string, string>) => {
+			if (activeSessionId() !== sessionId) return;
 			const { registerProject, fetchProjects, gatewayFetch } = await import("./api.js");
 			const project = await registerProject(fields.name, fields.root_path, undefined);
 			if (project) {
