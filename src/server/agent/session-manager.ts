@@ -580,7 +580,15 @@ export class SessionManager {
 	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
 		if (this.worktreePool) return;
 		this.worktreePool = new WorktreePool({ repoPath, targetSize, setupCommand });
-		this.worktreePool.startFilling();
+
+		// Collect worktree paths owned by active sessions so the pool doesn't
+		// reclaim them as orphaned pool entries on restart.
+		const activeWorktreePaths = new Set<string>();
+		for (const s of this.sessions.values()) {
+			if (s.worktreePath) activeWorktreePaths.add(s.worktreePath);
+		}
+
+		this.worktreePool.startFilling(activeWorktreePaths);
 	}
 
 	/** Get the worktree pool (for shutdown cleanup). */
