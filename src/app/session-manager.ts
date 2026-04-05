@@ -1348,6 +1348,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					const cls = accId === "crown" ? "bobbit-crowned" : `bobbit-${accId}`;
 					document.documentElement.classList.add(cls);
 				}
+				// Re-apply project palette after refreshSessions (session may now have projectId)
+				applyProjectPalette(sessionForRole?.projectId);
 				// Apply cwd/branch if not set earlier (sessionData wasn't in gatewaySessions yet)
 				if (state.chatPanel?.agentInterface && !state.chatPanel.agentInterface.cwd && sessionForRole?.cwd) {
 					state.chatPanel.agentInterface.cwd = sessionForRole.cwd;

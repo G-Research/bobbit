@@ -4,7 +4,7 @@ import path from "node:path";
 const FIXTURE = `file:///${path.resolve("tests/fixtures/palette-reapply.html").replace(/\\/g, "/")}`;
 
 test.describe("palette reapply after session refresh", () => {
-	test("BUG: palette reverts when session missing from gatewaySessions at connect time", async ({
+	test("FIX VERIFIED: palette is re-applied after refreshSessions populates session", async ({
 		page,
 	}) => {
 		await page.goto(FIXTURE);
@@ -21,29 +21,22 @@ test.describe("palette reapply after session refresh", () => {
 		// Step 2: refreshSessions brings the session with its projectId
 		await page.evaluate(() => (window as any).__simulateRefresh("reviewer-1", "proj-1"));
 
-		// Step 3: current code path after refresh — NO palette re-apply (the bug)
+		// Step 3: fixed code path — palette re-applied after refresh
 		await page.evaluate(() =>
-			(window as any).__simulatePostRefreshCurrentBehavior("reviewer-1")
+			(window as any).__simulatePostRefreshFixedBehavior("reviewer-1")
 		);
 
-		// Palette is still unset — bug confirmed
-		const paletteAfterBuggyRefresh = await page.evaluate(
+		// Palette should now be ocean (the fix works)
+		const paletteAfterRefresh = await page.evaluate(
 			() => document.documentElement.dataset.palette
 		);
-		expect(paletteAfterBuggyRefresh).toBeUndefined();
+		expect(paletteAfterRefresh).toBe("ocean");
 
-		// CSS confirms we're on forest (default), not ocean
+		// CSS confirms ocean hue
 		const primary = await page.evaluate(() =>
 			getComputedStyle(document.documentElement).getPropertyValue("--primary").trim()
 		);
-		expect(primary).toContain("148"); // Forest hue, not ocean's 230
-
-		// Step 4: assert what SHOULD happen after the fix — this FAILS before the fix
-		// The fix adds applyProjectPalette(sessionForRole?.projectId) after refreshSessions
-		expect(
-			paletteAfterBuggyRefresh,
-			"palette not reapplied after refreshSessions — expected ocean but got global"
-		).toBe("ocean");
+		expect(primary).toContain("230");
 	});
 
 	test("FIXED: palette is correctly applied after refreshSessions populates session", async ({
