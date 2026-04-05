@@ -160,6 +160,7 @@ textarea.addEventListener('keydown', (e) => {
 });
 
 // Public API for tests
+window._forceSelectedIndex = (i) => { slashSelectedIndex = i; renderMenu(); };
 window.isMenuOpen = () => slashMenuOpen;
 window.getFilteredSkills = () => slashFilteredSkills.map(s => s.name);
 window.getSelectedIndex = () => slashSelectedIndex;
