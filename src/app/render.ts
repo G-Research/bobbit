@@ -2691,7 +2691,7 @@ export function doRenderApp(): void {
 		teardownMobileScrollTracking();
 		render(html`
 			<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
-				<div class="flex items-center border-b border-border shrink-0">
+				<div class="flex items-center border-b border-border shrink-0 header-shadow">
 					${state.sidebarCollapsed ? html`
 					<div class="w-14 shrink-0 flex items-center justify-center self-stretch" style="background: var(--sidebar);">
 						${bobbitIcon}
