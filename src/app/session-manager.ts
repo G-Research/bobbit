@@ -1430,6 +1430,11 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		});
 		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
 		const { id } = await res.json();
+		// Clear creatingSession before connecting — connectToSession handles its
+		// own loading state via connectingSessionId, and we want the user to see
+		// the chat panel (with textarea) immediately, not a loading spinner.
+		state.creatingSession = false;
+		state.creatingSessionForGoalId = null;
 		await connectToSession(id, false);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
