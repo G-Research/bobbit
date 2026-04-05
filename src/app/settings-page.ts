@@ -34,6 +34,7 @@ const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "directories", label: "Config Directories" },
 	{ id: "palette", label: "Color Palette" },
 	{ id: "account", label: "Account" },
+	{ id: "maintenance", label: "Maintenance" },
 ];
 
 const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
@@ -2209,6 +2210,194 @@ function renderAppearanceTab(projectId: string) {
 	`;
 }
 
+// ── Maintenance tab state ──
+
+let maintenanceWorktrees: Array<{ path: string; branch: string }> | null = null;
+let maintenanceSessions: Array<{ id: string; title: string; createdAt: number }> | null = null;
+let maintenanceArchives: { count: number; totalSizeBytes: number } | null = null;
+let maintenanceLoading: "worktrees" | "sessions" | "archives" | null = null;
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function scanWorktrees(): Promise<void> {
+	maintenanceLoading = "worktrees";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/maintenance/orphaned-worktrees");
+		if (res.ok) {
+			const data = await res.json();
+			maintenanceWorktrees = data.worktrees ?? [];
+		}
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	renderApp();
+}
+
+async function cleanupWorktrees(): Promise<void> {
+	maintenanceLoading = "worktrees";
+	renderApp();
+	try {
+		await gatewayFetch("/api/maintenance/cleanup-worktrees", { method: "POST" });
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	await scanWorktrees();
+}
+
+async function scanSessions(): Promise<void> {
+	maintenanceLoading = "sessions";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/maintenance/orphaned-sessions");
+		if (res.ok) {
+			const data = await res.json();
+			maintenanceSessions = data.sessions ?? [];
+		}
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	renderApp();
+}
+
+async function cleanupSessions(): Promise<void> {
+	maintenanceLoading = "sessions";
+	renderApp();
+	try {
+		await gatewayFetch("/api/maintenance/cleanup-sessions", { method: "POST" });
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	await scanSessions();
+}
+
+async function scanArchives(): Promise<void> {
+	maintenanceLoading = "archives";
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/maintenance/expired-archives");
+		if (res.ok) {
+			maintenanceArchives = await res.json();
+		}
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	renderApp();
+}
+
+async function purgeArchives(): Promise<void> {
+	maintenanceLoading = "archives";
+	renderApp();
+	try {
+		await gatewayFetch("/api/maintenance/purge-archives", { method: "POST" });
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	await scanArchives();
+}
+
+function renderMaintenanceTab() {
+	const scanBtnClass = "px-3 py-1.5 text-sm rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50";
+	const actionBtnClass = "px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50";
+
+	return html`
+		<div class="flex flex-col gap-6">
+			<p class="text-sm text-muted-foreground">
+				Review and clean up orphaned resources. No cleanup happens automatically on server restart — use these tools to manage resources manually.
+			</p>
+
+			<!-- Orphaned Worktrees -->
+			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
+				<h3 class="text-sm font-semibold text-foreground">Orphaned Worktrees</h3>
+				<p class="text-xs text-muted-foreground">
+					Session worktrees with no matching active session.
+				</p>
+				${maintenanceWorktrees !== null && maintenanceWorktrees.length > 0 ? html`
+					<div class="flex flex-col gap-1 mt-1 max-h-40 overflow-y-auto">
+						${maintenanceWorktrees.map(wt => html`
+							<div class="flex items-center gap-2 text-xs font-mono text-muted-foreground px-2 py-1 rounded bg-secondary/30">
+								<span class="truncate flex-1">${wt.path}</span>
+								<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground shrink-0">${wt.branch}</span>
+							</div>
+						`)}
+					</div>
+				` : maintenanceWorktrees !== null ? html`
+					<p class="text-xs text-muted-foreground italic mt-1">No orphaned worktrees found.</p>
+				` : ""}
+				<div class="flex items-center gap-2 mt-2">
+					<button
+						class="${scanBtnClass}"
+						?disabled=${maintenanceLoading === "worktrees"}
+						@click=${scanWorktrees}
+					>${maintenanceLoading === "worktrees" && maintenanceWorktrees === null ? "Scanning..." : "Scan"}</button>
+					<button
+						class="${actionBtnClass}"
+						?disabled=${maintenanceLoading === "worktrees" || !maintenanceWorktrees || maintenanceWorktrees.length === 0}
+						@click=${cleanupWorktrees}
+					>${maintenanceLoading === "worktrees" && maintenanceWorktrees !== null ? "Cleaning..." : `Clean Up${maintenanceWorktrees && maintenanceWorktrees.length > 0 ? ` (${maintenanceWorktrees.length})` : ""}`}</button>
+				</div>
+			</div>
+
+			<!-- Orphaned Sessions -->
+			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
+				<h3 class="text-sm font-semibold text-foreground">Orphaned Sessions</h3>
+				<p class="text-xs text-muted-foreground">
+					Non-interactive sessions (e.g. verification reviewers) with no tracking.
+				</p>
+				${maintenanceSessions !== null && maintenanceSessions.length > 0 ? html`
+					<div class="flex flex-col gap-1 mt-1 max-h-40 overflow-y-auto">
+						${maintenanceSessions.map(s => html`
+							<div class="flex items-center gap-2 text-xs px-2 py-1 rounded bg-secondary/30">
+								<span class="truncate flex-1 text-foreground">${s.title || "Untitled"}</span>
+								<span class="text-[10px] font-mono text-muted-foreground shrink-0">${s.id.slice(0, 8)}</span>
+							</div>
+						`)}
+					</div>
+				` : maintenanceSessions !== null ? html`
+					<p class="text-xs text-muted-foreground italic mt-1">No orphaned sessions found.</p>
+				` : ""}
+				<div class="flex items-center gap-2 mt-2">
+					<button
+						class="${scanBtnClass}"
+						?disabled=${maintenanceLoading === "sessions"}
+						@click=${scanSessions}
+					>${maintenanceLoading === "sessions" && maintenanceSessions === null ? "Scanning..." : "Scan"}</button>
+					<button
+						class="${actionBtnClass}"
+						?disabled=${maintenanceLoading === "sessions" || !maintenanceSessions || maintenanceSessions.length === 0}
+						@click=${cleanupSessions}
+					>${maintenanceLoading === "sessions" && maintenanceSessions !== null ? "Terminating..." : `Terminate${maintenanceSessions && maintenanceSessions.length > 0 ? ` (${maintenanceSessions.length})` : ""}`}</button>
+				</div>
+			</div>
+
+			<!-- Expired Archives -->
+			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
+				<h3 class="text-sm font-semibold text-foreground">Expired Archives</h3>
+				<p class="text-xs text-muted-foreground">
+					Archived sessions past the retention period.
+				</p>
+				${maintenanceArchives !== null ? html`
+					<p class="text-sm text-foreground mt-1">
+						${maintenanceArchives.count > 0
+							? html`${maintenanceArchives.count} session${maintenanceArchives.count !== 1 ? "s" : ""} (${formatBytes(maintenanceArchives.totalSizeBytes)})`
+							: html`<span class="text-muted-foreground italic text-xs">No expired archives found.</span>`}
+					</p>
+				` : ""}
+				<div class="flex items-center gap-2 mt-2">
+					<button
+						class="${scanBtnClass}"
+						?disabled=${maintenanceLoading === "archives"}
+						@click=${scanArchives}
+					>${maintenanceLoading === "archives" && maintenanceArchives === null ? "Scanning..." : "Scan"}</button>
+					<button
+						class="${actionBtnClass}"
+						?disabled=${maintenanceLoading === "archives" || !maintenanceArchives || maintenanceArchives.count === 0}
+						@click=${purgeArchives}
+					>${maintenanceLoading === "archives" && maintenanceArchives !== null ? "Purging..." : `Purge${maintenanceArchives && maintenanceArchives.count > 0 ? ` (${maintenanceArchives.count})` : ""}`}</button>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
@@ -2247,7 +2436,7 @@ export function renderSettingsPage() {
 			<!-- Tab content -->
 			<div class="flex-1 overflow-y-auto">
 			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" || currentTab === "appearance" ? "max-w-3xl" : "max-w-xl"}">
+				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" || currentTab === "appearance" || currentTab === "maintenance" ? "max-w-3xl" : "max-w-xl"}">
 					${isProjectScope ? html`
 						${currentTab === "general" ? renderProjectGeneralTab(currentScope) : ""}
 						${currentTab === "appearance" ? renderAppearanceTab(currentScope) : ""}
@@ -2261,6 +2450,7 @@ export function renderSettingsPage() {
 						${currentTab === "palette" ? renderPaletteTab() : ""}
 						${currentTab === "directories" ? renderDirectoriesTab() : ""}
 						${currentTab === "account" ? renderAccountTab() : ""}
+						${currentTab === "maintenance" ? renderMaintenanceTab() : ""}
 					`}
 				</div>
 			 </div>
