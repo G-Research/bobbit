@@ -34,7 +34,7 @@ interface CachedSession {
 
 /** LRU cache of recently visited sessions — avoids full reconnect on switch-back. */
 const sessionCache = new Map<string, CachedSession>();
-const SESSION_CACHE_MAX = 5;
+const SESSION_CACHE_MAX = 10;
 
 function cacheSession(sessionId: string, chatPanel: ChatPanel, remoteAgent: RemoteAgent): void {
 	sessionCache.set(sessionId, { chatPanel, remoteAgent, cachedAt: Date.now() });
