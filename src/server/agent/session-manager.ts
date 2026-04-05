@@ -1588,7 +1588,25 @@ export class SessionManager {
 					], { timeout: 5_000 });
 					console.log(`[session-manager] Sandbox worktree verified for ${ps.id}: ${ps.cwd}`);
 				} catch {
-					console.warn(`[session-manager] Sandbox worktree MISSING for ${ps.id}: ${ps.cwd} — agent may fail`);
+					console.warn(`[session-manager] Sandbox worktree MISSING for ${ps.id}: ${ps.cwd} — attempting recovery`);
+					let recovered = false;
+					if (ps.branch && ps.projectId && this.sandboxManager) {
+						const sandbox = this.sandboxManager.get(ps.projectId);
+						if (sandbox) {
+							try {
+								await sandbox.createWorktree(ps.branch, ps.branch);
+								console.log(`[session-manager] Sandbox worktree recovered for ${ps.id}: ${ps.cwd}`);
+								recovered = true;
+							} catch (err) {
+								console.warn(`[session-manager] Sandbox worktree recovery failed for ${ps.id}:`, err);
+							}
+						}
+					}
+					if (!recovered) {
+						console.warn(`[session-manager] Archiving session ${ps.id} — sandbox worktree unrecoverable`);
+						try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* best-effort */ }
+						return; // Skip restoring this session
+					}
 				}
 			}
 		}
