@@ -597,9 +597,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
 
+		// Mark as visited so unseen indicators clear
+		markSessionVisited(sessionId);
+
 		// Re-bind draft handlers to the restored session.
-		// The cached editor already has the correct content, so just set
-		// the session ID for saves and focus the textarea.
 		_setupPromptDraftHandlers(sessionId);
 
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
