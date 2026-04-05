@@ -58,7 +58,7 @@ Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 
 - **Discovery**: Skills are found in `.claude/skills/<name>/SKILL.md` (project), `~/.claude/skills/<name>/SKILL.md` (personal), `.bobbit/skills/<name>/SKILL.md` (project/personal), and `.claude/commands/<name>.md` (legacy). Additional directories can be configured via the Settings → Config Directories tab or `config_directories` in `.bobbit/config/project.yaml`.
 - **Custom directories**: Configure via Settings → Config Directories tab (`#/settings`, Directories tab) or by setting `config_directories` in project config. The legacy `skill_directories` key is still read for backward compatibility but `config_directories` is preferred. Custom directories are additive — defaults always scan. Skills from custom dirs get source `"custom"` with lower priority than built-in directories.
-- **Invocation**: Via `/skill-name` slash commands in the chat input. Skill instructions are injected into the agent's prompt.
+- **Invocation**: Via `/skill-name` slash commands in the chat input. Skills can be invoked as a prefix (`/deploy staging`) or inline within a prompt (`Analyse using /my-skill the code`). The server resolves all `/skill-name` tokens at word boundaries and expands them inline. The autocomplete menu triggers at any `/` preceded by whitespace or at position 0, and anchors visually to the `/` character's position.
 - **Frontmatter**: YAML frontmatter supports `description`, `argument_hint`, `allowed_tools`, `context` (e.g. `fork`), `agent`, `disable_model_invocation`, and `user_invocable`.
 - **API**: `GET /api/slash-skills` for autocomplete data, `GET /api/slash-skills/details` for full content, file paths, and scanned directories.
 
@@ -75,8 +75,11 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 Server-side queuing of user messages when the agent is busy.
 
 - Steered messages sort before non-steered (priority interrupt).
-- Queue auto-drains when the agent finishes a turn.
-- Client can promote queued messages to steered (`steer_queued`) or remove them (`remove_queued`).
+- Queue auto-drains when the agent finishes a turn (suppressed on error — user must retry first).
+- Client can promote queued messages to steered (`steer_queued`), remove them (`remove_queued`), edit them (remove + populate textarea), or drag-reorder them (`reorder_queue`).
+- Queue pills show drag handle, edit (pencil), steer, and remove buttons. Steered pills show a "Sent" badge instead.
+- Steered messages are batched — they are held until the user presses Stop/Escape, then delivered as a single block on abort.
+- `follow_up` flag is preserved through the queue: messages enqueued with `isFollowUp: true` dispatch via `followUp()` RPC on drain.
 - Queue state broadcast to clients via `queue_update` events.
 
 See [prompt-queue.md](prompt-queue.md) for the full architecture.
