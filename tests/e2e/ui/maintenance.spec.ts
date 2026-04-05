@@ -12,7 +12,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
 
 		// Verify all three section headings are visible
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("Orphaned Sessions")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("Expired Archives")).toBeVisible({ timeout: 5_000 });
 
@@ -23,7 +23,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 10_000 });
 
 		// All action buttons should be disabled before scanning
 		await expect(page.getByRole("button", { name: /Clean Up/ })).toBeDisabled();
@@ -35,7 +35,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 10_000 });
 
 		// Scan worktrees — wait for API response then check UI updated
 		const worktreeResp = page.waitForResponse(
@@ -73,7 +73,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 10_000 });
 
 		// Before scan: all action buttons disabled
 		await expect(page.getByRole("button", { name: /Clean Up/ })).toBeDisabled();
@@ -116,14 +116,14 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await page.locator("button").filter({ hasText: "Maintenance" }).first().click();
 
 		await expect(page).toHaveURL(/#\/settings\/system\/maintenance/, { timeout: 5_000 });
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 5_000 });
 	});
 
 	test("scan state persists when switching tabs and back", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 10_000 });
 
 		// Scan worktrees to populate state
 		const worktreeResp = page.waitForResponse(
@@ -146,7 +146,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 
 		// Switch back to Maintenance tab
 		await page.locator("button").filter({ hasText: "Maintenance" }).first().click();
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 5_000 });
 
 		// Previous scan result should still be visible (module-level state persists)
 		if (hadOrphans) {
@@ -160,7 +160,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 
-		await expect(page.getByText("Orphaned Worktrees")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 10_000 });
 
 		// Scan first
 		const scanResp = page.waitForResponse(
