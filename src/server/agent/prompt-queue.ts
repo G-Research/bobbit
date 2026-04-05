@@ -20,11 +20,13 @@ export class PromptQueue {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
+		isFollowUp?: boolean;
 	}): QueuedMessage {
 		const msg: QueuedMessage = {
 			id: randomUUID(),
 			text,
 			isSteered: opts?.isSteered ?? false,
+			isFollowUp: opts?.isFollowUp ?? false,
 			createdAt: Date.now(),
 		};
 		if (opts?.images?.length) msg.images = opts.images;
@@ -107,6 +109,21 @@ export class PromptQueue {
 	/** Whether the queue is empty. */
 	get isEmpty(): boolean {
 		return this.queue.length === 0;
+	}
+
+	/** Reorder queue to match the given ID list. Unknown IDs ignored. Unlisted items appended at end. */
+	reorderByIds(messageIds: string[]): void {
+		const byId = new Map(this.queue.map(m => [m.id, m]));
+		const reordered: QueuedMessage[] = [];
+		const seen = new Set<string>();
+		for (const id of messageIds) {
+			const msg = byId.get(id);
+			if (msg) { reordered.push(msg); seen.add(id); }
+		}
+		for (const msg of this.queue) {
+			if (!seen.has(msg.id)) reordered.push(msg);
+		}
+		this.queue = reordered;
 	}
 
 	/**

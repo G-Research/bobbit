@@ -9,8 +9,9 @@ import type { QueuedMessage } from "../dist/server/ws/protocol.js";
 class DispatchSimulator {
 	queue: PromptQueue;
 	status: "idle" | "streaming" = "idle";
-	dispatched: Array<{ message: QueuedMessage; method: "prompt" | "steer" }> = [];
+	dispatched: Array<{ message: QueuedMessage; method: "prompt" | "steer" | "followUp" }> = [];
 	statusTransitions: Array<"idle" | "streaming"> = [];
+	lastTurnErrored = false;
 
 	constructor(queue?: PromptQueue) {
 		this.queue = queue ?? new PromptQueue();
@@ -26,17 +27,25 @@ class DispatchSimulator {
 
 	/**
 	 * Models enqueuePrompt from SessionManager:
+	 * - error state → always enqueue (never direct dispatch)
 	 * - idle + empty queue → dispatch directly (don't enqueue)
 	 * - idle + non-empty queue → enqueue then drain
 	 * - busy → enqueue only
 	 */
-	enqueue(text: string, opts?: { isSteered?: boolean }): QueuedMessage | null {
+	enqueue(text: string, opts?: { isSteered?: boolean; isFollowUp?: boolean }): QueuedMessage | null {
+		// Error-state gating: always enqueue when last turn errored
+		if (this.lastTurnErrored) {
+			const msg = this.queue.enqueue(text, opts);
+			return msg;
+		}
+
 		if (this.status === "idle" && this.queue.isEmpty) {
 			// Direct dispatch — create a synthetic QueuedMessage for tracking
 			const msg: QueuedMessage = {
 				id: `direct-${Date.now()}-${Math.random()}`,
 				text,
 				isSteered: opts?.isSteered ?? false,
+				isFollowUp: opts?.isFollowUp ?? false,
 				createdAt: Date.now(),
 			};
 			this.dispatch(msg);
@@ -53,32 +62,94 @@ class DispatchSimulator {
 		return msg;
 	}
 
-	/** Models drainQueue from SessionManager. */
+	/** Models drainQueue from SessionManager — uses followUp for isFollowUp messages. */
 	drain(): boolean {
 		if (this.queue.isEmpty) return false;
 
-		const next = this.queue.dequeue()!;
+		const next = this.queue.dequeueUndispatched();
+		if (!next) return false;
+
 		// Optimistic status update before dispatch (prevents double-dispatch race)
 		this.setStatus("streaming");
-		this.dispatched.push({ message: next, method: "prompt" });
+		const method = next.isFollowUp ? "followUp" as const : "prompt" as const;
+		this.dispatched.push({ message: next, method });
 		return true;
 	}
 
 	/** Simulate the agent finishing a turn (agent_end). */
 	agentEnd(): void {
 		this.setStatus("idle");
-		// SessionManager calls drainQueue on agent_end
-		this.drain();
+		// SessionManager calls drainQueue on agent_end (unless lastTurnErrored)
+		if (!this.lastTurnErrored) {
+			this.drain();
+		}
 	}
 
 	/** Simulate agent starting (agent_start event). */
 	agentStart(): void {
 		this.setStatus("streaming");
+		this.lastTurnErrored = false;
+	}
+
+	/** Simulate a turn ending with an error (message_end with stopReason "error"). */
+	errorEnd(): void {
+		this.lastTurnErrored = true;
+	}
+
+	/**
+	 * Models steerQueued — marks as steered + reorders but does NOT dispatch.
+	 * Steered messages stay in queue until batchedSteerAbort().
+	 */
+	steerQueued(messageId: string): boolean {
+		return this.queue.steer(messageId);
+	}
+
+	/**
+	 * Models forceAbort batched steer injection:
+	 * Collect all steered+undispatched messages, "dispatch" as steer batch,
+	 * mark all as dispatched.
+	 */
+	batchedSteerAbort(): void {
+		const steeredMessages = this.queue.toArray()
+			.filter(m => m.isSteered && !m.dispatched);
+		if (steeredMessages.length > 0) {
+			const batchText = steeredMessages.map(m => m.text).join('\n');
+			const batchMsg: QueuedMessage = {
+				id: `steer-batch-${Date.now()}`,
+				text: batchText,
+				isSteered: true,
+				createdAt: Date.now(),
+			};
+			this.dispatched.push({ message: batchMsg, method: "steer" });
+			for (const m of steeredMessages) {
+				this.queue.markDispatched(m.id);
+			}
+		}
+		// After abort, agent becomes idle and queue drains
+		this.setStatus("idle");
+		this.drain();
+	}
+
+	/**
+	 * Models retryLastPrompt — clears error state. The retry prompt triggers
+	 * agent_start → agent processes → agent_end → drainQueue.
+	 */
+	retry(): void {
+		this.lastTurnErrored = false;
+		// Simulate dispatching a retry prompt
+		const retryMsg: QueuedMessage = {
+			id: `retry-${Date.now()}`,
+			text: "[RETRY]",
+			isSteered: false,
+			createdAt: Date.now(),
+		};
+		this.dispatch(retryMsg);
 	}
 
 	private dispatch(msg: QueuedMessage): void {
 		this.setStatus("streaming");
-		this.dispatched.push({ message: msg, method: "prompt" });
+		const method = msg.isFollowUp ? "followUp" as const : "prompt" as const;
+		this.dispatched.push({ message: msg, method });
 	}
 
 	get dispatchedTexts(): string[] {
@@ -390,5 +461,181 @@ test.describe("Queue Dispatch Integration", () => {
 		sim.agentEnd();
 		expect(sim.status).toBe("idle");
 		expect(sim.dispatchedTexts).toEqual(expectedOrder);
+	});
+
+	// ── Error gating tests ─────────────────────────────────────────────
+
+	test("(story 35) error gating: error turn with queued messages — queue stays intact, no drain", () => {
+		const sim = new DispatchSimulator();
+
+		// Send initial prompt
+		sim.enqueue("Initial");
+		expect(sim.status).toBe("streaming");
+
+		// Queue 2 messages while busy
+		sim.enqueue("Queued1");
+		sim.enqueue("Queued2");
+		expect(sim.queue.length).toBe(2);
+
+		// Agent errors mid-turn
+		sim.errorEnd();
+		// agent_end fires — but drain should NOT happen because lastTurnErrored
+		sim.agentEnd();
+
+		// Queue should still have 2 messages
+		expect(sim.queue.length).toBe(2);
+		expect(sim.queue.toArray().map(m => m.text)).toEqual(["Queued1", "Queued2"]);
+		// Only the initial prompt was dispatched
+		expect(sim.dispatched.length).toBe(1);
+		expect(sim.dispatchedTexts).toEqual(["Initial"]);
+		expect(sim.status).toBe("idle");
+	});
+
+	test("(story 36) error → retry → drain: queued messages dispatch after successful retry", () => {
+		const sim = new DispatchSimulator();
+
+		// Send initial prompt, queue messages, error
+		sim.enqueue("Initial");
+		sim.enqueue("Queued1");
+		sim.enqueue("Queued2");
+		sim.errorEnd();
+		sim.agentEnd(); // drain skipped
+		expect(sim.queue.length).toBe(2);
+
+		// User clicks retry — clears error, dispatches retry prompt
+		sim.retry();
+		expect(sim.lastTurnErrored).toBe(false);
+		expect(sim.status).toBe("streaming");
+
+		// Retry succeeds → agent_end → drain fires
+		sim.agentEnd();
+		expect(sim.dispatchedTexts).toEqual(["Initial", "[RETRY]", "Queued1"]);
+
+		sim.agentEnd();
+		expect(sim.dispatchedTexts).toEqual(["Initial", "[RETRY]", "Queued1", "Queued2"]);
+
+		sim.agentEnd();
+		expect(sim.queue.isEmpty).toBe(true);
+		expect(sim.status).toBe("idle");
+	});
+
+	test("(story 37) error → new message: enqueue goes to queue, not direct dispatch", () => {
+		const sim = new DispatchSimulator();
+
+		// Send initial prompt, error
+		sim.enqueue("Initial");
+		sim.errorEnd();
+		sim.agentEnd();
+		expect(sim.status).toBe("idle");
+		expect(sim.lastTurnErrored).toBe(true);
+
+		// User sends a new message in error state — should be enqueued, not dispatched
+		const queued = sim.enqueue("NewMessage");
+		expect(queued).not.toBeNull();
+		expect(queued!.text).toBe("NewMessage");
+		expect(sim.queue.length).toBe(1);
+		// Should NOT have been dispatched directly
+		expect(sim.dispatched.length).toBe(1); // only Initial
+		expect(sim.dispatchedTexts).toEqual(["Initial"]);
+		// Status should still be idle (not streaming)
+		expect(sim.status).toBe("idle");
+	});
+
+	// ── Batched steer tests ────────────────────────────────────────────
+
+	test("(story 11) batched steer: steer 1 message, abort → steered dispatched as steer, remaining drains as prompt", () => {
+		const sim = new DispatchSimulator();
+
+		// Make agent busy
+		sim.enqueue("Running");
+		expect(sim.status).toBe("streaming");
+
+		// Queue messages
+		const msgA = sim.enqueue("MsgA");
+		const msgB = sim.enqueue("MsgB");
+		expect(sim.queue.length).toBe(2);
+
+		// Steer msgB (marks as steered, reorders to front, but does NOT dispatch)
+		sim.steerQueued(msgB!.id);
+		expect(sim.queue.toArray().map(m => m.text)).toEqual(["MsgB", "MsgA"]);
+		// No new dispatch should have happened
+		expect(sim.dispatched.length).toBe(1); // only "Running"
+
+		// User presses abort → batched steer injection
+		sim.batchedSteerAbort();
+
+		// "MsgB" should be dispatched as steer method
+		expect(sim.dispatched[1].method).toBe("steer");
+		expect(sim.dispatched[1].message.text).toBe("MsgB");
+
+		// After abort, agent goes idle and drains remaining → "MsgA" as prompt
+		expect(sim.dispatched[2].method).toBe("prompt");
+		expect(sim.dispatched[2].message.text).toBe("MsgA");
+
+		expect(sim.queue.isEmpty).toBe(true);
+	});
+
+	test("(story 12) multiple steer: steer C then B, abort → batch dispatch in steer order, then non-steered drain", () => {
+		const sim = new DispatchSimulator();
+
+		// Make agent busy
+		sim.enqueue("Running");
+
+		// Queue A, B, C
+		const msgA = sim.enqueue("A");
+		const msgB = sim.enqueue("B");
+		const msgC = sim.enqueue("C");
+
+		// Steer C first, then B (steer order: C first since steered first)
+		sim.steerQueued(msgC!.id);
+		sim.steerQueued(msgB!.id);
+		expect(sim.queue.toArray().map(m => m.text)).toEqual(["C", "B", "A"]);
+
+		// Abort — batch steer injection
+		sim.batchedSteerAbort();
+
+		// Batch steer: C and B concatenated as a single steer dispatch
+		expect(sim.dispatched[1].method).toBe("steer");
+		expect(sim.dispatched[1].message.text).toBe("C\nB");
+
+		// After abort, drain non-steered: A
+		expect(sim.dispatched[2].method).toBe("prompt");
+		expect(sim.dispatched[2].message.text).toBe("A");
+
+		sim.agentEnd();
+		expect(sim.queue.isEmpty).toBe(true);
+		expect(sim.status).toBe("idle");
+	});
+
+	// ── followUp dispatch test ─────────────────────────────────────────
+
+	test("followUp dispatch: enqueue with isFollowUp while busy → dispatched via followUp method", () => {
+		const sim = new DispatchSimulator();
+
+		// Make agent busy
+		sim.enqueue("Running");
+
+		// Queue a follow_up message
+		const followUp = sim.enqueue("FollowUp", { isFollowUp: true });
+		expect(followUp).not.toBeNull();
+		expect(followUp!.isFollowUp).toBe(true);
+
+		// Agent finishes → drain fires
+		sim.agentEnd();
+
+		// The follow_up message should be dispatched via "followUp" method
+		expect(sim.dispatched[1].method).toBe("followUp");
+		expect(sim.dispatched[1].message.text).toBe("FollowUp");
+	});
+
+	test("followUp direct dispatch: idle + empty queue + isFollowUp → dispatched via followUp method", () => {
+		const sim = new DispatchSimulator();
+
+		// Direct dispatch with isFollowUp
+		sim.enqueue("DirectFollowUp", { isFollowUp: true });
+
+		expect(sim.dispatched.length).toBe(1);
+		expect(sim.dispatched[0].method).toBe("followUp");
+		expect(sim.dispatched[0].message.text).toBe("DirectFollowUp");
 	});
 });
