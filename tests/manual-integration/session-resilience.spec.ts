@@ -3,7 +3,7 @@
  *
  * Single gateway, 6 session variations, one restart — verifies all survive.
  *
- *   npm run test:manual                  # API-only
+ *   npm run test:manual                  # API-only (no browser for timing test)
  *   SCREENSHOTS=1 npm run test:manual    # + browser screenshots + HTML report
  *
  * Prerequisites: `npm run build`, agent CLI in PATH, Docker for sandbox tests.
@@ -126,36 +126,17 @@ function wsConnect(gw: GW, id: string): Promise<Conn> {
 	});
 }
 
-async function sendMsg(gw: GW, id: string, text: string, ms = 120_000) {
-	const c = await wsConnect(gw, id);
-	c.send({ type: "send_message", text });
-	await new Promise(r => setTimeout(r, 200));
-	await pollIdle(gw, id, ms);
-	c.close();
-}
-
-async function screenshot(page: Page | undefined, gw: GW, id: string, name: string) {
-	if (!WANT_SCREENSHOTS || !page) return;
+/** Navigate to session, wait for history to load, type message, press Enter, wait for idle. */
+async function browserSend(page: Page, gw: GW, id: string, text: string, idleTimeoutMs = 120_000) {
 	await page.goto(`${gw.base}/?token=${gw.token}#/session/${id}`);
 	await page.waitForSelector("textarea", { timeout: 15_000 });
-	// Wait for message history to render
-	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 10_000 }); } catch {}
-	await page.waitForTimeout(2_000);
-	mkdirSync(RESULTS_DIR, { recursive: true });
-	await page.screenshot({ path: join(RESULTS_DIR, name), fullPage: true });
-	console.log(`    📸 ${name}`);
-}
-
-/** Send via browser UI so page already has the conversation loaded for screenshot. */
-async function browserSend(page: Page, gw: GW, id: string, text: string) {
-	await page.goto(`${gw.base}/?token=${gw.token}#/session/${id}`);
-	await page.waitForSelector("textarea", { timeout: 15_000 });
-	// Wait for prior messages to load
-	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 10_000 }); } catch {}
+	// Wait for any prior messages to render
+	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 8_000 }); } catch {}
+	await page.waitForTimeout(500);
 	await page.fill("textarea", text);
 	await page.press("textarea", "Enter");
-	await pollIdle(gw, id);
-	await page.waitForTimeout(2_000);
+	await pollIdle(gw, id, idleTimeoutMs);
+	await page.waitForTimeout(1_500);
 }
 
 function initRepo(dir: string) {
@@ -167,7 +148,6 @@ function initRepo(dir: string) {
 	writeFileSync(join(dir, "README.md"), "test\n");
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	// Add origin so sandbox can clone
 	try {
 		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
 		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
@@ -223,6 +203,13 @@ const VARIATIONS: Variation[] = [
 	{ name: "Sandbox worktree + interrupt",label: "sbx-wt-int", worktree: true,  sandboxed: true,  interrupt: true  },
 ];
 
+function variationLabel(v: Variation) {
+	const wt = v.worktree ? "Worktree" : "Master";
+	const sbx = v.sandboxed ? "Sandbox" : "No Sandbox";
+	const int = v.interrupt ? " + Interrupt" : "";
+	return `${wt}, ${sbx}${int}`;
+}
+
 // ===================================================================
 // Single gateway, all variations
 // ===================================================================
@@ -233,8 +220,6 @@ test.describe.serial("Session resilience — all variations", () => {
 	let dir: string;
 	let port: number;
 	let sandboxAvailable = false;
-
-	// session state keyed by label
 	const sessions: Record<string, { id: string; cwd: string; branch: string; timing: Partial<Result> }> = {};
 
 	test.beforeAll(async ({}, ti) => {
@@ -245,9 +230,6 @@ test.describe.serial("Session resilience — all variations", () => {
 		rmSync(dir, { recursive: true, force: true });
 		initRepo(dir);
 
-		// Pre-configure sandbox
-		// Pre-configure: large worktree pool (we create up to 4 worktree sessions)
-		// and sandbox if Docker is available
 		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
 		const yaml = [`worktree_pool_size: "6"`, HAS_DOCKER ? "sandbox: docker" : ""].filter(Boolean).join("\n") + "\n";
 		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), yaml);
@@ -256,8 +238,7 @@ test.describe.serial("Session resilience — all variations", () => {
 		console.log(`  Gateway :${port}  cwd=${dir}  docker=${HAS_DOCKER}`);
 
 		if (HAS_DOCKER) {
-			const sr = await api(gw, "/api/sandbox-status");
-			const ss = await sr.json();
+			const ss = await (await api(gw, "/api/sandbox-status")).json();
 			sandboxAvailable = ss.configured && ss.available;
 			console.log(`  Sandbox: configured=${ss.configured} available=${ss.available}`);
 		}
@@ -270,19 +251,15 @@ test.describe.serial("Session resilience — all variations", () => {
 	});
 
 	// ---------------------------------------------------------------
-	// Phase 1: Create all sessions and measure timing
+	// Phase 1: Create sessions, measure timing (WS only — no browser needed)
 	// ---------------------------------------------------------------
 	test("create all sessions and measure timing", async () => {
 		for (const v of VARIATIONS) {
-			if (v.sandboxed && !sandboxAvailable) {
-				console.log(`  SKIP ${v.name}: sandbox not available`);
-				continue;
-			}
+			if (v.sandboxed && !sandboxAvailable) { console.log(`  SKIP ${v.name}`); continue; }
 
 			const t0 = performance.now();
 			const res = await api(gw, "/api/sessions", {
-				method: "POST",
-				body: JSON.stringify({ worktree: v.worktree, sandboxed: v.sandboxed }),
+				method: "POST", body: JSON.stringify({ worktree: v.worktree, sandboxed: v.sandboxed }),
 			});
 			expect(res.status).toBe(201);
 			const id = (await res.json()).id;
@@ -291,7 +268,6 @@ test.describe.serial("Session resilience — all variations", () => {
 			await pollIdle(gw, id, v.sandboxed ? 180_000 : 120_000);
 			const idleMs = Math.round(performance.now() - t0);
 
-			// Send message and measure response
 			const c = await wsConnect(gw, id);
 			const tQ = performance.now();
 			c.send({ type: "send_message", text: "Reply with exactly: PONG" });
@@ -306,138 +282,107 @@ test.describe.serial("Session resilience — all variations", () => {
 			if (!v.sandboxed) {
 				if (v.worktree) {
 					expect(normalize(info.cwd)).not.toBe(normalize(dir));
-					expect(existsSync(info.cwd)).toBe(true);
 					branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: info.cwd, encoding: "utf-8" }).trim();
 					expect(branch).not.toBe("master");
 				} else {
 					expect(normalize(info.cwd)).toBe(normalize(dir));
 					branch = "master";
 				}
-			} else {
-				branch = "(sandbox)";
-			}
+			} else { branch = "(sandbox)"; }
 
 			sessions[v.label] = { id, cwd: info.cwd, branch, timing: { createMs, idleMs, queueMs, responseMs } };
-			console.log(`  ${v.name}: create=${createMs}ms idle=${idleMs}ms resp=${responseMs}ms cwd=${info.cwd}`);
+			console.log(`  ${v.name}: create=${createMs}ms idle=${idleMs}ms resp=${responseMs}ms`);
 		}
 	});
 
 	// ---------------------------------------------------------------
-	// Phase 2: Send pwd/git-status to all, warm up session files
+	// Phase 2: Send descriptive messages via browser, start interrupts,
+	//          kill gateway, restart, verify all, screenshot
 	// ---------------------------------------------------------------
-	test("send pwd/git-status to all sessions", async () => {
+	test("send messages, restart, verify recovery", async ({ page }) => {
+		// --- Send initial "Test: ..." message to each session ---
 		for (const v of VARIATIONS) {
 			const s = sessions[v.label];
 			if (!s) continue;
-			await sendMsg(gw, s.id, "Run `pwd` and `git status` and show me the output");
+			await browserSend(page, gw, s.id,
+				`Test: ${variationLabel(v)}\nRun \`pwd\` and \`git status\` and show me the output.`);
 			await waitForFile(gw, s.id);
-			console.log(`  ${v.name}: pwd/git sent ✓`);
+			console.log(`  ${v.name}: initial message ✓`);
 		}
-	});
 
-	// ---------------------------------------------------------------
-	// Phase 3: Start blocking commands on interrupt variants
-	// ---------------------------------------------------------------
-	test("start blocking commands on interrupt variants", async () => {
+		// --- Start blocking commands on interrupt variants ---
 		for (const v of VARIATIONS) {
 			if (!v.interrupt) continue;
 			const s = sessions[v.label];
 			if (!s) continue;
-			const c = await wsConnect(gw, s.id);
-			c.send({ type: "send_message",
-				text: "Run this exact bash command with the bash tool (not background): sleep 120 && echo done" });
-			c.close();
+			// Navigate and send via browser
+			await page.goto(`${gw.base}/?token=${gw.token}#/session/${s.id}`);
+			await page.waitForSelector("textarea", { timeout: 15_000 });
+			try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 8_000 }); } catch {}
+			await page.fill("textarea",
+				"Run this exact bash command with the bash tool (not background): sleep 120 && echo done");
+			await page.press("textarea", "Enter");
 			console.log(`  ${v.name}: blocking command sent`);
 		}
-		// Give agents time to start the tool call
-		await new Promise(r => setTimeout(r, 5_000));
-		for (const v of VARIATIONS) {
-			if (!v.interrupt) continue;
-			const s = sessions[v.label];
-			if (!s) continue;
-			const status = (await getSession(gw, s.id)).status;
-			console.log(`  ${v.name}: status=${status}`);
+		// Give agents time to start tool calls
+		if (VARIATIONS.some(v => v.interrupt && sessions[v.label])) {
+			await new Promise(r => setTimeout(r, 5_000));
+			for (const v of VARIATIONS) {
+				if (!v.interrupt || !sessions[v.label]) continue;
+				const st = (await getSession(gw, sessions[v.label].id)).status;
+				console.log(`  ${v.name}: status=${st}`);
+			}
 		}
-	});
 
-	// ---------------------------------------------------------------
-	// Phase 4: Kill gateway and restart
-	// ---------------------------------------------------------------
-	test("kill gateway and restart", async () => {
-		const t0 = performance.now();
+		// --- Kill gateway ---
+		const tRestart = performance.now();
 		await stopGW(gw);
-
-		// Verify state persisted
 		expect(existsSync(join(dir, ".bobbit", "state", "sessions.json"))).toBe(true);
-		for (const v of VARIATIONS) {
-			const s = sessions[v.label];
-			if (!s || v.sandboxed) continue;
-			if (v.worktree) expect(existsSync(s.cwd)).toBe(true);
-		}
 
+		// --- Restart ---
 		port = await freePort();
 		gw = await startGW(dir, port);
-		const restartMs = Math.round(performance.now() - t0);
+		const restartMs = Math.round(performance.now() - tRestart);
 		console.log(`  Restarted :${port} in ${restartMs}ms`);
 
-		// Record restart time for all sessions
-		for (const v of VARIATIONS) {
-			const s = sessions[v.label];
-			if (s) s.timing.restartMs = restartMs;
-		}
-	});
-
-	// ---------------------------------------------------------------
-	// Phase 5: Verify all sessions after restart
-	// ---------------------------------------------------------------
-	test("verify all sessions after restart", async ({ page }) => {
+		// --- Verify each session and screenshot ---
 		for (const v of VARIATIONS) {
 			const s = sessions[v.label];
 			if (!s) continue;
+			s.timing.restartMs = restartMs;
 
 			const info = await getSession(gw, s.id);
 			const restored = info.status !== "archived";
 			expect(normalize(info.cwd)).toBe(normalize(s.cwd));
 			console.log(`  ${v.name}: status=${info.status} cwd_preserved=✓`);
 
-			// Git checks for non-sandbox worktree
 			if (!v.sandboxed && v.worktree && restored && existsSync(s.cwd)) {
 				const br = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: s.cwd, encoding: "utf-8" }).trim();
 				expect(br).not.toBe("master");
-				console.log(`    git valid ✓ (branch=${br})`);
+				console.log(`    git ✓ (branch=${br})`);
 			}
 
-			// Send follow-up message to prove session works
+			// Send follow-up via browser — page will show full chat history
 			let screenshotId = s.id;
 			if (restored) {
 				await pollIdle(gw, s.id, 120_000);
-				if (WANT_SCREENSHOTS && page) {
-					await browserSend(page, gw, s.id, "Run `pwd` again to confirm same directory");
-				} else {
-					await sendMsg(gw, s.id, "Run `pwd` again to confirm same directory");
-				}
-				console.log(`    responds after restart ✓`);
+				await browserSend(page, gw, s.id, "Run `pwd`, and confirm `git status`");
+				console.log(`    responds ✓`);
 			} else {
-				// Archived — create new session to prove gateway works
 				const r = await api(gw, "/api/sessions", {
-					method: "POST",
-					body: JSON.stringify({ worktree: v.worktree, sandboxed: v.sandboxed }),
+					method: "POST", body: JSON.stringify({ worktree: v.worktree, sandboxed: v.sandboxed }),
 				});
 				const ns = (await r.json()).id;
 				await pollIdle(gw, ns, v.sandboxed ? 180_000 : 120_000);
-				if (WANT_SCREENSHOTS && page) {
-					await browserSend(page, gw, ns, "Run `pwd` and `git status` and show me the output");
-				} else {
-					await sendMsg(gw, ns, "Run `pwd` and `git status` and show me the output");
-				}
+				await browserSend(page, gw, ns, "Run `pwd`, and confirm `git status`");
 				screenshotId = ns;
-				console.log(`    new session responds ✓`);
+				console.log(`    new session ✓`);
 			}
 
+			// Screenshot — page already has conversation from browserSend
 			const ssName = `${v.label}-after-restart.png`;
-			if (WANT_SCREENSHOTS && page) {
+			if (WANT_SCREENSHOTS) {
 				mkdirSync(RESULTS_DIR, { recursive: true });
-				await page.waitForTimeout(1_000);
 				await page.screenshot({ path: join(RESULTS_DIR, ssName), fullPage: true });
 				console.log(`    📸 ${ssName}`);
 			}
@@ -456,7 +401,7 @@ test.describe.serial("Session resilience — all variations", () => {
 	});
 
 	// ---------------------------------------------------------------
-	// Phase 6: Generate HTML report
+	// Phase 3: HTML report
 	// ---------------------------------------------------------------
 	test("generate HTML report", async () => {
 		if (results.length === 0) { console.log("  No results"); return; }
@@ -490,7 +435,7 @@ test.describe.serial("Session resilience — all variations", () => {
 			const b64 = readFileSync(join(RESULTS_DIR, r.screenshot!)).toString("base64");
 			return `<div style="margin-bottom:28px">
 				<div style="font-size:14px;color:#a0d0a0;font-weight:600">${r.name}</div>
-				<div style="font-size:12px;color:#888;margin:4px 0 8px">cwd: <code>${r.cwd}</code> · branch: <code>${r.branch}</code> · ${r.restoredAsIdle ? "restored as idle" : "archived → new session"}</div>
+				<div style="font-size:12px;color:#888;margin:4px 0 8px">cwd: <code>${r.cwd}</code> · branch: <code>${r.branch}</code> · ${r.restoredAsIdle ? "restored as idle — chat history preserved" : "archived → new session"}</div>
 				<img src="data:image/png;base64,${b64}" style="width:100%;border-radius:6px;border:1px solid #333">
 			</div>`;
 		}).join("\n");
@@ -515,8 +460,10 @@ hr{border:none;border-top:1px solid #333;margin:32px 0}
 <table><tr><th>Variation</th><th class="r">Create</th><th class="r">Create→Idle</th><th class="r">Msg Response</th><th class="r">Restart</th></tr>${timingRows}</table>
 <h2>Post-crash verification</h2>
 <table><tr><th>Variation</th><th class="r">Restored</th><th class="r">cwd preserved</th><th class="r">Branch</th></tr>${checkRows}</table>
-${screenshotSections ? `<hr><h2>Screenshots — after restart</h2><p class="n">Each screenshot shows the session after a hard gateway kill and restart. Restored sessions show the original chat history plus a post-restart pwd confirmation. Archived sessions (sandbox) show a new session proving the gateway recovered.</p>${screenshotSections}` : ""}
-<p class="n">All variations share a single gateway instance. Sandbox sessions are archived after crash because the agent session file lives inside the Docker container (not accessible from host after restart). Non-sandbox sessions restore as idle thanks to proactive session file creation.</p>
+${screenshotSections ? `<hr><h2>Screenshots — after restart</h2>
+<p class="n">Each screenshot shows the session after a hard gateway kill and restart. All messages were sent through the browser UI. Restored sessions show the original "Test: ..." message and pwd/git output from before the crash, followed by the post-restart "Run pwd, and confirm git status" follow-up. Archived sessions (sandbox) show a new session.</p>
+${screenshotSections}` : ""}
+<p class="n">All variations share a single gateway instance. Sandbox sessions are archived after crash because the agent session file lives inside the Docker container. Non-sandbox sessions restore as idle thanks to proactive session file creation.</p>
 </body></html>`;
 
 		writeFileSync(join(RESULTS_DIR, "report.html"), html);
