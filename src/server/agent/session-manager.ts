@@ -3533,6 +3533,14 @@ export class SessionManager {
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 
+			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
+			if (session.sandboxed) {
+				await this.applySandboxWiring(bridgeOptions, id, {
+					projectId: session.projectId,
+					goalId: session.goalId,
+				});
+			}
+
 			// Restore goal extension
 			if (session.goalId) {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
