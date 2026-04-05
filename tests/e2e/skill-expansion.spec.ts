@@ -1,13 +1,12 @@
 /**
- * E2E tests for slash skill expansion mismatch across projects.
+ * E2E tests for slash skill expansion across projects.
  *
- * Reproduces the bug: when `/api/slash-skills` is called WITHOUT `projectId`,
- * skills from non-default projects with custom `config_directories` are not
- * found — because the server falls back to the default project's config store.
- * But the WS handler correctly uses `session.projectId` to resolve skills.
+ * The "autocomplete returns correct skills with projectId" test reproduces the
+ * bug: it asserts the DESIRED behavior (skill found with projectId param).
+ * Before the fix, this test FAILS because the API without projectId misses
+ * skills from non-default projects. After the fix, it passes.
  *
- * This proves that the autocomplete (which omits projectId) and the expansion
- * (which uses session.projectId) see different skill sets.
+ * The other tests verify WS expansion and project isolation.
  */
 import { test, expect } from "./in-process-harness.js";
 import {
@@ -69,7 +68,7 @@ ${SKILL_MARKER}
 });
 
 test.describe("Slash skill expansion mismatch", () => {
-	test("skill from non-default project is NOT found without projectId (reproduces bug)", async () => {
+	test("autocomplete without projectId should find non-default project skill (fails before fix)", async () => {
 		// Create a session in the second project
 		const sessResp = await apiFetch("/api/sessions", {
 			method: "POST",
@@ -83,35 +82,24 @@ test.describe("Slash skill expansion mismatch", () => {
 		const { id: sessionId, cwd: sessionCwd } = await sessResp.json();
 
 		try {
-			// Fetch slash-skills WITHOUT projectId — simulates the current buggy
-			// autocomplete behavior in MessageEditor
-			const withoutPid = await apiFetch(
+			// Fetch slash-skills WITHOUT projectId — this simulates the current
+			// buggy autocomplete in MessageEditor which omits projectId.
+			// DESIRED behavior: the skill should be found (matching what the
+			// WS handler sees via session.projectId).
+			// ACTUAL behavior (before fix): skill not found — autocomplete bug.
+			const resp = await apiFetch(
 				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}`,
 			);
-			expect(withoutPid.status).toBe(200);
-			const withoutPidData = await withoutPid.json();
-			const withoutPidNames = withoutPidData.skills.map((s: any) => s.name);
+			expect(resp.status).toBe(200);
+			const data = await resp.json();
+			const names = data.skills.map((s: any) => s.name);
 
-			// The custom skill should NOT be found because the default project's
-			// config store doesn't have the custom config_directories entry.
-			// This is the core of the bug: autocomplete misses the skill.
+			// This assertion FAILS before the fix — proving the autocomplete
+			// mismatch bug. The skill exists in the non-default project but
+			// is not found because projectId is not passed.
 			expect(
-				withoutPidNames,
-				`Expected skill "${SKILL_NAME}" to NOT be found without projectId (proves autocomplete bug)`,
-			).not.toContain(SKILL_NAME);
-
-			// Fetch slash-skills WITH projectId — the correct behavior
-			const withPid = await apiFetch(
-				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}&projectId=${encodeURIComponent(secondProjectId)}`,
-			);
-			expect(withPid.status).toBe(200);
-			const withPidData = await withPid.json();
-			const withPidNames = withPidData.skills.map((s: any) => s.name);
-
-			// With projectId, the skill SHOULD be found
-			expect(
-				withPidNames,
-				`Expected skill "${SKILL_NAME}" to be found with projectId`,
+				names,
+				`skill not found in autocomplete without projectId — autocomplete bug: expected "${SKILL_NAME}" in [${names.join(", ")}]`,
 			).toContain(SKILL_NAME);
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
