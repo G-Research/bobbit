@@ -80,6 +80,24 @@ export class WorktreePool {
 			return null;
 		}
 
+		// Reset worktree to latest origin/master so it isn't stale.
+		// The pool entry was created at some point in the past — master may have
+		// moved forward since then. Fetch + reset ensures we start from HEAD.
+		try {
+			await execFile("git", ["fetch", "origin"], {
+				cwd: entry.worktreePath,
+				timeout: 30_000,
+			});
+			const remotePrimary = await this.resolveRemotePrimary();
+			await execFile("git", ["reset", "--hard", remotePrimary], {
+				cwd: entry.worktreePath,
+				timeout: 10_000,
+			});
+		} catch (err) {
+			// Non-fatal — worktree is still usable, just possibly stale
+			console.warn(`[worktree-pool] Reset to origin failed for ${targetBranch}:`, err);
+		}
+
 		// Push the renamed branch to origin (fire-and-forget, non-blocking)
 		execFile("git", ["push", "-u", "origin", targetBranch], {
 			cwd: entry.worktreePath,
@@ -90,6 +108,21 @@ export class WorktreePool {
 
 		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${entry.worktreePath} (pool: ${this.pool.length}/${this.targetSize})`);
 		return { worktreePath: entry.worktreePath, branchName: targetBranch };
+	}
+
+	/** Resolve the remote primary branch (e.g. origin/master). */
+	private async resolveRemotePrimary(): Promise<string> {
+		try {
+			const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
+				cwd: this.repoPath,
+				timeout: 5_000,
+			});
+			const ref = stdout.trim().replace("refs/remotes/", "");
+			if (ref) return ref;
+		} catch {
+			// Fall back if origin/HEAD is not set
+		}
+		return "origin/master";
 	}
 
 	/** Fill pool up to targetSize in the background. */
