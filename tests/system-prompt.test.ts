@@ -134,7 +134,6 @@ describe("assembleSystemPrompt", () => {
 
 	it("returns working-directory-only prompt when all other parts are empty", () => {
 		const result = assembleSystemPrompt("test-session", { cwd: cwdDir });
-		// CWD alone now produces a prompt with just the Working Directory section
 		assert.ok(result);
 		const content = fs.readFileSync(result, "utf-8");
 		assert.ok(content.includes("# Working Directory"));

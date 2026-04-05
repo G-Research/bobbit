@@ -411,12 +411,20 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 
 	// Step 6: sandbox wiring (needs final CWD)
 	if (plan.sandboxed) {
+		const preSandboxCwd = plan.bridgeOptions.cwd;
 		await withRetry(
 			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
 		});
+
+		// Sandbox wiring may remap CWD to a container-internal path (e.g. /workspace-wt/<branch>).
+		// Re-assemble the prompt so the Working Directory section matches the actual --cwd.
+		if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== preSandboxCwd) {
+			plan.cwd = plan.bridgeOptions.cwd;
+			resolvePrompt(plan, ctx);
+		}
 	}
 
 	// Step 7: persist BEFORE spawning — if the spawn fails (e.g. Docker ENOENT),
@@ -490,12 +498,20 @@ export async function executeWorktreeAsync(
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
+		const preSandboxCwd = plan.bridgeOptions.cwd;
 		await withRetry(
 			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
 		});
+
+		// Sandbox wiring may remap CWD to a container-internal path.
+		// Re-assemble the prompt so the Working Directory section matches the actual --cwd.
+		if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== preSandboxCwd) {
+			plan.cwd = plan.bridgeOptions.cwd;
+			resolvePrompt(plan, ctx);
+		}
 	}
 
 	// Create real RpcBridge (replacing placeholder)

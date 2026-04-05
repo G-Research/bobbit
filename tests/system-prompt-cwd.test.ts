@@ -90,6 +90,7 @@ describe("system prompt working directory section", () => {
 			const cwdSection = sections.find(s => s.label === "Working Directory");
 			assert.ok(cwdSection, "should have a Working Directory section");
 			assert.ok(cwdSection.content.includes("`/workspace-wt/goal-branch`"), "should contain the path");
+			assert.ok(cwdSection.content.includes("Stay in this directory"), "should contain stay instruction");
 			assert.strictEqual(cwdSection.source, "/workspace-wt/goal-branch", "source should be the cwd path");
 			assert.ok(cwdSection.tokens > 0, "should have positive token count");
 		});

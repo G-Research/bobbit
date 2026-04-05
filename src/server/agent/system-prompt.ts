@@ -304,7 +304,8 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 2.5. Working directory
+	// 2.5. Working directory (display-only — not included in the actual prompt file;
+	// the agent CLI injects its own "Current working directory" based on --cwd)
 	if (parts.cwd) {
 		const cwdContent = `Your working directory is: \`${parts.cwd}\`\n\n` +
 			`Stay in this directory for all file operations and git commands. ` +
