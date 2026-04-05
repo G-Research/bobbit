@@ -81,6 +81,11 @@ function respondToPrompt(text) {
 		};
 	}
 
+	// MOCK_ERROR keyword — simulate an error turn (stopReason: "error")
+	if (lower.includes("mock_error")) {
+		return { mockError: true };
+	}
+
 	// Detect tool requests by keywords
 	if (lower.includes("bash") || lower.includes("echo ")) {
 		return { tool: "Bash", input: { command: "echo BOBBIT_TOOL_TEST_OK_12345" }, output: "BOBBIT_TOOL_TEST_OK_12345\n" };
@@ -234,6 +239,15 @@ async function handlePrompt(requestId, text) {
 			conversationMessages.push(assistantMsg);
 			emit({ type: "message_end", message: assistantMsg });
 		}
+	} else if (toolAction && toolAction.mockError) {
+		// Simulate an error turn — the message_end has stopReason "error"
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: "Error: something went wrong" }],
+			stopReason: "error",
+		};
+		conversationMessages.push(assistantMsg);
+		emit({ type: "message_end", message: assistantMsg });
 	} else if (toolAction && toolAction.tool) {
 		const toolId = `tool_${Date.now()}`;
 
