@@ -205,6 +205,8 @@ When asked to commit, other unstaged/staged changes may exist from in-progress w
 
 Dev server runs from **primary worktree** on `master`. All sessions use separate worktrees — goal sessions under `<project-root>-wt-goal\`, regular sessions under `<project-root>-wt-session\`. Assistant sessions (goal/project/tool assistants) are the exception: they don't edit code and don't get worktrees.
 
+**Always edit files in your session worktree, never in the primary worktree.** The user or other context may reference files by their primary-worktree path (e.g. `C:\Users\…\bobbit\src\…`) — read those for reference, but all edits, builds, and git operations must happen in your CWD (`C:\Users\…\bobbit-wt\session-…\`). The same source tree is available at both paths; editing the primary worktree risks conflicts with the dev server and other agents.
+
 **Pushing to remote `master` does NOT update the dev server.** Pull into the primary worktree:
 
 ```bash
