@@ -14,6 +14,7 @@ import { test as base } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,8 +25,10 @@ const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
 
 // Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
 // (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
-// local overlay FS instead. On the host, keep them in PROJECT_ROOT as before.
-const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : PROJECT_ROOT;
+// local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
+// is outside the git repo — otherwise isGitRepo() returns true for the project
+// rootPath and sessions auto-create worktrees (slow, conflicts with git state).
+const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : join(tmpdir(), "bobbit-e2e");
 
 /** Always serve the UI — the overhead is negligible (static files) and
  *  fullstack browser tests need it. API-only tests simply don't use it. */
@@ -51,6 +54,7 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 		});
 		srv.on("error", rej);
 	});
+	mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 	const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-worker-${port}`);
 
 	// Clean slate
