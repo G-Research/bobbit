@@ -113,6 +113,13 @@ Per-session token usage and cost, aggregated to goal and task level. Always know
 ### The Bobbit Mascot
 A squishy pixel-art blob that lives in the UI — animated, expressive, and drawn entirely with CSS box-shadows. Each session gets its own colour identity. Role accessories (crown, magnifying glass, bandana) show what the agent is doing at a glance. See the [sprite system docs](docs/bobbit-sprites.md).
 
+### Feature Y
+A utility function (`featureY()`) exported from `src/feature-y.ts`. Returns an activation status string. Import it with:
+
+```ts
+import { featureY } from './feature-y.js';
+```
+
 ## Documentation
 
 | Guide | Description |
