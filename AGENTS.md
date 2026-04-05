@@ -14,6 +14,8 @@ npm run check          # Type-check both server and web without emitting
 npm test               # Run all tests (unit + E2E)
 npm run test:unit      # Unit tests — Node test runner + Playwright file:// fixtures (<30s)
 npm run test:e2e       # E2E tests — API (in-process) + browser (spawned gateway)
+npm run test:manual    # Manual integration tests — real agents + Docker (~5 min)
+SCREENSHOTS=1 npm run test:manual  # Same + browser screenshots + HTML report
 ```
 
 ### Dev server harness
@@ -36,13 +38,14 @@ npm run test:e2e 2>&1 | tail -5  # E2E tests (API in-process + browser spawned)
 
 Test filter flags: `--failures` (default), `--verbose`, `--full`.
 
-UI-only changes need only unit tests. Server changes need E2E too. Docker-dependent tests (`tests/e2e/sandbox-docker.spec.ts`) skip automatically when Docker is unavailable — they never fail in CI without Docker.
+UI-only changes need only unit tests. Server changes need E2E too. Session lifecycle, sandbox, or restart changes should be validated with `npm run test:manual`. Docker-dependent tests skip automatically when Docker is unavailable.
 
 **Test types:**
 - **Unit** (`tests/*.spec.ts`, `tests/*.test.ts`): Playwright `file://` fixtures + Node test runner. See `mobile-header.spec.ts`.
 - **API E2E** (`tests/e2e/*.spec.ts`): Import `test` from `./in-process-harness.js` — the gateway runs in the same Node process (no child process spawn). Covers HTTP/WS API tests, CRUD, agent protocol, etc. Runs as the `api` project in `playwright-e2e.config.ts` with 4 workers.
 - **Browser E2E** (`tests/e2e/ui/*.spec.ts` + select non-ui files): Import `test` from `./gateway-harness.js` — spawns a real gateway child process. Used for tests that need a browser (`page` fixture), MCP integration, or process-level behavior (port allocation, localhost auth bypass). Runs as the `browser` project with 2 workers.
 - **UI E2E** (`tests/e2e/ui/*.spec.ts`): A subset of browser E2E — fullstack tests that exercise user journeys (click buttons, fill forms, verify outcomes) through UI → WebSocket → server → mock agent → UI. Covers project management, goal creation, team lifecycle, session interactions, navigation, and settings. Run with: `npx playwright test --config playwright-e2e.config.ts --project browser tests/e2e/ui/`
+- **Manual integration** (`tests/manual-integration/*.spec.ts`): Full-stack resilience tests using real agents and real Docker — no mocks. NOT included in `npm test` or CI. Uses `playwright-manual.config.ts`. See [Manual integration tests](#manual-integration-tests) below.
 
 **UI E2E page-object helpers** (`tests/e2e/ui/ui-helpers.ts`): Reusable helpers for browser tests. Import from `./ui-helpers.js`:
 - `openApp(page)` — navigate with token auth, wait for sidebar to load
@@ -66,6 +69,43 @@ UI-only changes need only unit tests. Server changes need E2E too. Docker-depend
 - Never read/write `.bobbit/` in tests — use isolated directory from `e2e-setup.ts`.
 - **Never start background servers from bash** (`node server.js &`) — pipes hang the agent session. Use Playwright `webServer` config.
 - Prefer `file://` fixtures for new tests. Use E2E only when you need a real server.
+
+### Manual integration tests
+
+Full-stack resilience tests that use real agents and real Docker containers — no mocks. Defined in `tests/manual-integration/session-resilience.spec.ts`, configured by `playwright-manual.config.ts`. **Not included in `npm test`, `npm run test:unit`, or `npm run test:e2e`.**
+
+```bash
+npm run test:manual                 # Headless, API assertions only (~5 min)
+SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
+```
+
+**Prerequisites**: `npm run build`, a working agent CLI in PATH (claude, etc.), Docker running for sandbox tests.
+
+**What it tests**: Creates 6 session variations on a single gateway, sends messages through the browser, hard-kills the gateway (simulating a crash), restarts on a fresh port, and verifies each session survives:
+
+| Variation | Worktree | Sandbox | Interrupt |
+|---|---|---|---|
+| Plain (no worktree) | ✗ | ✗ | ✗ |
+| Worktree | ✓ | ✗ | ✗ |
+| Worktree + interrupt | ✓ | ✗ | ✓ (kill mid-tool-call) |
+| Sandbox plain | ✗ | ✓ | ✗ |
+| Sandbox worktree | ✓ | ✓ | ✗ |
+| Sandbox worktree + interrupt | ✓ | ✓ | ✓ |
+
+**Assertions per variation**:
+- Session creation timing (create → idle, message round-trip)
+- `sessions.json` persisted to disk after crash
+- Session restores as `idle` (not archived) — proactive session file creation ensures this for non-sandbox
+- `cwd` preserved across restart (exact path match)
+- Git working copy valid after restart (branch unchanged, `rev-parse --is-inside-work-tree`)
+- Agent responds to follow-up message after restart
+- Git status widget renders in the UI (sandbox bug caught and fixed by this test)
+
+**HTML report**: When run with `SCREENSHOTS=1`, generates `test-results/manual-integration/report.html` with timing comparison table, post-crash verification matrix, and browser screenshots of each session after restart showing the preserved chat history.
+
+**Architecture**: The test creates an isolated git repo in a temp directory, pre-configures `project.yaml` (sandbox + worktree pool size), starts a gateway process, and manages its lifecycle. Sessions are created via API (worktree/sandbox flags aren't in the UI), but all agent messages go through the Playwright browser. The `worktree_pool_size` config key (default 2) is set to 6 for the test so all worktree sessions get pre-built pools.
+
+**When to run**: After changes to session lifecycle, restore logic, sandbox wiring, worktree management, git status polling, or any server restart behavior. Not needed for UI-only or prompt-only changes.
 
 ## Recipes
 
