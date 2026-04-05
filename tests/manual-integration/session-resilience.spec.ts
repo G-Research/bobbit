@@ -13,7 +13,7 @@ import { test, expect } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import {
-	mkdirSync, rmSync, readFileSync, existsSync, readdirSync,
+	mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync,
 } from "node:fs";
 import { join, resolve, normalize } from "node:path";
 import WebSocket from "ws";
@@ -159,7 +159,46 @@ function connect(gw: GW, id: string): Promise<Conn> {
 }
 
 // ---------------------------------------------------------------------------
-// Test
+// Shared setup: git repo + gateway
+// ---------------------------------------------------------------------------
+
+function initGitRepo(dir: string) {
+	mkdirSync(dir, { recursive: true });
+	execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/master"], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["config", "user.name", "T"], { cwd: dir, stdio: "ignore" });
+	writeFileSync(join(dir, "README.md"), "test\n");
+	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
+}
+
+function tmpDir(label: string, port: number) {
+	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+	return join(tmp, `.bobbit-manual-${label}-${port}`);
+}
+
+function cleanupDirs(dir: string) {
+	// Clean the main dir and any worktree dirs created as siblings
+	const parent = resolve(dir, "..");
+	const base = dir.split(/[\\/]/).pop()!;
+	const dirs = [dir];
+	try {
+		for (const e of readdirSync(parent)) {
+			if (e.startsWith(base) && e.includes("-wt")) dirs.push(join(parent, e));
+		}
+	} catch { /* ignore */ }
+	for (const d of dirs) {
+		for (let i = 0; i < 3; i++) {
+			try { rmSync(d, { recursive: true, force: true }); break; } catch {
+				// retry after delay
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests
 // ---------------------------------------------------------------------------
 
 test.describe.serial("Plain session resilience (no worktree, no sandbox)", () => {
@@ -174,21 +213,9 @@ test.describe.serial("Plain session resilience (no worktree, no sandbox)", () =>
 	test.beforeAll(async ({}, ti) => {
 		ti.setTimeout(120_000);
 		port = await freePort();
-		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
-		dir = join(tmp, `.bobbit-manual-${port}`);
+		dir = tmpDir("plain", port);
 		rmSync(dir, { recursive: true, force: true });
-		mkdirSync(dir, { recursive: true });
-
-		// Minimal git repo
-		execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
-		execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/master"], { cwd: dir, stdio: "ignore" });
-		execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir, stdio: "ignore" });
-		execFileSync("git", ["config", "user.name", "T"], { cwd: dir, stdio: "ignore" });
-		const { writeFileSync } = await import("node:fs");
-		writeFileSync(join(dir, "README.md"), "test\n");
-		execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
-		execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-
+		initGitRepo(dir);
 		gw = await start(dir, port);
 		console.log(`  Gateway up on :${port}, cwd=${dir}`);
 	});
@@ -196,11 +223,7 @@ test.describe.serial("Plain session resilience (no worktree, no sandbox)", () =>
 	test.afterAll(async ({}, ti) => {
 		ti.setTimeout(30_000);
 		if (gw) await stop(gw);
-		for (let i = 0; i < 3; i++) {
-			try { rmSync(dir, { recursive: true, force: true }); break; } catch {
-				await new Promise(r => setTimeout(r, 2_000));
-			}
-		}
+		cleanupDirs(dir);
 	});
 
 	test("create session, send message, measure timing", async () => {
@@ -318,6 +341,173 @@ test.describe.serial("Plain session resilience (no worktree, no sandbox)", () =>
 			await poll(gw, sessionId, "idle");
 			c.close();
 			console.log(`  Existing session responds after restart: ✓`);
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+
+test.describe.serial("Worktree session resilience (no sandbox)", () => {
+	test.setTimeout(300_000);
+
+	let gw: GW;
+	let dir: string;
+	let port: number;
+	let sessionId: string;
+	let sessionCwd: string;
+
+	test.beforeAll(async ({}, ti) => {
+		ti.setTimeout(120_000);
+		port = await freePort();
+		dir = tmpDir("wt", port);
+		rmSync(dir, { recursive: true, force: true });
+		initGitRepo(dir);
+		gw = await start(dir, port);
+		console.log(`  Gateway up on :${port}, cwd=${dir}`);
+	});
+
+	test.afterAll(async ({}, ti) => {
+		ti.setTimeout(30_000);
+		if (gw) await stop(gw);
+		cleanupDirs(dir);
+	});
+
+	test("create worktree session, send message, measure timing", async () => {
+		// --- Create with worktree: true ---
+		const t0 = performance.now();
+		const res = await api(gw, "/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ worktree: true }),
+		});
+		expect(res.status).toBe(201);
+		const created = await res.json();
+		sessionId = created.id;
+		const tCreate = performance.now();
+
+		// --- Wait for idle (worktree setup is async — may take longer) ---
+		await poll(gw, sessionId, "idle");
+		const tIdle = performance.now();
+
+		// --- Queue a message ---
+		const c = await connect(gw, sessionId);
+		const tBeforeQueue = performance.now();
+		c.send({ type: "send_message", text: "Reply with exactly: PONG" });
+		const tQueued = performance.now();
+
+		// --- Wait for response ---
+		await new Promise(r => setTimeout(r, 200));
+		await poll(gw, sessionId, "idle");
+		const tResponse = performance.now();
+		c.close();
+
+		// --- Record cwd ---
+		const info = await (await api(gw, `/api/sessions/${sessionId}`)).json();
+		sessionCwd = info.cwd;
+
+		// --- Verify cwd is NOT the project root (it's a worktree) ---
+		expect(normalize(sessionCwd)).not.toBe(normalize(dir));
+		expect(existsSync(sessionCwd)).toBe(true);
+
+		// --- Verify it's a valid git working copy ---
+		const insideWt = execFileSync("git", ["rev-parse", "--is-inside-work-tree"],
+			{ cwd: sessionCwd, encoding: "utf-8" }).trim();
+		expect(insideWt).toBe("true");
+
+		// --- Verify branch is NOT master (session branches are unique) ---
+		const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"],
+			{ cwd: sessionCwd, encoding: "utf-8" }).trim();
+		expect(branch).not.toBe("master");
+		console.log(`  Worktree branch: ${branch}`);
+
+		// --- Report ---
+		const ms = (v: number) => `${Math.round(v)}ms`;
+		console.log(`\n  Timing:`);
+		console.log(`    Create API call:     ${ms(tCreate - t0)}`);
+		console.log(`    Create → Idle:       ${ms(tIdle - t0)}`);
+		console.log(`    Queue message:       ${ms(tQueued - tBeforeQueue)}`);
+		console.log(`    Message → Response:  ${ms(tResponse - tQueued)}`);
+		console.log(`    Session cwd:         ${sessionCwd}`);
+	});
+
+	test("gateway restart — worktree cwd preserved, can send message", async () => {
+		expect(sessionId).toBeTruthy();
+
+		// --- Verify session is live before restart ---
+		const preRes = await api(gw, `/api/sessions/${sessionId}`);
+		expect(preRes.status).toBe(200);
+		const preInfo = await preRes.json();
+		expect(preInfo.status).toBe("idle");
+		console.log(`  Session status before restart: ${preInfo.status}`);
+
+		// --- Hard kill (simulate crash) ---
+		await stop(gw);
+
+		// --- Verify sessions.json persisted ---
+		const sf = join(dir, ".bobbit", "state", "sessions.json");
+		expect(existsSync(sf)).toBe(true);
+		const persisted = JSON.parse(readFileSync(sf, "utf-8"));
+		const mine = persisted.find((s: any) => s.id === sessionId);
+		expect(mine).toBeTruthy();
+		console.log(`  Session in sessions.json: ✓ (cwd=${mine.cwd})`);
+
+		// --- Verify the worktree directory still exists on disk ---
+		expect(existsSync(sessionCwd)).toBe(true);
+		console.log(`  Worktree dir exists after crash: ✓`);
+
+		// --- Restart on new port ---
+		port = await freePort();
+		gw = await start(dir, port);
+		console.log(`  Gateway restarted on :${port}`);
+
+		// --- Session still queryable? ---
+		const postRes = await api(gw, `/api/sessions/${sessionId}`);
+		expect(postRes.status).toBe(200);
+		const postInfo = await postRes.json();
+		console.log(`  Session status after restart: ${postInfo.status}`);
+
+		// --- Session cwd preserved? ---
+		expect(normalize(postInfo.cwd)).toBe(normalize(sessionCwd));
+		console.log(`  cwd preserved: ✓`);
+
+		// --- Worktree still a valid git working copy? ---
+		if (existsSync(sessionCwd)) {
+			const insideWt = execFileSync("git", ["rev-parse", "--is-inside-work-tree"],
+				{ cwd: sessionCwd, encoding: "utf-8" }).trim();
+			expect(insideWt).toBe("true");
+			const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"],
+				{ cwd: sessionCwd, encoding: "utf-8" }).trim();
+			expect(branch).not.toBe("master");
+			console.log(`  Worktree git valid after restart: ✓ (branch=${branch})`);
+		}
+
+		// --- Can we send a message? ---
+		if (postInfo.status === "archived") {
+			console.log(`  Session archived after crash — creating new worktree session`);
+			const res = await api(gw, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ worktree: true }),
+			});
+			expect(res.status).toBe(201);
+			const ns = await res.json();
+			await poll(gw, ns.id, "idle");
+
+			const c = await connect(gw, ns.id);
+			c.send({ type: "send_message", text: "Reply with exactly: PONG" });
+			await poll(gw, ns.id, "idle");
+			c.close();
+
+			const newInfo = await (await api(gw, `/api/sessions/${ns.id}`)).json();
+			// New worktree session should also NOT be in project root
+			expect(normalize(newInfo.cwd)).not.toBe(normalize(dir));
+			expect(existsSync(newInfo.cwd)).toBe(true);
+			console.log(`  New worktree session responds: ✓ (cwd=${newInfo.cwd})`);
+		} else {
+			await poll(gw, sessionId, "idle");
+			const c = await connect(gw, sessionId);
+			c.send({ type: "send_message", text: "Reply with exactly: PONG" });
+			await poll(gw, sessionId, "idle");
+			c.close();
+			console.log(`  Existing worktree session responds after restart: ✓`);
 		}
 	});
 });
