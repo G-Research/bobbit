@@ -168,17 +168,20 @@ function goalDashboardUrl(gw: GW, goalId: string) {
  * This is the browser-driven equivalent of abort + prompt.
  */
 async function interruptAndSend(page: Page, gw: GW, id: string, text: string, idleTimeoutMs = 120_000) {
-	// Abort via REST API — reliable, no UI race conditions.
-	// forceAbort() gives 3s grace then kills the process, so 15s is generous.
+	await page.goto(sessionUrl(gw, id));
+	await page.waitForSelector("textarea", { timeout: 30_000 });
+
+	// If streaming, click the stop button — it should appear and work reliably.
+	// forceAbort() gives 3s grace then force-kills, so 15s total is generous.
 	const sessInfo = await getSession(gw, id);
 	if (sessInfo.status === "streaming") {
-		await api(gw, `/api/sessions/${id}/abort`, { method: "POST" });
+		const stopBtn = page.locator('button[title="Stop streaming"]');
+		await stopBtn.waitFor({ state: "visible", timeout: 10_000 });
+		await stopBtn.click();
 		await pollIdle(gw, id, 15_000);
 	}
 
-	// Navigate to session and send the message
-	await page.goto(sessionUrl(gw, id));
-	await page.waitForSelector("textarea", { timeout: 15_000 });
+	// Now send the message
 	await page.fill("textarea", text);
 	await page.press("textarea", "Enter");
 	await page.waitForTimeout(1_500);
@@ -188,7 +191,7 @@ async function interruptAndSend(page: Page, gw: GW, id: string, text: string, id
 
 async function browserSend(page: Page, gw: GW, id: string, text: string, idleMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
-	await page.waitForSelector("textarea", { timeout: 15_000 });
+	await page.waitForSelector("textarea", { timeout: 30_000 });
 	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 8_000 }); } catch {}
 	await page.waitForTimeout(500);
 	await page.fill("textarea", text);
