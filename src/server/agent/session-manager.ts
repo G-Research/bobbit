@@ -577,9 +577,9 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePool(repoPath: string, setupCommand?: string): void {
+	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
 		if (this.worktreePool) return;
-		this.worktreePool = new WorktreePool({ repoPath, targetSize: 2, setupCommand });
+		this.worktreePool = new WorktreePool({ repoPath, targetSize, setupCommand });
 		this.worktreePool.startFilling();
 	}
 

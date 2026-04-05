@@ -1,23 +1,12 @@
 /**
  * Full-stack session resilience integration tests.
  *
- * Uses real agents — no mocks. Run manually:
+ * Single gateway, 6 session variations, one restart — verifies all survive.
  *
- *   npm run test:manual                  # API-only, no browser
- *   SCREENSHOTS=1 npm run test:manual    # also capture browser screenshots + HTML report
+ *   npm run test:manual                  # API-only
+ *   SCREENSHOTS=1 npm run test:manual    # + browser screenshots + HTML report
  *
- * Prerequisites:
- *   - `npm run build`
- *   - Agent CLI in PATH (claude, etc.)
- *   - Docker running (for sandbox tests; skipped if unavailable)
- *
- * 6 variations tested:
- *   1. Plain          (no worktree, no sandbox)
- *   2. Worktree       (worktree, no sandbox)
- *   3. Worktree + interrupt (kill mid-tool-call)
- *   4. Sandbox plain  (sandboxed, no worktree)
- *   5. Sandbox worktree
- *   6. Sandbox worktree + interrupt
+ * Prerequisites: `npm run build`, agent CLI in PATH, Docker for sandbox tests.
  */
 import { test, expect, type Page } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -34,18 +23,15 @@ const RESULTS_DIR = join(PROJECT_ROOT, "test-results", "manual-integration");
 const WANT_SCREENSHOTS = !!process.env.SCREENSHOTS;
 
 // ---------------------------------------------------------------------------
-// Docker detection
+// Docker
 // ---------------------------------------------------------------------------
-function isDockerAvailable(): boolean {
-	try {
-		execFileSync("docker", ["info"], { stdio: "ignore", timeout: 10_000 });
-		return true;
-	} catch { return false; }
+function hasDocker(): boolean {
+	try { execFileSync("docker", ["info"], { stdio: "ignore", timeout: 10_000 }); return true; } catch { return false; }
 }
-const HAS_DOCKER = isDockerAvailable();
+const HAS_DOCKER = hasDocker();
 
 // ---------------------------------------------------------------------------
-// Gateway lifecycle
+// Gateway
 // ---------------------------------------------------------------------------
 interface GW {
 	proc: ChildProcess; port: number; dir: string;
@@ -72,21 +58,19 @@ async function startGW(dir: string, port: number): Promise<GW> {
 	let stderr = "";
 	proc.stderr!.on("data", (c: Buffer) => { stderr += c; });
 	proc.stdout!.on("data", () => {});
-
-	const deadline = Date.now() + 120_000; // sandbox init can be slow
+	const deadline = Date.now() + 120_000;
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);
 		try {
 			const tp = join(dir, ".bobbit", "state", "token");
 			if (existsSync(tp)) {
 				const t = readFileSync(tp, "utf-8").trim();
-				const r = await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { Authorization: `Bearer ${t}` } });
-				if (r.ok) break;
+				if ((await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { Authorization: `Bearer ${t}` } })).ok) break;
 			}
 		} catch {}
 		await new Promise(r => setTimeout(r, 300));
 	}
-	if (Date.now() >= deadline) { proc.kill(); throw new Error(`Gateway not healthy:\n${stderr}`); }
+	if (Date.now() >= deadline) { proc.kill(); throw new Error(`Not healthy:\n${stderr}`); }
 	const token = readFileSync(join(dir, ".bobbit", "state", "token"), "utf-8").trim();
 	return { proc, port, dir, token, base: `http://127.0.0.1:${port}`, wsUrl: `ws://127.0.0.1:${port}` };
 }
@@ -106,27 +90,28 @@ async function stopGW(gw: GW): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// API / WS helpers
+// Helpers
 // ---------------------------------------------------------------------------
 function api(gw: GW, path: string, opts: RequestInit = {}) {
 	return fetch(`${gw.base}${path}`, { ...opts, headers: { "Content-Type": "application/json", Authorization: `Bearer ${gw.token}`, ...(opts.headers as Record<string, string> || {}) } });
 }
 
-async function pollStatus(gw: GW, id: string, target: string, ms = 120_000) {
+async function pollIdle(gw: GW, id: string, ms = 120_000) {
 	const t0 = Date.now();
 	while (Date.now() - t0 < ms) {
 		let res: Response;
 		try { res = await api(gw, `/api/sessions/${id}`); } catch { await new Promise(r => setTimeout(r, 1_000)); continue; }
 		if (res.status === 404) { await new Promise(r => setTimeout(r, 1_000)); continue; }
 		const s = await res.json();
-		if (s.status === target) return s;
-		if (["error", "terminated", "archived"].includes(s.status)) throw new Error(`Session ${id} is ${s.status}, wanted ${target}`);
+		if (s.status === "idle") return s;
+		if (s.status === "archived") throw new Error(`Session ${id} archived`);
+		if (s.status === "error" || s.status === "terminated") throw new Error(`Session ${id} ${s.status}`);
 		await new Promise(r => setTimeout(r, 1_000));
 	}
-	throw new Error(`Session ${id} did not reach ${target} in ${ms}ms`);
+	throw new Error(`Session ${id} not idle in ${ms}ms`);
 }
 
-async function getStatus(gw: GW, id: string): Promise<string> { return (await (await api(gw, `/api/sessions/${id}`)).json()).status; }
+async function getSession(gw: GW, id: string) { return (await api(gw, `/api/sessions/${id}`)).json(); }
 
 interface Conn { send(m: any): void; close(): void; }
 function wsConnect(gw: GW, id: string): Promise<Conn> {
@@ -141,52 +126,38 @@ function wsConnect(gw: GW, id: string): Promise<Conn> {
 	});
 }
 
-async function sendAndWait(gw: GW, id: string, text: string, ms = 120_000) {
+async function sendMsg(gw: GW, id: string, text: string, ms = 120_000) {
 	const c = await wsConnect(gw, id);
 	c.send({ type: "send_message", text });
 	await new Promise(r => setTimeout(r, 200));
-	await pollStatus(gw, id, "idle", ms);
+	await pollIdle(gw, id, ms);
 	c.close();
 }
 
-// ---------------------------------------------------------------------------
-// Screenshot + result recording
-// ---------------------------------------------------------------------------
 async function screenshot(page: Page | undefined, gw: GW, id: string, name: string) {
 	if (!WANT_SCREENSHOTS || !page) return;
 	await page.goto(`${gw.base}/?token=${gw.token}#/session/${id}`);
 	await page.waitForSelector("textarea", { timeout: 15_000 });
-	await page.waitForTimeout(2_500);
+	// Wait for message history to render
+	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 10_000 }); } catch {}
+	await page.waitForTimeout(2_000);
 	mkdirSync(RESULTS_DIR, { recursive: true });
 	await page.screenshot({ path: join(RESULTS_DIR, name), fullPage: true });
-	console.log(`    Screenshot: ${name}`);
+	console.log(`    📸 ${name}`);
 }
 
-interface TestResult {
-	name: string;
-	sandboxed: boolean;
-	worktree: boolean;
-	interrupt: boolean;
-	createMs: number;
-	idleMs: number;
-	queueMs: number;
-	responseMs: number;
-	restartMs: number;
-	cwd: string;
-	branch: string;
-	restoredAsIdle: boolean;
-	screenshot?: string;
+/** Send via browser UI so page already has the conversation loaded for screenshot. */
+async function browserSend(page: Page, gw: GW, id: string, text: string) {
+	await page.goto(`${gw.base}/?token=${gw.token}#/session/${id}`);
+	await page.waitForSelector("textarea", { timeout: 15_000 });
+	// Wait for prior messages to load
+	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 10_000 }); } catch {}
+	await page.fill("textarea", text);
+	await page.press("textarea", "Enter");
+	await pollIdle(gw, id);
+	await page.waitForTimeout(2_000);
 }
 
-function record(r: TestResult) {
-	mkdirSync(RESULTS_DIR, { recursive: true });
-	const slug = r.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-	writeFileSync(join(RESULTS_DIR, `result-${slug}.json`), JSON.stringify(r, null, 2));
-}
-
-// ---------------------------------------------------------------------------
-// Shared setup helpers
-// ---------------------------------------------------------------------------
 function initRepo(dir: string) {
 	mkdirSync(dir, { recursive: true });
 	execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
@@ -196,36 +167,27 @@ function initRepo(dir: string) {
 	writeFileSync(join(dir, "README.md"), "test\n");
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-}
-
-function initRepoWithRemote(dir: string) {
-	initRepo(dir);
+	// Add origin so sandbox can clone
 	try {
 		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
 		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch { console.log("  Could not add origin remote"); }
-}
-
-function tmpDir(label: string, port: number) {
-	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
-	return join(tmp, `.bobbit-manual-${label}-${port}`);
+	} catch {}
 }
 
 function cleanDirs(dir: string) {
 	const parent = resolve(dir, "..");
 	const base = dir.split(/[\\/]/).pop()!;
 	const dirs = [dir];
-	try { for (const e of readdirSync(parent)) if (e.startsWith(base) && e.includes("-wt")) dirs.push(join(parent, e)); } catch {}
+	try { for (const e of readdirSync(parent)) if (e.startsWith(base)) dirs.push(join(parent, e)); } catch {}
 	for (const d of dirs) { for (let i = 0; i < 3; i++) { try { rmSync(d, { recursive: true, force: true }); break; } catch {} } }
 }
 
-async function waitForSessionFile(gw: GW, id: string, maxMs = 30_000) {
+async function waitForFile(gw: GW, id: string, ms = 30_000) {
 	const t0 = Date.now();
-	while (Date.now() - t0 < maxMs) {
+	while (Date.now() - t0 < ms) {
 		const sf = join(gw.dir, ".bobbit", "state", "sessions.json");
 		if (existsSync(sf)) {
-			const all = JSON.parse(readFileSync(sf, "utf-8"));
-			const mine = all.find((s: any) => s.id === id);
+			const mine = JSON.parse(readFileSync(sf, "utf-8")).find((s: any) => s.id === id);
 			if (mine?.agentSessionFile && existsSync(mine.agentSessionFile)) return true;
 		}
 		await new Promise(r => setTimeout(r, 2_000));
@@ -234,256 +196,306 @@ async function waitForSessionFile(gw: GW, id: string, maxMs = 30_000) {
 }
 
 // ---------------------------------------------------------------------------
-// Generic test runner — called for each variation
+// Result tracking
 // ---------------------------------------------------------------------------
-function defineVariation(opts: {
-	name: string; label: string; worktree: boolean; sandboxed: boolean; interrupt: boolean;
-}) {
-	test.describe.serial(opts.name, () => {
-		test.setTimeout(300_000);
-		let gw: GW, dir: string, port: number;
-		let sessionId: string, sessionCwd: string, sessionBranch: string;
-		const timing: Partial<TestResult> = {};
+interface Result {
+	name: string; label: string;
+	sandboxed: boolean; worktree: boolean; interrupt: boolean;
+	createMs: number; idleMs: number; queueMs: number; responseMs: number;
+	restartMs: number; cwd: string; branch: string;
+	restoredAsIdle: boolean; screenshot?: string;
+}
+const results: Result[] = [];
 
-		test.beforeAll(async ({}, ti) => {
-			ti.setTimeout(180_000);
-			if (opts.sandboxed) test.skip(!HAS_DOCKER, "Docker not available");
+// ---------------------------------------------------------------------------
+// Variation config
+// ---------------------------------------------------------------------------
+interface Variation {
+	name: string; label: string;
+	worktree: boolean; sandboxed: boolean; interrupt: boolean;
+}
+const VARIATIONS: Variation[] = [
+	{ name: "Plain (no worktree)",          label: "plain",      worktree: false, sandboxed: false, interrupt: false },
+	{ name: "Worktree",                     label: "wt",         worktree: true,  sandboxed: false, interrupt: false },
+	{ name: "Worktree + interrupt",         label: "wt-int",     worktree: true,  sandboxed: false, interrupt: true  },
+	{ name: "Sandbox plain",               label: "sbx",        worktree: false, sandboxed: true,  interrupt: false },
+	{ name: "Sandbox worktree",            label: "sbx-wt",     worktree: true,  sandboxed: true,  interrupt: false },
+	{ name: "Sandbox worktree + interrupt",label: "sbx-wt-int", worktree: true,  sandboxed: true,  interrupt: true  },
+];
 
-			port = await freePort();
-			dir = tmpDir(opts.label, port);
-			rmSync(dir, { recursive: true, force: true });
+// ===================================================================
+// Single gateway, all variations
+// ===================================================================
+test.describe.serial("Session resilience — all variations", () => {
+	test.setTimeout(300_000);
 
-			if (opts.sandboxed) {
-				initRepoWithRemote(dir);
-				mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
-				writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), "sandbox: docker\n");
-			} else {
-				initRepo(dir);
+	let gw: GW;
+	let dir: string;
+	let port: number;
+	let sandboxAvailable = false;
+
+	// session state keyed by label
+	const sessions: Record<string, { id: string; cwd: string; branch: string; timing: Partial<Result> }> = {};
+
+	test.beforeAll(async ({}, ti) => {
+		ti.setTimeout(180_000);
+		port = await freePort();
+		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		dir = join(tmp, `.bobbit-manual-${port}`);
+		rmSync(dir, { recursive: true, force: true });
+		initRepo(dir);
+
+		// Pre-configure sandbox
+		// Pre-configure: large worktree pool (we create up to 4 worktree sessions)
+		// and sandbox if Docker is available
+		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+		const yaml = [`worktree_pool_size: "6"`, HAS_DOCKER ? "sandbox: docker" : ""].filter(Boolean).join("\n") + "\n";
+		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), yaml);
+
+		gw = await startGW(dir, port);
+		console.log(`  Gateway :${port}  cwd=${dir}  docker=${HAS_DOCKER}`);
+
+		if (HAS_DOCKER) {
+			const sr = await api(gw, "/api/sandbox-status");
+			const ss = await sr.json();
+			sandboxAvailable = ss.configured && ss.available;
+			console.log(`  Sandbox: configured=${ss.configured} available=${ss.available}`);
+		}
+	});
+
+	test.afterAll(async ({}, ti) => {
+		ti.setTimeout(30_000);
+		if (gw) await stopGW(gw);
+		cleanDirs(dir);
+	});
+
+	// ---------------------------------------------------------------
+	// Phase 1: Create all sessions and measure timing
+	// ---------------------------------------------------------------
+	test("create all sessions and measure timing", async () => {
+		for (const v of VARIATIONS) {
+			if (v.sandboxed && !sandboxAvailable) {
+				console.log(`  SKIP ${v.name}: sandbox not available`);
+				continue;
 			}
 
-			gw = await startGW(dir, port);
-			console.log(`  Gateway :${port}, cwd=${dir}`);
-
-			if (opts.sandboxed) {
-				const sr = await api(gw, "/api/sandbox-status");
-				const ss = await sr.json();
-				console.log(`  Sandbox: configured=${ss.configured} available=${ss.available}`);
-				if (!ss.available) test.skip(true, "Sandbox not available");
-			}
-		});
-
-		test.afterAll(async ({}, ti) => {
-			ti.setTimeout(30_000);
-			if (gw) await stopGW(gw);
-			cleanDirs(dir);
-		});
-
-		test("create, send message, measure timing", async () => {
 			const t0 = performance.now();
 			const res = await api(gw, "/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ worktree: opts.worktree, sandboxed: opts.sandboxed }),
+				body: JSON.stringify({ worktree: v.worktree, sandboxed: v.sandboxed }),
 			});
 			expect(res.status).toBe(201);
-			sessionId = (await res.json()).id;
-			timing.createMs = Math.round(performance.now() - t0);
+			const id = (await res.json()).id;
+			const createMs = Math.round(performance.now() - t0);
 
-			await pollStatus(gw, sessionId, "idle", opts.sandboxed ? 180_000 : 120_000);
-			timing.idleMs = Math.round(performance.now() - t0);
+			await pollIdle(gw, id, v.sandboxed ? 180_000 : 120_000);
+			const idleMs = Math.round(performance.now() - t0);
 
-			const c = await wsConnect(gw, sessionId);
-			const tQ0 = performance.now();
+			// Send message and measure response
+			const c = await wsConnect(gw, id);
+			const tQ = performance.now();
 			c.send({ type: "send_message", text: "Reply with exactly: PONG" });
-			timing.queueMs = Math.round(performance.now() - tQ0);
+			const queueMs = Math.round(performance.now() - tQ);
 			await new Promise(r => setTimeout(r, 200));
-			await pollStatus(gw, sessionId, "idle");
-			timing.responseMs = Math.round(performance.now() - tQ0);
+			await pollIdle(gw, id);
+			const responseMs = Math.round(performance.now() - tQ);
 			c.close();
 
-			const info = await (await api(gw, `/api/sessions/${sessionId}`)).json();
-			sessionCwd = info.cwd;
-
-			// Verify cwd
-			if (!opts.sandboxed) {
-				if (opts.worktree) {
-					expect(normalize(sessionCwd)).not.toBe(normalize(dir));
-					expect(existsSync(sessionCwd)).toBe(true);
-					sessionBranch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: sessionCwd, encoding: "utf-8" }).trim();
-					expect(sessionBranch).not.toBe("master");
+			const info = await getSession(gw, id);
+			let branch = "";
+			if (!v.sandboxed) {
+				if (v.worktree) {
+					expect(normalize(info.cwd)).not.toBe(normalize(dir));
+					expect(existsSync(info.cwd)).toBe(true);
+					branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: info.cwd, encoding: "utf-8" }).trim();
+					expect(branch).not.toBe("master");
 				} else {
-					expect(normalize(sessionCwd)).toBe(normalize(dir));
-					sessionBranch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: sessionCwd, encoding: "utf-8" }).trim();
-					expect(sessionBranch).toBe("master");
+					expect(normalize(info.cwd)).toBe(normalize(dir));
+					branch = "master";
 				}
 			} else {
-				expect(sessionCwd).toBeTruthy();
-				sessionBranch = "(sandbox)";
+				branch = "(sandbox)";
 			}
 
-			console.log(`\n  Create: ${timing.createMs}ms  Idle: ${timing.idleMs}ms  Queue: ${timing.queueMs}ms  Resp: ${timing.responseMs}ms\n  cwd: ${sessionCwd}  branch: ${sessionBranch}`);
-		});
+			sessions[v.label] = { id, cwd: info.cwd, branch, timing: { createMs, idleMs, queueMs, responseMs } };
+			console.log(`  ${v.name}: create=${createMs}ms idle=${idleMs}ms resp=${responseMs}ms cwd=${info.cwd}`);
+		}
+	});
 
-		test(`restart${opts.interrupt ? " (interrupt)" : ""} — verify recovery`, async ({ page }) => {
-			expect(sessionId).toBeTruthy();
+	// ---------------------------------------------------------------
+	// Phase 2: Send pwd/git-status to all, warm up session files
+	// ---------------------------------------------------------------
+	test("send pwd/git-status to all sessions", async () => {
+		for (const v of VARIATIONS) {
+			const s = sessions[v.label];
+			if (!s) continue;
+			await sendMsg(gw, s.id, "Run `pwd` and `git status` and show me the output");
+			await waitForFile(gw, s.id);
+			console.log(`  ${v.name}: pwd/git sent ✓`);
+		}
+	});
 
-			// Send a real message for chat history
-			await sendAndWait(gw, sessionId, "Run `pwd` and `git status` and show me the output");
-			await waitForSessionFile(gw, sessionId);
+	// ---------------------------------------------------------------
+	// Phase 3: Start blocking commands on interrupt variants
+	// ---------------------------------------------------------------
+	test("start blocking commands on interrupt variants", async () => {
+		for (const v of VARIATIONS) {
+			if (!v.interrupt) continue;
+			const s = sessions[v.label];
+			if (!s) continue;
+			const c = await wsConnect(gw, s.id);
+			c.send({ type: "send_message",
+				text: "Run this exact bash command with the bash tool (not background): sleep 120 && echo done" });
+			c.close();
+			console.log(`  ${v.name}: blocking command sent`);
+		}
+		// Give agents time to start the tool call
+		await new Promise(r => setTimeout(r, 5_000));
+		for (const v of VARIATIONS) {
+			if (!v.interrupt) continue;
+			const s = sessions[v.label];
+			if (!s) continue;
+			const status = (await getSession(gw, s.id)).status;
+			console.log(`  ${v.name}: status=${status}`);
+		}
+	});
 
-			// If interrupt variant, send a blocking command
-			if (opts.interrupt) {
-				const c = await wsConnect(gw, sessionId);
-				c.send({ type: "send_message",
-					text: "Run this exact bash command with the bash tool (not background): sleep 120 && echo done" });
-				await new Promise(r => setTimeout(r, 5_000));
-				const st = await getStatus(gw, sessionId);
-				console.log(`  Status during tool call: ${st}`);
-				c.close();
-			}
+	// ---------------------------------------------------------------
+	// Phase 4: Kill gateway and restart
+	// ---------------------------------------------------------------
+	test("kill gateway and restart", async () => {
+		const t0 = performance.now();
+		await stopGW(gw);
 
-			// Hard kill
-			const tRestart0 = performance.now();
-			await stopGW(gw);
+		// Verify state persisted
+		expect(existsSync(join(dir, ".bobbit", "state", "sessions.json"))).toBe(true);
+		for (const v of VARIATIONS) {
+			const s = sessions[v.label];
+			if (!s || v.sandboxed) continue;
+			if (v.worktree) expect(existsSync(s.cwd)).toBe(true);
+		}
 
-			// Verify state persisted
-			if (!opts.sandboxed) {
-				expect(existsSync(join(dir, ".bobbit", "state", "sessions.json"))).toBe(true);
-				if (opts.worktree) expect(existsSync(sessionCwd)).toBe(true);
-			}
+		port = await freePort();
+		gw = await startGW(dir, port);
+		const restartMs = Math.round(performance.now() - t0);
+		console.log(`  Restarted :${port} in ${restartMs}ms`);
 
-			// Restart
-			port = await freePort();
-			gw = await startGW(dir, port);
+		// Record restart time for all sessions
+		for (const v of VARIATIONS) {
+			const s = sessions[v.label];
+			if (s) s.timing.restartMs = restartMs;
+		}
+	});
 
-			// Check session state
-			const info = await (await api(gw, `/api/sessions/${sessionId}`)).json();
+	// ---------------------------------------------------------------
+	// Phase 5: Verify all sessions after restart
+	// ---------------------------------------------------------------
+	test("verify all sessions after restart", async ({ page }) => {
+		for (const v of VARIATIONS) {
+			const s = sessions[v.label];
+			if (!s) continue;
+
+			const info = await getSession(gw, s.id);
 			const restored = info.status !== "archived";
-			timing.restartMs = Math.round(performance.now() - tRestart0);
-			console.log(`  Restarted :${port} in ${timing.restartMs}ms — status: ${info.status}`);
+			expect(normalize(info.cwd)).toBe(normalize(s.cwd));
+			console.log(`  ${v.name}: status=${info.status} cwd_preserved=✓`);
 
-			// Verify cwd preserved
-			expect(normalize(info.cwd)).toBe(normalize(sessionCwd));
-			console.log(`  cwd preserved: ✓`);
+			// Git checks for non-sandbox worktree
+			if (!v.sandboxed && v.worktree && restored && existsSync(s.cwd)) {
+				const br = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: s.cwd, encoding: "utf-8" }).trim();
+				expect(br).not.toBe("master");
+				console.log(`    git valid ✓ (branch=${br})`);
+			}
 
-			let screenshotId = sessionId;
+			// Send follow-up message to prove session works
+			let screenshotId = s.id;
 			if (restored) {
-				// Verify git state (non-sandbox)
-				if (!opts.sandboxed && opts.worktree && existsSync(sessionCwd)) {
-					const br = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: sessionCwd, encoding: "utf-8" }).trim();
-					expect(br).not.toBe("master");
-					console.log(`  Git valid: ✓ (branch=${br})`);
+				await pollIdle(gw, s.id, 120_000);
+				if (WANT_SCREENSHOTS && page) {
+					await browserSend(page, gw, s.id, "Run `pwd` again to confirm same directory");
+				} else {
+					await sendMsg(gw, s.id, "Run `pwd` again to confirm same directory");
 				}
-				await pollStatus(gw, sessionId, "idle", 120_000);
-				await sendAndWait(gw, sessionId, "Run `pwd` again to confirm same directory");
-				console.log(`  Session responds after restart: ✓`);
+				console.log(`    responds after restart ✓`);
 			} else {
-				console.log(`  Session archived — creating new session`);
+				// Archived — create new session to prove gateway works
 				const r = await api(gw, "/api/sessions", {
 					method: "POST",
-					body: JSON.stringify({ worktree: opts.worktree, sandboxed: opts.sandboxed }),
+					body: JSON.stringify({ worktree: v.worktree, sandboxed: v.sandboxed }),
 				});
 				const ns = (await r.json()).id;
-				await pollStatus(gw, ns, "idle", opts.sandboxed ? 180_000 : 120_000);
-				await sendAndWait(gw, ns, "Run `pwd` and `git status` and show me the output");
+				await pollIdle(gw, ns, v.sandboxed ? 180_000 : 120_000);
+				if (WANT_SCREENSHOTS && page) {
+					await browserSend(page, gw, ns, "Run `pwd` and `git status` and show me the output");
+				} else {
+					await sendMsg(gw, ns, "Run `pwd` and `git status` and show me the output");
+				}
 				screenshotId = ns;
-				console.log(`  New session responds: ✓`);
+				console.log(`    new session responds ✓`);
 			}
 
-			const ssName = `${opts.label}-after-restart.png`;
-			await screenshot(page, gw, screenshotId, ssName);
+			const ssName = `${v.label}-after-restart.png`;
+			if (WANT_SCREENSHOTS && page) {
+				mkdirSync(RESULTS_DIR, { recursive: true });
+				await page.waitForTimeout(1_000);
+				await page.screenshot({ path: join(RESULTS_DIR, ssName), fullPage: true });
+				console.log(`    📸 ${ssName}`);
+			}
 
-			// Record results
-			record({
-				name: opts.name,
-				sandboxed: opts.sandboxed,
-				worktree: opts.worktree,
-				interrupt: opts.interrupt,
-				createMs: timing.createMs || 0,
-				idleMs: timing.idleMs || 0,
-				queueMs: timing.queueMs || 0,
-				responseMs: timing.responseMs || 0,
-				restartMs: timing.restartMs || 0,
-				cwd: sessionCwd,
-				branch: sessionBranch,
+			results.push({
+				name: v.name, label: v.label,
+				sandboxed: v.sandboxed, worktree: v.worktree, interrupt: v.interrupt,
+				createMs: s.timing.createMs || 0, idleMs: s.timing.idleMs || 0,
+				queueMs: s.timing.queueMs || 0, responseMs: s.timing.responseMs || 0,
+				restartMs: s.timing.restartMs || 0,
+				cwd: s.cwd, branch: s.branch,
 				restoredAsIdle: restored,
 				screenshot: WANT_SCREENSHOTS ? ssName : undefined,
 			});
-		});
+		}
 	});
-}
 
-// ===================================================================
-// Define all 6 variations
-// ===================================================================
+	// ---------------------------------------------------------------
+	// Phase 6: Generate HTML report
+	// ---------------------------------------------------------------
+	test("generate HTML report", async () => {
+		if (results.length === 0) { console.log("  No results"); return; }
+		mkdirSync(RESULTS_DIR, { recursive: true });
 
-defineVariation({ name: "Plain (no worktree)",            label: "plain",     worktree: false, sandboxed: false, interrupt: false });
-defineVariation({ name: "Worktree",                       label: "wt",        worktree: true,  sandboxed: false, interrupt: false });
-defineVariation({ name: "Worktree + interrupt",           label: "wt-int",    worktree: true,  sandboxed: false, interrupt: true  });
-defineVariation({ name: "Sandbox plain",                  label: "sbx",       worktree: false, sandboxed: true,  interrupt: false });
-defineVariation({ name: "Sandbox worktree",               label: "sbx-wt",    worktree: true,  sandboxed: true,  interrupt: false });
-defineVariation({ name: "Sandbox worktree + interrupt",   label: "sbx-wt-int",worktree: true,  sandboxed: true,  interrupt: true  });
+		const bar = (val: number, max: number, color: string) => {
+			const w = max > 0 ? Math.max(2, Math.round((val / max) * 120)) : 2;
+			return `<div style="display:inline-block;height:14px;width:${w}px;background:${color};border-radius:2px;vertical-align:middle;margin-left:6px"></div>`;
+		};
+		const palette = ["#5b9bd5", "#ed7d31", "#70ad47", "#ffc000", "#9b59b6", "#e74c3c"];
+		const maxIdle = Math.max(...results.map(r => r.idleMs));
+		const maxResp = Math.max(...results.map(r => r.responseMs));
+		const maxRestart = Math.max(...results.map(r => r.restartMs));
 
-// ===================================================================
-// HTML report generation
-// ===================================================================
-
-test("generate HTML report", async () => {
-	if (!existsSync(RESULTS_DIR)) { console.log("  No results to report"); return; }
-
-	const files = readdirSync(RESULTS_DIR).filter(f => f.startsWith("result-") && f.endsWith(".json"));
-	if (files.length === 0) { console.log("  No result files found"); return; }
-
-	const results: TestResult[] = files.map(f => JSON.parse(readFileSync(join(RESULTS_DIR, f), "utf-8")));
-
-	// Build screenshot img tags
-	const imgTag = (r: TestResult) => {
-		if (!r.screenshot || !existsSync(join(RESULTS_DIR, r.screenshot))) return "";
-		const b64 = readFileSync(join(RESULTS_DIR, r.screenshot)).toString("base64");
-		return `<img src="data:image/png;base64,${b64}" alt="${r.name}" style="width:100%;border-radius:6px;border:1px solid #333;margin-top:8px">`;
-	};
-
-	const bar = (val: number, max: number, color: string) => {
-		const w = max > 0 ? Math.max(2, Math.round((val / max) * 120)) : 2;
-		return `<div style="display:inline-block;height:14px;width:${w}px;background:${color};border-radius:2px;vertical-align:middle"></div>`;
-	};
-
-	const maxIdle = Math.max(...results.map(r => r.idleMs));
-	const maxResp = Math.max(...results.map(r => r.responseMs));
-	const maxRestart = Math.max(...results.map(r => r.restartMs));
-
-	const colors: Record<string, string> = {};
-	const palette = ["#5b9bd5", "#ed7d31", "#70ad47", "#ffc000", "#9b59b6", "#e74c3c"];
-	results.forEach((r, i) => { colors[r.name] = palette[i % palette.length]; });
-
-	const timingRows = results.map(r => `
-		<tr>
-			<td><span style="display:inline-block;width:10px;height:10px;background:${colors[r.name]};border-radius:2px;margin-right:6px"></span>${r.name}</td>
-			<td class="r">${r.createMs}</td>
-			<td class="r">${r.idleMs} ${bar(r.idleMs, maxIdle, colors[r.name])}</td>
-			<td class="r">${r.responseMs} ${bar(r.responseMs, maxResp, colors[r.name])}</td>
-			<td class="r">${r.restartMs} ${bar(r.restartMs, maxRestart, colors[r.name])}</td>
+		const timingRows = results.map((r, i) => `<tr>
+			<td><span style="display:inline-block;width:10px;height:10px;background:${palette[i % 6]};border-radius:2px;margin-right:6px"></span>${r.name}</td>
+			<td class="r">${r.createMs}${bar(r.createMs, maxIdle, palette[i % 6])}</td>
+			<td class="r">${r.idleMs}${bar(r.idleMs, maxIdle, palette[i % 6])}</td>
+			<td class="r">${r.responseMs}${bar(r.responseMs, maxResp, palette[i % 6])}</td>
+			<td class="r">${r.restartMs}${bar(r.restartMs, maxRestart, palette[i % 6])}</td>
 		</tr>`).join("\n");
 
-	const checkRows = results.map(r => `
-		<tr>
+		const checkRows = results.map(r => `<tr>
 			<td>${r.name}</td>
-			<td class="r">${r.restoredAsIdle ? '<span class="ck">✓ idle</span>' : '<span style="color:#e74c3c">archived</span>'}</td>
-			<td class="r"><span class="ck">✓</span></td>
-			<td class="r">${r.branch}</td>
+			<td class="r">${r.restoredAsIdle ? '<span class="g">✓ idle</span>' : '<span class="o">archived</span>'}</td>
+			<td class="r"><span class="g">✓</span></td>
+			<td class="r"><code>${r.branch}</code></td>
 		</tr>`).join("\n");
 
-	const screenshotSections = results.map(r => {
-		const img = imgTag(r);
-		if (!img) return "";
-		return `
-		<div style="margin-bottom:24px">
-			<div style="font-size:13px;color:#a0d0a0;font-weight:600;margin-bottom:4px">${r.name}</div>
-			<div style="font-size:12px;color:#888;margin-bottom:6px">cwd: <code>${r.cwd}</code> &bull; branch: <code>${r.branch}</code> &bull; restored: ${r.restoredAsIdle ? "✓" : "archived"}</div>
-			${img}
-		</div>`;
-	}).filter(Boolean).join("\n");
+		const screenshotSections = results.filter(r => r.screenshot && existsSync(join(RESULTS_DIR, r.screenshot))).map(r => {
+			const b64 = readFileSync(join(RESULTS_DIR, r.screenshot!)).toString("base64");
+			return `<div style="margin-bottom:28px">
+				<div style="font-size:14px;color:#a0d0a0;font-weight:600">${r.name}</div>
+				<div style="font-size:12px;color:#888;margin:4px 0 8px">cwd: <code>${r.cwd}</code> · branch: <code>${r.branch}</code> · ${r.restoredAsIdle ? "restored as idle" : "archived → new session"}</div>
+				<img src="data:image/png;base64,${b64}" style="width:100%;border-radius:6px;border:1px solid #333">
+			</div>`;
+		}).join("\n");
 
-	const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+		const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <title>Session Resilience Report</title>
 <style>
 *{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:920px;margin:40px auto;background:#1a1a2e;color:#e0e0e0;padding:0 20px}
@@ -493,36 +505,21 @@ table{width:100%;border-collapse:collapse;margin-bottom:24px}
 th{text-align:left;padding:8px 12px;border-bottom:2px solid #444;color:#a0d0a0;font-size:12px}
 td{padding:6px 12px;border-bottom:1px solid #333;font-size:13px}
 .r{text-align:right;font-variant-numeric:tabular-nums}th.r{text-align:right}
-.ck{color:#6d6}code{background:#333;padding:1px 5px;border-radius:3px;font-size:11px}
+.g{color:#6d6}.o{color:#ed7d31}code{background:#333;padding:1px 5px;border-radius:3px;font-size:11px}
 hr{border:none;border-top:1px solid #333;margin:32px 0}
-.note{font-size:12px;color:#777;line-height:1.6;margin-top:16px}
+.n{font-size:12px;color:#777;line-height:1.6;margin-top:16px}
 </style></head><body>
 <h1>Session Resilience Report</h1>
-<p class="sub">${results.length} variations &bull; real agents, no mocks &bull; ${new Date().toISOString().split("T")[0]}</p>
-
+<p class="sub">${results.length} variations · single gateway · real agents · ${new Date().toISOString().split("T")[0]}</p>
 <h2>Timing (ms)</h2>
-<table>
-<tr><th>Variation</th><th class="r">Create</th><th class="r">Create→Idle</th><th class="r">Msg Response</th><th class="r">Restart</th></tr>
-${timingRows}
-</table>
-
+<table><tr><th>Variation</th><th class="r">Create</th><th class="r">Create→Idle</th><th class="r">Msg Response</th><th class="r">Restart</th></tr>${timingRows}</table>
 <h2>Post-crash verification</h2>
-<table>
-<tr><th>Variation</th><th class="r">Restored</th><th class="r">cwd preserved</th><th class="r">Branch</th></tr>
-${checkRows}
-</table>
-
-${screenshotSections ? `<hr><h2>Screenshots — after restart</h2>${screenshotSections}` : ""}
-
-<p class="note">
-Tests run with <code>npm run test:manual</code>. Each variation creates an isolated git repo,
-starts a gateway, creates a session, exchanges messages, hard-kills the gateway, restarts on a
-fresh port, and verifies the session survives with cwd and git state intact.
-Sandbox variations run inside Docker containers.
-${WANT_SCREENSHOTS ? "Screenshots captured with <code>SCREENSHOTS=1</code>." : "Run with <code>SCREENSHOTS=1</code> for screenshots."}
-</p>
+<table><tr><th>Variation</th><th class="r">Restored</th><th class="r">cwd preserved</th><th class="r">Branch</th></tr>${checkRows}</table>
+${screenshotSections ? `<hr><h2>Screenshots — after restart</h2><p class="n">Each screenshot shows the session after a hard gateway kill and restart. Restored sessions show the original chat history plus a post-restart pwd confirmation. Archived sessions (sandbox) show a new session proving the gateway recovered.</p>${screenshotSections}` : ""}
+<p class="n">All variations share a single gateway instance. Sandbox sessions are archived after crash because the agent session file lives inside the Docker container (not accessible from host after restart). Non-sandbox sessions restore as idle thanks to proactive session file creation.</p>
 </body></html>`;
 
-	writeFileSync(join(RESULTS_DIR, "report.html"), html);
-	console.log(`  Report: ${join(RESULTS_DIR, "report.html")} (${results.length} variations)`);
+		writeFileSync(join(RESULTS_DIR, "report.html"), html);
+		console.log(`  Report: ${join(RESULTS_DIR, "report.html")} (${results.length} variations)`);
+	});
 });

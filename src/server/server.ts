@@ -625,7 +625,8 @@ export function createGateway(config: GatewayConfig) {
 				const defaultRepoPath = defaultCtx.project.rootPath;
 				if (await isGitRepo(defaultRepoPath)) {
 					const setupCmd = defaultCtx.projectConfigStore.get("worktree_setup_command") || undefined;
-					sessionManager.initWorktreePool(defaultRepoPath, setupCmd);
+					const poolSize = parseInt(defaultCtx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
+					sessionManager.initWorktreePool(defaultRepoPath, setupCmd, poolSize);
 				}
 			} catch { /* best-effort */ }
 
