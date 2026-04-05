@@ -7,17 +7,46 @@ provider:
 group: Shell
 renderer: src/ui/tools/renderers/BgProcessRenderer.ts
 docs: |-
-  Actions: create (start a process), logs (tail output), grep (search logs), head (first N lines), slice (line range), kill (terminate), list (show all). Use for dev servers, file watchers, long-running builds. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/grep/head/slice/kill), `tail` (log lines, default 200), `pattern` (for grep — string or regex), `context` (grep context lines, default 0), `max_results` (grep max matches, default 50), `lines` (for head, default 50), `from`/`to` (1-indexed line range for slice).
+  Manage background shell processes. Actions: create, logs, grep, head, slice, kill, list. Use `bash_bg` instead of `bash` for any command that might take longer than 2 minutes or produce large output you may not need to read in full. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/grep/head/slice/kill), `tail` (log lines, default 200), `pattern` (for grep — string or regex), `context` (grep context lines, default 0), `max_results` (grep max matches, default 50), `lines` (for head, default 50), `from`/`to` (1-indexed line range for slice).
 detail_docs: |
   Manage background shell processes that don't block the agent.
 
-  Actions:
+  ## When to use bash_bg instead of bash
+
+  Use `bash_bg` instead of `bash` when ANY of these apply:
+  - The command might take **longer than 2 minutes** (builds, test suites,
+    Docker operations, large installs, CI pipelines)
+  - The command produces **large or streaming output** that you may not
+    need to read in full (server logs, verbose builds, watch mode)
+  - You want to **continue working** while the process runs (dev servers,
+    file watchers, background compiles)
+  - You're **uncertain about duration** — when in doubt, use bash_bg. You
+    can always check the result later with `logs`, `grep`, or `head`.
+
+  The key advantage: bash_bg captures all output server-side, and you can
+  explore it selectively with `grep`, `head`, and `slice` — pulling only
+  the lines you need into your context window instead of ingesting
+  thousands of lines of build output.
+
+  ## Actions
+
+  ### Output exploration (use these to avoid loading full logs)
+  - `grep`: Search logs for a pattern. Returns only matching lines with
+    optional context. Use this FIRST to find errors, warnings, or specific
+    output in large logs — much cheaper than loading all output via `logs`.
+  - `head`: Get the first N lines. Useful to check startup messages,
+    configuration output, or early errors without reading the full log.
+  - `slice`: Get a specific line range (1-indexed). Use after `grep` to
+    read surrounding context, or to paginate through large output.
+  - `logs`: Tail the last N lines of output. Use when you need the most
+    recent output (e.g. checking if a process finished).
+
+  ### Lifecycle
   - `create`: Start a background process. Returns a handle ID.
-  - `logs`: View stdout/stderr output from a background process.
-  - `kill`: Terminate a background process.
+  - `kill`: Terminate a running process.
   - `list`: Show all background processes for this session.
 
-  Parameters:
+  ## Parameters
   - `action` (required): One of "create", "logs", "grep", "head", "slice", "kill", "list"
   - `command` (for create): Shell command to run in the background
   - `name` (required for create): Short descriptive name, max 3 words (e.g. "dev server", "test runner", "color echo loop")
@@ -29,14 +58,20 @@ detail_docs: |
   - `lines` (for head): Number of lines from start (default: 50)
   - `from` / `to` (for slice): 1-indexed line range to retrieve
 
-  Use for dev servers, file watchers, long builds, or any process that
-  should run while the agent continues working.
+  ## Typical workflow for long-running commands
 
-  **Polling discipline**: When waiting for a background process to finish
-  (e.g. a Docker build or long test run), do NOT spin-poll `logs` repeatedly.
-  Each poll consumes tokens and produces no new information if the output
-  hasn't changed. Instead, use `bash` with `sleep <N>` before checking logs,
-  or combine: `sleep 60 && echo "checking"` then check logs once. Pick a
-  sleep duration proportional to the expected wait (30-120s for builds,
-  5-10s for quick tasks). Never poll more than once per 30 seconds for
-  long-running processes.
+  1. `create` with command and a descriptive name
+  2. Continue other work while it runs
+  3. When ready to check: use `grep` with pattern "error|fail|warning"
+     to find problems without reading everything
+  4. If grep finds something, use `slice` to read context around those lines
+  5. If you need the ending: use `logs` with a small `tail` value
+
+  ## Polling discipline
+  When waiting for a background process to finish (e.g. a Docker build or
+  long test run), do NOT spin-poll `logs` repeatedly. Each poll consumes
+  tokens and produces no new information if the output hasn't changed.
+  Instead, use `bash` with `sleep <N>` before checking logs, or combine:
+  `sleep 60 && echo "checking"` then check logs once. Pick a sleep duration
+  proportional to the expected wait (30-120s for builds, 5-10s for quick
+  tasks). Never poll more than once per 30 seconds for long-running processes.

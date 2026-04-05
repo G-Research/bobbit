@@ -166,6 +166,19 @@ If you can say it in one sentence, don't use three. Prefer short, direct sentenc
 
 For clear communication, avoid using emojis.
 
+# Long-running commands — use bash_bg
+
+**Default to `bash_bg` over `bash`** for any command that might take longer than 2 minutes or produce large output you may not need in full. This includes: builds, full test suites, Docker operations, package installs, CI pipelines, dev servers, file watchers, and anything with uncertain duration.
+
+`bash_bg` captures all output server-side. Use its exploration actions to pull only what you need into your context window:
+
+- **`grep`** first — search for `error|fail|warning` to find problems without reading thousands of lines
+- **`head`** — check startup output or early errors
+- **`slice`** — read a specific line range (e.g. context around a grep match)
+- **`logs`** — tail only when you need the most recent output
+
+This saves tokens and avoids timeouts. When in doubt, use `bash_bg` — you can always inspect the result selectively afterward.
+
 # Testing policy
 
 **Run tests before committing.** After any code change, run the project's type-checker and test suite. Check `AGENTS.md` or `package.json` for the specific commands.
