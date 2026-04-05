@@ -468,12 +468,16 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 export function selectSession(sessionId: string, replaceHistory?: boolean): void {
 	state.switchGeneration++;
 
+	// Flush and teardown draft handlers for the outgoing session immediately.
+	// This prevents stale _draftSessionId from saving to the wrong session
+	// during the async gap before _setupPromptDraftHandlers binds the new one.
+	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+	_flushDraft();
+	_teardownDraftHandlers();
+
 	// Cache the outgoing session's panel + agent for fast switch-back
 	const outgoingId = state.selectedSessionId;
 	if (outgoingId && outgoingId !== sessionId && state.chatPanel && state.remoteAgent?.connected) {
-		// Flush any pending draft save for the outgoing session before caching
-		if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-		_flushDraft();
 		cacheSession(outgoingId, state.chatPanel, state.remoteAgent);
 		// Don't disconnect — the cached agent stays connected
 		state.remoteAgent = null;
@@ -555,8 +559,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
 
-		// Re-bind draft handlers to the restored session
-		_setupPromptDraftHandlers(sessionId);
+		// Re-bind draft handlers to the restored session.
+		// Skip the server draft load — the cached editor already has the correct content.
+		// Just set the session ID so saves go to the right place.
+		_teardownDraftHandlers();
+		_draftSessionId = sessionId;
 
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
 		refreshGitStatusForSession(sessionId);
