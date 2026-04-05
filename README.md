@@ -126,6 +126,10 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 
 **Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md)
 
+## Feature Y
+
+Feature Y is exported from `src/feature-y.ts` as `featureY()`. It returns the string `"Feature Y is active"` and serves as a simple status check for the feature.
+
 ## Contributing
 
 See the [development workflow guide](docs/dev-workflow.md) for dev setup, and [AGENTS.md](AGENTS.md) for repo layout and common tasks.
