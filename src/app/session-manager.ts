@@ -22,6 +22,54 @@ import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
 
 // ============================================================================
+// SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
+// ============================================================================
+
+interface CachedSession {
+	chatPanel: ChatPanel;
+	remoteAgent: RemoteAgent;
+	/** Epoch ms when this entry was cached */
+	cachedAt: number;
+}
+
+/** LRU cache of recently visited sessions — avoids full reconnect on switch-back. */
+const sessionCache = new Map<string, CachedSession>();
+const SESSION_CACHE_MAX = 5;
+
+function cacheSession(sessionId: string, chatPanel: ChatPanel, remoteAgent: RemoteAgent): void {
+	sessionCache.set(sessionId, { chatPanel, remoteAgent, cachedAt: Date.now() });
+	// Evict oldest if over limit
+	if (sessionCache.size > SESSION_CACHE_MAX) {
+		let oldestKey: string | null = null;
+		let oldestTime = Infinity;
+		for (const [key, entry] of sessionCache) {
+			if (entry.cachedAt < oldestTime) {
+				oldestTime = entry.cachedAt;
+				oldestKey = key;
+			}
+		}
+		if (oldestKey) {
+			const evicted = sessionCache.get(oldestKey);
+			evicted?.remoteAgent.disconnect();
+			sessionCache.delete(oldestKey);
+		}
+	}
+}
+
+function getCachedSession(sessionId: string): CachedSession | undefined {
+	return sessionCache.get(sessionId);
+}
+
+/** Remove a session from cache (e.g. on terminate/archive). */
+export function uncacheSession(sessionId: string): void {
+	const cached = sessionCache.get(sessionId);
+	if (cached) {
+		cached.remoteAgent.disconnect();
+		sessionCache.delete(sessionId);
+	}
+}
+
+// ============================================================================
 // PER-PROJECT PALETTE SWITCHING
 // ============================================================================
 
@@ -419,14 +467,30 @@ function _setupPromptDraftHandlers(sessionId: string): void {
  */
 export function selectSession(sessionId: string, replaceHistory?: boolean): void {
 	state.switchGeneration++;
-	state.selectedSessionId = sessionId;
 
-	// Disconnect previous agent immediately
-	if (state.remoteAgent) {
-		state.remoteAgent.disconnect();
+	// Cache the outgoing session's panel + agent for fast switch-back
+	const outgoingId = state.selectedSessionId;
+	if (outgoingId && outgoingId !== sessionId && state.chatPanel && state.remoteAgent?.connected) {
+		cacheSession(outgoingId, state.chatPanel, state.remoteAgent);
+		// Don't disconnect — the cached agent stays connected
 		state.remoteAgent = null;
 		state.connectionStatus = "disconnected";
+	} else {
+		// No cache — disconnect normally
+		if (state.remoteAgent) {
+			state.remoteAgent.disconnect();
+			state.remoteAgent = null;
+			state.connectionStatus = "disconnected";
+		}
 	}
+
+	state.selectedSessionId = sessionId;
+
+	// Fade out the current chat panel instantly
+	if (state.chatPanel) {
+		state.chatPanel.classList.add("session-fade-out");
+	}
+
 	// Clear the old chat panel so the render never shows stale messages
 	// from the previous session while connecting to the new one.
 	state.chatPanel = null;
@@ -467,6 +531,34 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 	// Phase 1: synchronous select
 	selectSession(sessionId, replaceHistory);
+
+	// Fast path: reuse cached session (instant switch-back)
+	const cached = getCachedSession(sessionId);
+	if (cached && isExisting) {
+		sessionCache.delete(sessionId); // Take ownership
+		state.chatPanel = cached.chatPanel;
+		state.remoteAgent = cached.remoteAgent;
+		state.connectionStatus = "connected";
+		state.connectingSessionId = null;
+
+		// Fade in the restored panel
+		state.chatPanel.classList.remove("session-fade-out");
+		state.chatPanel.classList.add("session-fade-in");
+		state.chatPanel.addEventListener("animationend", () => {
+			state.chatPanel?.classList.remove("session-fade-in");
+		}, { once: true });
+
+		// Apply palette + accessory for the restored session
+		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
+		applyProjectPalette(sessionForPalette?.projectId);
+
+		// Refresh git status and bg processes (lightweight, fire-and-forget)
+		refreshGitStatusForSession(sessionId);
+		refreshBgProcessesForSession(sessionId);
+
+		renderApp();
+		return;
+	}
 
 	// Apply per-project palette
 	const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
@@ -1026,6 +1118,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// ── First render: connected state with new (empty) ChatPanel.
 		// The mobile header and session chrome appear immediately.
+		// Trigger fade-in animation on the new panel.
+		if (state.chatPanel) {
+			state.chatPanel.classList.add("session-fade-in");
+			state.chatPanel.addEventListener("animationend", () => {
+				state.chatPanel?.classList.remove("session-fade-in");
+			}, { once: true });
+		}
 		renderApp();
 
 		// Replace history if the hash changed to a goal-dashboard during the async gap
@@ -1258,6 +1357,9 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 		true,
 	);
 	if (!confirmed) return;
+
+	// Remove from cache if present
+	uncacheSession(sessionId);
 
 	if (activeSessionId() === sessionId) {
 		state.remoteAgent?.disconnect();
