@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MessageEditor Slash Autocomplete Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  .slash-menu { border: 1px solid #444; max-height: 200px; overflow-y: auto; position: relative; }
+  .slash-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; }
+  .slash-item.selected { background: rgba(100,100,255,0.2); }
+  .slash-item:hover { background: rgba(100,100,255,0.1); }
+  .slash-name { font-family: monospace; font-size: 14px; color: #8af; }
+  .slash-desc { font-size: 12px; color: #888; }
+  .slash-hint { font-size: 11px; color: #666; }
+</style>
+</head>
+<body>
+<div id="editor-container" style="width: 400px; position: relative;">
+  <div id="slash-menu-container"></div>
+  <textarea id="textarea" rows="3" style="width:400px;display:block;font:14px/1.4 sans-serif;padding:8px;box-sizing:border-box;"></textarea>
+</div>
+
+<script>
+/**
+ * Replicates MessageEditor's intra-prompt slash autocomplete logic.
+ */
+
+// Mock slash skills
+const slashSkills = [
+  { name: 'deploy', description: 'Deploy to production', argumentHint: '<env>', source: 'project' },
+  { name: 'deploy-staging', description: 'Deploy to staging', source: 'project' },
+  { name: 'skill-name', description: 'A test skill', source: 'personal' },
+  { name: 'status', description: 'Check status', source: 'project' },
+  { name: 'test', description: 'Run tests', argumentHint: '<pattern>', source: 'project' },
+];
+
+let slashMenuOpen = false;
+let slashFilteredSkills = [];
+let slashSelectedIndex = 0;
+let slashTokenStart = 0;
+let lastInputCallback = [];
+
+// Mirror-div based menu left offset calculation (matches MessageEditor._getSlashMenuLeft)
+function getSlashMenuLeft() {
+  const textarea = document.getElementById('textarea');
+  if (!textarea) return 0;
+  const style = getComputedStyle(textarea);
+  const mirror = document.createElement('span');
+  mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;font:${style.font};letter-spacing:${style.letterSpacing};`;
+  const lineStart = textarea.value.lastIndexOf('\n', slashTokenStart - 1) + 1;
+  mirror.textContent = textarea.value.substring(lineStart, slashTokenStart);
+  document.body.appendChild(mirror);
+  const leftOffset = mirror.offsetWidth;
+  document.body.removeChild(mirror);
+  return leftOffset;
+}
+
+function updateSlashAutocomplete() {
+  const textarea = document.getElementById('textarea');
+  if (!textarea) { closeMenu(); return; }
+  const cursorPos = textarea.selectionStart;
+  const textBeforeCursor = textarea.value.substring(0, cursorPos);
+  const match = textBeforeCursor.match(/(^|[\s])\/([\w-]*)$/);
+  if (match) {
+    slashTokenStart = cursorPos - match[2].length - 1;
+    const query = match[2].toLowerCase();
+    slashFilteredSkills = query
+      ? slashSkills.filter(s => s.name.toLowerCase().includes(query))
+      : slashSkills;
+    slashMenuOpen = slashFilteredSkills.length > 0;
+    slashSelectedIndex = 0;
+    renderMenu();
+  } else {
+    closeMenu();
+  }
+}
+
+function selectSlashSkill(skill) {
+  const textarea = document.getElementById('textarea');
+  if (!textarea) return;
+  const before = textarea.value.substring(0, slashTokenStart);
+  const after = textarea.value.substring(textarea.selectionStart);
+  textarea.value = before + '/' + skill.name + ' ' + after;
+  const newPos = before.length + skill.name.length + 2;
+  textarea.setSelectionRange(newPos, newPos);
+  textarea.focus();
+  closeMenu();
+  lastInputCallback.push(textarea.value);
+}
+
+function closeMenu() {
+  slashMenuOpen = false;
+  slashFilteredSkills = [];
+  const container = document.getElementById('slash-menu-container');
+  container.innerHTML = '';
+}
+
+function renderMenu() {
+  const container = document.getElementById('slash-menu-container');
+  container.innerHTML = '';
+  if (!slashMenuOpen || slashFilteredSkills.length === 0) return;
+
+  const menuLeft = getSlashMenuLeft();
+
+  const menu = document.createElement('div');
+  menu.className = 'slash-menu';
+  menu.style.marginLeft = menuLeft + 'px';
+  menu.dataset.menuLeft = String(menuLeft);
+
+  slashFilteredSkills.forEach((skill, i) => {
+    const item = document.createElement('button');
+    item.className = 'slash-item' + (i === slashSelectedIndex ? ' selected' : '');
+    item.dataset.skillName = skill.name;
+    item.innerHTML = `
+      <span class="slash-name">/${skill.name}</span>
+      ${skill.argumentHint ? `<span class="slash-hint">${skill.argumentHint}</span>` : ''}
+      <span class="slash-desc">${skill.description}</span>
+    `;
+    item.onmousedown = (e) => { e.preventDefault(); selectSlashSkill(skill); };
+    item.onmouseenter = () => {
+      slashSelectedIndex = i;
+      renderMenu();
+    };
+    menu.appendChild(item);
+  });
+
+  container.appendChild(menu);
+}
+
+const textarea = document.getElementById('textarea');
+
+textarea.addEventListener('input', () => {
+  updateSlashAutocomplete();
+});
+
+textarea.addEventListener('keydown', (e) => {
+  if (slashMenuOpen) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      slashSelectedIndex = Math.min(slashSelectedIndex + 1, slashFilteredSkills.length - 1);
+      renderMenu();
+      return;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      slashSelectedIndex = Math.max(slashSelectedIndex - 1, 0);
+      renderMenu();
+      return;
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      if (slashFilteredSkills[slashSelectedIndex]) {
+        selectSlashSkill(slashFilteredSkills[slashSelectedIndex]);
+      }
+      return;
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMenu();
+      return;
+    }
+  }
+});
+
+// Public API for tests
+window._forceSelectedIndex = (i) => { slashSelectedIndex = i; renderMenu(); };
+window.isMenuOpen = () => slashMenuOpen;
+window.getFilteredSkills = () => slashFilteredSkills.map(s => s.name);
+window.getSelectedIndex = () => slashSelectedIndex;
+window.getSlashMenuLeftOffset = () => {
+  const menu = document.querySelector('.slash-menu');
+  return menu ? parseFloat(menu.dataset.menuLeft || '0') : 0;
+};
+window.getLastInputCallbacks = () => lastInputCallback;
+window.resetCallbacks = () => { lastInputCallback = []; };
+
+window._testReady = true;
+</script>
+</body>
+</html>

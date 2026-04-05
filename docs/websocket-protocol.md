@@ -12,6 +12,7 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `follow_up` | `text` | Send a follow-up message |
 | `steer_queued` | `messageId` | Promote a queued message to steered (priority) |
 | `remove_queued` | `messageId` | Remove a message from the queue |
+| `reorder_queue` | `messageIds` | Reorder the prompt queue to match the given ID order |
 | `abort` | — | Abort the current agent turn |
 | `retry` | — | Retry the last failed turn |
 | `set_model` | `provider`, `modelId` | Switch the AI model |

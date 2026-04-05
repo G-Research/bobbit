@@ -181,4 +181,63 @@ test.describe("PromptQueue", () => {
 
 		expect(q.length).toBe(1); // internal not affected
 	});
+
+	test("reorderByIds with valid IDs produces correct order", () => {
+		const q = new PromptQueue();
+		const a = q.enqueue("A");
+		const b = q.enqueue("B");
+		const c = q.enqueue("C");
+
+		q.reorderByIds([c.id, a.id, b.id]);
+		expect(q.toArray().map(m => m.text)).toEqual(["C", "A", "B"]);
+	});
+
+	test("reorderByIds with unknown IDs — ignored", () => {
+		const q = new PromptQueue();
+		const a = q.enqueue("A");
+		const b = q.enqueue("B");
+
+		q.reorderByIds(["unknown-id", a.id, b.id]);
+		expect(q.toArray().map(m => m.text)).toEqual(["A", "B"]);
+		expect(q.length).toBe(2);
+	});
+
+	test("reorderByIds with partial ID list — unlisted items appended at end", () => {
+		const q = new PromptQueue();
+		const a = q.enqueue("A");
+		const b = q.enqueue("B");
+		const c = q.enqueue("C");
+
+		q.reorderByIds([c.id]); // only C specified
+		expect(q.toArray().map(m => m.text)).toEqual(["C", "A", "B"]);
+	});
+
+	test("reorderByIds with empty array — all items preserved at end", () => {
+		const q = new PromptQueue();
+		q.enqueue("A");
+		q.enqueue("B");
+		q.enqueue("C");
+
+		q.reorderByIds([]);
+		expect(q.toArray().map(m => m.text)).toEqual(["A", "B", "C"]);
+		expect(q.length).toBe(3);
+	});
+
+	test("enqueue with isFollowUp: true — flag preserved in toArray() and dequeue()", () => {
+		const q = new PromptQueue();
+		q.enqueue("normal");
+		q.enqueue("follow", { isFollowUp: true });
+
+		const arr = q.toArray();
+		expect(arr[0].isFollowUp).toBeFalsy();
+		expect(arr[1].isFollowUp).toBe(true);
+
+		const first = q.dequeue();
+		expect(first?.text).toBe("normal");
+		expect(first?.isFollowUp).toBeFalsy();
+
+		const second = q.dequeue();
+		expect(second?.text).toBe("follow");
+		expect(second?.isFollowUp).toBe(true);
+	});
 });

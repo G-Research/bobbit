@@ -268,22 +268,43 @@ export function handleWebSocketConnection(
 					console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
 					let promptText = msg.text;
 
-					// Check for slash skill invocation (e.g. "/deploy staging")
-					const slashMatch = msg.text.match(/^\/([\w-]+)(?:\s+(.*))?$/);
-					if (slashMatch) {
-						const skillName = slashMatch[1];
-						const skillArgs = slashMatch[2] || "";
-						// Resolve per-project config store for skill lookup
-						let resolvedConfigStore = projectConfigStore;
-						if (session.projectId && projectContextManager) {
-							const ctx = projectContextManager.getOrCreate(session.projectId);
-							if (ctx) resolvedConfigStore = ctx.projectConfigStore;
-						}
+					// Resolve per-project config store for skill lookup
+					let resolvedConfigStore = projectConfigStore;
+					if (session.projectId && projectContextManager) {
+						const ctx = projectContextManager.getOrCreate(session.projectId);
+						if (ctx) resolvedConfigStore = ctx.projectConfigStore;
+					}
+
+					// Check for slash skill invocations at word boundaries
+					// Matches "/skill-name" at start of string or after whitespace
+					const slashPattern = /(^|[\s])\/([\w-]+)/g;
+					let match: RegExpExecArray | null;
+					const replacements: Array<{ start: number; end: number; expanded: string }> = [];
+					while ((match = slashPattern.exec(promptText)) !== null) {
+						const skillName = match[2];
 						const skill = getSlashSkill(session.cwd, skillName, resolvedConfigStore);
 						if (skill) {
-							promptText = buildSlashSkillPrompt(skill, skillArgs);
-							console.log(`[ws-handler] Slash skill "${skillName}" invoked for session ${sessionId}`);
+							const prefixLen = match[1].length; // 0 at start, 1 after whitespace
+							const tokenStart = match.index + prefixLen; // position of "/"
+							const tokenEnd = tokenStart + 1 + skillName.length; // end of "/skill-name"
+							// For prefix-only invocation (entire text is "/skill args"), use buildSlashSkillPrompt
+							// For inline, replace just the token with expanded content
+							if (tokenStart === 0 && promptText.match(/^\/([\w-]+)(?:\s+(.*))?$/)) {
+								// Prefix-only: use the full buildSlashSkillPrompt (includes args)
+								const skillArgs = promptText.slice(tokenEnd).trim();
+								promptText = buildSlashSkillPrompt(skill, skillArgs);
+								console.log(`[ws-handler] Slash skill "${skillName}" invoked for session ${sessionId}`);
+								replacements.length = 0; // clear any partial matches
+								break;
+							}
+							replacements.push({ start: tokenStart, end: tokenEnd, expanded: buildSlashSkillPrompt(skill, "") });
+							console.log(`[ws-handler] Inline slash skill "${skillName}" expanded for session ${sessionId}`);
 						}
+					}
+					// Apply inline replacements right-to-left to preserve indices
+					for (let i = replacements.length - 1; i >= 0; i--) {
+						const r = replacements[i];
+						promptText = promptText.slice(0, r.start) + r.expanded + promptText.slice(r.end);
 					}
 
 					await sessionManager.enqueuePrompt(sessionId, promptText, {
@@ -310,6 +331,9 @@ export function handleWebSocketConnection(
 					break;
 				case "remove_queued":
 					sessionManager.removeQueued(sessionId, msg.messageId);
+					break;
+				case "reorder_queue":
+					sessionManager.reorderQueue(sessionId, msg.messageIds);
 					break;
 				case "abort":
 					sessionManager.forceAbort(sessionId).catch((err) => {
