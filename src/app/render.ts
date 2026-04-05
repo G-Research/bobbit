@@ -2653,8 +2653,8 @@ export function doRenderApp(): void {
 		}
 		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
 
-		// Show bouncing bobbit while connecting to a session
-		if (state.connectingSessionId) {
+		// Show bouncing bobbit while connecting or creating a session
+		if (state.connectingSessionId || state.creatingSession) {
 			return html`<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>`;
 		}
 
