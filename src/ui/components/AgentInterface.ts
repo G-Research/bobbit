@@ -34,6 +34,8 @@ export class AgentInterface extends LitElement {
 	@property({ type: Boolean }) showThemeToggle = false;
 	// Working directory shown in the stats bar
 	@property() cwd?: string;
+	// Project ID for the current session — used for slash skill resolution
+	@property() projectId?: string;
 	// Git branch name shown in the stats bar
 	@property() branch?: string;
 	// Git status data for the widget
@@ -906,6 +908,7 @@ export class AgentInterface extends LitElement {
 						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
+						.projectId=${this.projectId}
 							.isStreaming=${state.isStreaming}
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}

@@ -1090,6 +1090,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Set cwd and branch on the AgentInterface stats bar
 		if (state.chatPanel.agentInterface && sessionData?.cwd) {
 			state.chatPanel.agentInterface.cwd = sessionData.cwd;
+			state.chatPanel.agentInterface.projectId = sessionData.projectId;
 			if (sessionData.goalId) {
 				const goal = state.goals.find((g) => g.id === sessionData.goalId);
 				if (goal?.branch) {
@@ -1357,6 +1358,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Apply cwd/branch if not set earlier (sessionData wasn't in gatewaySessions yet)
 				if (state.chatPanel?.agentInterface && !state.chatPanel.agentInterface.cwd && sessionForRole?.cwd) {
 					state.chatPanel.agentInterface.cwd = sessionForRole.cwd;
+					state.chatPanel.agentInterface.projectId = sessionForRole.projectId;
 					if (sessionForRole.goalId) {
 						const goal = state.goals.find((g) => g.id === sessionForRole.goalId);
 						if (goal?.branch) {
