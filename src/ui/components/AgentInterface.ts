@@ -98,6 +98,20 @@ export class AgentInterface extends LitElement {
 	private _scrollContainer?: HTMLElement;
 	private _resizeObserver?: ResizeObserver;
 	private _lastScrollHeight = 0;
+
+	// --- Pill overflow collapsing state ---
+	/** Number of pills visible before overflow (rest collapse into "More") */
+	private _visiblePillCount = Infinity;
+	/** Whether the "More" popover is expanded */
+	private _moreExpanded = false;
+	/** ResizeObserver for the pill container overflow check */
+	private _pillResizeObserver?: ResizeObserver;
+	/** ID of a pill currently animating out */
+	private _dismissingId: string | null = null;
+	/** IDs of pills promoted from hidden to visible (animate in) */
+	private _promotedIds: Set<string> = new Set();
+	/** Whether initial render is done (skip animations on first paint) */
+	private _pillsInitialized = false;
 	private _unsubscribeSession?: () => void;
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
@@ -212,6 +226,13 @@ export class AgentInterface extends LitElement {
 		if (this._scrollContainer) {
 			this._scrollContainer.removeEventListener("scroll", this._handleScroll);
 		}
+
+		if (this._pillResizeObserver) {
+			this._pillResizeObserver.disconnect();
+			this._pillResizeObserver = undefined;
+		}
+
+		document.removeEventListener("click", this._handleMoreClickOutside, true);
 
 		if (this._unsubscribeSession) {
 			this._unsubscribeSession();
@@ -836,18 +857,10 @@ export class AgentInterface extends LitElement {
 
 				<!-- Input Area -->
 				<div class="shrink-0 pt-0 pb-1">
-					<div class="max-w-5xl mx-auto px-2 relative">
+					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this.bgProcesses.length > 0 || this.gitStatus || this.gitStatusLoading ? html`
-						<div class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto flex items-center gap-1.5 flex-wrap justify-end" style="max-width:calc(100% - 1rem)">
-							${this.bgProcesses.map((p) => html`
-								<bg-process-pill
-									data-id="${p.id}"
-									.process=${p}
-									.sessionId=${this.session?.sessionId ?? ''}
-									.onKill=${this.onBgProcessKill}
-									.onDismiss=${this.onBgProcessDismiss}
-								></bg-process-pill>
-							`)}
+						<div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto flex items-center gap-1.5 flex-wrap justify-end" style="max-width:calc(100% - 1rem)">
+							${this._renderPillStrip()}
 							${this.gitStatus || this.gitStatusLoading ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
 								.token=${localStorage.getItem("gateway.token") || ""}
@@ -990,6 +1003,258 @@ export class AgentInterface extends LitElement {
 
 	private _handleAskAgentPr(): void {
 		this.onAskAgentPr?.();
+	}
+
+	// --- Pill overflow collapsing & animation ---
+
+	/**
+	 * Sort processes by startTime ascending (oldest first).
+	 * Visible = newest N, Hidden = oldest (total - N).
+	 */
+	private _getSortedProcesses(): BgProcessInfo[] {
+		return [...this.bgProcesses].sort((a, b) => a.startTime - b.startTime);
+	}
+
+	private _renderPillStrip() {
+		const sorted = this._getSortedProcesses();
+		if (sorted.length === 0) return nothing;
+
+		const count = Math.min(this._visiblePillCount, sorted.length);
+		// Ensure at least 1 pill is always visible
+		const visibleCount = Math.max(1, count);
+		const hiddenCount = sorted.length - visibleCount;
+		const hidden = sorted.slice(0, hiddenCount);
+		const visible = sorted.slice(hiddenCount);
+
+		return html`
+			<style>
+				@keyframes pill-fade-out {
+					from { opacity: 1; transform: scale(1); }
+					to   { opacity: 0; transform: scale(0.8); }
+				}
+				@keyframes pill-slide-in {
+					from { opacity: 0; transform: translateY(6px) scale(0.95); }
+					to   { opacity: 1; transform: translateY(0) scale(1); }
+				}
+				.pill-dismissing {
+					animation: pill-fade-out 150ms ease-in forwards;
+					pointer-events: none;
+				}
+				.pill-promoted {
+					animation: pill-slide-in 200ms ease-out;
+				}
+				@keyframes popover-in {
+					from { opacity: 0; transform: translateY(4px); }
+					to   { opacity: 1; transform: translateY(0); }
+				}
+				.pill-more-popover {
+					animation: popover-in 150ms ease-out;
+				}
+			</style>
+			${hidden.length > 0 ? html`
+				<div class="relative" style="display:inline-flex">
+					<button
+						class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight"
+						@click=${this._toggleMore}
+						aria-expanded=${this._moreExpanded}
+						aria-haspopup="true"
+						title="Show ${hidden.length} more background process${hidden.length > 1 ? 'es' : ''}"
+					>
+						<span>${hidden.length} more</span>
+						<span style="font-size:9px">${this._moreExpanded ? '∨' : '∧'}</span>
+					</button>
+					${this._moreExpanded ? html`
+						<div class="absolute bottom-full left-0 mb-1 z-50 flex flex-col gap-1 pill-more-popover" style="min-width:max-content">
+							${hidden.map((p) => html`
+								<bg-process-pill
+									data-id="${p.id}"
+									.process=${p}
+									.sessionId=${this.session?.sessionId ?? ''}
+									.onKill=${this.onBgProcessKill}
+									.onDismiss=${this._handlePillDismiss}
+								></bg-process-pill>
+							`)}
+						</div>
+					` : nothing}
+				</div>
+			` : nothing}
+			${visible.map((p) => {
+				const isDismissing = this._dismissingId === p.id;
+				const isPromoted = this._promotedIds.has(p.id);
+				const cls = isDismissing ? 'pill-dismissing' : isPromoted ? 'pill-promoted' : '';
+				return html`
+					<div
+						class="${cls}"
+						style="display:inline-flex"
+						@animationend=${(e: AnimationEvent) => this._handlePillAnimationEnd(e, p.id)}
+					>
+						<bg-process-pill
+							data-id="${p.id}"
+							.process=${p}
+							.sessionId=${this.session?.sessionId ?? ''}
+							.onKill=${this.onBgProcessKill}
+							.onDismiss=${this._handlePillDismiss}
+						></bg-process-pill>
+					</div>
+				`;
+			})}
+		`;
+	}
+
+	private _toggleMore = (e: MouseEvent) => {
+		e.stopPropagation();
+		this._moreExpanded = !this._moreExpanded;
+		this.requestUpdate();
+		if (this._moreExpanded) {
+			// Defer adding click-outside so this click doesn't immediately close it
+			requestAnimationFrame(() => {
+				document.addEventListener("click", this._handleMoreClickOutside, true);
+			});
+		} else {
+			document.removeEventListener("click", this._handleMoreClickOutside, true);
+		}
+	};
+
+	private _handleMoreClickOutside = (e: MouseEvent) => {
+		// Check if click is inside the "More" popover or its toggle button
+		const target = e.target as Node;
+		const moreContainer = this.querySelector('.pill-more-popover');
+		const moreBtn = moreContainer?.parentElement?.querySelector('button');
+		if (moreContainer?.contains(target) || moreBtn?.contains(target)) return;
+		this._moreExpanded = false;
+		this.requestUpdate();
+		document.removeEventListener("click", this._handleMoreClickOutside, true);
+	};
+
+	private _handlePillDismiss = (id: string) => {
+		if (!this._pillsInitialized) {
+			// Not yet initialized — just dismiss directly
+			this.onBgProcessDismiss?.(id);
+			return;
+		}
+
+		// Figure out which pill will be promoted (become newly visible) after removal
+		const sorted = this._getSortedProcesses();
+		const count = Math.min(this._visiblePillCount, sorted.length);
+		const visibleCount = Math.max(1, count);
+		const hiddenCount = sorted.length - visibleCount;
+
+		// After removing this pill, the first hidden pill may become visible
+		if (hiddenCount > 0) {
+			// The hidden pills are sorted[0..hiddenCount-1].
+			// The last hidden one (sorted[hiddenCount-1]) will be promoted if the
+			// dismissed pill is in the visible set.
+			const visibleIds = new Set(sorted.slice(hiddenCount).map(p => p.id));
+			if (visibleIds.has(id)) {
+				const promotedPill = sorted[hiddenCount - 1];
+				this._promotedIds.add(promotedPill.id);
+			}
+		}
+
+		// Start dismiss animation
+		this._dismissingId = id;
+		this.requestUpdate();
+	};
+
+	private _handlePillAnimationEnd = (e: AnimationEvent, id: string) => {
+		if (e.animationName === 'pill-fade-out' && this._dismissingId === id) {
+			this._dismissingId = null;
+			this.onBgProcessDismiss?.(id);
+			// Recalculate overflow after removal
+			requestAnimationFrame(() => this._measurePillOverflow());
+		}
+		if (e.animationName === 'pill-slide-in') {
+			this._promotedIds.delete(id);
+		}
+	};
+
+	/**
+	 * Measure pill container vs parent and compute how many pills fit.
+	 */
+	private _measurePillOverflow() {
+		const parentContainer = this.querySelector('[data-input-container]') as HTMLElement;
+		if (!parentContainer) return;
+		const maxWidth = parentContainer.clientWidth * 0.5;
+
+		const pillContainer = this.querySelector('[data-pill-strip]') as HTMLElement;
+		if (!pillContainer) return;
+
+		const gap = 6; // gap-1.5 = 0.375rem ≈ 6px
+		const pillWidths: number[] = [];
+
+		// Collect widths of visible pill wrappers — each visible pill is in a <div> wrapper
+		// The "more" button is in a <div class="relative">, skip it.
+		// git-status-widget is a direct child, skip it too.
+		for (const child of pillContainer.children) {
+			const el = child as HTMLElement;
+			if (el.querySelector('bg-process-pill') && !el.querySelector('.pill-more-popover')) {
+				pillWidths.push(el.offsetWidth);
+			}
+		}
+
+		if (pillWidths.length === 0) {
+			this._visiblePillCount = Infinity;
+			return;
+		}
+
+		// The "more" button itself takes ~80px when shown
+		const moreBtnWidth = 80;
+
+		// Count from right (newest) how many pills fit
+		let fitCount = 0;
+		let usedWidth = 0;
+		for (let i = pillWidths.length - 1; i >= 0; i--) {
+			const needed = pillWidths[i] + (fitCount > 0 ? gap : 0);
+			const wouldNeedMore = i > 0; // still have pills to hide
+			const reserveForMore = wouldNeedMore ? moreBtnWidth + gap : 0;
+			if (usedWidth + needed + reserveForMore <= maxWidth) {
+				usedWidth += needed;
+				fitCount++;
+			} else {
+				break;
+			}
+		}
+
+		// At least 1 pill must be visible
+		const newCount = Math.max(1, fitCount);
+		if (newCount !== this._visiblePillCount) {
+			this._visiblePillCount = newCount;
+			this.requestUpdate();
+		}
+
+		if (!this._pillsInitialized) {
+			this._pillsInitialized = true;
+		}
+	}
+
+	override updated(changedProperties: Map<string, any>) {
+		super.updated(changedProperties);
+
+		// Setup pill overflow observer once the pill strip is rendered
+		if (this.bgProcesses.length > 0) {
+			const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
+			if (pillStrip && !this._pillResizeObserver) {
+				this._pillResizeObserver = new ResizeObserver(() => {
+					this._measurePillOverflow();
+				});
+				// Observe the input container for size changes
+				const parent = this.querySelector('[data-input-container]') as HTMLElement;
+				if (parent) this._pillResizeObserver.observe(parent);
+			}
+			// Measure after renders that change pill count
+			if (changedProperties.has('bgProcesses')) {
+				requestAnimationFrame(() => this._measurePillOverflow());
+			}
+		} else {
+			// No pills — reset
+			this._visiblePillCount = Infinity;
+			this._moreExpanded = false;
+			this._pillsInitialized = false;
+			if (this._pillResizeObserver) {
+				this._pillResizeObserver.disconnect();
+				this._pillResizeObserver = undefined;
+			}
+		}
 	}
 }
 
