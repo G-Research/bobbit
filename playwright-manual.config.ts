@@ -12,6 +12,10 @@ export default defineConfig({
 	timeout: 300_000,     // 5 minutes per test — real LLM calls are slow
 	retries: 0,           // no retries — manual tests should be deterministic
 	workers: 1,           // serial — one gateway at a time
+	use: {
+		headless: true,
+		screenshot: "off",    // we capture manually
+	},
 	projects: [
 		{
 			name: "manual-integration",

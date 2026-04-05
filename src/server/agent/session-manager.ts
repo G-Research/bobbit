@@ -2195,6 +2195,21 @@ export class SessionManager {
 				// The session-fs module handles routing reads/checks to the right place.
 				const agentSessionFile = stateResp.data.sessionFile;
 
+				// Proactively ensure the session file exists on disk so the session
+				// survives a crash even if the agent hasn't written to it yet.
+				// The agent will append conversation data later; an empty file is
+				// enough for restoreOneSession() to pass the existence check and
+				// issue switch_session (which handles empty files gracefully).
+				if (!session.sandboxed && agentSessionFile) {
+					try {
+						const dir = path.dirname(agentSessionFile);
+						if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+						if (!fs.existsSync(agentSessionFile)) fs.writeFileSync(agentSessionFile, "");
+					} catch (err) {
+						console.warn(`[session-manager] Could not proactively create session file for ${session.id}: ${err}`);
+					}
+				}
+
 				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
 				return; // success
 			} catch (err) {
