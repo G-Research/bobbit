@@ -10,6 +10,7 @@ import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
+import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)
@@ -1981,16 +1982,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 
 export function renderGoalDashboard(): TemplateResult {
 	if (loading) {
-		return html`
-			<div class="dashboard-container">
-				<div class="dashboard-loading">
-					<svg class="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
-					</svg>
-					<span>Loading dashboard\u2026</span>
-				</div>
-			</div>
-		`;
+		return html`<div class="dashboard-container" style="flex:1;min-height:0;">${bobbitLoadingAnimation()}</div>`;
 	}
 
 	if (error || !currentGoal) {
