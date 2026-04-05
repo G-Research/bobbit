@@ -276,9 +276,12 @@ export class ProjectSandbox {
 	private async _createContainer(): Promise<void> {
 		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, githubToken } = this.options;
 
-		// Ensure the state directory exists for bind mount
+		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
 		fs.mkdirSync(stateDir, { recursive: true });
+		for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
+			fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
+		}
 
 		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
 		const totalMemGB = Math.max(4, Math.floor(os.totalmem() / (1024 ** 3)) - 2);
