@@ -1766,6 +1766,22 @@ export class SessionManager {
 		}
 
 		session.status = "idle";
+
+		// For sandbox sessions, resolve the container ID so git-status and other
+		// host-side operations can run commands inside the container via docker exec.
+		// The containerId is not persisted — it's resolved from SandboxManager which
+		// reconnects to the existing container by label on startup.
+		if (ps.sandboxed && this.sandboxManager && ps.projectId) {
+			try {
+				const sandbox = this.sandboxManager.get(ps.projectId);
+				if (sandbox) {
+					session.containerId = await sandbox.getContainerId();
+				}
+			} catch (err) {
+				console.warn(`[session-manager] Could not resolve container for sandbox session ${ps.id}: ${err}`);
+			}
+		}
+
 		this.sessions.set(ps.id, session);
 
 		// If the agent was mid-turn when the server died, re-prompt it to continue
