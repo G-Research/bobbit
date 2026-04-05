@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  /* Minimal Tailwind-like utilities for the pill strip layout */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; font-size: 14px; }
+
+  .max-w-5xl { max-width: 64rem; margin: 0 auto; padding: 0 0.5rem; position: relative; }
+  .absolute { position: absolute; }
+  .relative { position: relative; }
+  .right-2 { right: 0.5rem; }
+  .bottom-full { bottom: 100%; }
+  .mb-1\.5 { margin-bottom: 0.375rem; }
+  .z-10 { z-index: 10; }
+  .z-50 { z-index: 50; }
+  .flex { display: flex; }
+  .inline-flex { display: inline-flex; }
+  .items-center { align-items: center; }
+  .gap-1\.5 { gap: 0.375rem; }
+  .gap-1 { gap: 0.25rem; }
+  .flex-wrap { flex-wrap: wrap; }
+  .justify-end { justify-content: end; }
+  .flex-col { flex-direction: column; }
+  .pointer-events-auto { pointer-events: auto; }
+  .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+  .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+  .rounded-full { border-radius: 9999px; }
+  .text-\[11px\] { font-size: 11px; }
+  .leading-tight { line-height: 1.25; }
+  .cursor-pointer { cursor: pointer; }
+  .mb-1 { margin-bottom: 0.25rem; }
+
+  /* Pill styling */
+  bg-process-pill {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+  }
+  bg-process-pill button.pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    border: 1px solid #d1d5db;
+    background: #fff;
+    font-size: 11px;
+    line-height: 1.25;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .more-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    border: 1px solid #d1d5db;
+    background: #fff;
+    font-size: 11px;
+    line-height: 1.25;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  /* Animations */
+  @keyframes pill-fade-out {
+    from { opacity: 1; transform: scale(1); }
+    to   { opacity: 0; transform: scale(0.8); }
+  }
+  @keyframes pill-slide-in {
+    from { opacity: 0; transform: translateY(6px) scale(0.95); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes popover-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .pill-dismissing {
+    animation: pill-fade-out 150ms ease-in forwards;
+    pointer-events: none;
+  }
+  .pill-promoted {
+    animation: pill-slide-in 200ms ease-out;
+  }
+  .pill-more-popover {
+    animation: popover-in 150ms ease-out;
+  }
+
+  /* Give the input container a background so it's visible */
+  #input-area {
+    border-top: 1px solid #e5e7eb;
+    padding: 8px 0;
+  }
+  .input-placeholder {
+    height: 40px;
+    background: #f9fafb;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+  }
+</style>
+</head>
+<body>
+
+<!-- Main test container -->
+<div id="test-root" style="width: 800px; margin: 60px auto 0;">
+  <div id="input-area">
+    <div data-input-container class="max-w-5xl" id="input-container">
+      <div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto flex items-center gap-1.5 flex-wrap justify-end" style="max-width:calc(100% - 1rem)" id="pill-strip">
+        <!-- Pills rendered by JS below -->
+      </div>
+      <div class="input-placeholder"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/**
+ * Minimal bg-process-pill custom element for testing.
+ * Renders a button pill with the process command, a remove button for exited processes.
+ */
+class BgProcessPill extends HTMLElement {
+  constructor() {
+    super();
+    this._process = null;
+    this._onDismiss = null;
+    this._expanded = false;
+  }
+
+  get process() { return this._process; }
+  set process(val) {
+    this._process = val;
+    this._render();
+  }
+
+  get onDismiss() { return this._onDismiss; }
+  set onDismiss(fn) { this._onDismiss = fn; }
+
+  get onKill() { return this._onKill; }
+  set onKill(fn) { this._onKill = fn; }
+
+  get sessionId() { return this.getAttribute('sessionId') || ''; }
+  set sessionId(val) { this.setAttribute('sessionId', val || ''); }
+
+  connectedCallback() {
+    this._render();
+  }
+
+  _render() {
+    if (!this._process) return;
+    const p = this._process;
+    const statusDot = p.status === 'running' ? '🟢' : '⚫';
+    this.innerHTML = `
+      <button class="pill-btn" data-pill-toggle>
+        <span>${statusDot}</span>
+        <span class="pill-label">${p.command}</span>
+      </button>
+      ${this._expanded ? `
+        <div class="pill-dropdown" style="position:absolute;top:100%;right:0;background:#fff;border:1px solid #d1d5db;border-radius:8px;padding:8px;z-index:100;min-width:200px;">
+          <div>PID: ${p.pid}</div>
+          <div>Status: ${p.status}</div>
+          ${p.status === 'exited' ? `<button class="remove-btn" data-remove>Remove</button>` : ''}
+        </div>
+      ` : ''}
+    `;
+
+    // Toggle expand on click
+    const toggle = this.querySelector('[data-pill-toggle]');
+    if (toggle) {
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._expanded = !this._expanded;
+        this._render();
+      });
+    }
+
+    // Remove button
+    const removeBtn = this.querySelector('[data-remove]');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this._onDismiss) {
+          this._onDismiss(p.id);
+        }
+      });
+    }
+  }
+}
+
+if (!customElements.get('bg-process-pill')) {
+  customElements.define('bg-process-pill', BgProcessPill);
+}
+
+/**
+ * Pill Strip Manager — replicates the overflow logic from AgentInterface.ts
+ */
+class PillStripManager {
+  constructor() {
+    this.bgProcesses = [];
+    this._visiblePillCount = Infinity;
+    this._moreExpanded = false;
+    this._pillResizeObserver = null;
+    this._pillsInitialized = false;
+    this._dismissingId = null;
+    this._promotedIds = new Set();
+    this._outsideClickHandler = null;
+  }
+
+  get pillStrip() { return document.getElementById('pill-strip'); }
+  get inputContainer() { return document.getElementById('input-container'); }
+
+  /** Sort processes by startTime ascending (oldest first) */
+  _getSortedProcesses() {
+    return [...this.bgProcesses].sort((a, b) => a.startTime - b.startTime);
+  }
+
+  render() {
+    const strip = this.pillStrip;
+    if (!strip) return;
+    strip.innerHTML = '';
+
+    const sorted = this._getSortedProcesses();
+    if (sorted.length === 0) return;
+
+    const count = Math.min(this._visiblePillCount, sorted.length);
+    const visibleCount = Math.max(1, count);
+    const hiddenCount = sorted.length - visibleCount;
+    const hidden = sorted.slice(0, hiddenCount);
+    const visible = sorted.slice(hiddenCount);
+
+    // Render "More" button if there are hidden pills
+    if (hidden.length > 0) {
+      const moreWrapper = document.createElement('div');
+      moreWrapper.className = 'relative';
+      moreWrapper.style.display = 'inline-flex';
+
+      const moreBtn = document.createElement('button');
+      moreBtn.className = 'more-btn';
+      moreBtn.setAttribute('aria-expanded', String(this._moreExpanded));
+      moreBtn.setAttribute('aria-haspopup', 'true');
+      moreBtn.title = `Show ${hidden.length} more background process${hidden.length > 1 ? 'es' : ''}`;
+      moreBtn.innerHTML = `<span>${hidden.length} more</span><span style="font-size:9px">${this._moreExpanded ? '∨' : '∧'}</span>`;
+      moreBtn.addEventListener('click', (e) => this._toggleMore(e));
+      moreWrapper.appendChild(moreBtn);
+
+      // Render popover if expanded
+      if (this._moreExpanded) {
+        const popover = document.createElement('div');
+        popover.className = 'absolute bottom-full left-0 mb-1 z-50 flex flex-col gap-1 pill-more-popover';
+        popover.style.minWidth = 'max-content';
+        popover.style.position = 'absolute';
+        popover.style.bottom = '100%';
+        popover.style.left = '0';
+
+        for (const p of hidden) {
+          const pill = document.createElement('bg-process-pill');
+          pill.setAttribute('data-id', p.id);
+          pill.process = p;
+          pill.sessionId = '';
+          pill.onDismiss = (id) => this._handlePillDismiss(id);
+          popover.appendChild(pill);
+        }
+        moreWrapper.appendChild(popover);
+      }
+
+      strip.appendChild(moreWrapper);
+    }
+
+    // Render visible pills
+    for (const p of visible) {
+      const isDismissing = this._dismissingId === p.id;
+      const isPromoted = this._promotedIds.has(p.id);
+      const cls = isDismissing ? 'pill-dismissing' : isPromoted ? 'pill-promoted' : '';
+
+      const wrapper = document.createElement('div');
+      wrapper.className = cls;
+      wrapper.style.display = 'inline-flex';
+      wrapper.setAttribute('data-pill-wrapper', p.id);
+
+      wrapper.addEventListener('animationend', (e) => {
+        this._handlePillAnimationEnd(e, p.id);
+      });
+
+      const pill = document.createElement('bg-process-pill');
+      pill.setAttribute('data-id', p.id);
+      pill.process = p;
+      pill.sessionId = '';
+      pill.onDismiss = (id) => this._handlePillDismiss(id);
+      wrapper.appendChild(pill);
+      strip.appendChild(wrapper);
+    }
+
+    // Setup measurement after render
+    requestAnimationFrame(() => this._measurePillOverflow());
+  }
+
+  _toggleMore(e) {
+    e.stopPropagation();
+    this._moreExpanded = !this._moreExpanded;
+    this.render();
+    if (this._moreExpanded) {
+      requestAnimationFrame(() => {
+        this._outsideClickHandler = (ev) => {
+          const target = ev.target;
+          const popover = this.pillStrip.querySelector('.pill-more-popover');
+          const moreBtn = popover?.parentElement?.querySelector('button');
+          if (popover?.contains(target) || moreBtn?.contains(target)) return;
+          this._moreExpanded = false;
+          this.render();
+          document.removeEventListener('click', this._outsideClickHandler, true);
+          this._outsideClickHandler = null;
+        };
+        document.addEventListener('click', this._outsideClickHandler, true);
+      });
+    } else {
+      if (this._outsideClickHandler) {
+        document.removeEventListener('click', this._outsideClickHandler, true);
+        this._outsideClickHandler = null;
+      }
+    }
+  }
+
+  _handlePillDismiss(id) {
+    if (!this._pillsInitialized) {
+      this._removePill(id);
+      return;
+    }
+
+    const sorted = this._getSortedProcesses();
+    const count = Math.min(this._visiblePillCount, sorted.length);
+    const visibleCount = Math.max(1, count);
+    const hiddenCount = sorted.length - visibleCount;
+
+    if (hiddenCount > 0) {
+      const visibleIds = new Set(sorted.slice(hiddenCount).map(p => p.id));
+      if (visibleIds.has(id)) {
+        const promotedPill = sorted[hiddenCount - 1];
+        this._promotedIds.add(promotedPill.id);
+      }
+    }
+
+    this._dismissingId = id;
+    this.render();
+  }
+
+  _handlePillAnimationEnd(e, id) {
+    if (e.animationName === 'pill-fade-out' && this._dismissingId === id) {
+      this._dismissingId = null;
+      this._removePill(id);
+      requestAnimationFrame(() => this._measurePillOverflow());
+    }
+    if (e.animationName === 'pill-slide-in') {
+      this._promotedIds.delete(id);
+    }
+  }
+
+  _removePill(id) {
+    this.bgProcesses = this.bgProcesses.filter(p => p.id !== id);
+    this.render();
+  }
+
+  _measurePillOverflow() {
+    const parentContainer = this.inputContainer;
+    if (!parentContainer) return;
+    const maxWidth = parentContainer.clientWidth * 0.5;
+
+    const pillContainer = this.pillStrip;
+    if (!pillContainer) return;
+
+    const gap = 6;
+    const pillWidths = [];
+
+    for (const child of pillContainer.children) {
+      const el = child;
+      if (el.querySelector('bg-process-pill') && !el.querySelector('.pill-more-popover')) {
+        pillWidths.push(el.offsetWidth);
+      }
+    }
+
+    if (pillWidths.length === 0) {
+      this._visiblePillCount = Infinity;
+      return;
+    }
+
+    const moreBtnWidth = 80;
+
+    let fitCount = 0;
+    let usedWidth = 0;
+    for (let i = pillWidths.length - 1; i >= 0; i--) {
+      const needed = pillWidths[i] + (fitCount > 0 ? gap : 0);
+      const wouldNeedMore = i > 0;
+      const reserveForMore = wouldNeedMore ? moreBtnWidth + gap : 0;
+      if (usedWidth + needed + reserveForMore <= maxWidth) {
+        usedWidth += needed;
+        fitCount++;
+      } else {
+        break;
+      }
+    }
+
+    const newCount = Math.max(1, fitCount);
+    const changed = newCount !== this._visiblePillCount;
+    this._visiblePillCount = newCount;
+
+    if (!this._pillsInitialized) {
+      this._pillsInitialized = true;
+    }
+
+    if (changed) {
+      this.render();
+    }
+  }
+
+  setupResizeObserver() {
+    if (this._pillResizeObserver) return;
+    this._pillResizeObserver = new ResizeObserver(() => {
+      this._measurePillOverflow();
+    });
+    const parent = this.inputContainer;
+    if (parent) this._pillResizeObserver.observe(parent);
+  }
+
+  init(processes) {
+    this.bgProcesses = processes;
+    this._visiblePillCount = Infinity;
+    this._moreExpanded = false;
+    this._pillsInitialized = false;
+    this._dismissingId = null;
+    this._promotedIds = new Set();
+    this.render();
+    this.setupResizeObserver();
+  }
+}
+
+// Create and expose the manager
+window.__pillManager = new PillStripManager();
+
+/**
+ * Helper: create N mock background processes with sequential startTimes.
+ */
+window.__createProcesses = function(count, opts = {}) {
+  const processes = [];
+  for (let i = 0; i < count; i++) {
+    processes.push({
+      id: `proc-${i}`,
+      command: opts.longCommands ? `long-running-command-${i} --flag --option=value` : `cmd-${i}`,
+      pid: 1000 + i,
+      status: opts.allExited ? 'exited' : 'running',
+      exitCode: opts.allExited ? 0 : null,
+      startTime: Date.now() - (count - i) * 1000, // oldest first
+    });
+  }
+  return processes;
+};
+
+/**
+ * Helper: initialize the pill strip with N processes.
+ */
+window.__initPills = function(count, opts = {}) {
+  const processes = window.__createProcesses(count, opts);
+  window.__pillManager.init(processes);
+  return processes;
+};
+
+/**
+ * Helper: wait for pill measurement to complete (after rAF).
+ */
+window.__waitForMeasurement = function() {
+  return new Promise(resolve => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+  });
+};
+
+/**
+ * Helper: set the test root width.
+ */
+window.__setContainerWidth = function(width) {
+  document.getElementById('test-root').style.width = width + 'px';
+};
+</script>
+</body>
+</html>
