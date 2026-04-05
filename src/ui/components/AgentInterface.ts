@@ -865,7 +865,7 @@ export class AgentInterface extends LitElement {
 								${this._renderGlowLayer()}
 							</div>
 							<!-- Layer 1: Real interactive pills -->
-							<div class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1">
+							<div data-pill-content class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1">
 							${this._renderPillStrip()}
 							${this.gitStatus || this.gitStatusLoading ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
@@ -1119,7 +1119,7 @@ export class AgentInterface extends LitElement {
 						><svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block${this._moreExpanded ? ';transform:rotate(180deg)' : ''}"><path d="M1.5 5.5L4 3L6.5 5.5"/></svg></button>
 					</span>
 					${this._moreExpanded ? html`
-						<div class="absolute bottom-full left-0 z-50 flex flex-col gap-1 pill-more-popover" style="min-width:max-content; border-radius:16px; box-shadow:0 0 12px 8px var(--background), 0 0 4px 2px var(--background); padding:2px; margin:-2px; margin-bottom:8px">
+						<div class="absolute bottom-full z-50 flex flex-col gap-1 pill-more-popover" style="left:-8px; min-width:max-content; padding:14px; margin:-8px; margin-bottom:-7px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); --m:linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent), linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent); -webkit-mask-image:var(--m); mask-image:var(--m); -webkit-mask-composite:destination-in; mask-composite:intersect">
 							${hidden.map((p) => html`
 								<bg-process-pill
 									data-id="${p.id}"
@@ -1229,15 +1229,19 @@ export class AgentInterface extends LitElement {
 	private _measurePillOverflow() {
 		const parentContainer = this.querySelector('[data-input-container]') as HTMLElement;
 		if (!parentContainer) return;
-		let maxWidth = parentContainer.clientWidth * 0.6;
+		let maxWidth = parentContainer.clientWidth * 0.75;
 
-		const pillContainer = this.querySelector('[data-pill-strip]') as HTMLElement;
-		if (!pillContainer) return;
+		const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
+		if (!pillStrip) return;
+
+		// The content layer is the second child (z-index:1) inside the pill strip
+		const contentLayer = pillStrip.querySelector('[data-pill-content]') as HTMLElement;
+		if (!contentLayer) return;
 
 		const gap = 6; // gap-1.5 = 0.375rem ≈ 6px
 
 		// Subtract git-status-widget width from available space
-		const gitWidget = pillContainer.querySelector('git-status-widget') as HTMLElement;
+		const gitWidget = contentLayer.querySelector('git-status-widget') as HTMLElement;
 		if (gitWidget) {
 			maxWidth -= gitWidget.offsetWidth + gap;
 		}
@@ -1247,7 +1251,7 @@ export class AgentInterface extends LitElement {
 		// Collect widths of visible pill wrappers — each visible pill is in a <div> wrapper
 		// The "more" button is in a <div class="relative">, skip it.
 		// git-status-widget is a direct child, skip it too.
-		for (const child of pillContainer.children) {
+		for (const child of contentLayer.children) {
 			const el = child as HTMLElement;
 			if (el.querySelector('bg-process-pill') && !el.querySelector('.pill-more-popover')) {
 				pillWidths.push(el.offsetWidth);
