@@ -1457,44 +1457,14 @@ export class SessionManager {
 			}
 		}
 
-		// Clean up orphaned non-interactive sessions (e.g. reviewer sessions from
-		// a prior server run whose verification harness tracking was lost on restart).
-		// These sessions would otherwise sit idle forever since nothing is watching them.
-		await this.cleanupOrphanedNonInteractiveSessions();
+		// NOTE: Orphaned non-interactive session cleanup is no longer automatic
+		// on startup. Use the Settings → Maintenance UI or
+		// GET/POST /api/maintenance/orphaned-sessions to preview and clean up manually.
 	}
 
-	/**
-	 * Terminate any non-interactive sessions (e.g. verification reviewers) that
-	 * survived a server restart. Their in-memory verification tracking is gone,
-	 * so they'll never be cleaned up by the verification harness.
-	 */
-	private async cleanupOrphanedNonInteractiveSessions(): Promise<void> {
-		// Get session IDs that the verification harness will resume — skip those
-		const resumingIds = this._verificationHarness?.getResumingSessionIds() ?? new Set<string>();
-
-		const orphans: { id: string; projectId?: string }[] = [];
-		const allLive = this.projectContextManager
-			? [...this.projectContextManager.getAllLiveSessions()]
-			: (this._testStore?.getLive() ?? []);
-		for (const ps of allLive) {
-			if (ps.nonInteractive && !resumingIds.has(ps.id)) {
-				orphans.push({ id: ps.id, projectId: ps.projectId });
-			}
-		}
-		if (orphans.length === 0) return;
-
-		console.log(`[session-manager] Cleaning up ${orphans.length} orphaned non-interactive session(s)...`);
-		for (const { id, projectId } of orphans) {
-			try {
-				await this.terminateSession(id);
-				console.log(`[session-manager] Terminated orphaned non-interactive session ${id}`);
-			} catch (err) {
-				// If terminate fails (e.g. session wasn't fully restored), archive directly
-				console.warn(`[session-manager] Failed to terminate orphan ${id}, archiving:`, err);
-				try { this.getSessionStore(projectId).archive(id); } catch { /* project gone */ }
-			}
-		}
-	}
+	// NOTE: cleanupOrphanedNonInteractiveSessions() was removed — replaced by
+	// listOrphanedNonInteractiveSessions() + terminateOrphanedSessions() which
+	// are called via the /api/maintenance/* REST endpoints.
 
 	private async restoreOneSession(ps: PersistedSession): Promise<void> {
 		// Backfill missing projectId from goal association (pre-fix sessions)
@@ -3288,12 +3258,132 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * List orphaned session worktrees without deleting them.
+	 * Same detection logic as cleanupOrphanedSessionWorktrees but read-only.
+	 */
+	async listOrphanedSessionWorktrees(repoPath: string): Promise<Array<{ path: string; branch: string }>> {
+		try {
+			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+			const blocks = stdout.split("\n\n");
+
+			const persistedBranches = new Set<string>();
+			const allPersisted = this.projectContextManager
+				? [...this.projectContextManager.getAllLiveSessions()]
+				: (this._testStore?.getLive() ?? []);
+			for (const ps of allPersisted) {
+				if (ps.branch) persistedBranches.add(ps.branch);
+			}
+
+			const orphans: Array<{ path: string; branch: string }> = [];
+			for (const block of blocks) {
+				const branchMatch = block.match(/^branch refs\/heads\/(session\/.+)$/m);
+				if (!branchMatch) continue;
+				const branch = branchMatch[1];
+				if (branch.startsWith("session/_pool-")) continue;
+				const pathMatch = block.match(/^worktree (.+)$/m);
+				if (!pathMatch) continue;
+				const wtPath = pathMatch[1];
+				const normalize = (p: string | undefined) => p?.replace(/\\/g, "/").toLowerCase();
+				const normalizedWtPath = normalize(wtPath);
+				const isActive = [...this.sessions.values()].some(
+					s => normalize(s.worktreePath) === normalizedWtPath || normalize(s.cwd) === normalizedWtPath
+				) || persistedBranches.has(branch);
+				if (!isActive) {
+					orphans.push({ path: wtPath, branch });
+				}
+			}
+			return orphans;
+		} catch (err) {
+			console.warn("[session-manager] Failed to list orphaned session worktrees:", err);
+			return [];
+		}
+	}
+
+	/**
+	 * List orphaned non-interactive sessions (e.g. verification reviewers)
+	 * that have no tracking in the verification harness. Read-only.
+	 */
+	async listOrphanedNonInteractiveSessions(): Promise<Array<{ id: string; title: string; createdAt: number }>> {
+		const resumingIds = this._verificationHarness?.getResumingSessionIds() ?? new Set<string>();
+		const result: Array<{ id: string; title: string; createdAt: number }> = [];
+		const allLive = this.projectContextManager
+			? [...this.projectContextManager.getAllLiveSessions()]
+			: (this._testStore?.getLive() ?? []);
+		for (const ps of allLive) {
+			if (ps.nonInteractive && !resumingIds.has(ps.id)) {
+				result.push({ id: ps.id, title: ps.title, createdAt: ps.createdAt });
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * Terminate a list of orphaned non-interactive sessions.
+	 * Returns the number actually terminated.
+	 */
+	async terminateOrphanedSessions(sessionIds: string[]): Promise<number> {
+		let terminated = 0;
+		for (const id of sessionIds) {
+			try {
+				const didTerminate = await this.terminateSession(id);
+				if (didTerminate) {
+					terminated++;
+				} else {
+					// Session not in memory — try direct archive
+					try {
+						const ps = this.resolveStoreForId(id)?.get(id);
+						if (ps) {
+							this.getSessionStore(ps.projectId).archive(id);
+							terminated++;
+						}
+					} catch { /* project gone */ }
+				}
+			} catch (err) {
+				console.warn(`[session-manager] Failed to terminate orphan ${id}:`, err);
+				// Try direct archive as fallback
+				try {
+					const ps = this.resolveStoreForId(id)?.get(id);
+					if (ps) {
+						this.getSessionStore(ps.projectId).archive(id);
+						terminated++;
+					}
+				} catch { /* project gone */ }
+			}
+		}
+		return terminated;
+	}
+
+	/**
+	 * Get statistics about expired archives (past 7-day retention).
+	 */
+	async getExpiredArchiveStats(): Promise<{ count: number; totalSizeBytes: number }> {
+		const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+		const cutoff = Date.now() - SEVEN_DAYS_MS;
+		let count = 0;
+		let totalSizeBytes = 0;
+
+		const archived = this.projectContextManager
+			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
+			: (this._testStore?.getArchived() ?? []);
+
+		for (const ps of archived) {
+			if (ps.archivedAt && ps.archivedAt < cutoff) {
+				count++;
+				if (ps.agentSessionFile) {
+					try {
+						const stat = fs.statSync(ps.agentSessionFile);
+						totalSizeBytes += stat.size;
+					} catch { /* file may not exist */ }
+				}
+			}
+		}
+		return { count, totalSizeBytes };
+	}
+
 	/** Start the archive purge schedule — call after restoreSessions(). */
 	startPurgeSchedule(): void {
-		// Purge on startup
-		this.purgeExpiredArchives().catch(err => {
-			console.error("[session-manager] Startup purge failed:", err);
-		});
+		// No longer purge on startup — use Settings → Maintenance to purge manually.
 		// Purge every 24 hours
 		this.purgeInterval = setInterval(() => {
 			this.purgeExpiredArchives().catch(err => {

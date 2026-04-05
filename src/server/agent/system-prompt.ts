@@ -184,6 +184,16 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 		sections.push("# Project Context\n\n" + agentsMd.trim());
 	}
 
+	// 2.5. Working directory instructions
+	if (parts.cwd) {
+		sections.push(
+			`# Working Directory\n\n` +
+			`Your working directory is: \`${parts.cwd}\`\n\n` +
+			`Stay in this directory for all file operations and git commands. ` +
+			`Do not \`cd\` into other directories unless explicitly required by the task.`
+		);
+	}
+
 	// 3. Goal spec (merge rolePrompt and toolRestrictions into goalSpec section for backward compat)
 	{
 		let effectiveGoalSpec = parts.goalSpec || "";
@@ -292,6 +302,14 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 				sections.push({ label: "Project Context", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()) });
 			}
 		}
+	}
+
+	// 2.5. Working directory
+	if (parts.cwd) {
+		const cwdContent = `Your working directory is: \`${parts.cwd}\`\n\n` +
+			`Stay in this directory for all file operations and git commands. ` +
+			`Do not \`cd\` into other directories unless explicitly required by the task.`;
+		sections.push({ label: "Working Directory", source: parts.cwd, content: cwdContent, tokens: estimateTokens(cwdContent) });
 	}
 
 	// 3. Goal spec (separate from role)
