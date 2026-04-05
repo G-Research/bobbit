@@ -321,6 +321,14 @@ export class RpcBridge {
 			}
 		}
 
+		// Set the container process working directory via docker exec -w.
+		// The agent CLI (pi) uses process.cwd() — not --cwd — to determine the
+		// working directory for tools and the system prompt's "Current working
+		// directory" line. Without -w, docker exec defaults to the container's
+		// WORKDIR (/workspace), which is wrong for worktree sessions.
+		const containerCwd = this.options.cwd || "/workspace";
+		execArgs.push("-w", containerCwd);
+
 		execArgs.push(
 			containerId,
 			"node", "--disable-warning=DEP0123", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
@@ -329,10 +337,8 @@ export class RpcBridge {
 
 		console.log(`[rpc-bridge] Docker exec args: ${redactDockerArgs(execArgs)}`);
 
-		// NOTE: cwd for the host-side spawn must be a valid host path.
-		// this.options.cwd may be a container-internal path (e.g. /workspace-wt/branch)
-		// that doesn't exist on the host. The container cwd is set via --cwd in the
-		// remapped agent args, so the host spawn doesn't need a specific cwd.
+		// Host-side spawn doesn't need a specific cwd — the container working
+		// directory is set via `docker exec -w` above.
 		return spawn("docker", execArgs, {
 			stdio: ["pipe", "pipe", "pipe"],
 			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
@@ -355,7 +361,10 @@ export class RpcBridge {
 		for (let i = 0; i < agentArgs.length; i++) {
 			const arg = agentArgs[i];
 			if (arg === "--cwd") {
-				// Use the container-internal worktree path from bridgeOptions.cwd
+				// Remap to container-internal path. Note: the current pi agent
+				// ignores --cwd (it uses process.cwd() instead), so the actual
+				// working directory is set via `docker exec -w` in spawnDockerExec().
+				// We still pass --cwd for forward-compatibility with future CLIs.
 				const containerCwd = this.options.cwd || "/workspace";
 				remappedArgs.push("--cwd", containerCwd);
 				i++; // skip the next arg (the host cwd path)
