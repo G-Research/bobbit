@@ -859,7 +859,13 @@ export class AgentInterface extends LitElement {
 				<div class="shrink-0 pt-0 pb-1">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this.bgProcesses.length > 0 || this.gitStatus || this.gitStatusLoading ? html`
-						<div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto flex items-center gap-1.5 flex-wrap justify-end" style="max-width:calc(100% - 1rem)">
+						<div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto" style="max-width:calc(100% - 1rem); --pill-h: 22px">
+							<!-- Layer 0: Glow shadows only — no content, no interaction -->
+							<div class="flex items-center gap-1.5 flex-wrap justify-end pointer-events-none" aria-hidden="true" style="position:absolute;inset:0;z-index:0">
+								${this._renderGlowLayer()}
+							</div>
+							<!-- Layer 1: Real interactive pills -->
+							<div class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1">
 							${this._renderPillStrip()}
 							${this.gitStatus || this.gitStatusLoading ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
@@ -894,9 +900,10 @@ export class AgentInterface extends LitElement {
 								@ask-agent-commit=${this._handleAskAgentCommit}
 								@ask-agent-pr=${this._handleAskAgentPr}
 							></git-status-widget>` : nothing}
+							</div>
 						</div>
 						` : ''}
-						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor
+						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
 							.isStreaming=${state.isStreaming}
@@ -1005,6 +1012,43 @@ export class AgentInterface extends LitElement {
 		this.onAskAgentPr?.();
 	}
 
+	// --- Pill glow layer ---
+
+	/**
+	 * Render invisible pill-shaped shadows that sit behind the real pills.
+	 * Same flex layout ensures alignment; transparent content means only the box-shadow is visible.
+	 */
+	private _renderGlowLayer() {
+		const sorted = this._getSortedProcesses();
+		if (sorted.length === 0) return nothing;
+
+		const count = Math.min(this._visiblePillCount, sorted.length);
+		let visibleCount = Math.max(1, count);
+		let hiddenCount = sorted.length - visibleCount;
+		if (hiddenCount === 1) { visibleCount++; hiddenCount = 0; }
+
+		const glowStyle = "height:var(--pill-h, auto); border-radius:9999px; box-shadow:0 0 12px 8px var(--background), 0 0 4px 2px var(--background); background:transparent; border:1px solid transparent";
+
+		const glowPills = [];
+
+		// "N more" glow placeholder
+		if (hiddenCount > 0) {
+			glowPills.push(html`<div style="${glowStyle}; position:relative; top:1px"><span class="inline-flex items-center px-1.5 py-0.5 text-[11px] font-mono" style="visibility:hidden">${hiddenCount} more<span style="min-width:16px"></span></span></div>`);
+		}
+
+		// Visible pill glow placeholders
+		for (const p of sorted.slice(hiddenCount)) {
+			glowPills.push(html`<div style="${glowStyle}; position:relative; top:1px"><span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-mono" style="visibility:hidden"><span>●</span>${p.name || p.id}<span style="min-width:16px"></span></span></div>`);
+		}
+
+		// Git status glow placeholder
+		if (this.gitStatus || this.gitStatusLoading) {
+			glowPills.push(html`<div style="${glowStyle}"><span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px]" style="visibility:hidden">⎇ ${this.gitStatus?.branch ?? ''}</span></div>`);
+		}
+
+		return glowPills;
+	}
+
 	// --- Pill overflow collapsing & animation ---
 
 	/**
@@ -1020,51 +1064,62 @@ export class AgentInterface extends LitElement {
 		if (sorted.length === 0) return nothing;
 
 		const count = Math.min(this._visiblePillCount, sorted.length);
-		// Ensure at least 1 pill is always visible
-		const visibleCount = Math.max(1, count);
-		const hiddenCount = sorted.length - visibleCount;
+		// Ensure at least 1 pill is always visible; never show "1 more" — show the pill instead
+		let visibleCount = Math.max(1, count);
+		let hiddenCount = sorted.length - visibleCount;
+		if (hiddenCount === 1) { visibleCount++; hiddenCount = 0; }
 		const hidden = sorted.slice(0, hiddenCount);
 		const visible = sorted.slice(hiddenCount);
 
 		return html`
 			<style>
 				@keyframes pill-fade-out {
-					from { opacity: 1; transform: scale(1); }
-					to   { opacity: 0; transform: scale(0.8); }
+					0%   { opacity: 1; transform: scale(1) translateX(0); filter: blur(0); }
+					50%  { opacity: 0.5; transform: scale(0.85) translateX(4px); filter: blur(1px); }
+					100% { opacity: 0; transform: scale(0.6) translateX(12px); filter: blur(2px); }
 				}
 				@keyframes pill-slide-in {
-					from { opacity: 0; transform: translateY(6px) scale(0.95); }
-					to   { opacity: 1; transform: translateY(0) scale(1); }
+					0%   { opacity: 0; transform: translateY(8px) scale(0.8); filter: blur(2px); }
+					60%  { opacity: 1; transform: translateY(-2px) scale(1.03); filter: blur(0); }
+					100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
 				}
 				.pill-dismissing {
-					animation: pill-fade-out 150ms ease-in forwards;
+					animation: pill-fade-out 300ms cubic-bezier(0.4, 0, 1, 1) forwards;
 					pointer-events: none;
 				}
 				.pill-promoted {
-					animation: pill-slide-in 200ms ease-out;
+					animation: pill-slide-in 350ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
 				}
 				@keyframes popover-in {
-					from { opacity: 0; transform: translateY(4px); }
-					to   { opacity: 1; transform: translateY(0); }
+					0%   { opacity: 0; transform: translateY(8px) scale(0.92); filter: blur(3px); }
+					70%  { opacity: 1; transform: translateY(-1px) scale(1.005); filter: blur(0); }
+					100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
 				}
 				.pill-more-popover {
-					animation: popover-in 150ms ease-out;
+					animation: popover-in 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
 				}
 			</style>
 			${hidden.length > 0 ? html`
-				<div class="relative" style="display:inline-flex">
-					<button
-						class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight"
-						@click=${this._toggleMore}
-						aria-expanded=${this._moreExpanded}
-						aria-haspopup="true"
-						title="Show ${hidden.length} more background process${hidden.length > 1 ? 'es' : ''}"
-					>
-						<span>${hidden.length} more</span>
-						<span style="font-size:9px">${this._moreExpanded ? '∨' : '∧'}</span>
-					</button>
+				<div class="relative" style="display:inline-flex;align-items:center;position:relative;top:1px">
+					<span class="inline-flex items-center rounded-full bg-card border border-border text-[11px] leading-tight" data-more-btn style="height:var(--pill-h, auto)">
+						<button
+							class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer font-mono rounded-l-full"
+							@click=${this._toggleMore}
+							aria-expanded=${this._moreExpanded}
+							aria-haspopup="true"
+							title="Show ${hidden.length} more background process${hidden.length > 1 ? 'es' : ''}"
+						>
+							<span>${hidden.length} more</span>
+						</button>
+						<button
+							class="inline-flex items-center justify-center px-1 text-muted-foreground/50 hover:text-foreground transition-colors cursor-pointer rounded-r-full border-l border-border"
+							style="min-width:16px; align-self:stretch"
+							@click=${this._toggleMore}
+							title="Show ${hidden.length} more background process${hidden.length > 1 ? 'es' : ''}"
+						><svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block${this._moreExpanded ? ';transform:rotate(180deg)' : ''}"><path d="M1.5 5.5L4 3L6.5 5.5"/></svg></button>
+					</span>
 					${this._moreExpanded ? html`
-						<div class="absolute bottom-full left-0 mb-1 z-50 flex flex-col gap-1 pill-more-popover" style="min-width:max-content">
+						<div class="absolute bottom-full left-0 z-50 flex flex-col gap-1 pill-more-popover" style="min-width:max-content; border-radius:16px; box-shadow:0 0 12px 8px var(--background), 0 0 4px 2px var(--background); padding:2px; margin:-2px; margin-bottom:8px">
 							${hidden.map((p) => html`
 								<bg-process-pill
 									data-id="${p.id}"
@@ -1085,7 +1140,7 @@ export class AgentInterface extends LitElement {
 				return html`
 					<div
 						class="${cls}"
-						style="display:inline-flex"
+						style="display:inline-flex;align-items:center"
 						@animationend=${(e: AnimationEvent) => this._handlePillAnimationEnd(e, p.id)}
 					>
 						<bg-process-pill
@@ -1174,12 +1229,19 @@ export class AgentInterface extends LitElement {
 	private _measurePillOverflow() {
 		const parentContainer = this.querySelector('[data-input-container]') as HTMLElement;
 		if (!parentContainer) return;
-		const maxWidth = parentContainer.clientWidth * 0.5;
+		let maxWidth = parentContainer.clientWidth * 0.6;
 
 		const pillContainer = this.querySelector('[data-pill-strip]') as HTMLElement;
 		if (!pillContainer) return;
 
 		const gap = 6; // gap-1.5 = 0.375rem ≈ 6px
+
+		// Subtract git-status-widget width from available space
+		const gitWidget = pillContainer.querySelector('git-status-widget') as HTMLElement;
+		if (gitWidget) {
+			maxWidth -= gitWidget.offsetWidth + gap;
+		}
+
 		const pillWidths: number[] = [];
 
 		// Collect widths of visible pill wrappers — each visible pill is in a <div> wrapper
@@ -1197,8 +1259,8 @@ export class AgentInterface extends LitElement {
 			return;
 		}
 
-		// The "more" button itself takes ~80px when shown
-		const moreBtnWidth = 80;
+		// The "more" button itself takes ~60px when shown
+		const moreBtnWidth = 60;
 
 		// Count from right (newest) how many pills fit
 		let fitCount = 0;
@@ -1245,6 +1307,8 @@ export class AgentInterface extends LitElement {
 			if (changedProperties.has('bgProcesses')) {
 				requestAnimationFrame(() => this._measurePillOverflow());
 			}
+
+
 		} else {
 			// No pills — reset
 			this._visiblePillCount = Infinity;

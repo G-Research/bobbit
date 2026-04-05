@@ -4,9 +4,25 @@
  * foreground/background colors (standard + bright), and 256-color mode.
  */
 
+// Standard ANSI colors — use CSS custom properties so they adapt to light/dark themes.
+// Fallback values are for dark mode; light mode overrides are defined in app.css.
 const COLORS_16 = [
-	"#000", "#c00", "#0a0", "#c50", "#00c", "#c0c", "#0cc", "#ccc", // 0-7 standard
-	"#555", "#f55", "#5f5", "#ff5", "#55f", "#f5f", "#5ff", "#fff", // 8-15 bright
+	"var(--ansi-black, #555)",    // 0: black
+	"var(--ansi-red, #f55)",      // 1: red
+	"var(--ansi-green, #5f5)",    // 2: green
+	"var(--ansi-yellow, #fc5)",   // 3: yellow
+	"var(--ansi-blue, #55f)",     // 4: blue
+	"var(--ansi-magenta, #f5f)",  // 5: magenta
+	"var(--ansi-cyan, #5dd)",     // 6: cyan
+	"var(--ansi-white, #ccc)",    // 7: white
+	"var(--ansi-bright-black, #888)",    // 8: bright black
+	"var(--ansi-bright-red, #f77)",      // 9: bright red
+	"var(--ansi-bright-green, #7f7)",    // 10: bright green
+	"var(--ansi-bright-yellow, #ff7)",   // 11: bright yellow
+	"var(--ansi-bright-blue, #77f)",     // 12: bright blue
+	"var(--ansi-bright-magenta, #f7f)",  // 13: bright magenta
+	"var(--ansi-bright-cyan, #7ff)",     // 14: bright cyan
+	"var(--ansi-bright-white, #fff)",    // 15: bright white
 ];
 
 function color256(n: number): string {

@@ -4413,7 +4413,7 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		if (!body?.command) { json({ error: "command is required" }, 400); return; }
 		try {
-			const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId, session.sandboxed);
+			const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId, session.sandboxed, body.name);
 			json(info, 201);
 		} catch (err: any) {
 			if (err?.message?.includes("Sandboxed session without containerId")) {

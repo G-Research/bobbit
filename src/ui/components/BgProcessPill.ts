@@ -5,6 +5,8 @@ import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 
 export interface BgProcessInfo {
 	id: string;
+	/** Short human-readable name (max 3 words, agent-generated) */
+	name: string;
 	command: string;
 	pid: number;
 	status: "running" | "exited";
@@ -33,26 +35,58 @@ export class BgProcessPill extends LitElement {
 		return this;
 	}
 
+	/** When true, the dropdown plays the close animation before being removed */
+	@state() private _closing = false;
+
 	private _onDocumentClick = (e: MouseEvent) => {
-		if (this.expanded && !this.contains(e.target as Node)) {
-			this.expanded = false;
+		if (this.expanded && !this._closing && !this.contains(e.target as Node)) {
+			this._closeDropdown();
+		}
+	};
+
+	private _onEscapeKey = (e: KeyboardEvent) => {
+		if (e.key === "Escape" && this.expanded && !this._closing) {
+			e.stopPropagation();
+			this._closeDropdown();
 		}
 	};
 
 	connectedCallback() {
 		super.connectedCallback();
+		this.style.display = 'inline-flex';
+		this.style.alignItems = 'center';
+		this.style.position = 'relative';
+		this.style.top = '1px';
 		document.addEventListener("click", this._onDocumentClick, true);
+		document.addEventListener("keydown", this._onEscapeKey, true);
 	}
 
 	disconnectedCallback() {
 		super.disconnectedCallback();
 		document.removeEventListener("click", this._onDocumentClick, true);
+		document.removeEventListener("keydown", this._onEscapeKey, true);
+	}
+
+	private _closeDropdown() {
+		this._closing = true;
+		const dropdown = this.querySelector("#bg-process-dropdown") as HTMLElement;
+		if (dropdown) {
+			dropdown.addEventListener("animationend", () => {
+				this._closing = false;
+				this.expanded = false;
+			}, { once: true });
+		} else {
+			this._closing = false;
+			this.expanded = false;
+		}
 	}
 
 	private async _toggle(e: MouseEvent) {
 		e.stopPropagation();
-		this.expanded = !this.expanded;
-		if (this.expanded) {
+		if (this.expanded && !this._closing) {
+			this._closeDropdown();
+		} else if (!this.expanded) {
+			this.expanded = true;
 			await this._fetchLogs();
 		}
 	}
@@ -116,56 +150,77 @@ export class BgProcessPill extends LitElement {
 		if (el) el.scrollTop = el.scrollHeight;
 	}
 
-	private _shortCommand(): string {
-		const cmd = this.process.command;
-		// Show first 30 chars
-		return cmd.length > 30 ? cmd.slice(0, 27) + "..." : cmd;
+	private _displayName(): string {
+		return this.process.name || this.process.id;
 	}
 
 	render() {
 		if (!this.process) return nothing;
 		const p = this.process;
 		const isRunning = p.status === "running";
-		const dotClass = isRunning
-			? "bg-blue-400 animate-pulse"
+		const statusIndicator = isRunning
+			? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400 animate-pulse shrink-0"></span>`
 			: p.exitCode === 0
-				? "bg-green-400"
+				? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-green-600 dark:bg-green-400 shrink-0"></span>`
 				: p.exitCode !== null
-					? "bg-red-400"
-					: "bg-muted-foreground"; // scheduled / unknown
-		const statusDot = html`<span class="inline-block w-1.5 h-1.5 rounded-full ${dotClass} shrink-0"></span>`;
+					? html`<span class="shrink-0 text-red-600 dark:text-red-400" style="font-size:10px;line-height:1;font-weight:700">!</span>`
+					: html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0"></span>`;
 
 		return html`
-			<button
-				class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight"
-				style="max-width:200px"
-				@click=${this._toggle}
-				title="${p.command}"
-			>
-				${statusDot}
-				<span class="truncate font-mono">${this._shortCommand()}</span>
-				${!isRunning && p.exitCode !== null
-					? html`<span class="${p.exitCode === 0 ? "text-muted-foreground" : "text-red-400"} shrink-0">${p.exitCode}</span>`
-					: nothing}
-			</button>
+			<span class="inline-flex items-center rounded-full bg-card border border-border text-[11px] leading-tight" style="max-width:200px; height:var(--pill-h, auto)">
+				<button
+					class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer rounded-l-full"
+					@click=${this._toggle}
+					title="${p.command}"
+				>
+					${statusIndicator}
+					<span class="truncate font-mono">${this._displayName()}</span>
+				</button>
+				<button
+					class="inline-flex items-center justify-center px-1 text-muted-foreground/50 hover:text-foreground transition-colors cursor-pointer rounded-r-full border-l border-border"
+					style="font-size:10px; line-height:1; min-width:16px; align-self:stretch"
+					@click=${isRunning ? this._kill : this._dismiss}
+					title=${isRunning ? "Kill process" : "Remove"}
+				>✕</button>
+			</span>
 
 			${this.expanded
 				? html`
+					<style>
+						@keyframes bg-dropdown-in {
+							0%   { opacity: 0; transform: translateY(8px) scale(0.92); filter: blur(3px); }
+							70%  { opacity: 1; transform: translateY(-1px) scale(1.005); filter: blur(0); }
+							100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+						}
+						@keyframes bg-dropdown-out {
+							0%   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+							100% { opacity: 0; transform: translateY(6px) scale(0.95); filter: blur(2px); }
+						}
+						#bg-process-dropdown {
+							animation: bg-dropdown-in 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+						}
+						#bg-process-dropdown.closing {
+							animation: bg-dropdown-out 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
+						}
+					</style>
 					<div
-						class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-2 text-xs"
-						style="max-width:calc(100vw - 2rem); width: 900px;"
+						class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-2 text-xs ${this._closing ? 'closing' : ''}"
+						style="max-width:calc(100vw - 1rem); width: min(900px, calc(100vw - 1rem));"
 						id="bg-process-dropdown"
 					>
 						<div class="flex items-center justify-between mb-1.5">
 							<div class="flex items-center gap-1.5 text-foreground font-medium text-sm min-w-0">
-								${statusDot}
-								<span class="truncate font-mono">${p.id}</span>
-								<span class="text-[10px] text-muted-foreground font-normal">pid ${p.pid}</span>
+								${statusIndicator}
+								<span class="truncate font-mono">${this._displayName()}</span>
+								<span class="text-[10px] text-muted-foreground font-normal">${p.id} · pid ${p.pid}</span>
 							</div>
-							<div class="flex items-center gap-1.5">
+							<div class="flex items-center gap-2">
+								${!isRunning && p.exitCode !== null
+									? html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`
+									: nothing}
 								${isRunning
 									? html`<button
-										class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+										class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-700 dark:text-red-400 hover:bg-red-500/30 transition-colors"
 										@click=${this._kill}
 									>Kill</button>`
 									: html`<button
@@ -203,18 +258,22 @@ export class BgProcessPill extends LitElement {
 		const dropdown = this.querySelector("#bg-process-dropdown") as HTMLElement;
 		if (!btn || !dropdown) return;
 		const rect = btn.getBoundingClientRect();
-		const dropRect = dropdown.getBoundingClientRect();
+		const pad = 8;
+		const vw = window.innerWidth;
 
-		// Horizontal: align to button left, but clamp to viewport
+		// Let the dropdown render to get its actual width
+		const dropWidth = dropdown.offsetWidth;
+
+		// Horizontal: try to align left edge with button, but clamp to viewport
 		let left = rect.left;
-		if (left + dropRect.width > window.innerWidth - 8) {
-			left = window.innerWidth - dropRect.width - 8;
+		if (left + dropWidth > vw - pad) {
+			left = vw - dropWidth - pad;
 		}
-		if (left < 8) left = 8;
+		if (left < pad) left = pad;
 
 		// Vertical: prefer above the button, fall back to below if not enough space
-		let bottom = window.innerHeight - rect.top + 4;
-		if (rect.top < dropRect.height + 12) {
+		const bottom = window.innerHeight - rect.top + 4;
+		if (rect.top < dropdown.offsetHeight + 12) {
 			// Not enough room above — show below
 			dropdown.style.bottom = "auto";
 			dropdown.style.top = `${rect.bottom + 4}px`;

@@ -284,10 +284,11 @@ export default function (pi: ExtensionAPI) {
 				Type.Literal("list"),
 			], { description: "Action to perform" }),
 			command: Type.Optional(Type.String({ description: "Shell command to run (for 'create')" })),
+			name: Type.Optional(Type.String({ description: "Short name for the process (max 3 words, required for 'create'). Example: 'dev server', 'color echo loop', 'test runner'" })),
 			id: Type.Optional(Type.String({ description: "Background process ID (for 'logs' and 'kill')" })),
 			tail: Type.Optional(Type.Number({ description: "Number of log lines to return (default: 200)" })),
 		}),
-		async execute(_toolCallId, { action, command, id, tail }) {
+		async execute(_toolCallId, { action, command, name, id, tail }) {
 			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
 
 			if (!sessionId || !baseUrl) {
@@ -298,7 +299,8 @@ export default function (pi: ExtensionAPI) {
 				switch (action) {
 					case "create": {
 						if (!command) return text("Error: 'command' is required for create");
-						const result = await api("POST", `/api/sessions/${sessionId}/bg-processes`, { command }) as any;
+						if (!name) return text("Error: 'name' is required for create — provide a short descriptive name (max 3 words)");
+						const result = await api("POST", `/api/sessions/${sessionId}/bg-processes`, { command, name }) as any;
 						return text(`Background process started.\nID: ${result.id}\nPID: ${result.pid}\nCommand: ${command}\n\nUse bash_bg with action "logs" and id "${result.id}" to check output.\nUse bash_bg with action "kill" and id "${result.id}" to terminate.`);
 					}
 					case "logs": {

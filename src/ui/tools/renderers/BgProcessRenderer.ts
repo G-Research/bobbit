@@ -8,13 +8,14 @@ import type { ToolRenderer, ToolRenderResult } from "../types.js";
 interface BgParams {
 	action: string;
 	command?: string;
+	name?: string;
 	id?: string;
 	tail?: number;
 }
 
 function summarize(params: BgParams): string {
 	switch (params.action) {
-		case "create": return `bg start: ${(params.command || "").slice(0, 40)}`;
+		case "create": return `bg start: ${params.name || (params.command || "").slice(0, 40)}`;
 		case "logs": return `bg logs: ${params.id || ""}`;
 		case "kill": return `bg kill: ${params.id || ""}`;
 		case "list": return "bg list";

@@ -16,6 +16,8 @@ export interface LogEntry {
 
 export interface BgProcess {
 	id: string;
+	/** Short human-readable name (max 3 words, agent-generated) */
+	name: string;
 	command: string;
 	pid: number;
 	child: ChildProcess;
@@ -33,6 +35,8 @@ export interface BgProcess {
 
 export interface BgProcessInfo {
 	id: string;
+	/** Short human-readable name (max 3 words, agent-generated) */
+	name: string;
 	command: string;
 	pid: number;
 	status: "running" | "exited";
@@ -68,7 +72,7 @@ export class BgProcessManager {
 		}
 	}
 
-	create(sessionId: string, command: string, cwd: string, containerId?: string, sandboxed?: boolean): BgProcessInfo {
+	create(sessionId: string, command: string, cwd: string, containerId?: string, sandboxed?: boolean, name?: string): BgProcessInfo {
 		if (sandboxed && !containerId) {
 			throw new Error("Sandboxed session without containerId — refusing host-side execution");
 		}
@@ -102,6 +106,7 @@ export class BgProcessManager {
 
 		const bg: BgProcess = {
 			id,
+			name: name || id,
 			command,
 			pid: child.pid!,
 			child,
@@ -271,6 +276,7 @@ export class BgProcessManager {
 	private toInfo(bg: BgProcess): BgProcessInfo {
 		return {
 			id: bg.id,
+			name: bg.name,
 			command: bg.command,
 			pid: bg.pid,
 			status: bg.status,

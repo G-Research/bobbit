@@ -57,7 +57,7 @@ export type ServerMessage =
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }
 	| { type: "task_changed"; task: unknown }
 	| { type: "tasks_list"; tasks: unknown[] }
-	| { type: "bg_process_created"; process: { id: string; command: string; pid: number; status: string; exitCode: number | null; startTime: number } }
+	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: string; exitCode: number | null; startTime: number } }
 	| { type: "bg_process_output"; processId: string; stream: "stdout" | "stderr"; text: string; ts: number }
 	| { type: "bg_process_exited"; processId: string; exitCode: number | null }
 	| { type: "gate_signal_received"; goalId: string; gateId: string; signalId: string }

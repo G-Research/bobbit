@@ -40,6 +40,24 @@
 	--sidebar-accent: oklch(0.895 0.016 146);
 	--sidebar-accent-foreground: oklch(0.22 0.014 142);
 	--sidebar-border: oklch(0.86 0.014 146);
+
+	/* ANSI terminal colors — tuned for light backgrounds */
+	--ansi-black: #3c3c3c;
+	--ansi-red: #c4261e;
+	--ansi-green: #1a7f1a;
+	--ansi-yellow: #a56c00;
+	--ansi-blue: #1a39b0;
+	--ansi-magenta: #a020a0;
+	--ansi-cyan: #0e7d7d;
+	--ansi-white: #6e6e6e;
+	--ansi-bright-black: #5c5c5c;
+	--ansi-bright-red: #d43d2e;
+	--ansi-bright-green: #2a9e2a;
+	--ansi-bright-yellow: #c08000;
+	--ansi-bright-blue: #3355dd;
+	--ansi-bright-magenta: #c040c0;
+	--ansi-bright-cyan: #1a9e9e;
+	--ansi-bright-white: #4a4a4a;
 }
 
 /* Dark mode — warm charcoal with green undertone */
@@ -68,6 +86,24 @@
 	--sidebar-accent: oklch(0.27 0.012 145);
 	--sidebar-accent-foreground: oklch(0.96 0.008 140);
 	--sidebar-border: oklch(0.30 0.012 145);
+
+	/* ANSI terminal colors — tuned for dark backgrounds */
+	--ansi-black: #555;
+	--ansi-red: #f55;
+	--ansi-green: #5f5;
+	--ansi-yellow: #fc5;
+	--ansi-blue: #55f;
+	--ansi-magenta: #f5f;
+	--ansi-cyan: #5dd;
+	--ansi-white: #ccc;
+	--ansi-bright-black: #888;
+	--ansi-bright-red: #f77;
+	--ansi-bright-green: #7f7;
+	--ansi-bright-yellow: #ff7;
+	--ansi-bright-blue: #77f;
+	--ansi-bright-magenta: #f7f;
+	--ansi-bright-cyan: #7ff;
+	--ansi-bright-white: #fff;
 }
 
 /* ── Notification category colors — Forest palette (default) ── */

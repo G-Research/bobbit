@@ -1,5 +1,5 @@
 name: bash_bg
-description: "Manage background shell processes"
+description: "Manage background shell processes. Actions: create (start a process), logs (view output), kill (terminate), list (show all)."
 summary: "Start, monitor, and kill long-running background shell processes."
 provider:
   type: bobbit-extension
@@ -7,7 +7,7 @@ provider:
 group: Shell
 renderer: src/ui/tools/renderers/BgProcessRenderer.ts
 docs: |-
-  Actions: create (start a process), logs (view output), kill (terminate), list (show all). Use for dev servers, file watchers, long-running builds. Parameters: `command` (for create), `id` (for logs/kill), `tail` (log lines, default 200).
+  Actions: create (start a process), logs (view output), kill (terminate), list (show all). Use for dev servers, file watchers, long-running builds. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/kill), `tail` (log lines, default 200).
 detail_docs: |
   Manage background shell processes that don't block the agent.
 
@@ -20,6 +20,7 @@ detail_docs: |
   Parameters:
   - `action` (required): One of "create", "logs", "kill", "list"
   - `command` (for create): Shell command to run in the background
+  - `name` (required for create): Short descriptive name, max 3 words (e.g. "dev server", "test runner", "color echo loop")
   - `id` (for logs/kill): Background process ID (e.g. "bg-1")
   - `tail` (for logs): Number of log lines to return (default: 200)
 

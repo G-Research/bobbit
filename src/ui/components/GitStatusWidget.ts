@@ -66,12 +66,31 @@ export class GitStatusWidget extends LitElement {
 
     private _dropdownEl: HTMLElement | null = null;
 
+    @state() private _closing = false;
+
     private _onDocumentClick = (e: MouseEvent) => {
         const target = e.target as Node;
-        if (this.expanded && !this.contains(target) && !this._dropdownEl?.contains(target)) {
-            this.expanded = false;
+        if (this.expanded && !this._closing && !this.contains(target) && !this._dropdownEl?.contains(target)) {
+            this._closeDropdown();
         }
     };
+
+    private _onEscapeKeyDropdown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape' && this.expanded && !this._closing && !this._modalEl && !this._commitsModalEl) {
+            e.stopPropagation();
+            this._closeDropdown();
+        }
+    };
+
+    private _closeDropdown() {
+        if (this._closing || !this._dropdownEl) return;
+        this._closing = true;
+        this._dropdownEl.classList.add('git-dropdown-closing');
+        this._dropdownEl.addEventListener('animationend', () => {
+            this._closing = false;
+            this.expanded = false;
+        }, { once: true });
+    }
 
     createRenderRoot() {
         return this;
@@ -80,11 +99,13 @@ export class GitStatusWidget extends LitElement {
     connectedCallback() {
         super.connectedCallback();
         document.addEventListener('click', this._onDocumentClick, true);
+        document.addEventListener('keydown', this._onEscapeKeyDropdown, true);
     }
 
     disconnectedCallback() {
         super.disconnectedCallback();
         document.removeEventListener('click', this._onDocumentClick, true);
+        document.removeEventListener('keydown', this._onEscapeKeyDropdown, true);
         this._removeDropdown();
         this._removeModal();
         this._removeCommitsModal();
@@ -99,8 +120,10 @@ export class GitStatusWidget extends LitElement {
 
     private _toggle(e: MouseEvent) {
         e.stopPropagation();
-        this.expanded = !this.expanded;
-        if (this.expanded) {
+        if (this.expanded && !this._closing) {
+            this._closeDropdown();
+        } else if (!this.expanded) {
+            this.expanded = true;
             this.dispatchEvent(new CustomEvent('git-fetch', {
                 bubbles: true,
                 composed: true,
@@ -741,7 +764,7 @@ export class GitStatusWidget extends LitElement {
         return html`
             <button
                 class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight"
-                style="max-width:100%"
+                style="max-width:100%; height:var(--pill-h, auto)"
                 @click=${this._toggle}
             >
                 ${this.loading
@@ -759,6 +782,29 @@ export class GitStatusWidget extends LitElement {
         super.updated(changed);
         if (changed.has('expanded')) {
             if (this.expanded) {
+                // Inject animation styles once
+                if (!document.getElementById('git-dropdown-anim-styles')) {
+                    const styleEl = document.createElement('style');
+                    styleEl.id = 'git-dropdown-anim-styles';
+                    styleEl.textContent = `
+                        @keyframes git-dropdown-in {
+                            0%   { opacity: 0; transform: translateY(8px) scale(0.92); filter: blur(3px); }
+                            70%  { opacity: 1; transform: translateY(-1px) scale(1.005); filter: blur(0); }
+                            100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+                        }
+                        @keyframes git-dropdown-out {
+                            0%   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+                            100% { opacity: 0; transform: translateY(6px) scale(0.95); filter: blur(2px); }
+                        }
+                        #git-status-dropdown {
+                            animation: git-dropdown-in 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                        }
+                        #git-status-dropdown.git-dropdown-closing {
+                            animation: git-dropdown-out 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
+                        }
+                    `;
+                    document.head.appendChild(styleEl);
+                }
                 // Create portal dropdown on body
                 this._dropdownEl = document.createElement('div');
                 this._dropdownEl.id = 'git-status-dropdown';
