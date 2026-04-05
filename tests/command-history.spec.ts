@@ -106,3 +106,46 @@ test.describe("Command history", () => {
 		expect(state.textareaValue).toBe("");
 	});
 });
+
+test.describe("CommandHistoryStore dedup", () => {
+	test.beforeEach(async ({ page }) => {
+		await page.goto(TEST_PAGE);
+	});
+
+	test("consecutive duplicate entries are deduped (story 29)", async ({ page }) => {
+		const history = await page.evaluate(async () => {
+			const store = (window as any).historyStore;
+			await store.addEntry("test-session", "dup");
+			await store.addEntry("test-session", "dup");
+			await store.addEntry("test-session", "dup");
+			return store.getHistory("test-session");
+		});
+		expect(history).toEqual(["dup"]);
+		expect(history).toHaveLength(1);
+	});
+
+	test("non-consecutive duplicates are kept", async ({ page }) => {
+		const history = await page.evaluate(async () => {
+			const store = (window as any).historyStore;
+			await store.addEntry("test-session", "alpha");
+			// Small delay to avoid timestamp key collision (in-memory store uses Date.now() as key)
+			await new Promise(r => setTimeout(r, 2));
+			await store.addEntry("test-session", "beta");
+			await new Promise(r => setTimeout(r, 2));
+			await store.addEntry("test-session", "alpha");
+			return store.getHistory("test-session");
+		});
+		expect(history).toEqual(["alpha", "beta", "alpha"]);
+	});
+
+	test("empty/whitespace entries are ignored", async ({ page }) => {
+		const history = await page.evaluate(async () => {
+			const store = (window as any).historyStore;
+			await store.addEntry("test-session", "real");
+			await store.addEntry("test-session", "");
+			await store.addEntry("test-session", "   ");
+			return store.getHistory("test-session");
+		});
+		expect(history).toEqual(["real"]);
+	});
+});
