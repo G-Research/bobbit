@@ -2946,6 +2946,16 @@ export class SessionManager {
 			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
 		}
 
+		// Final get_state to flush conversation history to the .jsonl file.
+		// persistSessionMetadata runs at creation time (fire-and-forget) when
+		// the conversation may still be empty. This ensures the latest messages
+		// are written before we archive.
+		try {
+			await session.rpcClient.getState();
+		} catch {
+			// Agent may already be stopped — best-effort flush
+		}
+
 		session.unsubscribe();
 		await session.rpcClient.stop();
 		session.status = "terminated";
