@@ -32,7 +32,7 @@ test.beforeAll(() => {
 const TEST_PAGE = `file://${FIXTURE}`;
 
 test.describe("AssistantMessage markdown-block content throttling", () => {
-	test("streaming updates pass content to markdown-block on every render (no throttle)", async ({ page }) => {
+	test("streaming updates are throttled to markdown-block", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 
 		// Wait for custom elements to register
@@ -86,10 +86,10 @@ test.describe("AssistantMessage markdown-block content throttling", () => {
 			return changes;
 		}, updateCount);
 
-		// Without throttling, every update should produce a new markdown-block content.
-		// After the throttle fix, this assertion will FAIL because changeCount will be
-		// much less than updateCount (roughly updateCount / (250ms / frame_interval)).
-		expect(changeCount).toBeGreaterThanOrEqual(updateCount);
+		// With throttling, markdown-block should NOT update on every render.
+		// changeCount should be significantly less than updateCount.
+		// Without the fix, this FAILS because changeCount === updateCount (no throttle).
+		expect(changeCount).toBeLessThan(updateCount);
 	});
 
 	test("final content is accurate after streaming stops", async ({ page }) => {
