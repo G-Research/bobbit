@@ -1449,11 +1449,20 @@ export class SessionManager {
 			this.addDormantSession(ps);
 		}
 
-		// Recover worktrees whose directories are missing (e.g. deleted during cleanup/crash).
+		// Recover worktrees whose directories are missing OR whose .git metadata is broken.
+		// This covers two failure modes:
+		//   1. Directory deleted (cleanup, crash, manual removal)
+		//   2. Directory exists but .git file is gone (partial git worktree remove on Windows,
+		//      or worktree entry pruned by another git operation while files remain on disk)
 		// Skip sandboxed sessions — their worktreePath is a container-internal path.
 		for (const ps of persisted) {
-			if (ps.worktreePath && ps.branch && ps.repoPath && !ps.sandboxed && !ps.archived && !fs.existsSync(ps.worktreePath)) {
-				console.log(`[session-manager] Recovering missing worktree for "${ps.title}" (${ps.id}), branch: ${ps.branch}`);
+			if (!ps.worktreePath || !ps.branch || !ps.repoPath || ps.sandboxed || ps.archived) continue;
+			const dirExists = fs.existsSync(ps.worktreePath);
+			const gitFileExists = dirExists && fs.existsSync(path.join(ps.worktreePath, ".git"));
+
+			if (!dirExists || !gitFileExists) {
+				const reason = !dirExists ? "directory missing" : ".git metadata missing";
+				console.log(`[session-manager] Recovering worktree for "${ps.title}" (${ps.id}): ${reason}, branch: ${ps.branch}`);
 				try {
 					const { recoverWorktree } = await import("../skills/git.js");
 					const recovered = await recoverWorktree(ps.repoPath, ps.branch, ps.worktreePath);
