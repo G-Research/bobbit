@@ -43,32 +43,38 @@ Standard user message. Always routed through `enqueuePrompt()` — never sent di
 
 A mid-turn interrupt. Behavior depends on agent state:
 
-- **Agent streaming**: Sent directly via `rpcClient.steer()` as a real-time interrupt between tool calls. Bypasses the queue entirely.
-- **Agent idle**: Enqueued as a steered message (`isSteered: true`). Steered messages sort before normal messages in the queue.
+- **Agent streaming**: Enqueued as a steered message (`isSteered: true`). The message is **not** dispatched immediately — it is held until the user presses Stop/Escape. On `forceAbort()`, all steered+undispatched messages are concatenated and sent as a single `rpcClient.steer()` call. This batching ensures multiple steered messages arrive as one coherent block rather than racing individually.
+- **Agent idle**: Enqueued as a steered message. Steered messages sort before normal messages in the queue.
 
 ### `follow_up` (client → server)
 
-Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcClient.prompt()`. Used when continuing a conversation after the agent finished (different RPC semantics in the agent subprocess). Routed through `enqueuePrompt()` like normal prompts.
+Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcClient.prompt()`. Used when continuing a conversation after the agent finished (different RPC semantics in the agent subprocess). Routed through `enqueuePrompt()` like normal prompts. The `isFollowUp` flag is preserved on the `QueuedMessage` so that queued follow-ups dispatch via the correct RPC method on drain.
 
 ### `steer_queued` (client → server)
 
-Promotes an already-queued message to steered priority. If the agent is currently streaming, the steered message is immediately dispatched via `rpcClient.steer()` and marked as `dispatched` (kept in the queue for UI display until the user message appears in chat via `message_end`).
+Promotes an already-queued message to steered priority. The steered message is reordered to the top and shows a "Sent" badge in the UI. Like direct `steer`, the message is held until the user triggers an abort — it is not dispatched immediately.
 
 ### `remove_queued` (client → server)
 
 Removes a message from the queue. Broadcasts an updated queue.
 
+### `reorder_queue` (client → server)
+
+Reorders the queue to match a given array of message IDs. Unknown IDs are ignored; messages not listed are appended at the end. Broadcasts updated queue. Used by the drag-to-reorder UI on queue pills.
+
 ### `queue_update` (server → client)
 
-Sent whenever the queue changes — enqueue, dequeue, steer, remove. Contains the full queue array so clients can replace their local state.
+Sent whenever the queue changes — enqueue, dequeue, steer, remove, reorder. Contains the full queue array so clients can replace their local state.
 
 ## PromptQueue internals
 
 `src/server/agent/prompt-queue.ts` — a per-session ordered queue with priority sorting.
 
-**Ordering**: Steered messages always sort before non-steered. Within each group, insertion order is preserved (stable sort).
+**Ordering**: Steered messages always sort before non-steered. Within each group, insertion order is preserved (stable sort). The client can explicitly reorder via `reorder(messageIds)` — the queue adopts the given ID order, with unlisted items appended at the end.
 
-**Dispatched tracking**: When a steered message is sent mid-turn via `steer` RPC, it's marked `dispatched: true` but stays in the queue for UI display. On `message_end` for a user message, dispatched entries are cleaned up. On drain, `dequeueUndispatched()` skips already-dispatched messages.
+**Dispatched tracking**: When steered messages are sent on abort via `rpcClient.steer()`, they're marked `dispatched: true` but stay in the queue for UI display. On `message_end` for a user message, dispatched entries are cleaned up. On drain, `dequeueUndispatched()` skips already-dispatched messages.
+
+**follow_up preservation**: `QueuedMessage` carries an optional `isFollowUp` flag. When set, `drainQueue()` dispatches via `rpcClient.followUp()` instead of `rpcClient.prompt()`, preserving the correct RPC semantics through the queue.
 
 **Persistence**: The queue is persisted to `.bobbit/state/sessions.json` (via `SessionStore.update`) on every mutation, and restored on server restart via `new PromptQueue(ps.messageQueue)`.
 
@@ -92,7 +98,12 @@ When the server echoes a user message via `message_end`, `RemoteAgent` checks if
 
 ### Queue display
 
-The client receives `queue_update` events and stores them in `_serverQueue`. The UI can call `getQueue()` to show pending messages and offer steer/remove actions.
+The client receives `queue_update` events and stores them in `_serverQueue`. The UI renders each queued message as a "pill" above the textarea:
+
+- **Non-steered pills** show four controls: drag handle (for reordering), edit button (pencil — removes pill and populates textarea for editing), steer button, and remove button (X).
+- **Steered pills** show a "Sent" badge and no interactive controls — the message is committed for delivery on abort.
+- **Edit flow**: Clicking the pencil icon fires `onEditQueued`, which removes the pill from the queue and places its text back in the textarea. On re-send, the message is added to the end of the queue (or dispatched directly if the agent is idle).
+- **Drag reorder**: Dragging a pill's handle fires `onReorder`, which sends a `reorder_queue` WS message. The server reorders and broadcasts the updated queue to all clients.
 
 ## Error handling
 
@@ -100,11 +111,15 @@ The client receives `queue_update` events and stores them in `_serverQueue`. The
 
 If a turn ends with `stopReason: "error"` (tracked via `lastTurnErrored`), `drainQueue()` is skipped on `agent_end`. Queued messages wait for the user to retry rather than being fed into a broken agent.
 
+**Error-state queue gating**: While `lastTurnErrored` is true, `enqueuePrompt()` always adds to the queue — it never dispatches directly, even if the queue is empty and the agent appears idle. This prevents new messages from bypassing a failed state. The queue only resumes draining after a successful retry clears the error flag.
+
 ### Retry
 
 `retryLastPrompt()` handles two cases:
 - **Fresh error** (no tool calls executed): Re-sends `lastPromptText` via `rpcClient.prompt()`.
 - **Mid-work error** (tool calls already ran): Sends a system continuation message so the agent picks up where it left off rather than re-executing tools.
+
+On successful retry (turn completes without error), `lastTurnErrored` is cleared and `drainQueue()` resumes normal operation.
 
 ### Dispatch failure
 
@@ -119,6 +134,7 @@ If `rpcClient.prompt()` fails during `drainQueue()`, the optimistic `"streaming"
 | Client → Server | `follow_up` | Continue after agent idle (different RPC) |
 | Client → Server | `steer_queued` | Promote queued message to steered priority |
 | Client → Server | `remove_queued` | Remove a message from the queue |
+| Client → Server | `reorder_queue` | Reorder queue to match given ID array |
 | Client → Server | `abort` | Cancel current turn (force-kills if needed) |
 | Client → Server | `retry` | Retry after model/API error |
 | Server → Client | `queue_update` | Full queue state after any mutation |

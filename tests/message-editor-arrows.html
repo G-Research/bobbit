@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MessageEditor Arrow Key Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+</style>
+</head>
+<body>
+<!--
+  Narrow textarea (100px wide) to force visual line wrapping.
+  Replicates MessageEditor's visual-row-detection logic using a mirror div.
+-->
+<textarea id="textarea" rows="5"
+  style="width:100px; font: 14px/1.4 monospace; padding: 4px; border: 1px solid #444; box-sizing: border-box; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;"
+></textarea>
+
+<script>
+// Command history state (mirrors MessageEditor)
+let history = [];
+let historyIndex = -1;
+let savedDraft = '';
+
+window.setHistory = (h) => { history = h; historyIndex = -1; savedDraft = ''; };
+window.getHistoryState = () => ({
+  historyIndex,
+  savedDraft,
+  value: document.getElementById('textarea').value
+});
+
+// Mirror-div measurement (exact copy of MessageEditor._isCursorOnVisualTopRow)
+function isCursorOnVisualTopRow(textarea) {
+  const pos = textarea.selectionStart;
+  if (pos === 0) return true;
+
+  const style = getComputedStyle(textarea);
+  const mirror = document.createElement('div');
+  mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
+  mirror.textContent = textarea.value.substring(0, pos);
+  document.body.appendChild(mirror);
+  const cursorHeight = mirror.offsetHeight;
+  mirror.textContent = 'X';
+  const singleRowHeight = mirror.offsetHeight;
+  document.body.removeChild(mirror);
+
+  return cursorHeight <= singleRowHeight;
+}
+
+function isCursorOnVisualBottomRow(textarea) {
+  const pos = textarea.selectionStart;
+  if (pos >= textarea.value.length) return true;
+
+  const style = getComputedStyle(textarea);
+  const mirror = document.createElement('div');
+  mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
+  mirror.textContent = textarea.value;
+  document.body.appendChild(mirror);
+  const fullHeight = mirror.offsetHeight;
+  mirror.textContent = textarea.value.substring(0, pos);
+  const cursorHeight = mirror.offsetHeight;
+  mirror.textContent = 'X';
+  const singleRowHeight = mirror.offsetHeight;
+  document.body.removeChild(mirror);
+
+  return (fullHeight - cursorHeight) <= singleRowHeight;
+}
+
+document.getElementById('textarea').addEventListener('keydown', (e) => {
+  const textarea = e.target;
+
+  if (e.key === 'ArrowUp' && history.length > 0 && isCursorOnVisualTopRow(textarea)) {
+    if (historyIndex === -1) {
+      savedDraft = textarea.value;
+      historyIndex = history.length - 1;
+    } else if (historyIndex > 0) {
+      historyIndex--;
+    } else {
+      return; // At oldest, let default through
+    }
+    e.preventDefault();
+    textarea.value = history[historyIndex];
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  } else if (e.key === 'ArrowDown' && historyIndex !== -1 && isCursorOnVisualBottomRow(textarea)) {
+    e.preventDefault();
+    if (historyIndex < history.length - 1) {
+      historyIndex++;
+      textarea.value = history[historyIndex];
+    } else {
+      historyIndex = -1;
+      textarea.value = savedDraft;
+    }
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }
+});
+
+// Expose measurement functions for direct testing (use different names to avoid clobbering)
+window.checkCursorOnVisualTopRow = () => isCursorOnVisualTopRow(document.getElementById('textarea'));
+window.checkCursorOnVisualBottomRow = () => isCursorOnVisualBottomRow(document.getElementById('textarea'));
+
+window._testReady = true;
+</script>
+</body>
+</html>

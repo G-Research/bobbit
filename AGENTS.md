@@ -127,7 +127,7 @@ On proposal acceptance, the handler registers the project AND writes config fiel
 
 **Remove a project**: To remove a non-default project, go to its per-project settings page → General tab and click "Remove Project" in the Danger Zone section. This calls `DELETE /api/projects/:id`, which unregisters the project from the server without deleting any files on disk. The button is hidden for the default project (the server's own CWD). After removal, the UI navigates back to system settings and refreshes the sidebar.
 
-**Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts` switch, add `RpcBridge` method if needed. Examples: `set_model`, `set_thinking_level`.
+**Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts` switch, add `RpcBridge` method if needed. Examples: `set_model`, `set_thinking_level`, `reorder_queue`.
 
 **Viewer WebSocket (`/ws/viewer`)**: A read-only, sessionless WebSocket endpoint used by the goal dashboard to receive live gate verification events. Authenticates via `{ type: "auth", token }` like session connections, but does not associate with a session — events arrive through `broadcastToGoal()`'s fallback path (sends to all authenticated clients with no session). The dashboard opens this connection on mount and closes it on navigation away. Auto-reconnects with a 3s delay on unexpected close. See [docs/internals.md](docs/internals.md#viewer-websocket) for details.
 
@@ -137,7 +137,7 @@ On proposal acceptance, the handler registers the project AND writes config fiel
 
 **Add a tool**: Create YAML in `.bobbit/config/tools/<group>/`. Define `name`, `description`, `summary`, `group`, `provider`. Add extension code in group's `extension.ts` if needed. MCP tools are auto-discovered from `.mcp.json` — no YAML needed.
 
-**Add a slash skill**: Create `SKILL.md` in `.claude/skills/<name>/` or `~/.claude/skills/<name>/`. YAML frontmatter: `description`, optional `argument_hint`, `allowed_tools`, `context`, `agent`. Auto-discovered by `discoverSlashSkills()`.
+**Add a slash skill**: Create `SKILL.md` in `.claude/skills/<name>/` or `~/.claude/skills/<name>/`. YAML frontmatter: `description`, optional `argument_hint`, `allowed_tools`, `context`, `agent`. Auto-discovered by `discoverSlashSkills()`. Skills can be invoked as a prefix (`/deploy staging`) or inline within a prompt (`Analyse using /my-skill the code`) — the server resolves all `/skill-name` tokens at word boundaries and expands them inline.
 
 **Add/use MCP servers**: Configure in `.mcp.json` (project), `.bobbit/config/mcp.json` (overrides), or any of 7 discovery locations. In multi-project setups, MCP servers from all registered projects are discovered — not just the default project. See @docs/internals.md#mcp-servers for full priority list and multi-project behavior.
 

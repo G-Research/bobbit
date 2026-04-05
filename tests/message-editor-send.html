@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MessageEditor Send Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  .attachment-tile { display: inline-block; padding: 4px 8px; border: 1px solid #555; border-radius: 4px; margin: 2px; font-size: 12px; }
+  #send-btn { margin-top: 8px; padding: 4px 12px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="attachments"></div>
+<textarea id="textarea" rows="3" style="width:400px;display:block;"></textarea>
+<button id="send-btn">Send</button>
+
+<script>
+/**
+ * Replicates enough of MessageEditor behavior to test sending:
+ * - Enter to send, Shift+Enter for newline
+ * - Send button click
+ * - Empty send suppression
+ * - Image paste handling
+ * - Draft save/clear via sessionStorage
+ * - onSend callback tracking
+ */
+
+let sendCalls = [];
+let attachments = [];
+let sessionId = 'test-session';
+
+// Draft persistence
+let draftTimer = null;
+const DRAFT_DEBOUNCE = 80; // fast for tests
+
+function draftKey() { return `bobbit_draft_${sessionId}`; }
+
+function saveDraft(text) {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    draftTimer = null;
+    if (text.trim()) {
+      sessionStorage.setItem(draftKey(), text);
+    } else {
+      sessionStorage.removeItem(draftKey());
+    }
+  }, DRAFT_DEBOUNCE);
+}
+
+function clearDraft() {
+  clearTimeout(draftTimer);
+  sessionStorage.removeItem(draftKey());
+}
+
+function renderAttachments() {
+  const container = document.getElementById('attachments');
+  container.innerHTML = '';
+  attachments.forEach((att, i) => {
+    const tile = document.createElement('div');
+    tile.className = 'attachment-tile';
+    tile.dataset.index = String(i);
+    tile.textContent = att.name || 'image';
+    if (att.thumbnail) {
+      const img = document.createElement('img');
+      img.src = att.thumbnail;
+      img.style.cssText = 'width:24px;height:24px;vertical-align:middle;margin-right:4px';
+      tile.prepend(img);
+    }
+    container.appendChild(tile);
+  });
+}
+
+function handleSend() {
+  const textarea = document.getElementById('textarea');
+  const text = textarea.value;
+  const hasContent = text.trim() || attachments.length > 0;
+  if (!hasContent) return;
+
+  // Dispatch message-send event (like real MessageEditor)
+  document.dispatchEvent(new CustomEvent('message-send', { bubbles: true, composed: true }));
+
+  sendCalls.push({ text, attachments: attachments.slice() });
+
+  // Clear editor state after send
+  textarea.value = '';
+  attachments = [];
+  renderAttachments();
+  clearDraft();
+}
+
+// Textarea input handler
+document.getElementById('textarea').addEventListener('input', (e) => {
+  saveDraft(e.target.value);
+});
+
+// Keydown handler
+document.getElementById('textarea').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleSend();
+  }
+  // Shift+Enter: default behavior inserts newline
+});
+
+// Send button click
+document.getElementById('send-btn').addEventListener('click', () => {
+  handleSend();
+});
+
+// Paste handler for images
+document.getElementById('textarea').addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (file) {
+        // Create a thumbnail data URL
+        const reader = new FileReader();
+        reader.onload = () => {
+          attachments.push({
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            name: file.name || 'pasted-image',
+            type: file.type,
+            thumbnail: reader.result,
+            data: reader.result,
+          });
+          renderAttachments();
+        };
+        reader.readAsDataURL(file);
+      }
+      return; // Only handle first image
+    }
+  }
+});
+
+// message-send event clears draft (like session-manager.ts does)
+document.addEventListener('message-send', () => {
+  clearDraft();
+});
+
+// Public API
+window.getSendCalls = () => sendCalls;
+window.resetSendCalls = () => { sendCalls = []; };
+window.getAttachments = () => attachments;
+window.setSessionId = (id) => { sessionId = id; };
+window.getSessionId = () => sessionId;
+window.clearAttachments = () => { attachments = []; renderAttachments(); };
+window.getDraftKey = () => draftKey();
+window.DRAFT_DEBOUNCE = DRAFT_DEBOUNCE;
+
+window._testReady = true;
+</script>
+</body>
+</html>

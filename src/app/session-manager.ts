@@ -127,41 +127,82 @@ function clearDismissedProposal(sessionId: string): void {
 }
 
 // ============================================================================
-// GOAL DRAFT PERSISTENCE HELPERS
+// DRAFT MANAGER — generic draft persistence (replaces copy-pasted patterns)
 // ============================================================================
 
-/** Debounce timer for draft saves. */
-let _draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Save the current goal assistant preview state to the server (debounced 300ms). */
-export function saveGoalDraft(sessionId: string): void {
-	if (_draftSaveTimer) clearTimeout(_draftSaveTimer);
-	_draftSaveTimer = setTimeout(() => {
-		_draftSaveTimer = null;
-		const draft = {
-			sessionId,
-			activeGoalProposal: state.activeGoalProposal ?? undefined,
-			previewTitle: state.previewTitle,
-			previewSpec: state.previewSpec,
-			previewCwd: state.previewCwd,
-			previewProjectId: state.previewProjectId,
-			previewTitleEdited: state.previewTitleEdited,
-			previewSpecEdited: state.previewSpecEdited,
-			previewCwdEdited: state.previewCwdEdited,
-			hasReceivedProposal: state.assistantHasProposal,
-			goalAssistantTab: state.assistantTab,
-
-		};
-		saveDraftToServer(sessionId, 'goal', draft);
-	}, 300);
+interface DraftManager {
+	save(sessionId: string): void;
+	restore(sessionId: string): Promise<boolean>;
+	delete(sessionId: string): void;
+	teardown(): void;
 }
 
-/** Restore goal assistant preview state from the server. Returns true if a draft was found. */
-async function restoreGoalDraft(sessionId: string): Promise<boolean> {
-	try {
-		const draft = await loadDraftFromServer(sessionId, 'goal') as any;
-		if (!draft) return false;
+/**
+ * Generic draft persistence helper. Provides debounced save, restore, and delete
+ * for any assistant draft type. Eliminates duplication across goal/role/personality.
+ */
+function createDraftManager<T>(config: {
+	type: string;
+	serialize: (sessionId: string) => T;
+	restore: (sessionId: string, draft: T) => void;
+	debounceMs?: number;
+}): DraftManager {
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	const debounceMs = config.debounceMs ?? 300;
 
+	return {
+		save(sessionId: string): void {
+			if (timer) clearTimeout(timer);
+			timer = setTimeout(() => {
+				timer = null;
+				const draft = config.serialize(sessionId);
+				saveDraftToServer(sessionId, config.type, draft);
+			}, debounceMs);
+		},
+
+		async restore(sessionId: string): Promise<boolean> {
+			try {
+				const draft = await loadDraftFromServer(sessionId, config.type);
+				if (!draft) return false;
+				config.restore(sessionId, draft as T);
+				return true;
+			} catch (err) {
+				console.error(`[${config.type}-draft] Failed to restore draft:`, err);
+				return false;
+			}
+		},
+
+		delete(sessionId: string): void {
+			if (timer) { clearTimeout(timer); timer = null; }
+			deleteDraftFromServer(sessionId, config.type);
+		},
+
+		teardown(): void {
+			if (timer) { clearTimeout(timer); timer = null; }
+		},
+	};
+}
+
+// ============================================================================
+// GOAL DRAFT
+// ============================================================================
+
+const goalDraft = createDraftManager({
+	type: 'goal',
+	serialize: (sessionId) => ({
+		sessionId,
+		activeGoalProposal: state.activeGoalProposal ?? undefined,
+		previewTitle: state.previewTitle,
+		previewSpec: state.previewSpec,
+		previewCwd: state.previewCwd,
+		previewProjectId: state.previewProjectId,
+		previewTitleEdited: state.previewTitleEdited,
+		previewSpecEdited: state.previewSpecEdited,
+		previewCwdEdited: state.previewCwdEdited,
+		hasReceivedProposal: state.assistantHasProposal,
+		goalAssistantTab: state.assistantTab,
+	}),
+	restore: (_sessionId, draft: any) => {
 		state.activeGoalProposal = draft.activeGoalProposal ?? null;
 		state.previewTitle = draft.previewTitle ?? "";
 		state.previewSpec = draft.previewSpec ?? "";
@@ -172,57 +213,39 @@ async function restoreGoalDraft(sessionId: string): Promise<boolean> {
 		state.previewCwdEdited = draft.previewCwdEdited ?? false;
 		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
 		state.assistantTab = draft.goalAssistantTab ?? "chat";
+	},
+});
 
-		return true;
-	} catch (err) {
-		console.error("[goal-draft] Failed to restore draft:", err);
-		return false;
-	}
-}
-
+/** Save the current goal assistant preview state to the server (debounced 300ms). */
+export function saveGoalDraft(sessionId: string): void { goalDraft.save(sessionId); }
+/** Restore goal assistant preview state from the server. */
+async function restoreGoalDraft(sessionId: string): Promise<boolean> { return goalDraft.restore(sessionId); }
 /** Delete goal draft from the server. */
-export function deleteGoalDraft(sessionId: string): void {
-	deleteDraftFromServer(sessionId, 'goal');
-}
+export function deleteGoalDraft(sessionId: string): void { goalDraft.delete(sessionId); }
 
 // ============================================================================
-// ROLE DRAFT PERSISTENCE HELPERS
+// ROLE DRAFT
 // ============================================================================
 
-/** Debounce timer for role draft saves. */
-let _roleDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Save the current role assistant preview state to the server (debounced 300ms). */
-export function saveRoleDraft(sessionId: string): void {
-	if (_roleDraftSaveTimer) clearTimeout(_roleDraftSaveTimer);
-	_roleDraftSaveTimer = setTimeout(() => {
-		_roleDraftSaveTimer = null;
-		const draft = {
-			sessionId,
-			activeRoleProposal: state.activeRoleProposal ?? undefined,
-			previewName: state.rolePreviewName,
-			previewLabel: state.rolePreviewLabel,
-			previewPrompt: state.rolePreviewPrompt,
-			previewTools: state.rolePreviewTools,
-			previewAccessory: state.rolePreviewAccessory,
-			previewNameEdited: state.rolePreviewNameEdited,
-			previewLabelEdited: state.rolePreviewLabelEdited,
-			previewPromptEdited: state.rolePreviewPromptEdited,
-			previewToolsEdited: state.rolePreviewToolsEdited,
-			previewAccessoryEdited: state.rolePreviewAccessoryEdited,
-			hasReceivedRoleProposal: state.assistantHasProposal,
-			roleAssistantTab: state.assistantTab,
-		};
-		saveDraftToServer(sessionId, 'role', draft);
-	}, 300);
-}
-
-/** Restore role assistant preview state from the server. Returns true if a draft was found. */
-async function restoreRoleDraft(sessionId: string): Promise<boolean> {
-	try {
-		const draft = await loadDraftFromServer(sessionId, 'role') as any;
-		if (!draft) return false;
-
+const roleDraft = createDraftManager({
+	type: 'role',
+	serialize: (sessionId) => ({
+		sessionId,
+		activeRoleProposal: state.activeRoleProposal ?? undefined,
+		previewName: state.rolePreviewName,
+		previewLabel: state.rolePreviewLabel,
+		previewPrompt: state.rolePreviewPrompt,
+		previewTools: state.rolePreviewTools,
+		previewAccessory: state.rolePreviewAccessory,
+		previewNameEdited: state.rolePreviewNameEdited,
+		previewLabelEdited: state.rolePreviewLabelEdited,
+		previewPromptEdited: state.rolePreviewPromptEdited,
+		previewToolsEdited: state.rolePreviewToolsEdited,
+		previewAccessoryEdited: state.rolePreviewAccessoryEdited,
+		hasReceivedRoleProposal: state.assistantHasProposal,
+		roleAssistantTab: state.assistantTab,
+	}),
+	restore: (_sessionId, draft: any) => {
 		state.activeRoleProposal = draft.activeRoleProposal ?? null;
 		state.rolePreviewName = draft.previewName ?? "";
 		state.rolePreviewLabel = draft.previewLabel ?? "";
@@ -236,52 +259,37 @@ async function restoreRoleDraft(sessionId: string): Promise<boolean> {
 		state.rolePreviewAccessoryEdited = draft.previewAccessoryEdited ?? false;
 		state.assistantHasProposal = draft.hasReceivedRoleProposal ?? false;
 		state.assistantTab = draft.roleAssistantTab ?? "chat";
-		return true;
-	} catch (err) {
-		console.error("[role-draft] Failed to restore draft:", err);
-		return false;
-	}
-}
+	},
+});
 
+/** Save the current role assistant preview state to the server (debounced 300ms). */
+export function saveRoleDraft(sessionId: string): void { roleDraft.save(sessionId); }
+/** Restore role assistant preview state from the server. */
+async function restoreRoleDraft(sessionId: string): Promise<boolean> { return roleDraft.restore(sessionId); }
 /** Delete role draft from the server. */
-export function deleteRoleDraft(sessionId: string): void {
-	deleteDraftFromServer(sessionId, 'role');
-}
-
+export function deleteRoleDraft(sessionId: string): void { roleDraft.delete(sessionId); }
 
 // ============================================================================
-// PERSONALITY DRAFT PERSISTENCE HELPERS
+// PERSONALITY DRAFT
 // ============================================================================
 
-let _personalityDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-export function savePersonalityDraft(sessionId: string): void {
-	if (_personalityDraftSaveTimer) clearTimeout(_personalityDraftSaveTimer);
-	_personalityDraftSaveTimer = setTimeout(() => {
-		_personalityDraftSaveTimer = null;
-		const draft = {
-			sessionId,
-			activePersonalityProposal: state.activePersonalityProposal ?? undefined,
-			previewName: state.personalityPreviewName,
-			previewLabel: state.personalityPreviewLabel,
-			previewDescription: state.personalityPreviewDescription,
-			previewPromptFragment: state.personalityPreviewPromptFragment,
-			previewNameEdited: state.personalityPreviewNameEdited,
-			previewLabelEdited: state.personalityPreviewLabelEdited,
-			previewDescriptionEdited: state.personalityPreviewDescriptionEdited,
-			previewPromptFragmentEdited: state.personalityPreviewPromptFragmentEdited,
-			hasReceivedPersonalityProposal: state.assistantHasProposal,
-			personalityAssistantTab: state.assistantTab,
-		};
-		saveDraftToServer(sessionId, 'personality', draft);
-	}, 300);
-}
-
-async function restorePersonalityDraft(sessionId: string): Promise<boolean> {
-	try {
-		const draft = await loadDraftFromServer(sessionId, 'personality') as any;
-		if (!draft) return false;
-
+const personalityDraft = createDraftManager({
+	type: 'personality',
+	serialize: (sessionId) => ({
+		sessionId,
+		activePersonalityProposal: state.activePersonalityProposal ?? undefined,
+		previewName: state.personalityPreviewName,
+		previewLabel: state.personalityPreviewLabel,
+		previewDescription: state.personalityPreviewDescription,
+		previewPromptFragment: state.personalityPreviewPromptFragment,
+		previewNameEdited: state.personalityPreviewNameEdited,
+		previewLabelEdited: state.personalityPreviewLabelEdited,
+		previewDescriptionEdited: state.personalityPreviewDescriptionEdited,
+		previewPromptFragmentEdited: state.personalityPreviewPromptFragmentEdited,
+		hasReceivedPersonalityProposal: state.assistantHasProposal,
+		personalityAssistantTab: state.assistantTab,
+	}),
+	restore: (_sessionId, draft: any) => {
 		state.activePersonalityProposal = draft.activePersonalityProposal ?? null;
 		state.personalityPreviewName = draft.previewName ?? "";
 		state.personalityPreviewLabel = draft.previewLabel ?? "";
@@ -293,16 +301,12 @@ async function restorePersonalityDraft(sessionId: string): Promise<boolean> {
 		state.personalityPreviewPromptFragmentEdited = draft.previewPromptFragmentEdited ?? false;
 		state.assistantHasProposal = draft.hasReceivedPersonalityProposal ?? false;
 		state.assistantTab = draft.personalityAssistantTab ?? "chat";
-		return true;
-	} catch (err) {
-		console.error("[personality-draft] Failed to restore draft:", err);
-		return false;
-	}
-}
+	},
+});
 
-export function deletePersonalityDraft(sessionId: string): void {
-	deleteDraftFromServer(sessionId, 'personality');
-}
+export function savePersonalityDraft(sessionId: string): void { personalityDraft.save(sessionId); }
+async function restorePersonalityDraft(sessionId: string): Promise<boolean> { return personalityDraft.restore(sessionId); }
+export function deletePersonalityDraft(sessionId: string): void { personalityDraft.delete(sessionId); }
 
 
 // ============================================================================

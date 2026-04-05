@@ -11,6 +11,8 @@ export interface QueuedMessage {
 	/** True if this message was already dispatched mid-turn via steer RPC.
 	 *  Kept in queue so the UI shows "Sent" until the turn ends. */
 	dispatched?: boolean;
+	/** True if this message should be dispatched via followUp() instead of prompt(). */
+	isFollowUp?: boolean;
 	createdAt: number;
 }
 
@@ -37,7 +39,8 @@ export type ClientMessage =
 	| { type: "task_delete"; taskId: string }
 	| { type: "summarize_goal_title"; goalTitle: string }
 	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" }
-	| { type: "deny_tool_permission"; toolName: string };
+	| { type: "deny_tool_permission"; toolName: string }
+	| { type: "reorder_queue"; messageIds: string[] };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =

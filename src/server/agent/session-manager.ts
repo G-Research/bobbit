@@ -860,6 +860,19 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
 
+		// ERROR STATE GATING: if last turn errored, always enqueue (never direct dispatch)
+		// User must retry the error first before queue drains
+		if (session.lastTurnErrored) {
+			session.promptQueue.enqueue(text, {
+				images: opts?.images,
+				attachments: opts?.attachments,
+				isSteered: opts?.isSteered,
+				isFollowUp: opts?.isFollowUp,
+			});
+			this.broadcastQueue(session);
+			return;
+		}
+
 		// If agent is idle and queue is empty, dispatch directly
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
@@ -878,6 +891,7 @@ export class SessionManager {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
+			isFollowUp: opts?.isFollowUp,
 		});
 		this.broadcastQueue(session);
 
@@ -889,8 +903,8 @@ export class SessionManager {
 
 	/**
 	 * Promote a queued message to steered and reorder.
-	 * If the agent is streaming, immediately dequeue and dispatch the steered
-	 * message via `steer` RPC so it interrupts between tool calls.
+	 * Steered messages are held in the queue until interrupt/abort,
+	 * at which point they are batch-injected via forceAbort().
 	 */
 	steerQueued(sessionId: string, messageId: string): boolean {
 		const session = this.sessions.get(sessionId);
@@ -898,22 +912,16 @@ export class SessionManager {
 		const ok = session.promptQueue.steer(messageId);
 		if (!ok) return false;
 
-		// If agent is streaming, dispatch the steered message immediately
-		// so it gets picked up between tool calls via getSteeringMessages().
-		// Keep the message in the queue (marked dispatched) so the UI shows
-		// "Sent" until the turn ends and the message appears in chat.
-		if (session.status === "streaming") {
-			const front = session.promptQueue.peek();
-			if (front?.isSteered && !front.dispatched) {
-				session.promptQueue.markDispatched(front.id);
-				session.rpcClient.steer(front.text).catch((err: any) => {
-					console.error(`[session-manager] Failed to dispatch steered message for ${session.id}:`, err);
-				});
-			}
-		}
-
 		this.broadcastQueue(session);
 		return true;
+	}
+
+	/** Reorder queued messages to match the given ID list. */
+	reorderQueue(sessionId: string, messageIds: string[]): void {
+		const session = this.sessions.get(sessionId);
+		if (!session) return;
+		session.promptQueue.reorderByIds(messageIds);
+		this.broadcastQueue(session);
 	}
 
 	/** Remove a queued message. */
@@ -956,8 +964,11 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 		broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
 
-		// Always dispatch as prompt — agent is idle, steer is only for mid-turn
-		session.rpcClient.prompt(next.text, next.images).catch((err: any) => {
+		// Dispatch via appropriate method — followUp for follow_up messages, prompt otherwise
+		const dispatchPromise = next.isFollowUp
+			? session.rpcClient.followUp(next.text)
+			: session.rpcClient.prompt(next.text, next.images);
+		dispatchPromise.catch((err: any) => {
 			console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
 			// Revert optimistic status on failure
 			session.status = "idle";
@@ -3513,6 +3524,22 @@ export class SessionManager {
 
 		// If not streaming, nothing to abort
 		if (session.status !== "streaming") return;
+
+		// Collect all steered, undispatched messages and inject as a batch
+		const steeredMessages = session.promptQueue.toArray()
+			.filter(m => m.isSteered && !m.dispatched);
+		if (steeredMessages.length > 0) {
+			const batchText = steeredMessages.map(m => m.text).join('\n');
+			try {
+				await session.rpcClient.steer(batchText);
+			} catch (err) {
+				console.error(`[session-manager] Failed to dispatch batched steer for ${id}:`, err);
+			}
+			for (const m of steeredMessages) {
+				session.promptQueue.markDispatched(m.id);
+			}
+			this.broadcastQueue(session);
+		}
 
 		// Try graceful abort first
 		try {
