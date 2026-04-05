@@ -177,7 +177,7 @@ For clear communication, avoid using emojis.
 - **`slice`** — read a specific line range (e.g. context around a grep match)
 - **`logs`** — tail only when you need the most recent output
 
-This saves tokens and avoids timeouts. When in doubt, use `bash_bg` — you can always inspect the result selectively afterward.
+This saves tokens and avoids timeouts. When in doubt, use `bash_bg` — you can always inspect the result selectively afterward. **Exception**: if you need to block and wait for the result before continuing (e.g. a build that must finish before you can test), use `bash` with an appropriate timeout.
 
 # Testing policy
 

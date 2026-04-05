@@ -41,6 +41,9 @@
 	--sidebar-accent-foreground: oklch(0.22 0.014 142);
 	--sidebar-border: oklch(0.86 0.014 146);
 
+	/* Session switch crossfade */
+	--session-fade-duration: 120ms;
+
 	/* ANSI terminal colors — tuned for light backgrounds */
 	--ansi-black: #3c3c3c;
 	--ansi-red: #c4261e;
@@ -3186,4 +3189,24 @@ html {
 message-list > .flex > * {
 	content-visibility: auto;
 	contain-intrinsic-size: auto 100px;
+}
+
+/* ── Session switch crossfade ── */
+pi-chat-panel {
+	transition: opacity var(--session-fade-duration, 120ms) ease-out,
+	            filter var(--session-fade-duration, 120ms) ease-out;
+	opacity: 1;
+	filter: blur(0);
+}
+pi-chat-panel.session-fade-out {
+	opacity: 0;
+	filter: blur(2px);
+	transition: opacity 80ms ease-in, filter 80ms ease-in;
+}
+pi-chat-panel.session-fade-in {
+	animation: session-fade-in var(--session-fade-duration, 120ms) ease-out;
+}
+@keyframes session-fade-in {
+	from { opacity: 0; filter: blur(2px); }
+	to   { opacity: 1; filter: blur(0); }
 }

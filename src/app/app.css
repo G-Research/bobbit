@@ -54,6 +54,8 @@ theme-toggle button {
  * SIDEBAR — right edge border + glow
  * ============================================================================ */
 .sidebar-edge {
+	position: relative;
+	z-index: 1;
 	border-right: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
 	box-shadow:
 		1px 0 0 0 var(--color-border, rgba(255, 255, 255, 0.06)),

@@ -169,18 +169,16 @@ function goalDashboardUrl(gw: GW, goalId: string) {
  */
 async function interruptAndSend(page: Page, gw: GW, id: string, text: string, idleTimeoutMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
-	await page.waitForSelector("textarea", { timeout: 15_000 });
+	await page.waitForSelector("textarea", { timeout: 30_000 });
 
-	// Check if the session is streaming — if so, click the stop button.
+	// If streaming, click the stop button — it should appear and work reliably.
+	// forceAbort() gives 3s grace then force-kills, so 15s total is generous.
 	const sessInfo = await getSession(gw, id);
 	if (sessInfo.status === "streaming") {
 		const stopBtn = page.locator('button[title="Stop streaming"]');
-		try {
-			await stopBtn.click({ timeout: 5_000 });
-		} catch {
-			// Button may not be visible yet or session finished — continue
-		}
-		await pollIdle(gw, id, 60_000);
+		await stopBtn.waitFor({ state: "visible", timeout: 10_000 });
+		await stopBtn.click();
+		await pollIdle(gw, id, 15_000);
 	}
 
 	// Now send the message
@@ -193,7 +191,7 @@ async function interruptAndSend(page: Page, gw: GW, id: string, text: string, id
 
 async function browserSend(page: Page, gw: GW, id: string, text: string, idleMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
-	await page.waitForSelector("textarea", { timeout: 15_000 });
+	await page.waitForSelector("textarea", { timeout: 30_000 });
 	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 8_000 }); } catch {}
 	await page.waitForTimeout(500);
 	await page.fill("textarea", text);
@@ -852,6 +850,63 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		t0 = performance.now();
 		const tdRes = await api(gw, `/api/goals/${sbxGoalId}/team/teardown`, { method: "POST" });
 		recordGoalPhase("goal-sandbox", "Teardown", t0, tdRes.ok || tdRes.status === 404, `status=${tdRes.status}`);
+	});
+
+	// ---------------------------------------------------------------
+	// E-4. Delete Docker container — verify server recovers
+	// ---------------------------------------------------------------
+	test("E-4. sandbox container recovery", async ({ page }) => {
+		test.skip(!sandboxAvailable, "Docker sandbox not available");
+
+		// 1. Find and force-remove the project container
+		let t0 = performance.now();
+		const containerId = execFileSync("docker", [
+			"ps", "-q", "--filter", `label=bobbit-project`,
+		], { encoding: "utf-8", timeout: 10_000 }).trim();
+		expect(containerId).toBeTruthy();
+		console.log(`  Container to kill: ${containerId.substring(0, 12)}`);
+
+		execFileSync("docker", ["rm", "-f", containerId], { timeout: 15_000, stdio: "ignore" });
+		console.log("  Container removed");
+		recordGoalPhase("goal-sandbox", "Container killed", t0, true, `id=${containerId.substring(0, 12)}`);
+
+		// 2. Hit sandbox-status — this triggers the server to detect the missing container
+		//    and recreate it. Poll until it reports available again.
+		t0 = performance.now();
+		const deadline = Date.now() + 120_000;
+		let recovered = false;
+		while (Date.now() < deadline) {
+			try {
+				const res = await api(gw, "/api/sandbox-status");
+				const status = await res.json();
+				if (status.available) { recovered = true; break; }
+			} catch { /* server may be busy recreating */ }
+			await new Promise(r => setTimeout(r, 2_000));
+		}
+		expect(recovered).toBe(true);
+		const recoveryMs = Math.round(performance.now() - t0);
+		console.log(`  Sandbox recovered in ${recoveryMs}ms`);
+		recordGoalPhase("goal-sandbox", "Container recovered", t0, true, `${recoveryMs}ms`);
+
+		// 3. Pick a sandbox session and verify it can still respond.
+		//    The sandbox plain session is simplest — its cwd is /workspace which
+		//    will exist in the new container after re-init.
+		const sbxSession = sessions["sbx"];
+		if (sbxSession) {
+			t0 = performance.now();
+			const info = await getSession(gw, sbxSession.id);
+			const alive = info.status !== "archived" && info.status !== "terminated";
+			if (alive) {
+				await interruptAndSend(page, gw, sbxSession.id,
+					"Run ONLY `pwd` and `git status`. Nothing else.", 120_000);
+				await takeScreenshot(page, "sbx-after-container-recovery.png");
+				console.log(`  Sandbox session responds after container recovery`);
+				recordGoalPhase("goal-sandbox", "Session post-recovery", t0, true, "responds via browser");
+			} else {
+				console.log(`  Sandbox session status: ${info.status} — skipping message test`);
+				recordGoalPhase("goal-sandbox", "Session post-recovery", t0, false, `status=${info.status}`);
+			}
+		}
 	});
 
 	// ---------------------------------------------------------------

@@ -1,5 +1,5 @@
 name: bash_bg
-description: "Manage background shell processes. Actions: create, logs, grep, head, slice, kill, list."
+description: "Manage background shell processes. Actions: create, logs, grep, head, slice, kill, list, wait."
 summary: "Start, monitor, and kill long-running background shell processes."
 provider:
   type: bobbit-extension
@@ -43,11 +43,14 @@ detail_docs: |
 
   ### Lifecycle
   - `create`: Start a background process. Returns a handle ID.
+  - `wait`: Block until the process exits or a timeout is reached. Use when
+    you started a process, did other work, and now need it to finish before
+    continuing. Param: `timeout` (seconds, default 300).
   - `kill`: Terminate a running process.
   - `list`: Show all background processes for this session.
 
   ## Parameters
-  - `action` (required): One of "create", "logs", "grep", "head", "slice", "kill", "list"
+  - `action` (required): One of "create", "logs", "grep", "head", "slice", "kill", "list", "wait"
   - `command` (for create): Shell command to run in the background
   - `name` (required for create): Short descriptive name, max 3 words (e.g. "dev server", "test runner", "color echo loop")
   - `id` (for logs/grep/head/slice/kill): Background process ID (e.g. "bg-1")
@@ -57,6 +60,7 @@ detail_docs: |
   - `max_results` (for grep): Max matches to return (default: 50)
   - `lines` (for head): Number of lines from start (default: 50)
   - `from` / `to` (for slice): 1-indexed line range to retrieve
+  - `timeout` (for wait): Max seconds to wait for exit (default: 300)
 
   ## Typical workflow for long-running commands
 
