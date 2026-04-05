@@ -10,6 +10,7 @@ export function bobbitLoadingAnimation(): TemplateResult {
         width: 100%;
         height: 100%;
         background: var(--background);
+        animation: bobbit-loading-fade-in 0.4s ease-out both;
       }
       .bobbit-loading-camera {
         animation: bobbit-loading-camera-lag 1.95s cubic-bezier(0.37, 0, 0.63, 1) infinite;
@@ -242,6 +243,10 @@ export function bobbitLoadingAnimation(): TemplateResult {
         97.5%     { opacity: 0.15; transform: translate(-8px, -2px); }
         99.5%     { opacity: 0.05; transform: translate(-13px, -3px); }
         100%      { opacity: 0;    transform: translate(-14px, -3px); }
+      }
+      @keyframes bobbit-loading-fade-in {
+        from { opacity: 0; }
+        to   { opacity: 1; }
       }
     </style>
     <div class="bobbit-loading-scene-wrap">
