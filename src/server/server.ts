@@ -4067,6 +4067,21 @@ async function handleApiRoute(
 			}
 			await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
 			const output = await execGit(`git rebase origin/${primaryBranch}`, cwd, 30000, cid);
+
+			// After rebase, check if orphaned commits remain (common after squash-merge PRs).
+			// If the tree is identical to origin/primary (no diff), the commits are redundant —
+			// reset to origin/primary to clean them up.
+			const aheadAfter = parseInt(await execGitSafe(`git rev-list --count origin/${primaryBranch}..HEAD`, cwd, "0", cid), 10) || 0;
+			if (aheadAfter > 0) {
+				const diff = await execGitSafe(`git diff origin/${primaryBranch}..HEAD`, cwd, "", cid);
+				if (diff.trim() === "") {
+					// Tree is identical — these are orphaned commits from a squash merge
+					await execGit(`git reset --hard origin/${primaryBranch}`, cwd, 10000, cid);
+					json({ ok: true, output: `Rebased and reset ${aheadAfter} orphaned commit(s) from squash merge` });
+					return;
+				}
+			}
+
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
