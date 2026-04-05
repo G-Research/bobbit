@@ -713,8 +713,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Refresh git status when agent becomes idle (turn finished)
 			if (status === "idle") {
 				refreshGitStatusForSession(sessionId);
-				// Keep the active session marked as visited so it doesn't show unseen
-				markSessionVisited(sessionId);
+				// Keep the active session marked as visited so it doesn't show unseen.
+				// Only for the active session — cached sessions going idle should
+				// show the unseen indicator when the user switches back.
+				if (activeSessionId() === sessionId) {
+					markSessionVisited(sessionId);
+				}
 			}
 			renderApp();
 		};
