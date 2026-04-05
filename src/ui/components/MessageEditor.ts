@@ -330,7 +330,7 @@ export class MessageEditor extends LitElement {
 		} else if (e.key === "Escape" && this.isStreaming) {
 			e.preventDefault();
 			this.onAbort?.();
-		} else if (e.key === "ArrowUp" && this._history.length > 0 && this._isCursorOnVisualTopRow()) {
+		} else if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey && this._history.length > 0 && this._isCursorOnVisualTopRow()) {
 			// Enter history browsing or go further back
 			if (this._historyIndex === -1) {
 				// First press — save current draft and show newest history entry
@@ -343,7 +343,7 @@ export class MessageEditor extends LitElement {
 			}
 			e.preventDefault();
 			this._applyHistoryEntry();
-		} else if (e.key === "ArrowDown" && this._historyIndex !== -1 && this._isCursorOnVisualBottomRow()) {
+		} else if (e.key === "ArrowDown" && !e.ctrlKey && !e.metaKey && !e.altKey && this._historyIndex !== -1 && this._isCursorOnVisualBottomRow()) {
 			e.preventDefault();
 			if (this._historyIndex < this._history.length - 1) {
 				this._historyIndex++;

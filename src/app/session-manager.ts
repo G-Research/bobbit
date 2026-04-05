@@ -420,22 +420,6 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 	// Restore send gen from sessionStorage (survives HMR/reload)
 	_draftSendGen = parseInt(sessionStorage.getItem(`draft-send-gen-${sessionId}`) || "0", 10);
 
-	// Reset editor state synchronously so cached panels don't show stale text
-	// or history entries from the previous visit. The async draft load below
-	// will restore the correct draft if one exists.
-	{
-		const ed = document.querySelector("message-editor") as any;
-		if (ed && _draftSessionId === sessionId) {
-			ed.value = "";
-			// Reset command history browsing state — a cached panel may still
-			// have _historyIndex !== -1 from a previous visit
-			if (typeof ed._historyIndex === "number") {
-				ed._historyIndex = -1;
-				ed._savedDraft = "";
-			}
-		}
-	}
-
 	// Restore existing draft from server
 	(async () => {
 		try {

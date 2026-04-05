@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { box-sizing: border-box; }
+  textarea {
+    width: 300px;
+    font: 14px monospace;
+    padding: 4px;
+    resize: none;
+    overflow-y: auto;
+    field-sizing: content;
+    min-height: 1lh;
+  }
+</style>
+</head>
+<body>
+<textarea id="textarea" rows="1"></textarea>
+<script>
+// Minimal reproduction of MessageEditor's history + arrow key logic
+
+let _history = [];
+let _historyIndex = -1;
+let _savedDraft = "";
+let _value = "";
+
+const textarea = document.getElementById("textarea");
+
+function _isCursorOnVisualTopRow() {
+  const pos = textarea.selectionStart;
+  if (pos === 0) return true;
+  const style = getComputedStyle(textarea);
+  const mirror = document.createElement("div");
+  mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
+  mirror.textContent = textarea.value.substring(0, pos);
+  document.body.appendChild(mirror);
+  const cursorHeight = mirror.offsetHeight;
+  mirror.textContent = "X";
+  const singleRowHeight = mirror.offsetHeight;
+  document.body.removeChild(mirror);
+  return cursorHeight <= singleRowHeight;
+}
+
+function _isCursorOnVisualBottomRow() {
+  const pos = textarea.selectionStart;
+  if (pos >= textarea.value.length) return true;
+  const style = getComputedStyle(textarea);
+  const mirror = document.createElement("div");
+  mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
+  mirror.textContent = textarea.value;
+  document.body.appendChild(mirror);
+  const fullHeight = mirror.offsetHeight;
+  mirror.textContent = textarea.value.substring(0, pos);
+  const cursorHeight = mirror.offsetHeight;
+  mirror.textContent = "X";
+  const singleRowHeight = mirror.offsetHeight;
+  document.body.removeChild(mirror);
+  return (fullHeight - cursorHeight) <= singleRowHeight;
+}
+
+function _applyHistoryEntry() {
+  if (_historyIndex >= 0 && _historyIndex < _history.length) {
+    _value = _history[_historyIndex];
+    textarea.value = _value;
+  }
+}
+
+textarea.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey && _history.length > 0 && _isCursorOnVisualTopRow()) {
+    if (_historyIndex === -1) {
+      _savedDraft = textarea.value;
+      _historyIndex = _history.length - 1;
+    } else if (_historyIndex > 0) {
+      _historyIndex--;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    _applyHistoryEntry();
+  } else if (e.key === "ArrowDown" && !e.ctrlKey && !e.metaKey && !e.altKey && _historyIndex !== -1 && _isCursorOnVisualBottomRow()) {
+    e.preventDefault();
+    if (_historyIndex < _history.length - 1) {
+      _historyIndex++;
+      _applyHistoryEntry();
+    } else {
+      _historyIndex = -1;
+      _value = _savedDraft;
+      textarea.value = _value;
+    }
+  }
+});
+
+textarea.addEventListener("input", () => { _value = textarea.value; });
+
+// Test helpers
+window.setHistory = (h) => { _history = h; _historyIndex = -1; };
+window.getState = () => ({ value: textarea.value, historyIndex: _historyIndex, savedDraft: _savedDraft });
+window._testReady = true;
+</script>
+</body>
+</html>
