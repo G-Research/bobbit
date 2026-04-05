@@ -565,6 +565,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		_teardownDraftHandlers();
 		_draftSessionId = sessionId;
 
+		// Focus the prompt textarea
+		requestAnimationFrame(() => {
+			const editor = document.querySelector("message-editor") as any;
+			const textarea = editor?.querySelector("textarea");
+			if (textarea) textarea.focus();
+		});
+
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
