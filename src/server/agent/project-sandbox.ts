@@ -174,6 +174,11 @@ export class ProjectSandbox {
 	async shutdown(): Promise<void> {
 		if (!this.containerId) return;
 		try {
+			// Audit worktree state before stopping — helps diagnose lost worktrees on restart
+			try {
+				const wtList = await this._dockerExec(this.containerId, ["sh", "-c", "ls -d /workspace-wt/session/* 2>/dev/null || echo '(none)'"]);
+				console.log(`[project-sandbox] Pre-shutdown worktrees in ${this.containerId.substring(0, 12)}: ${wtList.trim()}`);
+			} catch { /* best-effort audit */ }
 			await execFileAsync("docker", ["stop", this.containerId], {
 				timeout: 30_000,
 				env: DOCKER_ENV,
@@ -223,7 +228,13 @@ export class ProjectSandbox {
 				try {
 					await this._dockerExec(existingId, ["echo", "ok"]);
 					this.containerId = existingId;
-					console.log(`[project-sandbox] Reconnected to running container ${existingId.substring(0, 12)} for project ${projectId}`);
+					// Audit worktree state on reconnect — helps debug disappearing worktrees
+					try {
+						const wtList = await this._dockerExec(existingId, ["sh", "-c", "ls -d /workspace-wt/session/* 2>/dev/null || echo '(none)'"]);
+						console.log(`[project-sandbox] Reconnected to running container ${existingId.substring(0, 12)} for project ${projectId} — worktrees: ${wtList.trim()}`);
+					} catch {
+						console.log(`[project-sandbox] Reconnected to running container ${existingId.substring(0, 12)} for project ${projectId}`);
+					}
 					return;
 				} catch {
 					// Container is in a bad state — remove and recreate
@@ -240,7 +251,13 @@ export class ProjectSandbox {
 					// Validate after start
 					await this._dockerExec(existingId, ["echo", "ok"]);
 					this.containerId = existingId;
-					console.log(`[project-sandbox] Restarted stopped container ${existingId.substring(0, 12)} for project ${projectId}`);
+					// Audit worktree state after restart — overlay FS data may have been lost
+					try {
+						const wtList = await this._dockerExec(existingId, ["sh", "-c", "ls -d /workspace-wt/session/* 2>/dev/null || echo '(none)'"]);
+						console.log(`[project-sandbox] Restarted stopped container ${existingId.substring(0, 12)} for project ${projectId} — worktrees: ${wtList.trim()}`);
+					} catch {
+						console.log(`[project-sandbox] Restarted stopped container ${existingId.substring(0, 12)} for project ${projectId}`);
+					}
 					return;
 				} catch {
 					console.warn(`[project-sandbox] Failed to restart container ${existingId.substring(0, 12)}, recreating`);

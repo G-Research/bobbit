@@ -81,6 +81,9 @@ export class BgProcessManager {
 		const args = containerId ? ["-c"] : hostArgs;
 		const containerCwd = cwd;
 
+		if (containerId) {
+			console.log(`[bg-process] Docker exec in container ${containerId.substring(0, 12)}, cwd=${containerCwd}`);
+		}
 		const child = containerId
 			? spawn("docker", ["exec", "-w", containerCwd, containerId, shell, ...args, command], {
 				stdio: ["ignore", "pipe", "pipe"],

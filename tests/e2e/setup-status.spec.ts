@@ -13,12 +13,15 @@ import { base, bobbitDir, apiFetch, nonGitCwd, deleteSession } from "./e2e-setup
 // Run tests serially — dismiss test modifies shared state (sentinel file)
 test.describe.configure({ mode: "serial" });
 
-/** Path to the setup-complete sentinel file in the E2E state dir. */
-const SENTINEL_PATH = join(bobbitDir(), "state", "setup-complete");
+/** Path to the setup-complete sentinel file in the E2E state dir.
+ *  Computed lazily because BOBBIT_DIR is set by the harness after module import. */
+function sentinelPath(): string {
+	return join(bobbitDir(), "state", "setup-complete");
+}
 
 /** Remove sentinel file to reset setup status. */
 function removeSentinel() {
-	try { unlinkSync(SENTINEL_PATH); } catch { /* doesn't exist */ }
+	try { unlinkSync(sentinelPath()); } catch { /* doesn't exist */ }
 }
 
 // Ensure clean state before the suite
@@ -65,7 +68,7 @@ test.describe("POST /api/setup-status/dismiss", () => {
 		expect(dismissData).toEqual({ ok: true });
 
 		// Sentinel file should now exist
-		expect(existsSync(SENTINEL_PATH)).toBe(true);
+		expect(existsSync(sentinelPath())).toBe(true);
 
 		// GET should now return complete: true
 		const statusResp = await apiFetch("/api/setup-status");

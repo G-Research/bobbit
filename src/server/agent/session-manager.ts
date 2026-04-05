@@ -1580,6 +1580,17 @@ export class SessionManager {
 				projectId: ps.projectId,
 				goalId: ps.goalId,
 			});
+			// Verify the sandbox worktree still exists inside the container
+			if (ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+				try {
+					await execFileAsync("docker", [
+						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
+					], { timeout: 5_000 });
+					console.log(`[session-manager] Sandbox worktree verified for ${ps.id}: ${ps.cwd}`);
+				} catch {
+					console.warn(`[session-manager] Sandbox worktree MISSING for ${ps.id}: ${ps.cwd} — agent may fail`);
+				}
+			}
 		}
 
 		// Restore extension args for goal/team sessions

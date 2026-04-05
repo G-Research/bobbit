@@ -55,10 +55,9 @@ test.describe("Sandbox session archive", () => {
 		const msgs = await sm.getArchivedMessages(id);
 		expect(msgs.length).toBeGreaterThan(0);
 
-		// 6. The path is in the agent's coordinate system.
-		// For non-sandboxed sessions (this test runs without Docker),
-		// it should be a host path.
-		const normalizedPath = hostPath.replace(/\\/g, "/");
-		expect(normalizedPath).not.toContain("/home/node/");
+		// 6. The path should be a valid host-accessible path.
+		// It should exist on disk (the .jsonl file was written by the mock agent).
+		const { existsSync } = await import("node:fs");
+		expect(existsSync(hostPath)).toBe(true);
 	});
 });

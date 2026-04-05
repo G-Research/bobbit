@@ -59,6 +59,15 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 	// Mark setup as complete so the setup wizard doesn't appear in tests
 	writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
+	// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
+	// The client checks /api/oauth/status which reads ~/.bobbit/agent/auth.json;
+	// by setting BOBBIT_AGENT_DIR we redirect that to our isolated dir.
+	const agentDir = join(bobbitDir, "agent");
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
+		anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
+	}));
+
 	const args = [
 		SERVER_CLI,
 		"--host", "127.0.0.1",
@@ -79,10 +88,15 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 		env: {
 			...process.env,
 			BOBBIT_DIR: bobbitDir,
+			BOBBIT_AGENT_DIR: agentDir,
 			BOBBIT_LLM_REVIEW_SKIP: "1",
 			BOBBIT_SKIP_NPM_CI: "1",
 			// Don't skip MCP — the mcp-integration tests need it
 			BOBBIT_NO_OPEN: "1",
+			// Clear host/sandbox gateway credentials to prevent agent subprocesses
+			// from posting to the wrong gateway (e.g. the production host).
+			BOBBIT_GATEWAY_URL: "",
+			BOBBIT_TOKEN: "",
 		},
 	});
 
