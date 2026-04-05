@@ -98,8 +98,9 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 
 	// ── Bind mounts / volumes ──────────────────────────────────────────
 	if (projectId) {
-		// Per-project container: named Docker volume for /workspace (survives container recreation)
+		// Per-project container: named Docker volumes (survive container recreation)
 		args.push("-v", `bobbit-workspace-${projectId}:/workspace`);
+		args.push("-v", `bobbit-worktrees-${projectId}:/workspace-wt`);
 	} else if (workspaceDir) {
 		// Legacy pool mode: bind-mount host directory as /workspace
 		args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);

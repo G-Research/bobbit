@@ -33,4 +33,30 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(args.some(a => a.includes("metadata.google.internal")));
 		assert.ok(args.some(a => a.includes("metadata.internal")));
 	});
+
+	it("mounts named workspace and worktrees volumes when projectId is set", () => {
+		const projectId = "test-project-abc";
+		const args = buildDockerRunArgs({
+			image: "test", workspaceDir: "/tmp/test",
+			projectId,
+		});
+		assert.ok(
+			args.includes(`bobbit-workspace-${projectId}:/workspace`),
+			"should mount workspace named volume",
+		);
+		assert.ok(
+			args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`),
+			"should mount worktrees named volume",
+		);
+	});
+
+	it("does not mount worktrees volume when projectId is not set", () => {
+		const args = buildDockerRunArgs({
+			image: "test", workspaceDir: "/tmp/test",
+		});
+		assert.ok(
+			!args.some(a => a.includes("/workspace-wt")),
+			"should not mount worktrees volume without projectId",
+		);
+	});
 });
