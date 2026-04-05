@@ -12,6 +12,8 @@
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
+import fs from "node:fs";
+import path from "node:path";
 import { createWorktree, cleanupWorktree, type WorktreeResult } from "../skills/git.js";
 
 const execFile = promisify(execFileCb);
@@ -40,7 +42,11 @@ export class WorktreePool {
 
 	/** Start filling the pool in the background. Call once after startup. */
 	startFilling(): void {
-		this.replenish();
+		// First, reclaim any orphaned pool worktrees from a previous server instance.
+		// These are directories matching the _pool-* naming convention with valid .git files
+		// that no active session owns. Reclaiming avoids creating unnecessary new worktrees
+		// and prevents the old entries from being pruned by git (which would break them).
+		this.reclaimOrphaned().then(() => this.replenish()).catch(() => this.replenish());
 	}
 
 	/**
@@ -123,6 +129,51 @@ export class WorktreePool {
 			// Fall back if origin/HEAD is not set
 		}
 		return "origin/master";
+	}
+
+	/**
+	 * Scan for orphaned pool worktrees from a previous server instance and reclaim them.
+	 * An orphaned pool worktree is a directory matching `session-_pool-*` in the worktree
+	 * root with a valid `.git` file, whose branch is still a `session/_pool-*` branch
+	 * (i.e. it was never claimed by a session).
+	 */
+	private async reclaimOrphaned(): Promise<void> {
+		try {
+			const wtRoot = path.resolve(this.repoPath, "..", `${path.basename(this.repoPath)}-wt`);
+			if (!fs.existsSync(wtRoot)) return;
+
+			const entries = fs.readdirSync(wtRoot, { withFileTypes: true });
+			for (const entry of entries) {
+				if (this.pool.length >= this.targetSize) break;
+				if (!entry.isDirectory() || !entry.name.startsWith("session-_pool-")) continue;
+
+				const wtPath = path.join(wtRoot, entry.name);
+				const gitFile = path.join(wtPath, ".git");
+				if (!fs.existsSync(gitFile)) continue;
+
+				// Check the branch — only reclaim if it's still a pool branch (unclaimed)
+				try {
+					const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+						cwd: wtPath,
+						timeout: 5_000,
+					});
+					const branch = stdout.trim();
+					if (!branch.startsWith("session/_pool-")) continue;
+
+					this.pool.push({
+						branchName: branch,
+						worktreePath: wtPath,
+						createdAt: Date.now(),
+					});
+					console.log(`[worktree-pool] Reclaimed orphaned: ${branch} at ${wtPath} (pool: ${this.pool.length}/${this.targetSize})`);
+				} catch {
+					// Can't read branch — skip, don't break
+					continue;
+				}
+			}
+		} catch (err) {
+			console.warn("[worktree-pool] Orphan reclaim scan failed:", err);
+		}
 	}
 
 	/** Fill pool up to targetSize in the background. */

@@ -176,9 +176,15 @@ export async function cleanupWorktree(
 			cwd: repoPath,
 		});
 	} catch {
-		// If remove fails, try prune
+		// If remove fails, clean up the admin entry for this specific worktree
+		// (NOT a blanket prune — that could damage other worktrees whose
+		// directories exist but have broken .git metadata).
 		try {
-			await execFile("git", ["worktree", "prune"], { cwd: repoPath });
+			const safeName = path.basename(worktreePath);
+			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+			if (fs.existsSync(adminPath)) {
+				fs.rmSync(adminPath, { recursive: true, force: true });
+			}
 		} catch {
 			// ignore
 		}
@@ -220,8 +226,61 @@ export async function recoverWorktree(
 	}
 
 	try {
-		// Prune stale worktree entries — git may still have a record of the old one
-		await execFile("git", ["worktree", "prune"], { cwd: repoPath });
+		const dirExists = fs.existsSync(worktreePath);
+		const gitFileExists = dirExists && fs.existsSync(path.join(worktreePath, ".git"));
+
+		if (dirExists && gitFileExists) {
+			// Directory and .git exist — try `git worktree repair` to fix any
+			// path mismatches (e.g. worktree was moved or .git/worktrees entry is stale).
+			try {
+				await execFile("git", ["worktree", "repair"], { cwd: repoPath });
+				console.log(`[git] Repaired worktree for branch "${branchName}" at ${worktreePath}`);
+				return worktreePath;
+			} catch {
+				// repair failed — fall through to full recovery
+			}
+		}
+
+		if (dirExists && !gitFileExists) {
+			// Directory exists but .git metadata is gone (e.g. partial git worktree
+			// remove on Windows, or worktree entry pruned while files remain).
+			// Try to restore the .git pointer file and repair in-place — this avoids
+			// having to delete the directory (which fails on Windows due to file locks
+			// in node_modules/.bin, etc.).
+			const safeName = path.basename(worktreePath);
+			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+			if (fs.existsSync(adminPath)) {
+				// Admin entry exists — restore the .git pointer file
+				const gitdirTarget = adminPath.split(path.sep).join("/");
+				try {
+					fs.writeFileSync(path.join(worktreePath, ".git"), `gitdir: ${gitdirTarget}\n`);
+					// Update admin entry's gitdir to point back to this worktree
+					fs.writeFileSync(path.join(adminPath, "gitdir"), worktreePath.split(path.sep).join("/") + "/.git\n");
+					await execFile("git", ["worktree", "repair"], { cwd: repoPath });
+					console.log(`[git] Restored .git pointer and repaired worktree for branch "${branchName}" at ${worktreePath}`);
+
+					// Run setup command if configured
+					if (!process.env.BOBBIT_SKIP_NPM_CI) {
+						const cmd = opts?.setupCommand !== undefined ? opts.setupCommand : (readWorktreeSetupCommand() ?? "");
+						await setupWorktreeDeps(repoPath, worktreePath, cmd);
+					}
+					return worktreePath;
+				} catch (repairErr) {
+					console.warn(`[git] Failed to repair worktree in-place for "${branchName}", falling back to recreate:`, repairErr);
+					// Clean up the potentially bad .git file
+					try { fs.rmSync(path.join(worktreePath, ".git"), { force: true }); } catch { /* best-effort */ }
+					try { fs.rmSync(adminPath, { recursive: true, force: true }); } catch { /* best-effort */ }
+				}
+			}
+		} else if (!dirExists) {
+			// Directory doesn't exist — remove the stale admin entry if present.
+			// Use targeted removal instead of blanket prune.
+			const safeName = path.basename(worktreePath);
+			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+			if (fs.existsSync(adminPath)) {
+				try { fs.rmSync(adminPath, { recursive: true, force: true }); } catch { /* best-effort */ }
+			}
+		}
 
 		// Fetch to make sure we have the branch ref
 		try {
@@ -246,6 +305,18 @@ export async function recoverWorktree(
 				console.warn(`[git] Cannot recover worktree: branch "${branchName}" not found locally or on remote`);
 				return null;
 			}
+		}
+
+		// If directory still exists with no .git (in-place repair failed or no admin entry),
+		// remove it so git worktree add can recreate it.
+		if (fs.existsSync(worktreePath) && !fs.existsSync(path.join(worktreePath, ".git"))) {
+			try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+
+		// If the directory still exists after rmSync (Windows file locks), we can't proceed
+		if (fs.existsSync(worktreePath)) {
+			console.warn(`[git] Cannot recover worktree: directory "${worktreePath}" exists and could not be removed (file locks?)`);
+			return null;
 		}
 
 		// Create the worktree — use existing branch (no -b) or track from remote
