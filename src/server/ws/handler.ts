@@ -283,6 +283,9 @@ export function handleWebSocketConnection(
 					while ((match = slashPattern.exec(promptText)) !== null) {
 						const skillName = match[2];
 						const skill = getSlashSkill(session.cwd, skillName, resolvedConfigStore);
+						if (!skill) {
+							console.warn(`[ws-handler] Slash skill "${skillName}" not found for session ${sessionId} (cwd=${session.cwd})`);
+						}
 						if (skill) {
 							const prefixLen = match[1].length; // 0 at start, 1 after whitespace
 							const tokenStart = match.index + prefixLen; // position of "/"
