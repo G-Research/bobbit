@@ -2722,7 +2722,7 @@ export function doRenderApp(): void {
 				</div>
 				<div class="flex-1 flex min-h-0">
 					${renderSidebar()}
-					<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">
+					<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col bg-background">
 						${mainArea()}
 					</div>
 				</div>
