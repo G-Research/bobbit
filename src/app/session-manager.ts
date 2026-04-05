@@ -413,6 +413,8 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 	// Tear down any previous session's draft state
 	_teardownDraftHandlers();
 	_draftSessionId = sessionId;
+	// Restore send gen from sessionStorage (survives HMR/reload)
+	_draftSendGen = parseInt(sessionStorage.getItem(`draft-send-gen-${sessionId}`) || "0", 10);
 
 	// Restore existing draft from server
 	(async () => {
@@ -477,6 +479,7 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 				// this, the load will see gen <= _draftSendGen and ignore it.
 				const gen = ++_draftGen;
 				_draftSendGen = gen;
+				sessionStorage.setItem(`draft-send-gen-${_draftSessionId}`, String(gen));
 				saveDraftToServer(_draftSessionId, 'prompt', { text: "", gen });
 			}
 		});
