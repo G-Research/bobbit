@@ -162,13 +162,14 @@ test.describe("Queue UI E2E", () => {
 		await expect(page.locator("textarea").first()).toHaveValue(draftText, { timeout: 10_000 });
 	});
 
-	test("story 9: edit pill via API — remove and re-queue", async ({ page }) => {
-		// Since onEditQueued is not wired in AgentInterface, test the
-		// edit flow via WebSocket API + verify UI reflects changes
+	test("story 9: edit pill — remove, modify, re-queue at end", async ({ page }) => {
+		// Note: onEditQueued is wired in AgentInterface by a separate task.
+		// This test verifies the full edit flow via WS API (remove + re-queue)
+		// and validates the UI reflects all changes correctly. When onEditQueued
+		// is wired, the pencil button click triggers the same API operations.
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
-		// Connect a WS client for API-level control
 		const conn = await connectWs(sessionId);
 
 		try {
@@ -179,33 +180,82 @@ test.describe("Queue UI E2E", () => {
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 			// Make agent busy
-			conn.send({ type: "prompt", text: "STAY_BUSY:10000 working" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:15000 working" });
 			await conn.waitFor(statusPredicate("streaming"));
 
-			// Queue a message
+			// Queue 2 messages
 			conn.send({ type: "prompt", text: "edit me" });
-			const q1 = await conn.waitFor(queueLenPredicate(1));
+			await conn.waitFor(queueLenPredicate(1));
+			conn.send({ type: "prompt", text: "keep me" });
+			const q2 = await conn.waitFor(queueLenPredicate(2));
 
-			// Verify pill appears in UI
-			await expect(page.locator(".queue-pill")).toHaveCount(1, { timeout: 5_000 });
-			await expect(page.locator(".pill-text").first()).toContainText("edit me");
+			// Verify both pills appear in UI in order
+			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
+			await expect(page.locator(".pill-text").nth(0)).toContainText("edit me");
+			await expect(page.locator(".pill-text").nth(1)).toContainText("keep me");
 
-			// Remove the message (simulating the edit flow: remove + put text in textarea)
-			conn.send({ type: "remove_queued", messageId: q1.queue![0].id });
-			await conn.waitFor(queueLenPredicate(0));
-
-			// Pill should disappear from UI
-			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
-
-			// Now re-queue a modified version
-			conn.send({ type: "prompt", text: "edited message" });
+			// Simulate edit: remove the first pill
+			conn.send({ type: "remove_queued", messageId: q2.queue![0].id });
 			await conn.waitFor(queueLenPredicate(1));
 
-			// Verify the new pill appears with updated text
+			// UI should show only "keep me"
 			await expect(page.locator(".queue-pill")).toHaveCount(1, { timeout: 5_000 });
-			await expect(page.locator(".pill-text").first()).toContainText("edited message");
+			await expect(page.locator(".pill-text").first()).toContainText("keep me");
+
+			// Re-queue modified version — should appear AFTER "keep me"
+			conn.send({ type: "prompt", text: "edited message" });
+			await conn.waitFor(queueLenPredicate(2));
+
+			// Verify order: "keep me" first (original), "edited message" at end
+			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
+			await expect(page.locator(".pill-text").nth(0)).toContainText("keep me");
+			await expect(page.locator(".pill-text").nth(1)).toContainText("edited message");
 		} finally {
 			conn.close();
 		}
+	});
+
+	test("story 24: draft cleared after sending message", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		await openApp(page);
+
+		// Navigate to session
+		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		// Type draft text (don't send yet)
+		const textarea = page.locator("textarea").first();
+		await textarea.fill("draft to be cleared");
+
+		// Wait for the debounced draft save to complete via API polling
+		await expect(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionId}/draft?type=prompt`);
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.data.text).toBe("draft to be cleared");
+		}).toPass({ timeout: 10_000 });
+
+		// Send the message (press Enter)
+		await textarea.press("Enter");
+
+		// Wait for agent to respond and go idle
+		await waitForSessionStatus(sessionId, "idle", 15_000);
+
+		// Reload the page
+		await page.reload();
+
+		// Wait for app to load
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 15_000 });
+
+		// Navigate back to the same session
+		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		// Verify textarea is empty — draft was cleared on send
+		await expect(page.locator("textarea").first()).toHaveValue("", { timeout: 10_000 });
 	});
 });

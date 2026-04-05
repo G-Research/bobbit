@@ -69,6 +69,7 @@ document.getElementById('editor').addEventListener('keydown', function(e) {
 // ── CommandHistoryStore mock (replicates real dedup logic from command-history-store.ts) ──
 // Uses in-memory Map instead of IndexedDB, but the addEntry/getHistory logic is identical.
 const storeData = new Map(); // key → { id, sessionId, text, timestamp }
+let _keyCounter = 0; // monotonic counter to avoid timestamp collisions in tests
 
 const historyStore = {
   async addEntry(sid, text) {
@@ -84,8 +85,8 @@ const historyStore = {
     if (entries.length > 0 && entries[entries.length - 1].text === trimmed) {
       return;
     }
-    const timestamp = Date.now();
-    const entry = { id: `${sid}:${timestamp}`, sessionId: sid, text: trimmed, timestamp };
+    const counter = ++_keyCounter;
+    const entry = { id: `${sid}:${counter}`, sessionId: sid, text: trimmed, timestamp: counter };
     storeData.set(entry.id, entry);
   },
 

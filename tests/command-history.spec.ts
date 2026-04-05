@@ -128,10 +128,7 @@ test.describe("CommandHistoryStore dedup", () => {
 		const history = await page.evaluate(async () => {
 			const store = (window as any).historyStore;
 			await store.addEntry("test-session", "alpha");
-			// Small delay to avoid timestamp key collision (in-memory store uses Date.now() as key)
-			await new Promise(r => setTimeout(r, 2));
 			await store.addEntry("test-session", "beta");
-			await new Promise(r => setTimeout(r, 2));
 			await store.addEntry("test-session", "alpha");
 			return store.getHistory("test-session");
 		});
