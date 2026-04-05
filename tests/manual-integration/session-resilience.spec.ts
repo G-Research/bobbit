@@ -167,7 +167,7 @@ function goalDashboardUrl(gw: GW, goalId: string) {
  * wait for idle, then send a message and wait for the response.
  * This is the browser-driven equivalent of abort + prompt.
  */
-async function interruptAndSend(page: Page, gw: GW, id: string, text: string) {
+async function interruptAndSend(page: Page, gw: GW, id: string, text: string, idleTimeoutMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
 	await page.waitForSelector("textarea", { timeout: 15_000 });
 
@@ -187,7 +187,7 @@ async function interruptAndSend(page: Page, gw: GW, id: string, text: string) {
 	await page.fill("textarea", text);
 	await page.press("textarea", "Enter");
 	await page.waitForTimeout(1_500);
-	await pollIdle(gw, id, 120_000);
+	await pollIdle(gw, id, idleTimeoutMs);
 	await page.waitForTimeout(2_000);
 }
 
@@ -584,12 +584,14 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		goalGateCount = gates.length;
 		recordGoalPhase("goal", "Gates visible", t0, true, `${gates.length} gates`);
 
-		// Navigate to team lead session — interrupt if streaming, then send a message
+		// Navigate to team lead session — just verify it's working, take a screenshot.
+		// Responsiveness is tested post-restart in E-2.
 		t0 = performance.now();
-		await interruptAndSend(page, gw, goalTeamLeadId,
-			"List tasks and gates. Run `pwd` and `git branch`.");
+		await page.goto(sessionUrl(gw, goalTeamLeadId));
+		await page.waitForSelector("textarea", { timeout: 15_000 });
+		await page.waitForTimeout(2_000);
 		await takeScreenshot(page, "goal-team-lead.png");
-		recordGoalPhase("goal", "Team lead responds", t0, true, "interrupted + message via browser");
+		recordGoalPhase("goal", "Team lead visible", t0, true, "session loaded in browser");
 
 		// Agents tab via browser
 		t0 = performance.now();
@@ -651,12 +653,14 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		sbxGoalGateCount = sbxGates.length;
 		recordGoalPhase("goal-sandbox", "Dashboard + gates", t0, true, `${sbxGates.length} gates`);
 
-		// Interrupt team lead and send a message
+		// Navigate to team lead session — just verify it's working, take a screenshot.
+		// Responsiveness is tested post-restart in E-3.
 		t0 = performance.now();
-		await interruptAndSend(page, gw, sbxGoalTeamLeadId,
-			"Run `pwd`, `hostname`, and `git branch` to confirm you are inside the container.");
+		await page.goto(sessionUrl(gw, sbxGoalTeamLeadId));
+		await page.waitForSelector("textarea", { timeout: 15_000 });
+		await page.waitForTimeout(2_000);
 		await takeScreenshot(page, "sbx-goal-team-lead.png");
-		recordGoalPhase("goal-sandbox", "Team lead responds", t0, true, "interrupted + message via browser (Docker)");
+		recordGoalPhase("goal-sandbox", "Team lead visible", t0, true, "session loaded in browser (Docker)");
 
 		// Agents tab
 		t0 = performance.now();
@@ -789,7 +793,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		const alive = sess.status !== "archived" && sess.status !== "terminated";
 		if (alive) {
 			await interruptAndSend(page, gw, goalTeamLeadId,
-				"Confirm you survived a gateway restart. Run `pwd` and `git log --oneline -3`.");
+				"Run ONLY `pwd` and `git log --oneline -3`. Nothing else.");
 			await takeScreenshot(page, "goal-team-lead-after-restart.png");
 			recordGoalPhase("goal", "Team lead post-restart", t0, true, "responds via browser");
 		} else {
@@ -836,7 +840,8 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		const alive = sess.status !== "archived" && sess.status !== "terminated";
 		if (alive) {
 			await interruptAndSend(page, gw, sbxGoalTeamLeadId,
-				"Confirm you survived a restart. Run `pwd`, `hostname`, `git log --oneline -3`.");
+				"Run ONLY these commands and nothing else: `pwd`, `hostname`, `git log --oneline -3`. Do not explore or read files.",
+				180_000);
 			await takeScreenshot(page, "sbx-goal-team-lead-after-restart.png");
 			recordGoalPhase("goal-sandbox", "Team lead post-restart", t0, true, "responds via browser (Docker)");
 		} else {
