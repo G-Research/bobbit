@@ -59,6 +59,7 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 - `sandboxed` is a typed field on `SessionInfo` (no `(session as any)._sandboxed` hack)
 - `restoreSessions()` in `session-manager.ts` skips sessions with missing `.jsonl` files
 - Failed restores create dormant entries that revive on client connect
+- **Server restarts are safe** — restarting the gateway never deletes worktrees, terminates sessions, or purges archives. All agent work survives intact. Orphaned resources can be cleaned up manually via Settings → Maintenance tab or the `/api/maintenance/*` REST endpoints.
 
 ## Compaction
 
@@ -113,6 +114,7 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 - Container not starting? Check `docker logs <containerId>` for init sequence errors (clone, npm ci, build)
 - Container not reconnecting after restart? The gateway finds containers by label on startup — verify the label matches with `docker inspect <containerId>` → Labels
 - Named volume lost (Docker Desktop reset)? The container will re-clone from remote and re-run npm ci on next init. Git commits are safe if push-to-remote hooks were active.
+- Container worktrees missing after recreation? Verify the `bobbit-worktrees-<projectId>` volume exists (`docker volume ls`). This volume persists `/workspace-wt` across container recreation.
 
 ## Search index
 

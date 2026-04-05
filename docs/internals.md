@@ -224,7 +224,7 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, `git worktree add` creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container.
 2. **Working**: The agent works in the worktree directory. The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
-4. **Orphan cleanup**: On server startup, `cleanupOrphanedSessionWorktrees()` scans for `session/*` worktree branches that don't match any active session and removes them. This handles ungraceful shutdowns where cleanup didn't run.
+4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
 5. **Restore**: After a restart, existing session worktrees are reused — the server reconnects to the worktree on disk without recreating it.
 
 ### Sidebar grouping
@@ -518,7 +518,7 @@ Auto-built on startup if image missing but `docker/Dockerfile` exists (120s time
 2. `ProjectSandbox.init()` searches for an existing container by label (`bobbit-project=<projectId>`):
    - **Found running** → reconnect (reuse container ID)
    - **Found stopped** → restart via `docker start`
-   - **Not found** → create new container with named Docker volume (`bobbit-workspace-<projectId>`)
+   - **Not found** → create new container with named Docker volumes (`bobbit-workspace-<projectId>` for `/workspace`, `bobbit-worktrees-<projectId>` for `/workspace-wt`)
 3. On first create, the container runs an init sequence: `git clone <repoUrl>`, `npm ci`, optional Playwright install, `npm run build`
 4. Container runs with `--restart=unless-stopped` so it survives Docker daemon restarts
 
@@ -607,11 +607,11 @@ Sandbox containers are long-lived and survive gateway restarts (via `--restart=u
 **Recovery flow on gateway startup:**
 
 1. `ProjectSandbox.init()` finds the existing container by label (`bobbit-project=<projectId>`)
-2. If running, reconnects. If stopped, restarts. If gone, recreates with the same named volume (`bobbit-workspace-<projectId>`) — git history in the volume is preserved
-3. If the volume was also lost (e.g. Docker Desktop reset), the container re-clones from the remote — committed work is recovered from the remote, uncommitted work is lost
+2. If running, reconnects. If stopped, restarts. If gone, recreates with the same named volumes (`bobbit-workspace-<projectId>` for `/workspace`, `bobbit-worktrees-<projectId>` for `/workspace-wt`) — git history and agent worktrees in the volumes are preserved
+3. If the volumes were also lost (e.g. Docker Desktop reset), the container re-clones from the remote — committed work is recovered from the remote, uncommitted work is lost
 4. `restoreSession()` calls `applySandboxWiring()` which verifies the worktree still exists inside the container
 
-**Durability layers:** (1) Post-commit hooks push every commit to the remote immediately. (2) Named Docker volume preserves `/workspace` across container recreation. (3) Session logs are bind-mounted to the host — never stored only inside the container.
+**Durability layers:** (1) Post-commit hooks push every commit to the remote immediately. (2) Named Docker volumes preserve `/workspace` and `/workspace-wt` across container recreation — agent worktrees survive even if the container is removed and recreated. (3) Session logs are bind-mounted to the host — never stored only inside the container.
 
 ### Verification command execution
 
