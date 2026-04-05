@@ -3262,6 +3262,9 @@ export class SessionManager {
 				const branchMatch = block.match(/^branch refs\/heads\/(session\/.+)$/m);
 				if (!branchMatch) continue;
 				const branch = branchMatch[1];
+				// Skip worktree pool entries — they're pre-built and waiting to be
+				// claimed by new sessions. They won't have a matching active session yet.
+				if (branch.startsWith("session/_pool-")) continue;
 				const pathMatch = block.match(/^worktree (.+)$/m);
 				if (!pathMatch) continue;
 				const wtPath = pathMatch[1];
