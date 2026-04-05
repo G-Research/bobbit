@@ -4814,9 +4814,18 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		let cleaned = 0;
 		if (body?.worktrees && Array.isArray(body.worktrees)) {
-			// Clean specific worktrees
+			// Clean specific worktrees — validate each against registered projects and orphan list
+			const validRepoPaths = new Set([...projectContextManager.all()].map(ctx => ctx.project.rootPath));
 			for (const wt of body.worktrees) {
 				if (wt.path && wt.branch && wt.repoPath) {
+					// Validate repoPath is a registered project
+					if (!validRepoPaths.has(wt.repoPath)) continue;
+					// Validate this worktree is actually orphaned
+					try {
+						const orphans = await sessionManager.listOrphanedSessionWorktrees(wt.repoPath);
+						const isOrphan = orphans.some(o => o.path === wt.path && o.branch === wt.branch);
+						if (!isOrphan) continue;
+					} catch { continue; }
 					try {
 						const { cleanupWorktree } = await import("./skills/git.js");
 						await cleanupWorktree(wt.repoPath, wt.path, wt.branch, true);

@@ -2231,8 +2231,12 @@ async function scanWorktrees(): Promise<void> {
 		if (res.ok) {
 			const data = await res.json();
 			maintenanceWorktrees = data.worktrees ?? [];
+		} else {
+			maintenanceWorktrees = [];
 		}
-	} catch { /* ignore */ }
+	} catch {
+		maintenanceWorktrees = [];
+	}
 	maintenanceLoading = null;
 	renderApp();
 }
@@ -2255,8 +2259,12 @@ async function scanSessions(): Promise<void> {
 		if (res.ok) {
 			const data = await res.json();
 			maintenanceSessions = data.sessions ?? [];
+		} else {
+			maintenanceSessions = [];
 		}
-	} catch { /* ignore */ }
+	} catch {
+		maintenanceSessions = [];
+	}
 	maintenanceLoading = null;
 	renderApp();
 }
@@ -2278,8 +2286,12 @@ async function scanArchives(): Promise<void> {
 		const res = await gatewayFetch("/api/maintenance/expired-archives");
 		if (res.ok) {
 			maintenanceArchives = await res.json();
+		} else {
+			maintenanceArchives = { count: 0, totalSizeBytes: 0 };
 		}
-	} catch { /* ignore */ }
+	} catch {
+		maintenanceArchives = { count: 0, totalSizeBytes: 0 };
+	}
 	maintenanceLoading = null;
 	renderApp();
 }
