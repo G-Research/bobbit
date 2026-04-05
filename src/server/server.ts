@@ -612,15 +612,9 @@ export function createGateway(config: GatewayConfig) {
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 
-			// Clean up orphaned session worktrees (best-effort, non-blocking)
-			for (const ctx of projectContextManager.all()) {
-				try {
-					const repoPath = ctx.project.rootPath;
-					if (await isGitRepo(repoPath)) {
-						await sessionManager.cleanupOrphanedSessionWorktrees(repoPath);
-					}
-				} catch { /* best-effort */ }
-			}
+			// NOTE: Orphaned worktree cleanup and non-interactive session cleanup
+			// are no longer automatic on startup. Use the Settings → Maintenance UI
+			// or the /api/maintenance/* endpoints to preview and clean up manually.
 
 			sessionManager.startPurgeSchedule();
 
@@ -4790,6 +4784,93 @@ async function handleApiRoute(
 			reportHtml,
 		});
 		json({ ok: true });
+		return;
+	}
+
+	// ─── Maintenance endpoints ──────────────────────────────────────────
+	// These replace the old automatic cleanup-on-startup behavior.
+	// Users can preview orphaned resources and choose to clean them up.
+
+	// GET /api/maintenance/orphaned-worktrees
+	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
+		const allOrphans: Array<{ path: string; branch: string; repoPath: string }> = [];
+		for (const ctx of projectContextManager.all()) {
+			try {
+				const repoPath = ctx.project.rootPath;
+				if (await isGitRepo(repoPath)) {
+					const orphans = await sessionManager.listOrphanedSessionWorktrees(repoPath);
+					for (const o of orphans) {
+						allOrphans.push({ ...o, repoPath });
+					}
+				}
+			} catch { /* best-effort */ }
+		}
+		json({ worktrees: allOrphans });
+		return;
+	}
+
+	// POST /api/maintenance/cleanup-worktrees
+	if (url.pathname === "/api/maintenance/cleanup-worktrees" && req.method === "POST") {
+		const body = await readBody(req);
+		let cleaned = 0;
+		if (body?.worktrees && Array.isArray(body.worktrees)) {
+			// Clean specific worktrees
+			for (const wt of body.worktrees) {
+				if (wt.path && wt.branch && wt.repoPath) {
+					try {
+						const { cleanupWorktree } = await import("./skills/git.js");
+						await cleanupWorktree(wt.repoPath, wt.path, wt.branch, true);
+						cleaned++;
+					} catch { /* best-effort */ }
+				}
+			}
+		} else {
+			// Clean all orphans across all projects
+			for (const ctx of projectContextManager.all()) {
+				try {
+					const repoPath = ctx.project.rootPath;
+					if (await isGitRepo(repoPath)) {
+						await sessionManager.cleanupOrphanedSessionWorktrees(repoPath);
+						cleaned++; // count projects cleaned, not individual worktrees
+					}
+				} catch { /* best-effort */ }
+			}
+		}
+		json({ cleaned });
+		return;
+	}
+
+	// GET /api/maintenance/orphaned-sessions
+	if (url.pathname === "/api/maintenance/orphaned-sessions" && req.method === "GET") {
+		const sessions = await sessionManager.listOrphanedNonInteractiveSessions();
+		json({ sessions });
+		return;
+	}
+
+	// POST /api/maintenance/cleanup-sessions
+	if (url.pathname === "/api/maintenance/cleanup-sessions" && req.method === "POST") {
+		const body = await readBody(req);
+		const orphans = await sessionManager.listOrphanedNonInteractiveSessions();
+		const idsToTerminate = (body?.sessionIds && Array.isArray(body.sessionIds))
+			? body.sessionIds as string[]
+			: orphans.map(o => o.id);
+		const terminated = await sessionManager.terminateOrphanedSessions(idsToTerminate);
+		json({ terminated });
+		return;
+	}
+
+	// GET /api/maintenance/expired-archives
+	if (url.pathname === "/api/maintenance/expired-archives" && req.method === "GET") {
+		const stats = await sessionManager.getExpiredArchiveStats();
+		json(stats);
+		return;
+	}
+
+	// POST /api/maintenance/purge-archives
+	if (url.pathname === "/api/maintenance/purge-archives" && req.method === "POST") {
+		await sessionManager.purgeExpiredArchives();
+		const stats = await sessionManager.getExpiredArchiveStats();
+		json({ purged: true, remaining: stats });
 		return;
 	}
 
