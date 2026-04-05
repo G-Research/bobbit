@@ -129,8 +129,12 @@ async function browserSend(page: Page, gw: GW, id: string, text: string, idleMs 
 	await page.waitForTimeout(500);
 	await page.fill("textarea", text);
 	await page.press("textarea", "Enter");
+	// Wait for session to leave idle (become busy/streaming) before polling for idle,
+	// otherwise pollIdle returns immediately on the stale idle state
+	await page.waitForTimeout(1_500);
 	await pollIdle(gw, id, idleMs);
-	await page.waitForTimeout(1_000);
+	// Wait for the UI to finish rendering the response
+	await page.waitForTimeout(2_000);
 }
 
 /** Navigate to session, wait for it to reach idle (no message sent). */
