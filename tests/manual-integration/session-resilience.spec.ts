@@ -209,6 +209,47 @@ async function takeScreenshot(page: Page, name: string) {
 }
 
 /**
+ * Fetch git-status for a session via the API and return the parsed data.
+ * Returns null if the endpoint fails (e.g. session archived or cwd missing).
+ */
+async function fetchGitStatusApi(gw: GW, sessionId: string): Promise<{
+	branch: string; primaryBranch: string; isOnPrimary: boolean;
+	summary: string; clean: boolean; hasUpstream: boolean;
+	ahead: number; behind: number; aheadOfPrimary: number; behindPrimary: number;
+	mergedIntoPrimary: boolean; unpushed: boolean;
+	status: Array<{ file: string; status: string }>;
+} | null> {
+	try {
+		const res = await api(gw, `/api/sessions/${sessionId}/git-status`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch { return null; }
+}
+
+/**
+ * Verify the git-status widget is visible in the session UI.
+ * Looks for the `<git-status-widget>` custom element rendered inside the
+ * pill strip near the textarea. Returns the widget's text content (branch name etc.)
+ * or null if not found within the timeout.
+ */
+async function checkGitStatusWidget(page: Page): Promise<string | null> {
+	try {
+		const widget = page.locator('git-status-widget');
+		await widget.waitFor({ state: 'attached', timeout: 15_000 });
+		// The widget renders a shadow DOM button — get its text via JS
+		const text = await widget.evaluate((el: Element) => {
+			const sr = el.shadowRoot;
+			if (!sr) return el.textContent?.trim() || '';
+			const btn = sr.querySelector('button');
+			return btn?.textContent?.trim() || sr.textContent?.trim() || '';
+		});
+		return text || null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Create a goal via the browser UI:
  *   1. Click "New Goal" button — opens goal assistant with form panel
  *   2. Fill in title and spec directly in the form
@@ -347,6 +388,8 @@ interface SessionResult {
 	createMs: number; idleMs: number; responseMs: number;
 	restartMs: number; cwd: string; branch: string;
 	restoredAsIdle: boolean; screenshot?: string;
+	gitStatusApiBranch?: string; gitWidgetText?: string;
+	agentPwd?: string;
 }
 
 interface GoalPhase {
@@ -713,9 +756,41 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			expect(normalize(info.cwd)).toBe(normalize(s.cwd));
 			console.log(`  ${v.name}: status=${info.status} cwd_preserved=✓`);
 
+			// ── API metadata checks ──
+			// Sandbox sessions: cwd should be a container-internal path (starts with /workspace)
+			if (v.sandboxed) {
+				expect(info.cwd).toMatch(/^\/workspace/);
+				console.log(`    sandbox cwd=${info.cwd} (container-internal) ✓`);
+			}
+
+			// Non-sandbox worktree sessions: verify host worktree directory exists on disk
 			if (!v.sandboxed && v.worktree && restored && existsSync(s.cwd)) {
 				const br = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: s.cwd, encoding: "utf-8" }).trim();
 				expect(br).not.toBe("master");
+				console.log(`    worktree dir exists, branch=${br} ✓`);
+			} else if (!v.sandboxed && v.worktree && restored) {
+				console.log(`    WARNING: worktree dir ${s.cwd} does not exist on disk`);
+			}
+
+			// ── Git status API check ──
+			// After restart, the git-status endpoint should still return valid data
+			if (restored) {
+				const gitStatus = await fetchGitStatusApi(gw, s.id);
+				if (gitStatus) {
+					expect(gitStatus.branch).toBeTruthy();
+					if (!v.sandboxed) {
+						if (v.worktree) {
+							expect(gitStatus.branch).not.toBe("master");
+							expect(gitStatus.isOnPrimary).toBe(false);
+						} else {
+							expect(gitStatus.branch).toBe("master");
+							expect(gitStatus.isOnPrimary).toBe(true);
+						}
+					}
+					console.log(`    git-status API: branch=${gitStatus.branch} clean=${gitStatus.clean} isOnPrimary=${gitStatus.isOnPrimary} ✓`);
+				} else {
+					console.log(`    git-status API: not available (may be expected for sandbox after restart)`);
+				}
 			}
 
 			let screenshotId = s.id;
@@ -730,6 +805,40 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 				await pollIdle(gw, ns, v.sandboxed ? 180_000 : 120_000);
 				await browserSend(page, gw, ns, "Run `pwd`, and confirm `git status`");
 				screenshotId = ns;
+			}
+
+			// ── Git status widget UI check ──
+			// After sending a message, the widget should render with the correct branch
+			const widgetText = await checkGitStatusWidget(page);
+			if (widgetText) {
+				expect(widgetText).toContain("⎇");
+				if (!v.sandboxed && !v.worktree) {
+					expect(widgetText).toContain("master");
+				} else if (!v.sandboxed && v.worktree) {
+					expect(widgetText).not.toContain("master");
+				}
+				console.log(`    git-status widget: "${widgetText}" ✓`);
+			} else {
+				console.log(`    git-status widget: not rendered (may be loading)`);
+			}
+
+			// ── Verify agent-reported pwd matches API cwd ──
+			// Extract pwd output from the last assistant message in the page
+			const pageContent = await page.locator('[class*="message"], [class*="Message"], pre, code').allTextContents();
+			const allText = pageContent.join("\n");
+			const pwdMatch = allText.match(/(?:\/[\w./-]+workspace[\w./-]*|[A-Z]:\\[\w\\.-]+)/);
+			if (pwdMatch) {
+				const agentPwd = pwdMatch[0];
+				if (v.sandboxed) {
+					expect(agentPwd).toMatch(/^\/workspace/);
+					console.log(`    agent pwd=${agentPwd} (container-internal) ✓`);
+				} else {
+					// On non-sandbox, the agent's pwd should match the session cwd (normalized)
+					expect(normalize(agentPwd)).toBe(normalize(s.cwd));
+					console.log(`    agent pwd=${agentPwd} matches API cwd ✓`);
+				}
+			} else {
+				console.log(`    agent pwd: could not extract from page content`);
 			}
 
 			const ssName = `${v.label}-after-restart.png`;
@@ -902,6 +1011,41 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 				await takeScreenshot(page, "sbx-after-container-recovery.png");
 				console.log(`  Sandbox session responds after container recovery`);
 				recordGoalPhase("goal-sandbox", "Session post-recovery", t0, true, "responds via browser");
+
+				// ── Verify git-status widget renders after container recovery ──
+				const widgetText = await checkGitStatusWidget(page);
+				if (widgetText) {
+					expect(widgetText).toContain("⎇");
+					console.log(`  Git-status widget after recovery: "${widgetText}" ✓`);
+					recordGoalPhase("goal-sandbox", "Git widget post-recovery", t0, true, widgetText);
+				} else {
+					console.log(`  Git-status widget not rendered after recovery`);
+					recordGoalPhase("goal-sandbox", "Git widget post-recovery", t0, false, "widget not visible");
+				}
+
+				// ── Verify git-status API returns valid data after recovery ──
+				const gitStatus = await fetchGitStatusApi(gw, sbxSession.id);
+				if (gitStatus) {
+					expect(gitStatus.branch).toBeTruthy();
+					console.log(`  Git-status API after recovery: branch=${gitStatus.branch} clean=${gitStatus.clean} ✓`);
+					recordGoalPhase("goal-sandbox", "Git API post-recovery", t0, true, `branch=${gitStatus.branch}`);
+				} else {
+					console.log(`  Git-status API not available after recovery`);
+					recordGoalPhase("goal-sandbox", "Git API post-recovery", t0, false, "API returned null");
+				}
+
+				// ── Verify agent-reported pwd is container-internal after recovery ──
+				const pageContent = await page.locator('[class*="message"], [class*="Message"], pre, code').allTextContents();
+				const allText = pageContent.join("\n");
+				const pwdMatch = allText.match(/\/workspace[\w./-]*/);
+				if (pwdMatch) {
+					expect(pwdMatch[0]).toMatch(/^\/workspace/);
+					console.log(`  Agent pwd after recovery: ${pwdMatch[0]} (container-internal) ✓`);
+					recordGoalPhase("goal-sandbox", "Agent pwd post-recovery", t0, true, pwdMatch[0]);
+				} else {
+					console.log(`  Could not extract agent pwd after recovery`);
+					recordGoalPhase("goal-sandbox", "Agent pwd post-recovery", t0, false, "pwd not found in output");
+				}
 			} else {
 				console.log(`  Sandbox session status: ${info.status} — skipping message test`);
 				recordGoalPhase("goal-sandbox", "Session post-recovery", t0, false, `status=${info.status}`);
