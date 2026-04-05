@@ -157,6 +157,12 @@ export default defineConfig({
 	},
 	server: {
 		host,
+		watch: {
+			// Exclude worktree directories — test runners and agent sessions create
+			// clones under these dirs, and Vite's watcher triggers page reloads for
+			// every file in them.
+			ignored: ["**/.e2e-*-wt/**", "**/bobbit-wt/**", "**/*-wt/.sandbox-pool/**"],
+		},
 		fs: {
 			deny: [".bobbit/state", ".bobbit/config", "node_modules/.vite"],
 		},

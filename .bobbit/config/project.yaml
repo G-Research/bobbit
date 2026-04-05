@@ -1,4 +1,3 @@
-name: Josh
 build_command: npm run build
 typecheck_command: npm run check
 test_unit_command: npx playwright test --config tests/playwright.config.ts
@@ -12,11 +11,10 @@ config_directories: '[{"path":"C:\\tmp\\.bobbit","types":["skills"]},{"path":"C:
 sandbox: docker
 sandbox_image: bobbit-agent
 qa_build_command: npm run build
-qa_start_command: >-
-  PORT=$PORT WORK_DIR=$WORK_DIR BOBBIT_DIR=$WORK_DIR/.bobbit
-  BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1 BOBBIT_SKIP_NPM_CI=1
-  node dist/server/cli.js
-  --host 127.0.0.1 --port $PORT --no-tls --auth --cwd $WORK_DIR
+qa_start_command: PORT=$PORT WORK_DIR=$WORK_DIR BOBBIT_DIR=$WORK_DIR/.bobbit
+  BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1 BOBBIT_SKIP_NPM_CI=1 node
+  dist/server/cli.js --host 127.0.0.1 --port $PORT --no-tls --auth --cwd
+  $WORK_DIR
 qa_health_check: http://127.0.0.1:$PORT/api/health
 qa_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
 qa_env: '{"BOBBIT_NO_OPEN":"1","BOBBIT_LLM_REVIEW_SKIP":"1","BOBBIT_SKIP_NPM_CI":"1"}'
