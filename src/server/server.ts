@@ -4851,8 +4851,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/maintenance/cleanup-sessions" && req.method === "POST") {
 		const body = await readBody(req);
 		const orphans = await sessionManager.listOrphanedNonInteractiveSessions();
+		const orphanIds = new Set(orphans.map(o => o.id));
 		const idsToTerminate = (body?.sessionIds && Array.isArray(body.sessionIds))
-			? body.sessionIds as string[]
+			? (body.sessionIds as string[]).filter(id => orphanIds.has(id))
 			: orphans.map(o => o.id);
 		const terminated = await sessionManager.terminateOrphanedSessions(idsToTerminate);
 		json({ terminated });

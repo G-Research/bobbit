@@ -3326,8 +3326,19 @@ export class SessionManager {
 		let terminated = 0;
 		for (const id of sessionIds) {
 			try {
-				await this.terminateSession(id);
-				terminated++;
+				const didTerminate = await this.terminateSession(id);
+				if (didTerminate) {
+					terminated++;
+				} else {
+					// Session not in memory — try direct archive
+					try {
+						const ps = this.resolveStoreForId(id)?.get(id);
+						if (ps) {
+							this.getSessionStore(ps.projectId).archive(id);
+							terminated++;
+						}
+					} catch { /* project gone */ }
+				}
 			} catch (err) {
 				console.warn(`[session-manager] Failed to terminate orphan ${id}:`, err);
 				// Try direct archive as fallback

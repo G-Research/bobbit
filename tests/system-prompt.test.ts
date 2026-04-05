@@ -132,9 +132,13 @@ describe("assembleSystemPrompt", () => {
 	beforeEach(setup);
 	afterEach(cleanup);
 
-	it("returns undefined when all parts are empty", () => {
+	it("returns working-directory-only prompt when all other parts are empty", () => {
 		const result = assembleSystemPrompt("test-session", { cwd: cwdDir });
-		assert.equal(result, undefined);
+		// CWD alone now produces a prompt with just the Working Directory section
+		assert.ok(result);
+		const content = fs.readFileSync(result, "utf-8");
+		assert.ok(content.includes("# Working Directory"));
+		assert.ok(content.includes(cwdDir));
 	});
 
 	it("includes global system prompt", () => {
@@ -291,8 +295,11 @@ describe("assembleSystemPrompt", () => {
 			cwd: cwdDir,
 			goalSpec: "   \n\n  ",
 		});
-		// Whitespace-only goalSpec should be treated as empty
-		assert.equal(result, undefined);
+		// Whitespace-only goalSpec should be treated as empty, but CWD still produces a prompt
+		assert.ok(result);
+		const content = fs.readFileSync(result, "utf-8");
+		assert.ok(content.includes("# Working Directory"));
+		assert.ok(!content.includes("Goal"));
 	});
 });
 
