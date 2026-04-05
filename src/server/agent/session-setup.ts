@@ -507,9 +507,13 @@ export async function executeWorktreeAsync(
 		});
 
 		// Sandbox wiring may remap CWD to a container-internal path.
-		// Re-assemble the prompt so the Working Directory section matches the actual --cwd.
+		// Update session.cwd so git-status and other host-side operations use the
+		// container-internal path (via docker exec -w <cwd>), and re-assemble the
+		// prompt so the Working Directory section matches the actual --cwd.
 		if (plan.bridgeOptions.cwd && plan.bridgeOptions.cwd !== preSandboxCwd) {
 			plan.cwd = plan.bridgeOptions.cwd;
+			session.cwd = plan.bridgeOptions.cwd;
+			ctx.store.update(session.id, { cwd: session.cwd });
 			resolvePrompt(plan, ctx);
 		}
 	}
