@@ -598,6 +598,7 @@ export class MessageEditor extends LitElement {
 						size: "icon",
 						className: "h-8 w-8 shrink-0",
 						onClick: this.handleAttachmentClick,
+						title: "Attach files",
 						children: icon(Paperclip, "sm"),
 					})
 			: "";
@@ -608,6 +609,7 @@ export class MessageEditor extends LitElement {
 					size: "icon",
 					className: `h-8 w-8 shrink-0 ${this.isRecording ? "text-red-500 animate-pulse" : ""}`,
 					onClick: this.toggleSpeechRecognition,
+					title: this.isRecording ? "Stop recording" : "Start recording",
 					children: icon(this.isRecording ? MicOff : Mic, "sm"),
 				})
 			: "";
@@ -618,6 +620,7 @@ export class MessageEditor extends LitElement {
 					variant: "ghost",
 					size: "icon",
 					onClick: this.onAbort,
+					title: "Stop streaming",
 					children: icon(Square, "sm"),
 					className: "h-8 w-8 shrink-0",
 				})
@@ -627,6 +630,7 @@ export class MessageEditor extends LitElement {
 			size: "icon",
 			onClick: this.handleSend,
 			disabled: !hasContent || this.processingFiles,
+			title: "Send message",
 			children: icon(Send, "sm"),
 			className: "h-8 w-8 shrink-0",
 		});
