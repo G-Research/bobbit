@@ -597,6 +597,31 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
 
+		// Reset session-scoped global state so it doesn't bleed from the previous session
+		const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+		state.assistantType = sessionData?.assistantType
+			|| (sessionData?.goalAssistant ? "goal"
+			: sessionData?.roleAssistant ? "role"
+			: sessionData?.toolAssistant ? "tool"
+			: sessionData?.staffAssistant ? "staff"
+			: null);
+		state.assistantTab = "chat";
+		state.assistantHasProposal = false;
+		state.activeGoalProposal = null;
+		state.activeRoleProposal = null;
+		state.activeStaffProposal = null;
+		state.previewTitle = "";
+		state.previewSpec = "";
+		state.previewCwd = "";
+		state.previewProjectId = "";
+		state.previewTitleEdited = false;
+		state.previewSpecEdited = false;
+		state.previewCwdEdited = false;
+		state.isPreviewSession = sessionData?.preview || false;
+		state.previewPanelHtml = "";
+		if (state.isPreviewSession) startPreviewPolling();
+		else stopPreviewPolling();
+
 		// Mark as visited so unseen indicators clear
 		markSessionVisited(sessionId);
 
