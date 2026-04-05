@@ -560,17 +560,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		applyProjectPalette(sessionForPalette?.projectId);
 
 		// Re-bind draft handlers to the restored session.
-		// Skip the server draft load — the cached editor already has the correct content.
-		// Just set the session ID so saves go to the right place.
-		_teardownDraftHandlers();
-		_draftSessionId = sessionId;
-
-		// Focus the prompt textarea
-		requestAnimationFrame(() => {
-			const editor = document.querySelector("message-editor") as any;
-			const textarea = editor?.querySelector("textarea");
-			if (textarea) textarea.focus();
-		});
+		// The cached editor already has the correct content, so just set
+		// the session ID for saves and focus the textarea.
+		_setupPromptDraftHandlers(sessionId);
 
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
 		refreshGitStatusForSession(sessionId);
