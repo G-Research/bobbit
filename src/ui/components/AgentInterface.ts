@@ -933,6 +933,21 @@ export class AgentInterface extends LitElement {
 									(session as any).removeQueued(id);
 								}
 							}}
+							.onEditQueued=${(msg: any) => {
+								// Remove pill from queue and place text back in textarea for editing
+								if (typeof (session as any).removeQueued === 'function') {
+									(session as any).removeQueued(msg.id);
+								}
+								this._messageEditor.value = msg.text || '';
+								// Focus the textarea inside the editor
+								const ta = this._messageEditor.shadowRoot?.querySelector('textarea');
+								ta?.focus();
+							}}
+							.onReorder=${(messageIds: string[]) => {
+								if (typeof (session as any).reorderQueue === 'function') {
+									(session as any).reorderQueue(messageIds);
+								}
+							}}
 							.onModelSelect=${() => {
 								ModelSelector.open(state.model, (model) => session.setModel(model));
 							}}

@@ -480,6 +480,8 @@ export class MessageEditor extends LitElement {
 	private handleDragOver = (e: DragEvent) => {
 		e.preventDefault();
 		e.stopPropagation();
+		// Don't show "Drop files here" overlay when dragging queue pills
+		if (this._draggedPillId) return;
 		if (!this.isDragging) {
 			this.isDragging = true;
 		}
