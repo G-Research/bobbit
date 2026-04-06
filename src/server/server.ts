@@ -1194,13 +1194,24 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/sandbox-pool
+	// GET /api/sandbox-pool (deprecated — no longer a real pool, returns basic stats)
 	if (url.pathname === "/api/sandbox-pool" && req.method === "GET") {
 		if (sandboxManager) {
 			const stats = sandboxManager.getStats();
 			json({ ...stats, type: "sandbox" });
 		} else {
 			json({ enabled: false });
+		}
+		return;
+	}
+
+	// GET /api/worktree-pool
+	if (url.pathname === "/api/worktree-pool" && req.method === "GET") {
+		const pool = sessionManager.getWorktreePool();
+		if (pool) {
+			json(pool.getStatus());
+		} else {
+			json({ enabled: false, ready: 0, target: 0, filling: false });
 		}
 		return;
 	}
