@@ -242,10 +242,8 @@
       </div>
     `;
 
-    // BUG: Dropdown is appended as child of the pill container (inside backdrop-filter)
-    // This causes position:fixed to be relative to the backdrop-filter container
-    const pillContainer = document.querySelector('[data-pill-container="p1"]');
-    pillContainer.appendChild(dropdown1);
+    // FIX: Portal dropdown to document.body so it escapes backdrop-filter containing block
+    document.body.appendChild(dropdown1);
 
     // Position it
     const rect = toggleBtn1.getBoundingClientRect();
@@ -264,8 +262,15 @@
     window.__dismissCalls.push(id);
   }
 
-  // Replicates _handlePillDismiss from AgentInterface
+  // Replicates _handlePillDismiss from AgentInterface (with fix)
+  const hiddenPillIds = new Set(['old-1', 'old-2', 'old-3']);
   function handlePillDismiss(id) {
+    // FIX: Check if the pill is in the hidden (popover) set — dismiss directly
+    if (hiddenPillIds.has(id)) {
+      onBgProcessDismiss(id);
+      return;
+    }
+
     // Set _dismissingId — expects animationend to call onBgProcessDismiss
     window.__dismissingId = id;
 
@@ -276,8 +281,6 @@
       wrapper.classList.add('pill-dismissing');
       // Animation will fire and the animationend handler will call onBgProcessDismiss
     }
-    // BUG: If the pill is in the popover (no wrapper), nothing happens.
-    // _dismissingId stays stuck and onBgProcessDismiss is never called.
   }
 
   // AnimationEnd handler for visible pill wrappers

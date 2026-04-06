@@ -1214,8 +1214,21 @@ export class AgentInterface extends LitElement {
 		// Figure out which pill will be promoted (become newly visible) after removal
 		const sorted = this._getSortedProcesses();
 		const count = Math.min(this._visiblePillCount, sorted.length);
-		const visibleCount = Math.max(1, count);
-		const hiddenCount = sorted.length - visibleCount;
+		let visibleCount = Math.max(1, count);
+		let hiddenCount = sorted.length - visibleCount;
+		// Apply the same "never show 1 more" adjustment as _renderPillStrip
+		if (hiddenCount === 1) { visibleCount++; hiddenCount = 0; }
+
+		// Check if the pill is in the hidden (popover) set — no animation wrapper there
+		if (hiddenCount > 0) {
+			const hiddenIds = new Set(sorted.slice(0, hiddenCount).map(p => p.id));
+			if (hiddenIds.has(id)) {
+				// Pill is in the "More" popover — dismiss directly, no animation
+				this.onBgProcessDismiss?.(id);
+				requestAnimationFrame(() => this._measurePillOverflow());
+				return;
+			}
+		}
 
 		// After removing this pill, the first hidden pill may become visible
 		if (hiddenCount > 0) {
