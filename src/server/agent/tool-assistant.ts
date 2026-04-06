@@ -125,15 +125,10 @@ Follow these steps in order:
 
 ## Progress tracking
 
-As you complete each part of the work, emit a \`<tool_proposal>\` block so the UI can track progress:
-
-<tool_proposal>
-<tool>tool-name</tool>
-<action>docs|renderer|tests|access|new-tool|config</action>
-<content>
-Summary of what was done.
-</content>
-</tool_proposal>
+As you complete each part of the work, call the \`propose_tool\` tool to track progress:
+- **tool**: The tool name (e.g. "tool-name")
+- **action**: One of: docs, renderer, tests, access, new-tool, config
+- **content**: Summary of what was done
 
 ### Actions
 - **docs** — Documentation written or updated

@@ -34,7 +34,7 @@ export function buildReattemptContext(goal: PersistedGoal): string {
 	lines.push("   - **Fix up**: keep the merged work and build on top");
 	lines.push("   - **Revert & fix up**: revert from master but use old code as starting point");
 	lines.push("4. Compose a new goal spec that includes the original spec, what went wrong, the chosen approach, and pointers to the old branch/PR");
-	lines.push(`5. Propose the new goal with a title like "Re-attempt: ${goal.title}"`);
+	lines.push(`5. Call \`propose_goal\` with a title like "Re-attempt: ${goal.title}"`);
 	return lines.join("\n");
 }
 
@@ -68,28 +68,15 @@ Pick the workflow that best fits. When in doubt, use **general**.
 
 ## Proposing a goal
 
-When ready, output a structured proposal block in EXACTLY this format:
-
-<goal_proposal>
-<title>Short 2-5 word title (must be under 29 characters)</title>
-<workflow>workflow-id</workflow>
-<spec>
-Markdown spec content. Include:
-- Brief description of what needs to be done
-- Key requirements or acceptance criteria
-- Constraints or edge cases discussed
-- Technical approach notes if relevant
-</spec>
-</goal_proposal>
-
-The \`<workflow>\` tag should contain the workflow ID (e.g. \`general\`, \`feature\`, or \`bug-fix\`).
-
-The \`<options>\` tag is optional. Use comma-separated step names matching optional steps in the workflow to pre-enable them (e.g. \`QA testing\`).
+When ready, call the \`propose_goal\` tool with these parameters:
+- **title**: Short 2-5 word title (must be under 29 characters)
+- **spec**: Markdown spec content. Include: brief description of what needs to be done, key requirements or acceptance criteria, constraints or edge cases discussed, technical approach notes if relevant
+- **workflow**: Workflow ID (e.g. "general", "feature", "bug-fix")
+- **options**: (optional) Comma-separated step names matching optional steps in the workflow to pre-enable them (e.g. "QA testing")
+- **cwd**: (optional) Working directory override path, if the user asks to change it
 
 Keep the spec focused and actionable — it will be injected into every coding agent session's context window for this goal. Don't pad it with generic advice. Every line should be specific to THIS goal.
 
-If the user asks to change the working directory, include a <cwd>/path/here</cwd> tag inside the proposal.
-
-After proposing, wait for feedback. The user may ask you to revise the proposal — just output a new <goal_proposal> block with the changes.
+After proposing, wait for feedback. The user may ask you to revise the proposal — just call \`propose_goal\` again with the changes.
 
 Be conversational and concise. Don't be overly formal or verbose.`;
