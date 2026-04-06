@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: sans-serif; background: #1a1a2e; color: #e0e0e0; }
+
+  :root {
+    --card: #2a2a3e;
+    --border: #444;
+    --foreground: #e0e0e0;
+    --muted-foreground: #999;
+    --background: #1a1a2e;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 9999px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    line-height: 1.25;
+    max-width: 200px;
+  }
+  .pill-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    background: none;
+    border: none;
+    font: inherit;
+    border-radius: 9999px 0 0 9999px;
+  }
+  .pill-dismiss-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 4px;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    background: none;
+    border: none;
+    border-left: 1px solid var(--border);
+    font-size: 10px;
+    line-height: 1;
+    min-width: 16px;
+    align-self: stretch;
+    border-radius: 0 9999px 9999px 0;
+  }
+  .status-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-running { background: #3b82f6; }
+  .status-exited { background: #22c55e; }
+
+  /* The dropdown that opens when you click a pill */
+  .pill-dropdown {
+    position: fixed;
+    z-index: 50;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 10px 15px -3px rgba(0,0,0,.1);
+    padding: 8px;
+    font-size: 12px;
+    width: min(400px, calc(100vw - 1rem));
+    max-width: calc(100vw - 1rem);
+  }
+
+  /* Animations for pill strip */
+  @keyframes pill-fade-out {
+    0%   { opacity: 1; transform: scale(1) translateX(0); }
+    100% { opacity: 0; transform: scale(0.6) translateX(12px); }
+  }
+  .pill-dismissing {
+    animation: pill-fade-out 300ms forwards;
+    pointer-events: none;
+  }
+
+  /* Popover styling matching AgentInterface's .pill-more-popover */
+  .pill-more-popover {
+    position: absolute;
+    bottom: 100%;
+    left: -8px;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: max-content;
+    padding: 14px;
+    margin: -8px;
+    margin-bottom: -7px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    --m: linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent),
+         linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent);
+    -webkit-mask-image: var(--m);
+    mask-image: var(--m);
+    -webkit-mask-composite: destination-in;
+    mask-composite: intersect;
+  }
+
+  .pill-strip { display: flex; gap: 6px; align-items: center; width: 300px; }
+  .pill-wrapper { display: inline-flex; align-items: center; position: relative; }
+  .more-container { display: inline-flex; align-items: center; position: relative; }
+</style>
+</head>
+<body>
+
+<!-- Test 1: Dropdown positioning inside a backdrop-filter container -->
+<div id="test-dropdown-positioning" style="padding:20px; margin-top:200px">
+  <h3 style="margin-bottom:12px">Bug 1: Dropdown inside backdrop-filter container</h3>
+  <div id="backdrop-container" style="
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 14px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    --m: linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent),
+         linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent);
+    -webkit-mask-image: var(--m);
+    mask-image: var(--m);
+    -webkit-mask-composite: destination-in;
+    mask-composite: intersect;
+  ">
+    <div class="pill-wrapper" data-pill-container="p1">
+      <span class="pill">
+        <button class="pill-toggle" data-pill-toggle="p1">
+          <span class="status-dot status-running"></span>
+          <span style="font-family:monospace">dev server</span>
+        </button>
+        <button class="pill-dismiss-btn" data-pill-dismiss="p1">✕</button>
+      </span>
+      <!-- Dropdown renders HERE (inline) when expanded — this is the bug -->
+    </div>
+  </div>
+</div>
+
+<hr style="border-color:#444; margin:20px 0">
+
+<!-- Test 2: Dismiss callback for popover pills -->
+<div id="test-dismiss" style="padding:20px; position: relative; margin-top: 200px;">
+  <h3 style="margin-bottom:12px">Bug 2: Dismiss in popover</h3>
+  <div class="pill-strip" id="pill-strip">
+    <!-- "More" button with popover containing hidden pills -->
+    <div class="more-container" id="more-container">
+      <span class="pill" data-more-btn>
+        <button class="pill-toggle" data-more-toggle>3 more</button>
+        <button class="pill-dismiss-btn" data-more-chevron>
+          <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 5.5L4 3L6.5 5.5"/></svg>
+        </button>
+      </span>
+      <!-- Popover with hidden pills (NO animation wrapper — this is the bug) -->
+      <div class="pill-more-popover" data-popover style="display:none">
+        <div data-popover-pill="old-1">
+          <span class="pill">
+            <button class="pill-toggle" data-pill-toggle="old-1">
+              <span class="status-dot status-exited"></span>
+              <span style="font-family:monospace">build</span>
+            </button>
+            <button class="pill-dismiss-btn" data-pill-dismiss="old-1">✕</button>
+          </span>
+        </div>
+        <div data-popover-pill="old-2">
+          <span class="pill">
+            <button class="pill-toggle" data-pill-toggle="old-2">
+              <span class="status-dot status-exited"></span>
+              <span style="font-family:monospace">lint</span>
+            </button>
+            <button class="pill-dismiss-btn" data-pill-dismiss="old-2">✕</button>
+          </span>
+        </div>
+        <div data-popover-pill="old-3">
+          <span class="pill">
+            <button class="pill-toggle" data-pill-toggle="old-3">
+              <span class="status-dot status-exited"></span>
+              <span style="font-family:monospace">test</span>
+            </button>
+            <button class="pill-dismiss-btn" data-pill-dismiss="old-3">✕</button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Visible pills WITH animation wrapper (matching AgentInterface behavior) -->
+    <div class="pill-wrapper" data-pill-wrapper="new-1" style="display:inline-flex;align-items:center">
+      <span class="pill">
+        <button class="pill-toggle" data-pill-toggle="new-1">
+          <span class="status-dot status-running"></span>
+          <span style="font-family:monospace">dev server</span>
+        </button>
+        <button class="pill-dismiss-btn" data-pill-dismiss="new-1">✕</button>
+      </span>
+    </div>
+    <div class="pill-wrapper" data-pill-wrapper="new-2" style="display:inline-flex;align-items:center">
+      <span class="pill">
+        <button class="pill-toggle" data-pill-toggle="new-2">
+          <span class="status-dot status-running"></span>
+          <span style="font-family:monospace">watcher</span>
+        </button>
+        <button class="pill-dismiss-btn" data-pill-dismiss="new-2">✕</button>
+      </span>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ---- Test 1: Dropdown toggle ----
+  // Replicates BgProcessPill behavior: clicking toggle renders a fixed dropdown
+  // INLINE as a child of the pill container (the bug — should be portaled to body)
+  const toggleBtn1 = document.querySelector('[data-pill-toggle="p1"]');
+  let dropdown1 = null;
+
+  toggleBtn1.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (dropdown1) {
+      dropdown1.remove();
+      dropdown1 = null;
+      return;
+    }
+    dropdown1 = document.createElement('div');
+    dropdown1.className = 'pill-dropdown';
+    dropdown1.id = 'bg-process-dropdown';
+    dropdown1.setAttribute('data-dropdown', '');
+    dropdown1.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <span style="font-family:monospace;font-weight:500;color:var(--foreground)">dev server</span>
+      </div>
+      <div style="background:var(--background);border-radius:4px;padding:6px;font-family:monospace;height:80px">
+        (log output)
+      </div>
+    `;
+
+    // BUG: Dropdown is appended as child of the pill container (inside backdrop-filter)
+    // This causes position:fixed to be relative to the backdrop-filter container
+    const pillContainer = document.querySelector('[data-pill-container="p1"]');
+    pillContainer.appendChild(dropdown1);
+
+    // Position it
+    const rect = toggleBtn1.getBoundingClientRect();
+    const bottom = window.innerHeight - rect.top + 4;
+    dropdown1.style.bottom = bottom + 'px';
+    dropdown1.style.left = rect.left + 'px';
+  });
+
+  // ---- Test 2: Dismiss tracking ----
+  // Replicates AgentInterface._handlePillDismiss behavior
+  window.__dismissCalls = [];
+  window.__dismissingId = null;
+
+  // The "real" dismiss callback (like onBgProcessDismiss)
+  function onBgProcessDismiss(id) {
+    window.__dismissCalls.push(id);
+  }
+
+  // Replicates _handlePillDismiss from AgentInterface
+  function handlePillDismiss(id) {
+    // Set _dismissingId — expects animationend to call onBgProcessDismiss
+    window.__dismissingId = id;
+
+    // Try to find the animation wrapper for this pill
+    const wrapper = document.querySelector('[data-pill-wrapper="' + id + '"]');
+    if (wrapper) {
+      // Visible pill: add dismissing class, wait for animationend
+      wrapper.classList.add('pill-dismissing');
+      // Animation will fire and the animationend handler will call onBgProcessDismiss
+    }
+    // BUG: If the pill is in the popover (no wrapper), nothing happens.
+    // _dismissingId stays stuck and onBgProcessDismiss is never called.
+  }
+
+  // AnimationEnd handler for visible pill wrappers
+  document.querySelectorAll('[data-pill-wrapper]').forEach(wrapper => {
+    wrapper.addEventListener('animationend', (e) => {
+      const id = wrapper.getAttribute('data-pill-wrapper');
+      if (e.animationName === 'pill-fade-out' && window.__dismissingId === id) {
+        window.__dismissingId = null;
+        onBgProcessDismiss(id);
+      }
+    });
+  });
+
+  // Wire dismiss buttons
+  document.querySelectorAll('[data-pill-dismiss]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute('data-pill-dismiss');
+      // For the backdrop test (p1), just dismiss directly (not the focus of test 2)
+      if (id === 'p1') return;
+      handlePillDismiss(id);
+    });
+  });
+
+  // Toggle popover
+  document.querySelector('[data-more-toggle]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const popover = document.querySelector('[data-popover]');
+    popover.style.display = popover.style.display === 'none' ? '' : 'none';
+  });
+  document.querySelector('[data-more-chevron]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const popover = document.querySelector('[data-popover]');
+    popover.style.display = popover.style.display === 'none' ? '' : 'none';
+  });
+</script>
+
+</body>
+</html>
