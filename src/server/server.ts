@@ -3402,8 +3402,9 @@ async function handleApiRoute(
 			return;
 		}
 		const goalAdminFlag = body?.admin ? " --admin" : "";
+		const goalMergeBranch = goal.branch ? ` ${goal.branch}` : "";
 		try {
-			await execAsync(`gh pr merge --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
+			await execAsync(`gh pr merge${goalMergeBranch} --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 			json({ ok: true });
@@ -4322,11 +4323,14 @@ async function handleApiRoute(
 			return;
 		}
 		const sessAdminFlag = body?.admin ? " --admin" : "";
-		const sessMergeBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
+		const sessMergeBranch = session.goalId
+			? getGoalAcrossProjects(session.goalId)?.branch
+			: sessionManager.getPersistedSession(id)?.branch;
+		const sessMergeBranchArg = sessMergeBranch ? ` ${sessMergeBranch}` : "";
 		try {
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
 			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await execAsync(`gh pr merge --${method}${sessAdminFlag}`, { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
+			await execAsync(`gh pr merge${sessMergeBranchArg} --${method}${sessAdminFlag}`, { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });
