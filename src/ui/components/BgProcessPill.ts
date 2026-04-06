@@ -236,7 +236,7 @@ export class BgProcessPill extends LitElement {
 
 				${this.loadingLogs
 					? html`<div class="text-muted-foreground animate-pulse">Loading...</div>`
-					: html`<div class="h-[180px] overflow-y-auto bg-background rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output">${this.logs.length > 0
+					: html`<div class="h-[180px] overflow-y-auto bg-background text-foreground rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output">${this.logs.length > 0
 								? this.logs.map((entry) => html`<div class="whitespace-pre-wrap">${entry.ts
 									? html`<span class="text-muted-foreground select-none">${this._fmtTime(entry.ts)} </span>`
 									: nothing}${hasAnsi(entry.text) ? unsafeHTML(ansiToHtml(entry.text)) : entry.text}</div>`)
