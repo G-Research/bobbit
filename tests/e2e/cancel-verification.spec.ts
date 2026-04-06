@@ -162,29 +162,29 @@ test.describe("Cancel Verification API", () => {
 		expect(body.error).toContain("not found");
 	});
 
-	test("cancel on archived goal returns 400", async () => {
+	test("cancel on shelved goal returns 400", async () => {
 		const goal = await createGoal({
-			title: `Cancel Archived Verif ${Date.now()}`,
+			title: `Cancel Shelved Verif ${Date.now()}`,
 			workflowId: SLOW_WORKFLOW_ID,
 			worktree: false,
 		});
 		const goalId = goal.id;
 
 		try {
-			// Archive the goal
-			const archiveRes = await apiFetch(`/api/goals/${goalId}`, {
-				method: "PATCH",
-				body: JSON.stringify({ status: "archived" }),
+			// Shelve the goal via PUT
+			const shelveRes = await apiFetch(`/api/goals/${goalId}`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "shelved" }),
 			});
-			expect(archiveRes.ok).toBe(true);
+			expect(shelveRes.ok).toBe(true);
 
-			// Try to cancel verification on archived goal
+			// Try to cancel verification on shelved goal
 			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
 				method: "POST",
 			});
 			expect(cancelRes.status).toBe(400);
 			const body = await cancelRes.json();
-			expect(body.error).toContain("archived");
+			expect(body.error).toContain("shelved");
 		} finally {
 			await deleteGoal(goalId).catch(() => {});
 		}
