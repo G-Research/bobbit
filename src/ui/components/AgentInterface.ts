@@ -493,7 +493,8 @@ export class AgentInterface extends LitElement {
 		this._stickToBottom = true;
 		this._scrollToBottom();
 
-		// Always send to the server — it handles queuing when the agent is busy
+		// Always send to the server — it handles queuing when the agent is busy.
+		// Steers are opt-in via the queue pill's Steer button, not automatic.
 		if (attachments && attachments.length > 0) {
 			const message: UserMessageWithAttachments = {
 				role: "user-with-attachments",
@@ -910,6 +911,7 @@ export class AgentInterface extends LitElement {
 						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
+							.projectId=${this.projectId}
 							.isStreaming=${state.isStreaming}
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}
@@ -929,6 +931,21 @@ export class AgentInterface extends LitElement {
 							.onRemoveQueued=${(id: string) => {
 								if (typeof (session as any).removeQueued === 'function') {
 									(session as any).removeQueued(id);
+								}
+							}}
+							.onEditQueued=${(msg: any) => {
+								// Remove pill from queue and place text back in textarea for editing
+								if (typeof (session as any).removeQueued === 'function') {
+									(session as any).removeQueued(msg.id);
+								}
+								this._messageEditor.value = msg.text || '';
+								// Focus the textarea inside the editor
+								const ta = this._messageEditor.shadowRoot?.querySelector('textarea');
+								ta?.focus();
+							}}
+							.onReorder=${(messageIds: string[]) => {
+								if (typeof (session as any).reorderQueue === 'function') {
+									(session as any).reorderQueue(messageIds);
 								}
 							}}
 							.onModelSelect=${() => {

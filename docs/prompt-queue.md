@@ -17,6 +17,8 @@ Browser (RemoteAgent)          Server (SessionManager)         Agent subprocess
                      ├─ drainQueue()
                      │  └─ dequeue next ──► rpcClient.prompt()
                      └─ broadcastQueue() ──WS──► queue_update
+
+  steer()  ──WS──►  (streaming?) ──► rpcClient.steer() ──► injected mid-turn
 ```
 
 ## Three dispatch paths
@@ -41,9 +43,9 @@ Standard user message. Always routed through `enqueuePrompt()` — never sent di
 
 ### `steer` (client → server)
 
-A mid-turn interrupt. Behavior depends on agent state:
+A mid-turn redirect. Behavior depends on agent state:
 
-- **Agent streaming**: Enqueued as a steered message (`isSteered: true`). The message is **not** dispatched immediately — it is held until the user presses Stop/Escape. On `forceAbort()`, all steered+undispatched messages are concatenated and sent as a single `rpcClient.steer()` call. This batching ensures multiple steered messages arrive as one coherent block rather than racing individually.
+- **Agent streaming**: Dispatched **immediately** via `rpcClient.steer()` — injected between tool calls in real-time. The message is NOT queued. This path is reached via the `steer_queued` promotion flow (the user clicks "Steer" on a queue pill, then the batched steer is delivered on abort) or by sending `{ type: "steer" }` programmatically. The UI textarea always queues via `prompt` — it never sends `steer` directly.
 - **Agent idle**: Enqueued as a steered message. Steered messages sort before normal messages in the queue.
 
 ### `follow_up` (client → server)
@@ -52,7 +54,7 @@ Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcCli
 
 ### `steer_queued` (client → server)
 
-Promotes an already-queued message to steered priority. The steered message is reordered to the top and shows a "Sent" badge in the UI. Like direct `steer`, the message is held until the user triggers an abort — it is not dispatched immediately.
+Promotes an already-queued message to steered priority. The steered message is reordered to the top and shows a "Sent" badge in the UI. If the agent is streaming, all steered+undispatched messages are immediately batch-dispatched via `rpcClient.steer()` — injected at the next tool boundary. Multiple promoted messages are concatenated into a single steer call so they arrive as one coherent block. On `forceAbort()`, any remaining undispatched steers are flushed before the abort proceeds.
 
 ### `remove_queued` (client → server)
 
@@ -86,7 +88,7 @@ Sent whenever the queue changes — enqueue, dequeue, steer, remove, reorder. Co
 
 When the user sends a prompt and the agent is **idle** (`!isStreaming`), `RemoteAgent.prompt()` adds the message to `state.messages` immediately with an `optimistic_*` id prefix. This ensures the message appears in chat without waiting for the server echo.
 
-When the agent is **streaming** (prompt will be queued), no optimistic message is added. The server will echo it in the correct interleaved position when the queue drains and the agent processes it.
+When the agent is **streaming**, the message is queued — no optimistic message is added. The server will echo it in the correct interleaved position when the queue drains and the agent processes it. The message appears as a queue pill above the textarea so the user knows it's pending.
 
 ### Deduplication
 

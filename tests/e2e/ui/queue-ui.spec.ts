@@ -39,7 +39,7 @@ test.describe("Queue UI E2E", () => {
 		// Wait for streaming status (the stop button appears)
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 
-		// Queue 2 messages via textarea
+		// Queue 2 messages via textarea (messages during streaming are queued, not steered)
 		const textarea = page.locator("textarea").first();
 		await textarea.fill("steer me");
 		await textarea.press("Enter");
@@ -89,7 +89,7 @@ test.describe("Queue UI E2E", () => {
 		await sendMessage(page, "STAY_BUSY:15000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 
-		// Queue 3 messages
+		// Queue 3 messages via textarea (messages during streaming are queued, not steered)
 		const textarea = page.locator("textarea").first();
 		for (const text of ["steer A", "steer B", "normal C"]) {
 			await textarea.fill(text);

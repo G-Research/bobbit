@@ -523,6 +523,15 @@ export async function executeWorktreeAsync(
 		}
 	}
 
+	// After sandbox wiring — reconcile persisted branch with actual container branch.
+	// For team-spawned sandboxed sessions, plan.sandboxBranch differs from plan.branch
+	// (host auto-generates session/new-session-<uuid8>, team manager sets goal-<slug>-<role>-<id>).
+	if (plan.sandboxed && plan.sandboxBranch && plan.sandboxBranch !== plan.branch) {
+		plan.branch = plan.sandboxBranch;
+		ctx.store.update(session.id, { branch: plan.branch });
+		console.log(`[session-setup] Reconciled branch for sandbox session ${session.id}: ${plan.branch}`);
+	}
+
 	// Create real RpcBridge (replacing placeholder)
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;

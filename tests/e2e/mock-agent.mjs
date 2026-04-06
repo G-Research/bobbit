@@ -355,6 +355,16 @@ rl.on("line", async (line) => {
 
 		case "steer":
 			send({ type: "response", id: msg.id, success: true });
+			// Emit a steer_received event so E2E tests can verify delivery.
+			// Also emit a message_end with the steer text so it's visible in conversation.
+			{
+				const steerMsg = {
+					role: "assistant",
+					content: [{ type: "text", text: `[STEER_RECEIVED] ${msg.message || msg.text || ""}` }],
+				};
+				conversationMessages.push(steerMsg);
+				emit({ type: "message_end", message: steerMsg });
+			}
 			break;
 
 		case "abort":
