@@ -7,6 +7,7 @@ import { html } from "lit";
 import { FileText } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import "../../../ui/components/ExpandableSection.js";
 
 /** Map tool name → display label and proposal type key */
 const PROPOSAL_LABELS: Record<string, { label: string; type: string; titleField: string; previewField: string }> = {
@@ -80,14 +81,16 @@ export class ProposalRenderer implements ToolRenderer {
 				<div class="space-y-2">
 					${renderHeader(state, FileText, meta.label)}
 					${title ? html`<div class="text-sm font-medium">${title}</div>` : ""}
-					${preview ? html`<div class="text-xs text-muted-foreground">${truncate(preview)}</div>` : ""}
+					${preview ? html`<expandable-section .summary=${truncate(preview, 80)}><markdown-block .content=${preview}></markdown-block></expandable-section>` : ""}
 					${result ? html`
-						<button
-							@click=${openProposal}
-							class="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors cursor-pointer"
-						>
-							Open proposal
-						</button>
+						<div class="flex justify-end">
+							<button
+								@click=${openProposal}
+								class="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors cursor-pointer"
+							>
+								Open proposal
+							</button>
+						</div>
 					` : ""}
 				</div>
 			`,
