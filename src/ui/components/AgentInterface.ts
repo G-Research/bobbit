@@ -493,8 +493,12 @@ export class AgentInterface extends LitElement {
 		this._stickToBottom = true;
 		this._scrollToBottom();
 
-		// Always send to the server — it handles queuing when the agent is busy
-		if (attachments && attachments.length > 0) {
+		// Dispatch: if the agent is streaming and there are no attachments,
+		// send as a steer so the message is injected between tool calls
+		// immediately. Otherwise fall back to prompt (queued if busy).
+		if (isStreaming && (!attachments || attachments.length === 0)) {
+			session.steer(input as any);
+		} else if (attachments && attachments.length > 0) {
 			const message: UserMessageWithAttachments = {
 				role: "user-with-attachments",
 				content: input,

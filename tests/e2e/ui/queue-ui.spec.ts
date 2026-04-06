@@ -27,6 +27,11 @@ test.describe("Queue UI E2E", () => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
+		const conn = await connectWs(sessionId);
+
+		try {
+		await conn.waitFor((m) => m.type === "queue_update");
+
 		await openApp(page);
 
 		// Navigate to session
@@ -39,16 +44,15 @@ test.describe("Queue UI E2E", () => {
 		// Wait for streaming status (the stop button appears)
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 
-		// Queue 2 messages via textarea
-		const textarea = page.locator("textarea").first();
-		await textarea.fill("steer me");
-		await textarea.press("Enter");
+		// Queue 2 messages via WS (bypasses UI's steer-during-streaming logic)
+		conn.send({ type: "prompt", text: "steer me" });
+		await conn.waitFor(queueLenPredicate(1));
 
 		// Wait for the pill to appear
 		await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 5_000 });
 
-		await textarea.fill("normal msg");
-		await textarea.press("Enter");
+		conn.send({ type: "prompt", text: "normal msg" });
+		await conn.waitFor(queueLenPredicate(2));
 
 		// Wait for 2 pills
 		await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
@@ -75,11 +79,19 @@ test.describe("Queue UI E2E", () => {
 			},
 			{ timeout: 15_000 },
 		);
+		} finally {
+			conn.close();
+		}
 	});
 
 	test("story 12: multiple steer — both delivered on abort", async ({ page }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
+
+		const conn = await connectWs(sessionId);
+
+		try {
+		await conn.waitFor((m) => m.type === "queue_update");
 
 		await openApp(page);
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
@@ -89,14 +101,13 @@ test.describe("Queue UI E2E", () => {
 		await sendMessage(page, "STAY_BUSY:15000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 
-		// Queue 3 messages
-		const textarea = page.locator("textarea").first();
+		// Queue 3 messages via WS (bypasses UI's steer-during-streaming logic)
 		for (const text of ["steer A", "steer B", "normal C"]) {
-			await textarea.fill(text);
-			await textarea.press("Enter");
+			conn.send({ type: "prompt", text });
 		}
 
 		// Wait for 3 pills
+		await conn.waitFor(queueLenPredicate(3));
 		await expect(page.locator(".queue-pill")).toHaveCount(3, { timeout: 5_000 });
 
 		// Steer first two pills
@@ -118,6 +129,9 @@ test.describe("Queue UI E2E", () => {
 		// The non-steered message should also drain eventually
 		// Wait for queue to be empty (all processed)
 		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 15_000 });
+		} finally {
+			conn.close();
+		}
 	});
 
 	test("story 22: draft text persists across page reload", async ({ page }) => {
