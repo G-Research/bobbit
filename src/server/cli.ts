@@ -258,6 +258,14 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 		console.warn("[gateway] EPIPE (ignored — child process stdin closed)");
 		return;
 	}
+	// ENOTCONN on Windows when spawning a child process — the socket pair for
+	// stdin/stdout/stderr fails transiently (e.g. under high fd pressure).
+	// Same class of error as EPIPE — the calling code will see the spawn failure
+	// and handle it. Don't crash the gateway.
+	if (err.code === "ENOTCONN") {
+		console.warn("[gateway] ENOTCONN (ignored — child process socket creation failed)");
+		return;
+	}
 	console.error("[gateway] Uncaught exception:", err);
 	process.exit(1);
 });
