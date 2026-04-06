@@ -73,6 +73,8 @@ export class MessageEditor extends LitElement {
 		"image/*,application/pdf,.docx,.pptx,.txt,.md,.json,.xml,.html,.css,.js,.ts,.jsx,.tsx,.yml,.yaml";
 	/** Working directory — used to discover slash skills */
 	@property() cwd?: string;
+	/** Project ID — used to scope slash skill discovery */
+	@property() projectId?: string;
 
 	@state() processingFiles = false;
 	@state() isDragging = false;
@@ -92,6 +94,7 @@ export class MessageEditor extends LitElement {
 	@state() private _slashTokenStart = 0;
 	private _slashSkillsLoaded = false;
 	private _slashSkillsCwd?: string;
+	private _slashSkillsProjectId?: string;
 
 	// Drag-to-reorder state
 	private _draggedPillId: string | null = null;
@@ -140,9 +143,11 @@ export class MessageEditor extends LitElement {
 
 	private async _loadSlashSkills() {
 		if (!this.cwd) return;
-		if (this._slashSkillsLoaded && this._slashSkillsCwd === this.cwd) return;
+		if (this._slashSkillsLoaded && this._slashSkillsCwd === this.cwd && this._slashSkillsProjectId === this.projectId) return;
 		try {
-			const res = await gatewayFetch(`/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`);
+			let url = `/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`;
+			if (this.projectId) url += `&projectId=${encodeURIComponent(this.projectId)}`;
+			const res = await gatewayFetch(url);
 			if (res.ok) {
 				const data = await res.json();
 				this._slashSkills = data.skills || [];
@@ -151,6 +156,7 @@ export class MessageEditor extends LitElement {
 			// Best effort
 		}
 		this._slashSkillsCwd = this.cwd;
+		this._slashSkillsProjectId = this.projectId;
 		this._slashSkillsLoaded = true;
 	}
 
@@ -684,7 +690,7 @@ export class MessageEditor extends LitElement {
 				this._loadHistory();
 			}
 		}
-		if (changed.has("cwd") && this.cwd) {
+		if ((changed.has("cwd") || changed.has("projectId")) && this.cwd) {
 			this._slashSkillsLoaded = false;
 			this._loadSlashSkills();
 		}
