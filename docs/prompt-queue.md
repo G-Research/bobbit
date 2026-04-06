@@ -17,9 +17,11 @@ Browser (RemoteAgent)          Server (SessionManager)         Agent subprocess
                      ├─ drainQueue()
                      │  └─ dequeue next ──► rpcClient.prompt()
                      └─ broadcastQueue() ──WS──► queue_update
+
+  steer()  ──WS──►  (streaming?) ──► rpcClient.steer() ──► injected mid-turn
 ```
 
-## Three dispatch paths
+## Four dispatch paths
 
 ### 1. Direct dispatch (idle + empty queue)
 
@@ -29,9 +31,17 @@ The fast path. Agent is idle and nothing is queued — the prompt goes straight 
 
 Agent is streaming or the queue already has items. The message is added to `PromptQueue`, and a `queue_update` is broadcast to all connected clients so the UI can show the pending messages. If the agent happens to be idle (queue was non-empty), `drainQueue()` is called immediately.
 
+Note: when the agent is streaming and the user sends a text-only message via the UI, `sendMessage()` uses the steer path (path 4) instead of enqueuing. Messages only reach this enqueue path during streaming if they have attachments (the steer protocol is text-only) or are sent programmatically via `{ type: "prompt" }`.
+
 ### 3. Drain (agent becomes idle)
 
 On `agent_end`, if the queue has items and the turn didn't end with an error, `drainQueue()` pops the next undispatched message and sends it via `rpcClient.prompt()`. Status is set to `"streaming"` optimistically to prevent a race where another `enqueuePrompt()` call sees idle+empty and dispatches a second concurrent prompt.
+
+### 4. Direct steer (streaming, text-only)
+
+When the user sends a text-only message while the agent is streaming, `AgentInterface.sendMessage()` calls `session.steer()` instead of `session.prompt()`. This sends `{ type: "steer" }` over WebSocket, and the server dispatches it immediately via `rpcClient.steer()` — injected between tool calls without waiting for the turn to end. The message bypasses the queue entirely. An optimistic user message is rendered in chat so the user sees it immediately.
+
+This path is only used when: (a) the agent is streaming, and (b) the message has no attachments (the steer WS protocol is text-only). Messages with attachments fall back to `session.prompt()` and are enqueued via path 2.
 
 ## Message types
 
@@ -86,7 +96,9 @@ Sent whenever the queue changes — enqueue, dequeue, steer, remove, reorder. Co
 
 When the user sends a prompt and the agent is **idle** (`!isStreaming`), `RemoteAgent.prompt()` adds the message to `state.messages` immediately with an `optimistic_*` id prefix. This ensures the message appears in chat without waiting for the server echo.
 
-When the agent is **streaming** (prompt will be queued), no optimistic message is added. The server will echo it in the correct interleaved position when the queue drains and the agent processes it.
+When the agent is **streaming** and the message is sent as a **direct steer** (no attachments), `RemoteAgent.steer()` also adds an optimistic message so the user sees it in chat immediately — matching the idle-prompt pattern.
+
+When the agent is **streaming** and the message is sent as a **queued prompt** (has attachments, or sent via the queue), no optimistic message is added. The server will echo it in the correct interleaved position when the queue drains and the agent processes it.
 
 ### Deduplication
 
