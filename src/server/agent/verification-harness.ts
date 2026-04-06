@@ -107,6 +107,23 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Check if any verification sessions for a given signalId are still alive.
+	 * Returns true if at least one running step has a live session.
+	 * Returns false (zombie) if no running sessions exist — safe to auto-cancel.
+	 */
+	areVerificationSessionsAlive(signalId: string): boolean {
+		const active = this.activeVerifications.get(signalId);
+		if (!active) return false;
+		for (const step of active.steps) {
+			if (step.sessionId && step.status === "running") {
+				const session = this.sessionManager?.getSession(step.sessionId);
+				if (session) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Return session IDs from persisted active verifications that are still running.
 	 * Used by SessionManager to skip orphan cleanup for sessions that will be resumed.
 	 */
