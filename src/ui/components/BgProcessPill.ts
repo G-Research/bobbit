@@ -1,4 +1,4 @@
-import { html, LitElement, nothing } from "lit";
+import { html, LitElement, nothing, render as litRender } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { customElement, property, state } from "lit/decorators.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
@@ -38,8 +38,11 @@ export class BgProcessPill extends LitElement {
 	/** When true, the dropdown plays the close animation before being removed */
 	@state() private _closing = false;
 
+	/** Portal element appended to document.body for the dropdown */
+	private _portalEl: HTMLDivElement | null = null;
+
 	private _onDocumentClick = (e: MouseEvent) => {
-		if (this.expanded && !this._closing && !this.contains(e.target as Node)) {
+		if (this.expanded && !this._closing && !this.contains(e.target as Node) && !this._portalEl?.contains(e.target as Node)) {
 			this._closeDropdown();
 		}
 	};
@@ -65,19 +68,30 @@ export class BgProcessPill extends LitElement {
 		super.disconnectedCallback();
 		document.removeEventListener("click", this._onDocumentClick, true);
 		document.removeEventListener("keydown", this._onEscapeKey, true);
+		this._removePortal();
+	}
+
+	private _removePortal() {
+		if (this._portalEl) {
+			this._portalEl.remove();
+			this._portalEl = null;
+		}
 	}
 
 	private _closeDropdown() {
 		this._closing = true;
-		const dropdown = this.querySelector("#bg-process-dropdown") as HTMLElement;
+		this._renderPortal();
+		const dropdown = this._portalEl?.querySelector("#bg-process-dropdown") as HTMLElement;
 		if (dropdown) {
 			dropdown.addEventListener("animationend", () => {
 				this._closing = false;
 				this.expanded = false;
+				this._removePortal();
 			}, { once: true });
 		} else {
 			this._closing = false;
 			this.expanded = false;
+			this._removePortal();
 		}
 	}
 
@@ -102,6 +116,9 @@ export class BgProcessPill extends LitElement {
 		const lines = text.split("\n").filter((l) => l.length > 0);
 		if (lines.length === 0) return;
 		this.logs = [...this.logs, ...lines.map((l) => ({ ts: timestamp, text: l }))];
+		if (this.expanded && this._portalEl) {
+			this._renderPortal();
+		}
 		this.updateComplete.then(() => this._scrollToBottom());
 	}
 
@@ -146,7 +163,7 @@ export class BgProcessPill extends LitElement {
 	}
 
 	private _scrollToBottom() {
-		const el = this.querySelector("#bg-log-output");
+		const el = this._portalEl?.querySelector("#bg-log-output");
 		if (el) el.scrollTop = el.scrollHeight;
 	}
 
@@ -154,17 +171,94 @@ export class BgProcessPill extends LitElement {
 		return this.process.name || this.process.id;
 	}
 
-	render() {
-		if (!this.process) return nothing;
+	private _statusIndicator() {
 		const p = this.process;
 		const isRunning = p.status === "running";
-		const statusIndicator = isRunning
+		return isRunning
 			? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400 animate-pulse shrink-0"></span>`
 			: p.exitCode === 0
 				? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-green-600 dark:bg-green-400 shrink-0"></span>`
 				: p.exitCode !== null
 					? html`<span class="shrink-0 text-red-600 dark:text-red-400" style="font-size:10px;line-height:1;font-weight:700">!</span>`
 					: html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0"></span>`;
+	}
+
+	private _dropdownTemplate() {
+		const p = this.process;
+		const isRunning = p.status === "running";
+		const statusIndicator = this._statusIndicator();
+		return html`
+			<style>
+				@keyframes bg-dropdown-in {
+					0%   { opacity: 0; transform: translateY(8px) scale(0.92); filter: blur(3px); }
+					70%  { opacity: 1; transform: translateY(-1px) scale(1.005); filter: blur(0); }
+					100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+				}
+				@keyframes bg-dropdown-out {
+					0%   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+					100% { opacity: 0; transform: translateY(6px) scale(0.95); filter: blur(2px); }
+				}
+				#bg-process-dropdown {
+					animation: bg-dropdown-in 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+				}
+				#bg-process-dropdown.closing {
+					animation: bg-dropdown-out 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
+				}
+			</style>
+			<div
+				class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-2 text-xs ${this._closing ? 'closing' : ''}"
+				style="max-width:calc(100vw - 1rem); width: min(900px, calc(100vw - 1rem));"
+				id="bg-process-dropdown"
+			>
+				<div class="flex items-center justify-between mb-1.5">
+					<div class="flex items-center gap-1.5 text-foreground font-medium text-sm min-w-0">
+						${statusIndicator}
+						<span class="truncate font-mono">${this._displayName()}</span>
+						<span class="text-[10px] text-muted-foreground font-normal">${p.id} · pid ${p.pid}</span>
+					</div>
+					<div class="flex items-center gap-2">
+						${!isRunning && p.exitCode !== null
+							? html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`
+							: nothing}
+						${isRunning
+							? html`<button
+								class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-700 dark:text-red-400 hover:bg-red-500/30 transition-colors"
+								@click=${this._kill}
+							>Kill</button>`
+							: html`<button
+								class="px-2 py-0.5 rounded text-[11px] bg-muted text-muted-foreground hover:text-foreground transition-colors"
+								@click=${this._dismiss}
+							>Remove</button>`}
+					</div>
+				</div>
+
+				<div class="text-muted-foreground mb-1.5 font-mono text-[11px] break-all leading-tight">${p.command}</div>
+
+				${this.loadingLogs
+					? html`<div class="text-muted-foreground animate-pulse">Loading...</div>`
+					: html`<div class="h-[180px] overflow-y-auto bg-background rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output">${this.logs.length > 0
+								? this.logs.map((entry) => html`<div class="whitespace-pre-wrap">${entry.ts
+									? html`<span class="text-muted-foreground select-none">${this._fmtTime(entry.ts)} </span>`
+									: nothing}${hasAnsi(entry.text) ? unsafeHTML(ansiToHtml(entry.text)) : entry.text}</div>`)
+								: html`<div class="text-muted-foreground text-center py-1">(no output yet)</div>`}</div>
+				`}
+			</div>
+		`;
+	}
+
+	private _renderPortal() {
+		if (!this._portalEl) {
+			this._portalEl = document.createElement('div');
+			document.body.appendChild(this._portalEl);
+		}
+		litRender(this._dropdownTemplate(), this._portalEl);
+	}
+
+	render() {
+		if (!this.process) return nothing;
+		const p = this.process;
+		const isRunning = p.status === "running";
+		const statusIndicator = this._statusIndicator();
 
 		return html`
 			<span class="inline-flex items-center rounded-full bg-card border border-border text-[11px] leading-tight" style="max-width:200px; height:var(--pill-h, auto)">
@@ -183,79 +277,24 @@ export class BgProcessPill extends LitElement {
 					title=${isRunning ? "Kill process" : "Remove"}
 				>✕</button>
 			</span>
-
-			${this.expanded
-				? html`
-					<style>
-						@keyframes bg-dropdown-in {
-							0%   { opacity: 0; transform: translateY(8px) scale(0.92); filter: blur(3px); }
-							70%  { opacity: 1; transform: translateY(-1px) scale(1.005); filter: blur(0); }
-							100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
-						}
-						@keyframes bg-dropdown-out {
-							0%   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
-							100% { opacity: 0; transform: translateY(6px) scale(0.95); filter: blur(2px); }
-						}
-						#bg-process-dropdown {
-							animation: bg-dropdown-in 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
-						}
-						#bg-process-dropdown.closing {
-							animation: bg-dropdown-out 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
-						}
-					</style>
-					<div
-						class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-2 text-xs ${this._closing ? 'closing' : ''}"
-						style="max-width:calc(100vw - 1rem); width: min(900px, calc(100vw - 1rem));"
-						id="bg-process-dropdown"
-					>
-						<div class="flex items-center justify-between mb-1.5">
-							<div class="flex items-center gap-1.5 text-foreground font-medium text-sm min-w-0">
-								${statusIndicator}
-								<span class="truncate font-mono">${this._displayName()}</span>
-								<span class="text-[10px] text-muted-foreground font-normal">${p.id} · pid ${p.pid}</span>
-							</div>
-							<div class="flex items-center gap-2">
-								${!isRunning && p.exitCode !== null
-									? html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`
-									: nothing}
-								${isRunning
-									? html`<button
-										class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-700 dark:text-red-400 hover:bg-red-500/30 transition-colors"
-										@click=${this._kill}
-									>Kill</button>`
-									: html`<button
-										class="px-2 py-0.5 rounded text-[11px] bg-muted text-muted-foreground hover:text-foreground transition-colors"
-										@click=${this._dismiss}
-									>Remove</button>`}
-							</div>
-						</div>
-
-						<div class="text-muted-foreground mb-1.5 font-mono text-[11px] break-all leading-tight">${p.command}</div>
-
-						${this.loadingLogs
-							? html`<div class="text-muted-foreground animate-pulse">Loading...</div>`
-							: html`<div class="h-[180px] overflow-y-auto bg-background rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output">${this.logs.length > 0
-										? this.logs.map((entry) => html`<div class="whitespace-pre-wrap">${entry.ts
-											? html`<span class="text-muted-foreground select-none">${this._fmtTime(entry.ts)} </span>`
-											: nothing}${hasAnsi(entry.text) ? unsafeHTML(ansiToHtml(entry.text)) : entry.text}</div>`)
-										: html`<div class="text-muted-foreground text-center py-1">(no output yet)</div>`}</div>
-							`}
-					</div>
-				`
-				: nothing}
 		`;
 	}
 
 	override updated(changed: Map<string, unknown>) {
 		super.updated(changed);
-		if (changed.has("expanded") && this.expanded) {
-			this._positionDropdown();
+		if (changed.has("expanded")) {
+			if (this.expanded) {
+				this._renderPortal();
+				this._positionDropdown();
+			} else if (!this._closing) {
+				this._removePortal();
+			}
 		}
 	}
 
 	private _positionDropdown() {
 		const btn = this.querySelector("button");
-		const dropdown = this.querySelector("#bg-process-dropdown") as HTMLElement;
+		const dropdown = this._portalEl?.querySelector("#bg-process-dropdown") as HTMLElement;
 		if (!btn || !dropdown) return;
 		const rect = btn.getBoundingClientRect();
 		const pad = 8;
