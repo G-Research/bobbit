@@ -54,7 +54,7 @@ Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcCli
 
 ### `steer_queued` (client → server)
 
-Promotes an already-queued message to steered priority. The steered message is reordered to the top and shows a "Sent" badge in the UI. Promoted steers are held until the agent is next able to consume a message (e.g. when a tool call ends, or after the user interrupts via abort) — on `forceAbort()`, all steered+undispatched messages are concatenated and sent as a single `rpcClient.steer()` call. This batching ensures multiple promoted messages arrive as one coherent block rather than racing individually.
+Promotes an already-queued message to steered priority. The steered message is reordered to the top and shows a "Sent" badge in the UI. If the agent is streaming, all steered+undispatched messages are immediately batch-dispatched via `rpcClient.steer()` — injected at the next tool boundary. Multiple promoted messages are concatenated into a single steer call so they arrive as one coherent block. On `forceAbort()`, any remaining undispatched steers are flushed before the abort proceeds.
 
 ### `remove_queued` (client → server)
 
