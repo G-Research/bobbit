@@ -70,9 +70,11 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 
 ## Goal proposal dismissed but reappears
 
+- Proposals now use `propose_*` tool calls (e.g. `propose_goal`), which persist in message history as tool result blocks. Each completed proposal block includes an "Open proposal" button for re-access — proposals are no longer lost on reconnect or cache eviction.
 - localStorage key: `bobbit-goal-proposal-dismissed-<sessionId>` stores djb2 hash of `title + "\n" + spec`
 - Check: (1) key exists for session, (2) hash matches, (3) session is not goal-assistant type (those use IndexedDB)
 - Cleanup: `clearDismissedProposal()` in `terminateSession()`
+- Legacy XML proposal parsing (`proposal-parsers.ts`) still works as a deprecated fallback — check console for `[proposal] Detected legacy XML proposal block` warnings
 
 ## Render performance
 

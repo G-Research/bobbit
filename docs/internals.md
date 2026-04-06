@@ -139,9 +139,9 @@ Two resolution modes:
 
 The project assistant guides users through registering a new project directory. It operates in two modes, selected automatically by the smart Add Project flow based on directory detection (`POST /api/projects/detect`):
 
-**Detection mode** (assistant type `"project"`): For directories with existing content but no `.bobbit/`. The assistant explores the directory (package.json, build files, git config, CI config, README) and emits a `<project_proposal>` XML block with discovered settings: name, root_path, build_command, test_command, typecheck_command, test_unit_command, test_e2e_command, and worktree_setup_command.
+**Detection mode** (assistant type `"project"`): For directories with existing content but no `.bobbit/`. The assistant explores the directory (package.json, build files, git config, CI config, README) and calls the `propose_project` tool with discovered settings: name, root_path, build_command, test_command, typecheck_command, test_unit_command, test_e2e_command, and worktree_setup_command. Because proposals are tool calls, they persist in message history and remain accessible on reconnect via the "Open proposal" button.
 
-**Scaffolding mode** (assistant type `"project-scaffolding"`): For empty or non-existent directories. The assistant asks what the project is about, suggests tech stacks, and helps scaffold the project structure (directory layout, basic files, README). After the user accepts the proposal, the assistant uses bash/write tools to create the project files, then emits the same `<project_proposal>` block format.
+**Scaffolding mode** (assistant type `"project-scaffolding"`): For empty or non-existent directories. The assistant asks what the project is about, suggests tech stacks, and helps scaffold the project structure (directory layout, basic files, README). After the user accepts the proposal, the assistant uses bash/write tools to create the project files, then calls `propose_project` with the same settings.
 
 On proposal acceptance, the client-side handler registers the project via `POST /api/projects` and then writes all config fields to `project.yaml` via `PUT /api/projects/:id/config`. This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
 
