@@ -657,9 +657,10 @@ export class VerificationHarness {
 				// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
 				this.resolveGateStore(goalId).updateSignalVerification(signalId, {
 					status: "failed",
-					steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled by user.", duration_ms: 0 }],
+					steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled.", duration_ms: 0 }],
 				});
-				this.resolveGateStore(goalId).updateGateStatus(goalId, gateId, "failed");
+				// Note: gate status is NOT updated here — the caller decides whether to set it
+				// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
 
 				// Remove from active verifications
 				this.activeVerifications.delete(signalId);

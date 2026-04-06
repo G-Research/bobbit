@@ -2822,6 +2822,9 @@ async function handleApiRoute(
 		}
 
 		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+		// Explicit user cancel: also update gate status to "failed"
+		const cancelCtx = projectContextManager.getContextForGoal(goalId);
+		if (cancelCtx) cancelCtx.gateStore.updateGateStatus(goalId, gateId, "failed");
 		json({ cancelled: true }, 200);
 		return;
 	}
