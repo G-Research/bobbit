@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+<head><title>Message ordering – deferred message race condition</title></head>
+<body>
+<script>
+/**
+ * Reproduces the race condition where a wholesale "messages" refresh from
+ * the server arrives while _deferredAssistantMessage is non-null.  Without
+ * the fix, flushDeferredMessage() later appends a duplicate.
+ *
+ * Uses a minimal FakeRemoteAgent that mirrors the real state machine in
+ * src/app/remote-agent.ts.
+ */
+
+function extractText(message) {
+	if (!message) return "";
+	if (typeof message === "string") return message;
+	if (typeof message.content === "string") return message.content;
+	if (Array.isArray(message.content)) {
+		return message.content
+			.filter(c => c.type === "text")
+			.map(c => c.text || "")
+			.join("\n");
+	}
+	return "";
+}
+
+function enrichUserMessage(msg) {
+	if (msg.role !== "user" || !Array.isArray(msg.content)) return msg;
+	const imageChunks = msg.content.filter(c => c.type === "image" && c.data);
+	if (imageChunks.length === 0) return msg;
+	return { ...msg, role: "user-with-attachments", attachments: imageChunks };
+}
+
+class FakeRemoteAgent {
+	constructor() {
+		this.state = {
+			messages: [],
+			streamMessage: null,
+			isStreaming: false,
+			pendingToolCalls: new Set(),
+		};
+		this._deferredAssistantMessage = null;
+		this._liveEventMessages = [];
+		this._compactionSyntheticMessages = [];
+	}
+
+	flushDeferredMessage() {
+		if (this._deferredAssistantMessage) {
+			this.state.messages = [...this.state.messages, this._deferredAssistantMessage];
+			this.state.streamMessage = null;
+			this._deferredAssistantMessage = null;
+		}
+	}
+
+	/**
+	 * Simulates the "case messages" handler in remote-agent.ts.
+	 * Includes the fix: clears _deferredAssistantMessage after replacing
+	 * messages with the server's authoritative list.
+	 */
+	handleMessagesResponse(msgs) {
+		this.state.messages = msgs.map(enrichUserMessage);
+
+		// FIX: Clear deferred assistant message — the server's message list is
+		// authoritative and already contains it in the correct position.
+		this._deferredAssistantMessage = null;
+
+		if (this._liveEventMessages.length > 0) {
+			const serverTexts = new Set(
+				this.state.messages
+					.filter(m => m.role === "user" || m.role === "user-with-attachments")
+					.map(m => extractText(m))
+			);
+			for (const liveMsg of this._liveEventMessages) {
+				if (!serverTexts.has(extractText(liveMsg))) {
+					this.state.messages = [...this.state.messages, liveMsg];
+				}
+			}
+			this._liveEventMessages = [];
+		}
+
+		if (this._compactionSyntheticMessages.length > 0) {
+			this.state.messages = [...this.state.messages, ...this._compactionSyntheticMessages];
+		}
+	}
+
+	handleEvent(event) {
+		switch (event.type) {
+			case "agent_start":
+				this.state.isStreaming = true;
+				break;
+
+			case "agent_end":
+				this.flushDeferredMessage();
+				this.state.isStreaming = false;
+				this.state.streamMessage = null;
+				this.state.pendingToolCalls = new Set();
+				break;
+
+			case "message_update":
+				this.flushDeferredMessage();
+				if (event.message) this.state.streamMessage = event.message;
+				break;
+
+			case "message_end":
+				if (event.message) {
+					if (event.message.role === "assistant") {
+						const hasToolCalls = Array.isArray(event.message.content) &&
+							event.message.content.some(c => c.type === "toolCall");
+						if (hasToolCalls) {
+							this._deferredAssistantMessage = event.message;
+						} else {
+							this.state.streamMessage = null;
+							this.state.messages = [...this.state.messages, event.message];
+						}
+					} else {
+						this.flushDeferredMessage();
+						this.state.streamMessage = null;
+						this.state.messages = [...this.state.messages, event.message];
+					}
+				}
+				break;
+		}
+	}
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+function makeAssistantMsg(text, withToolCalls = false) {
+	const content = [{ type: "text", text }];
+	if (withToolCalls) {
+		content.push({ type: "toolCall", id: "tc_1", name: "bash", input: "{}" });
+	}
+	return { role: "assistant", content };
+}
+
+function makeUserMsg(text) {
+	return { role: "user", content: [{ type: "text", text }] };
+}
+
+function makeToolResult(id = "tc_1") {
+	return { role: "toolResult", tool_use_id: id, content: "ok" };
+}
+
+const results = [];
+
+function assert(condition, name, error) {
+	results.push({ name, passed: !!condition, error: condition ? null : (error || "assertion failed") });
+}
+
+// ── Test 1: messages refresh clears deferred assistant message ──────────
+{
+	const agent = new FakeRemoteAgent();
+
+	// Simulate: agent streams an assistant message with tool calls
+	agent.handleEvent({ type: "agent_start" });
+	agent.handleEvent({
+		type: "message_end",
+		message: makeAssistantMsg("Running bash...", true),
+	});
+
+	// At this point, the message is deferred
+	assert(
+		agent._deferredAssistantMessage !== null,
+		"message_end with tool calls defers assistant message",
+	);
+	assert(
+		agent.state.messages.length === 0,
+		"deferred message is NOT in messages[] yet",
+	);
+
+	// Server sends a wholesale messages refresh that includes the assistant message
+	const serverMessages = [
+		makeUserMsg("do something"),
+		makeAssistantMsg("Running bash...", true),
+		makeToolResult(),
+	];
+	agent.handleMessagesResponse(serverMessages);
+
+	// After the fix, deferred message should be cleared
+	assert(
+		agent._deferredAssistantMessage === null,
+		"messages refresh clears _deferredAssistantMessage",
+	);
+
+	// Now flush should be a no-op (no duplicate)
+	agent.flushDeferredMessage();
+	assert(
+		agent.state.messages.length === 3,
+		"flushDeferredMessage after refresh does NOT add duplicate (count=" + agent.state.messages.length + ")",
+	);
+}
+
+// ── Test 2: without fix, duplicate would appear ─────────────────────────
+{
+	// This tests the broken path: if we DON'T clear the deferred message,
+	// flushDeferredMessage adds a 4th entry.
+	const agent = new FakeRemoteAgent();
+
+	agent.handleEvent({ type: "agent_start" });
+	agent.handleEvent({
+		type: "message_end",
+		message: makeAssistantMsg("Running bash...", true),
+	});
+
+	// Manually simulate OLD behavior: replace messages but do NOT clear deferred
+	const serverMessages = [
+		makeUserMsg("do something"),
+		makeAssistantMsg("Running bash...", true),
+		makeToolResult(),
+	];
+	agent.state.messages = serverMessages.map(enrichUserMessage);
+	// Intentionally NOT clearing _deferredAssistantMessage
+
+	assert(
+		agent._deferredAssistantMessage !== null,
+		"(old behavior) deferred message still set after naive replace",
+	);
+
+	agent.flushDeferredMessage();
+	assert(
+		agent.state.messages.length === 4,
+		"(old behavior) flush adds duplicate — 4 messages instead of 3 (count=" + agent.state.messages.length + ")",
+	);
+}
+
+// ── Test 3: normal flow without race — deferred message flushed on next event
+{
+	const agent = new FakeRemoteAgent();
+
+	agent.handleEvent({ type: "agent_start" });
+	agent.handleEvent({
+		type: "message_end",
+		message: makeAssistantMsg("Running bash...", true),
+	});
+
+	// Tool result arrives, which flushes the deferred message
+	agent.handleEvent({
+		type: "message_end",
+		message: makeToolResult(),
+	});
+
+	assert(
+		agent.state.messages.length === 2,
+		"normal flow: deferred message flushed before tool result (count=" + agent.state.messages.length + ")",
+	);
+	assert(
+		agent._deferredAssistantMessage === null,
+		"normal flow: deferred message is null after flush",
+	);
+}
+
+// ── Test 4: messages refresh with no deferred message is harmless ───────
+{
+	const agent = new FakeRemoteAgent();
+
+	const serverMessages = [
+		makeUserMsg("hello"),
+		makeAssistantMsg("world"),
+	];
+	agent.handleMessagesResponse(serverMessages);
+
+	assert(
+		agent.state.messages.length === 2,
+		"messages refresh with no deferred message works normally (count=" + agent.state.messages.length + ")",
+	);
+	assert(
+		agent._deferredAssistantMessage === null,
+		"deferred message remains null when none was set",
+	);
+}
+
+// ── Test 5: agent_end also flushes — no interaction with the fix ────────
+{
+	const agent = new FakeRemoteAgent();
+
+	agent.handleEvent({ type: "agent_start" });
+	agent.handleEvent({
+		type: "message_end",
+		message: makeAssistantMsg("Running bash...", true),
+	});
+
+	// Messages refresh clears it
+	agent.handleMessagesResponse([
+		makeUserMsg("do something"),
+		makeAssistantMsg("Running bash...", true),
+	]);
+
+	// agent_end should NOT add a duplicate
+	agent.handleEvent({ type: "agent_end" });
+	assert(
+		agent.state.messages.length === 2,
+		"agent_end after messages refresh does not duplicate (count=" + agent.state.messages.length + ")",
+	);
+}
+
+window.__TEST_RESULTS = results;
+</script>
+</body>
+</html>

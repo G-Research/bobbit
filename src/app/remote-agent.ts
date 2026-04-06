@@ -678,6 +678,10 @@ export class RemoteAgent {
 				if (Array.isArray(msgs)) {
 					this._state.messages = msgs.map(enrichUserMessage);
 
+					// Clear deferred assistant message — the server's message list is
+					// authoritative and already contains it in the correct position.
+					this._deferredAssistantMessage = null;
+
 					// Re-append any live-event messages missing from the server
 					// response.  This prevents the wholesale replacement from
 					// silently dropping messages that arrived via message_end
