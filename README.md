@@ -129,3 +129,4 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 ## Contributing
 
 See the [development workflow guide](docs/dev-workflow.md) for dev setup, and [AGENTS.md](AGENTS.md) for repo layout and common tasks.
+
