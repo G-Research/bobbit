@@ -40,13 +40,19 @@ export class WorktreePool {
 	/** Number of ready worktrees available. */
 	get size(): number { return this.pool.length; }
 
-	/** Start filling the pool in the background. Call once after startup. */
-	startFilling(): void {
+	/**
+	 * Start filling the pool in the background. Call once after startup.
+	 *
+	 * @param activeWorktreePaths — Worktree paths currently owned by live sessions.
+	 *   These are excluded from orphan reclamation to prevent the pool from stealing
+	 *   a session's working directory on restart.
+	 */
+	startFilling(activeWorktreePaths?: Set<string>): void {
 		// First, reclaim any orphaned pool worktrees from a previous server instance.
 		// These are directories matching the _pool-* naming convention with valid .git files
 		// that no active session owns. Reclaiming avoids creating unnecessary new worktrees
 		// and prevents the old entries from being pruned by git (which would break them).
-		this.reclaimOrphaned().then(() => this.replenish()).catch(() => this.replenish());
+		this.reclaimOrphaned(activeWorktreePaths).then(() => this.replenish()).catch(() => this.replenish());
 	}
 
 	/**
@@ -136,8 +142,12 @@ export class WorktreePool {
 	 * An orphaned pool worktree is a directory matching `session-_pool-*` in the worktree
 	 * root with a valid `.git` file, whose branch is still a `session/_pool-*` branch
 	 * (i.e. it was never claimed by a session).
+	 *
+	 * @param activeWorktreePaths — Paths owned by live sessions; skip these even if
+	 *   the branch name looks like a pool branch (the session may not have renamed it yet,
+	 *   or recovery may have restored the original pool branch name).
 	 */
-	private async reclaimOrphaned(): Promise<void> {
+	private async reclaimOrphaned(activeWorktreePaths?: Set<string>): Promise<void> {
 		try {
 			const wtRoot = path.resolve(this.repoPath, "..", `${path.basename(this.repoPath)}-wt`);
 			if (!fs.existsSync(wtRoot)) return;
@@ -148,6 +158,12 @@ export class WorktreePool {
 				if (!entry.isDirectory() || !entry.name.startsWith("session-_pool-")) continue;
 
 				const wtPath = path.join(wtRoot, entry.name);
+
+				// Skip worktrees owned by active sessions — even if the branch
+				// still looks like a pool branch (claim may not have renamed it
+				// before the previous shutdown).
+				if (activeWorktreePaths?.has(wtPath)) continue;
+
 				const gitFile = path.join(wtPath, ".git");
 				if (!fs.existsSync(gitFile)) continue;
 

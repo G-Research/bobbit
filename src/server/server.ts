@@ -143,6 +143,121 @@ async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?
 	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
 }
 
+/** Batched git status — runs all queries in a single shell invocation.
+ *  Returns null if not a git repository. */
+async function batchGitStatus(cwd: string, containerId?: string): Promise<{
+	branch: string; primaryBranch: string; isOnPrimary: boolean;
+	status: { file: string; status: string }[];
+	hasUpstream: boolean; ahead: number; behind: number;
+	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
+	clean: boolean; summary: string; unpushed: boolean;
+} | null> {
+	// Single script with NUL-delimited sections — avoids spawning 6-8 processes.
+	const batchScript = [
+		'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo __FAIL__',
+		'printf "\\0"',
+		'git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo __FAIL__',
+		'printf "\\0"',
+		'git rev-parse --verify refs/heads/master 2>/dev/null && echo yes || echo no',
+		'printf "\\0"',
+		'git rev-parse --verify refs/heads/main 2>/dev/null && echo yes || echo no',
+		'printf "\\0"',
+		'git -c core.filemode=false status --porcelain 2>/dev/null',
+		'printf "\\0"',
+		'BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)',
+		'git rev-parse --abbrev-ref "$BRANCH@{u}" 2>/dev/null || echo __FAIL__',
+		'printf "\\0"',
+		'git rev-list --count @{u}..HEAD 2>/dev/null || echo 0',
+		'printf "\\0"',
+		'git rev-list --count HEAD..@{u} 2>/dev/null || echo 0',
+		'printf "\\0"',
+		'PRIMARY=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed "s|refs/remotes/origin/||")',
+		'if [ -z "$PRIMARY" ]; then PRIMARY=master; fi',
+		'if git rev-parse --verify "origin/$PRIMARY" >/dev/null 2>&1; then PREF="origin/$PRIMARY"; else PREF="$PRIMARY"; fi',
+		'git rev-list --count "$PREF..HEAD" 2>/dev/null || echo 0',
+		'printf "\\0"',
+		'git rev-list --count "HEAD..$PREF" 2>/dev/null || echo 0',
+	].join('\n');
+
+	let rawOutput: string;
+	if (containerId) {
+		const { stdout } = await execFileAsync("docker", [
+			"exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript,
+		], { encoding: "utf-8", timeout: 10000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+		rawOutput = stdout;
+	} else {
+		const { stdout } = await execAsync(batchScript, { cwd, encoding: "utf-8", timeout: 10000, shell: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh" });
+		rawOutput = stdout;
+	}
+
+	const sections = rawOutput.split('\0').map(s => s.trim());
+
+	const branchRaw = sections[0] || '';
+	if (branchRaw === '__FAIL__' || !branchRaw) return null;
+	const branch = branchRaw;
+
+	let primaryBranch = 'master';
+	const remoteHeadRaw = sections[1] || '';
+	if (remoteHeadRaw !== '__FAIL__' && remoteHeadRaw) {
+		primaryBranch = remoteHeadRaw.replace('refs/remotes/origin/', '');
+	} else {
+		const masterExists = (sections[2] || '').startsWith('yes');
+		const mainExists = (sections[3] || '').startsWith('yes');
+		if (!masterExists && mainExists) primaryBranch = 'main';
+	}
+
+	const isOnPrimary = branch === primaryBranch;
+
+	// Parse porcelain status — preserve leading spaces in status codes
+	const statusRaw = sections[4] || '';
+	const statusLines = statusRaw ? statusRaw.split("\n") : [];
+	const status = statusLines.map(line => {
+		const l = line.endsWith("\r") ? line.slice(0, -1) : line;
+		return { file: l.substring(3), status: l.substring(0, 2).trim() };
+	});
+
+	const upstreamRaw = sections[5] || '';
+	const hasUpstream = upstreamRaw !== '__FAIL__' && upstreamRaw !== '';
+
+	let ahead = 0, behind = 0;
+	if (hasUpstream) {
+		ahead = parseInt(sections[6] || '0', 10) || 0;
+		behind = parseInt(sections[7] || '0', 10) || 0;
+	}
+
+	let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
+	if (!isOnPrimary) {
+		aheadOfPrimary = parseInt(sections[8] || '0', 10) || 0;
+		behindPrimary = parseInt(sections[9] || '0', 10) || 0;
+		mergedIntoPrimary = aheadOfPrimary === 0;
+	}
+
+	const clean = statusLines.length === 0;
+	let summary = 'clean';
+	if (!clean) {
+		const counts: Record<string, number> = {};
+		for (const line of statusLines) {
+			const code = line.substring(0, 2).trim();
+			let key: string;
+			if (code.includes('?')) key = '?';
+			else if (code.includes('M')) key = 'M';
+			else if (code.includes('A')) key = 'A';
+			else if (code.includes('D')) key = 'D';
+			else if (code.includes('R')) key = 'R';
+			else if (code.includes('U')) key = 'U';
+			else key = code;
+			counts[key] = (counts[key] || 0) + 1;
+		}
+		summary = Object.entries(counts).map(([k, v]) => `${v}${k}`).join(' ');
+	}
+
+	return {
+		branch, primaryBranch, isOnPrimary, status, hasUpstream,
+		ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
+		clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
+	};
+}
+
 // ── Git diff helper (shared between session and goal endpoints) ──
 const DIFF_MAX_BYTES = 500 * 1024; // 500KB
 
@@ -2963,79 +3078,9 @@ async function handleApiRoute(
 			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
 		}
 		try {
-			let branch = "";
-			try { branch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid); }
-			catch { json({ error: "Not a git repository" }, 400); return; }
-			let primaryBranch = "master";
-			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
-				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
-			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
-			}
-			const isOnPrimary = branch === primaryBranch;
-			let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
-			if (!isOnPrimary) {
-				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
-				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, "0", cid), 10) || 0;
-				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, "0", cid), 10) || 0;
-				mergedIntoPrimary = aheadOfPrimary === 0;
-			}
-			// Don't use execGit here — its trim() strips the leading space from
-			// porcelain status lines like " M file.txt", corrupting the first filename.
-			let statusRaw = "";
-			try {
-				if (cid) {
-					const { stdout } = await execFileAsync("docker", [
-						"exec", "-w", cwd, cid, "/bin/sh", "-c", "git -c core.filemode=false status --porcelain",
-					], { encoding: "utf-8", timeout: 5000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-					statusRaw = stdout.replace(/\s+$/, '');
-				} else {
-					const { stdout } = await execAsync('git -c core.filemode=false status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
-					statusRaw = stdout.replace(/\s+$/, '');
-				}
-			} catch {}
-			const statusLines = statusRaw ? statusRaw.split("\n") : [];
-			const status = statusLines.map(line => {
-				const l = line.endsWith("\r") ? line.slice(0, -1) : line;
-				return { file: l.substring(3), status: l.substring(0, 2).trim() };
-			});
-
-			let hasUpstream = false;
-			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid); hasUpstream = true; } catch { /* no upstream */ }
-
-			let ahead = 0, behind = 0;
-			if (hasUpstream) {
-				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0', cid), 10) || 0;
-				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0', cid), 10) || 0;
-			}
-
-			const clean = statusLines.length === 0;
-			let summary = 'clean';
-			if (!clean) {
-				const counts: Record<string, number> = {};
-				for (const line of statusLines) {
-					const code = line.substring(0, 2).trim();
-					let key: string;
-					if (code.includes('?')) key = '?';
-					else if (code.includes('M')) key = 'M';
-					else if (code.includes('A')) key = 'A';
-					else if (code.includes('D')) key = 'D';
-					else if (code.includes('R')) key = 'R';
-					else if (code.includes('U')) key = 'U';
-					else key = code;
-					counts[key] = (counts[key] || 0) + 1;
-				}
-				summary = Object.entries(counts).map(([k, v]) => `${v}${k}`).join(' ');
-			}
-
-			json({
-				branch, primaryBranch, isOnPrimary, status, hasUpstream,
-				ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
-				clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
-			});
+			const result = await batchGitStatus(cwd, cid);
+			if (!result) { json({ error: "Not a git repository" }, 400); return; }
+			json(result);
 		} catch (err) {
 			json({ error: String(err) }, 500);
 		}
@@ -3735,90 +3780,17 @@ async function handleApiRoute(
 		}
 
 		try {
-			let branch = '';
-			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd, 5000, cid); }
-			catch { json({ error: "Not a git repository" }, 400); return; }
+			const result = await batchGitStatus(cwd, cid);
+			if (!result) { json({ error: "Not a git repository" }, 400); return; }
 
-			let primaryBranch = 'master';
-			try {
-				const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd, 5000, cid);
-				primaryBranch = remoteHead.replace('refs/remotes/origin/', '');
-			} catch {
-				try { await execGit('git rev-parse --verify refs/heads/master', cwd, 5000, cid); primaryBranch = 'master'; }
-				catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd, 5000, cid); primaryBranch = 'main'; } catch { /* keep default */ } }
-			}
-
-			const isOnPrimary = branch === primaryBranch;
-			// Don't use execGit here — its trim() strips the leading space from
-			// porcelain status lines like " M file.txt", corrupting the first filename.
-			let statusRaw = "";
-			try {
-				if (cid) {
-					// Run inside container — execGit trims, so use raw exec
-					const { stdout } = await execFileAsync("docker", [
-						"exec", "-w", cwd, cid, "/bin/sh", "-c", "git -c core.filemode=false status --porcelain",
-					], { encoding: "utf-8", timeout: 5000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-					statusRaw = stdout.replace(/\s+$/, '');
-				} else {
-					const { stdout } = await execAsync('git -c core.filemode=false status --porcelain', { cwd, encoding: "utf-8", timeout: 5000 });
-					statusRaw = stdout.replace(/\s+$/, '');
-				}
-			} catch {}
-			const statusLines = statusRaw ? statusRaw.split("\n") : [];
-			const status = statusLines.map(line => {
-				const l = line.endsWith("\r") ? line.slice(0, -1) : line;
-				return { file: l.substring(3), status: l.substring(0, 2).trim() };
-			});
-
-			let hasUpstream = false;
-			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid); hasUpstream = true; } catch { /* no upstream */ }
-
-			let ahead = 0, behind = 0;
-			if (hasUpstream) {
-				ahead = parseInt(await execGitSafe('git rev-list --count @{u}..HEAD', cwd, '0', cid), 10) || 0;
-				behind = parseInt(await execGitSafe('git rev-list --count HEAD..@{u}', cwd, '0', cid), 10) || 0;
-			}
-
-			let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
-			if (!isOnPrimary) {
-				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
-				aheadOfPrimary = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, '0', cid), 10) || 0;
-				behindPrimary = parseInt(await execGitSafe(`git rev-list --count HEAD..${primaryRef}`, cwd, '0', cid), 10) || 0;
-				mergedIntoPrimary = aheadOfPrimary === 0;
-			}
-
-			const clean = statusLines.length === 0;
-			let summary = 'clean';
-			if (!clean) {
-				const counts: Record<string, number> = {};
-				for (const line of statusLines) {
-					const code = line.substring(0, 2).trim();
-					let key: string;
-					if (code.includes('?')) key = '?';
-					else if (code.includes('M')) key = 'M';
-					else if (code.includes('A')) key = 'A';
-					else if (code.includes('D')) key = 'D';
-					else if (code.includes('R')) key = 'R';
-					else if (code.includes('U')) key = 'U';
-					else key = code;
-					counts[key] = (counts[key] || 0) + 1;
-				}
-				summary = Object.entries(counts).map(([k, v]) => `${v}${k}`).join(' ');
-			}
-
-			json({
-				branch, primaryBranch, isOnPrimary, status, hasUpstream,
-				ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
-				clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
-			});
+			json(result);
 
 			// Auto-push: for feature branches with unpushed commits, push in background
-			if (!isOnPrimary && ahead > 0 && hasUpstream) {
+			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
 				execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
-			} else if (!isOnPrimary && !hasUpstream && branch && /^session\//.test(branch)) {
+			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
 				// Session branches without upstream: set up tracking and push
-				execAsync(`git push -u origin ${branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+				execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
 			}
 		} catch (err) {
 			json({ error: String(err) }, 500);
