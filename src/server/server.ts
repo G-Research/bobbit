@@ -2811,6 +2811,7 @@ async function handleApiRoute(
 		const [, goalId, gateId] = cancelVerifMatch;
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 400); return; }
 		if (goal.state === "shelved") { json({ error: "Goal is shelved" }, 400); return; }
 
 		const activeVers = verificationHarness.getActiveVerifications(goalId);

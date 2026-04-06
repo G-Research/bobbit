@@ -110,10 +110,14 @@ export class VerificationHarness {
 	 * Check if any verification sessions for a given signalId are still alive.
 	 * Returns true if at least one running step has a live session.
 	 * Returns false (zombie) if no running sessions exist — safe to auto-cancel.
+	 * Also returns true if steps are still in "waiting" state (not yet started),
+	 * to avoid premature cancellation during phase transitions.
 	 */
 	areVerificationSessionsAlive(signalId: string): boolean {
 		const active = this.activeVerifications.get(signalId);
 		if (!active) return false;
+		// If any step is still waiting to start, the verification is not a zombie
+		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
 			if (step.sessionId && step.status === "running") {
 				const session = this.sessionManager?.getSession(step.sessionId);

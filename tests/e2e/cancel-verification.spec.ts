@@ -5,7 +5,8 @@
  * 1. Cancel a running verification via POST /api/goals/:goalId/gates/:gateId/cancel-verification
  * 2. Idempotent cancel when nothing is running (returns 200 with cancelled: false)
  * 3. Cancel on non-existent goal (404)
- * 4. Cancel on archived goal (400)
+ * 4. Cancel on shelved goal (400)
+ * 4b. Cancel on archived goal (400)
  * 5. Re-signal after cancel succeeds (no 409)
  */
 import { test, expect } from "./in-process-harness.js";
@@ -185,6 +186,33 @@ test.describe("Cancel Verification API", () => {
 			expect(cancelRes.status).toBe(400);
 			const body = await cancelRes.json();
 			expect(body.error).toContain("shelved");
+		} finally {
+			await deleteGoal(goalId).catch(() => {});
+		}
+	});
+
+	test("cancel on archived goal returns 400", async () => {
+		const goal = await createGoal({
+			title: `Cancel Archived Verif ${Date.now()}`,
+			workflowId: SLOW_WORKFLOW_ID,
+			worktree: false,
+		});
+		const goalId = goal.id;
+
+		try {
+			// Archive the goal via DELETE
+			const archiveRes = await apiFetch(`/api/goals/${goalId}`, {
+				method: "DELETE",
+			});
+			expect(archiveRes.ok).toBe(true);
+
+			// Try to cancel verification on archived goal
+			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
+				method: "POST",
+			});
+			expect(cancelRes.status).toBe(400);
+			const body = await cancelRes.json();
+			expect(body.error).toContain("archived");
 		} finally {
 			await deleteGoal(goalId).catch(() => {});
 		}
