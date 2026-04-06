@@ -191,7 +191,9 @@ async function batchGitStatus(cwd: string, containerId?: string): Promise<{
 		rawOutput = stdout;
 	}
 
-	const sections = rawOutput.split('\0').map(s => s.trim());
+	// Trim trailing whitespace only — porcelain status lines have meaningful
+	// leading spaces (e.g. " M file.txt") that substring(3) relies on.
+	const sections = rawOutput.split('\0').map(s => s.replace(/\s+$/, ''));
 
 	const branchRaw = sections[0] || '';
 	if (branchRaw === '__FAIL__' || !branchRaw) return null;
