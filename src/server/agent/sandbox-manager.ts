@@ -7,7 +7,7 @@
  */
 
 import { ProjectSandbox } from "./project-sandbox.js";
-import type { ProjectSandboxOptions, ContainerState } from "./project-sandbox.js";
+import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent } from "./project-sandbox.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +20,17 @@ export interface SandboxManagerStats {
 
 export class SandboxManager {
 	private sandboxes = new Map<string, ProjectSandbox>();
+	private _recoveryListeners: Array<(projectId: string, containerId: string) => void> = [];
+	private _healthUnsubscribes = new Map<string, () => void>();
+
+	/** Subscribe to container recovery events across all projects. Returns unsubscribe function. */
+	onContainerRecovered(listener: (projectId: string, containerId: string) => void): () => void {
+		this._recoveryListeners.push(listener);
+		return () => {
+			const idx = this._recoveryListeners.indexOf(listener);
+			if (idx >= 0) this._recoveryListeners.splice(idx, 1);
+		};
+	}
 
 	/**
 	 * Initialize sandbox for a project. Creates the ProjectSandbox and calls init().
@@ -42,6 +53,19 @@ export class SandboxManager {
 		try {
 			await sandbox.init();
 			console.log(`[sandbox-manager] Project ${projectId} sandbox ready (container: ${sandbox.getStatus().containerId.substring(0, 12)})`);
+
+			// Start health monitoring and subscribe to events
+			sandbox.startHealthMonitor();
+			const unsub = sandbox.onHealthEvent((event: SandboxHealthEvent) => {
+				if (event.type === "container-died") {
+					console.log(`[sandbox-manager] Container died for project ${projectId}`);
+				} else if (event.type === "container-recovered") {
+					for (const listener of this._recoveryListeners) {
+						try { listener(projectId, event.containerId); } catch { /* ignore */ }
+					}
+				}
+			});
+			this._healthUnsubscribes.set(projectId, unsub);
 		} catch (err: any) {
 			console.error(`[sandbox-manager] Failed to init sandbox for project ${projectId}:`, err?.message || err);
 			// Keep it in the map so callers can see the error state.
@@ -71,6 +95,15 @@ export class SandboxManager {
 
 	/** Shutdown all sandboxes gracefully (stop containers, preserve volumes). */
 	async shutdownAll(): Promise<void> {
+		// Stop all health monitors first
+		for (const sandbox of this.sandboxes.values()) {
+			sandbox.stopHealthMonitor();
+		}
+		for (const unsub of this._healthUnsubscribes.values()) {
+			try { unsub(); } catch { /* ignore */ }
+		}
+		this._healthUnsubscribes.clear();
+
 		const shutdownPromises = [...this.sandboxes.values()].map(sandbox =>
 			sandbox.shutdown().catch(err => {
 				console.warn(`[sandbox-manager] Shutdown error:`, err?.message || err);
@@ -84,6 +117,10 @@ export class SandboxManager {
 	async destroy(projectId: string): Promise<void> {
 		const sandbox = this.sandboxes.get(projectId);
 		if (!sandbox) return;
+
+		sandbox.stopHealthMonitor();
+		const unsub = this._healthUnsubscribes.get(projectId);
+		if (unsub) { try { unsub(); } catch { /* ignore */ } this._healthUnsubscribes.delete(projectId); }
 
 		await sandbox.destroy();
 		this.sandboxes.delete(projectId);
