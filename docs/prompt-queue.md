@@ -41,9 +41,9 @@ Standard user message. Always routed through `enqueuePrompt()` — never sent di
 
 ### `steer` (client → server)
 
-A mid-turn interrupt. Behavior depends on agent state:
+A mid-turn redirect. Behavior depends on agent state:
 
-- **Agent streaming**: Enqueued as a steered message (`isSteered: true`). The message is **not** dispatched immediately — it is held until the user presses Stop/Escape. On `forceAbort()`, all steered+undispatched messages are concatenated and sent as a single `rpcClient.steer()` call. This batching ensures multiple steered messages arrive as one coherent block rather than racing individually.
+- **Agent streaming**: Dispatched **immediately** via `rpcClient.steer()` — injected between tool calls in real-time. The message is NOT queued. The UI sends `steer` (instead of `prompt`) when `isStreaming` is true and there are no attachments. Optimistic rendering adds the user message to chat immediately.
 - **Agent idle**: Enqueued as a steered message. Steered messages sort before normal messages in the queue.
 
 ### `follow_up` (client → server)
@@ -52,7 +52,7 @@ Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcCli
 
 ### `steer_queued` (client → server)
 
-Promotes an already-queued message to steered priority. The steered message is reordered to the top and shows a "Sent" badge in the UI. Like direct `steer`, the message is held until the user triggers an abort — it is not dispatched immediately.
+Promotes an already-queued message to steered priority. The steered message is reordered to the top and shows a "Sent" badge in the UI. Unlike direct `steer` (which is dispatched immediately during streaming), promoted steers are held until the user triggers an abort — on `forceAbort()`, all steered+undispatched messages are concatenated and sent as a single `rpcClient.steer()` call. This batching ensures multiple promoted messages arrive as one coherent block rather than racing individually.
 
 ### `remove_queued` (client → server)
 

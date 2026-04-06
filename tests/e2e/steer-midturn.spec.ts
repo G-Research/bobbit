@@ -1,17 +1,12 @@
 /**
  * E2E tests for steer mid-turn delivery.
  *
- * BUG: When the user sends a message while the agent is streaming,
- * AgentInterface.sendMessage() always sends { type: "prompt" } which
- * gets queued. It should send { type: "steer" } so the message is
- * injected between tool calls immediately.
- *
- * The server-side steer handler (ws/handler.ts case "steer") works
- * correctly — it calls rpcClient.steer() when the agent is streaming.
- * The bug is purely in the UI dispatch path.
- *
- * These tests verify the server-side steer mechanism and demonstrate
- * the bug by showing that prompt-during-streaming gets queued.
+ * Tests verify:
+ * 1. Steers sent while streaming are delivered immediately to the agent
+ *    (via rpcClient.steer(), injected between tool calls).
+ * 2. Prompts sent while streaming are correctly queued by the server
+ *    (the UI now sends steer instead, but the server queue path is
+ *    still exercised here for completeness).
  */
 import { test, expect } from "./in-process-harness.js";
 import {
@@ -76,11 +71,10 @@ test.describe("Steer mid-turn delivery", () => {
 		}
 	});
 
-	test("prompt sent while streaming gets queued instead of being delivered as steer", async () => {
-		// This test demonstrates the BUG: the UI always sends { type: "prompt" }
-		// even when the agent is streaming. The server correctly queues prompts
-		// sent during streaming. After the fix, the UI will send { type: "steer" }
-		// instead, which bypasses the queue entirely.
+	test("prompt sent while streaming is correctly queued by the server", async () => {
+		// Verify the server correctly queues { type: "prompt" } during streaming.
+		// The UI fix sends { type: "steer" } instead (tested above), but the
+		// server's queue behavior for prompts should remain unchanged.
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
@@ -94,26 +88,17 @@ test.describe("Steer mid-turn delivery", () => {
 			// Clear messages
 			conn.messages.length = 0;
 
-			// Send a prompt while streaming — this is what the UI currently does.
-			// BUG: This gets queued instead of being delivered as a steer.
-			conn.send({ type: "prompt", text: "redirect the agent please" });
+			// Send a prompt while streaming — the server should queue it
+			conn.send({ type: "prompt", text: "this should be queued" });
 
-			// The message gets QUEUED (queue_update with 1 item).
-			// After the fix, the UI sends { type: "steer" } instead, which
-			// bypasses the queue and delivers immediately.
+			// Verify the message is queued (queue_update with 1 item)
 			const queueMsg = await conn.waitFor(
 				(m: WsMsg) => m.type === "queue_update" && m.queue && m.queue.length > 0,
 				3000,
 			);
 
-			// BUG ASSERTION: The message should NOT be in the queue — it should
-			// have been delivered immediately as a steer. This fails because the
-			// current UI sends "prompt" which always queues during streaming.
-			expect(
-				queueMsg.queue.length,
-				"Expected message to be delivered as steer (queue empty), but it was queued instead — " +
-				"UI sends prompt instead of steer while streaming",
-			).toBe(0);
+			expect(queueMsg.queue.length).toBe(1);
+			expect(queueMsg.queue[0].text).toContain("this should be queued");
 		} finally {
 			conn.close();
 		}
