@@ -3074,8 +3074,10 @@ export class SessionManager {
 			this.sandboxTokenStore.removeSession(session.projectId, id);
 		}
 
-		// Clean up sandbox worktree inside the container
-		if (session.sandboxed && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+		// Clean up sandbox worktree inside the container.
+		// Skip for delegate sessions — they share the parent's worktree and must
+		// never remove it.  Only the owning (non-delegate) session should clean up.
+		if (session.sandboxed && !session.delegateOf && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
 			try {
 				const sandbox = this.sandboxManager.get(session.projectId);
 				if (sandbox) {
@@ -3278,7 +3280,8 @@ export class SessionManager {
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
 		// worktree for server bookkeeping, so we clean those up too.  Skip paths that
 		// are container-internal (start with /workspace) — those have no host counterpart.
-		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace")) {
+		// Skip delegates — they share the parent's worktree and must never remove it.
+		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf) {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
 				await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
