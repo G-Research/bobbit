@@ -15,7 +15,7 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
 		return { view: "search", searchQuery: params?.get("q") || undefined };
 	}
-	const sessionMatch = hash.match(/^#\/session\/([a-f0-9-]+)$/i);
+	const sessionMatch = hash.match(/^#\/session\/([a-zA-Z0-9_-]+)$/i);
 	if (sessionMatch) {
 		return { view: "session", sessionId: sessionMatch[1] };
 	}
