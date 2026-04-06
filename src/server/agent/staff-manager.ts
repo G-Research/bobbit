@@ -90,7 +90,7 @@ export class StaffManager {
 				projectId,
 			});
 			session.staffId = id;
-			session.title = staff.name;
+			sessionManager.setTitle(session.id, staff.name);
 			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
 			await sessionManager.persistSessionMetadata(session);
 			store.update(id, { currentSessionId: session.id });
@@ -242,7 +242,7 @@ export class StaffManager {
 				sandboxed: sessionManager.isSandboxEnabled,
 			});
 			session.staffId = staffId;
-			session.title = staff.name;
+			sessionManager.setTitle(session.id, staff.name);
 			await sessionManager.persistSessionMetadata(session);
 			store.update(staffId, { currentSessionId: session.id, lastWakeAt: Date.now() });
 
