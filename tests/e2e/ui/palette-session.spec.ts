@@ -25,7 +25,7 @@ test.describe("Project palette on session navigation", () => {
 			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		}
 		if (paletteDir) {
-			rmSync(paletteDir, { recursive: true, force: true });
+			try { rmSync(paletteDir, { recursive: true, force: true }); } catch { /* Windows EPERM on locked temp dirs */ }
 		}
 	});
 
