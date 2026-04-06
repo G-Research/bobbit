@@ -268,11 +268,21 @@ export function handleWebSocketConnection(
 					console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
 					let promptText = msg.text;
 
-					// Resolve per-project config store for skill lookup
+					// Resolve per-project config store and host-side cwd for skill lookup.
+					// For sandbox sessions, session.cwd is a container-internal path
+					// (e.g. /workspace-wt/<branch>) that doesn't exist on the host.
+					// Skill discovery runs on the host, so fall back to the project's
+					// rootPath for sandboxed sessions.
 					let resolvedConfigStore = projectConfigStore;
+					let skillCwd = session.cwd;
 					if (session.projectId && projectContextManager) {
 						const ctx = projectContextManager.getOrCreate(session.projectId);
-						if (ctx) resolvedConfigStore = ctx.projectConfigStore;
+						if (ctx) {
+							resolvedConfigStore = ctx.projectConfigStore;
+							if (session.sandboxed) {
+								skillCwd = ctx.project.rootPath;
+							}
+						}
 					}
 
 					// Check for slash skill invocations at word boundaries
@@ -282,7 +292,7 @@ export function handleWebSocketConnection(
 					const replacements: Array<{ start: number; end: number; expanded: string }> = [];
 					while ((match = slashPattern.exec(promptText)) !== null) {
 						const skillName = match[2];
-						const skill = getSlashSkill(session.cwd, skillName, resolvedConfigStore);
+						const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore);
 						if (!skill) {
 							console.warn(`[ws-handler] Slash skill "${skillName}" not found for session ${sessionId} (cwd=${session.cwd})`);
 						}
