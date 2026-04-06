@@ -211,6 +211,8 @@ Dev server runs from **primary worktree** on `master`. All sessions use separate
 
 **Always edit files in your session worktree, never in the primary worktree.** The user or other context may reference files by their primary-worktree path — read those for reference, but all edits, builds, and git operations must happen in your CWD (your session worktree). The same source tree is available at both paths; editing the primary worktree risks conflicts with the dev server and other agents.
 
+> **Why this matters:** The primary worktree is shared, mutable state — the dev server runs from it, other agents may have uncommitted work there, and the user may be editing files in it. When you `cd` into the primary worktree and make changes, you can cause merge conflicts during rebase, corrupt other agents' in-progress work, or break the running dev server. Even if your intent is to change infrastructure files (Dockerfiles, configs) that "need to end up" in the primary worktree, the correct flow is: edit in your worktree → commit → push to origin → pull from primary. One `cd /workspace` violation cascades — once you're there, all subsequent commands (edit, git add, commit, rebase) operate on shared state. Treat your working directory as a hard constraint, not a suggestion.
+
 **Pushing to remote `master` does NOT update the dev server.** Pull into the primary worktree:
 
 ```bash
