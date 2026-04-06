@@ -34,8 +34,6 @@ export class AgentInterface extends LitElement {
 	@property({ type: Boolean }) showThemeToggle = false;
 	// Working directory shown in the stats bar
 	@property() cwd?: string;
-	// Project ID for the current session — used for slash skill resolution
-	@property() projectId?: string;
 	// Git branch name shown in the stats bar
 	@property() branch?: string;
 	// Git status data for the widget
@@ -530,19 +528,10 @@ export class AgentInterface extends LitElement {
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
 		const state = this.session.state;
 
-		const preparingBanner = (state as any).isPreparing ? html`
-			<div class="flex items-center justify-center gap-2 py-3 text-muted-foreground text-sm" style="opacity:0.7">
-				<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-					<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-				</svg>
-				<span>Setting up worktree…</span>
-			</div>
-		` : nothing;
 		// Build a map of tool results to allow inline rendering in assistant messages
 		const toolResultsById = this._getToolResultsById();
 		return html`
 			<div class="flex flex-col gap-3">
-				${preparingBanner}
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${this.session.state.messages}
@@ -559,9 +548,6 @@ export class AgentInterface extends LitElement {
 						);
 						this.requestUpdate();
 					}}
-					.onRestartAgent=${typeof (this.session as any)?.restartAgent === 'function'
-						? () => (this.session as any).restartAgent()
-						: undefined}
 					.onRetry=${!state.isStreaming && typeof (this.session as any)?.retry === 'function'
 						? () => (this.session as any).retry()
 						: undefined}
@@ -587,6 +573,15 @@ export class AgentInterface extends LitElement {
 					.onCostClick=${this.onCostClick}
 					.turnStartTime=${(state as any).turnStartTime ?? null}
 				></streaming-message-container>
+
+				${(state as any).isPreparing ? html`
+					<div class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm">
+						<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+						</svg>
+						<span>Setting up worktree…</span>
+					</div>
+				` : nothing}
 
 			</div>
 		`;
@@ -907,10 +902,9 @@ export class AgentInterface extends LitElement {
 							</div>
 						</div>
 						` : ''}
-						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) ? nothing : html`<message-editor style="position:relative;z-index:20"
+						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
-						.projectId=${this.projectId}
 							.isStreaming=${state.isStreaming}
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}
@@ -930,21 +924,6 @@ export class AgentInterface extends LitElement {
 							.onRemoveQueued=${(id: string) => {
 								if (typeof (session as any).removeQueued === 'function') {
 									(session as any).removeQueued(id);
-								}
-							}}
-							.onEditQueued=${(msg: any) => {
-								if (typeof (session as any).removeQueued === 'function') {
-									(session as any).removeQueued(msg.id);
-								}
-								const editor = this._messageEditor;
-								if (editor) {
-									editor.value = msg.text;
-									editor.onInput?.(msg.text);
-								}
-							}}
-							.onReorder=${(messageIds: string[]) => {
-								if (typeof (session as any).reorderQueue === 'function') {
-									(session as any).reorderQueue(messageIds);
 								}
 							}}
 							.onModelSelect=${() => {
