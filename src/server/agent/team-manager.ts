@@ -134,9 +134,13 @@ export class TeamManager {
 	private _localGoalManager: GoalManager | null = null;
 	/** Timers for the idle-nudge mechanism (goalId → timer). */
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
+	/** Separate timer for nudging when no workers remain (goalId → timer). */
+	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
 	private verificationHarness?: VerificationHarness;
-	/** Delay before nudging the idle team lead (ms). */
+	/** Delay before nudging the idle team lead when workers are active (ms). */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
+	/** Delay before nudging the idle team lead when no workers remain (ms). */
+	private static readonly NO_WORKERS_NUDGE_DELAY_MS = 300_000;
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
@@ -301,7 +305,7 @@ export class TeamManager {
 				const tlSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 				if (tlSession && tlSession.status !== "terminated") {
 					this.subscribeTeamLeadEvents(goalId);
-					if (tlSession.status === "idle" && entry.agents.length > 0) {
+					if (tlSession.status === "idle") {
 						this.startIdleNudgeTimer(goalId);
 					}
 				}
@@ -327,13 +331,18 @@ export class TeamManager {
 	}
 
 	/**
-	 * Clear and remove the idle-nudge timer for a goal.
+	 * Clear and remove all idle-nudge timers for a goal.
 	 */
 	private clearIdleNudgeTimer(goalId: string): void {
 		const timer = this.idleNudgeTimers.get(goalId);
 		if (timer) {
 			clearInterval(timer);
 			this.idleNudgeTimers.delete(goalId);
+		}
+		const nwTimer = this.noWorkersNudgeTimers.get(goalId);
+		if (nwTimer) {
+			clearInterval(nwTimer);
+			this.noWorkersNudgeTimers.delete(goalId);
 		}
 	}
 
@@ -344,41 +353,73 @@ export class TeamManager {
 		return formatElapsed(sinceMs);
 	}
 
+	/** Common pre-checks for nudge timer ticks. Returns true if the nudge should be skipped. */
+	private shouldSkipNudge(goalId: string): boolean {
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return true;
+		const tl = this.sessionManager.getSession(entry.teamLeadSessionId);
+		if (!tl || tl.status !== "idle") return true;
+		if (this.verificationHarness?.getActiveVerifications(goalId).length) return true;
+		return false;
+	}
+
+	/** Get active (non-reviewer, non-terminated) workers for a goal. */
+	private getActiveWorkers(goalId: string): TeamAgent[] {
+		const entry = this.teams.get(goalId);
+		if (!entry) return [];
+		return entry.agents.filter((a) => {
+			if (a.role === 'reviewer') return false;
+			const s = this.sessionManager.getSession(a.sessionId);
+			return s && s.status !== "terminated";
+		});
+	}
+
 	/**
-	 * Start a repeating idle-nudge timer that checks in on team progress.
-	 * Fires every IDLE_NUDGE_DELAY_MS while the team lead is idle and workers are active.
+	 * Start both idle-nudge timers when the team lead goes idle.
+	 *
+	 * Two independent repeating timers run in parallel:
+	 * - **No-workers timer** (5 min): fires when the team lead is idle with zero
+	 *   active workers — one-shot nudge then self-clears.
+	 * - **Workers timer** (10 min): fires when the team lead is idle while workers
+	 *   are still active — repeats every 10 min.
+	 *
+	 * Each timer checks conditions on every tick and returns early if they don't apply.
 	 */
 	private startIdleNudgeTimer(goalId: string): void {
-		// Prevent duplicate timers
 		this.clearIdleNudgeTimer(goalId);
 
+		// --- 5-minute no-workers timer (one-shot) ---
+		const nwTimer = setInterval(() => {
+			if (this.shouldSkipNudge(goalId)) return;
+
+			if (this.getActiveWorkers(goalId).length > 0) return; // workers exist — not our concern
+
+			const entry = this.teams.get(goalId)!;
+			const goal = this.resolveGoal(goalId);
+			const goalTitle = goal?.title || goalId.slice(0, 8);
+			const message =
+				`[AUTO-NUDGE] You have been idle for a while and have no active team agents. ` +
+				`Goal: "${goalTitle}". ` +
+				`Check your progress — use task_list and gate_list to review what's done and what remains. ` +
+				`If there's more work to do, spawn agents or do it yourself. ` +
+				`If all work is complete and gates are passed, call team_complete to finish the goal.`;
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
+			console.log(`[team-manager] Sent no-workers idle nudge to team lead for goal ${goalId}`);
+
+			// One-shot: clear only this timer
+			const t = this.noWorkersNudgeTimers.get(goalId);
+			if (t) { clearInterval(t); this.noWorkersNudgeTimers.delete(goalId); }
+		}, TeamManager.NO_WORKERS_NUDGE_DELAY_MS);
+		this.noWorkersNudgeTimers.set(goalId, nwTimer);
+
+		// --- 10-minute workers timer (repeating) ---
 		const timer = setInterval(() => {
-			const entry = this.teams.get(goalId);
-			if (!entry?.teamLeadSessionId) return;
+			if (this.shouldSkipNudge(goalId)) return;
 
-			const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
-			if (!teamLeadSession || teamLeadSession.status !== "idle") {
-				return; // Skip this tick — team lead busy or gone
-			}
+			const activeWorkers = this.getActiveWorkers(goalId);
+			if (activeWorkers.length === 0) return; // no workers — handled by the other timer
 
-			// Skip nudge while gate verifications are in-flight — reviewer agents are managed by the harness
-			if (this.verificationHarness?.getActiveVerifications(goalId).length) {
-				return;
-			}
-
-			// Collect active workers
-			const activeWorkers = entry.agents.filter((a) => {
-				if (a.role === 'reviewer') return false; // managed by verification harness
-				const s = this.sessionManager.getSession(a.sessionId);
-				return s && s.status !== "terminated";
-			});
-
-			if (activeWorkers.length === 0) {
-				this.clearIdleNudgeTimer(goalId);
-				return;
-			}
-
-			// Build status lines
+			const entry = this.teams.get(goalId)!;
 			const lines = activeWorkers.map((agent) => {
 				const s = this.sessionManager.getSession(agent.sessionId);
 				const status = s?.status ?? "unknown";
@@ -397,10 +438,9 @@ export class TeamManager {
 				`If an agent is idle and their work looks complete, mark their task as done and dismiss them. ` +
 				`If idle agents have more to do, prompt them to continue.`;
 
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
 			console.log(`[team-manager] Sent idle nudge to team lead for goal ${goalId}`);
 		}, TeamManager.IDLE_NUDGE_DELAY_MS);
-
 		this.idleNudgeTimers.set(goalId, timer);
 	}
 
@@ -1017,9 +1057,17 @@ export class TeamManager {
 		this.lastNotifyTime.delete(sessionId);
 		this.persistEntry(goalId);
 
-		// If no workers remain, clear the idle-nudge timer
+		// If no workers remain and team lead is idle, restart timers so the
+		// 5-minute no-workers nudge fires from this point.
 		if (entry.agents.length === 0) {
-			this.clearIdleNudgeTimer(goalId);
+			const tlSession = entry.teamLeadSessionId
+				? this.sessionManager.getSession(entry.teamLeadSessionId)
+				: null;
+			if (tlSession && tlSession.status === "idle") {
+				this.startIdleNudgeTimer(goalId);
+			} else {
+				this.clearIdleNudgeTimer(goalId);
+			}
 		}
 
 		console.log(`[team-manager] Dismissed ${agent.role} agent (${sessionId}) for goal ${goalId}`);
