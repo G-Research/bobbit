@@ -1222,7 +1222,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.remoteAgent.prompt('Please raise a pull request for the current branch with an appropriate title and description.');
 				}
 			};
-			state.chatPanel.agentInterface.onPrMerge = async (method: string, admin?: boolean) => {
+			state.chatPanel.agentInterface.onPrMerge = async (method: string, admin?: boolean, branch?: string) => {
 				const sd = state.gatewaySessions.find((s) => s.id === sessionId);
 				const mergeUrl = sd?.goalId
 					? `/api/goals/${sd.goalId}/pr-merge`
@@ -1231,7 +1231,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					const res = await gatewayFetch(mergeUrl, {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({ method, ...(admin ? { admin: true } : {}) }),
+						body: JSON.stringify({ method, ...(admin ? { admin: true } : {}), ...(branch ? { branch } : {}) }),
 					});
 					if (res.ok) {
 						refreshPrStatusForSession(sessionId);
@@ -1649,6 +1649,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 				ai.prMergeable = undefined;
 				ai.viewerIsAdmin = undefined;
 				ai.reviewDecision = undefined;
+				ai.headRefName = undefined;
 			}
 			return;
 		}
@@ -1661,6 +1662,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prMergeable = data.mergeable;
 			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
 			ai.reviewDecision = data.reviewDecision ?? undefined;
+			ai.headRefName = data.headRefName ?? undefined;
 		}
 		// Update goal grouping cache so sidebar reflects the new PR state immediately
 		if (goalId && data.state) {
@@ -1676,6 +1678,7 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 			ai.prMergeable = undefined;
 			ai.viewerIsAdmin = undefined;
 			ai.reviewDecision = undefined;
+			ai.headRefName = undefined;
 		}
 	}
 }

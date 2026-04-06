@@ -31,6 +31,7 @@ export class GitStatusWidget extends LitElement {
     @property() prMergeable?: string;
     @property({ type: Boolean }) viewerIsAdmin = false;
     @property() reviewDecision?: string; // "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null
+    @property() headRefName?: string; // The actual branch name the PR targets
 
     @state() private _modalFile: string | null = null;
     @state() private _loadingDiff: string | null = null;
@@ -460,7 +461,7 @@ export class GitStatusWidget extends LitElement {
         this.dispatchEvent(new CustomEvent('pr-merge', {
             bubbles: true,
             composed: true,
-            detail: { method: this.mergeMethod },
+            detail: { method: this.mergeMethod, ...(this.headRefName ? { branch: this.headRefName } : {}) },
         }));
     }
 
@@ -470,7 +471,7 @@ export class GitStatusWidget extends LitElement {
         this.dispatchEvent(new CustomEvent('pr-merge', {
             bubbles: true,
             composed: true,
-            detail: { method: this.mergeMethod, admin: true },
+            detail: { method: this.mergeMethod, admin: true, ...(this.headRefName ? { branch: this.headRefName } : {}) },
         }));
     }
 

@@ -158,8 +158,13 @@ test.describe("Queue UI E2E", () => {
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// Verify the textarea has the draft text restored
-		await expect(page.locator("textarea").first()).toHaveValue(draftText, { timeout: 10_000 });
+		// Draft restore is async (fires after session connects, messages load, and
+		// _setupPromptDraftHandlers runs). A Lit re-render can race with the restore,
+		// momentarily clearing the textarea. Use toPass to retry the full check.
+		await expect(async () => {
+			const val = await page.locator("textarea").first().inputValue();
+			expect(val).toBe(draftText);
+		}).toPass({ intervals: [500, 1000, 1000, 2000, 2000], timeout: 20_000 });
 	});
 
 	test("story 9: edit pill — remove, modify, re-queue at end", async ({ page }) => {

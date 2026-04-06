@@ -90,6 +90,7 @@ interface PrStatus {
 	mergeable?: string;
 	viewerIsAdmin?: boolean;
 	reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+	headRefName?: string;
 }
 let prStatus: PrStatus | null = null;
 
@@ -924,7 +925,7 @@ async function handleEndTeam(goalId: string): Promise<void> {
 // PR MERGE HANDLER
 // ============================================================================
 
-async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>): Promise<void> {
+async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; branch?: string }>): Promise<void> {
 	if (!currentGoalId) return;
 	const widget = e.target as import('../ui/components/GitStatusWidget.js').GitStatusWidget;
 	const goalId = currentGoalId;
@@ -932,7 +933,7 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>
 		const res = await gatewayFetch(`/api/goals/${goalId}/pr-merge`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ method: e.detail.method, ...(e.detail.admin ? { admin: true } : {}) }),
+			body: JSON.stringify({ method: e.detail.method, ...(e.detail.admin ? { admin: true } : {}), ...(e.detail.branch ? { branch: e.detail.branch } : {}) }),
 		});
 		if (res.ok) {
 			widget.setMergeResult();
@@ -1236,6 +1237,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.prMergeable=${prStatus?.mergeable}
 						.viewerIsAdmin=${prStatus?.viewerIsAdmin ?? false}
 						.reviewDecision=${prStatus?.reviewDecision}
+						.headRefName=${prStatus?.headRefName}
 						@pr-merge=${handlePrMerge}
 						@git-fetch=${handleGitFetch}
 					></git-status-widget>
