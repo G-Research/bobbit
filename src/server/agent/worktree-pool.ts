@@ -40,6 +40,22 @@ export class WorktreePool {
 	/** Number of ready worktrees available. */
 	get size(): number { return this.pool.length; }
 
+	/** Target pool size. */
+	get target(): number { return this.targetSize; }
+
+	/** Whether the pool is currently filling. */
+	get isFilling(): boolean { return this.filling; }
+
+	/** Status snapshot for the API. */
+	getStatus(): { enabled: boolean; ready: number; target: number; filling: boolean } {
+		return {
+			enabled: this.targetSize > 0,
+			ready: this.pool.length,
+			target: this.targetSize,
+			filling: this.filling,
+		};
+	}
+
 	/**
 	 * Start filling the pool in the background. Call once after startup.
 	 *

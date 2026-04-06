@@ -156,7 +156,7 @@ describe("assembleSystemPrompt", () => {
 		const result = assembleSystemPrompt("test-session-2", { cwd: cwdDir });
 		assert.ok(result);
 		const content = fs.readFileSync(result, "utf-8");
-		assert.ok(content.includes("# Project Context"));
+		assert.ok(content.includes("# Project AGENTS.md"));
 		assert.ok(content.includes("Use TypeScript."));
 	});
 

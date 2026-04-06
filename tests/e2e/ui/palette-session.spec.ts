@@ -5,13 +5,17 @@
  * refreshSessions() resolved, causing the palette to revert to the global one
  * when the session wasn't yet in gatewaySessions.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, nonGitCwd } from "../e2e-setup.js";
+import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Project palette on session navigation", () => {
 	let projectId: string;
 	let sessionId: string;
+	let paletteDir: string;
 
 	test.afterEach(async () => {
 		if (sessionId) {
@@ -20,15 +24,21 @@ test.describe("Project palette on session navigation", () => {
 		if (projectId) {
 			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		}
+		if (paletteDir) {
+			rmSync(paletteDir, { recursive: true, force: true });
+		}
 	});
 
 	test("palette matches project after navigating to session", async ({ page }) => {
+		// Use a unique directory to avoid rootPath conflicts with other tests
+		paletteDir = mkdtempSync(join(tmpdir(), "bobbit-palette-test-"));
+
 		// Create a project with the "ocean" palette
 		const projResp = await apiFetch("/api/projects", {
 			method: "POST",
 			body: JSON.stringify({
 				name: "palette-test",
-				rootPath: nonGitCwd(),
+				rootPath: paletteDir,
 				palette: "ocean",
 			}),
 		});
@@ -40,7 +50,7 @@ test.describe("Project palette on session navigation", () => {
 		const sessResp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({
-				cwd: nonGitCwd(),
+				cwd: paletteDir,
 				projectId,
 			}),
 		});
