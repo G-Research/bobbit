@@ -428,6 +428,18 @@ export class RemoteAgent {
 
 	steer(message: any): void {
 		const text = typeof message === "string" ? message : extractText(message);
+		// Add optimistic user message so it renders immediately in chat,
+		// matching the pattern used in prompt() for idle sends.
+		const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+		const optimisticMsg: any = {
+			role: "user",
+			content: [{ type: "text", text }],
+			timestamp: Date.now(),
+			id: optimisticId,
+		};
+		this._state.messages = [...this._state.messages, optimisticMsg];
+		this._liveEventMessages.push(optimisticMsg);
+		this.emit({ type: "message_end", message: optimisticMsg });
 		this.send({ type: "steer", text });
 	}
 

@@ -893,6 +893,20 @@ async function handleApiRoute(
 		return projectConfigStore;
 	}
 
+	/**
+	 * Resolve the host-side cwd for slash-skill discovery.
+	 * For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...)
+	 * which doesn't exist on the host. Use the project's rootPath instead so skill
+	 * files (.claude/skills/, .bobbit/skills/) are found on the host filesystem.
+	 */
+	function resolveSkillDiscoveryCwd(cwd: string, projectId: string | null | undefined): string {
+		if (projectId && projectContextManager) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (ctx) return ctx.project.rootPath;
+		}
+		return cwd;
+	}
+
 	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
 	function getGoalManagerForGoal(goalId: string): GoalManager {
 		const ctx = projectContextManager.getContextForGoal(goalId);
@@ -4105,9 +4119,12 @@ async function handleApiRoute(
 
 	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
 	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
-		const cwd = url.searchParams.get("cwd") || process.cwd();
+		const rawCwd = url.searchParams.get("cwd") || process.cwd();
 		const projectId = url.searchParams.get("projectId");
 		const resolvedStore = resolveProjectConfigStore(projectId);
+		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
+		// Skill files live on the host, so resolve the project rootPath for discovery.
+		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
 		const skills = discoverSlashSkills(cwd, resolvedStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
 		return;
@@ -4115,9 +4132,10 @@ async function handleApiRoute(
 
 	// GET /api/slash-skills/details — full slash skill details including content and file paths
 	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
-		const cwd = url.searchParams.get("cwd") || process.cwd();
+		const rawCwd = url.searchParams.get("cwd") || process.cwd();
 		const projectId = url.searchParams.get("projectId");
 		const resolvedStore = resolveProjectConfigStore(projectId);
+		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
 		const skills = discoverSlashSkills(cwd, resolvedStore);
 		const directories = getSkillDirectories(cwd, resolvedStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })), directories });
