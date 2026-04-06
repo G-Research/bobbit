@@ -1,5 +1,7 @@
 # Bobbit
 
+<!-- Test change — this PR will be closed without merging -->
+
 **Your AI dev team, running on your machine, controlled from your browser.**
 
 Bobbit is a command centre for AI coding agents. Spin up teams — leads that plan, coders that build in parallel, reviewers and testers that enforce quality — and point them at anything from a quick bug fix to a full-stack feature. Watch every agent work in real time, steer them mid-task, and stay in control of what ships.
