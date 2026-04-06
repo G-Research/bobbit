@@ -119,3 +119,51 @@ export function detectHostTokens(prefs?: PreferencesStore | null): DetectedHostT
 
 	return result;
 }
+
+/**
+ * Resolve the actual value of a host token by env var name.
+ * Used by the sandbox token system when a token has an empty value (meaning "from host").
+ * Returns undefined if the token cannot be resolved.
+ */
+export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore | null): string | undefined {
+	// Check env var directly
+	if (process.env[envVar]) return process.env[envVar];
+
+	// Special cases
+	if (envVar === "GITHUB_TOKEN") {
+		if (process.env["GH_TOKEN"]) return process.env["GH_TOKEN"];
+		try {
+			const token = execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).trim();
+			if (token) return token;
+		} catch { /* gh not installed or not authenticated */ }
+		return undefined;
+	}
+
+	if (envVar === "ANTHROPIC_OAUTH_TOKEN" && process.env["ANTHROPIC_API_KEY"]) {
+		return process.env["ANTHROPIC_API_KEY"];
+	}
+
+	// Check auth.json for provider tokens
+	const providerForEnv = PROVIDER_TOKENS.find(t => t.envVar === envVar);
+	if (providerForEnv) {
+		// Check preferences store
+		if (prefs) {
+			const storedKey = prefs.get(`providerKey.${providerForEnv.provider}`) as string | undefined;
+			if (storedKey) return storedKey;
+		}
+		// Check auth.json
+		try {
+			const authPath = globalAuthPath();
+			if (fs.existsSync(authPath)) {
+				const data = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+				const providerData = data[providerForEnv.provider];
+				if (providerData) {
+					if (providerData.type === "oauth" && providerData.access) return providerData.access;
+					if (providerData.type === "api_key" && providerData.key) return providerData.key;
+				}
+			}
+		} catch { /* ignore read errors */ }
+	}
+
+	return undefined;
+}

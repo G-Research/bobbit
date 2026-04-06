@@ -173,8 +173,8 @@ let poolStatusLoaded = false;
 let hostTokens: { envVar: string; label: string; available: boolean }[] | null = null;
 let hostTokensLoaded = false;
 
-// Per-project mutable state for dynamic list editors (credentials, mounts)
-const _sandboxCredEntries = new Map<string, { key: string; value: string }[]>();
+// Per-project mutable state for dynamic list editors (tokens, mounts)
+const _sandboxTokenEntries = new Map<string, { key: string; value: string; enabled: boolean; isHost: boolean }[]>();
 const _sandboxMountEntries = new Map<string, string[]>();
 
 function loadSandboxStatus(): void {
@@ -219,22 +219,78 @@ function loadPoolStatus(): void {
 	});
 }
 
-/** Initialize credential/mount entries from resolved config if not already tracked. */
+/** Initialize token/mount entries from resolved config if not already tracked. */
 function initSandboxEntries(projectId: string, resolved: Record<string, { value: string; source: string }>): void {
-	if (!_sandboxCredEntries.has(projectId)) {
-		try {
-			const raw = resolved.sandbox_credentials?.value || "";
-			if (raw) {
-				const obj = JSON.parse(raw);
-				if (typeof obj === "object" && obj !== null && !Array.isArray(obj)) {
-					_sandboxCredEntries.set(projectId, Object.entries(obj).map(([key, value]) => ({ key, value: String(value) })));
+	if (!_sandboxTokenEntries.has(projectId)) {
+		const tokensRaw = resolved.sandbox_tokens?.value || "";
+		const hostEnvVars = new Set((hostTokens || []).map(t => t.envVar));
+		if (tokensRaw) {
+			// New unified format
+			try {
+				const arr: { key: string; value: string; enabled: boolean }[] = JSON.parse(tokensRaw);
+				if (Array.isArray(arr)) {
+					const entries = arr.map(e => ({
+						key: e.key || "",
+						value: e.value || "",
+						enabled: !!e.enabled,
+						isHost: hostEnvVars.has(e.key),
+					}));
+					// Add any detected host tokens not already in the saved list as disabled
+					for (const ht of (hostTokens || [])) {
+						if (!entries.some(e => e.key === ht.envVar)) {
+							entries.push({ key: ht.envVar, value: "", enabled: false, isHost: true });
+						}
+					}
+					_sandboxTokenEntries.set(projectId, entries);
 				} else {
-					_sandboxCredEntries.set(projectId, []);
+					_sandboxTokenEntries.set(projectId, []);
 				}
-			} else {
-				_sandboxCredEntries.set(projectId, []);
+			} catch { _sandboxTokenEntries.set(projectId, []); }
+		} else {
+			// Legacy fallback: merge host tokens + sandbox_credentials + sandbox_host_token_overrides
+			const entries: { key: string; value: string; enabled: boolean; isHost: boolean }[] = [];
+
+			// Parse legacy overrides
+			const overridesRaw = resolved.sandbox_host_token_overrides?.value || "";
+			let overrides: Record<string, string> = {};
+			try { overrides = overridesRaw ? JSON.parse(overridesRaw) : {}; } catch { /* ignore */ }
+			const legacyGh = resolved.sandbox_github_token?.value ?? "true";
+
+			// Add host tokens
+			for (const ht of (hostTokens || [])) {
+				let enabled: boolean;
+				if (overrides[ht.envVar] !== undefined) {
+					enabled = overrides[ht.envVar] !== "false";
+				} else if (ht.envVar === "GITHUB_TOKEN") {
+					enabled = legacyGh !== "false";
+				} else {
+					enabled = true; // default: auto-inject
+				}
+				entries.push({ key: ht.envVar, value: "", enabled, isHost: true });
 			}
-		} catch { _sandboxCredEntries.set(projectId, []); }
+
+			// Add sandbox_credentials entries
+			const credRaw = resolved.sandbox_credentials?.value || "";
+			try {
+				if (credRaw) {
+					const obj = JSON.parse(credRaw);
+					if (typeof obj === "object" && obj !== null && !Array.isArray(obj)) {
+						for (const [key, value] of Object.entries(obj)) {
+							const existing = entries.find(e => e.key === key);
+							if (existing) {
+								// Override the host token entry with explicit value
+								existing.value = String(value);
+								existing.enabled = true;
+							} else {
+								entries.push({ key, value: String(value), enabled: true, isHost: false });
+							}
+						}
+					}
+				}
+			} catch { /* ignore */ }
+
+			_sandboxTokenEntries.set(projectId, entries);
+		}
 	}
 	if (!_sandboxMountEntries.has(projectId)) {
 		try {
@@ -253,6 +309,17 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 	}
 }
 
+/** Serialize token entries to pendingChanges.sandbox_tokens */
+function syncTokenEntries(
+	tokenEntries: { key: string; value: string; enabled: boolean; isHost: boolean }[],
+	pendingChanges: Record<string, string>,
+): void {
+	const arr = tokenEntries
+		.filter(e => e.key) // skip empty key rows
+		.map(e => ({ key: e.key, value: e.value, enabled: e.enabled }));
+	pendingChanges.sandbox_tokens = arr.length > 0 ? JSON.stringify(arr) : "";
+}
+
 function renderSandboxSection(
 	projectId: string,
 	resolved: Record<string, { value: string; source: string }>,
@@ -265,7 +332,7 @@ function renderSandboxSection(
 
 	const sandboxMode = pendingChanges.sandbox ?? resolved.sandbox?.value ?? "none";
 	const imageName = pendingChanges.sandbox_image ?? resolved.sandbox_image?.value ?? "bobbit-agent";
-	const credEntries = _sandboxCredEntries.get(projectId)!;
+	const tokenEntries = _sandboxTokenEntries.get(projectId)!;
 	const mountEntries = _sandboxMountEntries.get(projectId)!;
 
 	return html`
@@ -369,119 +436,67 @@ function renderSandboxSection(
 				/>
 			</div>
 
-			<!-- Host Tokens -->
+			<!-- Tokens -->
 			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Host Tokens</span>
+				<span class="${labelClass} pt-1.5">Tokens</span>
 				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
 					<p class="text-xs text-muted-foreground -mt-0.5 mb-1">
-						Detected tokens from the host environment. Enabled tokens are auto-injected into sandbox containers.
+						Environment variables injected into sandbox containers. Empty values resolve from the host.
 					</p>
 					${(() => {
 						loadHostTokens();
 						if (hostTokens === null) return html`<span class="text-xs text-muted-foreground">Detecting...</span>`;
-						const overridesRaw = pendingChanges.sandbox_host_token_overrides ?? resolved.sandbox_host_token_overrides?.value ?? "";
-						let overrides: Record<string, string> = {};
-						try { overrides = overridesRaw ? JSON.parse(overridesRaw) : {}; } catch { /* ignore */ }
-						// For backward compat: if GITHUB_TOKEN not in overrides, use legacy sandbox_github_token
-						const legacyGh = pendingChanges.sandbox_github_token ?? resolved.sandbox_github_token?.value ?? "true";
-						return hostTokens.map(t => {
-							const isOverridden = credEntries.some(e => e.key === t.envVar && e.value);
-							let enabled: boolean;
-							if (overrides[t.envVar] !== undefined) {
-								enabled = overrides[t.envVar] !== "false";
-							} else if (t.envVar === "GITHUB_TOKEN") {
-								enabled = legacyGh !== "false";
-							} else {
-								enabled = true; // default: auto-inject
-							}
-							return html`
-								<div class="flex items-center gap-2 py-0.5">
-									<span class="w-2 h-2 rounded-full shrink-0 ${t.available ? "bg-green-500" : "bg-zinc-400"}"></span>
-									<label class="flex items-center gap-2 cursor-pointer min-w-0">
-										<input
-											type="checkbox"
-											class="accent-primary"
-											.checked=${enabled}
-											?disabled=${isOverridden}
-											@change=${(e: Event) => {
-												const checked = (e.target as HTMLInputElement).checked;
-												overrides[t.envVar] = checked ? "true" : "false";
-												pendingChanges.sandbox_host_token_overrides =
-													Object.keys(overrides).length > 0 ? JSON.stringify(overrides) : "";
-												// Also sync legacy key for backward compat
-												if (t.envVar === "GITHUB_TOKEN") {
-													pendingChanges.sandbox_github_token = checked ? "true" : "false";
-												}
-												renderApp();
-											}}
-										/>
-										<code class="text-[11px] font-mono text-foreground">${t.envVar}</code>
-										<span class="text-xs text-muted-foreground">${t.label}</span>
-									</label>
-									${!t.available ? html`<span class="text-[10px] text-muted-foreground italic">(not detected)</span>` : ""}
-									${isOverridden ? html`<span class="text-[10px] text-amber-500 italic">(overridden below)</span>` : ""}
-								</div>
-							`;
-						});
+						return tokenEntries.map((entry, i) => html`
+							<div class="flex items-center gap-2">
+								<input
+									type="checkbox"
+									class="accent-primary shrink-0"
+									.checked=${entry.enabled}
+									@change=${(e: Event) => {
+										tokenEntries[i].enabled = (e.target as HTMLInputElement).checked;
+										syncTokenEntries(tokenEntries, pendingChanges);
+										renderApp();
+									}}
+								/>
+								<input
+									type="text"
+									class="w-44 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
+										focus:outline-none focus:ring-2 focus:ring-ring"
+									placeholder="ENV_VAR"
+									.value=${entry.key}
+									@input=${(e: Event) => {
+										tokenEntries[i].key = (e.target as HTMLInputElement).value;
+										syncTokenEntries(tokenEntries, pendingChanges);
+									}}
+								/>
+								<span class="text-muted-foreground text-xs">=</span>
+								<input
+									type="text"
+									class="${inputClass} ${!entry.value && entry.isHost ? 'text-muted-foreground italic' : ''}"
+									placeholder=${entry.isHost ? '(from host)' : 'value'}
+									.value=${entry.value}
+									@input=${(e: Event) => {
+										tokenEntries[i].value = (e.target as HTMLInputElement).value;
+										syncTokenEntries(tokenEntries, pendingChanges);
+									}}
+								/>
+								<button
+									class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+									title="Remove"
+									@click=${() => {
+										tokenEntries.splice(i, 1);
+										syncTokenEntries(tokenEntries, pendingChanges);
+										renderApp();
+									}}
+								>${icon(X, "xs")}</button>
+							</div>
+						`);
 					})()}
-				</div>
-			</div>
-
-			<!-- Additional Credentials -->
-			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Additional Credentials</span>
-				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
-					<p class="text-xs text-muted-foreground -mt-0.5 mb-1">
-						Manual overrides — these take priority over auto-detected host tokens.
-					</p>
-					${credEntries.map((entry, i) => html`
-						<div class="flex items-center gap-2">
-							<input
-								type="text"
-								class="w-36 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
-									focus:outline-none focus:ring-2 focus:ring-ring"
-								placeholder="ENV_VAR"
-								.value=${entry.key}
-								@input=${(e: Event) => {
-									credEntries[i].key = (e.target as HTMLInputElement).value;
-									const obj: Record<string, string> = {};
-									for (const e2 of credEntries) { if (e2.key) obj[e2.key] = e2.value; }
-									pendingChanges.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
-									renderApp();
-								}}
-							/>
-							<span class="text-muted-foreground text-xs">=</span>
-							<input
-								type="text"
-								class="${inputClass}"
-								placeholder="value"
-								.value=${entry.value}
-								@input=${(e: Event) => {
-									credEntries[i].value = (e.target as HTMLInputElement).value;
-									const obj: Record<string, string> = {};
-									for (const e2 of credEntries) { if (e2.key) obj[e2.key] = e2.value; }
-									pendingChanges.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
-									renderApp();
-								}}
-							/>
-							<button
-								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-								title="Remove"
-								@click=${() => {
-									credEntries.splice(i, 1);
-									const obj: Record<string, string> = {};
-									for (const e2 of credEntries) { if (e2.key) obj[e2.key] = e2.value; }
-									pendingChanges.sandbox_credentials = Object.keys(obj).length > 0 ? JSON.stringify(obj) : "";
-									renderApp();
-								}}
-							>${icon(X, "xs")}</button>
-						</div>
-					`)}
 					<button
 						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
 							hover:bg-muted rounded-md transition-colors self-start"
-						@click=${() => { credEntries.push({ key: "", value: "" }); renderApp(); }}
-					>${icon(Plus, "xs")} Add credential</button>
+						@click=${() => { tokenEntries.push({ key: "", value: "", enabled: true, isHost: false }); renderApp(); }}
+					>${icon(Plus, "xs")} Add token</button>
 				</div>
 			</div>
 
@@ -1924,7 +1939,7 @@ function renderProjectScopeTab(projectId: string) {
 	// Keys to show in the Commands & Sandbox tab
 	const HIDDEN_KEYS = new Set([
 		"default_thinking_level", "sandbox", "sandbox_image",
-		"sandbox_credentials", "sandbox_github_token", "sandbox_host_token_overrides", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
+		"sandbox_tokens", "sandbox_credentials", "sandbox_github_token", "sandbox_host_token_overrides", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
 		"config_directories", "skill_directories",
 		// Rendered in dedicated sections below
 		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
@@ -2099,7 +2114,7 @@ function renderProjectGeneralTab(projectId: string) {
 								saveProjectScopeConfig(projectId, pendingChanges);
 								_projectScopePending.delete(projectId);
 								// Clear sandbox entry caches so they reload from saved config
-								_sandboxCredEntries.delete(projectId);
+								_sandboxTokenEntries.delete(projectId);
 								_sandboxMountEntries.delete(projectId);
 							}
 						}}

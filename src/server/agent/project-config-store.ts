@@ -24,9 +24,10 @@ const DEFAULTS: Record<string, string> = {
 	default_thinking_level: "",  // Empty = use agent's built-in default ("medium")
 	sandbox: "none",                    // "none" | "docker"
 	sandbox_image: "bobbit-agent",      // Docker image name
-	sandbox_credentials: "",            // JSON object: '{"GITHUB_TOKEN":"ghp_xxx"}'
-	sandbox_github_token: "true",       // "true" | "false" — DEPRECATED, use sandbox_host_token_overrides
-	sandbox_host_token_overrides: "",   // JSON object: '{"GITHUB_TOKEN":"false","NPM_TOKEN":"false"}' — tokens not listed default to injected
+	sandbox_tokens: "",                 // JSON array: '[{"key":"GITHUB_TOKEN","value":"","enabled":true}]' — unified token list
+	sandbox_credentials: "",            // DEPRECATED — use sandbox_tokens. JSON object: '{"GITHUB_TOKEN":"ghp_xxx"}'
+	sandbox_github_token: "true",       // DEPRECATED — use sandbox_tokens. "true" | "false"
+	sandbox_host_token_overrides: "",   // DEPRECATED — use sandbox_tokens. JSON object: '{"GITHUB_TOKEN":"false","NPM_TOKEN":"false"}'
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
 	sandbox_pool_size: "2",             // Pre-warmed containers (0 = disable pooling)
 	sandbox_pool_max_idle: "300",       // Seconds before excess idle containers culled

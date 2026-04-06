@@ -680,12 +680,8 @@ export class SessionManager {
 			bridgeOptions.cwd = "/workspace";
 		}
 
-		// Auto-resolve API credentials from host auth system, then overlay manual overrides
-		const credentialsRaw = this.projectConfigStore.get("sandbox_credentials") || "";
-		let credentials: Record<string, string> = {};
-		try { credentials = credentialsRaw ? JSON.parse(credentialsRaw) : {}; } catch { /* ignore */ }
-		const autoCredentials = resolveHostApiCredentials(this.preferencesStore, this.projectConfigStore);
-		bridgeOptions.sandboxCredentials = { ...autoCredentials, ...credentials };
+		// Resolve sandbox tokens from unified config (with legacy fallback)
+		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, this.projectConfigStore);
 
 		return true;
 	}
@@ -4015,9 +4011,12 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
+import { resolveHostTokenValue } from "./host-tokens.js";
+
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
  * OAuth providers use their OAuth token env var; API-key providers use the standard key var.
+ * Kept for legacy fallback when sandbox_tokens is not set.
  */
 const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any) => string | undefined }> = {
 	anthropic: {
@@ -4051,11 +4050,46 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
 };
 
 /**
- * Resolve API credentials from the host's auth.json + env vars + preferences store.
- * Returns a map of env var names → values to inject into the sandbox container.
- * Manual sandbox_credentials always take precedence (merged on top by caller).
+ * Resolve sandbox tokens from the unified sandbox_tokens config key.
+ * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
+ * when sandbox_tokens is not set.
  */
-function resolveHostApiCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
+function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
+	const tokensRaw = projectConfig?.get("sandbox_tokens") || "";
+
+	// ── New unified path: sandbox_tokens is set ──
+	if (tokensRaw) {
+		const result: Record<string, string> = {};
+		try {
+			const entries: { key: string; value: string; enabled: boolean }[] = JSON.parse(tokensRaw);
+			if (Array.isArray(entries)) {
+				for (const entry of entries) {
+					if (!entry.enabled || !entry.key) continue;
+					if (entry.value) {
+						// Explicit value provided
+						result[entry.key] = entry.value;
+					} else {
+						// Empty value = resolve from host
+						const resolved = resolveHostTokenValue(entry.key, prefs);
+						if (resolved) {
+							result[entry.key] = resolved;
+						}
+					}
+				}
+			}
+		} catch { /* ignore parse errors */ }
+		return result;
+	}
+
+	// ── Legacy fallback: sandbox_tokens not set ──
+	return resolveLegacySandboxCredentials(prefs, projectConfig);
+}
+
+/**
+ * Legacy credential resolution from sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token.
+ * Used as fallback when sandbox_tokens is not configured.
+ */
+function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// 1. Read auth.json
@@ -4070,16 +4104,12 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 	}
 
 	for (const [provider, { envVar, extractKey }] of Object.entries(PROVIDER_ENV_MAP)) {
-		// Skip if the host env var is already set (will be inherited by docker)
-		// Actually docker exec doesn't inherit host env — we need to pass explicitly
-		// But check host env as a credential source
 		const hostEnvVal = process.env[envVar];
 		if (hostEnvVal) {
 			result[envVar] = hostEnvVal;
 			continue;
 		}
 
-		// Check preferences store (migrated provider keys from UI)
 		if (prefs) {
 			const storedKey = prefs.get(`providerKey.${provider}`) as string | undefined;
 			if (storedKey) {
@@ -4088,7 +4118,6 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 			}
 		}
 
-		// Check auth.json
 		if (authData && authData[provider]) {
 			const key = extractKey(authData[provider]);
 			if (key) {
@@ -4097,15 +4126,11 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 		}
 	}
 
-	// Auto-detect GITHUB_TOKEN for gh CLI (PR creation, git push via HTTPS).
-	// Gated by per-token overrides or legacy sandbox_github_token setting.
+	// Auto-detect GITHUB_TOKEN for gh CLI
 	const overridesRaw = projectConfig?.get("sandbox_host_token_overrides") || "";
 	let tokenOverrides: Record<string, string> = {};
 	try { tokenOverrides = overridesRaw ? JSON.parse(overridesRaw) : {}; } catch { /* ignore */ }
 
-	// Determine if GITHUB_TOKEN injection is enabled:
-	// - If sandbox_host_token_overrides has a GITHUB_TOKEN key, use that
-	// - Otherwise fall back to legacy sandbox_github_token setting
 	const ghTokenEnabled = tokenOverrides["GITHUB_TOKEN"] !== undefined
 		? tokenOverrides["GITHUB_TOKEN"] !== "false"
 		: (projectConfig?.get("sandbox_github_token") ?? "true") !== "false";
@@ -4138,6 +4163,13 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 			delete result[envVar];
 		}
 	}
+
+	// Merge manual sandbox_credentials on top
+	const credentialsRaw = projectConfig?.get("sandbox_credentials") || "";
+	try {
+		const credentials: Record<string, string> = credentialsRaw ? JSON.parse(credentialsRaw) : {};
+		Object.assign(result, credentials);
+	} catch { /* ignore */ }
 
 	return result;
 }
