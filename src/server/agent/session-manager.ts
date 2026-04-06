@@ -580,7 +580,15 @@ export class SessionManager {
 	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
 		if (this.worktreePool) return;
 		this.worktreePool = new WorktreePool({ repoPath, targetSize, setupCommand });
-		this.worktreePool.startFilling();
+
+		// Collect worktree paths owned by active sessions so the pool doesn't
+		// reclaim them as orphaned pool entries on restart.
+		const activeWorktreePaths = new Set<string>();
+		for (const s of this.sessions.values()) {
+			if (s.worktreePath) activeWorktreePaths.add(s.worktreePath);
+		}
+
+		this.worktreePool.startFilling(activeWorktreePaths);
 	}
 
 	/** Get the worktree pool (for shutdown cleanup). */
@@ -1338,6 +1346,53 @@ export class SessionManager {
 	}
 
 	/**
+	 * Restart the agent process for a session whose process has died.
+	 * Stops any remnant process, then restores from persisted state.
+	 * Re-attaches existing WS clients so the user can keep working.
+	 */
+	async restartAgent(sessionId: string): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session) throw new Error("Session not found");
+
+		const ps = this.resolveStoreForSession(session.id).get(session.id);
+		if (!ps) throw new Error("No persisted session data");
+
+		// Save state that must survive the restart
+		const clients = new Set(session.clients);
+		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+
+		// Stop remnant process (may already be dead)
+		session.unsubscribe();
+		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+
+		// Remove from sessions map — restoreSession will re-add it
+		this.sessions.delete(sessionId);
+
+		(ps as any)._overrideAllowedTools = savedAllowedTools;
+		try {
+			await this.restoreSession(ps);
+		} finally {
+			delete (ps as any)._overrideAllowedTools;
+		}
+
+		// Re-attach saved clients and carry over grant state
+		const restored = this.sessions.get(sessionId);
+		if (restored) {
+			for (const ws of clients) {
+				if ((ws as any).readyState === 1) {
+					restored.clients.add(ws);
+				}
+			}
+			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
+			broadcast(restored.clients, { type: "session_status", status: "idle" });
+		} else {
+			throw new Error("Failed to restore session after restart");
+		}
+	}
+
+	/**
 	 * Check an event for usage data and record it via the cost tracker.
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
@@ -1637,10 +1692,12 @@ export class SessionManager {
 		// Restore extension args for goal/team sessions
 		if (ps.goalId && !ps.assistantType) {
 			const isTeamLead = ps.role === "team-lead";
-			const extensionPath = isTeamLead
-				? TEAM_LEAD_EXTENSION_PATH
-				: GOAL_TOOLS_EXTENSION_PATH;
-			bridgeOptions.args = ["--extension", extensionPath];
+			if (isTeamLead) {
+				// Team leads need both: team tools + goal tools (tasks/gates)
+				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+			} else {
+				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+			}
 		}
 
 		// Restore tool activation from role's allowedTools
@@ -2655,8 +2712,11 @@ export class SessionManager {
 		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
-			// Re-attach goal tools extension (unless this is a team lead, which gets it from team-manager)
-			if (!bridgeOptions.args?.includes("--extension")) {
+			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
+			const isTeamLead = session.role === "team-lead";
+			if (isTeamLead) {
+				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+			} else if (!bridgeOptions.args?.includes("--extension")) {
 				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
 			}
 		}
@@ -2795,7 +2855,10 @@ export class SessionManager {
 		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
-			if (!bridgeOptions.args?.includes("--extension")) {
+			const isTeamLead2 = session.role === "team-lead";
+			if (isTeamLead2) {
+				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+			} else if (!bridgeOptions.args?.includes("--extension")) {
 				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
 			}
 		}
@@ -3623,10 +3686,11 @@ export class SessionManager {
 			if (session.goalId) {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 				const isTeamLead = session.role === "team-lead";
-				const extensionPath = isTeamLead
-					? TEAM_LEAD_EXTENSION_PATH
-					: GOAL_TOOLS_EXTENSION_PATH;
-				bridgeOptions.args = ["--extension", extensionPath];
+				if (isTeamLead) {
+					bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+				} else {
+					bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+				}
 			}
 
 			// Restore tool activation from role's allowedTools

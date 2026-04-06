@@ -36,3 +36,4 @@ sessions_tmp.json
 .e2e-inproc-*/
 .e2e-resilience-*/
 .bobbit-manual-integration-*/
+tests/fixtures/markdown-throttle-bundle.js

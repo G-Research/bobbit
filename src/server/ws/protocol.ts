@@ -40,7 +40,8 @@ export type ClientMessage =
 	| { type: "summarize_goal_title"; goalTitle: string }
 	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" }
 	| { type: "deny_tool_permission"; toolName: string }
-	| { type: "reorder_queue"; messageIds: string[] };
+	| { type: "reorder_queue"; messageIds: string[] }
+	| { type: "restart_agent" };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =

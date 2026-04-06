@@ -118,6 +118,7 @@ function renderMenu() {
     `;
     item.onmousedown = (e) => { e.preventDefault(); selectSlashSkill(skill); };
     item.onmouseenter = () => {
+      if (window.__suppressMouseenter) return;
       slashSelectedIndex = i;
       renderMenu();
     };
@@ -137,13 +138,17 @@ textarea.addEventListener('keydown', (e) => {
   if (slashMenuOpen) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
+      window.__suppressMouseenter = true;
       slashSelectedIndex = Math.min(slashSelectedIndex + 1, slashFilteredSkills.length - 1);
       renderMenu();
+      setTimeout(() => { window.__suppressMouseenter = false; }, 100);
       return;
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
+      window.__suppressMouseenter = true;
       slashSelectedIndex = Math.max(slashSelectedIndex - 1, 0);
       renderMenu();
+      setTimeout(() => { window.__suppressMouseenter = false; }, 100);
       return;
     } else if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault();
@@ -160,7 +165,12 @@ textarea.addEventListener('keydown', (e) => {
 });
 
 // Public API for tests
-window._forceSelectedIndex = (i) => { slashSelectedIndex = i; renderMenu(); };
+window._forceSelectedIndex = (i) => {
+  window.__suppressMouseenter = true;
+  slashSelectedIndex = i;
+  renderMenu();
+  setTimeout(() => { window.__suppressMouseenter = false; }, 100);
+};
 window.isMenuOpen = () => slashMenuOpen;
 window.getFilteredSkills = () => slashFilteredSkills.map(s => s.name);
 window.getSelectedIndex = () => slashSelectedIndex;

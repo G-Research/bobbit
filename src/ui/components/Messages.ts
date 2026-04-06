@@ -115,6 +115,27 @@ export class AssistantMessage extends LitElement {
 	@property({ type: Number }) turnStartTime: number | null = null;
 	@state() private _retrying = false;
 
+	private _throttledContent: string = "";
+	private _contentThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+
+	private _getThrottledContent(text: string): string {
+		// Reset throttle when content diverges completely from the snapshot
+		// (i.e. a different message was assigned to this element).
+		// During streaming, text grows but shares a common prefix with the snapshot.
+		const prefix = this._throttledContent.slice(0, 20);
+		if (this._contentThrottleTimer && prefix && !text.startsWith(prefix)) {
+			clearTimeout(this._contentThrottleTimer);
+			this._contentThrottleTimer = null;
+		}
+		if (!this._contentThrottleTimer) {
+			this._throttledContent = text;
+			this._contentThrottleTimer = setTimeout(() => {
+				this._contentThrottleTimer = null;
+			}, 250);
+		}
+		return this._throttledContent;
+	}
+
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
@@ -125,6 +146,12 @@ export class AssistantMessage extends LitElement {
 	}
 
 	override render() {
+		// Reset throttle state when streaming stops so final content renders immediately
+		if (!this.isStreaming && this._contentThrottleTimer) {
+			clearTimeout(this._contentThrottleTimer);
+			this._contentThrottleTimer = null;
+		}
+
 		// Render content in the order it appears
 		const orderedParts: TemplateResult[] = [];
 
@@ -142,7 +169,8 @@ export class AssistantMessage extends LitElement {
 			if (chunk.type === "text" && chunk.text.trim() !== "") {
 				const displayText = chunk.text.replace(/<suggest_goal\s*\/?>/g, '');
 				if (displayText.trim() !== '') {
-					orderedParts.push(html`<markdown-block .content=${displayText}></markdown-block>`);
+					const mdContent = this.isStreaming ? this._getThrottledContent(displayText) : displayText;
+					orderedParts.push(html`<markdown-block .content=${mdContent}></markdown-block>`);
 				}
 				i++;
 			} else if (chunk.type === "thinking" && chunk.thinking.trim() !== "") {

@@ -597,8 +597,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel?.classList.remove("session-fade-in");
 		}, { once: true });
 
-		// Apply palette + accessory for the restored session
-		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
+		// Apply palette + accessory for the restored session (check archived too)
+		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId)
+			|| state.archivedSessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
 
 		// Reset session-scoped global state so it doesn't bleed from the previous session
@@ -641,8 +642,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		return;
 	}
 
-	// Apply per-project palette
-	const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId);
+	// Apply per-project palette (check archived sessions too — e.g. verification reviewers)
+	const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
 	applyProjectPalette(sessionForPalette?.projectId);
 
 	// Phase 2: async hydrate
@@ -1091,6 +1093,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Set cwd and branch on the AgentInterface stats bar
 		if (state.chatPanel.agentInterface && sessionData?.cwd) {
 			state.chatPanel.agentInterface.cwd = sessionData.cwd;
+			state.chatPanel.agentInterface.projectId = sessionData.projectId;
 			if (sessionData.goalId) {
 				const goal = state.goals.find((g) => g.id === sessionData.goalId);
 				if (goal?.branch) {
@@ -1344,7 +1347,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			refreshSessions().then(() => {
 				if (isStale()) return;
 				// Re-apply accessory class after refreshSessions (may have new data)
-				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId);
+				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId)
+					|| state.archivedSessions.find((s) => s.id === sessionId);
 				const accClasses2 = ACCESSORY_IDS.map(id => id === "crown" ? "bobbit-crowned" : `bobbit-${id}`);
 				accClasses2.forEach((c) => document.documentElement.classList.remove(c));
 				const accId = sessionForRole?.accessory
@@ -1358,6 +1362,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Apply cwd/branch if not set earlier (sessionData wasn't in gatewaySessions yet)
 				if (state.chatPanel?.agentInterface && !state.chatPanel.agentInterface.cwd && sessionForRole?.cwd) {
 					state.chatPanel.agentInterface.cwd = sessionForRole.cwd;
+					state.chatPanel.agentInterface.projectId = sessionForRole.projectId;
 					if (sessionForRole.goalId) {
 						const goal = state.goals.find((g) => g.id === sessionForRole.goalId);
 						if (goal?.branch) {
@@ -1427,6 +1432,11 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		});
 		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
 		const { id } = await res.json();
+		// Clear creatingSession before connecting — connectToSession handles its
+		// own loading state via connectingSessionId, and we want the user to see
+		// the chat panel (with textarea) immediately, not a loading spinner.
+		state.creatingSession = false;
+		state.creatingSessionForGoalId = null;
 		await connectToSession(id, false);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);

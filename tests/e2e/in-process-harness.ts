@@ -21,6 +21,7 @@
  */
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,8 +31,10 @@ const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
 // Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
 // (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
-// local overlay FS instead. On the host, keep them in PROJECT_ROOT as before.
-const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : PROJECT_ROOT;
+// local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
+// is outside the git repo — otherwise isGitRepo() returns true for the project
+// rootPath and sessions auto-create worktrees (slow, conflicts with git state).
+const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : join(tmpdir(), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;
@@ -50,6 +53,7 @@ export interface GatewayInfo {
  */
 export const test = base.extend<{}, { gateway: GatewayInfo }>({
 	gateway: [async ({}, use, workerInfo) => {
+		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-inproc-${workerInfo.workerIndex}`);
 
 		// Clean slate

@@ -528,16 +528,6 @@ export class AgentInterface extends LitElement {
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
 		const state = this.session.state;
 
-		if ((state as any).isPreparing) {
-			return html`
-				<div class="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
-					<svg class="animate-spin" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-						<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-					</svg>
-					<span class="text-sm">Creating worktree…</span>
-				</div>
-			`;
-		}
 		// Build a map of tool results to allow inline rendering in assistant messages
 		const toolResultsById = this._getToolResultsById();
 		return html`
@@ -558,6 +548,9 @@ export class AgentInterface extends LitElement {
 						);
 						this.requestUpdate();
 					}}
+					.onRestartAgent=${typeof (this.session as any)?.restartAgent === 'function'
+						? () => (this.session as any).restartAgent()
+						: undefined}
 					.onRetry=${!state.isStreaming && typeof (this.session as any)?.retry === 'function'
 						? () => (this.session as any).retry()
 						: undefined}
@@ -583,6 +576,15 @@ export class AgentInterface extends LitElement {
 					.onCostClick=${this.onCostClick}
 					.turnStartTime=${(state as any).turnStartTime ?? null}
 				></streaming-message-container>
+
+				${(state as any).isPreparing ? html`
+					<div class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm">
+						<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+						</svg>
+						<span>Setting up worktree…</span>
+					</div>
+				` : nothing}
 
 			</div>
 		`;
@@ -925,21 +927,6 @@ export class AgentInterface extends LitElement {
 							.onRemoveQueued=${(id: string) => {
 								if (typeof (session as any).removeQueued === 'function') {
 									(session as any).removeQueued(id);
-								}
-							}}
-							.onEditQueued=${(msg: any) => {
-								if (typeof (session as any).removeQueued === 'function') {
-									(session as any).removeQueued(msg.id);
-								}
-								const editor = this._messageEditor;
-								if (editor) {
-									editor.value = msg.text;
-									editor.onInput?.(msg.text);
-								}
-							}}
-							.onReorder=${(messageIds: string[]) => {
-								if (typeof (session as any).reorderQueue === 'function') {
-									(session as any).reorderQueue(messageIds);
 								}
 							}}
 							.onModelSelect=${() => {
