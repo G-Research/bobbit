@@ -60,14 +60,14 @@ describe("system prompt working directory section", () => {
 			assert.ok(promptPath);
 			const content = fs.readFileSync(promptPath, "utf-8");
 
-			const projectIdx = content.indexOf("# Project Context");
+			const projectIdx = content.indexOf("# Project AGENTS.md");
 			const cwdIdx = content.indexOf("# Working Directory");
 			const goalIdx = content.indexOf("# Goal");
 
-			assert.ok(projectIdx >= 0, "should have Project Context section");
+			assert.ok(projectIdx >= 0, "should have Project AGENTS.md section");
 			assert.ok(cwdIdx >= 0, "should have Working Directory section");
 			assert.ok(goalIdx >= 0, "should have Goal section");
-			assert.ok(projectIdx < cwdIdx, "Project Context should come before Working Directory");
+			assert.ok(projectIdx < cwdIdx, "Project AGENTS.md should come before Working Directory");
 			assert.ok(cwdIdx < goalIdx, "Working Directory should come before Goal");
 		});
 
@@ -116,14 +116,14 @@ describe("system prompt working directory section", () => {
 			}));
 
 			const labels = sections.map(s => s.label);
-			const projectIdx = labels.indexOf("Project Context");
+			const projectIdx = labels.indexOf("Project AGENTS.md");
 			const cwdIdx = labels.indexOf("Working Directory");
 			const goalIdx = labels.indexOf("Goal");
 
-			assert.ok(projectIdx >= 0, "should have Project Context");
+			assert.ok(projectIdx >= 0, "should have Project AGENTS.md");
 			assert.ok(cwdIdx >= 0, "should have Working Directory");
 			assert.ok(goalIdx >= 0, "should have Goal");
-			assert.ok(projectIdx < cwdIdx, "Project Context before Working Directory");
+			assert.ok(projectIdx < cwdIdx, "Project AGENTS.md before Working Directory");
 			assert.ok(cwdIdx < goalIdx, "Working Directory before Goal");
 		});
 	});
