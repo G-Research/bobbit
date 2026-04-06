@@ -20,3 +20,4 @@ qa_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
 qa_env: '{"BOBBIT_NO_OPEN":"1","BOBBIT_LLM_REVIEW_SKIP":"1","BOBBIT_SKIP_NPM_CI":"1"}'
 qa_max_duration_minutes: "10"
 qa_max_scenarios: "5"
+sandbox_tokens: '[{"key":"ANTHROPIC_OAUTH_TOKEN","value":"","enabled":true},{"key":"OPENAI_API_KEY","value":"","enabled":true},{"key":"GEMINI_API_KEY","value":"","enabled":true},{"key":"XAI_API_KEY","value":"","enabled":true},{"key":"GROQ_API_KEY","value":"","enabled":true},{"key":"MISTRAL_API_KEY","value":"","enabled":true},{"key":"OPENROUTER_API_KEY","value":"","enabled":true},{"key":"GITHUB_TOKEN","value":"","enabled":true},{"key":"NPM_TOKEN","value":"","enabled":true}]'

@@ -443,126 +443,123 @@ function renderSandboxSection(
 			</div>
 
 			<!-- Tokens -->
-			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Tokens</span>
-				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
-					<p class="text-xs text-muted-foreground -mt-0.5 mb-1">
-						Environment variables injected into sandbox containers. Empty values resolve from the host.
-					</p>
-					${(() => {
-						loadHostTokens();
-						if (hostTokens === null) return html`<span class="text-xs text-muted-foreground">Detecting...</span>`;
-						const hostAvail = new Map((hostTokens || []).map(t => [t.envVar, t.available]));
-						return tokenEntries.map((entry, i) => {
-							const hasHostValue = hostAvail.get(entry.key) === true;
-							return html`
-							<div class="flex items-center gap-2">
-								<span class="w-2 h-2 rounded-full shrink-0 ${hasHostValue ? 'bg-green-500' : 'bg-zinc-400'}" title=${hasHostValue ? 'Detected on host' : 'Not detected on host'}></span>
-								<input
-									type="checkbox"
-									class="accent-primary shrink-0"
-									.checked=${entry.enabled}
-									@change=${(e: Event) => {
-										tokenEntries[i].enabled = (e.target as HTMLInputElement).checked;
-										syncTokenEntries(tokenEntries, pendingChanges);
-										renderApp();
-									}}
-								/>
-								<input
-									type="text"
-									class="w-44 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
-										focus:outline-none focus:ring-2 focus:ring-ring"
-									placeholder="ENV_VAR"
-									.value=${entry.key}
-									@input=${(e: Event) => {
-										tokenEntries[i].key = (e.target as HTMLInputElement).value;
-										syncTokenEntries(tokenEntries, pendingChanges);
-										renderApp();
-									}}
-								/>
-								<span class="text-muted-foreground text-xs">=</span>
-								${entry.redacted && !entry.value
-									? html`
-										<div class="flex-1 min-w-0 flex items-center gap-2">
-											<span class="px-2 py-1 text-sm font-mono text-muted-foreground tracking-widest select-none">••••••••</span>
-											<button
-												class="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-												@click=${() => {
-													tokenEntries[i].redacted = false;
-													tokenEntries[i].value = "";
-													syncTokenEntries(tokenEntries, pendingChanges);
-													renderApp();
-												}}
-											>Change</button>
-										</div>
-									`
-									: html`<input
-									type="text"
-									class="${inputClass} ${!entry.value && entry.isHost ? 'text-muted-foreground italic' : ''}"
-									placeholder=${entry.isHost ? '(from host)' : 'value'}
-									.value=${entry.value}
-									@input=${(e: Event) => {
-										tokenEntries[i].value = (e.target as HTMLInputElement).value;
-										syncTokenEntries(tokenEntries, pendingChanges);
-										renderApp();
-									}}
-								/>`}
-								<button
-									class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-									title="Remove"
-									@click=${() => {
-										tokenEntries.splice(i, 1);
-										syncTokenEntries(tokenEntries, pendingChanges);
-										renderApp();
-									}}
-								>${icon(X, "xs")}</button>
-							</div>
-						`; });
-					})()}
-					<button
-						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
-							hover:bg-muted rounded-md transition-colors self-start"
-						@click=${() => { tokenEntries.push({ key: "", value: "", enabled: true, isHost: false, redacted: false }); renderApp(); }}
-					>${icon(Plus, "xs")} Add token</button>
-				</div>
-			</div>
-
-			<!-- Additional Mounts -->
-			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Additional Mounts</span>
-				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
-					${mountEntries.map((mount, i) => html`
-						<div class="flex items-center gap-2">
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Tokens</div>
+				<p class="text-xs text-muted-foreground -mt-1">
+					Environment variables injected into sandbox containers. Empty values resolve from the host.
+				</p>
+				${(() => {
+					loadHostTokens();
+					if (hostTokens === null) return html`<span class="text-xs text-muted-foreground">Detecting...</span>`;
+					const hostAvail = new Map((hostTokens || []).map(t => [t.envVar, t.available]));
+					return tokenEntries.map((entry, i) => {
+						const hasHostValue = hostAvail.get(entry.key) === true;
+						return html`
+						<div class="flex items-center gap-2 h-8">
+							<span class="w-2 h-2 rounded-full shrink-0 ${hasHostValue ? 'bg-green-500' : 'bg-zinc-400'}" title=${hasHostValue ? 'Detected on host' : 'Not detected on host'}></span>
 							<input
-								type="text"
-								class="${inputClass}"
-								placeholder="/host/path:/container/path:ro"
-								.value=${mount}
-								@input=${(e: Event) => {
-									mountEntries[i] = (e.target as HTMLInputElement).value;
-									const filtered = mountEntries.filter(Boolean);
-									pendingChanges.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
+								type="checkbox"
+								class="accent-primary shrink-0"
+								.checked=${entry.enabled}
+								@change=${(e: Event) => {
+									tokenEntries[i].enabled = (e.target as HTMLInputElement).checked;
+									syncTokenEntries(tokenEntries, pendingChanges);
 									renderApp();
 								}}
 							/>
+							<input
+								type="text"
+								class="w-52 shrink-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
+									focus:outline-none focus:ring-2 focus:ring-ring"
+								placeholder="ENV_VAR"
+								.value=${entry.key}
+								@input=${(e: Event) => {
+									tokenEntries[i].key = (e.target as HTMLInputElement).value;
+									syncTokenEntries(tokenEntries, pendingChanges);
+									renderApp();
+								}}
+							/>
+							${entry.redacted && !entry.value
+								? html`
+									<div class="flex-1 min-w-0 flex items-center gap-2 px-2">
+										<span class="text-sm font-mono text-muted-foreground tracking-widest select-none">••••••••</span>
+										<button
+											class="text-[11px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+											@click=${() => {
+												tokenEntries[i].redacted = false;
+												tokenEntries[i].value = "";
+												syncTokenEntries(tokenEntries, pendingChanges);
+												renderApp();
+											}}
+										>Change</button>
+									</div>
+								`
+								: html`<input
+								type="text"
+								class="flex-1 min-w-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
+									focus:outline-none focus:ring-2 focus:ring-ring ${!entry.value && entry.isHost ? 'text-muted-foreground italic' : ''}"
+								placeholder=${entry.isHost ? '(from host)' : 'value'}
+								.value=${entry.value}
+								@input=${(e: Event) => {
+									tokenEntries[i].value = (e.target as HTMLInputElement).value;
+									syncTokenEntries(tokenEntries, pendingChanges);
+									renderApp();
+								}}
+							/>`}
 							<button
 								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 								title="Remove"
 								@click=${() => {
-									mountEntries.splice(i, 1);
-									const filtered = mountEntries.filter(Boolean);
-									pendingChanges.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
+									tokenEntries.splice(i, 1);
+									syncTokenEntries(tokenEntries, pendingChanges);
 									renderApp();
 								}}
 							>${icon(X, "xs")}</button>
 						</div>
-					`)}
-					<button
-						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
-							hover:bg-muted rounded-md transition-colors self-start"
-						@click=${() => { mountEntries.push(""); renderApp(); }}
-					>${icon(Plus, "xs")} Add mount</button>
-				</div>
+					`; });
+				})()}
+				<button
+					class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
+						hover:bg-muted rounded-md transition-colors self-start"
+					@click=${() => { tokenEntries.push({ key: "", value: "", enabled: true, isHost: false, redacted: false }); renderApp(); }}
+				>${icon(Plus, "xs")} Add token</button>
+			</div>
+
+			<!-- Additional Mounts -->
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Additional Mounts</div>
+				${mountEntries.map((mount, i) => html`
+					<div class="flex items-center gap-2 h-8">
+						<input
+							type="text"
+							class="flex-1 min-w-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
+								focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="/host/path:/container/path:ro"
+							.value=${mount}
+							@input=${(e: Event) => {
+								mountEntries[i] = (e.target as HTMLInputElement).value;
+								const filtered = mountEntries.filter(Boolean);
+								pendingChanges.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
+								renderApp();
+							}}
+						/>
+						<button
+							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+							title="Remove"
+							@click=${() => {
+								mountEntries.splice(i, 1);
+								const filtered = mountEntries.filter(Boolean);
+								pendingChanges.sandbox_mounts = filtered.length > 0 ? JSON.stringify(filtered) : "";
+								renderApp();
+							}}
+						>${icon(X, "xs")}</button>
+					</div>
+				`)}
+				<button
+					class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
+						hover:bg-muted rounded-md transition-colors self-start"
+					@click=${() => { mountEntries.push(""); renderApp(); }}
+				>${icon(Plus, "xs")} Add mount</button>
 			</div>
 
 			<!-- Container Pool -->
