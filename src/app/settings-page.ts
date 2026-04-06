@@ -221,7 +221,9 @@ function loadPoolStatus(): void {
 
 /** Initialize token/mount entries from resolved config if not already tracked. */
 function initSandboxEntries(projectId: string, resolved: Record<string, { value: string; source: string }>): void {
-	if (!_sandboxTokenEntries.has(projectId)) {
+	// Defer token entry init until host tokens have loaded (async),
+	// otherwise the list would be seeded with zero host tokens.
+	if (!_sandboxTokenEntries.has(projectId) && hostTokens !== null) {
 		const tokensRaw = resolved.sandbox_tokens?.value || "";
 		const hostEnvVars = new Set((hostTokens || []).map(t => t.envVar));
 		if (tokensRaw) {
@@ -332,8 +334,8 @@ function renderSandboxSection(
 
 	const sandboxMode = pendingChanges.sandbox ?? resolved.sandbox?.value ?? "none";
 	const imageName = pendingChanges.sandbox_image ?? resolved.sandbox_image?.value ?? "bobbit-agent";
-	const tokenEntries = _sandboxTokenEntries.get(projectId)!;
-	const mountEntries = _sandboxMountEntries.get(projectId)!;
+	const tokenEntries = _sandboxTokenEntries.get(projectId) || [];
+	const mountEntries = _sandboxMountEntries.get(projectId) || [];
 
 	return html`
 		<div class="flex flex-col gap-2">
