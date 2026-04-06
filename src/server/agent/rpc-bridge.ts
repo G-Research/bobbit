@@ -85,6 +85,78 @@ export class RpcBridge {
 			}
 		}
 
+		// Retry spawn on transient socket errors (ENOTCONN on Windows under fd pressure).
+		// The ENOTCONN can throw either synchronously from spawn() or asynchronously from
+		// socket initialization — we catch both by wrapping spawn + a brief stabilization delay.
+		const MAX_SPAWN_RETRIES = 2;
+		for (let attempt = 0; attempt <= MAX_SPAWN_RETRIES; attempt++) {
+			try {
+				this._spawnProcess(cliPath, args);
+				this._attachProcessHandlers();
+				// Brief pause to let async socket initialization errors surface.
+				// If ENOTCONN occurs during socket read setup, the process 'error'
+				// event fires within the next microtask. We wait for that.
+				await new Promise<void>((resolve, reject) => {
+					// Check immediately if process already died
+					if (!this.process) {
+						reject(new Error("Process failed to start"));
+						return;
+					}
+					let settled = false;
+					const onError = (err: Error) => {
+						if (!settled) { settled = true; reject(err); }
+					};
+					const onExit = (code: number | null, signal: string | null) => {
+						if (!settled) {
+							settled = true;
+							reject(new Error(`Process exited immediately (${signal ? `signal ${signal}` : `code ${code}`})`));
+						}
+					};
+					this.process!.once("error", onError);
+					this.process!.once("exit", onExit);
+					// If no error within 100ms, the spawn is stable
+					const startupDelay = this.options.containerId ? 100 : 100;
+					setTimeout(() => {
+						if (!settled) {
+							settled = true;
+							this.process?.removeListener("error", onError);
+							this.process?.removeListener("exit", onExit);
+							resolve();
+						}
+					}, startupDelay);
+				});
+				// Spawn succeeded and stabilized
+				return;
+			} catch (err: any) {
+				// Clean up the failed process
+				this.process?.kill().toString(); // best-effort kill
+				this.process = null;
+				this.pending.clear();
+
+				const isTransient = err?.code === "ENOTCONN" || err?.code === "EMFILE" ||
+					err?.code === "ENFILE" || err?.code === "EAGAIN" ||
+					err?.message?.includes("ENOTCONN");
+
+				if (isTransient && attempt < MAX_SPAWN_RETRIES) {
+					const delay = 300 * (attempt + 1);
+					console.warn(
+						`[rpc-bridge] Transient spawn error (${err.code || err.message}) — ` +
+						`retry ${attempt + 1}/${MAX_SPAWN_RETRIES} in ${delay}ms` +
+						`${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`,
+					);
+					await new Promise(resolve => setTimeout(resolve, delay));
+					continue;
+				}
+				throw err;
+			}
+		}
+	}
+
+	/**
+	 * Spawn the child process (docker exec or direct node).
+	 * Factored out of start() so retry logic can re-attempt.
+	 */
+	private _spawnProcess(cliPath: string, args: string[]): void {
 		if (this.options.containerId) {
 			this.process = this.spawnDockerExec(this.options.containerId, cliPath, args);
 		} else {
@@ -107,12 +179,18 @@ export class RpcBridge {
 				},
 			});
 		}
+	}
 
-		this.process.stdout!.on("data", (chunk: Buffer) => {
+	/**
+	 * Attach stdout/stderr/stdin/error/exit handlers to this.process.
+	 * Factored out of start() so retry logic can re-attach after re-spawn.
+	 */
+	private _attachProcessHandlers(): void {
+		this.process!.stdout!.on("data", (chunk: Buffer) => {
 			this.handleData(chunk.toString("utf-8"));
 		});
 
-		this.process.stderr!.on("data", (chunk: Buffer) => {
+		this.process!.stderr!.on("data", (chunk: Buffer) => {
 			process.stderr.write(chunk);
 			// Keep last 20 lines of stderr for diagnostics on unexpected exit
 			const lines = chunk.toString("utf-8").split("\n").filter(l => l.trim());
@@ -125,14 +203,14 @@ export class RpcBridge {
 		// Absorb EPIPE on stdin — the agent process may exit while we still have
 		// queued writes. Without this handler, the error surfaces as an uncaught
 		// exception and crashes the gateway.
-		this.process.stdin!.on("error", (err: NodeJS.ErrnoException) => {
+		this.process!.stdin!.on("error", (err: NodeJS.ErrnoException) => {
 			if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") return;
 			console.warn(`[rpc-bridge] stdin error: ${err.code || err.message}`);
 		});
 
 		// Handle spawn errors (e.g. ENOENT when executable not found) — without this
 		// the error becomes an uncaught exception and crashes the gateway.
-		this.process.on("error", (err: NodeJS.ErrnoException) => {
+		this.process!.on("error", (err: NodeJS.ErrnoException) => {
 			console.error(`[rpc-bridge] Process error: ${err.code || err.message}${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`);
 			for (const [, p] of this.pending) {
 				clearTimeout(p.timeout);
@@ -142,7 +220,7 @@ export class RpcBridge {
 			this.process = null;
 		});
 
-		this.process.on("exit", (code, signal) => {
+		this.process!.on("exit", (code, signal) => {
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
 				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
@@ -165,15 +243,6 @@ export class RpcBridge {
 				} catch { /* listener errors are non-fatal */ }
 			}
 		});
-
-		// Brief pause for process initialization.
-		// Pool containers (containerId) are already running — stdin is buffered,
-		// so writes before the process reads are safe. No delay needed.
-		// Bare node processes need a brief init pause.
-		const startupDelay = this.options.containerId ? 0 : 50;
-		if (startupDelay > 0) {
-			await new Promise((r) => setTimeout(r, startupDelay));
-		}
 	}
 
 	/** Subscribe to agent events. Returns unsubscribe function. */
