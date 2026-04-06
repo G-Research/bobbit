@@ -50,7 +50,7 @@ import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { detectHostTokens } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -728,7 +728,7 @@ export function createGateway(config: GatewayConfig) {
 							const githubTokenEnabled = projectConfigStore.get("sandbox_github_token") !== "false";
 							let githubToken: string | undefined;
 							if (githubTokenEnabled) {
-								githubToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+								githubToken = resolveHostTokenValue("GITHUB_TOKEN");
 							}
 
 							sandboxManager = new SandboxManager();
