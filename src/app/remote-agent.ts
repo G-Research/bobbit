@@ -933,8 +933,24 @@ export class RemoteAgent {
 			while ((match = regex.exec(text)) !== null) {
 				const block = match[1];
 				const result: Record<string, string> = {};
+				// Extract fields in two passes to avoid false positives from field tags
+				// appearing inside large content fields (e.g. <cwd> in backtick-quoted
+				// code inside <spec> text). First pass: extract large content fields and
+				// strip them from the block. Second pass: extract remaining fields from
+				// the cleaned block.
+				const LARGE_CONTENT_FIELDS = new Set(["spec", "prompt", "content", "description", "gates", "triggers"]);
+				let remainingBlock = block;
 				for (const field of parser.fields) {
-					const m = block.match(new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`));
+					if (!LARGE_CONTENT_FIELDS.has(field)) continue;
+					const m = remainingBlock.match(new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`));
+					result[field] = m ? m[1].trim() : "";
+					if (m) {
+						remainingBlock = remainingBlock.replace(m[0], "");
+					}
+				}
+				for (const field of parser.fields) {
+					if (LARGE_CONTENT_FIELDS.has(field)) continue;
+					const m = remainingBlock.match(new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`));
 					result[field] = m ? m[1].trim() : "";
 				}
 
