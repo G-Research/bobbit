@@ -3148,6 +3148,7 @@ export class SessionManager {
 	tryGenerateTitleFromPrompt(sessionId: string, userText: string): void {
 		const session = this.sessions.get(sessionId);
 		if (!session || session.titleGenerated) return;
+		if (session.staffId) return; // Staff sessions use the staff name as title
 		session.titleGenerated = true;
 
 		// Fire-and-forget
