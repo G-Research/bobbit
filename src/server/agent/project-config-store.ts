@@ -29,8 +29,7 @@ const DEFAULTS: Record<string, string> = {
 	sandbox_github_token: "true",       // DEPRECATED — use sandbox_tokens. "true" | "false"
 	sandbox_host_token_overrides: "",   // DEPRECATED — use sandbox_tokens. JSON object: '{"GITHUB_TOKEN":"false","NPM_TOKEN":"false"}'
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
-	sandbox_pool_size: "2",             // Pre-warmed containers (0 = disable pooling)
-	sandbox_pool_max_idle: "300",       // Seconds before excess idle containers culled
+	worktree_pool_size: "2",            // Pre-built worktrees for instant session startup (0 = disable)
 	qa_start_command: "",               // How to start an isolated server for QA
 	qa_build_command: "",               // Build command for QA (defaults to build_command)
 	qa_health_check: "",                // URL to check server health
