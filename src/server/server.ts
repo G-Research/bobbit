@@ -50,6 +50,7 @@ import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { GoalManager } from "./agent/goal-manager.js";
+import { detectHostTokens } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -1065,6 +1066,13 @@ async function handleApiRoute(
 		} else {
 			json({ success: false, error: result.error }, 500);
 		}
+		return;
+	}
+
+	// GET /api/sandbox/host-tokens
+	if (url.pathname === "/api/sandbox/host-tokens" && req.method === "GET") {
+		const tokens = detectHostTokens(preferencesStore);
+		json(tokens);
 		return;
 	}
 

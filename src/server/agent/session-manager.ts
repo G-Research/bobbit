@@ -3901,9 +3901,18 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 	}
 
 	// Auto-detect GITHUB_TOKEN for gh CLI (PR creation, git push via HTTPS).
-	// Gated by sandbox_github_token setting (defaults to true).
-	const ghTokenEnabled = (projectConfig?.get("sandbox_github_token") ?? "true") !== "false";
-	
+	// Gated by per-token overrides or legacy sandbox_github_token setting.
+	const overridesRaw = projectConfig?.get("sandbox_host_token_overrides") || "";
+	let tokenOverrides: Record<string, string> = {};
+	try { tokenOverrides = overridesRaw ? JSON.parse(overridesRaw) : {}; } catch { /* ignore */ }
+
+	// Determine if GITHUB_TOKEN injection is enabled:
+	// - If sandbox_host_token_overrides has a GITHUB_TOKEN key, use that
+	// - Otherwise fall back to legacy sandbox_github_token setting
+	const ghTokenEnabled = tokenOverrides["GITHUB_TOKEN"] !== undefined
+		? tokenOverrides["GITHUB_TOKEN"] !== "false"
+		: (projectConfig?.get("sandbox_github_token") ?? "true") !== "false";
+
 	if (ghTokenEnabled && !result["GITHUB_TOKEN"]) {
 		const hostGhToken = process.env["GITHUB_TOKEN"] || process.env["GH_TOKEN"];
 		if (hostGhToken) {
@@ -3917,6 +3926,19 @@ function resolveHostApiCredentials(prefs?: import("./preferences-store.js").Pref
 			} catch {
 				// gh not installed or not authenticated — skip
 			}
+		}
+	}
+
+	// Auto-detect NPM_TOKEN if enabled
+	const npmTokenEnabled = tokenOverrides["NPM_TOKEN"] !== "false";
+	if (npmTokenEnabled && !result["NPM_TOKEN"] && process.env["NPM_TOKEN"]) {
+		result["NPM_TOKEN"] = process.env["NPM_TOKEN"];
+	}
+
+	// Remove any tokens that are explicitly disabled in overrides
+	for (const [envVar, override] of Object.entries(tokenOverrides)) {
+		if (override === "false" && result[envVar]) {
+			delete result[envVar];
 		}
 	}
 

@@ -170,6 +170,8 @@ let sandboxBuildInProgress = false;
 let sandboxBuildError = "";
 let poolStatus: { enabled: boolean; total?: number; idle?: number; claimed?: number; warming?: number } | null = null;
 let poolStatusLoaded = false;
+let hostTokens: { envVar: string; label: string; available: boolean }[] | null = null;
+let hostTokensLoaded = false;
 
 // Per-project mutable state for dynamic list editors (credentials, mounts)
 const _sandboxCredEntries = new Map<string, { key: string; value: string }[]>();
@@ -181,6 +183,22 @@ function loadSandboxStatus(): void {
 	fetchSandboxStatus().then(s => {
 		sandboxStatusLocal = s;
 		state.sandboxStatus = s;
+		renderApp();
+	});
+}
+
+function loadHostTokens(): void {
+	if (hostTokensLoaded) return;
+	hostTokensLoaded = true;
+	gatewayFetch("/api/sandbox/host-tokens").then(async (res) => {
+		if (res.ok) {
+			hostTokens = await res.json();
+		} else {
+			hostTokens = [];
+		}
+		renderApp();
+	}).catch(() => {
+		hostTokens = [];
 		renderApp();
 	});
 }
@@ -351,10 +369,71 @@ function renderSandboxSection(
 				/>
 			</div>
 
-			<!-- Credentials -->
+			<!-- Host Tokens -->
 			<div class="flex items-start gap-3">
-				<span class="${labelClass} pt-1.5">Credentials</span>
+				<span class="${labelClass} pt-1.5">Host Tokens</span>
 				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
+					<p class="text-xs text-muted-foreground -mt-0.5 mb-1">
+						Detected tokens from the host environment. Enabled tokens are auto-injected into sandbox containers.
+					</p>
+					${(() => {
+						loadHostTokens();
+						if (hostTokens === null) return html`<span class="text-xs text-muted-foreground">Detecting...</span>`;
+						const overridesRaw = pendingChanges.sandbox_host_token_overrides ?? resolved.sandbox_host_token_overrides?.value ?? "";
+						let overrides: Record<string, string> = {};
+						try { overrides = overridesRaw ? JSON.parse(overridesRaw) : {}; } catch { /* ignore */ }
+						// For backward compat: if GITHUB_TOKEN not in overrides, use legacy sandbox_github_token
+						const legacyGh = pendingChanges.sandbox_github_token ?? resolved.sandbox_github_token?.value ?? "true";
+						return hostTokens.map(t => {
+							const isOverridden = credEntries.some(e => e.key === t.envVar && e.value);
+							let enabled: boolean;
+							if (overrides[t.envVar] !== undefined) {
+								enabled = overrides[t.envVar] !== "false";
+							} else if (t.envVar === "GITHUB_TOKEN") {
+								enabled = legacyGh !== "false";
+							} else {
+								enabled = true; // default: auto-inject
+							}
+							return html`
+								<div class="flex items-center gap-2 py-0.5">
+									<span class="w-2 h-2 rounded-full shrink-0 ${t.available ? "bg-green-500" : "bg-zinc-400"}"></span>
+									<label class="flex items-center gap-2 cursor-pointer min-w-0">
+										<input
+											type="checkbox"
+											class="accent-primary"
+											.checked=${enabled}
+											?disabled=${isOverridden}
+											@change=${(e: Event) => {
+												const checked = (e.target as HTMLInputElement).checked;
+												overrides[t.envVar] = checked ? "true" : "false";
+												pendingChanges.sandbox_host_token_overrides =
+													Object.keys(overrides).length > 0 ? JSON.stringify(overrides) : "";
+												// Also sync legacy key for backward compat
+												if (t.envVar === "GITHUB_TOKEN") {
+													pendingChanges.sandbox_github_token = checked ? "true" : "false";
+												}
+												renderApp();
+											}}
+										/>
+										<code class="text-[11px] font-mono text-foreground">${t.envVar}</code>
+										<span class="text-xs text-muted-foreground">${t.label}</span>
+									</label>
+									${!t.available ? html`<span class="text-[10px] text-muted-foreground italic">(not detected)</span>` : ""}
+									${isOverridden ? html`<span class="text-[10px] text-amber-500 italic">(overridden below)</span>` : ""}
+								</div>
+							`;
+						});
+					})()}
+				</div>
+			</div>
+
+			<!-- Additional Credentials -->
+			<div class="flex items-start gap-3">
+				<span class="${labelClass} pt-1.5">Additional Credentials</span>
+				<div class="flex-1 min-w-0 flex flex-col gap-1.5">
+					<p class="text-xs text-muted-foreground -mt-0.5 mb-1">
+						Manual overrides — these take priority over auto-detected host tokens.
+					</p>
 					${credEntries.map((entry, i) => html`
 						<div class="flex items-center gap-2">
 							<input
@@ -404,22 +483,6 @@ function renderSandboxSection(
 						@click=${() => { credEntries.push({ key: "", value: "" }); renderApp(); }}
 					>${icon(Plus, "xs")} Add credential</button>
 				</div>
-			</div>
-
-			<!-- GitHub Token auto-injection -->
-			<div class="flex items-center gap-3">
-				<span class="${labelClass}"></span>
-				<label class="flex items-center gap-2 cursor-pointer">
-					<input
-						type="checkbox"
-						class="accent-primary"
-						.checked=${(pendingChanges.sandbox_github_token ?? resolved.sandbox_github_token?.value ?? "true") === "true"}
-						@change=${(e: Event) => {
-							pendingChanges.sandbox_github_token = (e.target as HTMLInputElement).checked ? "true" : "false";
-						}}
-					/>
-					<span class="text-xs text-muted-foreground">Auto-inject host GitHub token (for <code class="text-[10px]">gh pr create</code>, git push via HTTPS)</span>
-				</label>
 			</div>
 
 			<!-- Additional Mounts -->
@@ -1861,7 +1924,7 @@ function renderProjectScopeTab(projectId: string) {
 	// Keys to show in the Commands & Sandbox tab
 	const HIDDEN_KEYS = new Set([
 		"default_thinking_level", "sandbox", "sandbox_image",
-		"sandbox_credentials", "sandbox_github_token", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
+		"sandbox_credentials", "sandbox_github_token", "sandbox_host_token_overrides", "sandbox_mounts", "sandbox_pool_size", "sandbox_pool_max_idle",
 		"config_directories", "skill_directories",
 		// Rendered in dedicated sections below
 		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
