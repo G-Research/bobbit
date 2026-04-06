@@ -174,7 +174,7 @@ let hostTokens: { envVar: string; label: string; available: boolean }[] | null =
 let hostTokensLoaded = false;
 
 // Per-project mutable state for dynamic list editors (tokens, mounts)
-const _sandboxTokenEntries = new Map<string, { key: string; value: string; enabled: boolean; isHost: boolean }[]>();
+const _sandboxTokenEntries = new Map<string, { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[]>();
 const _sandboxMountEntries = new Map<string, string[]>();
 
 function loadSandboxStatus(): void {
@@ -233,14 +233,15 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 				if (Array.isArray(arr)) {
 					const entries = arr.map(e => ({
 						key: e.key || "",
-						value: e.value || "",
+						value: e.value === "__REDACTED__" ? "" : (e.value || ""),
 						enabled: !!e.enabled,
 						isHost: hostEnvVars.has(e.key),
+						redacted: e.value === "__REDACTED__",
 					}));
 					// Add any detected host tokens not already in the saved list as disabled
 					for (const ht of (hostTokens || [])) {
 						if (!entries.some(e => e.key === ht.envVar)) {
-							entries.push({ key: ht.envVar, value: "", enabled: false, isHost: true });
+							entries.push({ key: ht.envVar, value: "", enabled: false, isHost: true, redacted: false });
 						}
 					}
 					_sandboxTokenEntries.set(projectId, entries);
@@ -250,7 +251,7 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 			} catch { _sandboxTokenEntries.set(projectId, []); }
 		} else {
 			// Legacy fallback: merge host tokens + sandbox_credentials + sandbox_host_token_overrides
-			const entries: { key: string; value: string; enabled: boolean; isHost: boolean }[] = [];
+			const entries: { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[] = [];
 
 			// Parse legacy overrides
 			const overridesRaw = resolved.sandbox_host_token_overrides?.value || "";
@@ -268,7 +269,7 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 				} else {
 					enabled = true; // default: auto-inject
 				}
-				entries.push({ key: ht.envVar, value: "", enabled, isHost: true });
+				entries.push({ key: ht.envVar, value: "", enabled, isHost: true, redacted: false });
 			}
 
 			// Add sandbox_credentials entries
@@ -281,10 +282,13 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 							const existing = entries.find(e => e.key === key);
 							if (existing) {
 								// Override the host token entry with explicit value
-								existing.value = String(value);
+								const strVal = String(value);
+								existing.value = strVal === "__REDACTED__" ? "" : strVal;
 								existing.enabled = true;
+								existing.redacted = strVal === "__REDACTED__";
 							} else {
-								entries.push({ key, value: String(value), enabled: true, isHost: false });
+								const strVal = String(value);
+								entries.push({ key, value: strVal === "__REDACTED__" ? "" : strVal, enabled: true, isHost: false, redacted: strVal === "__REDACTED__" });
 							}
 						}
 					}
@@ -313,12 +317,12 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 
 /** Serialize token entries to pendingChanges.sandbox_tokens */
 function syncTokenEntries(
-	tokenEntries: { key: string; value: string; enabled: boolean; isHost: boolean }[],
+	tokenEntries: { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[],
 	pendingChanges: Record<string, string>,
 ): void {
 	const arr = tokenEntries
 		.filter(e => e.key) // skip empty key rows
-		.map(e => ({ key: e.key, value: e.value, enabled: e.enabled }));
+		.map(e => ({ key: e.key, value: e.redacted && !e.value ? "__REDACTED__" : e.value, enabled: e.enabled }));
 	pendingChanges.sandbox_tokens = arr.length > 0 ? JSON.stringify(arr) : "";
 }
 
@@ -476,7 +480,22 @@ function renderSandboxSection(
 									}}
 								/>
 								<span class="text-muted-foreground text-xs">=</span>
-								<input
+								${entry.redacted && !entry.value
+									? html`
+										<div class="flex-1 min-w-0 flex items-center gap-2">
+											<span class="px-2 py-1 text-sm font-mono text-muted-foreground tracking-widest select-none">••••••••</span>
+											<button
+												class="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+												@click=${() => {
+													tokenEntries[i].redacted = false;
+													tokenEntries[i].value = "";
+													syncTokenEntries(tokenEntries, pendingChanges);
+													renderApp();
+												}}
+											>Change</button>
+										</div>
+									`
+									: html`<input
 									type="text"
 									class="${inputClass} ${!entry.value && entry.isHost ? 'text-muted-foreground italic' : ''}"
 									placeholder=${entry.isHost ? '(from host)' : 'value'}
@@ -485,7 +504,7 @@ function renderSandboxSection(
 										tokenEntries[i].value = (e.target as HTMLInputElement).value;
 										syncTokenEntries(tokenEntries, pendingChanges);
 									}}
-								/>
+								/>`}
 								<button
 									class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 									title="Remove"
@@ -501,7 +520,7 @@ function renderSandboxSection(
 					<button
 						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
 							hover:bg-muted rounded-md transition-colors self-start"
-						@click=${() => { tokenEntries.push({ key: "", value: "", enabled: true, isHost: false }); renderApp(); }}
+						@click=${() => { tokenEntries.push({ key: "", value: "", enabled: true, isHost: false, redacted: false }); renderApp(); }}
 					>${icon(Plus, "xs")} Add token</button>
 				</div>
 			</div>

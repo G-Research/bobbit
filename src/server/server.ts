@@ -840,6 +840,102 @@ function isSetupComplete(): boolean {
 	}
 }
 
+/** Redact token values in sandbox config for API responses. Never send real secrets to the browser. */
+function redactSandboxSecrets(config: Record<string, string>): Record<string, string> {
+	const result = { ...config };
+	if (result.sandbox_tokens) {
+		try {
+			const arr = JSON.parse(result.sandbox_tokens);
+			if (Array.isArray(arr)) {
+				result.sandbox_tokens = JSON.stringify(arr.map((e: any) => ({
+					...e,
+					value: e.value ? "__REDACTED__" : "",
+				})));
+			}
+		} catch { /* leave as-is */ }
+	}
+	if (result.sandbox_credentials) {
+		try {
+			const obj = JSON.parse(result.sandbox_credentials);
+			if (typeof obj === "object" && obj !== null) {
+				const redacted: Record<string, string> = {};
+				for (const [k, v] of Object.entries(obj)) {
+					redacted[k] = v ? "__REDACTED__" : "";
+				}
+				result.sandbox_credentials = JSON.stringify(redacted);
+			}
+		} catch { /* leave as-is */ }
+	}
+	return result;
+}
+
+/** Redact token values in resolved config (with source annotations). */
+function redactSandboxSecretsResolved(config: Record<string, { value: string; source: string }>): Record<string, { value: string; source: string }> {
+	const result = { ...config };
+	for (const key of ["sandbox_tokens", "sandbox_credentials"] as const) {
+		if (!result[key]) continue;
+		const entry = { ...result[key] };
+		if (key === "sandbox_tokens" && entry.value) {
+			try {
+				const arr = JSON.parse(entry.value);
+				if (Array.isArray(arr)) {
+					entry.value = JSON.stringify(arr.map((e: any) => ({
+						...e,
+						value: e.value ? "__REDACTED__" : "",
+					})));
+					result[key] = entry;
+				}
+			} catch { /* leave as-is */ }
+		}
+		if (key === "sandbox_credentials" && entry.value) {
+			try {
+				const obj = JSON.parse(entry.value);
+				if (typeof obj === "object" && obj !== null) {
+					const redacted: Record<string, string> = {};
+					for (const [k, v] of Object.entries(obj)) {
+						redacted[k] = v ? "__REDACTED__" : "";
+					}
+					entry.value = JSON.stringify(redacted);
+					result[key] = entry;
+				}
+			} catch { /* leave as-is */ }
+		}
+	}
+	return result;
+}
+
+/** Merge redacted sentinel values with existing stored values before saving. */
+function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore): void {
+	if (updates.sandbox_tokens) {
+		try {
+			const incoming: any[] = JSON.parse(updates.sandbox_tokens);
+			const existingRaw = configStore.get("sandbox_tokens") || "";
+			let existing: any[] = [];
+			try { existing = existingRaw ? JSON.parse(existingRaw) : []; } catch { /* ignore */ }
+			const existingMap = new Map(existing.map((e: any) => [e.key, e.value]));
+			const merged = incoming.map((e: any) => ({
+				...e,
+				value: e.value === "__REDACTED__" ? (existingMap.get(e.key) || "") : e.value,
+			}));
+			updates.sandbox_tokens = JSON.stringify(merged);
+		} catch { /* leave as-is */ }
+	}
+	if (updates.sandbox_credentials) {
+		try {
+			const incoming = JSON.parse(updates.sandbox_credentials) as Record<string, string>;
+			const existingRaw = configStore.get("sandbox_credentials") || "";
+			let existingObj: Record<string, string> = {};
+			try { existingObj = existingRaw ? JSON.parse(existingRaw) : {}; } catch { /* ignore */ }
+			for (const [k, v] of Object.entries(incoming)) {
+				if (v === "__REDACTED__") {
+					incoming[k] = existingObj[k] || "";
+				}
+			}
+			updates.sandbox_credentials = JSON.stringify(incoming);
+		} catch { /* leave as-is */ }
+	}
+}
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -1278,7 +1374,7 @@ async function handleApiRoute(
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
 
 		if (req.method === "GET" && !suffix) {
-			json(ctx.projectConfigStore.getAll());
+			json(redactSandboxSecrets(ctx.projectConfigStore.getAll()));
 			return;
 		}
 		if (req.method === "GET" && suffix === "defaults") {
@@ -1306,12 +1402,14 @@ async function handleApiRoute(
 					result[key] = { value: serverRaw[key], source: "server" };
 				}
 			}
-			json(result);
+			json(redactSandboxSecretsResolved(result));
 			return;
 		}
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			// Merge redacted token values with existing stored values
+			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore);
 			for (const [key, value] of Object.entries(body)) {
 				if (key.includes(".")) {
 					json({ error: `Config key "${key}" must not contain dots` }, 400);
