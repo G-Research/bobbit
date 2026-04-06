@@ -448,8 +448,12 @@ function renderSandboxSection(
 					${(() => {
 						loadHostTokens();
 						if (hostTokens === null) return html`<span class="text-xs text-muted-foreground">Detecting...</span>`;
-						return tokenEntries.map((entry, i) => html`
+						const hostAvail = new Map((hostTokens || []).map(t => [t.envVar, t.available]));
+						return tokenEntries.map((entry, i) => {
+							const hasHostValue = hostAvail.get(entry.key) === true;
+							return html`
 							<div class="flex items-center gap-2">
+								<span class="w-2 h-2 rounded-full shrink-0 ${hasHostValue ? 'bg-green-500' : 'bg-zinc-400'}" title=${hasHostValue ? 'Detected on host' : 'Not detected on host'}></span>
 								<input
 									type="checkbox"
 									class="accent-primary shrink-0"
@@ -492,7 +496,7 @@ function renderSandboxSection(
 									}}
 								>${icon(X, "xs")}</button>
 							</div>
-						`);
+						`; });
 					})()}
 					<button
 						class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground
