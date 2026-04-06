@@ -54,6 +54,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 |---|---|---|
 | `GET` | `/api/goals/:id/gates` | List gates for a goal |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
+| `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
 
 ### Goal Team
 
