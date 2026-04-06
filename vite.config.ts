@@ -119,7 +119,9 @@ function localhostGuard(): Plugin {
 		configureServer(server) {
 			server.middlewares.use((req, res, next) => {
 				const addr = req.socket.remoteAddress || "";
-				const isLocalhost = addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+				// Normalize: strip IPv6-mapped prefix, handle various loopback representations
+				const rawIp = addr.replace(/^::ffff:/, "");
+				const isLocalhost = rawIp === "127.0.0.1" || rawIp === "::1" || addr === "::1" || rawIp === "localhost";
 				if (host === "localhost" && !isLocalhost) {
 					console.warn(`[security] Blocked non-localhost request from ${addr}`);
 					res.writeHead(403);
