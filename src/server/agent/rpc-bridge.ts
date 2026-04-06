@@ -474,7 +474,11 @@ function buildMountTable(): MountMapping[] {
 		{ containerPrefix: CONTAINER_AGENT_DIR + "sessions", hostPath: agentSessionsDir },
 		{ containerPrefix: "/tmp/session-prompts", hostPath: sessionPromptsDir },
 		{ containerPrefix: "/mcp-extensions", hostPath: mcpExtDir },
-		{ containerPrefix: "/bobbit-state", hostPath: stateDir },
+		// Mount only specific state subdirectories — never the full state dir
+		// (which contains the host gateway token, TLS keys, etc.)
+		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
+		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
+		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
 }

@@ -157,6 +157,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 	});
 
 	test("cleanup worktrees action calls POST endpoint", async ({ page }) => {
+		test.slow(); // Worktree scan can be slow under concurrent test load
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 

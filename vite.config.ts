@@ -81,6 +81,73 @@ function stripH1Response(raw: http.IncomingHttpHeaders): Record<string, string |
 	return out;
 }
 
+/**
+ * Defense-in-depth: Block import.meta.glob calls that reference .bobbit
+ * paths or use excessive ../ traversal (3+ levels). Prevents sandbox agents
+ * from writing .mjs files that trick Vite into resolving arbitrary paths
+ * at transform time, bypassing server.fs.deny.
+ */
+function blockDangerousGlobs(): Plugin {
+	return {
+		name: "block-dangerous-globs",
+		apply: "serve",
+		transform(code, id) {
+			if (!code.includes("import.meta.glob")) return null;
+			const globPattern = /import\.meta\.glob\s*\(\s*['"`]([^'"`]+)['"`]/g;
+			let match;
+			while ((match = globPattern.exec(code)) !== null) {
+				const pattern = match[1];
+				if (pattern.includes(".bobbit") || (pattern.match(/\.\.\//g) || []).length >= 3) {
+					console.warn(`[security] Blocked dangerous import.meta.glob pattern in ${id}: ${pattern}`);
+					return { code: "export default {};", map: null };
+				}
+			}
+			return null;
+		},
+	};
+}
+
+/**
+ * Defense-in-depth: Reject requests from non-localhost IPs when Vite is
+ * bound to localhost, and block Docker bridge subnet IPs in all modes.
+ * Prevents sandbox containers from reaching the Vite dev server even if
+ * network isolation fails.
+ */
+function localhostGuard(): Plugin {
+	return {
+		name: "localhost-guard",
+		configureServer(server) {
+			server.middlewares.use((req, res, next) => {
+				const addr = req.socket.remoteAddress || "";
+				// Normalize: strip IPv6-mapped prefix, handle various loopback representations
+				const rawIp = addr.replace(/^::ffff:/, "");
+				const isLocalhost = rawIp === "127.0.0.1" || rawIp === "::1" || addr === "::1" || rawIp === "localhost";
+				if (host === "localhost" && !isLocalhost) {
+					console.warn(`[security] Blocked non-localhost request from ${addr}`);
+					res.writeHead(403);
+					res.end("Forbidden");
+					return;
+				}
+				// In non-localhost mode (NordVPN mesh), block Docker bridge subnets (172.16.0.0/12)
+				if (host !== "localhost" && !isLocalhost) {
+					const raw = addr.replace("::ffff:", "");
+					if (raw.startsWith("172.")) {
+						const parts = raw.split(".");
+						const second = parseInt(parts[1], 10);
+						if (second >= 16 && second <= 31) {
+							console.warn(`[security] Blocked Docker bridge request from ${addr}`);
+							res.writeHead(403);
+							res.end("Forbidden");
+							return;
+						}
+					}
+				}
+				next();
+			});
+		},
+	};
+}
+
 function dynamicGatewayProxy(): Plugin {
 	return {
 		name: "dynamic-gateway-proxy",
@@ -151,7 +218,7 @@ function dynamicGatewayProxy(): Plugin {
 }
 
 export default defineConfig({
-	plugins: [tailwindcss(), dynamicGatewayProxy()],
+	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), dynamicGatewayProxy()],
 	build: {
 		outDir: "dist/ui",
 	},
@@ -164,7 +231,7 @@ export default defineConfig({
 			ignored: ["**/.e2e-*/**", "**/bobbit-wt/**", "**/*-wt/**"],
 		},
 		fs: {
-			deny: [".bobbit/state", ".bobbit/config", "node_modules/.vite"],
+			deny: [".bobbit", "node_modules/.vite"],
 		},
 		// Serve vite dev server over HTTPS using the same self-signed cert
 		...(tlsAvailable

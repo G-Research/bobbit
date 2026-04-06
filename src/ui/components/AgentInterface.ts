@@ -34,6 +34,8 @@ export class AgentInterface extends LitElement {
 	@property({ type: Boolean }) showThemeToggle = false;
 	// Working directory shown in the stats bar
 	@property() cwd?: string;
+	// Project ID for palette resolution
+	@property() projectId?: string;
 	// Git branch name shown in the stats bar
 	@property() branch?: string;
 	// Git status data for the widget

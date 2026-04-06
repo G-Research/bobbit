@@ -162,7 +162,10 @@ test.describe("Slash autocomplete", () => {
 		await textarea.pressSequentially("/dep");
 		await page.waitForFunction(() => (window as any).isMenuOpen());
 
-		// Reset selected index to 0 to avoid mouseenter race during render
+		// Move mouse away from the menu to prevent mouseenter from overriding the selected index
+		await page.mouse.move(0, 0);
+
+		// Force index to 0 and verify
 		await page.evaluate(() => { (window as any)._forceSelectedIndex(0); });
 		let idx = await page.evaluate(() => (window as any).getSelectedIndex());
 		expect(idx).toBe(0);

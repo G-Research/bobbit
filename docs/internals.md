@@ -626,7 +626,7 @@ To solve this, `runCommandStep` in `verification-harness.ts` accepts an optional
 
 ### Security summary
 
-- Container sees `/workspace`, `/workspace-wt/`, `/agent-modules` (ro), `/tools` (ro), `/bobbit-state/`
+- Container sees `/workspace`, `/workspace-wt/`, `/agent-modules` (ro), `/tools` (ro), `/bobbit-state/{sessions,tool-guard,html-snapshots}/` (selective mounts — the host gateway token, TLS keys, and other sensitive state files are not mounted)
 - Runs as `node` user (uid=1000), no Docker socket
 - Mount paths validated against blocklist (`/proc`, `/sys`, `/.ssh`, `/.aws`, etc.)
 - Credential keys sanitized (`^[A-Za-z_][A-Za-z0-9_]*$`)

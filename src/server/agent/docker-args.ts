@@ -109,9 +109,15 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
 	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
 
-	// Bind mount host state directory for session logs persistence
+	// Bind mount ONLY specific state subdirectories — never the full state dir,
+	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	if (stateDir) {
-		args.push("-v", `${toDockerPath(stateDir)}:/bobbit-state`);
+		const sandboxStateDirs = ["sessions", "tool-guard", "html-snapshots"];
+		for (const sub of sandboxStateDirs) {
+			const hostPath = path.join(stateDir, sub);
+			fs.mkdirSync(hostPath, { recursive: true });
+			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}`);
+		}
 	}
 
 	// Host agent sessions dir (~/.bobbit/agent/sessions/) — mount ONLY sessions, not the
