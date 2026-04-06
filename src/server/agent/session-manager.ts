@@ -1045,8 +1045,9 @@ export class SessionManager {
 
 	/**
 	 * Promote a queued message to steered and reorder.
-	 * Steered messages are held in the queue until interrupt/abort,
-	 * at which point they are batch-injected via forceAbort().
+	 * If the agent is streaming, all steered+undispatched messages are
+	 * batched and dispatched immediately via rpcClient.steer() so they
+	 * are injected at the next tool boundary.
 	 */
 	steerQueued(sessionId: string, messageId: string): boolean {
 		const session = this.sessions.get(sessionId);
@@ -1055,7 +1056,32 @@ export class SessionManager {
 		if (!ok) return false;
 
 		this.broadcastQueue(session);
+
+		// If agent is streaming, batch-dispatch all steered+undispatched now
+		if (session.status === "streaming") {
+			this._dispatchSteeredMessages(session);
+		}
 		return true;
+	}
+
+	/**
+	 * Batch-dispatch all steered+undispatched messages via rpcClient.steer().
+	 * Messages are concatenated and sent as a single steer call, then marked
+	 * dispatched so they aren't sent again on abort or subsequent promotions.
+	 */
+	private _dispatchSteeredMessages(session: SessionInfo): void {
+		const steeredMessages = session.promptQueue.toArray()
+			.filter(m => m.isSteered && !m.dispatched);
+		if (steeredMessages.length === 0) return;
+
+		const batchText = steeredMessages.map(m => m.text).join('\n');
+		session.rpcClient.steer(batchText).catch((err) => {
+			console.error(`[session-manager] Failed to dispatch batched steer for ${session.id}:`, err);
+		});
+		for (const m of steeredMessages) {
+			session.promptQueue.markDispatched(m.id);
+		}
+		this.broadcastQueue(session);
 	}
 
 	/** Reorder queued messages to match the given ID list. */
@@ -3765,21 +3791,8 @@ export class SessionManager {
 		// If not streaming, nothing to abort
 		if (session.status !== "streaming") return;
 
-		// Collect all steered, undispatched messages and inject as a batch
-		const steeredMessages = session.promptQueue.toArray()
-			.filter(m => m.isSteered && !m.dispatched);
-		if (steeredMessages.length > 0) {
-			const batchText = steeredMessages.map(m => m.text).join('\n');
-			try {
-				await session.rpcClient.steer(batchText);
-			} catch (err) {
-				console.error(`[session-manager] Failed to dispatch batched steer for ${id}:`, err);
-			}
-			for (const m of steeredMessages) {
-				session.promptQueue.markDispatched(m.id);
-			}
-			this.broadcastQueue(session);
-		}
+		// Dispatch any remaining steered messages before aborting
+		this._dispatchSteeredMessages(session);
 
 		// Try graceful abort first
 		try {

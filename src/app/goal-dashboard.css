@@ -1224,6 +1224,23 @@
 	margin-left: auto;
 }
 
+.cancel-verification-btn {
+	font-size: 11px;
+	padding: 2px 8px;
+	background: color-mix(in oklch, var(--destructive) 14%, transparent);
+	color: var(--destructive);
+	border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
+	border-radius: 4px;
+	cursor: pointer;
+	font-weight: 500;
+	line-height: 1.4;
+	transition: background 150ms, border-color 150ms;
+}
+.cancel-verification-btn:hover {
+	background: color-mix(in oklch, var(--destructive) 24%, transparent);
+	border-color: color-mix(in oklch, var(--destructive) 50%, transparent);
+}
+
 .signal-expand-icon {
 	font-size: 10px;
 	color: var(--text-tertiary);
