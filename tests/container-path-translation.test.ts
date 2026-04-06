@@ -21,7 +21,7 @@ const TEST_BOBBIT_DIR = process.platform === "win32"
 process.env.PI_CODING_AGENT_DIR = TEST_AGENT_DIR;
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
-const { containerPathToHost, hostPathToContainer } = await import("../src/server/agent/rpc-bridge.js");
+const { containerPathToHost, hostPathToContainer } = await import("../dist/server/agent/rpc-bridge.js");
 
 describe("containerPathToHost (bind-mount fallback)", () => {
 	it("translates agent sessions path", () => {
@@ -33,13 +33,20 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 		assert.equal(hostPath, expected);
 	});
 
-	it("translates /bobbit-state paths", () => {
-		const containerPath = "/bobbit-state/sessions.json";
+	it("translates /bobbit-state subdirectory paths", () => {
+		// Only specific subdirs are mounted (sessions/, tool-guard/, html-snapshots/)
+		const containerPath = "/bobbit-state/sessions/abc-123/2026-01-01.jsonl";
 		const hostPath = containerPathToHost(containerPath);
 		const expected = process.platform === "win32"
-			? "C:\\Users\\test\\project\\.bobbit\\state\\sessions.json"
-			: "/home/test/project/.bobbit/state/sessions.json";
+			? "C:\\Users\\test\\project\\.bobbit\\state\\sessions\\abc-123\\2026-01-01.jsonl"
+			: "/home/test/project/.bobbit/state/sessions/abc-123/2026-01-01.jsonl";
 		assert.equal(hostPath, expected);
+	});
+
+	it("does NOT translate /bobbit-state root files (not mounted)", () => {
+		// sessions.json is at the state dir root — intentionally not exposed to containers
+		const containerPath = "/bobbit-state/sessions.json";
+		assert.equal(containerPathToHost(containerPath), containerPath);
 	});
 
 	it("returns non-matching paths unchanged", () => {

@@ -562,7 +562,9 @@ function buildMountTable(): MountMapping[] {
 export function containerPathToHost(containerPath: string): string {
 	const normalized = containerPath.replace(/\\/g, "/");
 	for (const { containerPrefix, hostPath } of buildMountTable()) {
-		if (normalized.startsWith(containerPrefix)) {
+		// Match exact prefix or prefix followed by "/" to avoid collisions
+		// (e.g. "/bobbit-state/sessions" must not match "/bobbit-state/sessions.json")
+		if (normalized === containerPrefix || normalized.startsWith(containerPrefix + "/")) {
 			const relative = normalized.substring(containerPrefix.length);
 			return path.join(hostPath, ...relative.split("/").filter(Boolean));
 		}
