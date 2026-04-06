@@ -375,6 +375,30 @@ export function createGateway(config: GatewayConfig) {
 	const projectContextManager = new ProjectContextManager(projectRegistry);
 	projectContextManager.initAll();
 
+	// Migrate inline token values from project.yaml → secrets.json (one-time)
+	for (const p of projectRegistry.list()) {
+		const ctx = projectContextManager.getOrCreate(p.id);
+		if (!ctx) continue;
+		const tokensRaw = ctx.projectConfigStore.get("sandbox_tokens");
+		if (!tokensRaw) continue;
+		try {
+			const arr = JSON.parse(tokensRaw);
+			if (!Array.isArray(arr)) continue;
+			const hasValues = arr.some((e: any) => e.value);
+			if (!hasValues) continue;
+			// Move values to secrets store
+			const secretUpdates: Record<string, string> = {};
+			for (const e of arr) {
+				if (e.value) secretUpdates[e.key] = e.value;
+			}
+			ctx.secretsStore.update(secretUpdates);
+			// Strip values from config
+			ctx.projectConfigStore.set("sandbox_tokens",
+				JSON.stringify(arr.map((e: any) => ({ key: e.key, enabled: e.enabled }))));
+			console.log(`[migration] Moved ${Object.keys(secretUpdates).length} token secret(s) to secrets.json for project ${ctx.project.id}`);
+		} catch { /* ignore parse errors */ }
+	}
+
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
