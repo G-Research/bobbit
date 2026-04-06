@@ -167,6 +167,14 @@ export class VerificationHarness {
 
 		for (const v of running) {
 			try {
+				// Skip verifications for goals that completed/shelved while we were down
+				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
+				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
+					console.log(`[verification] Skipping resume for ${v.signalId} — goal ${v.goalId} is ${goal.state}`);
+					this.activeVerifications.delete(v.signalId);
+					this._persistActive();
+					continue;
+				}
 				await this._resumeOneVerification(v);
 			} catch (err) {
 				console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
@@ -448,6 +456,12 @@ export class VerificationHarness {
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			// Check if goal completed/shelved before retrying
+			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
+			if (goalCheck && (goalCheck.state === "complete" || goalCheck.state === "shelved")) {
+				console.log(`[verification] Aborting re-run of "${stepName}" — goal ${goalId} is ${goalCheck.state}`);
+				return { name: stepName, type: "llm-review", passed: false, output: `Aborted: goal is ${goalCheck.state}`, duration_ms: Date.now() - startedAt };
+			}
 			result = await this.runLlmReviewStep(
 				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role },
 				ctx.cwd, ctx.builtinVars,
@@ -500,6 +514,12 @@ export class VerificationHarness {
 		const maxAttempts = 2;
 		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any } = { passed: false, output: "Re-run failed." };
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			// Check if goal completed/shelved before retrying
+			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
+			if (goalCheck && (goalCheck.state === "complete" || goalCheck.state === "shelved")) {
+				console.log(`[verification] Aborting re-run of QA "${stepName}" — goal ${goalId} is ${goalCheck.state}`);
+				return { name: stepName, type: "agent-qa", passed: false, output: `Aborted: goal is ${goalCheck.state}`, duration_ms: Date.now() - startedAt };
+			}
 			result = await this.runAgentQaStep(
 				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role },
 				ctx.cwd, goalId, ctx.builtinVars,
@@ -551,6 +571,38 @@ export class VerificationHarness {
 	/** Register a callback to notify the team lead agent when verification completes. */
 	setTeamLeadNotifier(fn: (goalId: string, message: string) => void): void {
 		this.notifyTeamLeadFn = fn;
+	}
+
+	/**
+	 * Cancel ALL in-flight verifications for a goal (all gates).
+	 * Called when a goal completes, a team is torn down, or the goal is shelved.
+	 */
+	async cancelAllVerifications(goalId: string): Promise<void> {
+		for (const [signalId, active] of this.activeVerifications) {
+			if (active.goalId !== goalId) continue;
+			active.cancelled = true;
+			active.overallStatus = "cancelled";
+
+			for (const step of active.steps) {
+				if (step.sessionId && step.status === "running") {
+					try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* ignore */ }
+					if (this.teamManager) {
+						try { await this.teamManager.unregisterReviewerSession(goalId, step.sessionId); } catch { /* ignore */ }
+					}
+				}
+			}
+
+			this.activeVerifications.delete(signalId);
+			this._persistActive();
+
+			this.broadcastFn(goalId, {
+				type: "gate_verification_complete",
+				goalId, gateId: active.gateId, signalId,
+				status: "cancelled",
+			});
+
+			console.log(`[verification] Cancelled verification ${signalId} for goal ${goalId} (goal completing)`);
+		}
 	}
 
 	/**
@@ -988,6 +1040,7 @@ export class VerificationHarness {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
 								const maxAttempts = 3;
 								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									if (active.cancelled) break;
 									const qaResult = await this.runAgentQaStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 										cwd, signal.goalId, builtinVars,
@@ -1013,6 +1066,7 @@ export class VerificationHarness {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
 								const maxAttempts = 3;
 								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									if (active.cancelled) break;
 									result = await this.runLlmReviewStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 										cwd, builtinVars,

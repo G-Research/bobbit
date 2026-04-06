@@ -1120,6 +1120,11 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
+		// Cancel any in-flight verifications before completing — prevents zombie reviewers
+		if (this.verificationHarness) {
+			await this.verificationHarness.cancelAllVerifications(goalId);
+		}
+
 		// Enforce gate requirements before allowing completion
 		const completeGateStore = this.resolveGateStore(goalId);
 		const goal = this.resolveGoal(goalId);
@@ -1169,6 +1174,11 @@ export class TeamManager {
 		const entry = this.teams.get(goalId);
 		if (!entry) {
 			throw new Error(`No active team for goal: ${goalId}`);
+		}
+
+		// Cancel any in-flight verifications before teardown — prevents zombie reviewers
+		if (this.verificationHarness) {
+			await this.verificationHarness.cancelAllVerifications(goalId);
 		}
 
 		// Cancel idle-nudge timer and unsubscribe from team lead events
