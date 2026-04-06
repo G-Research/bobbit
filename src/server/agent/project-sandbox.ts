@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
+import { stripTokenFromGitUrl } from "../skills/git.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -367,7 +368,9 @@ export class ProjectSandbox {
 			// .git doesn't exist — need to clone
 		}
 
-		const { repoUrl } = this.options;
+		// Strip any embedded token from the URL (defense-in-depth).
+		// Auth is handled by the credential helper reading GITHUB_TOKEN from env.
+		const repoUrl = stripTokenFromGitUrl(this.options.repoUrl);
 
 		// Clone the repo
 		console.log(`[project-sandbox] Cloning ${repoUrl} into /workspace...`);

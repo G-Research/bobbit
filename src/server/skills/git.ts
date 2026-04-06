@@ -9,6 +9,26 @@ import { resolveShell } from "../agent/shell-util.js";
 const execFile = promisify(execFileCb);
 
 /**
+ * Strip embedded credentials from a git remote URL.
+ * e.g. "https://ghp_abc123@github.com/user/repo.git" → "https://github.com/user/repo.git"
+ * Prevents tokens from leaking into .git/config inside sandbox containers.
+ * Authentication is handled by the credential helper reading GITHUB_TOKEN from env.
+ */
+export function stripTokenFromGitUrl(url: string): string {
+	try {
+		const parsed = new URL(url);
+		if (parsed.username || parsed.password) {
+			parsed.username = "";
+			parsed.password = "";
+			return parsed.toString();
+		}
+	} catch {
+		// Not a URL (e.g. SSH or local path) — return as-is
+	}
+	return url;
+}
+
+/**
  * Resolve the remote primary branch (e.g. origin/main or origin/master).
  * Uses `git symbolic-ref refs/remotes/origin/HEAD` which is set by `git clone`.
  * Falls back to "HEAD" if detection fails.

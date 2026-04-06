@@ -31,7 +31,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
-import { isGitRepo, getRepoRoot } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, stripTokenFromGitUrl } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -661,11 +661,14 @@ export function createGateway(config: GatewayConfig) {
 					if (isRepo) {
 						const repoPath = await getRepoRoot(config.defaultCwd);
 
-						// Get repo URL for cloning inside the container
+						// Get repo URL for cloning inside the container.
+						// Strip any embedded token (e.g. https://ghp_xxx@github.com/...)
+						// so it doesn't leak into .git/config inside the container.
+						// The container's credential helper reads GITHUB_TOKEN from env instead.
 						let repoUrl: string;
 						try {
 							const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoPath, timeout: 5000 });
-							repoUrl = stdout.trim();
+							repoUrl = stripTokenFromGitUrl(stdout.trim());
 						} catch {
 							repoUrl = repoPath; // fallback to local path
 						}
