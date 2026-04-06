@@ -3896,11 +3896,14 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged
+		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged.
+		// For non-goal sessions, fall back to the session's persisted branch — needed for sandbox
+		// sessions where the host worktree may not have the right branch checked out.
 		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
+		const sessionBranch = goalBranch || sessionManager.getPersistedSession(id)?.branch;
 		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
 		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
-		const pr = await getCachedPrStatus(prCwd, goalBranch, process.cwd());
+		const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
 		if (pr) {
 			const goalId = session.goalId;
 			if (goalId) prStatusStore.set(goalId, pr);
