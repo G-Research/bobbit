@@ -3900,7 +3900,15 @@ async function handleApiRoute(
 		// For non-goal sessions, fall back to the session's persisted branch — needed for sandbox
 		// sessions where the host worktree may not have the right branch checked out.
 		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
-		const sessionBranch = goalBranch || sessionManager.getPersistedSession(id)?.branch;
+		let sessionBranch = goalBranch || sessionManager.getPersistedSession(id)?.branch;
+		// For sandboxed sessions, the persisted branch may not match the actual container branch
+		// (e.g. gateway assigns a different worktree name). Detect the real branch from the container.
+		if (cid && cwd) {
+			try {
+				const actualBranch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid);
+				if (actualBranch && actualBranch !== "HEAD") sessionBranch = actualBranch;
+			} catch { /* fall back to persisted branch */ }
+		}
 		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
 		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
 		const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
