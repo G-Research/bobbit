@@ -948,6 +948,9 @@ export class RemoteAgent {
 			if (!input && typeof block.arguments === "string") {
 				try { input = JSON.parse(block.arguments); } catch { continue; }
 			}
+			if (!input && typeof block.arguments === "object" && block.arguments !== null) {
+				input = block.arguments;
+			}
 			if (!input || typeof input !== "object") continue;
 			callback(input);
 			// Track that this message had a tool-based proposal
