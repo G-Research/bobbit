@@ -282,7 +282,7 @@ function renderMobileLanding() {
 													<div class="flex items-center gap-2 shrink-0">
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
-															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
+															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/general`); }}
 															title="Project settings"
 														>${icon(Settings, "sm")}</button>
 														<button

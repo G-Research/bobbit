@@ -39,7 +39,7 @@ const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 
 const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "general", label: "General" },
-	{ id: "project", label: "Commands & Sandbox" },
+	{ id: "project", label: "Commands" },
 	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
 	{ id: "appearance", label: "Appearance" },
@@ -2019,11 +2019,6 @@ function renderProjectScopeTab(projectId: string) {
 				</div>
 			` : ""}
 
-			<hr class="border-border" />
-
-			<!-- Docker Sandbox -->
-			${renderSandboxSection(projectId, resolved, pendingChanges, inputClass, labelClass)}
-
 			<!-- Save -->
 			<div class="flex items-center gap-3 pt-2 border-t border-border">
 				<button
@@ -2034,9 +2029,6 @@ function renderProjectScopeTab(projectId: string) {
 						if (Object.keys(pendingChanges).length > 0) {
 							saveProjectScopeConfig(projectId, pendingChanges);
 							_projectScopePending.delete(projectId);
-							// Clear sandbox entry caches so they reload from saved config
-							_sandboxCredEntries.delete(projectId);
-							_sandboxMountEntries.delete(projectId);
 						}
 					}}
 				>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
@@ -2052,11 +2044,19 @@ function renderProjectGeneralTab(projectId: string) {
 	const project = (state.projects || []).find((p: any) => p.id === projectId);
 	const isDefault = state.projects?.[0]?.id === projectId;
 
-	// Reuse the per-project pending changes map for rootPath edits
+	// Reuse the per-project pending changes map for rootPath edits + sandbox config
 	if (!_projectScopePending.has(projectId)) _projectScopePending.set(projectId, {});
 	const pendingChanges = _projectScopePending.get(projectId)!;
 
 	const inputClass = "flex-1 min-w-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring";
+	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
+
+	// Load project config for sandbox section (shared with Commands tab)
+	loadProjectScopeConfig(projectId);
+	const cached = projectScopeConfigCache.get(projectId);
+	const resolved = cached?.loaded ? cached.resolved : {};
+
+	const hasPendingChanges = Object.keys(pendingChanges).length > 0;
 
 	return html`
 		<div class="flex flex-col gap-6">
@@ -2081,16 +2081,27 @@ function renderProjectGeneralTab(projectId: string) {
 					The directory used when creating new sessions and goals for this project.
 				</p>
 			</div>
+
+			<hr class="border-border" />
+
+			<!-- Docker Sandbox -->
+			${renderSandboxSection(projectId, resolved, pendingChanges, inputClass, labelClass)}
+
 			<!-- Save -->
-			${pendingChanges._rootPath !== undefined ? html`
+			${hasPendingChanges ? html`
 				<div class="flex items-center gap-3 pt-2 border-t border-border">
 					<button
 						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
 							hover:bg-primary/90 transition-colors disabled:opacity-50"
 						?disabled=${projectScopeSaveStatus === "saving"}
 						@click=${() => {
-							saveProjectScopeConfig(projectId, { _rootPath: pendingChanges._rootPath });
-							delete pendingChanges._rootPath;
+							if (hasPendingChanges) {
+								saveProjectScopeConfig(projectId, pendingChanges);
+								_projectScopePending.delete(projectId);
+								// Clear sandbox entry caches so they reload from saved config
+								_sandboxCredEntries.delete(projectId);
+								_sandboxMountEntries.delete(projectId);
+							}
 						}}
 					>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
 					${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved.</span>` : ""}

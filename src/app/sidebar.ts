@@ -809,7 +809,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
-				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/project`); }}
+				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/general`); }}
 				title="Project settings"
 			>${icon(Settings, "xs")}</button>
 			<button
