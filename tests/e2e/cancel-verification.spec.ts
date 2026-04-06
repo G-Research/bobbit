@@ -191,7 +191,7 @@ test.describe("Cancel Verification API", () => {
 		}
 	});
 
-	test("cancel on archived goal returns 400", async () => {
+	test("cancel on archived goal returns 409", async () => {
 		const goal = await createGoal({
 			title: `Cancel Archived Verif ${Date.now()}`,
 			workflowId: SLOW_WORKFLOW_ID,
@@ -210,7 +210,7 @@ test.describe("Cancel Verification API", () => {
 			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
 				method: "POST",
 			});
-			expect(cancelRes.status).toBe(400);
+			expect(cancelRes.status).toBe(409);
 			const body = await cancelRes.json();
 			expect(body.error).toContain("archived");
 		} finally {
