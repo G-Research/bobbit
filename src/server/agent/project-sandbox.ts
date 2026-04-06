@@ -115,11 +115,22 @@ export class ProjectSandbox {
 			// Fetch failure is non-fatal — may be offline
 		}
 
-		// Create the worktree
-		const args = ["git", "worktree", "add", worktreePath, "-b", branch];
-		if (baseBranch) {
-			args.push(baseBranch);
+		// Resolve start point: use baseBranch if provided, otherwise resolve
+		// the remote primary branch so we don't base on a stale local HEAD.
+		let startPoint = baseBranch;
+		if (!startPoint) {
+			try {
+				const refResult = await this._dockerExec(containerId,
+					["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+					{ cwd: "/workspace" });
+				const ref = refResult.trim().replace("refs/remotes/", "");
+				if (ref) startPoint = ref;
+			} catch { /* fall back below */ }
+			if (!startPoint) startPoint = "origin/master";
 		}
+
+		// Create the worktree
+		const args = ["git", "worktree", "add", worktreePath, "-b", branch, startPoint];
 		try {
 			await this._dockerExec(containerId, args, { cwd: "/workspace" });
 		} catch {
