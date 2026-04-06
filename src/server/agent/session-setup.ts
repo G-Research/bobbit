@@ -179,9 +179,11 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 /** Step 2: Add goal/team extension paths to bridge args. */
 export function resolveGoalExtensions(plan: SessionSetupPlan, _ctx: PipelineContext): void {
 	if (plan.goalId && !plan.assistantType) {
-		const alreadyHasExtension = plan.bridgeOptions.args?.includes("--extension");
-		if (!alreadyHasExtension) {
-			plan.bridgeOptions.args = plan.bridgeOptions.args || [];
+		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
+		// Add goal tools extension (task + gate management) if not already present.
+		// Check for the specific path — not just any "--extension" flag — because
+		// team lead sessions already have --extension for the team tools extension.
+		if (!plan.bridgeOptions.args.includes(GOAL_TOOLS_EXTENSION_PATH)) {
 			plan.bridgeOptions.args.push("--extension", GOAL_TOOLS_EXTENSION_PATH);
 		}
 		plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };

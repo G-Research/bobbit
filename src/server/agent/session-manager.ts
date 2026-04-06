@@ -1645,10 +1645,12 @@ export class SessionManager {
 		// Restore extension args for goal/team sessions
 		if (ps.goalId && !ps.assistantType) {
 			const isTeamLead = ps.role === "team-lead";
-			const extensionPath = isTeamLead
-				? TEAM_LEAD_EXTENSION_PATH
-				: GOAL_TOOLS_EXTENSION_PATH;
-			bridgeOptions.args = ["--extension", extensionPath];
+			if (isTeamLead) {
+				// Team leads need both: team tools + goal tools (tasks/gates)
+				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+			} else {
+				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+			}
 		}
 
 		// Restore tool activation from role's allowedTools
@@ -2663,8 +2665,11 @@ export class SessionManager {
 		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
-			// Re-attach goal tools extension (unless this is a team lead, which gets it from team-manager)
-			if (!bridgeOptions.args?.includes("--extension")) {
+			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
+			const isTeamLead = session.role === "team-lead";
+			if (isTeamLead) {
+				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+			} else if (!bridgeOptions.args?.includes("--extension")) {
 				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
 			}
 		}
@@ -2803,7 +2808,10 @@ export class SessionManager {
 		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
-			if (!bridgeOptions.args?.includes("--extension")) {
+			const isTeamLead2 = session.role === "team-lead";
+			if (isTeamLead2) {
+				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+			} else if (!bridgeOptions.args?.includes("--extension")) {
 				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
 			}
 		}
@@ -3631,10 +3639,11 @@ export class SessionManager {
 			if (session.goalId) {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 				const isTeamLead = session.role === "team-lead";
-				const extensionPath = isTeamLead
-					? TEAM_LEAD_EXTENSION_PATH
-					: GOAL_TOOLS_EXTENSION_PATH;
-				bridgeOptions.args = ["--extension", extensionPath];
+				if (isTeamLead) {
+					bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+				} else {
+					bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+				}
 			}
 
 			// Restore tool activation from role's allowedTools
