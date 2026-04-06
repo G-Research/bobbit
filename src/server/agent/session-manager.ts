@@ -681,7 +681,11 @@ export class SessionManager {
 		}
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, this.projectConfigStore);
+		// Get secretsStore from project context if available
+		const secretsStore = (opts?.projectId && this.projectContextManager)
+			? this.projectContextManager.getOrCreate(opts.projectId)?.secretsStore ?? null
+			: null;
+		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, this.projectConfigStore, secretsStore);
 
 		return true;
 	}
@@ -4054,20 +4058,22 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
  * when sandbox_tokens is not set.
  */
-function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
+function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
 	const tokensRaw = projectConfig?.get("sandbox_tokens") || "";
 
 	// ── New unified path: sandbox_tokens is set ──
 	if (tokensRaw) {
 		const result: Record<string, string> = {};
 		try {
-			const entries: { key: string; value: string; enabled: boolean }[] = JSON.parse(tokensRaw);
+			const entries: { key: string; value?: string; enabled: boolean }[] = JSON.parse(tokensRaw);
 			if (Array.isArray(entries)) {
+				const secrets = secretsStore?.getAll() || {};
 				for (const entry of entries) {
 					if (!entry.enabled || !entry.key) continue;
-					if (entry.value) {
-						// Explicit value provided
-						result[entry.key] = entry.value;
+					// Check secrets store first, then fall back to inline value (pre-migration)
+					const explicitValue = secrets[entry.key] || entry.value;
+					if (explicitValue) {
+						result[entry.key] = explicitValue;
 					} else {
 						// Empty value = resolve from host
 						const resolved = resolveHostTokenValue(entry.key, prefs);

@@ -906,20 +906,63 @@ function redactSandboxSecretsResolved(config: Record<string, { value: string; so
 	return result;
 }
 
+/** Merge secrets into sandbox_tokens for GET responses (adds value from SecretsStore). */
+function mergeSecretsIntoTokens(config: Record<string, string>, secretsStore: import("./agent/secrets-store.js").SecretsStore): void {
+	if (config.sandbox_tokens) {
+		try {
+			const arr = JSON.parse(config.sandbox_tokens);
+			if (Array.isArray(arr)) {
+				const secrets = secretsStore.getAll();
+				config.sandbox_tokens = JSON.stringify(arr.map((e: any) => ({
+					...e,
+					// Prefer secrets store, fall back to value in config (pre-migration)
+					value: secrets[e.key] || e.value || "",
+				})));
+			}
+		} catch { /* leave as-is */ }
+	}
+}
+
 /** Merge redacted sentinel values with existing stored values before saving. */
-function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore): void {
+function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore, secretsStore?: import("./agent/secrets-store.js").SecretsStore | null): void {
 	if (updates.sandbox_tokens) {
 		try {
 			const incoming: any[] = JSON.parse(updates.sandbox_tokens);
-			const existingRaw = configStore.get("sandbox_tokens") || "";
-			let existing: any[] = [];
-			try { existing = existingRaw ? JSON.parse(existingRaw) : []; } catch { /* ignore */ }
-			const existingMap = new Map(existing.map((e: any) => [e.key, e.value]));
-			const merged = incoming.map((e: any) => ({
-				...e,
-				value: e.value === "__REDACTED__" ? (existingMap.get(e.key) || "") : e.value,
-			}));
-			updates.sandbox_tokens = JSON.stringify(merged);
+
+			if (secretsStore) {
+				// New path: extract values into SecretsStore, strip from config
+				const secretUpdates: Record<string, string> = {};
+
+				for (const entry of incoming) {
+					if (entry.value === "__REDACTED__") {
+						// Keep existing secret — don't touch secretsStore for this key
+					} else if (entry.value) {
+						// New explicit value — save to secrets
+						secretUpdates[entry.key] = entry.value;
+					} else {
+						// Empty value — remove from secrets (will resolve from host)
+						secretUpdates[entry.key] = "";
+					}
+				}
+
+				secretsStore.update(secretUpdates);
+
+				// Strip values from tokens before saving to config
+				updates.sandbox_tokens = JSON.stringify(
+					incoming.map((e: any) => ({ key: e.key, enabled: e.enabled }))
+				);
+			} else {
+				// Legacy path (no secretsStore): merge redacted values from config
+				const existingRaw = configStore.get("sandbox_tokens") || "";
+				let existing: any[] = [];
+				try { existing = existingRaw ? JSON.parse(existingRaw) : []; } catch { /* ignore */ }
+				const existingMap = new Map(existing.map((e: any) => [e.key, e.value]));
+				const merged = incoming.map((e: any) => ({
+					...e,
+					value: e.value === "__REDACTED__" ? (existingMap.get(e.key) || "") : e.value,
+				}));
+				updates.sandbox_tokens = JSON.stringify(merged);
+			}
 		} catch { /* leave as-is */ }
 	}
 	if (updates.sandbox_credentials) {
@@ -1376,7 +1419,9 @@ async function handleApiRoute(
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
 
 		if (req.method === "GET" && !suffix) {
-			json(redactSandboxSecrets(ctx.projectConfigStore.getAll()));
+			const config = ctx.projectConfigStore.getAll();
+			mergeSecretsIntoTokens(config, ctx.secretsStore);
+			json(redactSandboxSecrets(config));
 			return;
 		}
 		if (req.method === "GET" && suffix === "defaults") {
@@ -1404,14 +1449,21 @@ async function handleApiRoute(
 					result[key] = { value: serverRaw[key], source: "server" };
 				}
 			}
+			// Merge secrets into sandbox_tokens for the resolved response
+			if (result.sandbox_tokens) {
+				const tokensVal = result.sandbox_tokens.value;
+				const tempConfig: Record<string, string> = { sandbox_tokens: tokensVal };
+				mergeSecretsIntoTokens(tempConfig, ctx.secretsStore);
+				result.sandbox_tokens = { value: tempConfig.sandbox_tokens, source: result.sandbox_tokens.source };
+			}
 			json(redactSandboxSecretsResolved(result));
 			return;
 		}
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-			// Merge redacted token values with existing stored values
-			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore);
+			// Merge redacted token values with existing stored values, split secrets into SecretsStore
+			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore, ctx.secretsStore);
 			for (const [key, value] of Object.entries(body)) {
 				if (key.includes(".")) {
 					json({ error: `Config key "${key}" must not contain dots` }, 400);

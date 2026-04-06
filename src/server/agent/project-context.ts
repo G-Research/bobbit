@@ -16,6 +16,7 @@ import { ColorStore } from "./color-store.js";
 import { SearchIndex } from "../search/search-index.js";
 import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
+import { SecretsStore } from "./secrets-store.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -44,6 +45,7 @@ export class ProjectContext {
   readonly searchIndex: SearchIndex;
   readonly costTracker: CostTracker;
   readonly goalManager: GoalManager;
+  readonly secretsStore: SecretsStore;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -70,6 +72,7 @@ export class ProjectContext {
     this.searchIndex = new SearchIndex(path.join(this.stateDir, "search.db"));
     this.costTracker = new CostTracker(this.stateDir);
     this.goalManager = new GoalManager(this.goalStore);
+    this.secretsStore = new SecretsStore(this.stateDir);
 
     // Instantiate config stores with project-scoped config directory
     this.roleStore = new RoleStore(this.configDir);
