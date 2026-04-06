@@ -358,6 +358,50 @@ function initRepo(dir: string) {
 	}
 }
 
+/**
+ * Remove Docker containers and volumes created by test runs.
+ * Matches containers whose bind-mounts reference temp dirs used by manual tests
+ * (`.bobbit-manual-*`, `.bobbit-manual-integration-*`, `.e2e-resilience-*`).
+ * Skips the live project sandbox (bound to the real project root).
+ */
+function cleanTestDockerContainers() {
+	try {
+		// List all bobbit-project containers (running + stopped)
+		const ids = execFileSync("docker", [
+			"ps", "-aq", "--filter", "label=bobbit-project",
+		], { encoding: "utf-8", timeout: 10_000 }).trim();
+		if (!ids) return;
+
+		for (const id of ids.split(/\s+/).filter(Boolean)) {
+			try {
+				const binds = execFileSync("docker", [
+					"inspect", "--format", "{{json .HostConfig.Binds}}", id,
+				], { encoding: "utf-8", timeout: 5_000 }).trim();
+				// Only remove containers bound to test temp dirs
+				if (/\.bobbit-manual|\.e2e-resilience/.test(binds)) {
+					// Get project ID for volume cleanup
+					const projectId = execFileSync("docker", [
+						"inspect", "--format", '{{index .Config.Labels "bobbit-project"}}', id,
+					], { encoding: "utf-8", timeout: 5_000 }).trim();
+
+					execFileSync("docker", ["rm", "-f", id], { timeout: 15_000, stdio: "ignore" });
+
+					// Remove associated named volumes
+					if (projectId) {
+						for (const prefix of ["bobbit-workspace-", "bobbit-worktrees-"]) {
+							try {
+								execFileSync("docker", ["volume", "rm", "-f", `${prefix}${projectId}`], {
+									timeout: 10_000, stdio: "ignore",
+								});
+							} catch { /* volume may not exist */ }
+						}
+					}
+				}
+			} catch { /* inspect/rm may fail for already-removed containers */ }
+		}
+	} catch { /* docker not available */ }
+}
+
 function cleanDirs(dir: string) {
 	const parent = resolve(dir, "..");
 	const base = dir.split(/[\\/]/).pop()!;
@@ -487,7 +531,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 	});
 
 	test.afterAll(async ({}, ti) => {
-		ti.setTimeout(60_000);
+		ti.setTimeout(120_000);
 		// Best-effort goal cleanup
 		if (gw && goalId) {
 			try { await api(gw, `/api/goals/${goalId}/team/teardown`, { method: "POST" }); } catch {}
@@ -498,6 +542,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			try { await api(gw, `/api/goals/${sbxGoalId}`, { method: "DELETE" }); } catch {}
 		}
 		if (gw) await stopGW(gw);
+		cleanTestDockerContainers();
 		cleanDirs(dir);
 	});
 
