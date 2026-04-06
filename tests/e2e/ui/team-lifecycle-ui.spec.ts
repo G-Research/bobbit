@@ -20,7 +20,7 @@ test.describe("Team lifecycle (UI)", () => {
 
 	test("start team via UI and see team lead", async ({ page }) => {
 		// Create a team-enabled goal via API
-		const goal = await createGoal({ title: "Team UI Test", worktree: false, team: true });
+		const goal = await createGoal({ title: "Team UI Test", worktree: false, team: true, autoStartTeam: false });
 		goalIds.push(goal.id);
 
 		await openApp(page);
@@ -28,9 +28,9 @@ test.describe("Team lifecycle (UI)", () => {
 		// Debug: check what the page shows before navigating
 		await navigateToGoalDashboard(page, goal.id);
 
-		// The "Start Team" button should be in the nav bar
-		// It's inside a .btn-split > button.btn-split-main with title containing "Start the goal team"
-		const startBtn = page.locator(".btn-split-main").filter({ hasText: "Start Team" }).first();
+		// The "Start Team" button should be in the nav bar.
+		// It may be a .btn-split-main (no PR) or a plain .btn-icon (PR merged).
+		const startBtn = page.locator("button").filter({ hasText: "Start Team" }).first();
 		await expect(startBtn).toBeVisible({ timeout: 10_000 });
 		// Check if button is disabled
 		const isDisabled = await startBtn.isDisabled();

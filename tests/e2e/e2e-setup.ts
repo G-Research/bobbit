@@ -162,6 +162,7 @@ export async function createGoal(opts: {
 	team?: boolean;
 	worktree?: boolean;
 	workflowId?: string;
+	autoStartTeam?: boolean;
 }): Promise<{ id: string; [k: string]: unknown }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",

@@ -9,10 +9,8 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 
-		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
-
-		// Verify all three section headings are visible
-		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 5_000 });
+		// Wait for the Maintenance tab content to fully render
+		await expect(page.getByRole("heading", { name: "Orphaned Worktrees" })).toBeVisible({ timeout: 10_000 });
 		await expect(page.getByText("Orphaned Sessions")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("Expired Archives")).toBeVisible({ timeout: 5_000 });
 

@@ -3413,7 +3413,9 @@ async function handleApiRoute(
 			return;
 		}
 		const goalAdminFlag = body?.admin ? " --admin" : "";
-		const goalMergeBranch = goal.branch ? ` ${goal.branch}` : "";
+		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
+		const resolvedGoalBranch = clientGoalBranch || goal.branch;
+		const goalMergeBranch = resolvedGoalBranch ? ` ${resolvedGoalBranch}` : "";
 		try {
 			await execAsync(`gh pr merge${goalMergeBranch} --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
@@ -4334,9 +4336,12 @@ async function handleApiRoute(
 			return;
 		}
 		const sessAdminFlag = body?.admin ? " --admin" : "";
-		const sessMergeBranch = session.goalId
-			? getGoalAcrossProjects(session.goalId)?.branch
-			: sessionManager.getPersistedSession(id)?.branch;
+		// Prefer the client-provided branch (headRefName from PR status) so the merge
+		// targets the exact PR the widget displayed — avoids mismatches when the session's
+		// persisted branch differs from the PR's head ref (e.g. staff/team agent worktrees).
+		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
+		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
+		const sessMergeBranch = clientBranch || goalBranch || sessionManager.getPersistedSession(id)?.branch;
 		const sessMergeBranchArg = sessMergeBranch ? ` ${sessMergeBranch}` : "";
 		try {
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree

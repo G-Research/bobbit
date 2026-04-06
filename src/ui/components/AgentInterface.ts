@@ -63,11 +63,12 @@ export class AgentInterface extends LitElement {
 	@property() prMergeable?: string;
 	@property({ type: Boolean }) viewerIsAdmin?: boolean;
 	@property() reviewDecision?: string;
+	@property() headRefName?: string;
 	// Background processes for this session
 	@property({ attribute: false }) bgProcesses: BgProcessInfo[] = [];
 	@property({ attribute: false }) onBgProcessKill?: (id: string) => void;
 	@property({ attribute: false }) onBgProcessDismiss?: (id: string) => void;
-	@property({ attribute: false }) onPrMerge?: (method: string, admin?: boolean) => Promise<string | undefined>;
+	@property({ attribute: false }) onPrMerge?: (method: string, admin?: boolean, branch?: string) => Promise<string | undefined>;
 	@property({ attribute: false }) onGitPull?: () => Promise<string | undefined>;
 	@property({ attribute: false }) onGitPush?: () => Promise<string | undefined>;
 	@property({ attribute: false }) onGitFetch?: () => void;
@@ -896,6 +897,7 @@ export class AgentInterface extends LitElement {
 								.prMergeable=${this.prMergeable}
 								.viewerIsAdmin=${this.viewerIsAdmin ?? false}
 								.reviewDecision=${this.reviewDecision}
+								.headRefName=${this.headRefName}
 								@pr-merge=${this._handlePrMerge}
 								@git-pull=${this._handleGitPull}
 								@git-push=${this._handleGitPush}
@@ -966,11 +968,11 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
-	private async _handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean }>): Promise<void> {
+	private async _handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; branch?: string }>): Promise<void> {
 		if (!this.onPrMerge) return;
 		const widget = e.target as import('./GitStatusWidget.js').GitStatusWidget;
 		try {
-			const error = await this.onPrMerge(e.detail.method, e.detail.admin);
+			const error = await this.onPrMerge(e.detail.method, e.detail.admin, e.detail.branch);
 			widget.setMergeResult(error);
 		} catch (err) {
 			widget.setMergeResult(err instanceof Error ? err.message : 'Network error');
