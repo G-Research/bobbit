@@ -1,12 +1,11 @@
 /**
- * E2E tests for steer mid-turn delivery.
+ * E2E tests for steer mid-turn delivery (server-side WS protocol).
  *
  * Tests verify:
- * 1. Steers sent while streaming are delivered immediately to the agent
- *    (via rpcClient.steer(), injected between tool calls).
- * 2. Prompts sent while streaming are correctly queued by the server
- *    (the UI now sends steer instead, but the server queue path is
- *    still exercised here for completeness).
+ * 1. { type: "steer" } sent while streaming is delivered immediately to the
+ *    agent via rpcClient.steer() (used by steer_queued promotion + abort).
+ * 2. { type: "prompt" } sent while streaming is correctly queued by the server
+ *    (the default path — the UI always queues via prompt during streaming).
  */
 import { test, expect } from "./in-process-harness.js";
 import {
