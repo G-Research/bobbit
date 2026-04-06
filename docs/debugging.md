@@ -160,10 +160,12 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 
 ## Gate re-signal cancellation
 
-- `cancelStaleVerifications()` in `verification-harness.ts` terminates old reviewer sessions
+- `cancelStaleVerifications()` in `verification-harness.ts` terminates old reviewer sessions and persists `status: "failed"` to the gate store
 - Cancelled flag checked after `Promise.all` to suppress stale results
 - Check `sessionManager` and `teamManager` passed to `VerificationHarness`
 - Inspect: `GET /api/goals/:goalId/verifications/active`
+- **Stuck verification?** Cancel manually via `POST /api/goals/:goalId/gates/:gateId/cancel-verification` (returns `{ cancelled: true }` or `{ cancelled: false }` if nothing was running). The goal dashboard also shows a Cancel button when a verification is in "running" state.
+- **Zombie detection**: On re-signal, the server checks `areVerificationSessionsAlive()` before returning 409. If all reviewer sessions are dead, the stale verification is auto-cancelled and the new signal proceeds. Command steps (no `sessionId`) and waiting steps are treated as alive.
 
 ## Phased verification
 
