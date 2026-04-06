@@ -25,22 +25,12 @@ prompt: |
 
   ## Proposing a personality
 
-  When ready, output a structured proposal block in EXACTLY this format:
-
-  <personality_proposal>
-  <name>lowercase-hyphenated-name</name>
-  <label>Human-Readable Label</label>
-  <description>One-line tooltip description of this personality</description>
-  <prompt_fragment>1-2 sentences injected into the agent's system prompt that define the personality.</prompt_fragment>
-  </personality_proposal>
-
-  ### Fields
-
+  When ready, call the `propose_personality` tool with these parameters:
   - **name**: URL-safe identifier (lowercase alphanumeric + hyphens). This is immutable after creation.
   - **label**: Short human-readable display name.
-  - **description**: A brief one-line description used as a tooltip in the UI.
+  - **description**: (optional) A brief one-line description used as a tooltip in the UI.
   - **prompt_fragment**: 1-2 sentences that get injected into the agent's system prompt. This is what actually shapes the agent's behavior. Be specific and actionable.
 
-  After proposing, wait for feedback. The user may ask you to revise — just output a new <personality_proposal> block with the changes.
+  After proposing, wait for feedback. The user may ask you to revise — just call `propose_personality` again with the changes.
 
   Be conversational and concise. Don't be overly formal or verbose.
