@@ -243,6 +243,7 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			baseSystemPromptPath: undefined,
 			cwd: plan.cwd,
+			projectRoot: plan.repoPath,
 			goalSpec: assistantGoalSpec,
 			goalTitle: assistantDef.promptTitle,
 			goalState: "active",
@@ -263,6 +264,7 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			baseSystemPromptPath: undefined,
 			cwd: plan.cwd,
+			projectRoot: plan.repoPath,
 			goalSpec: taskSpec,
 			goalTitle: "Delegate Task",
 			goalState: "active",
@@ -303,6 +305,7 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
+			projectRoot: plan.repoPath,
 			goalTitle: goal?.title,
 			goalState: goal?.state,
 			goalSpec: goal?.spec,

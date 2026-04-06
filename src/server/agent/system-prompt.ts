@@ -116,8 +116,11 @@ export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfi
 export interface PromptParts {
 	/** Path to the global system prompt file (config/system-prompt.md) */
 	baseSystemPromptPath?: string;
-	/** Working directory for the session — used to find AGENTS.md */
+	/** Working directory shown to the agent (may be container-internal for sandbox). */
 	cwd: string;
+	/** Host-accessible project root for AGENTS.md / config directory discovery.
+	 *  Falls back to `cwd` when not set (non-sandbox sessions). */
+	projectRoot?: string;
 	/** Goal title (for header) */
 	goalTitle?: string;
 	/** Goal state */
@@ -178,10 +181,12 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 		if (base) sections.push(base);
 	}
 
-	// 2. Agent files from working directory and custom locations
-	const agentsMd = readAllAgentFiles(parts.cwd, parts.projectConfigStore);
+	// 2. Agent files — use projectRoot (host-accessible) when available; for sandboxed
+	// agents cwd is a container-internal path the host can't read.
+	const filesRoot = parts.projectRoot || parts.cwd;
+	const agentsMd = readAllAgentFiles(filesRoot, parts.projectConfigStore);
 	if (agentsMd.trim()) {
-		sections.push("# Project Context\n\n" + agentsMd.trim());
+		sections.push("# Project AGENTS.md\n\n" + agentsMd.trim());
 	}
 
 	// 2.5. Working directory instructions
@@ -283,15 +288,16 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	}
 
 	// 2. Agent files (individual sections per file for provenance)
+	const viewerRoot = parts.projectRoot || parts.cwd;
 	if (parts.projectConfigStore) {
-		const dirs = getAllConfigDirectories(parts.cwd, parts.projectConfigStore);
+		const dirs = getAllConfigDirectories(viewerRoot, parts.projectConfigStore);
 		const agentEntries = dirs.filter(d => d.types.includes("agents") && d.exists);
 		for (const entry of agentEntries) {
 			try {
 				const content = fs.readFileSync(entry.path, "utf-8");
 				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
 				if (resolved.trim()) {
-					sections.push({ label: "Project Context", source: entry.path, content: resolved.trim(), tokens: estimateTokens(resolved.trim()) });
+					sections.push({ label: "Project AGENTS.md", source: entry.path, content: resolved.trim(), tokens: estimateTokens(resolved.trim()) });
 				}
 			} catch {
 				// skip unreadable files
@@ -299,11 +305,11 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	} else {
 		// Legacy fallback: single AGENTS.md with absolute path
-		const agentsPath = path.join(parts.cwd, "AGENTS.md");
+		const agentsPath = path.join(viewerRoot, "AGENTS.md");
 		if (fs.existsSync(agentsPath)) {
-			const content = readAgentsMd(parts.cwd);
+			const content = readAgentsMd(viewerRoot);
 			if (content.trim()) {
-				sections.push({ label: "Project Context", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()) });
+				sections.push({ label: "Project AGENTS.md", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()) });
 			}
 		}
 	}
