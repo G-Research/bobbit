@@ -477,6 +477,7 @@ function renderSandboxSection(
 									@input=${(e: Event) => {
 										tokenEntries[i].key = (e.target as HTMLInputElement).value;
 										syncTokenEntries(tokenEntries, pendingChanges);
+										renderApp();
 									}}
 								/>
 								<span class="text-muted-foreground text-xs">=</span>
@@ -503,6 +504,7 @@ function renderSandboxSection(
 									@input=${(e: Event) => {
 										tokenEntries[i].value = (e.target as HTMLInputElement).value;
 										syncTokenEntries(tokenEntries, pendingChanges);
+										renderApp();
 									}}
 								/>`}
 								<button
@@ -2067,8 +2069,11 @@ function renderProjectScopeTab(projectId: string) {
 					?disabled=${projectScopeSaveStatus === "saving"}
 					@click=${() => {
 						if (Object.keys(pendingChanges).length > 0) {
-							saveProjectScopeConfig(projectId, pendingChanges);
-							_projectScopePending.delete(projectId);
+							saveProjectScopeConfig(projectId, pendingChanges).then(() => {
+								_projectScopePending.delete(projectId);
+								projectScopeConfigCache.delete(projectId);
+								renderApp();
+							});
 						}
 					}}
 				>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
@@ -2136,11 +2141,14 @@ function renderProjectGeneralTab(projectId: string) {
 						?disabled=${projectScopeSaveStatus === "saving"}
 						@click=${() => {
 							if (hasPendingChanges) {
-								saveProjectScopeConfig(projectId, pendingChanges);
-								_projectScopePending.delete(projectId);
-								// Clear sandbox entry caches so they reload from saved config
-								_sandboxTokenEntries.delete(projectId);
-								_sandboxMountEntries.delete(projectId);
+								saveProjectScopeConfig(projectId, pendingChanges).then(() => {
+									// Invalidate all caches so UI reloads fresh (redacted) data from server
+									_projectScopePending.delete(projectId);
+									_sandboxTokenEntries.delete(projectId);
+									_sandboxMountEntries.delete(projectId);
+									projectScopeConfigCache.delete(projectId);
+									renderApp();
+								});
 							}
 						}}
 					>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
