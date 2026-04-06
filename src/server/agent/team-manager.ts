@@ -534,6 +534,7 @@ export class TeamManager {
 			undefined,
 			{
 				rolePrompt: teamLeadPrompt,
+				roleName: "team-lead",
 				env: { BOBBIT_GOAL_ID: goalId },
 				sandboxed,
 				// For sandboxed goals, create a worktree at the goal branch inside the container

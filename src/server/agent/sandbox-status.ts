@@ -26,7 +26,7 @@ export async function buildSandboxImage(imageName: string, projectDir: string): 
 	_building = true;
 	try {
 		console.log(`[sandbox] Building Docker image "${imageName}" from docker/Dockerfile...`);
-		await execFileAsync("docker", ["build", "-t", imageName, "docker/"], { cwd: projectDir, timeout: 120_000 });
+		await execFileAsync("docker", ["build", "-t", imageName, "docker/"], { cwd: projectDir, timeout: 300_000 });
 		console.log(`[sandbox] Docker image "${imageName}" built successfully`);
 		return { success: true };
 	} catch (err: any) {

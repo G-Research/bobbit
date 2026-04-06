@@ -56,6 +56,9 @@ RUN mkdir -p /home/node/.node_modules_cache
 ARG PLAYWRIGHT_VERSION=1.58.2
 RUN npx -y playwright@${PLAYWRIGHT_VERSION} install chromium
 
+# TypeScript compiler — needed for `npm run check` in worktrees
+RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
+
 WORKDIR /workspace
 
 CMD ["sleep", "infinity"]
