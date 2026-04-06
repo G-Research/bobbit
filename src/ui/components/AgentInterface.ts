@@ -559,6 +559,9 @@ export class AgentInterface extends LitElement {
 						);
 						this.requestUpdate();
 					}}
+					.onRestartAgent=${typeof (this.session as any)?.restartAgent === 'function'
+						? () => (this.session as any).restartAgent()
+						: undefined}
 					.onRetry=${!state.isStreaming && typeof (this.session as any)?.retry === 'function'
 						? () => (this.session as any).retry()
 						: undefined}

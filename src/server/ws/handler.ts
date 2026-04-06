@@ -472,6 +472,19 @@ export function handleWebSocketConnection(
 					sessionManager.denyToolPermission(sessionId, msg.toolName);
 					break;
 				}
+				case "restart_agent":
+					sessionManager.restartAgent(sessionId).then(() => {
+						// Refresh messages after restart so the client sees the full history
+						const restored = sessionManager.getSession(sessionId);
+						if (restored) {
+							restored.rpcClient.getMessages?.()
+								.then((msgs: any) => { if (msgs) send(ws, { type: "messages", data: msgs }); })
+								.catch(() => {});
+						}
+					}).catch((err: any) => {
+						send(ws, { type: "error", message: `Restart failed: ${err}`, code: "RESTART_ERROR" });
+					});
+					break;
 				case "ping":
 					send(ws, { type: "pong" });
 					break;

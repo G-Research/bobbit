@@ -49,6 +49,7 @@ export class MessageList extends LitElement {
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
 	@property({ attribute: false }) onCostClick?: () => void;
 	@property({ attribute: false }) onDismissError?: (id: string) => void;
+	@property({ attribute: false }) onRestartAgent?: () => void;
 	@property({ attribute: false }) onRetry?: () => void;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -87,6 +88,7 @@ export class MessageList extends LitElement {
 					template: html`<error-message
 						.message=${errMsg}
 						.onDismiss=${this.onDismissError}
+						.onRestartAgent=${this.onRestartAgent}
 					></error-message>`,
 				});
 				i++;

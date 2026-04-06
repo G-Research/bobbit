@@ -605,6 +605,11 @@ export class RemoteAgent {
 		this.send({ type: "reorder_queue", messageIds });
 	}
 
+	/** Ask the server to restart the agent process for this session. */
+	restartAgent(): void {
+		this.send({ type: "restart_agent" });
+	}
+
 	// ── Internal ─────────────────────────────────────────────────────
 
 	private send(msg: any): void {
