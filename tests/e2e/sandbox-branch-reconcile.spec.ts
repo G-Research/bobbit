@@ -51,9 +51,11 @@ test.describe("Sandbox branch reconciliation", () => {
 				await new Promise(r => setTimeout(r, 500));
 			}
 
-			// Branch should match the auto-generated pattern session/new-session-<uuid8>
-			expect(session.branch).toBeTruthy();
-			expect(session.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
+			// GET /api/sessions/:id doesn't include branch — use sessionManager to read persisted data
+			const persisted = gateway.sessionManager.getPersistedSession(id);
+			expect(persisted).toBeTruthy();
+			expect(persisted!.branch).toBeTruthy();
+			expect(persisted!.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
 		} finally {
 			await apiFetch(gateway.baseURL, `/api/sessions/${id}`, { method: "DELETE" }).catch(() => {});
 		}
@@ -101,36 +103,16 @@ test.describe("Sandbox branch reconciliation", () => {
 					// If the session finished successfully, branch should be reconciled
 					// to the sandboxBranch value
 					if (session.status === "idle" || session.status === "active") {
-						expect(session.branch).toBe("goal-test-coder-abc123");
+						const persisted = gateway.sessionManager.getPersistedSession(id);
+						expect(persisted).toBeTruthy();
+						expect(persisted!.branch).toBe("goal-test-coder-abc123");
 					}
 				} finally {
 					await apiFetch(gateway.baseURL, `/api/sessions/${id}`, { method: "DELETE" }).catch(() => {});
 				}
 			} else {
-				// Docker unavailable — the session was created but sandbox wiring failed.
-				// The session may have been persisted before the error. Check the store.
-				const sm = (gateway as any).sessionManager;
-				const store = sm.getSessionStore?.(projectId);
-
-				if (store) {
-					// Find any session that was created with our sandboxBranch
-					const sessions = store.list();
-					const ourSession = sessions.find((s: any) =>
-						s.sandboxBranch === "goal-test-coder-abc123" ||
-						s.branch === "goal-test-coder-abc123"
-					);
-
-					// If the session was persisted before the error, the branch
-					// may or may not have been reconciled depending on when the
-					// error occurred. This is expected — the reconciliation runs
-					// after sandbox wiring succeeds.
-					if (ourSession) {
-						// Clean up
-						await apiFetch(gateway.baseURL, `/api/sessions/${ourSession.id}`, { method: "DELETE" }).catch(() => {});
-					}
-				}
-
-				// Server should still be healthy
+				// Docker unavailable — session creation failed during sandbox wiring.
+				// Server should still be healthy.
 				const healthRes = await apiFetch(gateway.baseURL, "/api/health");
 				expect(healthRes.ok).toBe(true);
 			}
@@ -163,8 +145,10 @@ test.describe("Sandbox branch reconciliation", () => {
 			}
 
 			// Branch should be the auto-generated one (not reconciled to anything else)
-			expect(session.branch).toBeTruthy();
-			expect(session.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
+			const persisted = gateway.sessionManager.getPersistedSession(id);
+			expect(persisted).toBeTruthy();
+			expect(persisted!.branch).toBeTruthy();
+			expect(persisted!.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
 
 			// sandboxed should be falsy
 			expect(session.sandboxed).toBeFalsy();
