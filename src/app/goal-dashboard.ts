@@ -1314,6 +1314,22 @@ function toggleGateExpand(gateId: string): void {
 	renderApp();
 }
 
+async function cancelVerification(gateId: string): Promise<void> {
+	if (!currentGoalId) return;
+	try {
+		const resp = await gatewayFetch(`/api/goals/${currentGoalId}/gates/${gateId}/cancel-verification`, {
+			method: "POST",
+		});
+		if (resp.ok) {
+			await refreshDashboardGoal();
+			gates = await fetchGoalGates(currentGoalId);
+			renderApp();
+		}
+	} catch (err) {
+		console.error("Failed to cancel verification:", err);
+	}
+}
+
 function toggleSignalExpand(signalId: string): void {
 	if (expandedSignalIds.has(signalId)) {
 		expandedSignalIds.delete(signalId);
@@ -1760,6 +1776,12 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 					<span class="signal-steps-summary">
 						${signal.verification.steps.filter(s => s.passed).length}/${signal.verification.steps.length} checks
 					</span>
+				` : nothing}
+				${vStatus === "running" ? html`
+					<button class="cancel-verification-btn" title="Cancel stuck verification"
+						@click=${(e: Event) => { e.stopPropagation(); cancelVerification(signal.gateId); }}>
+						Cancel
+					</button>
 				` : nothing}
 				<span class="signal-expand-icon">${isExpanded ? "\u25B4" : "\u25BE"}</span>
 			</div>
