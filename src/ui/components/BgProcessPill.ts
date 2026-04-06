@@ -147,15 +147,15 @@ export class BgProcessPill extends LitElement {
 		}
 	}
 
-	private _kill(e: MouseEvent) {
+	private _kill = (e: MouseEvent) => {
 		e.stopPropagation();
 		if (this.onKill) this.onKill(this.process.id);
-	}
+	};
 
-	private _dismiss(e: MouseEvent) {
+	private _dismiss = (e: MouseEvent) => {
 		e.stopPropagation();
 		if (this.onDismiss) this.onDismiss(this.process.id);
-	}
+	};
 
 	private _fmtTime(ts: number): string {
 		const d = new Date(ts);
@@ -289,6 +289,10 @@ export class BgProcessPill extends LitElement {
 			} else if (!this._closing) {
 				this._removePortal();
 			}
+		} else if (this.expanded && this._portalEl && (changed.has("loadingLogs") || changed.has("logs"))) {
+			// Re-render portal when log state changes — portal content is outside
+			// Lit's render tree so @state() changes don't automatically propagate.
+			this._renderPortal();
 		}
 	}
 
