@@ -59,7 +59,8 @@ test.describe("Remove Project button", () => {
 		expect(projects.find((p: any) => p.id === project.id)).toBeUndefined();
 
 		// Project name should not appear in the sidebar
-		await expect(page.getByText("Removable Project")).not.toBeVisible({ timeout: 3_000 });
+		const sidebar = page.locator(".sidebar-edge").first();
+		await expect(sidebar.getByText("Removable Project")).not.toBeVisible({ timeout: 3_000 });
 	});
 
 	test("default project does not show Remove Project button", async ({ page }) => {
