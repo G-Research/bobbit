@@ -480,6 +480,8 @@ export class MessageEditor extends LitElement {
 	private handleDragOver = (e: DragEvent) => {
 		e.preventDefault();
 		e.stopPropagation();
+		// Don't show "Drop files here" overlay when dragging queue pills
+		if (this._draggedPillId) return;
 		if (!this.isDragging) {
 			this.isDragging = true;
 		}
@@ -797,18 +799,21 @@ export class MessageEditor extends LitElement {
 									? html`<span class="sent-indicator shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[0.65rem] font-medium text-amber-600 dark:text-amber-400">${icon(Zap, "xs")} Sent</span>`
 									: html`
 										<button
+											draggable="false"
 											@click=${() => this.onSteer?.(msg)}
 											class="steer-btn shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.65rem] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
 											title="Send now — interrupts the current turn"
 										>${icon(Zap, "xs")} Steer</button>
 										<button
+											draggable="false"
 											@click=${() => this.onEditQueued?.(msg)}
-											class="edit-btn shrink-0 p-0.5 rounded text-muted-foreground/50 hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer"
+											class="edit-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer"
 											title="Edit message"
 										>${icon(Pencil, "xs")}</button>
 										<button
+											draggable="false"
 											@click=${() => this.onRemoveQueued?.(msg.id)}
-											class="remove-btn shrink-0 p-0.5 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
+											class="remove-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
 											title="Remove from queue"
 										>${icon(X, "xs")}</button>
 									`}

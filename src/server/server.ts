@@ -723,6 +723,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 			sessionManager.setSandboxManager(sandboxManager);
+			sessionManager.subscribeSandboxRecovery();
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
@@ -2658,8 +2659,16 @@ async function handleApiRoute(
 				return s?.commitSha === commitSha;
 			});
 			if (runningDup) {
-				json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
-				return;
+				// Check if sessions are actually alive — auto-cancel zombies
+				const alive = verificationHarness.areVerificationSessionsAlive(runningDup.signalId);
+				if (!alive) {
+					console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
+					await verificationHarness.cancelStaleVerifications(goalId, gateId);
+					// Fall through to create new signal
+				} else {
+					json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
+					return;
+				}
 			}
 		}
 
@@ -2794,6 +2803,30 @@ async function handleApiRoute(
 		const [, goalId] = activeVerifMatch;
 		const active = verificationHarness.getActiveVerifications(goalId);
 		json({ verifications: active });
+		return;
+	}
+
+	// POST /api/goals/:goalId/gates/:gateId/cancel-verification — cancel a stuck verification
+	const cancelVerifMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/cancel-verification$/);
+	if (cancelVerifMatch && req.method === "POST") {
+		const [, goalId, gateId] = cancelVerifMatch;
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (goal.state === "shelved") { json({ error: "Goal is shelved" }, 400); return; }
+
+		const activeVers = verificationHarness.getActiveVerifications(goalId);
+		const running = activeVers.find(v => v.gateId === gateId && v.overallStatus === "running");
+		if (!running) {
+			json({ cancelled: false, message: "No running verification to cancel" }, 200);
+			return;
+		}
+
+		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+		// Explicit user cancel: also update gate status to "failed"
+		const cancelCtx = projectContextManager.getContextForGoal(goalId);
+		if (cancelCtx) cancelCtx.gateStore.updateGateStatus(goalId, gateId, "failed");
+		json({ cancelled: true }, 200);
 		return;
 	}
 
