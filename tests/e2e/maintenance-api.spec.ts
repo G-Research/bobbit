@@ -27,6 +27,7 @@ test("GET /api/maintenance/orphaned-worktrees returns list", async () => {
 // POST /api/maintenance/cleanup-worktrees returns cleaned count
 // ---------------------------------------------------------------------------
 test("POST /api/maintenance/cleanup-worktrees returns cleaned count", async () => {
+	test.slow(); // Worktree scan can be slow when other tests create worktrees concurrently
 	const resp = await apiFetch("/api/maintenance/cleanup-worktrees", {
 		method: "POST",
 		body: JSON.stringify({}),
