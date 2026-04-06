@@ -6,7 +6,7 @@
  * 2. Idempotent cancel when nothing is running (returns 200 with cancelled: false)
  * 3. Cancel on non-existent goal (404)
  * 4. Cancel on shelved goal (400)
- * 4b. Cancel on archived goal (400)
+ * 4b. Cancel on archived goal (409)
  * 5. Re-signal after cancel succeeds (no 409)
  */
 import { test, expect } from "./in-process-harness.js";

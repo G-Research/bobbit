@@ -119,7 +119,10 @@ export class VerificationHarness {
 		// If any step is still waiting to start, the verification is not a zombie
 		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
-			if (step.sessionId && step.status === "running") {
+			if (step.status === "running") {
+				// Command steps have no sessionId — if status is running, the process is alive
+				if (!step.sessionId) return true;
+				// LLM/agent steps — check if session is still alive
 				const session = this.sessionManager?.getSession(step.sessionId);
 				if (session) return true;
 			}
@@ -650,6 +653,13 @@ export class VerificationHarness {
 						}
 					}
 				}
+
+				// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
+				this.resolveGateStore(goalId).updateSignalVerification(signalId, {
+					status: "failed",
+					steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled by user.", duration_ms: 0 }],
+				});
+				this.resolveGateStore(goalId).updateGateStatus(goalId, gateId, "failed");
 
 				// Remove from active verifications
 				this.activeVerifications.delete(signalId);
