@@ -124,10 +124,49 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 		// Fetch failure is non-fatal — may be offline, or startPoint is a local ref
 	}
 
-	// Create branch and worktree in one step (async, no shell, prevents injection)
-	await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, startPoint], {
-		cwd: repoPath,
-	});
+	// Check if the branch already exists (e.g. from a previous interrupted attempt)
+	let branchExists = false;
+	try {
+		await execFile("git", ["rev-parse", "--verify", branchName], { cwd: repoPath });
+		branchExists = true;
+	} catch {
+		// Branch doesn't exist — will create below
+	}
+
+	if (branchExists) {
+		const dirExists = fs.existsSync(worktreePath);
+		const gitFileExists = dirExists && fs.existsSync(path.join(worktreePath, ".git"));
+
+		if (dirExists && gitFileExists) {
+			// Worktree fully exists from a previous attempt — repair and reuse
+			try {
+				await execFile("git", ["worktree", "repair"], { cwd: repoPath });
+				console.log(`[git] Repaired existing worktree for branch "${branchName}" at ${worktreePath}`);
+			} catch {
+				// repair failed — still usable if .git exists
+			}
+		} else {
+			// Branch exists but worktree is missing or partial — clean up and re-create
+			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+			if (fs.existsSync(adminPath)) {
+				try { fs.rmSync(adminPath, { recursive: true, force: true }); } catch { /* best-effort */ }
+			}
+			if (dirExists && !gitFileExists) {
+				try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ }
+				if (fs.existsSync(worktreePath)) {
+					throw new Error(`Cannot create worktree: directory "${worktreePath}" exists and could not be removed (file locks?)`);
+				}
+			}
+			// Re-create worktree using existing branch (no -b)
+			await execFile("git", ["worktree", "add", worktreePath, branchName], { cwd: repoPath });
+			console.log(`[git] Re-created worktree for existing branch "${branchName}" at ${worktreePath}`);
+		}
+	} else {
+		// Branch doesn't exist — create branch and worktree in one step
+		await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, startPoint], {
+			cwd: repoPath,
+		});
+	}
 
 	// Set up dependencies in the new worktree (only if configured).
 	// Reads `worktree_setup_command` from project.yaml. If not set, does nothing.
