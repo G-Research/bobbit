@@ -59,6 +59,9 @@ const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
 /** Team lead extension — team management tools. */
 const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
 
+/** Proposal tools extension — propose_* tools for assistant sessions. */
+const PROPOSAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "proposals", "extension.ts");
+
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "terminated";
 
 export interface SessionInfo {
@@ -1700,6 +1703,14 @@ export class SessionManager {
 			}
 		}
 
+		// Restore proposal tools extension for assistant sessions
+		if (ps.assistantType) {
+			bridgeOptions.args = bridgeOptions.args || [];
+			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+			}
+		}
+
 		// Restore tool activation from role's allowedTools
 		// Use overridden allowedTools if provided (session-only/one-time grants)
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
@@ -2721,6 +2732,14 @@ export class SessionManager {
 			}
 		}
 
+		// Re-attach proposal tools extension for assistant sessions
+		if (session.assistantType) {
+			bridgeOptions.args = bridgeOptions.args || [];
+			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+			}
+		}
+
 		// Apply tool activation args based on role's allowedTools
 		if (effectiveAllowed.length > 0) {
 			const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed, fullRole, session.cwd);
@@ -2860,6 +2879,14 @@ export class SessionManager {
 				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
 			} else if (!bridgeOptions.args?.includes("--extension")) {
 				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+			}
+		}
+
+		// Re-attach proposal tools extension for assistant sessions
+		if (session.assistantType) {
+			bridgeOptions.args = bridgeOptions.args || [];
+			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
 			}
 		}
 
@@ -3693,6 +3720,14 @@ export class SessionManager {
 					bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
 				} else {
 					bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+				}
+			}
+
+			// Restore proposal tools extension for assistant sessions
+			if (session.assistantType) {
+				bridgeOptions.args = bridgeOptions.args || [];
+				if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+					bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
 				}
 			}
 
