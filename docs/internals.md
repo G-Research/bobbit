@@ -139,9 +139,9 @@ Two resolution modes:
 
 The project assistant guides users through registering a new project directory. It operates in two modes, selected automatically by the smart Add Project flow based on directory detection (`POST /api/projects/detect`):
 
-**Detection mode** (assistant type `"project"`): For directories with existing content but no `.bobbit/`. The assistant explores the directory (package.json, build files, git config, CI config, README) and emits a `<project_proposal>` XML block with discovered settings: name, root_path, build_command, test_command, typecheck_command, test_unit_command, test_e2e_command, and worktree_setup_command.
+**Detection mode** (assistant type `"project"`): For directories with existing content but no `.bobbit/`. The assistant explores the directory (package.json, build files, git config, CI config, README) and calls the `propose_project` tool with discovered settings: name, root_path, build_command, test_command, typecheck_command, test_unit_command, test_e2e_command, and worktree_setup_command. Because proposals are tool calls, they persist in message history and remain accessible on reconnect via the "Open proposal" button.
 
-**Scaffolding mode** (assistant type `"project-scaffolding"`): For empty or non-existent directories. The assistant asks what the project is about, suggests tech stacks, and helps scaffold the project structure (directory layout, basic files, README). After the user accepts the proposal, the assistant uses bash/write tools to create the project files, then emits the same `<project_proposal>` block format.
+**Scaffolding mode** (assistant type `"project-scaffolding"`): For empty or non-existent directories. The assistant asks what the project is about, suggests tech stacks, and helps scaffold the project structure (directory layout, basic files, README). After the user accepts the proposal, the assistant uses bash/write tools to create the project files, then calls `propose_project` with the same settings.
 
 On proposal acceptance, the client-side handler registers the project via `POST /api/projects` and then writes all config fields to `project.yaml` via `PUT /api/projects/:id/config`. This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
 
@@ -623,6 +623,63 @@ When a gate's verification workflow includes `command` steps (e.g. running tests
 To solve this, `runCommandStep` in `verification-harness.ts` accepts an optional `containerId`. At the call site, the harness checks `goal.sandboxed`; if true, it resolves the project container ID via `SandboxManager.get(projectId)` → `ProjectSandbox.getContainerId()`. When a container ID is available, the command runs via `docker exec -w /workspace <containerId> /bin/sh -c <command>` instead of spawning on the host.
 
 **Fallback:** If the goal is sandboxed but the project container is not running (container crashed, Docker restarting), the harness falls back to host execution. A warning is emitted to both server logs (`console.warn`) and the verification step's output stream so the user can see why results may be stale.
+
+### Container resilience
+
+When a sandbox container is killed or removed (e.g. `docker rm -f`, OOM kill, Docker Desktop restart), the gateway automatically detects the death, recreates the container, and recovers all affected sessions — no server restart required.
+
+#### Why this matters
+
+Without container health monitoring, a killed container leaves all sandbox sessions in a stale state (`idle` or `streaming` with a dead subprocess). The user sees no error — sessions simply stop responding. Recovery previously required a full server restart, and even then sessions were often archived instead of restored due to broken worktree state.
+
+#### Health monitor
+
+`ProjectSandbox` runs a background health check that polls container liveness via `docker inspect --format "{{.State.Running}}"` every 20 seconds (configurable via `startHealthMonitor(intervalMs)`). The monitor is started automatically by `SandboxManager.initForProject()` after the container is initialized.
+
+**Detection logic:**
+- If the container is running → healthy, no action
+- If the container is not running, inspect fails, or the container is gone → trigger recovery
+- If a previous recovery attempt failed (`_status === "error"`), the monitor retries on the next poll — recovery is never permanently abandoned
+- Active recovery is guarded by `_recovering` flag to prevent concurrent recovery attempts
+
+**Recovery sequence:**
+1. Set status to `"error"`, emit `container-died` event with the old container ID
+2. Call `init()` to reconnect/recreate the container (reuses existing named volumes so git history and worktrees may survive)
+3. On success, emit `container-recovered` event with the new container ID
+4. On failure, log the error and retry on the next poll cycle
+
+#### Event API
+
+`ProjectSandbox` exposes `onHealthEvent(listener)` for low-level events (`container-died`, `container-recovered`). `SandboxManager` exposes a higher-level `onContainerRecovered(listener)` that fires with `(projectId, newContainerId)` — this is what `SessionManager` subscribes to for session recovery.
+
+```typescript
+type SandboxHealthEvent =
+  | { type: "container-died"; projectId: string; containerId: string }
+  | { type: "container-recovered"; projectId: string; containerId: string };
+```
+
+#### Session recovery flow
+
+When the health monitor emits `container-recovered`, `SessionManager.recoverSandboxSessions()` runs:
+
+1. **Find affected sessions** — all sessions with `sandboxed === true` and matching `projectId`
+2. **Recover worktrees** using a 3-tier strategy for each session:
+   - **Tier 1: Verify** — `docker exec test -d <cwd>` checks if the worktree still exists on the volume
+   - **Tier 2: Repair** — `git worktree repair` inside the container fixes broken `.git` link files (common after hard container kill where the worktree directory survived on the volume but git metadata is inconsistent)
+   - **Tier 3: Recreate** — `ProjectSandbox.createWorktree(name, branch)` creates a fresh worktree from the session's persisted branch
+3. **Archive unrecoverable sessions** — if all three tiers fail (branch deleted, volume lost), the session is archived
+4. **Restore sessions** — calls the existing `restoreSession()` path which re-spawns the agent process inside the new container
+5. **Preserve WebSocket clients** — connected browser clients are saved before session deletion and re-attached after restore, so the UI receives the recovery status broadcast in real-time
+
+The user experience for idle sessions: status briefly shows `terminated` (from `process_exit` handling), then automatically transitions back to `idle` within ~30 seconds. Chat history, branches, and all Bobbit state are preserved.
+
+#### process_exit handling
+
+When a container dies, all agent processes inside it die. The RPC bridge emits `process_exit` events for each dead process. `handleAgentLifecycle()` now handles this event type — it transitions the session to `terminated` status and broadcasts to connected UI clients. This provides immediate visual feedback while the health monitor works on recovery in the background.
+
+#### Startup worktree repair
+
+The existing session restore path (on gateway restart) also benefits from worktree repair. Before attempting `createWorktree` for a missing sandbox worktree, the restore flow now tries `git worktree repair` first. This handles cases where the worktree directory exists on the volume but git considers it broken — common after an ungraceful container shutdown.
 
 ### Security summary
 

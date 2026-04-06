@@ -36,32 +36,19 @@ Be conversational. If something is ambiguous (e.g. multiple test commands), ask 
 
 ## Proposing a project
 
-When ready, output a structured proposal block in EXACTLY this format:
+When ready, call the \`propose_project\` tool with these parameters:
+- **name**: A short identifier for the project (e.g. "my-api")
+- **root_path**: Absolute path to the project root directory
+- **build_command**: (optional) The command to build the project
+- **test_command**: (optional) The primary test command (runs all tests)
+- **typecheck_command**: (optional) Type-checking command (e.g. \`tsc --noEmit\`)
+- **test_unit_command**: (optional) Unit test command, if separate from the main test command
+- **test_e2e_command**: (optional) E2E test command, if separate
+- **worktree_setup_command**: (optional) Command to run when setting up a new git worktree. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`
 
-<project_proposal>
-<name>Short project name (e.g. "my-api")</name>
-<root_path>/absolute/path/to/project</root_path>
-<build_command>npm run build</build_command>
-<test_command>npm test</test_command>
-<typecheck_command>npm run check</typecheck_command>
-<test_unit_command>npm run test:unit</test_unit_command>
-<test_e2e_command>npm run test:e2e</test_e2e_command>
-<worktree_setup_command>npm ci --prefer-offline --no-audit --no-fund</worktree_setup_command>
-</project_proposal>
+Only include parameters you actually discovered — omit any whose value would be empty.
 
-**Field notes:**
-- \`name\`: A short identifier for the project.
-- \`root_path\`: Absolute path to the project root directory.
-- \`build_command\`: The command to build the project. Leave empty if none.
-- \`test_command\`: The primary test command (runs all tests). Leave empty if none.
-- \`typecheck_command\`: Type-checking command (e.g. \`tsc --noEmit\`). Leave empty if none.
-- \`test_unit_command\`: Unit test command, if separate from the main test command. Leave empty if none.
-- \`test_e2e_command\`: E2E test command, if separate. Leave empty if none.
-- \`worktree_setup_command\`: Command to run when setting up a new git worktree for this project. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`.
-
-Omit any tag whose value would be empty — only include fields you actually discovered.
-
-After proposing, wait for feedback. The user may ask you to revise — just output a new \`<project_proposal>\` block with changes.
+After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
 Be concise and helpful. Don't pad with generic advice — focus on what you actually found in the directory.`;
 
@@ -84,7 +71,7 @@ Acknowledge the target directory path and ask the user what they want to build. 
    - **Go**: go modules, standard library vs popular frameworks
    - **Python**: pip/poetry, Flask/FastAPI, pytest
    - Other stacks as appropriate
-3. Propose the project setup with a \`<project_proposal>\` block.
+3. Propose the project setup by calling the \`propose_project\` tool.
 4. After the user accepts the proposal, scaffold the project:
    - Create the directory if it doesn't exist
    - Initialize the project (\`npm init\`, \`cargo init\`, \`go mod init\`, etc.)
@@ -99,31 +86,18 @@ Be conversational but efficient. Don't overwhelm with options — make a sensibl
 
 ## Proposing a project
 
-When ready, output a structured proposal block in EXACTLY this format:
+When ready, call the \`propose_project\` tool with these parameters:
+- **name**: A short identifier for the project (e.g. "my-api")
+- **root_path**: Absolute path to the project root directory
+- **build_command**: (optional) The command to build the project
+- **test_command**: (optional) The primary test command (runs all tests)
+- **typecheck_command**: (optional) Type-checking command (e.g. \`tsc --noEmit\`)
+- **test_unit_command**: (optional) Unit test command, if separate from the main test command
+- **test_e2e_command**: (optional) E2E test command, if separate
+- **worktree_setup_command**: (optional) Command to run when setting up a new git worktree. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`
 
-<project_proposal>
-<name>Short project name (e.g. "my-api")</name>
-<root_path>/absolute/path/to/project</root_path>
-<build_command>npm run build</build_command>
-<test_command>npm test</test_command>
-<typecheck_command>npm run check</typecheck_command>
-<test_unit_command>npm run test:unit</test_unit_command>
-<test_e2e_command>npm run test:e2e</test_e2e_command>
-<worktree_setup_command>npm ci --prefer-offline --no-audit --no-fund</worktree_setup_command>
-</project_proposal>
+Only include parameters you plan to set up — omit any whose value would be empty.
 
-**Field notes:**
-- \`name\`: A short identifier for the project.
-- \`root_path\`: Absolute path to the project root directory.
-- \`build_command\`: The command to build the project. Leave empty if none.
-- \`test_command\`: The primary test command (runs all tests). Leave empty if none.
-- \`typecheck_command\`: Type-checking command (e.g. \`tsc --noEmit\`). Leave empty if none.
-- \`test_unit_command\`: Unit test command, if separate from the main test command. Leave empty if none.
-- \`test_e2e_command\`: E2E test command, if separate. Leave empty if none.
-- \`worktree_setup_command\`: Command to run when setting up a new git worktree for this project. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`.
-
-Omit any tag whose value would be empty — only include fields you plan to set up.
-
-After proposing, wait for feedback. The user may ask you to revise — just output a new \`<project_proposal>\` block with changes.
+After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
 **Important**: After the user accepts the proposal, proceed to actually create the project files using your tools. Don't just propose — execute the scaffolding.`;

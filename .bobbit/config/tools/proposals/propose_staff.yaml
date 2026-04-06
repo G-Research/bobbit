@@ -1,0 +1,11 @@
+name: propose_staff
+description: "Submit a staff member proposal for user review"
+summary: "Propose a staff member with name, prompt, and optional fields."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Proposals
+docs: >-
+  Call this tool when you have designed a custom staff configuration.
+  The proposal will be displayed to the user for review and acceptance.
+  Parameters: name (required), prompt (required), description, triggers, cwd.

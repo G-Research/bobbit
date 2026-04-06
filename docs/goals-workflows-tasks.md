@@ -204,7 +204,7 @@ Verify steps can be marked `optional: true` with a human-readable `label` for th
 
 **How it works:**
 - Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
-- At goal creation, the UI shows a checkbox for each optional step in the selected workflow. The goal assistant can pre-toggle steps via `<options>step name 1, step name 2</options>` in its proposal.
+- At goal creation, the UI shows a checkbox for each optional step in the selected workflow. The goal assistant can pre-toggle steps via the `options` parameter (comma-separated step names) in its `propose_goal` tool call.
 - During verification, the harness checks each step before phase grouping. If `step.optional === true` and the step's `name` is not in the goal's `enabledOptionalSteps`, the step is skipped with `{ passed: true, skipped: true, output: "Skipped — not enabled for this goal" }`.
 - Skipped optional steps do not block the gate and do not affect phase pass/fail logic.
 

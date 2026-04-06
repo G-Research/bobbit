@@ -27,6 +27,7 @@ import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
 import { PersonalitiesListRenderer, PersonalitiesCreateRenderer } from "./renderers/PersonalityToolRenderers.js";
 import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
 import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
+import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
 import type { ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
@@ -66,6 +67,15 @@ registerToolRenderer("gate_signal", new GateSignalRenderer());
 registerToolRenderer("gate_status", new GateStatusRenderer());
 registerToolRenderer("preview_open", new PreviewOpenRenderer());
 registerToolRenderer("verification_result", new VerificationResultRenderer());
+
+// Proposal tools — one renderer per proposal type
+const PROPOSAL_TOOL_NAMES = [
+	"propose_goal", "propose_role", "propose_tool", "propose_personality",
+	"propose_staff", "propose_setup", "propose_workflow", "propose_project",
+] as const;
+for (const name of PROPOSAL_TOOL_NAMES) {
+	registerToolRenderer(name, new ProposalRenderer(name));
+}
 
 const defaultRenderer = new DefaultRenderer();
 

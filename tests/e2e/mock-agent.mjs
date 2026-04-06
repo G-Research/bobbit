@@ -73,11 +73,17 @@ function respondToPrompt(text) {
 		return { toolDenied: toolDeniedMatch[1] };
 	}
 
-	// Goal proposal keyword — emit XML-tagged proposal block
+	// Goal proposal keyword — emit propose_goal tool call
 	if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
 		return {
-			tool: null,
-			text: `Here is a goal proposal:\n\n<goal_proposal>\n<title>E2E Test Goal</title>\n<workflow>general</workflow>\n<options>QA testing</options>\n<spec>\nThis is a test goal created via the assistant flow.\nIt validates the goal creation UI.\n</spec>\n</goal_proposal>`
+			tool: "propose_goal",
+			input: {
+				title: "E2E Test Goal",
+				workflow: "general",
+				options: "QA testing",
+				spec: "This is a test goal created via the assistant flow.\nIt validates the goal creation UI."
+			},
+			output: "Proposal submitted. Waiting for user response."
 		};
 	}
 
@@ -270,7 +276,7 @@ async function handlePrompt(requestId, text) {
 			} catch { /* best effort */ }
 		}
 
-		// Tool execution end
+		// Tool execution progress + end
 		emit({
 			type: "tool_execution_update",
 			toolId,
@@ -278,17 +284,37 @@ async function handlePrompt(requestId, text) {
 			status: "complete",
 			output: toolAction.output,
 		});
+		emit({
+			type: "tool_execution_end",
+			toolCallId: toolId,
+			toolName: toolAction.tool,
+			isError: false,
+		});
 
-		// Assistant message with tool result
+		// Assistant message with tool call
+		// Use "toolCall" type (pi-ai format) so the UI renders tool cards correctly.
+		// Include both `arguments` (for UI rendering) and `input` (for _checkToolProposals).
 		const assistantMsg = {
 			role: "assistant",
 			content: [
-				{ type: "tool_use", id: toolId, name: toolAction.tool, input: toolAction.input },
+				{ type: "toolCall", id: toolId, name: toolAction.tool, arguments: toolAction.input, input: toolAction.input },
 				{ type: "text", text: `Done. Used ${toolAction.tool} tool.` },
 			],
 		};
 		conversationMessages.push(assistantMsg);
 		emit({ type: "message_end", message: assistantMsg });
+
+		// Tool result message — required for the UI to populate toolResultsById
+		// which enables tool renderers to show completion state (e.g. "Open proposal" button).
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: toolAction.tool,
+			isError: false,
+			content: [{ type: "text", text: toolAction.output }],
+		};
+		conversationMessages.push(toolResultMsg);
+		emit({ type: "message_end", message: toolResultMsg });
 	} else if (toolAction && toolAction.text) {
 		// Custom text response (e.g. goal_proposal)
 		const assistantMsg = {

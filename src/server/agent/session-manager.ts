@@ -59,6 +59,9 @@ const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
 /** Team lead extension — team management tools. */
 const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
 
+/** Proposal tools extension — propose_* tools for assistant sessions. */
+const PROPOSAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "proposals", "extension.ts");
+
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "terminated";
 
 export interface SessionInfo {
@@ -215,6 +218,140 @@ export class SessionManager {
 
 	setSandboxManager(manager: SandboxManager | null): void {
 		this.sandboxManager = manager;
+	}
+
+	/**
+	 * Subscribe to sandbox container recovery events.
+	 * Call after both SessionManager and SandboxManager are initialized.
+	 */
+	subscribeSandboxRecovery(): void {
+		if (!this.sandboxManager) return;
+		this.sandboxManager.onContainerRecovered((projectId: string, newContainerId: string) => {
+			this.recoverSandboxSessions(projectId, newContainerId).catch(err => {
+				console.error(`[session-manager] Sandbox recovery failed for project ${projectId}:`, err);
+			});
+		});
+	}
+
+	/**
+	 * Recover all sandbox sessions after a container has been recreated.
+	 * Verifies/repairs/recreates worktrees, then re-restores each session.
+	 */
+	private async recoverSandboxSessions(projectId: string, newContainerId: string): Promise<void> {
+		console.log(`[session-manager] Recovering sandbox sessions for project ${projectId} (new container: ${newContainerId.substring(0, 12)})`);
+
+		const sessionsToRecover: SessionInfo[] = [];
+		for (const session of this.sessions.values()) {
+			if (session.sandboxed && session.projectId === projectId) {
+				sessionsToRecover.push(session);
+			}
+		}
+
+		if (sessionsToRecover.length === 0) {
+			console.log(`[session-manager] No sandbox sessions to recover for project ${projectId}`);
+			return;
+		}
+
+		console.log(`[session-manager] Found ${sessionsToRecover.length} sandbox session(s) to recover`);
+
+		for (const session of sessionsToRecover) {
+			try {
+				// Verify/repair/recreate worktree if needed
+				if (session.cwd?.startsWith("/workspace-wt/")) {
+					let worktreeOk = false;
+
+					// Check if worktree still exists (volumes may survive rm -f)
+					try {
+						await execFileAsync("docker", [
+							"exec", newContainerId, "test", "-d", session.cwd,
+						], { timeout: 5_000 });
+						worktreeOk = true;
+					} catch {
+						// Try git worktree repair first
+						try {
+							await execFileAsync("docker", [
+								"exec", "-w", "/workspace", newContainerId,
+								"git", "worktree", "repair",
+							], { timeout: 10_000 });
+							// Re-check after repair
+							await execFileAsync("docker", [
+								"exec", newContainerId, "test", "-d", session.cwd,
+							], { timeout: 5_000 });
+							worktreeOk = true;
+							console.log(`[session-manager] Worktree repaired for session ${session.id}`);
+						} catch {
+							// Repair didn't help — try recreate from persisted branch
+							const store = this.getSessionStore(session.projectId);
+							const ps = store.get(session.id);
+							if (ps?.branch && this.sandboxManager) {
+								const sandbox = this.sandboxManager.get(projectId);
+								if (sandbox) {
+									try {
+										const worktreeName = session.cwd.replace(/^\/workspace-wt\//, "");
+										await sandbox.createWorktree(worktreeName, ps.branch);
+										worktreeOk = true;
+										console.log(`[session-manager] Worktree recreated for session ${session.id}`);
+									} catch (err) {
+										console.warn(`[session-manager] Worktree recreation failed for ${session.id}:`, err);
+									}
+								}
+							}
+						}
+					}
+
+					if (!worktreeOk) {
+						console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
+						try { this.getSessionStore(session.projectId).archive(session.id); } catch { /* best-effort */ }
+						session.status = "terminated";
+						broadcast(session.clients, { type: "session_status", status: "terminated" });
+						continue;
+					}
+				}
+
+				// Stop old RPC client gracefully (it's dead, but clean up listeners)
+				try {
+					session.unsubscribe();
+					await session.rpcClient.stop();
+				} catch { /* already dead — ignore */ }
+
+				// Get persisted session data for restore
+				const store = this.getSessionStore(session.projectId);
+				const ps = store.get(session.id);
+				if (!ps) {
+					console.warn(`[session-manager] No persisted data for session ${session.id}, skipping recovery`);
+					continue;
+				}
+
+				// Save connected WebSocket clients before removing session
+				const savedClients = new Set(session.clients);
+
+				// Remove from map so restoreSession can re-add it
+				this.sessions.delete(session.id);
+				try {
+					await this.restoreSession(ps);
+					// Re-attach WebSocket clients to the restored session
+					const restored = this.sessions.get(session.id);
+					if (restored) {
+						for (const ws of savedClients) {
+							if ((ws as any).readyState === 1) restored.clients.add(ws);
+						}
+						broadcast(restored.clients, { type: "session_status", status: "idle" });
+					}
+					console.log(`[session-manager] Session ${session.id} recovered successfully`);
+				} catch (err) {
+					console.warn(`[session-manager] Failed to restore session ${session.id} after container recreation:`, err);
+					// Put it back as terminated so user can still see it
+					session.status = "terminated";
+					this.sessions.set(session.id, session);
+					for (const ws of savedClients) {
+						if ((ws as any).readyState === 1) session.clients.add(ws);
+					}
+					broadcast(session.clients, { type: "session_status", status: "terminated" });
+				}
+			} catch (err) {
+				console.error(`[session-manager] Error recovering session ${session.id}:`, err);
+			}
+		}
 	}
 
 	constructor(options?: SessionManagerOptions) {
@@ -1085,6 +1222,17 @@ export class SessionManager {
 		} else if (event.type === "auto_compaction_end") {
 			session.isCompacting = false;
 			if (!event.aborted) this.refreshAfterCompaction(session);
+		} else if (event.type === "process_exit") {
+			session.status = "terminated";
+			session.streamingStartedAt = undefined;
+			this.resolveStoreForSession(session.id).update(session.id, {
+				wasStreaming: false,
+				streamingStartedAt: undefined,
+			});
+			broadcast(session.clients, {
+				type: "session_status",
+				status: "terminated",
+			});
 		}
 
 		// Index completed assistant messages for search
@@ -1691,7 +1839,24 @@ export class SessionManager {
 				} catch {
 					console.warn(`[session-manager] Sandbox worktree MISSING for ${ps.id}: ${ps.cwd} — attempting recovery`);
 					let recovered = false;
-					if (ps.branch && ps.projectId && this.sandboxManager) {
+
+					// Try git worktree repair first — handles broken .git link files after hard container kill
+					try {
+						await execFileAsync("docker", [
+							"exec", "-w", "/workspace", bridgeOptions.containerId!,
+							"git", "worktree", "repair",
+						], { timeout: 10_000 });
+						// Re-check if worktree now exists after repair
+						await execFileAsync("docker", [
+							"exec", bridgeOptions.containerId!, "test", "-d", ps.cwd!,
+						], { timeout: 5_000 });
+						console.log(`[session-manager] Sandbox worktree repaired for ${ps.id}: ${ps.cwd}`);
+						recovered = true;
+					} catch {
+						// Repair didn't help — fall through to createWorktree
+					}
+
+					if (!recovered && ps.branch && ps.projectId && this.sandboxManager) {
 						const sandbox = this.sandboxManager.get(ps.projectId);
 						if (sandbox) {
 							try {
@@ -1723,6 +1888,14 @@ export class SessionManager {
 				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
 			} else {
 				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+			}
+		}
+
+		// Restore proposal tools extension for assistant sessions
+		if (ps.assistantType) {
+			bridgeOptions.args = bridgeOptions.args || [];
+			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
 			}
 		}
 
@@ -2747,6 +2920,14 @@ export class SessionManager {
 			}
 		}
 
+		// Re-attach proposal tools extension for assistant sessions
+		if (session.assistantType) {
+			bridgeOptions.args = bridgeOptions.args || [];
+			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+			}
+		}
+
 		// Apply tool activation args based on role's allowedTools
 		if (effectiveAllowed.length > 0) {
 			const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed, fullRole, session.cwd);
@@ -2886,6 +3067,14 @@ export class SessionManager {
 				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
 			} else if (!bridgeOptions.args?.includes("--extension")) {
 				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+			}
+		}
+
+		// Re-attach proposal tools extension for assistant sessions
+		if (session.assistantType) {
+			bridgeOptions.args = bridgeOptions.args || [];
+			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
 			}
 		}
 
@@ -3706,6 +3895,14 @@ export class SessionManager {
 					bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
 				} else {
 					bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+				}
+			}
+
+			// Restore proposal tools extension for assistant sessions
+			if (session.assistantType) {
+				bridgeOptions.args = bridgeOptions.args || [];
+				if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+					bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
 				}
 			}
 

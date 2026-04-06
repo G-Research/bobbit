@@ -45,6 +45,10 @@ export interface ContainerState {
 	projectId: string;
 }
 
+export type SandboxHealthEvent =
+	| { type: "container-died"; projectId: string; containerId: string }
+	| { type: "container-recovered"; projectId: string; containerId: string };
+
 // ── ProjectSandbox ─────────────────────────────────────────────────────────
 
 export class ProjectSandbox {
@@ -53,6 +57,9 @@ export class ProjectSandbox {
 	private _readyPromise: Promise<void> | null = null;
 	private _readyResolve: (() => void) | null = null;
 	private _readyReject: ((err: Error) => void) | null = null;
+	private _healthInterval: ReturnType<typeof setInterval> | null = null;
+	private _healthListeners: Array<(event: SandboxHealthEvent) => void> = [];
+	private _recovering = false;
 
 
 	constructor(private options: ProjectSandboxOptions) {}
@@ -182,8 +189,75 @@ export class ProjectSandbox {
 		return this._dockerExec(containerId, args, opts);
 	}
 
+	// ── Health monitoring ──────────────────────────────────────────────
+
+	/** Start periodic health checks. Safe to call multiple times. */
+	startHealthMonitor(intervalMs = 20_000): void {
+		this.stopHealthMonitor();
+		this._healthInterval = setInterval(() => {
+			this._healthCheck().catch(err => {
+				console.warn(`[project-sandbox] Health check error for project ${this.options.projectId}:`, err?.message || err);
+			});
+		}, intervalMs);
+	}
+
+	/** Stop periodic health checks. */
+	stopHealthMonitor(): void {
+		if (this._healthInterval) {
+			clearInterval(this._healthInterval);
+			this._healthInterval = null;
+		}
+	}
+
+	/** Subscribe to health events. Returns unsubscribe function. */
+	onHealthEvent(listener: (event: SandboxHealthEvent) => void): () => void {
+		this._healthListeners.push(listener);
+		return () => {
+			const idx = this._healthListeners.indexOf(listener);
+			if (idx >= 0) this._healthListeners.splice(idx, 1);
+		};
+	}
+
+	private _emitHealthEvent(event: SandboxHealthEvent): void {
+		for (const listener of this._healthListeners) {
+			try { listener(event); } catch { /* listener error — ignore */ }
+		}
+	}
+
+	private async _healthCheck(): Promise<void> {
+		if (this._recovering) return;
+		// Skip if never initialized (still in first-time startup)
+		if (this._status === "starting") return;
+		// If status is "ready", check container health; if "error", retry recovery
+		if (this._status === "ready") {
+			if (!this.containerId) return;
+			const isRunning = await this._isContainerRunning(this.containerId);
+			if (isRunning) return;
+		}
+
+		// Container is dead or previous recovery failed — begin recovery
+		this._recovering = true;
+		const oldContainerId = this.containerId ?? "unknown";
+		this._status = "error";
+
+		console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);
+		this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+
+		try {
+			await this.init();
+			console.log(`[project-sandbox] Container recovered for project ${this.options.projectId} (new container: ${this.containerId!.substring(0, 12)})`);
+			this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
+		} catch (err: any) {
+			console.error(`[project-sandbox] Recovery failed for project ${this.options.projectId}:`, err?.message || err);
+			// Will retry on next poll cycle — _recovering resets so next cycle can try again
+		} finally {
+			this._recovering = false;
+		}
+	}
+
 	/** Graceful shutdown: stop the container (don't remove — named volume persists). */
 	async shutdown(): Promise<void> {
+		this.stopHealthMonitor();
 		if (!this.containerId) return;
 		try {
 			// Audit worktree state before stopping — helps diagnose lost worktrees on restart
@@ -203,6 +277,7 @@ export class ProjectSandbox {
 
 	/** Full destroy: remove container AND volume. */
 	async destroy(): Promise<void> {
+		this.stopHealthMonitor();
 		const volumeName = this._volumeName();
 		if (this.containerId) {
 			try {

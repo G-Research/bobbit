@@ -5,6 +5,18 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
 
+/** Maps propose_* tool suffix → callback name on RemoteAgent */
+const PROPOSAL_TOOL_MAP: Record<string, string> = {
+	goal: "onGoalProposal",
+	role: "onRoleProposal",
+	tool: "onToolProposal",
+	personality: "onPersonalityProposal",
+	staff: "onStaffProposal",
+	setup: "onSetupProposal",
+	workflow: "onWorkflowProposal",
+	project: "onProjectProposal",
+};
+
 /**
  * A remote agent adapter that connects to the Bobbit Gateway via WebSocket.
  * Duck-types the Agent interface from pi-agent-core so it can be used
@@ -65,6 +77,9 @@ export class RemoteAgent {
 	// draft restores finish without being overwritten by proposal detection.
 	private _deferProposalCheck = false;
 	private _hasDeferredProposals = false;
+	// Tracks message IDs where a tool-based proposal was already detected,
+	// so the legacy XML path can be skipped for those messages.
+	private _toolProposalMessageIds = new Set<string>();
 
 	// Task timing — track when the agent started working so we can
 	// notify the user if a long task finishes while the tab is hidden.
@@ -491,6 +506,7 @@ export class RemoteAgent {
 			this._hasDeferredProposals = false;
 			for (const m of this._state.messages) {
 				if (m.role === "assistant") {
+					this._checkToolProposals(m);
 					this._checkProposals(m);
 				}
 			}
@@ -702,6 +718,7 @@ export class RemoteAgent {
 					} else {
 						for (const m of this._state.messages) {
 							if (m.role === "assistant") {
+								this._checkToolProposals(m);
 								this._checkProposals(m);
 							}
 						}
@@ -914,8 +931,38 @@ export class RemoteAgent {
 	 * message_end of non-assistant clears it, agent_end clears it) so the
 	 * tool call never appears in both message-list and streaming-container.
 	 */
-	/** Check an assistant message for proposal blocks and fire the matching callback. */
+	/** Check an assistant message for propose_* tool calls and fire the matching callback. */
+	private _checkToolProposals(message: any): void {
+		if (!Array.isArray(message.content)) return;
+		for (const block of message.content) {
+			if (block.type !== "tool_use" && block.type !== "toolCall") continue;
+			const toolName = block.name || block.toolName;
+			if (!toolName?.startsWith("propose_")) continue;
+			const proposalType = toolName.replace("propose_", "");
+			const callbackName = PROPOSAL_TOOL_MAP[proposalType];
+			if (!callbackName) continue;
+			const callback = (this as any)[callbackName];
+			if (!callback) continue;
+			// Extract input — tool_use blocks use `input`, toolCall blocks may use `arguments`
+			let input = block.input;
+			if (!input && typeof block.arguments === "string") {
+				try { input = JSON.parse(block.arguments); } catch { continue; }
+			}
+			if (!input || typeof input !== "object") continue;
+			callback(input);
+			// Track that this message had a tool-based proposal
+			const msgId = message.id || "";
+			if (msgId) this._toolProposalMessageIds.add(msgId);
+		}
+	}
+
+	/** Check an assistant message for legacy XML proposal blocks and fire the matching callback.
+	 *  Kept as backward-compatibility fallback — tool-based proposals are preferred. */
 	private _checkProposals(message: any): void {
+		// Skip XML parsing if a tool-based proposal was already detected for this message
+		const msgId = message.id || "";
+		if (msgId && this._toolProposalMessageIds.has(msgId)) return;
+
 		let text = "";
 		if (typeof message.content === "string") text = message.content;
 		else if (Array.isArray(message.content)) {
@@ -966,6 +1013,7 @@ export class RemoteAgent {
 				});
 				if (missing) continue;
 
+				console.warn(`[proposal] Detected legacy XML <${parser.tag}> block — this format is deprecated, use propose_* tools instead`);
 				callback(normalized);
 			}
 		}
@@ -1053,6 +1101,7 @@ export class RemoteAgent {
 				if (event.message) {
 					this._state.streamMessage = event.message;
 					// Check for proposals during streaming so preview syncs live
+					this._checkToolProposals(event.message);
 					this._checkProposals(event.message);
 				}
 				break;
@@ -1061,6 +1110,7 @@ export class RemoteAgent {
 				if (event.message) {
 					if (event.message.role === "assistant") {
 						// Check for proposals in assistant message
+						this._checkToolProposals(event.message);
 						this._checkProposals(event.message);
 
 						// Check whether this assistant message contains tool calls.
