@@ -2282,6 +2282,7 @@ export function doRenderApp(): void {
 	const sessionTitle = connected && state.remoteAgent ? (state.remoteAgent.title || "New session") : "";
 	const activeSid = activeSessionId();
 	const activeStaffAgent = activeSid ? state.staffList.find(s => s.currentSessionId === activeSid) : undefined;
+	const headerTitle = activeStaffAgent?.name ?? sessionTitle;
 	const editLabel = activeStaffAgent ? "Edit" : "Modify";
 	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 	const isTeamLead = activeSession?.role === "team-lead";
@@ -2341,7 +2342,7 @@ export function doRenderApp(): void {
 					<div class="flex items-center w-full pr-0.5 relative" style="min-height:40px;">
 						<div class="shrink-0">${backBtn}</div>
 						<div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-							<span class="text-sm font-medium text-foreground px-14 inline-flex items-center gap-1 max-w-full" title=${sessionTitle}><span class="truncate">${sessionTitle}</span>${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}</span>
+							<span class="text-sm font-medium text-foreground px-14 inline-flex items-center gap-1 max-w-full" title=${headerTitle}><span class="truncate">${headerTitle}</span>${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}</span>
 							${goalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate px-14 uppercase tracking-wider">${goalTitle}</span>` : ""}
 						</div>
 						<div class="ml-auto shrink-0">${editDeleteBtns}</div>
@@ -2354,7 +2355,7 @@ export function doRenderApp(): void {
 			return html`
 				<div class="flex items-center gap-2 px-3 min-w-0 flex-1">
 					<div class="flex flex-col min-w-0 py-1">
-						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${sessionTitle}><span class="truncate">${sessionTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}</span>
+						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}</span>
 						${deskGoalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider">${deskGoalTitle}</span>` : ""}
 					</div>
 				</div>
