@@ -15,7 +15,7 @@ Each session is a running `pi-coding-agent` child process with its own conversat
 
 Goals are a task-tracking layer on top of sessions. A goal has a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`).
 
-- **Goal assistant**: Sessions created with `assistantType: "goal"` get a special prompt that helps users define clear goals. The assistant outputs structured `<goal_proposal>` blocks parsed by the browser client.
+- **Goal assistant**: Sessions created with `assistantType: "goal"` get a special prompt that helps users define clear goals. The assistant calls `propose_goal` (and other `propose_*` tools) to emit structured proposals as tool calls, which persist in message history and can be reopened via an "Open proposal" button. A deprecated XML fallback (`proposal-parsers.ts`) still parses legacy `<goal_proposal>` blocks for backward compatibility.
 - **Auto-transition**: Goals move from `todo` to `in-progress` when their first session starts.
 - **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager.
 - **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architecture.

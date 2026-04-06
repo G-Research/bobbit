@@ -42,6 +42,9 @@ import { createWorktree, cleanupWorktree } from "../skills/git.js";
 /** Goal tools extension — task + gate management for any goal session. */
 const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
 
+/** Proposal tools extension — propose_* tools for assistant sessions. */
+const PROPOSAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "proposals", "extension.ts");
+
 /** Delegate spawn timeout (30 seconds). */
 export const DELEGATE_SPAWN_TIMEOUT_MS = 30_000;
 
@@ -187,6 +190,14 @@ export function resolveGoalExtensions(plan: SessionSetupPlan, _ctx: PipelineCont
 			plan.bridgeOptions.args.push("--extension", GOAL_TOOLS_EXTENSION_PATH);
 		}
 		plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };
+	}
+
+	// Add proposal tools extension for assistant sessions (goal assistant, role assistant, etc.)
+	if (plan.assistantType) {
+		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
+		if (!plan.bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
+			plan.bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+		}
 	}
 }
 

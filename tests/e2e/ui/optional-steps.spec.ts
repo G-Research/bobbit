@@ -209,7 +209,7 @@ test.describe("Optional steps", () => {
 		expect(qaStep.type).toBe("agent-qa");
 	});
 
-	test("goal proposal with <options> tag is parsed", async ({ page }) => {
+	test("goal proposal with options field is parsed", async ({ page }) => {
 		await openApp(page);
 
 		// Click the "New Goal" button
@@ -221,7 +221,8 @@ test.describe("Optional steps", () => {
 		const textarea = page.locator("textarea").first();
 		await expect(textarea).toBeVisible({ timeout: 15_000 });
 
-		// Send GOAL_PROPOSAL keyword — mock agent now includes <options>QA testing</options>
+		// Send GOAL_PROPOSAL keyword — mock agent emits propose_goal tool call
+		// with options: "QA testing"
 		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
 		// Wait for the proposal panel to show the title
@@ -229,9 +230,9 @@ test.describe("Optional steps", () => {
 		await expect(titleInput).toBeVisible({ timeout: 10_000 });
 		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
 
-		// The proposal was successfully parsed (title populated means the parser ran,
-		// which now includes the <options> field). The mock agent includes
-		// <options>QA testing</options> in its response.
+		// The proposal was successfully parsed via propose_goal tool call
+		// (title populated means _checkToolProposals fired correctly).
+		// The mock agent includes options: "QA testing" in its tool input.
 		// Verify the Create Goal button is enabled
 		const createGoalBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
 		await expect(createGoalBtn).toBeVisible({ timeout: 5_000 });

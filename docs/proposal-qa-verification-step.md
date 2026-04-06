@@ -156,18 +156,18 @@ Workflow: [Feature ▾]    ☐ Enable QA Testing
 
 Toggles default to **off**. The user explicitly opts in per goal.
 
-**Goal proposal format:** The `<goal_proposal>` block gains an optional `<options>` tag:
+**Goal proposal format:** The `propose_goal` tool call accepts an optional `options` parameter:
 
-```xml
-<goal_proposal>
-  <title>Add dark mode toggle</title>
-  <workflow>feature</workflow>
-  <options>qa-testing</options>
-  <spec>...</spec>
-</goal_proposal>
+```json
+{
+  "title": "Add dark mode toggle",
+  "workflow": "feature",
+  "options": "qa-testing",
+  "spec": "..."
+}
 ```
 
-The `<options>` tag contains a comma-separated list of optional step names that should be enabled. The goal assistant can recommend enabling QA when the goal involves UI changes.
+The `options` field contains a comma-separated list of optional step names that should be enabled. The goal assistant can recommend enabling QA when the goal involves UI changes.
 
 **Storage:** The goal's `PersistedGoal` gains a new field:
 
@@ -315,7 +315,7 @@ The same change applies to `bug-fix.yaml`.
 3. Update `GoalManager.createGoal()` to accept and store enabled optional steps.
 4. Update `VerificationHarness` to skip optional steps not in `enabledOptionalSteps`.
 5. Update goal creation UI to render toggles for optional steps when a workflow is selected.
-6. Update goal assistant prompt and `<goal_proposal>` parsing to support `<options>` tag.
+6. Update goal assistant prompt and `propose_goal` tool to support `options` parameter.
 7. Update REST API for goal creation to accept `enabledOptionalSteps`.
 
 ### Phase 5: Remove standalone qa-testing gate

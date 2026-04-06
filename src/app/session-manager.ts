@@ -1043,6 +1043,34 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		// Listen for "Open proposal" button clicks from ProposalRenderer tool cards.
+		// Routes the event to the same callbacks already wired above.
+		const proposalOpenHandler = ((e: CustomEvent) => {
+			if (activeSessionId() !== sessionId) return;
+			const { type, fields } = e.detail || {};
+			if (!type || !fields) return;
+			const callbackMap: Record<string, ((p: any) => void) | undefined> = {
+				goal: remote.onGoalProposal,
+				role: remote.onRoleProposal,
+				tool: remote.onToolProposal,
+				personality: remote.onPersonalityProposal,
+				staff: remote.onStaffProposal,
+				setup: remote.onSetupProposal,
+				workflow: remote.onWorkflowProposal,
+				project: remote.onProjectProposal,
+			};
+			const cb = callbackMap[type];
+			if (cb) cb(fields);
+		}) as EventListener;
+		document.addEventListener("proposal-open", proposalOpenHandler);
+
+		// Clean up the listener when the remote agent disconnects
+		const origDisconnect = remote.disconnect.bind(remote);
+		remote.disconnect = () => {
+			document.removeEventListener("proposal-open", proposalOpenHandler);
+			origDisconnect();
+		};
+
 		if (isStale()) { remote.disconnect(); return; }
 
 		state.connectionStatus = "connected";
