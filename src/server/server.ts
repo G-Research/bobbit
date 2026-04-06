@@ -723,6 +723,7 @@ export function createGateway(config: GatewayConfig) {
 				}
 			}
 			sessionManager.setSandboxManager(sandboxManager);
+			sessionManager.subscribeSandboxRecovery();
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
