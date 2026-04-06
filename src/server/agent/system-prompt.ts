@@ -190,7 +190,11 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 			`# Working Directory\n\n` +
 			`Your working directory is: \`${parts.cwd}\`\n\n` +
 			`Stay in this directory for all file operations and git commands. ` +
-			`Do not \`cd\` into other directories unless explicitly required by the task.`
+			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
+			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
+			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
+			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
+			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`
 		);
 	}
 
@@ -309,7 +313,11 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	if (parts.cwd) {
 		const cwdContent = `Your working directory is: \`${parts.cwd}\`\n\n` +
 			`Stay in this directory for all file operations and git commands. ` +
-			`Do not \`cd\` into other directories unless explicitly required by the task.`;
+			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
+			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
+			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
+			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
+			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`;
 		sections.push({ label: "Working Directory", source: parts.cwd, content: cwdContent, tokens: estimateTokens(cwdContent) });
 	}
 
