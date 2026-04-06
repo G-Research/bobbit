@@ -1,4 +1,4 @@
-import { html, LitElement } from "lit";
+import { html, LitElement, nothing } from "lit";
 import { property } from "lit/decorators.js";
 
 /**
@@ -9,9 +9,14 @@ import { property } from "lit/decorators.js";
 export class ErrorMessage extends LitElement {
 	@property({ type: Object }) message!: { role: "error"; content: string; code?: string; timestamp: number; id: string };
 	@property({ attribute: false }) onDismiss?: (id: string) => void;
+	@property({ attribute: false }) onRestartAgent?: () => void;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
+	}
+
+	private get _isAgentProcessError(): boolean {
+		return !!this.message.content?.includes("Agent process not running");
 	}
 
 	override render() {
@@ -24,6 +29,14 @@ export class ErrorMessage extends LitElement {
 					<div class="text-sm text-destructive font-medium">Error</div>
 					<div class="text-sm text-destructive/80 mt-0.5 break-words">${this.message.content}</div>
 					${this.message.code ? html`<div class="text-xs text-destructive/50 mt-1 font-mono">${this.message.code}</div>` : ""}
+					${this._isAgentProcessError ? html`
+						<button
+							class="mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-destructive/15 hover:bg-destructive/25 text-destructive border border-destructive/20 transition-colors"
+							@click=${this._handleRestart}
+						>
+							Restart Agent
+						</button>
+					` : nothing}
 				</div>
 				<button
 					class="shrink-0 p-1 rounded hover:bg-destructive/10 text-destructive/60 hover:text-destructive transition-colors"
@@ -36,6 +49,11 @@ export class ErrorMessage extends LitElement {
 				</button>
 			</div>
 		`;
+	}
+
+	private _handleRestart(): void {
+		this.onRestartAgent?.();
+		this.onDismiss?.(this.message.id);
 	}
 }
 

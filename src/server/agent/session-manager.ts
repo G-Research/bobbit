@@ -1346,6 +1346,53 @@ export class SessionManager {
 	}
 
 	/**
+	 * Restart the agent process for a session whose process has died.
+	 * Stops any remnant process, then restores from persisted state.
+	 * Re-attaches existing WS clients so the user can keep working.
+	 */
+	async restartAgent(sessionId: string): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session) throw new Error("Session not found");
+
+		const ps = this.resolveStoreForSession(session.id).get(session.id);
+		if (!ps) throw new Error("No persisted session data");
+
+		// Save state that must survive the restart
+		const clients = new Set(session.clients);
+		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+
+		// Stop remnant process (may already be dead)
+		session.unsubscribe();
+		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+
+		// Remove from sessions map — restoreSession will re-add it
+		this.sessions.delete(sessionId);
+
+		(ps as any)._overrideAllowedTools = savedAllowedTools;
+		try {
+			await this.restoreSession(ps);
+		} finally {
+			delete (ps as any)._overrideAllowedTools;
+		}
+
+		// Re-attach saved clients and carry over grant state
+		const restored = this.sessions.get(sessionId);
+		if (restored) {
+			for (const ws of clients) {
+				if ((ws as any).readyState === 1) {
+					restored.clients.add(ws);
+				}
+			}
+			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
+			broadcast(restored.clients, { type: "session_status", status: "idle" });
+		} else {
+			throw new Error("Failed to restore session after restart");
+		}
+	}
+
+	/**
 	 * Check an event for usage data and record it via the cost tracker.
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
