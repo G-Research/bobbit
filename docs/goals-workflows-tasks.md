@@ -250,11 +250,16 @@ The `agent-qa` step typically runs at phase 2 in the `feature` and `bug-fix` wor
 
 When a gate is re-signaled while a previous verification is still running:
 - The in-flight verification is cancelled — its reviewer sessions are terminated and its results are suppressed
+- The cancelled signal's verification status is persisted as `"failed"` in the gate store
 - Only the latest signal's verification determines the gate's pass/fail status
 - The team lead is not notified about superseded verification results
 - Command steps that are already running will complete but their results won't update gate status
 
 This prevents reviewer agent proliferation when gates are re-signaled multiple times. The cancellation is triggered by `cancelStaleVerifications()` in `verification-harness.ts`, which is called before starting a new verification in the gate signal handler.
+
+**Zombie detection:** If the previous verification's reviewer sessions have all died (crashed, timed out), the server detects this via `areVerificationSessionsAlive()` and auto-cancels the zombie verification instead of returning a 409 duplicate error. This prevents deadlocks where a stuck verification blocks all future signals.
+
+**Manual cancellation:** A stuck verification can also be cancelled via `POST /api/goals/:goalId/gates/:gateId/cancel-verification`. The goal dashboard shows a Cancel button in the signal entry header when a verification is in "running" state. The endpoint is idempotent — calling it when nothing is running returns `{ cancelled: false }`.
 
 ### Tasks
 
