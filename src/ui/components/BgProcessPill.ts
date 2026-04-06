@@ -289,8 +289,8 @@ export class BgProcessPill extends LitElement {
 			} else if (!this._closing) {
 				this._removePortal();
 			}
-		} else if (this.expanded && this._portalEl && (changed.has("loadingLogs") || changed.has("logs"))) {
-			// Re-render portal when log state changes — portal content is outside
+		} else if (this.expanded && this._portalEl && (changed.has("loadingLogs") || changed.has("logs") || changed.has("process"))) {
+			// Re-render portal when log/process state changes — portal content is outside
 			// Lit's render tree so @state() changes don't automatically propagate.
 			this._renderPortal();
 		}
