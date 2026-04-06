@@ -96,6 +96,24 @@ export function bobbitLoadingAnimation(): TemplateResult {
       .bobbit-loading-dust-px:nth-child(1) { animation: bobbit-loading-dust1 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
       .bobbit-loading-dust-px:nth-child(2) { animation: bobbit-loading-dust2 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
       .bobbit-loading-dust-px:nth-child(3) { animation: bobbit-loading-dust3 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+      .bobbit-loading-kick {
+        position: absolute;
+        z-index: 4;
+        animation: bobbit-loading-bounce 0.75s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+        bottom: 40px;
+        left: calc(54% + 2px);
+      }
+      .bobbit-loading-kick-px {
+        position: absolute;
+        width: 4px;
+        height: 4px;
+        background: rgba(142, 198, 63, 0.5);
+        image-rendering: pixelated;
+        opacity: 0;
+      }
+      .bobbit-loading-kick-px:nth-child(1) { animation: bobbit-loading-kick-fly1 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+      .bobbit-loading-kick-px:nth-child(2) { animation: bobbit-loading-kick-fly2 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite; animation-delay: 0.75s; }
+      .bobbit-loading-kick-px:nth-child(3) { animation: bobbit-loading-kick-fly3 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite; animation-delay: 0.35s; }
 
       @keyframes bobbit-loading-camera-lag {
         0%   { transform: translate(0, 0); }
@@ -137,31 +155,31 @@ export function bobbitLoadingAnimation(): TemplateResult {
         100% { transform: translateY(0); }
       }
       @keyframes bobbit-loading-squash {
-        0%   { transform: scale(4) scaleX(1.28) scaleY(0.68) rotate(1.8deg); }
-        2%   { transform: scale(4) scaleX(1.30) scaleY(0.65) rotate(2deg); }
-        5%   { transform: scale(4) scaleX(1.32) scaleY(0.62) rotate(2.2deg); }
-        8%   { transform: scale(4) scaleX(1.22) scaleY(0.75) rotate(1.5deg); }
+        0%   { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
+        2%   { transform: scale(4) scaleX(1.17) scaleY(0.82) rotate(1.2deg); }
+        5%   { transform: scale(4) scaleX(1.19) scaleY(0.80) rotate(1.3deg); }
+        8%   { transform: scale(4) scaleX(1.13) scaleY(0.86) rotate(0.9deg); }
         12%  { transform: scale(4) scaleX(1.0)  scaleY(1.0)  rotate(0deg); }
-        17%  { transform: scale(4) scaleX(0.85) scaleY(1.18) rotate(-1deg); }
-        22%  { transform: scale(4) scaleX(0.78) scaleY(1.26) rotate(-1.8deg); }
-        28%  { transform: scale(4) scaleX(0.74) scaleY(1.32) rotate(-2.2deg); }
-        34%  { transform: scale(4) scaleX(0.72) scaleY(1.34) rotate(-2deg); }
-        39%  { transform: scale(4) scaleX(0.78) scaleY(1.24) rotate(-1.2deg); }
-        43%  { transform: scale(4) scaleX(0.84) scaleY(1.17) rotate(-0.6deg); }
-        47%  { transform: scale(4) scaleX(0.88) scaleY(1.12) rotate(-0.2deg); }
-        50%  { transform: scale(4) scaleX(0.90) scaleY(1.10) rotate(0deg); }
-        53%  { transform: scale(4) scaleX(0.88) scaleY(1.12) rotate(0.2deg); }
-        57%  { transform: scale(4) scaleX(0.84) scaleY(1.17) rotate(0.5deg); }
-        62%  { transform: scale(4) scaleX(0.78) scaleY(1.26) rotate(1deg); }
-        67%  { transform: scale(4) scaleX(0.74) scaleY(1.32) rotate(1.5deg); }
-        73%  { transform: scale(4) scaleX(0.80) scaleY(1.22) rotate(1.8deg); }
-        79%  { transform: scale(4) scaleX(0.90) scaleY(1.08) rotate(2deg); }
-        84%  { transform: scale(4) scaleX(1.02) scaleY(0.94) rotate(2deg); }
-        89%  { transform: scale(4) scaleX(1.12) scaleY(0.84) rotate(2deg); }
-        93%  { transform: scale(4) scaleX(1.22) scaleY(0.74) rotate(1.8deg); }
-        96%  { transform: scale(4) scaleX(1.28) scaleY(0.68) rotate(1.8deg); }
-        98%  { transform: scale(4) scaleX(1.28) scaleY(0.68) rotate(1.8deg); }
-        100% { transform: scale(4) scaleX(1.28) scaleY(0.68) rotate(1.8deg); }
+        17%  { transform: scale(4) scaleX(0.92) scaleY(1.10) rotate(-0.6deg); }
+        22%  { transform: scale(4) scaleX(0.88) scaleY(1.14) rotate(-1.0deg); }
+        28%  { transform: scale(4) scaleX(0.85) scaleY(1.17) rotate(-1.2deg); }
+        34%  { transform: scale(4) scaleX(0.84) scaleY(1.18) rotate(-1.1deg); }
+        39%  { transform: scale(4) scaleX(0.88) scaleY(1.14) rotate(-0.7deg); }
+        43%  { transform: scale(4) scaleX(0.92) scaleY(1.10) rotate(-0.4deg); }
+        47%  { transform: scale(4) scaleX(0.94) scaleY(1.06) rotate(-0.1deg); }
+        50%  { transform: scale(4) scaleX(0.95) scaleY(1.05) rotate(0deg); }
+        53%  { transform: scale(4) scaleX(0.94) scaleY(1.06) rotate(0.1deg); }
+        57%  { transform: scale(4) scaleX(0.92) scaleY(1.10) rotate(0.3deg); }
+        62%  { transform: scale(4) scaleX(0.88) scaleY(1.14) rotate(0.6deg); }
+        67%  { transform: scale(4) scaleX(0.85) scaleY(1.17) rotate(0.8deg); }
+        73%  { transform: scale(4) scaleX(0.89) scaleY(1.12) rotate(1.0deg); }
+        79%  { transform: scale(4) scaleX(0.95) scaleY(1.04) rotate(1.1deg); }
+        84%  { transform: scale(4) scaleX(1.01) scaleY(0.97) rotate(1.1deg); }
+        89%  { transform: scale(4) scaleX(1.08) scaleY(0.92) rotate(1.1deg); }
+        93%  { transform: scale(4) scaleX(1.13) scaleY(0.86) rotate(1.05deg); }
+        96%  { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
+        98%  { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
+        100% { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
       }
       @keyframes bobbit-loading-shadow-anim {
         0%   { box-shadow:
@@ -244,6 +262,36 @@ export function bobbitLoadingAnimation(): TemplateResult {
         99.5%     { opacity: 0.05; transform: translate(-13px, -3px); }
         100%      { opacity: 0;    transform: translate(-14px, -3px); }
       }
+      @keyframes bobbit-loading-kick-fly1 {
+        0%   { opacity: 0;    transform: translate(0, 0); }
+        2%   { opacity: 0.45; transform: translate(-2px, -1px); }
+        8%   { opacity: 0.6;  transform: translate(-6px, -4px); }
+        18%  { opacity: 0.45; transform: translate(-12px, -8px); }
+        35%  { opacity: 0.25; transform: translate(-20px, -14px); }
+        55%  { opacity: 0.1;  transform: translate(-26px, -18px); }
+        80%  { opacity: 0.03; transform: translate(-30px, -22px); }
+        100% { opacity: 0;    transform: translate(-32px, -24px); }
+      }
+      @keyframes bobbit-loading-kick-fly2 {
+        0%   { opacity: 0;    transform: translate(2px, 0); }
+        2%   { opacity: 0.35; transform: translate(0px, -2px); }
+        8%   { opacity: 0.5;  transform: translate(-4px, -5px); }
+        18%  { opacity: 0.35; transform: translate(-10px, -10px); }
+        35%  { opacity: 0.2;  transform: translate(-16px, -16px); }
+        55%  { opacity: 0.08; transform: translate(-22px, -20px); }
+        80%  { opacity: 0.02; transform: translate(-26px, -24px); }
+        100% { opacity: 0;    transform: translate(-28px, -26px); }
+      }
+      @keyframes bobbit-loading-kick-fly3 {
+        0%   { opacity: 0;    transform: translate(-2px, 0); }
+        2%   { opacity: 0.3;  transform: translate(-4px, -1px); }
+        8%   { opacity: 0.5;  transform: translate(-8px, -3px); }
+        18%  { opacity: 0.4;  transform: translate(-14px, -6px); }
+        35%  { opacity: 0.22; transform: translate(-22px, -10px); }
+        55%  { opacity: 0.08; transform: translate(-28px, -14px); }
+        80%  { opacity: 0.02; transform: translate(-32px, -16px); }
+        100% { opacity: 0;    transform: translate(-34px, -18px); }
+      }
       @keyframes bobbit-loading-fade-in {
         from { opacity: 0; }
         to   { opacity: 1; }
@@ -263,6 +311,11 @@ export function bobbitLoadingAnimation(): TemplateResult {
             <div class="bobbit-loading-dust-px"></div>
             <div class="bobbit-loading-dust-px"></div>
             <div class="bobbit-loading-dust-px"></div>
+          </div>
+          <div class="bobbit-loading-kick">
+            <div class="bobbit-loading-kick-px"></div>
+            <div class="bobbit-loading-kick-px"></div>
+            <div class="bobbit-loading-kick-px"></div>
           </div>
           <div class="bobbit-loading-shadow"></div>
         </div>
