@@ -448,7 +448,7 @@ test.describe("sandbox container recovery", () => {
 
 		if (sessionCwd?.startsWith("/workspace-wt/")) {
 			// Verify the worktree directory exists
-			const cwdCheck = execFileSync("docker", [
+			execFileSync("docker", [
 				"exec", newContainerId, "test", "-d", sessionCwd,
 			], { timeout: 5_000, encoding: "utf-8" });
 

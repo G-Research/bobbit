@@ -223,16 +223,11 @@ export class SessionManager {
 	 */
 	subscribeSandboxRecovery(): void {
 		if (!this.sandboxManager) return;
-		// onContainerRecovered is added by the health monitor feature in sandbox-manager.ts.
-		// Use a runtime check + type assertion for forward compatibility.
-		const mgr = this.sandboxManager as any;
-		if (typeof mgr.onContainerRecovered === "function") {
-			mgr.onContainerRecovered((projectId: string, newContainerId: string) => {
-				this.recoverSandboxSessions(projectId, newContainerId).catch(err => {
-					console.error(`[session-manager] Sandbox recovery failed for project ${projectId}:`, err);
-				});
+		this.sandboxManager.onContainerRecovered((projectId: string, newContainerId: string) => {
+			this.recoverSandboxSessions(projectId, newContainerId).catch(err => {
+				console.error(`[session-manager] Sandbox recovery failed for project ${projectId}:`, err);
 			});
-		}
+		});
 	}
 
 	/**
@@ -258,9 +253,6 @@ export class SessionManager {
 
 		for (const session of sessionsToRecover) {
 			try {
-				// Update container ID on the in-memory session
-				session.containerId = newContainerId;
-
 				// Verify/repair/recreate worktree if needed
 				if (session.cwd?.startsWith("/workspace-wt/")) {
 					let worktreeOk = false;
@@ -327,16 +319,30 @@ export class SessionManager {
 					continue;
 				}
 
+				// Save connected WebSocket clients before removing session
+				const savedClients = new Set(session.clients);
+
 				// Remove from map so restoreSession can re-add it
 				this.sessions.delete(session.id);
 				try {
 					await this.restoreSession(ps);
+					// Re-attach WebSocket clients to the restored session
+					const restored = this.sessions.get(session.id);
+					if (restored) {
+						for (const ws of savedClients) {
+							if ((ws as any).readyState === 1) restored.clients.add(ws);
+						}
+						broadcast(restored.clients, { type: "session_status", status: "idle" });
+					}
 					console.log(`[session-manager] Session ${session.id} recovered successfully`);
 				} catch (err) {
 					console.warn(`[session-manager] Failed to restore session ${session.id} after container recreation:`, err);
 					// Put it back as terminated so user can still see it
 					session.status = "terminated";
 					this.sessions.set(session.id, session);
+					for (const ws of savedClients) {
+						if ((ws as any).readyState === 1) session.clients.add(ws);
+					}
 					broadcast(session.clients, { type: "session_status", status: "terminated" });
 				}
 			} catch (err) {

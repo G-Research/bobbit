@@ -224,14 +224,19 @@ export class ProjectSandbox {
 	}
 
 	private async _healthCheck(): Promise<void> {
-		if (this._status !== "ready" || !this.containerId || this._recovering) return;
+		if (this._recovering) return;
+		// Skip if never initialized (still in first-time startup)
+		if (this._status === "starting") return;
+		// If status is "ready", check container health; if "error", retry recovery
+		if (this._status === "ready") {
+			if (!this.containerId) return;
+			const isRunning = await this._isContainerRunning(this.containerId);
+			if (isRunning) return;
+		}
 
-		const isRunning = await this._isContainerRunning(this.containerId);
-		if (isRunning) return;
-
-		// Container is dead — begin recovery
+		// Container is dead or previous recovery failed — begin recovery
 		this._recovering = true;
-		const oldContainerId = this.containerId;
+		const oldContainerId = this.containerId ?? "unknown";
 		this._status = "error";
 
 		console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);

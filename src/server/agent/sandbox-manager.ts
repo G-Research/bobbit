@@ -129,6 +129,12 @@ export class SandboxManager {
 
 	/** Destroy all sandboxes. */
 	async destroyAll(): Promise<void> {
+		// Clean up health subscriptions
+		for (const [, unsub] of this._healthUnsubscribes) {
+			unsub();
+		}
+		this._healthUnsubscribes.clear();
+
 		const destroyPromises = [...this.sandboxes.entries()].map(([projectId, sandbox]) =>
 			sandbox.destroy().catch(err => {
 				console.warn(`[sandbox-manager] Destroy error for project ${projectId}:`, err?.message || err);
