@@ -2213,9 +2213,7 @@ export function doRenderApp(): void {
 	if (!app) return;
 
 	// Dynamic page title
-	const activeProject = state.activeProjectId
-		? state.projects.find(p => p.id === state.activeProjectId)
-		: state.projects[0];
+	const activeProject = state.projects.find(p => p.id === state.activeProjectId);
 	document.title = activeProject ? `${activeProject.name} · Bobbit` : "Bobbit";
 
 	document.documentElement.style.setProperty("--bobbit-shimmer-delay", `${-(Date.now() % 8000)}ms`);

@@ -9,6 +9,7 @@ import QRCode from "qrcode";
 import {
 	state,
 	renderApp,
+	setProjects,
 	activeSessionId,
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
@@ -1142,7 +1143,7 @@ export function showProjectDialog(): void {
 				// Path A: Auto-import
 				const project = await registerProject(detection.name, trimmedPath, undefined);
 				if (project) {
-					state.projects = await fetchProjects();
+					setProjects(await fetchProjects());
 					renderApp();
 					cleanup();
 				} else {

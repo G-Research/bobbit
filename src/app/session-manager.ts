@@ -5,6 +5,7 @@ import { RemoteAgent } from "./remote-agent.js";
 import {
 	state,
 	renderApp,
+	setProjects,
 	activeSessionId,
 	isDesktop,
 	GW_URL_KEY,
@@ -1051,7 +1052,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					}
 				}
 				// Refresh project list
-				state.projects = await fetchProjects();
+				setProjects(await fetchProjects());
 			}
 			renderApp();
 		};

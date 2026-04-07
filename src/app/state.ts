@@ -433,6 +433,19 @@ export function renderAppSync(): void {
 }
 
 // ============================================================================
+// PROJECT HELPERS
+// ============================================================================
+
+/** Update the project list and ensure activeProjectId stays in sync.
+ *  Defaults to the first project when no explicit selection exists. */
+export function setProjects(projects: Project[]): void {
+	state.projects = projects;
+	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
+		state.activeProjectId = projects[0]?.id ?? null;
+	}
+}
+
+// ============================================================================
 // SEARCH CONTENT MODE
 // ============================================================================
 

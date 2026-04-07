@@ -1,6 +1,7 @@
 import {
 	state,
 	renderApp,
+	setProjects,
 	expandedGoals,
 	saveExpandedGoals,
 	GW_URL_KEY,
@@ -117,7 +118,7 @@ export async function refreshSessions(): Promise<void> {
 		// Apply projects before processing sessions so the first renderApp()
 		// already has the correct project list for sidebar grouping.
 		if (projectsResult) {
-			state.projects = projectsResult;
+			setProjects(projectsResult);
 		}
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
 		const sessionsData = await sessionsRes.json();
