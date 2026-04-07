@@ -3496,11 +3496,7 @@ export class SessionManager {
 		}
 
 		// Delete persisted prompt sections JSON
-		try {
-			purgePromptSectionsJson(ps.id);
-		} catch (err) {
-			console.error(`[session-manager] Failed to purge prompt sections for ${ps.id}:`, err);
-		}
+		purgePromptSectionsJson(ps.id);
 
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
 		// worktree for server bookkeeping, so we clean those up too.  Skip paths that

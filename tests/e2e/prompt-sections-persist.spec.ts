@@ -13,7 +13,6 @@ import {
 	deleteSession,
 	apiFetch,
 	connectWs,
-	waitForSessionStatus,
 	statusPredicate,
 } from "./e2e-setup.js";
 
@@ -101,10 +100,7 @@ test.describe("Persisted prompt sections", () => {
 		const delResp = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 		expect(delResp.status).toBe(200);
 
-		// Wait briefly for cleanup to complete
-		await new Promise(r => setTimeout(r, 500));
-
-		// Prompt sections should still be available
+		// Prompt sections should still be available (persisted JSON survives termination)
 		const afterResp = await apiFetch(`/api/sessions/${sessionId}/prompt-sections`);
 		expect(afterResp.status).toBe(200);
 		const afterData = await afterResp.json();
