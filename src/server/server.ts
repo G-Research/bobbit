@@ -27,6 +27,7 @@ import { PersonalityManager } from "./agent/personality-manager.js";
 import { getPromptSections, initPromptDirs } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
+import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 
 import { WorkflowStore } from "./agent/workflow-store.js";
@@ -362,7 +363,11 @@ export function createGateway(config: GatewayConfig) {
 
 	// Project registry — persisted at server level
 	const projectRegistry = new ProjectRegistry(stateDir);
-	projectRegistry.ensureDefaultProject(getProjectRoot());
+	// Only auto-register a default project if .bobbit/ already exists at the server CWD.
+	// A truly fresh folder should start with zero projects — the user creates one explicitly.
+	if (fs.existsSync(path.join(getProjectRoot(), ".bobbit"))) {
+		projectRegistry.ensureDefaultProject(getProjectRoot());
+	}
 
 	// Run one-time migration from centralized to per-project state
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
@@ -439,9 +444,13 @@ export function createGateway(config: GatewayConfig) {
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
+	// When no projects exist (fresh folder), use server stateDir for a placeholder task store.
+	// Once a project is registered, goals/tasks will use per-project stores.
+	const defaultCtxForInit = projectContextManager.getDefaultOrNull();
+	const taskStore = defaultCtxForInit ? defaultCtxForInit.taskStore : new TaskStore(stateDir);
 	const teamManager = new TeamManager(sessionManager, {
 		colorStore,
-		taskManager: new TaskManager(projectContextManager.getDefault().taskStore),
+		taskManager: new TaskManager(taskStore),
 		roleStore,
 		personalityManager,
 		projectContextManager,
@@ -721,8 +730,8 @@ export function createGateway(config: GatewayConfig) {
 							console.error("[sandbox] Cannot create sandbox network — sandbox disabled:", err);
 						}
 
-						if (sandboxNetwork) {
-							const defaultProjectId = projectContextManager.getDefaultProjectId();
+						const defaultProjectId = projectContextManager.getDefaultProjectIdOrNull();
+						if (sandboxNetwork && defaultProjectId) {
 
 							// Resolve GitHub token for git push inside container
 							const githubTokenEnabled = projectConfigStore.get("sandbox_github_token") !== "false";
@@ -767,7 +776,8 @@ export function createGateway(config: GatewayConfig) {
 			// Initialize worktree pool for the default project's repo
 			// (pre-creates worktrees in the background so new sessions start instantly)
 			try {
-				const defaultCtx = projectContextManager.getDefault();
+				const defaultCtx = projectContextManager.getDefaultOrNull();
+				if (!defaultCtx) throw new Error("no projects");
 				const defaultRepoPath = defaultCtx.project.rootPath;
 				if (await isGitRepo(defaultRepoPath)) {
 					const setupCmd = defaultCtx.projectConfigStore.get("worktree_setup_command") || undefined;
@@ -1376,10 +1386,28 @@ async function handleApiRoute(
 			return;
 		}
 		try {
+			const upsert = body.upsert === true;
 			const color = typeof body.color === "string" ? body.color : undefined;
 			const palette = typeof body.palette === "string" ? body.palette : undefined;
 			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
 			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+
+			// Upsert: if a project already exists at this path, return it
+			if (upsert) {
+				const existing = projectRegistry.getByPath(body.rootPath);
+				if (existing) {
+					// Ensure context is initialized
+					const ctx = projectContextManager.getOrCreate(existing.id);
+					if (ctx) {
+						ctx.gateStore.onStatusChange = () => {
+							ctx.goalStore.bumpGeneration();
+						};
+					}
+					json(existing, 200);
+					return;
+				}
+			}
+
 			const project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark });
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
@@ -1497,13 +1525,18 @@ async function handleApiRoute(
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-			// Merge redacted token values with existing stored values, split secrets into SecretsStore
-			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore, ctx.secretsStore);
-			for (const [key, value] of Object.entries(body)) {
+
+			// Validate ALL keys before writing ANY (atomic: all-or-nothing)
+			for (const [key] of Object.entries(body)) {
 				if (key.includes(".")) {
 					json({ error: `Config key "${key}" must not contain dots` }, 400);
 					return;
 				}
+			}
+
+			// All keys valid — merge secrets then write
+			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore, ctx.secretsStore);
+			for (const [key, value] of Object.entries(body)) {
 				if (value === null || value === "") {
 					ctx.projectConfigStore.remove(key);
 				} else if (typeof value === "string") {
@@ -1874,7 +1907,14 @@ async function handleApiRoute(
 		}
 		// Default to the server's own project when no project could be resolved from CWD or explicit param.
 		// This is the correct API contract: sessions created without a project context belong to the default project.
-		if (!resolvedProjectId) resolvedProjectId = projectContextManager.getDefaultProjectId();
+		if (!resolvedProjectId) {
+			const defaultId = projectContextManager.getDefaultProjectIdOrNull();
+			if (!defaultId) {
+				json({ error: "No projects configured — add a project first" }, 400);
+				return;
+			}
+			resolvedProjectId = defaultId;
+		}
 
 		// ── Sandbox auto-branch ──
 		// For sandboxed non-goal, non-assistant sessions, generate a branch so they get
@@ -2000,7 +2040,14 @@ async function handleApiRoute(
 			}
 			// Default to the server's own project when no project could be resolved.
 			// This is the correct API contract: goals created without explicit project belong to the default project.
-			if (!targetProjectId) targetProjectId = projectContextManager.getDefaultProjectId();
+			if (!targetProjectId) {
+				const defaultId = projectContextManager.getDefaultProjectIdOrNull();
+				if (!defaultId) {
+					json({ error: "No projects configured — add a project first" }, 400);
+					return;
+				}
+				targetProjectId = defaultId;
+			}
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
@@ -4849,7 +4896,12 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = body.cwd || config.defaultCwd;
-		const projectId = (typeof body.projectId === "string") ? body.projectId : projectContextManager.getDefaultProjectId();
+		const defaultPid = projectContextManager.getDefaultProjectIdOrNull();
+		const projectId = (typeof body.projectId === "string") ? body.projectId : defaultPid;
+		if (!projectId) {
+			json({ error: "No projects configured — add a project first" }, 400);
+			return;
+		}
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,
