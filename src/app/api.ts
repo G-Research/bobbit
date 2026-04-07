@@ -320,10 +320,11 @@ export async function browseDirectory(dirPath?: string): Promise<{
   return res.json();
 }
 
-export async function registerProject(name: string, rootPath: string, color?: string): Promise<Project | null> {
+export async function registerProject(name: string, rootPath: string, color?: string, upsert?: boolean): Promise<Project | null> {
   try {
-    const body: Record<string, string> = { name, rootPath };
+    const body: Record<string, unknown> = { name, rootPath };
     if (color) body.color = color;
+    if (upsert) body.upsert = true;
     const res = await gatewayFetch("/api/projects", {
       method: "POST",
       body: JSON.stringify(body),

@@ -72,7 +72,10 @@ export class GoalManager {
 		if (worktree && repoPath) {
 			branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 			worktreePath = path.join(path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`), branch.replace(/\//g, "-"));
-			goalCwd = worktreePath;
+			// Apply subdirectory offset: if project rootPath (cwd) is a subdirectory of the
+			// git repo, the worktree cwd must point to the same subdirectory within the worktree.
+			const relativeOffset = path.relative(repoPath, cwd);
+			goalCwd = relativeOffset && relativeOffset !== "." ? path.join(worktreePath, relativeOffset) : worktreePath;
 			setupStatus = "preparing";
 		}
 
@@ -141,14 +144,21 @@ export class GoalManager {
 	}
 
 	private async _doSetupWorktree(goal: PersistedGoal): Promise<void> {
+		// Compute subdirectory offset: the difference between the preliminary
+		// worktreePath (repo root level) and goal.cwd (which may include offset).
+		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				const result = await createWorktree(goal.repoPath!, goal.branch!);
+				// Apply the subdirectory offset to the actual worktree path
+				const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
+					? path.join(result.worktreePath, preliminaryOffset)
+					: result.worktreePath;
 				// Update goal with actual worktree path and mark as ready
 				this.store.update(goal.id, {
 					worktreePath: result.worktreePath,
-					cwd: result.worktreePath,
+					cwd: offsetCwd,
 					setupStatus: "ready",
 					setupError: undefined,
 				});

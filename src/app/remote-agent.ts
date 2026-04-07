@@ -81,6 +81,10 @@ export class RemoteAgent {
 	// so the legacy XML path can be skipped for those messages.
 	private _toolProposalMessageIds = new Set<string>();
 
+	// Tracks tool_use block IDs that have already been processed as proposals,
+	// preventing re-fires on message re-scan (reconnect, refresh).
+	private _processedProposalIds = new Set<string>();
+
 	// Task timing — track when the agent started working so we can
 	// notify the user if a long task finishes while the tab is hidden.
 	private _taskStartTime: number | null = null;
@@ -218,6 +222,14 @@ export class RemoteAgent {
 		this._sessionId = sessionId;
 		this._intentionalDisconnect = false;
 		this._reconnectAttempt = 0;
+
+		// Restore processed proposal IDs from sessionStorage
+		try {
+			const stored = sessionStorage.getItem(`processed-proposals-${sessionId}`);
+			if (stored) {
+				this._processedProposalIds = new Set(JSON.parse(stored));
+			}
+		} catch { /* ignore */ }
 
 		// Race the WebSocket connect against a timeout so we don't hang
 		// forever on degraded mobile networks.
@@ -947,6 +959,11 @@ export class RemoteAgent {
 			if (!callbackName) continue;
 			const callback = (this as any)[callbackName];
 			if (!callback) continue;
+
+			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh)
+			const blockId = block.id || block.toolCallId || "";
+			if (blockId && this._processedProposalIds.has(blockId)) continue;
+
 			// Extract input — tool_use blocks use `input`, toolCall blocks may use `arguments`
 			let input = block.input;
 			if (!input && typeof block.arguments === "string") {
@@ -957,6 +974,20 @@ export class RemoteAgent {
 			}
 			if (!input || typeof input !== "object") continue;
 			callback(input);
+
+			// Mark this block as processed after firing the callback
+			if (blockId) {
+				this._processedProposalIds.add(blockId);
+				// Persist to sessionStorage so it survives page refresh
+				if (this._sessionId) {
+					try {
+						sessionStorage.setItem(
+							`processed-proposals-${this._sessionId}`,
+							JSON.stringify([...this._processedProposalIds]),
+						);
+					} catch { /* ignore quota errors */ }
+				}
+			}
 			// Track that this message had a tool-based proposal
 			const msgId = message.id || "";
 			if (msgId) this._toolProposalMessageIds.add(msgId);

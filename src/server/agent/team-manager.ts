@@ -777,6 +777,14 @@ export class TeamManager {
 				await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
 			} catch { /* fetch failure is non-fatal — worktree falls back to local HEAD */ }
 
+			// Compute subdirectory offset from the goal's worktree root to its cwd.
+			// If the project rootPath is a subdirectory of the repo, goal.cwd includes
+			// the offset (e.g. worktreePath + "/packages/my-app"), and we must apply
+			// the same offset to the member's worktree.
+			const memberSubdirOffset = goal.worktreePath
+				? path.relative(goal.worktreePath, goal.cwd)
+				: "";
+
 			if (memberSandboxed && this.sessionManager.getSandboxManager()) {
 				// Sandboxed: worktree created inside the container by applySandboxWiring
 				// via ProjectSandbox.createWorktree(). Use goal.cwd as placeholder.
@@ -784,7 +792,10 @@ export class TeamManager {
 			} else {
 				// Non-sandboxed: create worktree the traditional way
 				worktreeResult = await createWorktree(goal.repoPath!, branchName, { startPoint: goal.branch ? `origin/${goal.branch}` : undefined });
-				agentCwd = worktreeResult.worktreePath;
+				// Apply subdirectory offset to member worktree cwd
+				agentCwd = memberSubdirOffset && memberSubdirOffset !== "."
+					? path.join(worktreeResult.worktreePath, memberSubdirOffset)
+					: worktreeResult.worktreePath;
 			}
 		} else {
 			agentCwd = goal.cwd;

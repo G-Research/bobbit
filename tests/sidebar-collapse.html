@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sidebar Collapse State Test Fixture</title>
+  <script type="module">
+    // Per-project collapse state (matches the fixed state.ts implementation).
+    // Stores collapsed project IDs — default is expanded (not in set = expanded).
+
+    const COLLAPSED_UNGROUPED_KEY = "bobbit-collapsed-ungrouped";
+    const COLLAPSED_STAFF_KEY = "bobbit-collapsed-staff";
+
+    let collapsedUngroupedProjects = new Set(
+      JSON.parse(localStorage.getItem(COLLAPSED_UNGROUPED_KEY) || "[]")
+    );
+    let collapsedStaffProjects = new Set(
+      JSON.parse(localStorage.getItem(COLLAPSED_STAFF_KEY) || "[]")
+    );
+
+    function isUngroupedExpandedForProject(projectId) {
+      return !collapsedUngroupedProjects.has(projectId);
+    }
+
+    function setUngroupedExpandedForProject(projectId, value) {
+      if (value) collapsedUngroupedProjects.delete(projectId);
+      else collapsedUngroupedProjects.add(projectId);
+      localStorage.setItem(COLLAPSED_UNGROUPED_KEY, JSON.stringify([...collapsedUngroupedProjects]));
+    }
+
+    function isStaffExpandedForProject(projectId) {
+      return !collapsedStaffProjects.has(projectId);
+    }
+
+    function setStaffExpandedForProject(projectId, value) {
+      if (value) collapsedStaffProjects.delete(projectId);
+      else collapsedStaffProjects.add(projectId);
+      localStorage.setItem(COLLAPSED_STAFF_KEY, JSON.stringify([...collapsedStaffProjects]));
+    }
+
+    // Expose to test
+    window.__collapseState = {
+      isUngroupedExpandedForProject,
+      setUngroupedExpandedForProject,
+      isStaffExpandedForProject,
+      setStaffExpandedForProject,
+    };
+  </script>
+</head>
+<body>
+  <div id="fixture">Sidebar Collapse State Test Fixture</div>
+</body>
+</html>

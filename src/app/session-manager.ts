@@ -1021,9 +1021,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		remote.onProjectProposal = async (fields: Record<string, string>) => {
 			if (activeSessionId() !== sessionId) return;
 			const { registerProject, fetchProjects, gatewayFetch } = await import("./api.js");
-			const project = await registerProject(fields.name, fields.root_path, undefined);
+			// Use upsert so re-registration returns existing project instead of erroring
+			const project = await registerProject(fields.name, fields.root_path, undefined, true);
 			if (project) {
-				// Write detected config to project.yaml
+				// Write detected config to project.yaml (proceeds even if project already existed)
 				const configFields: Record<string, string> = {};
 				const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
 					'test_unit_command', 'test_e2e_command',
@@ -1032,10 +1033,22 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					if (fields[key]) configFields[key] = fields[key];
 				}
 				if (Object.keys(configFields).length > 0) {
-					await gatewayFetch(`/api/projects/${project.id}/config`, {
-						method: 'PUT',
-						body: JSON.stringify(configFields),
-					});
+					try {
+						const cfgRes = await gatewayFetch(`/api/projects/${project.id}/config`, {
+							method: 'PUT',
+							body: JSON.stringify(configFields),
+						});
+						if (!cfgRes.ok) {
+							const errData = await cfgRes.json().catch(() => ({}));
+							const msg = `Project config write failed: ${errData.error || cfgRes.status}. You may need to set build/test commands manually in Settings.`;
+							console.error(`[project-proposal] ${msg}`);
+							window.alert?.(msg);
+						}
+					} catch (err) {
+						const msg = `Project config write error: ${err instanceof Error ? err.message : err}. You may need to set build/test commands manually in Settings.`;
+						console.error(`[project-proposal] ${msg}`);
+						window.alert?.(msg);
+					}
 				}
 				// Refresh project list
 				state.projects = await fetchProjects();

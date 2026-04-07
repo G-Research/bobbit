@@ -10,9 +10,9 @@ import {
 	activeSessionId,
 	isDesktop,
 	expandedGoals,
-	ungroupedExpanded,
+	isUngroupedExpanded,
 	setUngroupedExpanded,
-	staffSectionExpanded,
+	isStaffExpanded,
 	setStaffSectionExpanded,
 	saveExpandedGoals,
 	toggleTeamLeadExpanded,
@@ -562,10 +562,11 @@ async function handleStaffClick(agent: typeof state.staffList[0]): Promise<void>
 	}
 }
 
-export function renderStaffSidebarSection(filteredList?: typeof state.staffList) {
+export function renderStaffSidebarSection(filteredList?: typeof state.staffList, projectId?: string) {
 	ensureStaffLoaded();
 	const list = filteredList ?? state.staffList.filter((s) => s.state !== "retired");
 	const mobile = !isDesktop();
+	const staffExpanded = isStaffExpanded(projectId || "");
 	// Always show the Staff section so users can create their first staff agent
 
 	return html`
@@ -573,8 +574,8 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList)
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
 				style="${mobile ? "" : `padding-left:${HEADER_CHEVRON_W}px;`}"
-				@click=${() => { setStaffSectionExpanded(!staffSectionExpanded); renderApp(); }}>
-				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-sm"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}">${staffSectionExpanded ? "▾" : "▸"}</span>
+				@click=${() => { setStaffSectionExpanded(projectId || "", !staffExpanded); renderApp(); }}>
+				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-sm"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}">${staffExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
 				<span class="flex-1 ${mobile ? "text-sm" : "text-[9px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
@@ -590,7 +591,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList)
 					>${icon(Plus, mobile ? "sm" : "xs")}</button>
 				</div>
 			</div>
-			${staffSectionExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${list.filter((agent) => {
+			${staffExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${list.filter((agent) => {
 				// Hide staff agents whose current session is archived and belongs to a goal
 				// — those show under their goal's archived section instead
 				if (agent.currentSessionId) {
@@ -836,6 +837,7 @@ function renderProjectContent(
 	sessions: GatewaySession[],
 	staff?: typeof state.staffList,
 ) {
+	const ungroupedExp = isUngroupedExpanded(project.id);
 	return html`
 		${goals.map((goal, i) => html`
 			${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
@@ -845,8 +847,8 @@ function renderProjectContent(
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 				style="padding-left:${HEADER_CHEVRON_W}px;"
-				@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
-				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExpanded ? "▾" : "▸"}</span>
+				@click=${() => { setUngroupedExpanded(project.id, !ungroupedExp); renderApp(); }}>
+				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExp ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 				<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 				<div class="flex items-center relative">
@@ -864,13 +866,13 @@ function renderProjectContent(
 					${renderRolePickerDropdown()}
 				</div>
 			</div>
-			${ungroupedExpanded && sessions.length > 0 ? html`
+			${ungroupedExp && sessions.length > 0 ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${sessions.map(renderSessionRow)}
 				</div>
 			` : ""}
 		</div>
-		${staff ? renderStaffSidebarSection(staff) : ""}
+		${staff ? renderStaffSidebarSection(staff, project.id) : ""}
 	`;
 }
 
@@ -1108,7 +1110,18 @@ export function renderSidebar() {
 								`;
 							})()}
 						`; })()}
-				${state.projects.length >= 1 ? html`
+				${state.projects.length === 0 ? html`
+					<div style="padding: 1.5rem 1rem; text-align: center;">
+						<p class="text-muted-foreground" style="margin: 0 0 0.75rem; font-size: 0.8125rem;">No projects configured</p>
+						<button
+							class="flex items-center justify-center gap-1 px-3 py-1.5 rounded-md text-xs text-primary-foreground bg-primary hover:bg-primary/90 transition-colors mx-auto"
+							@click=${() => showProjectDialog()}
+						>
+							${icon(Plus, "xs")}
+							<span>Add Project</span>
+						</button>
+					</div>
+				` : html`
 					<div class="border-t border-border/30 my-1 mx-2"></div>
 					<button
 						class="flex items-center gap-1 px-1 py-1 rounded-md text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full"
@@ -1119,7 +1132,7 @@ export function renderSidebar() {
 						${icon(Plus, "xs")}
 						<span>Add Project</span>
 					</button>
-				` : ""}
+				`}
 			</div>
 			<div class="flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
@@ -1230,15 +1243,15 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				})}
 				${sortedGoals.length > 0 ? html`
 					<div class="w-7 border-t border-border/50 my-1.5"></div>
-					<button
+					${(() => { const _collapsedUngroupedExp = isUngroupedExpanded(state.projects[0]?.id || ""); return html`<button
 						class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
 						title="Ungrouped sessions"
-						@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}
+						@click=${() => { setUngroupedExpanded(state.projects[0]?.id || "", !_collapsedUngroupedExp); renderApp(); }}
 					>
-						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${ungroupedExpanded ? "▾" : "▸"}</span>
+						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${_collapsedUngroupedExp ? "▾" : "▸"}</span>
 						<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
 					</button>
-					${ungroupedExpanded ? ungrouped.map(renderCollapsedSession) : ""}
+					${_collapsedUngroupedExp ? ungrouped.map(renderCollapsedSession) : ""}`; })()}
 				` : ungrouped.map(renderCollapsedSession)}
 				<div class="w-7 border-t border-border/50 my-1.5"></div>
 				${state.staffList.filter(s => s.state !== "retired").map((agent) => {

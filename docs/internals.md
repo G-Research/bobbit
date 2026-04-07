@@ -25,8 +25,8 @@ interface RegisteredProject {
 ```
 
 Key behaviors:
-- The server CWD is always auto-registered as the "default" project on startup via `ensureDefaultProject()`.
-- `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed.
+- On startup, the server auto-registers the CWD as the "default" project via `ensureDefaultProject()` — but **only if `projects.json` already exists** in the state directory (i.e. not a fresh install). A truly fresh folder starts with zero projects; the user adds one explicitly via the "Add Project" flow. This prevents Bobbit from assuming every directory it runs in is a project.
+- `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed. `POST /api/projects` supports `upsert: true` — if a project already exists at the same `rootPath`, the existing project is returned (200) instead of a 400 error. This makes project registration idempotent.
 - `remove()` only unregisters — it does not delete files. Callers guard against removing the default project.
 - The per-project settings page General tab exposes a "Remove Project" button in a Danger Zone section (hidden for the default project). On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
 - Persistence is atomic (write to `.tmp` then rename).
@@ -94,7 +94,7 @@ Store resolution **never falls back to a default project**. Every operation reso
 2. **Explicit projectId** — `getOrCreate(projectId)`: used when the caller already knows the target project (e.g. from a session's `projectId` field).
 3. **Creation-time defaulting** — API endpoints for creating sessions, goals, and staff agents default to the server CWD project when no `projectId` is provided. This is the API contract for creation, not a store-resolution fallback — once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2.
 
-The `getDefault()` and `getDefaultProjectId()` methods are **deprecated**. They exist only for bootstrapping (constructing managers at startup) and the creation-time defaulting described above. New code must not use them for runtime store resolution.
+The `getDefault()` and `getDefaultProjectId()` methods are **deprecated**. They exist only for bootstrapping (constructing managers at startup) and the creation-time defaulting described above. New code must not use them for runtime store resolution. Null-safe alternatives `getDefaultOrNull()` and `getDefaultProjectIdOrNull()` are available for code paths that must handle zero-project environments gracefully (e.g. API creation endpoints return 400 "No projects configured" instead of crashing).
 
 `SessionManager` does not hold default store fields (`this.store`, `this.costTracker`, etc.). All store access goes through PCM resolution. `TeamManager`, `StaffManager`, and `VerificationHarness` follow the same pattern — they resolve stores per-goal or per-entity via PCM, with no fallback store references. `resolveStoreForId()` returns `null` instead of falling back, and callers use optional chaining.
 
@@ -143,7 +143,7 @@ The project assistant guides users through registering a new project directory. 
 
 **Scaffolding mode** (assistant type `"project-scaffolding"`): For empty or non-existent directories. The assistant asks what the project is about, suggests tech stacks, and helps scaffold the project structure (directory layout, basic files, README). After the user accepts the proposal, the assistant uses bash/write tools to create the project files, then calls `propose_project` with the same settings.
 
-On proposal acceptance, the client-side handler registers the project via `POST /api/projects` and then writes all config fields to `project.yaml` via `PUT /api/projects/:id/config`. This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
+On proposal acceptance, the client-side handler registers the project via `POST /api/projects` (with `upsert: true` for idempotency) and then writes all config fields to `project.yaml` via `PUT /api/projects/:id/config`. The config write is atomic — all keys are validated before any are written, so a validation failure leaves the existing config unchanged. The client deduplicates proposal acceptance by tracking processed tool_use block IDs in `sessionStorage`, preventing re-fires on message re-scan (reconnect, refresh). This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
 
 **Auto-import path**: If `POST /api/projects/detect` reports `.bobbit/` already exists, the UI skips the assistant entirely and registers the project immediately with the auto-detected name (from `package.json` or directory basename). Existing `.bobbit/config/` settings are preserved as-is.
 
@@ -221,8 +221,8 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 
 **Lifecycle:**
 
-1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, `git worktree add` creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container.
-2. **Working**: The agent works in the worktree directory. The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
+1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, `git worktree add` creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
+2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
 4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
 5. **Restore**: After a restart, existing session worktrees are reused — the server reconnects to the worktree on disk without recreating it.
@@ -242,7 +242,9 @@ The sidebar always groups sessions and goals under collapsible project folder ro
 ├── [+ Add Project]
 ```
 
-When only one project is registered, its folder row defaults to expanded so there is no extra click required. Each project row shows a folder icon, project name, settings gear, and new-goal button.
+When only one project is registered, its folder row defaults to expanded so there is no extra click required. Each project row shows a folder icon, project name, settings gear, and new-goal button. When no projects are registered (fresh install), the sidebar shows a "No projects configured" empty state with an "Add Project" button.
+
+**Collapse state is per-project**: The Sessions and Staff section collapse toggles are stored per-project, not globally. Collapsing Sessions in Project A does not affect Project B. State is persisted as collapsed-project-ID sets in localStorage (`bobbit-collapsed-ungrouped`, `bobbit-collapsed-staff`). Default state is expanded for all projects. Access via `isUngroupedExpanded(projectId)` / `setUngroupedExpanded(projectId, value)` and `isStaffExpanded(projectId)` / `setStaffSectionExpanded(projectId, value)` in `state.ts`.
 
 ### REST API
 

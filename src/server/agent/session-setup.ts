@@ -498,11 +498,19 @@ export async function executeWorktreeAsync(
 		// No baseBranch for regular sessions — they branch from HEAD
 	}
 
-	// Update session and plan with worktree CWD
-	session.cwd = worktreeCwd;
+	// Apply subdirectory offset: if the session's original CWD (project rootPath) is a
+	// subdirectory of the repo, offset the working directory within the worktree.
+	const originalCwd = plan.cwd;
+	const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
+	const offsetCwd = relativeOffset && relativeOffset !== "."
+		? path.join(worktreeCwd, relativeOffset)
+		: worktreeCwd;
+
+	// Update session and plan with worktree CWD (offset applied)
+	session.cwd = offsetCwd;
 	session.worktreePath = worktreeCwd;
-	plan.cwd = worktreeCwd;
-	ctx.store.update(session.id, { cwd: worktreeCwd, worktreePath: worktreeCwd });
+	plan.cwd = offsetCwd;
+	ctx.store.update(session.id, { cwd: offsetCwd, worktreePath: worktreeCwd });
 	console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 
 	// Run remaining pipeline steps on the worktree CWD

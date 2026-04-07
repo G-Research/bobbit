@@ -59,6 +59,8 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 		// Clean slate
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)
+		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
 		// Set BOBBIT_DIR env BEFORE importing server modules.

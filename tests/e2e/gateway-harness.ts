@@ -60,6 +60,8 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 	// Clean slate
 	rmSync(bobbitDir, { recursive: true, force: true });
 	mkdirSync(join(bobbitDir, "state"), { recursive: true });
+	// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)
+	writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 	// Mark setup as complete so the setup wizard doesn't appear in tests
 	writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
