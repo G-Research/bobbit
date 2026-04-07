@@ -10,7 +10,8 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, apiFetch, nonGitCwd } from "./e2e-setup.js";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -125,5 +126,87 @@ test.describe("Bug 3b: Config write atomicity", () => {
 		const config = await getResp.json();
 		expect(config.build_command).toBe("npm run build");
 		expect(config.test_command).toBe("npm test");
+	});
+});
+
+test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
+	let repoDir: string;
+	let subdirPath: string;
+	let projectId: string;
+
+	test.beforeAll(async () => {
+		// Create a real git repo with a subdirectory structure:
+		//   <repoDir>/
+		//     packages/my-app/    <-- project rootPath
+		//       package.json
+		repoDir = join(tmpdir(), `bobbit-e2e-subrepo-${Date.now()}`);
+		subdirPath = join(repoDir, "packages", "my-app");
+		mkdirSync(subdirPath, { recursive: true });
+		writeFileSync(join(subdirPath, "package.json"), JSON.stringify({ name: "my-app" }));
+		writeFileSync(join(repoDir, "README.md"), "# Monorepo\n");
+
+		execFileSync("git", ["init"], { cwd: repoDir, stdio: "pipe" });
+		execFileSync("git", ["add", "."], { cwd: repoDir, stdio: "pipe" });
+		execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir, stdio: "pipe" });
+
+		// Register a project at the subdirectory (not the repo root)
+		const resp = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "subdir-project", rootPath: subdirPath }),
+		});
+		expect(resp.status).toBe(201);
+		const project = await resp.json();
+		projectId = project.id;
+	});
+
+	test("goal.cwd includes subdirectory offset within worktree", async () => {
+		// Create a goal with cwd pointing to the subdirectory.
+		// The goal-manager should detect the git repo root, compute the offset
+		// (packages/my-app), and apply it to the worktree path.
+		const resp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "Test subdir offset",
+				cwd: subdirPath,
+				spec: "Test goal for Bug 2",
+				projectId,
+			}),
+		});
+		expect(resp.status).toBe(201);
+		const goal = await resp.json();
+
+		// The goal should have a worktreePath at the repo-level worktree root
+		expect(goal.worktreePath).toBeTruthy();
+		// worktreePath should NOT contain the subdirectory offset
+		expect(goal.worktreePath).not.toMatch(/packages[/\\]my-app/);
+
+		// The goal's cwd MUST include the subdirectory offset within the worktree
+		expect(goal.cwd).toContain("packages");
+		expect(goal.cwd).toMatch(/packages[/\\]my-app$/);
+
+		// cwd should start with worktreePath (it's worktreePath + offset)
+		const normalizedCwd = goal.cwd.replace(/\\/g, "/");
+		const normalizedWt = goal.worktreePath.replace(/\\/g, "/");
+		expect(normalizedCwd.startsWith(normalizedWt)).toBe(true);
+
+		// Wait for worktree setup to complete, then verify cwd is preserved
+		const goalId = goal.id;
+		const start = Date.now();
+		let readyGoal: any;
+		while (Date.now() - start < 30_000) {
+			const getResp = await apiFetch(`/api/goals/${goalId}`);
+			readyGoal = await getResp.json();
+			if (readyGoal.setupStatus === "ready" || readyGoal.setupStatus === "error") break;
+			await new Promise(r => setTimeout(r, 500));
+		}
+
+		// After async setup, the cwd should still include the subdirectory offset
+		expect(readyGoal.setupStatus).toBe("ready");
+		expect(readyGoal.cwd).toMatch(/packages[/\\]my-app$/);
+		// worktreePath should still be the worktree root (no subdirectory)
+		expect(readyGoal.worktreePath).not.toMatch(/packages[/\\]my-app/);
+
+		// Cleanup: delete the goal
+		await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
 	});
 });
