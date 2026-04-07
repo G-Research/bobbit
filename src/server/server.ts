@@ -24,7 +24,7 @@ import { ToolManager } from "./agent/tool-manager.js";
 import { PersonalityStore } from "./agent/personality-store.js";
 import { PersonalityManager } from "./agent/personality-manager.js";
 
-import { getPromptSections, initPromptDirs } from "./agent/system-prompt.js";
+import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
@@ -4832,6 +4832,15 @@ async function handleApiRoute(
 	const promptSectionsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-sections$/);
 	if (promptSectionsMatch && req.method === "GET") {
 		const id = promptSectionsMatch[1];
+
+		// Try persisted snapshot first (captures the actual prompt at creation time)
+		const persisted = loadPersistedPromptSections(id);
+		if (persisted) {
+			json(persisted);
+			return;
+		}
+
+		// Fallback: reconstruct for legacy sessions without a persisted snapshot
 		const parts = sessionManager.getPromptParts(id);
 		if (!parts) { json({ error: "Session not found or no prompt data" }, 404); return; }
 

@@ -381,6 +381,46 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 }
 
 /**
+ * Persist the resolved prompt sections as a JSON snapshot at session creation time.
+ * This captures the actual prompt that was used, not a reconstruction from current files.
+ */
+export function persistPromptSections(sessionId: string, parts: PromptParts): void {
+	try {
+		const sections = getPromptSections(parts);
+		const totalTokens = sections.reduce((sum, s) => sum + s.tokens, 0);
+		const data = { sections, totalTokens, createdAt: new Date().toISOString() };
+		const jsonPath = path.join(getPromptsDir(), `${sessionId}-prompt.json`);
+		fs.writeFileSync(jsonPath, JSON.stringify(data), "utf-8");
+	} catch (err) {
+		console.error(`[system-prompt] Failed to persist prompt sections for ${sessionId}:`, err);
+	}
+}
+
+/**
+ * Load persisted prompt sections snapshot for a session.
+ * Returns null if the file doesn't exist or can't be parsed.
+ */
+export function loadPersistedPromptSections(sessionId: string): { sections: PromptSection[]; totalTokens: number; createdAt: string } | null {
+	try {
+		const jsonPath = path.join(getPromptsDir(), `${sessionId}-prompt.json`);
+		if (!fs.existsSync(jsonPath)) return null;
+		return JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Delete the persisted prompt sections JSON for a session (archive purge only).
+ */
+export function purgePromptSectionsJson(sessionId: string): void {
+	try {
+		const jsonPath = path.join(getPromptsDir(), `${sessionId}-prompt.json`);
+		if (fs.existsSync(jsonPath)) fs.unlinkSync(jsonPath);
+	} catch { /* ignore */ }
+}
+
+/**
  * Clean up a session's assembled prompt file.
  */
 export function cleanupSessionPrompt(sessionId: string): void {
