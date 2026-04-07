@@ -16,7 +16,7 @@ import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsCo
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
@@ -886,6 +886,8 @@ export class SessionManager {
 		// Cache parts for prompt-sections API
 		const session = this.sessions.get(sessionId);
 		if (session) session.promptParts = parts;
+		// Persist prompt sections snapshot for the inspector
+		persistPromptSections(sessionId, parts);
 		return assembleSystemPrompt(sessionId, parts);
 	}
 
@@ -3491,6 +3493,13 @@ export class SessionManager {
 			cleanupSessionPrompt(ps.id);
 		} catch (err) {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
+		}
+
+		// Delete persisted prompt sections JSON
+		try {
+			purgePromptSectionsJson(ps.id);
+		} catch (err) {
+			console.error(`[session-manager] Failed to purge prompt sections for ${ps.id}:`, err);
 		}
 
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
