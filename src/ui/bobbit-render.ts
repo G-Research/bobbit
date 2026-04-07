@@ -154,20 +154,34 @@ export function drawShadowPixels(ctx: CanvasRenderingContext2D, pixels: ShadowPi
 }
 
 /**
- * Render a bobbit body to a data URL image at 1:1 pixel scale.
- * Use CSS image-rendering:pixelated and transform:scale() to display at desired size.
+ * Render a bobbit body to a data URL image.
+ *
+ * When `pixelScale` is 1 (default), the canvas is 10×9 — one canvas pixel per
+ * sprite pixel.  When `pixelScale` > 1, each sprite pixel is drawn as a
+ * `pixelScale × pixelScale` rect, producing a larger canvas that can be
+ * displayed at 1:1 device-pixel mapping to avoid fractional-DPR resampling
+ * artifacts (e.g. double-width eye columns at non-integer zoom levels).
  */
 export function renderBodyToDataURL(
 	palette: BobbitPalette,
 	gaze: EyeGaze = "center",
 	blink = false,
 	eyeColor?: string,
+	pixelScale = 1,
 ): string {
 	const canvas = document.createElement("canvas");
-	canvas.width = BODY_WIDTH;
-	canvas.height = BODY_HEIGHT;
+	canvas.width = BODY_WIDTH * pixelScale;
+	canvas.height = BODY_HEIGHT * pixelScale;
 	const ctx = canvas.getContext("2d")!;
-	drawPixels(ctx, resolveBodyPixels(palette, gaze, blink, eyeColor));
+	const pixels = resolveBodyPixels(palette, gaze, blink, eyeColor);
+	if (pixelScale === 1) {
+		drawPixels(ctx, pixels);
+	} else {
+		for (const [x, y, color] of pixels) {
+			ctx.fillStyle = color;
+			ctx.fillRect(x * pixelScale, y * pixelScale, pixelScale, pixelScale);
+		}
+	}
 	return canvas.toDataURL();
 }
 
@@ -243,38 +257,81 @@ export interface ChatBlobOptions {
 // CANVAS EYE ANIMATION
 // ============================================================================
 
-/** Pre-render all unique eye frames for an eye sequence, return map of frameKey → dataURL */
-function buildEyeFrameCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<string, string> {
-	const cache = new Map<string, string>();
+/** CSS scale factor used by .bobbit-blob__sprite */
+const CSS_SCALE = 4;
+
+/** Pre-render all unique eye frames for an eye sequence as SpritePixel arrays */
+function buildEyePixelCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<string, SpritePixel[]> {
+	const cache = new Map<string, SpritePixel[]>();
 	for (const frame of sequence) {
 		const key = `${frame.gaze}-${frame.blink}`;
 		if (!cache.has(key)) {
-			cache.set(key, renderBodyToDataURL(palette, frame.gaze, frame.blink));
+			cache.set(key, resolveBodyPixels(palette, frame.gaze, frame.blink));
 		}
 	}
 	return cache;
 }
 
-/** Start a JS eye animation loop on a canvas sprite <img> element.
- *  Returns a cleanup function to stop the loop. */
+/**
+ * Draw sprite pixels to a canvas at exact device-pixel resolution using
+ * Bresenham-style distribution. Each sprite pixel gets either
+ * floor(devicePx / spritePx) or ceil(devicePx / spritePx) device pixels,
+ * distributed uniformly so adjacent columns never differ by more than 1px.
+ * This guarantees pixel-perfect eyes at every DPR.
+ */
+function drawPixelsBresenham(
+	ctx: CanvasRenderingContext2D,
+	pixels: SpritePixel[],
+	devW: number,
+	devH: number,
+): void {
+	// Precompute column and row boundaries
+	const colEdges = new Int32Array(BODY_WIDTH + 1);
+	const rowEdges = new Int32Array(BODY_HEIGHT + 1);
+	for (let x = 0; x <= BODY_WIDTH; x++) colEdges[x] = Math.round(x * devW / BODY_WIDTH);
+	for (let y = 0; y <= BODY_HEIGHT; y++) rowEdges[y] = Math.round(y * devH / BODY_HEIGHT);
+
+	for (const [x, y, color] of pixels) {
+		const px = colEdges[x];
+		const py = rowEdges[y];
+		const pw = colEdges[x + 1] - px;
+		const ph = rowEdges[y + 1] - py;
+		ctx.fillStyle = color;
+		ctx.fillRect(px, py, pw, ph);
+	}
+}
+
+/**
+ * Start a JS eye animation loop on a <canvas> sprite element.
+ * Draws directly to the canvas at device-pixel resolution — no image scaling,
+ * no nearest-neighbor resampling. Returns a cleanup function to stop the loop.
+ */
 export function startCanvasEyeAnimation(
-	img: HTMLImageElement,
+	canvas: HTMLCanvasElement,
 	sequence: EyeFrame[],
 	cycleDurationMs: number,
 	palette: BobbitPalette = CANONICAL_PALETTE,
 ): () => void {
-	const cache = buildEyeFrameCache(palette, sequence);
+	const cache = buildEyePixelCache(palette, sequence);
+
+	// Size canvas backing to exact device pixel count
+	const dpr = window.devicePixelRatio || 1;
+	const cssW = BODY_WIDTH * CSS_SCALE;
+	const cssH = BODY_HEIGHT * CSS_SCALE;
+	const devW = Math.round(cssW * dpr);
+	const devH = Math.round(cssH * dpr);
+	canvas.width = devW;
+	canvas.height = devH;
+	// CSS dimensions are handled by the canvas.bobbit-blob__sprite rule (40×36px)
+
+	const ctx = canvas.getContext("2d")!;
 	let rafId = 0;
 	let lastKey = "";
 	let cssAnim: Animation | null = null;
 
 	function findCssAnimation(): Animation | null {
 		try {
-			const anims = img.getAnimations();
-			for (const a of anims) {
-				const kfs = (a.effect as KeyframeEffect)?.getKeyframes?.() ?? [];
-				if (kfs.some((k: Keyframe) => "boxShadow" in k)) return a;
-			}
+			const anims = canvas.getAnimations();
 			for (const a of anims) {
 				const dur = (a.effect as KeyframeEffect)?.getTiming?.()?.duration;
 				if (dur === cycleDurationMs) return a;
@@ -306,41 +363,54 @@ export function startCanvasEyeAnimation(
 		}
 		const key = `${frame.gaze}-${frame.blink}`;
 		if (key !== lastKey) {
-			const url = cache.get(key);
-			if (url) img.src = url;
+			const pixels = cache.get(key);
+			if (pixels) {
+				ctx.clearRect(0, 0, devW, devH);
+				drawPixelsBresenham(ctx, pixels, devW, devH);
+			}
 			lastKey = key;
 		}
 		rafId = requestAnimationFrame(tick);
 	}
+
+	// Draw initial frame synchronously to avoid a blank-canvas flash on mount
+	const initPixels = cache.get("center-false") ?? cache.values().next().value;
+	if (initPixels) drawPixelsBresenham(ctx, initPixels, devW, devH);
+	lastKey = "center-false";
+
 	rafId = requestAnimationFrame(tick);
 	return () => cancelAnimationFrame(rafId);
 }
 
 // ============================================================================
-// CANVAS BLOB SPRITE — standalone <img> for use inside existing blob templates
+// CANVAS BLOB SPRITE — <canvas> element for use inside existing blob templates
 // ============================================================================
 
 /**
- * Render just the canvas sprite <img> element with eye animation.
+ * Render just the canvas sprite element with eye animation.
  * Drop-in replacement for `<div class="bobbit-blob__sprite"></div>`.
- * Inherits all CSS animations from the class; eyes driven by JS.
+ * Uses a <canvas> rendered at exact device-pixel resolution for pixel-perfect
+ * eyes at any DPR/zoom level. CSS animations use -canvas keyframe variants
+ * (no scale(4), translates ×4).
  */
-export function renderBlobSpriteImg(isIdle: boolean): TemplateResult {
-	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
-	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
+export function renderBlobSpriteCanvas(isIdle: boolean): TemplateResult {
 	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
 	let cleanup: (() => void) | null = null;
 	const onRef = (el: Element | undefined) => {
-		if (el && el instanceof HTMLImageElement) {
+		if (el && el instanceof HTMLCanvasElement) {
 			cleanup?.();
 			cleanup = startCanvasEyeAnimation(el, sequence, 10000);
 		} else {
-			// Element disconnected — stop the animation loop
 			cleanup?.();
 			cleanup = null;
 		}
 	};
-	return html`<img ${ref(onRef)} class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">`;
+	return html`<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>`;
+}
+
+/** @deprecated Use renderBlobSpriteCanvas instead. Kept for backward compat. */
+export function renderBlobSpriteImg(isIdle: boolean): TemplateResult {
+	return renderBlobSpriteCanvas(isIdle);
 }
 
 // ============================================================================
@@ -348,29 +418,21 @@ export function renderBlobSpriteImg(isIdle: boolean): TemplateResult {
 // ============================================================================
 
 /**
- * Render a chat blob using canvas <img> with the same CSS classes as the
+ * Render a chat blob using canvas-based sprite with the same CSS classes as the
  * box-shadow version. Eye animation runs via JS (startCanvasEyeAnimation)
- * instead of CSS box-shadow keyframes. All other animations (bob, shimmer,
- * enter/exit, squish, idle translate) work via CSS.
+ * drawing directly to a <canvas> at device-pixel resolution. All other
+ * animations (bob, shimmer, enter/exit, squish, idle translate) work via
+ * the -canvas CSS keyframe variants.
  */
 export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 	const { blobClass, accClass = "", hueRotate = 0 } = opts;
 	const isIdle = blobClass.includes("idle");
 
-	// Body — start with center gaze, JS animation will swap frames
-	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
-
-	// Use img elements WITH the CSS class names so all layout/transform/animation
-	// CSS applies identically. Override width (CSS sets 1px for box-shadow technique)
-	// to actual pixel dimensions, and compensate margins to keep the same layout box.
-	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
-
-	// Start eye animation when the img mounts
 	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
-	const cycleDuration = 10000; // both busy and idle use 10s cycles
+	const cycleDuration = 10000;
 	let cleanup: (() => void) | null = null;
 	const onRef = (el: Element | undefined) => {
-		if (el && el instanceof HTMLImageElement) {
+		if (el && el instanceof HTMLCanvasElement) {
 			cleanup?.();
 			cleanup = startCanvasEyeAnimation(el, sequence, cycleDuration);
 		} else {
@@ -381,7 +443,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 
 	return html`<div class="${accClass}" style="--bobbit-hue-rotate:${hueRotate}deg;display:inline-block;padding:8px 20px 40px 20px;">
 		<div class="${blobClass}">
-			<img ${ref(onRef)} class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">
+			<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>
 			<div class="bobbit-blob__crown"></div>
 			<div class="bobbit-blob__bandana"></div>
 			<div class="bobbit-blob__magnifier"></div>
@@ -404,7 +466,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 // ============================================================================
 
 /**
- * Render an idle blob using canvas-based <img> for the sprite body.
+ * Render an idle blob using canvas-based <canvas> for the sprite body.
  * Only the sprite body is canvas-rendered; accessories use CSS box-shadow.
  */
 export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
@@ -416,13 +478,10 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
 	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
 
-	const bodyUrl = renderBodyToDataURL(CANONICAL_PALETTE, "center", false);
-	const spriteStyle = `width:${BODY_WIDTH}px !important;height:${BODY_HEIGHT}px !important;margin:9px ${18 - (BODY_WIDTH - 1)}px ${28 - (BODY_HEIGHT - 1)}px 18px !important;box-shadow:none !important;image-rendering:pixelated;`;
-
 	// Eye animation for idle blob
 	let cleanup: (() => void) | null = null;
 	const onRef = (el: Element | undefined) => {
-		if (el && el instanceof HTMLImageElement) {
+		if (el && el instanceof HTMLCanvasElement) {
 			cleanup?.();
 			cleanup = startCanvasEyeAnimation(el, IDLE_EYE_SEQUENCE, 10000);
 		} else {
@@ -435,7 +494,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
 			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
 				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
-					<img ${ref(onRef)} class="bobbit-blob__sprite" src="${bodyUrl}" style="${spriteStyle}">
+					<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>
 					<div class="bobbit-blob__crown"></div>
 					<div class="bobbit-blob__bandana"></div>
 					<div class="bobbit-blob__magnifier"></div>
