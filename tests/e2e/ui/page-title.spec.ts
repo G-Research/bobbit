@@ -9,12 +9,12 @@ test.describe("Dynamic page title", () => {
 		await openApp(page);
 
 		// The gateway harness auto-creates a default project.
-		// After openApp, the title should reflect the active project.
-		const title = await page.evaluate(() => document.title);
-
-		expect(title).toContain("·");
-		expect(title).toContain("Bobbit");
-		// Title format: "<ProjectName> · Bobbit"
-		expect(title).toMatch(/.+ · Bobbit$/);
+		// Wait for the title to update after projects load and render cycle runs.
+		await expect(async () => {
+			const title = await page.evaluate(() => document.title);
+			expect(title).toContain("·");
+			expect(title).toContain("Bobbit");
+			expect(title).toMatch(/.+ · Bobbit$/);
+		}).toPass({ timeout: 5000 });
 	});
 });
