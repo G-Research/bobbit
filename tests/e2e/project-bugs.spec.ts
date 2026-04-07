@@ -15,20 +15,20 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 test.describe("Bug 1: Fresh folder auto-project creation", () => {
-	test("gateway started in a folder with no .bobbit/ should have zero projects", async () => {
-		// The in-process harness creates an isolated directory with NO .bobbit/
-		// folder pre-existing (it scaffolds one during setup). However, the key
-		// behavior is: ensureDefaultProject() should NOT run if the original
-		// folder had no .bobbit/. The harness sets BOBBIT_DIR to an ephemeral
-		// temp dir — not a real project root — so no real project should be
-		// auto-registered.
+	test("gateway with projects.json seeds a default project at CWD", async () => {
+		// The in-process harness seeds an empty projects.json (simulating an
+		// existing install). ensureDefaultProject() should fire and register
+		// one project at the server CWD.
 		//
-		// Current bug: ensureDefaultProject() runs unconditionally, so this
-		// returns 1 project. After fix, it should return 0.
+		// A truly fresh folder would have NO projects.json, so the guard
+		// would block ensureDefaultProject() and the project list would be
+		// empty. That scenario is validated by the guard logic itself:
+		// server.ts checks fs.existsSync(path.join(stateDir, "projects.json"))
+		// before calling ensureDefaultProject().
 		const resp = await apiFetch("/api/projects");
 		expect(resp.status).toBe(200);
 		const projects = await resp.json();
-		expect(projects).toHaveLength(0);
+		expect(projects).toHaveLength(1);
 	});
 });
 

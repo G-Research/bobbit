@@ -363,9 +363,12 @@ export function createGateway(config: GatewayConfig) {
 
 	// Project registry — persisted at server level
 	const projectRegistry = new ProjectRegistry(stateDir);
-	// Only auto-register a default project if .bobbit/ already exists at the server CWD.
-	// A truly fresh folder should start with zero projects — the user creates one explicitly.
-	if (fs.existsSync(path.join(getProjectRoot(), ".bobbit"))) {
+	// Only auto-register a default project if projects.json exists (not a fresh install).
+	// This respects BOBBIT_DIR overrides (test harnesses, custom deployments) where .bobbit/
+	// may not exist at the project root. A truly fresh folder has no projects.json and starts
+	// with zero projects — the user creates one explicitly via the "Add Project" flow.
+	const projectsFile = path.join(stateDir, "projects.json");
+	if (fs.existsSync(projectsFile)) {
 		projectRegistry.ensureDefaultProject(getProjectRoot());
 	}
 
