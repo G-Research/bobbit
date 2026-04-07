@@ -1110,7 +1110,18 @@ export function renderSidebar() {
 								`;
 							})()}
 						`; })()}
-				${state.projects.length >= 1 ? html`
+				${state.projects.length === 0 ? html`
+					<div style="padding: 1.5rem 1rem; text-align: center;">
+						<p class="text-muted-foreground" style="margin: 0 0 0.75rem; font-size: 0.8125rem;">No projects configured</p>
+						<button
+							class="flex items-center justify-center gap-1 px-3 py-1.5 rounded-md text-xs text-primary-foreground bg-primary hover:bg-primary/90 transition-colors mx-auto"
+							@click=${() => showProjectDialog()}
+						>
+							${icon(Plus, "xs")}
+							<span>Add Project</span>
+						</button>
+					</div>
+				` : html`
 					<div class="border-t border-border/30 my-1 mx-2"></div>
 					<button
 						class="flex items-center gap-1 px-1 py-1 rounded-md text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full"
@@ -1121,7 +1132,7 @@ export function renderSidebar() {
 						${icon(Plus, "xs")}
 						<span>Add Project</span>
 					</button>
-				` : ""}
+				`}
 			</div>
 			<div class="flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button

@@ -1040,10 +1040,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 						});
 						if (!cfgRes.ok) {
 							const errData = await cfgRes.json().catch(() => ({}));
-							console.error(`[project-proposal] Config write failed: ${errData.error || cfgRes.status}`);
+							const msg = `Project config write failed: ${errData.error || cfgRes.status}. You may need to set build/test commands manually in Settings.`;
+							console.error(`[project-proposal] ${msg}`);
+							window.alert?.(msg);
 						}
 					} catch (err) {
-						console.error("[project-proposal] Config write error:", err);
+						const msg = `Project config write error: ${err instanceof Error ? err.message : err}. You may need to set build/test commands manually in Settings.`;
+						console.error(`[project-proposal] ${msg}`);
+						window.alert?.(msg);
 					}
 				}
 				// Refresh project list
