@@ -37,6 +37,7 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
+		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 
 		// Run the seed script BEFORE starting the gateway
 		execFileSync("node", [SEED_SCRIPT, bobbitDir], { stdio: "pipe" });
