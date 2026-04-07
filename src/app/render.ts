@@ -2212,6 +2212,10 @@ export function doRenderApp(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
 
+	// Dynamic page title
+	const activeProject = state.projects.find(p => p.id === state.activeProjectId);
+	document.title = activeProject ? `${activeProject.name} · Bobbit` : "Bobbit";
+
 	document.documentElement.style.setProperty("--bobbit-shimmer-delay", `${-(Date.now() % 8000)}ms`);
 
 	// Disconnected state

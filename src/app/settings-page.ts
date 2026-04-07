@@ -18,7 +18,7 @@ import {
 	type KeyBinding,
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
-import { renderApp, state } from "./state.js";
+import { renderApp, setProjects, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects } from "./api.js";
 import { openOAuthDialog } from "./dialogs.js";
@@ -146,7 +146,7 @@ async function saveProjectScopeConfig(projectId: string, updates: Record<string,
 			if (rootPath !== undefined) {
 				try {
 					const res = await gatewayFetch("/api/projects");
-					if (res.ok) state.projects = await res.json();
+					if (res.ok) setProjects(await res.json());
 				} catch {}
 			}
 			setTimeout(() => { projectScopeSaveStatus = ""; renderApp(); }, 2000);
@@ -2151,7 +2151,7 @@ function renderProjectGeneralTab(projectId: string) {
 							if (!ok) return;
 							const success = await removeProject(projectId);
 							if (success) {
-								state.projects = await fetchProjects();
+								setProjects(await fetchProjects());
 								setHashRoute("settings", "system/general", true);
 								renderApp();
 							}
