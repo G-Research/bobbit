@@ -26,6 +26,67 @@ const execFileAsync = promisify(execFileCb);
 /** Env config for docker commands — suppresses MSYS path mangling on Windows. */
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
 
+// ── Docker resource limits ─────────────────────────────────────────────────
+
+interface DockerResourceLimits {
+	cpus: number;
+	memBytes: number;
+}
+
+let _cachedDockerLimits: DockerResourceLimits | null | undefined; // undefined = not yet queried
+
+/**
+ * Query Docker daemon's available CPU and memory.
+ * Cached for the process lifetime (Docker resource limits don't change mid-session).
+ * Returns null if `docker info` fails (caller should fall back to host values).
+ */
+export async function getDockerResourceLimits(): Promise<DockerResourceLimits | null> {
+	if (_cachedDockerLimits !== undefined) return _cachedDockerLimits;
+
+	try {
+		const { stdout } = await execFileAsync(
+			"docker", ["info", "--format", "{{.NCPU}} {{.MemTotal}}"],
+			{ timeout: 5_000, env: DOCKER_ENV },
+		);
+		const parts = stdout.trim().split(/\s+/);
+		const cpus = parseInt(parts[0], 10);
+		const memBytes = parseInt(parts[1], 10);
+		if (Number.isNaN(cpus) || Number.isNaN(memBytes) || cpus <= 0 || memBytes <= 0) {
+			_cachedDockerLimits = null;
+			return null;
+		}
+		_cachedDockerLimits = { cpus, memBytes };
+		return _cachedDockerLimits;
+	} catch {
+		_cachedDockerLimits = null;
+		return null;
+	}
+}
+
+/**
+ * Pure computation of container resource limits — easy to unit-test.
+ * Takes host values and optional Docker-reported limits; returns { cpus, memoryGB }.
+ */
+export function computeResourceLimits(
+	hostCpus: number,
+	hostMemBytes: number,
+	dockerCpus?: number,
+	dockerMemBytes?: number,
+): { cpus: number; memoryGB: number } {
+	const effectiveCpus = dockerCpus != null ? Math.min(hostCpus, dockerCpus) : hostCpus;
+	const effectiveMemBytes = dockerMemBytes != null ? Math.min(hostMemBytes, dockerMemBytes) : hostMemBytes;
+
+	return {
+		cpus: Math.max(2, effectiveCpus - 2),
+		memoryGB: Math.max(4, Math.floor(effectiveMemBytes / (1024 ** 3)) - 2),
+	};
+}
+
+/** @internal — exported for testing only. Resets the cached Docker limits. */
+export function _resetDockerLimitsCache(): void {
+	_cachedDockerLimits = undefined;
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface ProjectSandboxOptions {
@@ -371,8 +432,14 @@ export class ProjectSandbox {
 		}
 
 		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
-		const totalMemGB = Math.max(4, Math.floor(os.totalmem() / (1024 ** 3)) - 2);
-		const totalCpus = Math.max(2, os.cpus().length - 2);
+		// Query Docker daemon to avoid requesting more resources than the VM has
+		const dockerLimits = await getDockerResourceLimits();
+		const { cpus: totalCpus, memoryGB: totalMemGB } = computeResourceLimits(
+			os.cpus().length,
+			os.totalmem(),
+			dockerLimits?.cpus,
+			dockerLimits?.memBytes,
+		);
 
 		const dockerArgs = buildDockerRunArgs({
 			image,
