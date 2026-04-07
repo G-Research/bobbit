@@ -308,21 +308,41 @@ export const state = {
 // ============================================================================
 
 const EXPANDED_GOALS_KEY = "bobbit-expanded-goals";
-const UNGROUPED_EXPANDED_KEY = "bobbit-ungrouped-expanded";
 
 export let expandedGoals: Set<string> = new Set(
 	JSON.parse(localStorage.getItem(EXPANDED_GOALS_KEY) || "[]"),
 );
-export let ungroupedExpanded =
-	localStorage.getItem(UNGROUPED_EXPANDED_KEY) !== "false";
 
-const STAFF_EXPANDED_KEY = "bobbit-staff-expanded";
-export let staffSectionExpanded =
-	localStorage.getItem(STAFF_EXPANDED_KEY) !== "false";
+// ── Per-project collapse state (Bug 4 fix) ─────────────────────────
+// Stores collapsed project IDs. Default is expanded (not in set = expanded).
+const COLLAPSED_UNGROUPED_KEY = "bobbit-collapsed-ungrouped";
+const COLLAPSED_STAFF_KEY = "bobbit-collapsed-staff";
 
-export function setStaffSectionExpanded(value: boolean): void {
-	staffSectionExpanded = value;
-	localStorage.setItem(STAFF_EXPANDED_KEY, String(value));
+export let collapsedUngroupedProjects: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(COLLAPSED_UNGROUPED_KEY) || "[]"),
+);
+export let collapsedStaffProjects: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(COLLAPSED_STAFF_KEY) || "[]"),
+);
+
+export function isUngroupedExpanded(projectId: string): boolean {
+	return !collapsedUngroupedProjects.has(projectId);
+}
+
+export function setUngroupedExpanded(projectId: string, value: boolean): void {
+	if (value) collapsedUngroupedProjects.delete(projectId);
+	else collapsedUngroupedProjects.add(projectId);
+	localStorage.setItem(COLLAPSED_UNGROUPED_KEY, JSON.stringify([...collapsedUngroupedProjects]));
+}
+
+export function isStaffExpanded(projectId: string): boolean {
+	return !collapsedStaffProjects.has(projectId);
+}
+
+export function setStaffSectionExpanded(projectId: string, value: boolean): void {
+	if (value) collapsedStaffProjects.delete(projectId);
+	else collapsedStaffProjects.add(projectId);
+	localStorage.setItem(COLLAPSED_STAFF_KEY, JSON.stringify([...collapsedStaffProjects]));
 }
 
 const COLLAPSED_TEAM_LEADS_KEY = "bobbit-collapsed-team-leads";
@@ -334,10 +354,6 @@ export function saveExpandedGoals(): void {
 	localStorage.setItem(EXPANDED_GOALS_KEY, JSON.stringify([...expandedGoals]));
 }
 
-export function setUngroupedExpanded(value: boolean): void {
-	ungroupedExpanded = value;
-	localStorage.setItem(UNGROUPED_EXPANDED_KEY, String(value));
-}
 
 export function toggleTeamLeadExpanded(sessionId: string): void {
 	if (collapsedTeamLeadSessions.has(sessionId)) {

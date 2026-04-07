@@ -11,7 +11,7 @@ import {
 	isDesktop,
 	hasActiveSession,
 	activeSessionId,
-	ungroupedExpanded,
+	isUngroupedExpanded,
 	setUngroupedExpanded,
 
 	resetArchivedExpandState,
@@ -136,8 +136,6 @@ function renderMobileLanding() {
 		});
 		ungroupedSessions = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q));
 	}
-
-	const isUngroupedExpanded = ungroupedExpanded;
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto">
@@ -306,9 +304,9 @@ function renderMobileLanding() {
 													`)}
 													${data.goals.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
-														<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
-															@click=${() => { setUngroupedExpanded(!ungroupedExpanded); renderApp(); }}>
-															<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${isUngroupedExpanded ? "▾" : "▸"}</span>
+														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
+															<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;">${_mobileUngroupedExp ? "▾" : "▸"}</span>
 															<span class="shrink-0 text-muted-foreground">${icon(MessagesSquare, "sm")}</span>
 															<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
 															<div class="flex items-center relative">
@@ -325,13 +323,13 @@ function renderMobileLanding() {
 																${renderRolePickerDropdown()}
 															</div>
 														</div>
-														${isUngroupedExpanded && data.sessions.length > 0 ? html`
+														${_mobileUngroupedExp && data.sessions.length > 0 ? html`
 															<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 																${data.sessions.map(renderSessionRow)}
 															</div>
 														` : ""}
-													</div>
-													${renderStaffSidebarSection(data.staff)}
+													</div>`; })()}
+													${renderStaffSidebarSection(data.staff, project.id)}
 												</div>` : ""}
 											`;
 										})}`;
