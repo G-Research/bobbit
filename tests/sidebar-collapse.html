@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sidebar Collapse State Test Fixture</title>
+  <script type="module">
+    // Simulate the state.ts module behavior for sidebar collapse state.
+    // This is a faithful reproduction of the current (buggy) code from state.ts.
+
+    const UNGROUPED_EXPANDED_KEY = "bobbit-ungrouped-expanded";
+    const STAFF_EXPANDED_KEY = "bobbit-staff-expanded";
+
+    // Current implementation: single global boolean (the bug)
+    let ungroupedExpanded = localStorage.getItem(UNGROUPED_EXPANDED_KEY) !== "false";
+    let staffSectionExpanded = localStorage.getItem(STAFF_EXPANDED_KEY) !== "false";
+
+    function setUngroupedExpanded(value) {
+      ungroupedExpanded = value;
+      localStorage.setItem(UNGROUPED_EXPANDED_KEY, String(value));
+    }
+
+    function setStaffSectionExpanded(value) {
+      staffSectionExpanded = value;
+      localStorage.setItem(STAFF_EXPANDED_KEY, String(value));
+    }
+
+    // --- Post-fix API (per-project) ---
+    // These functions represent the DESIRED behavior.
+    // The fix should make these work per-project using a Set<projectId> pattern.
+    // For now, they delegate to the global functions (which is the bug).
+
+    function isUngroupedExpandedForProject(projectId) {
+      // Current (buggy): returns the global boolean, ignoring projectId
+      return ungroupedExpanded;
+    }
+
+    function setUngroupedExpandedForProject(projectId, value) {
+      // Current (buggy): sets the global boolean, ignoring projectId
+      setUngroupedExpanded(value);
+    }
+
+    function isStaffExpandedForProject(projectId) {
+      return staffSectionExpanded;
+    }
+
+    function setStaffExpandedForProject(projectId, value) {
+      setStaffSectionExpanded(value);
+    }
+
+    // Expose to test
+    window.__collapseState = {
+      isUngroupedExpandedForProject,
+      setUngroupedExpandedForProject,
+      isStaffExpandedForProject,
+      setStaffExpandedForProject,
+    };
+  </script>
+</head>
+<body>
+  <div id="fixture">Sidebar Collapse State Test Fixture</div>
+</body>
+</html>
