@@ -1021,9 +1021,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		remote.onProjectProposal = async (fields: Record<string, string>) => {
 			if (activeSessionId() !== sessionId) return;
 			const { registerProject, fetchProjects, gatewayFetch } = await import("./api.js");
-			const project = await registerProject(fields.name, fields.root_path, undefined);
+			// Use upsert so re-registration returns existing project instead of erroring
+			const project = await registerProject(fields.name, fields.root_path, undefined, true);
 			if (project) {
-				// Write detected config to project.yaml
+				// Write detected config to project.yaml (proceeds even if project already existed)
 				const configFields: Record<string, string> = {};
 				const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
 					'test_unit_command', 'test_e2e_command',
@@ -1032,10 +1033,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					if (fields[key]) configFields[key] = fields[key];
 				}
 				if (Object.keys(configFields).length > 0) {
-					await gatewayFetch(`/api/projects/${project.id}/config`, {
-						method: 'PUT',
-						body: JSON.stringify(configFields),
-					});
+					try {
+						const cfgRes = await gatewayFetch(`/api/projects/${project.id}/config`, {
+							method: 'PUT',
+							body: JSON.stringify(configFields),
+						});
+						if (!cfgRes.ok) {
+							const errData = await cfgRes.json().catch(() => ({}));
+							console.error(`[project-proposal] Config write failed: ${errData.error || cfgRes.status}`);
+						}
+					} catch (err) {
+						console.error("[project-proposal] Config write error:", err);
+					}
 				}
 				// Refresh project list
 				state.projects = await fetchProjects();
