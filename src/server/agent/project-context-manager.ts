@@ -63,11 +63,29 @@ export class ProjectContextManager {
     return ctx;
   }
 
+  /**
+   * Null-safe version of getDefault().
+   * Returns null when no projects are registered (e.g. fresh folder with no .bobbit/).
+   */
+  getDefaultOrNull(): ProjectContext | null {
+    if (!this.defaultProjectId) return null;
+    return this.contexts.get(this.defaultProjectId) ?? null;
+  }
+
   /** @deprecated Use explicit projectId resolution instead. The default project should not be used as a fallback. */
   getDefaultProjectId(): string {
     if (!this.defaultProjectId) {
       throw new Error("Default project not initialized — call initAll() first");
     }
+    return this.defaultProjectId;
+  }
+
+  /**
+   * Null-safe version of getDefaultProjectId().
+   * Returns null when no projects are registered (e.g. fresh folder with no .bobbit/).
+   * Use this in API creation endpoints that should return a clear error instead of crashing.
+   */
+  getDefaultProjectIdOrNull(): string | null {
     return this.defaultProjectId;
   }
 
