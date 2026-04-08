@@ -74,9 +74,14 @@ export function uncacheSession(sessionId: string): void {
 // PER-PROJECT PALETTE SWITCHING
 // ============================================================================
 
-/** Apply the per-project palette (if any) or revert to the global default. */
+/** Apply the per-project palette (if any) or revert to the global default.
+ *  Also updates `activeProjectId` so the page title and other project-scoped
+ *  UI elements reflect the current project. */
 export function applyProjectPalette(projectId?: string): void {
 	const project = (state.projects || []).find((p: any) => p.id === projectId);
+	if (projectId && project) {
+		state.activeProjectId = projectId;
+	}
 	const palette = project?.palette;
 	if (palette) {
 		document.documentElement.dataset.palette = palette;
