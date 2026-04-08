@@ -10,7 +10,6 @@ import {
 	state,
 	renderApp,
 	setProjects,
-	addPendingProject,
 	activeSessionId,
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
@@ -1329,8 +1328,6 @@ async function createProjectAssistantSession(dirPath: string, scaffolding: boole
 		});
 		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
 		const { id } = await res.json();
-		const name = dirPath.split(/[\\/]/).filter(Boolean).pop() || "new-project";
-		addPendingProject({ sessionId: id, dirPath, name });
 		const { connectToSession } = await import("./session-manager.js");
 		const actualType = scaffolding ? "project-scaffolding" : "project";
 		await connectToSession(id, false, { assistantType: actualType, projectDirPath: dirPath });

@@ -1280,6 +1280,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantType !== "role") state.activeRoleProposal = null;
 			if (state.assistantType !== "personality") state.activePersonalityProposal = null;
 			if (state.assistantType !== "staff") state.activeStaffProposal = null;
+			if (state.assistantType !== "project" && state.assistantType !== "project-scaffolding") state.activeProjectProposal = undefined;
 
 			if (state.assistantType === "goal") {
 				const restored = await restoreGoalDraft(sessionId);
@@ -1558,7 +1559,8 @@ export async function acceptProjectProposal(): Promise<void> {
 	const { promoteProject, fetchProjects, gatewayFetch } = await import("./api.js");
 
 	// Promote the provisional project
-	await promoteProject(projectId, fields.name);
+	const promoted = await promoteProject(projectId, fields.name);
+	if (!promoted) return;
 
 	// Write config fields
 	const configFields: Record<string, string> = {};
@@ -1596,6 +1598,7 @@ export function backToSessions(): void {
 	state.selectedSessionId = null;
 	state.activeGoalProposal = null;
 	state.activeRoleProposal = null;
+	state.activeProjectProposal = undefined;
 	state.assistantType = null;
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;

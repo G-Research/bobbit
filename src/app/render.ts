@@ -1857,6 +1857,7 @@ function projectProposalPanel() {
 						onInput: (e: Event) => {
 							if (state.activeProjectProposal) {
 								state.activeProjectProposal.fields.name = (e.target as HTMLInputElement).value;
+								renderApp();
 							}
 						},
 					})}
