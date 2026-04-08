@@ -73,6 +73,22 @@ function respondToPrompt(text) {
 		return { toolDenied: toolDeniedMatch[1] };
 	}
 
+	// Project proposal keyword — emit propose_project tool call
+	if (lower.includes("project_proposal") || lower.includes("project proposal")) {
+		return {
+			tool: "propose_project",
+			input: {
+				name: "Test Project",
+				root_path: "/tmp/test-project",
+				build_command: "npm run build",
+				test_command: "npm test",
+				typecheck_command: "npm run check",
+				worktree_setup_command: "npm ci"
+			},
+			output: "Project proposal submitted."
+		};
+	}
+
 	// Goal proposal keyword — emit propose_goal tool call
 	if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
 		return {

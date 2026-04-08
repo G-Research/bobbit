@@ -2,7 +2,6 @@ import {
 	state,
 	renderApp,
 	setProjects,
-	addPendingProject,
 	expandedGoals,
 	saveExpandedGoals,
 	GW_URL_KEY,
@@ -158,18 +157,8 @@ export async function refreshSessions(): Promise<void> {
 				state.sessionsGeneration = sessionsData.generation;
 			}
 
-			// Reconstruct pending project placeholders from project assistant sessions.
-			// These are sessions with assistantType "project" or "project-scaffolding"
-			// that have no projectId (not yet linked to a registered project).
-			// This survives page refresh — the transient pendingProjects state is rebuilt.
-			for (const s of state.gatewaySessions) {
-				if ((s.assistantType === "project" || s.assistantType === "project-scaffolding")
-					&& !s.projectId
-					&& s.status !== "archived") {
-					const dirName = s.cwd?.split(/[\\/]/).filter(Boolean).pop() || "new-project";
-					addPendingProject({ sessionId: s.id, dirPath: s.cwd || "", name: dirName });
-				}
-			}
+			// Provisional projects are now real projects with a `provisional` flag.
+			// No client-side reconstruction needed — they come through GET /api/projects.
 		}
 
 		// Process goals — skip if server says unchanged
@@ -383,6 +372,27 @@ export async function removeProject(id: string): Promise<boolean> {
     const { showConnectionError } = await import("./dialogs.js");
     showConnectionError("Failed to remove project", err instanceof Error ? err.message : String(err));
     return false;
+  }
+}
+
+/** Promote a provisional project to a full project (clears provisional flag, optionally updates name). */
+export async function promoteProject(id: string, name?: string): Promise<Project | null> {
+  try {
+    const body: Record<string, unknown> = {};
+    if (name) body.name = name;
+    const res = await gatewayFetch(`/api/projects/${id}/promote`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed: ${res.status}`);
+    }
+    return await res.json();
+  } catch (err) {
+    const { showConnectionError } = await import("./dialogs.js");
+    showConnectionError("Failed to promote project", err instanceof Error ? err.message : String(err));
+    return null;
   }
 }
 

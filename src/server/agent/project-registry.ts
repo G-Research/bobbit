@@ -16,6 +16,7 @@ export interface RegisteredProject {
   palette?: string;     // One of 10 palette IDs or undefined
   colorLight: string;   // Accent color for light mode (always present)
   colorDark: string;    // Accent color for dark mode (always present)
+  provisional?: boolean; // True while a project assistant is setting up this project
 }
 
 export class ProjectRegistry {
@@ -204,6 +205,84 @@ export class ProjectRegistry {
     if (!this.projects.has(id)) {
       throw new Error(`Project not found: ${id}`);
     }
+    this.projects.delete(id);
+    this.save();
+  }
+
+  /**
+   * Register a provisional project (used by project assistant sessions).
+   * Provisional projects are real persisted projects with `provisional: true`.
+   * For scaffolding (Path C), the rootPath may not exist yet — skip existence check.
+   * Deduplicates: if a provisional project already exists at the same rootPath, reuse it.
+   */
+  registerProvisional(name: string, rootPath: string): RegisteredProject {
+    if (!path.isAbsolute(rootPath)) {
+      throw new Error(`rootPath must be absolute, got: ${rootPath}`);
+    }
+
+    // Deduplicate: reuse existing provisional project at same path
+    const normalized = path.resolve(rootPath);
+    for (const p of this.projects.values()) {
+      if (p.provisional && path.resolve(p.rootPath) === normalized) {
+        return p;
+      }
+    }
+
+    // Scaffold .bobbit directories only if rootPath exists
+    if (fs.existsSync(rootPath)) {
+      const bobbitDir = path.join(rootPath, ".bobbit");
+      fs.mkdirSync(path.join(bobbitDir, "config"), { recursive: true });
+      fs.mkdirSync(path.join(bobbitDir, "state"), { recursive: true });
+    }
+
+    const project: RegisteredProject = {
+      id: randomUUID(),
+      name,
+      rootPath,
+      createdAt: Date.now(),
+      colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
+      colorDark: DEFAULT_PROJECT_COLOR_DARK,
+      provisional: true,
+    };
+
+    this.projects.set(project.id, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Promote a provisional project to a full project.
+   * Clears `provisional` flag and optionally updates the name.
+   * If rootPath now exists but wasn't scaffolded, scaffold it.
+   */
+  promote(id: string, updates: { name?: string }): RegisteredProject {
+    const project = this.projects.get(id);
+    if (!project) throw new Error(`Project not found: ${id}`);
+    if (!project.provisional) throw new Error(`Project ${id} is not provisional`);
+
+    delete project.provisional;
+    if (updates.name !== undefined) project.name = updates.name;
+
+    // Scaffold .bobbit directories if they don't exist yet (e.g. scaffolding path)
+    if (fs.existsSync(project.rootPath)) {
+      const bobbitDir = path.join(project.rootPath, ".bobbit");
+      fs.mkdirSync(path.join(bobbitDir, "config"), { recursive: true });
+      fs.mkdirSync(path.join(bobbitDir, "state"), { recursive: true });
+    }
+
+    this.projects.set(id, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Remove a provisional project. Safety guard: throws if the project is not provisional.
+   * Does NOT delete files on disk — only unregisters.
+   */
+  removeProvisional(id: string): void {
+    const project = this.projects.get(id);
+    if (!project) throw new Error(`Project not found: ${id}`);
+    if (!project.provisional) throw new Error(`Cannot remove non-provisional project ${id} via removeProvisional()`);
     this.projects.delete(id);
     this.save();
   }

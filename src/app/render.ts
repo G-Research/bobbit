@@ -1810,6 +1810,93 @@ function workflowPreviewPanel() {
 	`;
 }
 
+function projectProposalPanel() {
+	const proposal = state.activeProjectProposal;
+
+	if (!proposal) {
+		return html`
+			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
+					Waiting for project analysis…
+				</div>
+			</div>
+		`;
+	}
+
+	const fields = { ...proposal.fields };
+
+	const CMD_FIELDS = [
+		{ key: "build_command", label: "Build Command" },
+		{ key: "test_command", label: "Test Command" },
+		{ key: "typecheck_command", label: "Type Check Command" },
+		{ key: "test_unit_command", label: "Unit Test Command" },
+		{ key: "test_e2e_command", label: "E2E Test Command" },
+		{ key: "worktree_setup_command", label: "Worktree Setup Command" },
+	];
+
+	const handleAccept = async () => {
+		const { acceptProjectProposal } = await import("./session-manager.js");
+		await acceptProjectProposal();
+	};
+
+	const handleDismiss = () => {
+		state.activeProjectProposal = undefined;
+		state.assistantHasProposal = false;
+		renderApp();
+	};
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Project Name</label>
+					${Input({
+						type: "text",
+						value: fields.name || "",
+						placeholder: "Project name",
+						onInput: (e: Event) => {
+							if (state.activeProjectProposal) {
+								state.activeProjectProposal.fields.name = (e.target as HTMLInputElement).value;
+								renderApp();
+							}
+						},
+					})}
+				</div>
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
+					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || ""}>
+						${fields.root_path || "—"}
+					</div>
+				</div>
+				${CMD_FIELDS.map(({ key, label }) => html`
+					<div>
+						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
+						${Input({
+							type: "text",
+							value: fields[key] || "",
+							placeholder: `e.g. npm run ${key.replace(/_command$/, "").replace(/_/g, ":")}`,
+							onInput: (e: Event) => {
+								if (state.activeProjectProposal) {
+									state.activeProjectProposal.fields[key] = (e.target as HTMLInputElement).value;
+								}
+							},
+						})}
+					</div>
+				`)}
+			</div>
+			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
+				${Button({
+					variant: "default",
+					onClick: handleAccept,
+					disabled: !fields.name?.trim(),
+					children: html`<span class="inline-flex items-center gap-1.5">${icon(FolderOpen, "sm")} Accept Project</span>`,
+				})}
+			</div>
+		</div>
+	`;
+}
+
 function getAssistantPreviewPanel(type: string) {
 	switch (type) {
 		case "goal": return goalPreviewPanel();
@@ -1819,6 +1906,9 @@ function getAssistantPreviewPanel(type: string) {
 		case "staff": return staffPreviewPanel();
 		case "setup": return setupPreviewPanel();
 		case "workflow": return workflowPreviewPanel();
+		case "project":
+		case "project-scaffolding":
+			return projectProposalPanel();
 		default: return "";
 	}
 }
