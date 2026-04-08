@@ -1469,8 +1469,27 @@ async function handleApiRoute(
 				try { await sessionManager.terminateSession(s.id); } catch {}
 			}
 			projectContextManager.remove(projectId);
-			projectRegistry.remove(projectId);
+			if (project?.provisional) {
+				projectRegistry.removeProvisional(projectId);
+			} else {
+				projectRegistry.remove(projectId);
+			}
 			json({ ok: true });
+		} catch (err: any) {
+			json({ error: err.message }, 400);
+		}
+		return;
+	}
+
+	// POST /api/projects/:id/promote
+	const projectPromoteMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/promote$/);
+	if (projectPromoteMatch && req.method === "POST") {
+		const projectId = projectPromoteMatch[1];
+		try {
+			const body = await readBody(req);
+			const name = typeof body?.name === "string" ? body.name : undefined;
+			const promoted = projectRegistry.promote(projectId, { name });
+			json(promoted);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
 		}
@@ -1894,11 +1913,11 @@ async function handleApiRoute(
 
 		// Auto-detect projectId from cwd if not explicitly provided.
 		// Project assistant sessions (assistantType "project" or "project-scaffolding") are
-		// setting up a NEW project — they must not be assigned to any existing project.
-		// They get the default project only for store placement (so they persist), but
-		// the projectId is NOT set on the session itself until the proposal is accepted.
+		// setting up a NEW project — they get a provisional project registration so sessions
+		// persist under their own project context (survives page refresh).
 		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
 		let resolvedProjectId = body?.projectId as string | undefined;
+		let provisionalProjectId: string | undefined;
 
 		// If re-attempting a goal, inherit cwd and projectId from the original goal
 		if (reattemptGoalId && !body?.cwd) {
@@ -1906,6 +1925,20 @@ async function handleApiRoute(
 			if (origGoal) {
 				cwd = origGoal.cwd || cwd;
 				if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
+			}
+		}
+
+		// For project assistants, register a provisional project at the target cwd
+		if (isProjectAssistant && cwd && !resolvedProjectId) {
+			const provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+			provisionalProjectId = provisionalProject.id;
+			resolvedProjectId = provisionalProject.id;
+			// Ensure a ProjectContext exists for the provisional project
+			const provCtx = projectContextManager.getOrCreate(provisionalProject.id);
+			if (provCtx) {
+				provCtx.gateStore.onStatusChange = () => {
+					provCtx.goalStore.bumpGeneration();
+				};
 			}
 		}
 
@@ -1949,13 +1982,9 @@ async function handleApiRoute(
 			}
 
 			// Store projectId on the session if resolved (explicit or auto-detected).
-			// Project assistant sessions are setting up a NEW project — clear the
-			// projectId that was set during persistOnce (needed for store routing)
-			// so the session doesn't appear under an existing project in the sidebar.
-			if (isProjectAssistant) {
-				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: undefined });
-				session.projectId = undefined;
-			} else if (resolvedProjectId) {
+			// Project assistant sessions keep their provisional projectId so they
+			// persist under the provisional project's store and appear in the sidebar.
+			if (resolvedProjectId) {
 				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
 			}
 
@@ -1973,6 +2002,7 @@ async function handleApiRoute(
 				accessory: session.accessory,
 				personalities: session.personalities,
 				reattemptGoalId,
+				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
 		} catch (err) {
 			json({ error: String(err) }, 500);
