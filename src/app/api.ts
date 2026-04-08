@@ -2,6 +2,7 @@ import {
 	state,
 	renderApp,
 	setProjects,
+	addPendingProject,
 	expandedGoals,
 	saveExpandedGoals,
 	GW_URL_KEY,
@@ -155,6 +156,19 @@ export async function refreshSessions(): Promise<void> {
 
 			if (sessionsData.generation !== undefined) {
 				state.sessionsGeneration = sessionsData.generation;
+			}
+
+			// Reconstruct pending project placeholders from project assistant sessions.
+			// These are sessions with assistantType "project" or "project-scaffolding"
+			// that have no projectId (not yet linked to a registered project).
+			// This survives page refresh — the transient pendingProjects state is rebuilt.
+			for (const s of state.gatewaySessions) {
+				if ((s.assistantType === "project" || s.assistantType === "project-scaffolding")
+					&& !s.projectId
+					&& s.status !== "archived") {
+					const dirName = s.cwd?.split(/[\\/]/).filter(Boolean).pop() || "new-project";
+					addPendingProject({ sessionId: s.id, dirPath: s.cwd || "", name: dirName });
+				}
 			}
 		}
 

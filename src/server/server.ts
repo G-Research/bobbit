@@ -1892,7 +1892,12 @@ async function handleApiRoute(
 			}
 		}
 
-		// Auto-detect projectId from cwd if not explicitly provided
+		// Auto-detect projectId from cwd if not explicitly provided.
+		// Project assistant sessions (assistantType "project" or "project-scaffolding") are
+		// setting up a NEW project — they must not be assigned to any existing project.
+		// They get the default project only for store placement (so they persist), but
+		// the projectId is NOT set on the session itself until the proposal is accepted.
+		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
 		let resolvedProjectId = body?.projectId as string | undefined;
 
 		// If re-attempting a goal, inherit cwd and projectId from the original goal
@@ -1943,8 +1948,14 @@ async function handleApiRoute(
 				sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
 			}
 
-			// Store projectId on the session if resolved (explicit or auto-detected)
-			if (resolvedProjectId) {
+			// Store projectId on the session if resolved (explicit or auto-detected).
+			// Project assistant sessions are setting up a NEW project — clear the
+			// projectId that was set during persistOnce (needed for store routing)
+			// so the session doesn't appear under an existing project in the sidebar.
+			if (isProjectAssistant) {
+				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: undefined });
+				session.projectId = undefined;
+			} else if (resolvedProjectId) {
 				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
 			}
 
