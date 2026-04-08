@@ -437,16 +437,20 @@ export function renderAppSync(): void {
 // PROJECT HELPERS
 // ============================================================================
 
-/** Update the project list and ensure activeProjectId stays in sync.
- *  Defaults to the first project when no explicit selection exists. */
+/** Add a pending project placeholder to show in the sidebar while a project assistant session is active. */
 export function addPendingProject(entry: { sessionId: string; dirPath: string; name: string }): void {
-	state.pendingProjects.push(entry);
+	if (!state.pendingProjects.some(p => p.sessionId === entry.sessionId)) {
+		state.pendingProjects.push(entry);
+	}
 }
 
+/** Remove a pending project placeholder (on session terminate or project registration). */
 export function removePendingProject(sessionId: string): void {
 	state.pendingProjects = state.pendingProjects.filter(p => p.sessionId !== sessionId);
 }
 
+/** Update the project list and ensure activeProjectId stays in sync.
+ *  Defaults to the first project when no explicit selection exists. */
 export function setProjects(projects: Project[]): void {
 	state.projects = projects;
 	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
