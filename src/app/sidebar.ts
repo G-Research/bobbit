@@ -998,6 +998,10 @@ export function renderSidebar() {
 									filteredStaff = filteredStaff.filter(s => ids.has(s.id));
 								}
 							}
+							// Filter out sessions associated with pending projects
+							const pendingSessionIds = new Set(state.pendingProjects.map(p => p.sessionId));
+							filteredUngrouped = filteredUngrouped.filter(s => !pendingSessionIds.has(s.id));
+
 							// Group goals, sessions, and staff by project
 							const projectMap = new Map<string, { goals: Goal[]; sessions: GatewaySession[]; staff: typeof filteredStaff }>();
 							for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
@@ -1028,6 +1032,21 @@ export function renderSidebar() {
 									${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 										${renderProjectContent(project, data.goals, data.sessions, data.staff)}
 									</div>` : ""}
+								`;
+							})}
+							${state.pendingProjects.map(pp => {
+								const session = state.gatewaySessions.find(s => s.id === pp.sessionId);
+								if (!session) return "";
+								return html`
+									<div class="border-t border-border/30 my-1 mx-2"></div>
+									<div class="flex items-center gap-1.5 pr-1 py-0.5 rounded-md" style="padding-left:${HEADER_CHEVRON_W}px;">
+										<span class="shrink-0 text-muted-foreground">${icon(FolderOpen, "xs")}</span>
+										<span class="flex-1 text-xs font-semibold truncate">${pp.name}</span>
+										<span class="text-[9px] text-muted-foreground italic shrink-0">(setting up)</span>
+									</div>
+									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+										${renderSessionRow(session)}
+									</div>
 								`;
 							})}
 							${(() => {
