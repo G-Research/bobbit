@@ -128,6 +128,7 @@ export const state = {
 	gatewaySessions: [] as GatewaySession[],
 	goals: [] as Goal[],
 	projects: [] as Project[],
+	pendingProjects: [] as Array<{ sessionId: string; dirPath: string; name: string }>,
 	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
 	sessionsGeneration: -1,
@@ -438,6 +439,14 @@ export function renderAppSync(): void {
 
 /** Update the project list and ensure activeProjectId stays in sync.
  *  Defaults to the first project when no explicit selection exists. */
+export function addPendingProject(entry: { sessionId: string; dirPath: string; name: string }): void {
+	state.pendingProjects.push(entry);
+}
+
+export function removePendingProject(sessionId: string): void {
+	state.pendingProjects = state.pendingProjects.filter(p => p.sessionId !== sessionId);
+}
+
 export function setProjects(projects: Project[]): void {
 	state.projects = projects;
 	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
@@ -527,7 +536,7 @@ let _sidebarCacheKey: string = "";
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.pendingProjects.map(p => p.sessionId).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
