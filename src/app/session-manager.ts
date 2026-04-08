@@ -6,7 +6,6 @@ import {
 	state,
 	renderApp,
 	setProjects,
-	removePendingProject,
 	activeSessionId,
 	isDesktop,
 	GW_URL_KEY,
@@ -1031,40 +1030,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onProjectProposal = async (fields: Record<string, string>) => {
 			if (activeSessionId() !== sessionId) return;
-			const { registerProject, fetchProjects, gatewayFetch } = await import("./api.js");
-			// Use upsert so re-registration returns existing project instead of erroring
-			const project = await registerProject(fields.name, fields.root_path, undefined, true);
-			if (project) {
-				// Remove from pending projects — it's now a real project
-				removePendingProject(sessionId);
-				// Write detected config to project.yaml (proceeds even if project already existed)
-				const configFields: Record<string, string> = {};
-				const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
-					'test_unit_command', 'test_e2e_command',
-					'worktree_setup_command'];
-				for (const key of CONFIG_KEYS) {
-					if (fields[key]) configFields[key] = fields[key];
-				}
-				if (Object.keys(configFields).length > 0) {
-					try {
-						const cfgRes = await gatewayFetch(`/api/projects/${project.id}/config`, {
-							method: 'PUT',
-							body: JSON.stringify(configFields),
-						});
-						if (!cfgRes.ok) {
-							const errData = await cfgRes.json().catch(() => ({}));
-							const msg = `Project config write failed: ${errData.error || cfgRes.status}. You may need to set build/test commands manually in Settings.`;
-							console.error(`[project-proposal] ${msg}`);
-							window.alert?.(msg);
-						}
-					} catch (err) {
-						const msg = `Project config write error: ${err instanceof Error ? err.message : err}. You may need to set build/test commands manually in Settings.`;
-						console.error(`[project-proposal] ${msg}`);
-						window.alert?.(msg);
-					}
-				}
-				// Refresh project list
-				setProjects(await fetchProjects());
+			state.activeProjectProposal = { sessionId, fields };
+			state.assistantHasProposal = true;
+			if (state.assistantTab === "chat" && !isDesktop()) {
+				state.assistantTab = "preview";
 			}
 			renderApp();
 		};
@@ -1548,8 +1517,72 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	deleteRoleDraft(sessionId);
 	deletePersonalityDraft(sessionId);
 	clearDismissedProposal(sessionId);
-	removePendingProject(sessionId);
+
+	// Clean up provisional project if this was a project assistant session
+	if (session?.assistantType === "project" || session?.assistantType === "project-scaffolding") {
+		const projectId = session?.projectId;
+		if (projectId) {
+			const provisionalProject = state.projects.find(p => p.id === projectId && p.provisional);
+			if (provisionalProject) {
+				try {
+					await gatewayFetch(`/api/projects/${projectId}`, { method: "DELETE" });
+				} catch (err) {
+					console.error("[project-cleanup] Failed to delete provisional project:", err);
+				}
+			}
+		}
+	}
+
+	// Clear project proposal if it belonged to this session
+	if (state.activeProjectProposal?.sessionId === sessionId) {
+		state.activeProjectProposal = undefined;
+	}
+
 	await refreshSessions();
+}
+
+// ============================================================================
+// PROJECT PROPOSAL ACCEPTANCE
+// ============================================================================
+
+export async function acceptProjectProposal(): Promise<void> {
+	const proposal = state.activeProjectProposal;
+	if (!proposal) return;
+	const { fields, sessionId: propSessionId } = proposal;
+
+	// Find the provisional project for this session
+	const session = state.gatewaySessions.find(s => s.id === propSessionId);
+	const projectId = session?.projectId;
+	if (!projectId) return;
+
+	const { promoteProject, fetchProjects, gatewayFetch } = await import("./api.js");
+
+	// Promote the provisional project
+	await promoteProject(projectId, fields.name);
+
+	// Write config fields
+	const configFields: Record<string, string> = {};
+	const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
+		'test_unit_command', 'test_e2e_command', 'worktree_setup_command'];
+	for (const key of CONFIG_KEYS) {
+		if (fields[key]) configFields[key] = fields[key];
+	}
+	if (Object.keys(configFields).length > 0) {
+		try {
+			await gatewayFetch(`/api/projects/${projectId}/config`, {
+				method: 'PUT',
+				body: JSON.stringify(configFields),
+			});
+		} catch (err) {
+			console.error('[project-proposal] Config write error:', err);
+		}
+	}
+
+	// Refresh
+	setProjects(await fetchProjects());
+	state.activeProjectProposal = undefined;
+	state.assistantHasProposal = false;
+	renderApp();
 }
 
 // ============================================================================

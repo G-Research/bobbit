@@ -801,12 +801,14 @@ function _handleFullSearchClick(query: string): void {
 /** Render a collapsible project section header. */
 function renderProjectHeader(project: Project, expanded: boolean) {
 	const color = getProjectAccentColor(project);
+	const isProvisional = !!project.provisional;
 	return html`
 		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
 			<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
+			${isProvisional ? html`<span class="text-[9px] text-muted-foreground italic shrink-0">(setting up)</span>` : html`
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
@@ -826,6 +828,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 					</svg>
 				</span>
 			</button>
+			`}
 		</div>
 	`;
 }
@@ -837,6 +840,7 @@ function renderProjectContent(
 	sessions: GatewaySession[],
 	staff?: typeof state.staffList,
 ) {
+	const isProvisional = !!project.provisional;
 	const ungroupedExp = isUngroupedExpanded(project.id);
 	return html`
 		${goals.map((goal, i) => html`
@@ -851,6 +855,7 @@ function renderProjectContent(
 				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExp ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
 				<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
+				${!isProvisional ? html`
 				<div class="flex items-center relative">
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
@@ -865,6 +870,7 @@ function renderProjectContent(
 					>${icon(ChevronDown, "xs")}</button>
 					${renderRolePickerDropdown()}
 				</div>
+				` : ""}
 			</div>
 			${ungroupedExp && sessions.length > 0 ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
@@ -872,7 +878,7 @@ function renderProjectContent(
 				</div>
 			` : ""}
 		</div>
-		${staff ? renderStaffSidebarSection(staff, project.id) : ""}
+		${!isProvisional && staff ? renderStaffSidebarSection(staff, project.id) : ""}
 	`;
 }
 
@@ -998,9 +1004,7 @@ export function renderSidebar() {
 									filteredStaff = filteredStaff.filter(s => ids.has(s.id));
 								}
 							}
-							// Filter out sessions associated with pending projects
-							const pendingSessionIds = new Set(state.pendingProjects.map(p => p.sessionId));
-							filteredUngrouped = filteredUngrouped.filter(s => !pendingSessionIds.has(s.id));
+							// No longer need to filter out pending project sessions — they have real projectIds now
 
 							// Group goals, sessions, and staff by project
 							const projectMap = new Map<string, { goals: Goal[]; sessions: GatewaySession[]; staff: typeof filteredStaff }>();
@@ -1034,21 +1038,7 @@ export function renderSidebar() {
 									</div>` : ""}
 								`;
 							})}
-							${state.pendingProjects.map(pp => {
-								const session = state.gatewaySessions.find(s => s.id === pp.sessionId);
-								if (!session) return "";
-								return html`
-									<div class="border-t border-border/30 my-1 mx-2"></div>
-									<div class="flex items-center gap-1.5 pr-1 py-0.5 rounded-md" style="padding-left:${HEADER_CHEVRON_W}px;">
-										<span class="shrink-0 text-muted-foreground">${icon(FolderOpen, "xs")}</span>
-										<span class="flex-1 text-xs font-semibold truncate">${pp.name}</span>
-										<span class="text-[9px] text-muted-foreground italic shrink-0">(setting up)</span>
-									</div>
-									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-										${renderSessionRow(session)}
-									</div>
-								`;
-							})}
+							
 							${(() => {
 								// Archived section: archived goals + standalone archived sessions
 								// Goal-affiliated archived sessions render inside their goal groups.

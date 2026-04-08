@@ -14,6 +14,7 @@ export interface Project {
   palette?: string;
   colorLight: string;
   colorDark: string;
+  provisional?: boolean;
 }
 
 export interface GatewaySession {
@@ -128,7 +129,9 @@ export const state = {
 	gatewaySessions: [] as GatewaySession[],
 	goals: [] as Goal[],
 	projects: [] as Project[],
+	/** @deprecated No longer used — provisional projects replace pending projects */
 	pendingProjects: [] as Array<{ sessionId: string; dirPath: string; name: string }>,
+	activeProjectProposal: undefined as undefined | { sessionId: string; fields: Record<string, string> },
 	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
 	sessionsGeneration: -1,
@@ -437,16 +440,15 @@ export function renderAppSync(): void {
 // PROJECT HELPERS
 // ============================================================================
 
-/** Add a pending project placeholder to show in the sidebar while a project assistant session is active. */
-export function addPendingProject(entry: { sessionId: string; dirPath: string; name: string }): void {
-	if (!state.pendingProjects.some(p => p.sessionId === entry.sessionId)) {
-		state.pendingProjects.push(entry);
-	}
+/** @deprecated No-op — provisional projects replace pending project placeholders. */
+export function addPendingProject(_entry: { sessionId: string; dirPath: string; name: string }): void {
+	// No-op: provisional projects are now real projects with a `provisional` flag.
+	// Kept as export for backward compat with callers that haven't been updated yet.
 }
 
-/** Remove a pending project placeholder (on session terminate or project registration). */
-export function removePendingProject(sessionId: string): void {
-	state.pendingProjects = state.pendingProjects.filter(p => p.sessionId !== sessionId);
+/** @deprecated No-op — provisional projects are cleaned up via DELETE /api/projects/:id. */
+export function removePendingProject(_sessionId: string): void {
+	// No-op: see addPendingProject.
 }
 
 /** Update the project list and ensure activeProjectId stays in sync.
@@ -540,7 +542,7 @@ let _sidebarCacheKey: string = "";
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.pendingProjects.map(p => p.sessionId).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
