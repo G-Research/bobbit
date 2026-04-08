@@ -194,7 +194,7 @@ export class SessionManager {
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
-	private worktreePool: WorktreePool | null = null;
+	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
@@ -714,9 +714,10 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
-		if (this.worktreePool) return;
-		this.worktreePool = new WorktreePool({ repoPath, targetSize, setupCommand });
+	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2): void {
+		if (this.worktreePools.has(projectId)) return;
+		const pool = new WorktreePool({ repoPath, targetSize, setupCommand });
+		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
 		// reclaim them as orphaned pool entries on restart.
@@ -725,12 +726,37 @@ export class SessionManager {
 			if (s.worktreePath) activeWorktreePaths.add(s.worktreePath);
 		}
 
-		this.worktreePool.startFilling(activeWorktreePaths);
+		pool.startFilling(activeWorktreePaths);
 	}
 
-	/** Get the worktree pool (for shutdown cleanup). */
-	getWorktreePool(): WorktreePool | null {
-		return this.worktreePool;
+	/** @deprecated Use initWorktreePoolForProject instead. */
+	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
+		// Legacy shim — uses empty string as key for backward compat
+		this.initWorktreePoolForProject("", repoPath, setupCommand, targetSize);
+	}
+
+	/** Get the worktree pool for a specific project. */
+	getWorktreePool(projectId?: string): WorktreePool | null {
+		if (projectId === undefined) {
+			// Legacy: return the first pool (backward compat for callers that don't pass projectId)
+			const first = this.worktreePools.values().next();
+			return first.done ? null : first.value;
+		}
+		return this.worktreePools.get(projectId) ?? null;
+	}
+
+	/** Get all worktree pools (for shutdown / API). */
+	getAllWorktreePools(): Map<string, WorktreePool> {
+		return this.worktreePools;
+	}
+
+	/** Drain and remove a project's worktree pool (for project deletion). */
+	async removeWorktreePool(projectId: string): Promise<void> {
+		const pool = this.worktreePools.get(projectId);
+		if (pool) {
+			await pool.drain();
+			this.worktreePools.delete(projectId);
+		}
 	}
 
 	async initMcp(cwd: string): Promise<void> {
@@ -2183,9 +2209,10 @@ export class SessionManager {
 			// Persist immediately with all known structural fields
 			persistOnce(session, plan, ctx.store);
 
-			// Try to claim a pre-built worktree from the pool (instant)
-			const poolClaim = this.worktreePool
-				? await this.worktreePool.claim(branch).catch(() => null)
+			// Try to claim a pre-built worktree from the project's pool (instant)
+			const pool = projectId ? this.worktreePools.get(projectId) : undefined;
+			const poolClaim = pool
+				? await pool.claim(branch).catch(() => null)
 				: null;
 
 			if (poolClaim) {
