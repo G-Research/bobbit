@@ -170,6 +170,7 @@ let sandboxBuildInProgress = false;
 let sandboxBuildError = "";
 let worktreePoolStatus: { enabled: boolean; ready?: number; target?: number; filling?: boolean } | null = null;
 let worktreePoolStatusLoaded = false;
+let worktreePoolLastScope = "";
 let hostTokens: { envVar: string; label: string; available: boolean }[] | null = null;
 let hostTokensLoaded = false;
 
@@ -204,11 +205,27 @@ function loadHostTokens(): void {
 }
 
 function loadWorktreePoolStatus(): void {
-	if (worktreePoolStatusLoaded) return;
+	const scope = getActiveScope();
+	if (worktreePoolStatusLoaded && worktreePoolLastScope === scope) return;
 	worktreePoolStatusLoaded = true;
-	gatewayFetch("/api/worktree-pool").then(async (res) => {
+	worktreePoolLastScope = scope;
+	const endpoint = scope !== "system"
+		? `/api/worktree-pool?projectId=${encodeURIComponent(scope)}`
+		: "/api/worktree-pool";
+	gatewayFetch(endpoint).then(async (res) => {
 		if (res.ok) {
-			worktreePoolStatus = await res.json();
+			const data = await res.json();
+			if (scope === "system" && data.pools) {
+				// System scope: aggregate — pick first pool or show disabled
+				const entries = Object.values(data.pools) as any[];
+				if (entries.length > 0) {
+					worktreePoolStatus = entries[0];
+				} else {
+					worktreePoolStatus = { enabled: false };
+				}
+			} else {
+				worktreePoolStatus = data;
+			}
 		} else {
 			worktreePoolStatus = { enabled: false };
 		}

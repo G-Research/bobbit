@@ -776,18 +776,18 @@ export function createGateway(config: GatewayConfig) {
 
 			sessionManager.startPurgeSchedule();
 
-			// Initialize worktree pool for the default project's repo
+			// Initialize worktree pools for all git-repo projects
 			// (pre-creates worktrees in the background so new sessions start instantly)
-			try {
-				const defaultCtx = projectContextManager.getDefaultOrNull();
-				if (!defaultCtx) throw new Error("no projects");
-				const defaultRepoPath = defaultCtx.project.rootPath;
-				if (await isGitRepo(defaultRepoPath)) {
-					const setupCmd = defaultCtx.projectConfigStore.get("worktree_setup_command") || undefined;
-					const poolSize = parseInt(defaultCtx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-					sessionManager.initWorktreePool(defaultRepoPath, setupCmd, poolSize);
-				}
-			} catch { /* best-effort */ }
+			for (const ctx of projectContextManager.all()) {
+				try {
+					const repoPath = ctx.project.rootPath;
+					if (await isGitRepo(repoPath)) {
+						const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
+						const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
+						sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize);
+					}
+				} catch { /* best-effort */ }
+			}
 
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
@@ -842,7 +842,9 @@ export function createGateway(config: GatewayConfig) {
 			clearInterval(cleanupInterval);
 			triggerEngine.stop();
 			wss.close();
-			await sessionManager.getWorktreePool()?.drain();
+			for (const pool of sessionManager.getAllWorktreePools().values()) {
+				await pool.drain();
+			}
 			await sessionManager.shutdown();
 			projectContextManager.closeAll();
 			if (sandboxManager) {
@@ -1220,11 +1222,16 @@ async function handleApiRoute(
 
 	// GET /api/worktree-pool
 	if (url.pathname === "/api/worktree-pool" && req.method === "GET") {
-		const pool = sessionManager.getWorktreePool();
-		if (pool) {
-			json(pool.getStatus());
+		const projectId = url.searchParams.get("projectId");
+		if (projectId) {
+			const pool = sessionManager.getWorktreePool(projectId);
+			json(pool ? pool.getStatus() : { enabled: false, ready: 0, target: 0, filling: false });
 		} else {
-			json({ enabled: false, ready: 0, target: 0, filling: false });
+			const pools: Record<string, any> = {};
+			for (const [pid, pool] of sessionManager.getAllWorktreePools()) {
+				pools[pid] = pool.getStatus();
+			}
+			json({ pools });
 		}
 		return;
 	}
@@ -1419,6 +1426,14 @@ async function handleApiRoute(
 					newCtx.goalStore.bumpGeneration();
 				};
 			}
+			// Initialize worktree pool if the new project is a git repo
+			try {
+				if (await isGitRepo(body.rootPath)) {
+					const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
+					const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
+					sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize);
+				}
+			} catch { /* best-effort */ }
 			json(project, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
@@ -1463,6 +1478,8 @@ async function handleApiRoute(
 			return;
 		}
 		try {
+			// Drain the project's worktree pool before removing
+			await sessionManager.removeWorktreePool(projectId);
 			// Terminate all live sessions belonging to the removed project
 			const liveSessions = sessionManager.listSessions().filter(s => s.projectId === projectId);
 			for (const s of liveSessions) {
