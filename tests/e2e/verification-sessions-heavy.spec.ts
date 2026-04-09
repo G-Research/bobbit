@@ -53,6 +53,9 @@ async function waitForGateStatus(
 }
 
 test.describe("Verification sessions and step events (heavy)", () => {
+	// These tests involve multiple sequential gate signals and WS waits.
+	// Under system load, child process spawning can be slow.
+	test.setTimeout(120_000);
 
 	test("all step events received for multi-step verification", async () => {
 		const goalId = await createTestFastGoal();

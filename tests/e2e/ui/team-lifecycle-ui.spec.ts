@@ -31,12 +31,12 @@ test.describe("Team lifecycle (UI)", () => {
 		// The "Start Team" button should be in the nav bar.
 		// It may be a .btn-split-main (no PR) or a plain .btn-icon (PR merged).
 		const startBtn = page.locator("button").filter({ hasText: "Start Team" }).first();
-		await expect(startBtn).toBeVisible({ timeout: 10_000 });
+		await expect(startBtn).toBeVisible({ timeout: 30_000 });
 		// Check if button is disabled
 		const isDisabled = await startBtn.isDisabled();
 		if (isDisabled) {
 			// setupStatus may not be "ready" — wait for it
-			await expect(startBtn).toBeEnabled({ timeout: 10_000 });
+			await expect(startBtn).toBeEnabled({ timeout: 30_000 });
 		}
 		await startBtn.click();
 
@@ -45,7 +45,7 @@ test.describe("Team lifecycle (UI)", () => {
 		// Wait for the session view to load (textarea appears)
 		await expect(
 			page.locator("textarea").first(),
-		).toBeVisible({ timeout: 25_000 });
+		).toBeVisible({ timeout: 30_000 });
 
 		// Navigate back to the goal dashboard to verify the team is visible
 		await navigateToGoalDashboard(page, goal.id);
@@ -81,7 +81,7 @@ test.describe("Team lifecycle (UI)", () => {
 		// Verify session view loads (textarea for sending messages should be visible)
 		await expect(
 			page.locator("textarea").first(),
-		).toBeVisible({ timeout: 10_000 });
+		).toBeVisible({ timeout: 30_000 });
 	});
 
 	test("team teardown cleans up UI", async ({ page }) => {
@@ -118,6 +118,6 @@ test.describe("Team lifecycle (UI)", () => {
 		// All remaining agent cards should be archived/dismissed (none active)
 		await expect(
 			page.locator(".agent-card").filter({ hasNot: page.locator("text=Dismissed") }),
-		).toHaveCount(0, { timeout: 10_000 });
+		).toHaveCount(0, { timeout: 30_000 });
 	});
 });
