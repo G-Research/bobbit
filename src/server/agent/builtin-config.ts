@@ -137,8 +137,8 @@ export class BuiltinConfigProvider {
 				const data = parse(entry.content);
 				if (!data?.id) continue;
 				const wf = this.normalizeWorkflow(data);
-				// Filter out hidden workflows — same as WorkflowStore.getAll()
-				if (wf.hidden) continue;
+				// Include all workflows (including hidden ones like test-fast) —
+				// hidden filtering is done at the API/cascade level, not here.
 				workflows.push(wf);
 			} catch (err) {
 				console.error(`[builtin-config] Failed to parse workflow ${entry.file}:`, err);

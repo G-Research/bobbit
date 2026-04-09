@@ -78,13 +78,16 @@ export class ConfigCascade {
 	// ── Workflows ────────────────────────────────────────────────
 
 	resolveWorkflows(projectId?: string): ResolvedItem<Workflow>[] {
+		// Filter out hidden workflows (e.g. test-fast) from the resolved set.
+		// Builtins include all workflows (hidden ones needed for seeding),
+		// but the API/UI should not expose them.
 		return this.resolve<Workflow>(
 			this.builtins.getWorkflows(),
 			w => w.id,
 			projectId,
 			this.serverStores.getWorkflows(),
 			ctx => ctx.workflowStore.getAll(),
-		);
+		).filter(r => !r.item.hidden);
 	}
 
 	// ── Tools ────────────────────────────────────────────────────
