@@ -410,7 +410,7 @@ Resolution order is unchanged (first non-null wins):
 1. `role.toolPolicies["<tool-name>"]` — per-tool override on role
 2. `role.toolPolicies["<group>"]` — per-group override on role
 3. `tool.grantPolicy` — tool YAML default
-4. Group default — `.bobbit/config/tool-group-policies.yaml`
+4. Group default — `defaults/tool-group-policies.yaml` (builtin), overridden by `.bobbit/config/tool-group-policies.yaml` (server/project)
 5. System fallback — `allow`
 
 ### REST API
@@ -505,7 +505,7 @@ Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additi
 |---|---|
 | Skills | `.claude/skills/`, `.bobbit/skills/`, `~/.claude/skills/`, `~/.bobbit/skills/`, `.claude/commands/` |
 | MCP | `~/.claude.json`, `~/.claude/.mcp.json`, `~/.bobbit/.mcp.json`, `.mcp.json`, `.claude/.mcp.json`, `.bobbit/config/mcp.json` |
-| Tools | `.bobbit/config/tools/` |
+| Tools | `defaults/tools/` (builtins), `.bobbit/config/tools/` (overrides) |
 | Agents | `AGENTS.md` (falls back to `CLAUDE.md`) |
 
 **Agents type:** entries point at individual files, not directories. Concatenated into system prompt in order. `@ref` resolved relative to file's parent dir.
@@ -554,7 +554,7 @@ When an MCP server connects, `McpManager` auto-generates documentation for its t
 - `<serverName>.cache.json` — per-tool SHA-256 content hash (of description + inputSchema) and generated summary. On each connect, hashes are compared; only changed tools trigger regeneration.
 - `<serverName>.md` — full Markdown reference with tool descriptions and parameter tables (name, type, required, description). Rewritten only when any tool in the server changes.
 
-**Prompt layout** — `getToolDocsForPrompt()` in `tool-manager.ts` produces a single `# Tools` section (not two separate sections). Each group renders: summary lines → per-tool doc blocks → a footer link. Built-in groups link to `.bobbit/config/tools/<groupDir>/<tool>.yaml` (`detail_docs` field); MCP groups link to `.bobbit/state/mcp-tool-docs/<serverName>.md`.
+**Prompt layout** — `getToolDocsForPrompt()` in `tool-manager.ts` produces a single `# Tools` section (not two separate sections). Each group renders: summary lines → per-tool doc blocks → a footer link. Built-in groups link to `defaults/tools/<groupDir>/<tool>.yaml` (`detail_docs` field); MCP groups link to `.bobbit/state/mcp-tool-docs/<serverName>.md`.
 
 **API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`
 
@@ -850,18 +850,30 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 ## Disk state
 
-### `.bobbit/config/` — version controlled
+### `defaults/` — version controlled (shipped builtins)
 
 | File / Directory | Owner | Purpose |
 |---|---|---|
-| `system-prompt.md` | `cli.ts` | Global system prompt |
-| `roles/*.yaml` | `RoleStore` | Role definitions + tool access |
-| `workflows/*.yaml` | `WorkflowStore` | Workflow templates |
-| `personalities/*.yaml` | `PersonalityStore` | Personality definitions |
-| `tools/<group>/*.yaml` | `ToolManager` | Tool definitions + extensions |
+| `system-prompt.md` | `cli.ts` | Global system prompt template |
+| `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
+| `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
+| `workflows/*.yaml` | `WorkflowStore` | Built-in workflow templates |
+| `personalities/*.yaml` | `PersonalityStore` | Built-in personality definitions |
+| `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
+| `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
+
+Copied to `dist/server/defaults/` at build time by `scripts/copy-defaults.mjs`. Read at runtime by `BuiltinConfigProvider`.
+
+### `.bobbit/config/` — runtime overrides (gitignored)
+
+| File / Directory | Owner | Purpose |
+|---|---|---|
 | `project.yaml` | `ProjectConfigStore` | Project settings |
-| `roles/assistant/*.yaml` | `assistant-registry.ts` | Assistant prompts |
-| `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Group grant policies |
+| `roles/*.yaml` | `RoleStore` | Server/project role overrides |
+| `workflows/*.yaml` | `WorkflowStore` | Server/project workflow overrides |
+| `personalities/*.yaml` | `PersonalityStore` | Server/project personality overrides |
+| `tools/<group>/*.yaml` | `ToolManager` | Server/project tool overrides |
+| `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Server/project policy overrides |
 | `mcp.json` | `McpManager` | MCP server overrides |
 
 ### `<project-root>/.bobbit/state/` — per-project, gitignored
