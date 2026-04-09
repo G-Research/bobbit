@@ -4,6 +4,7 @@ import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
+import { clearAnnotations, clearAllAnnotations } from "../ui/components/review/AnnotationStore.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
@@ -1108,15 +1109,18 @@ export class RemoteAgent {
 				state.reviewPanelOpen = true;
 				state.reviewActiveTab = data.title;
 				state.previewPanelActiveTab = "review";
+				state.previewPanelTab = "review";
 				// Un-collapse panel on desktop
 				if (this._sessionId) {
 					localStorage.removeItem(`bobbit-preview-collapsed-${this._sessionId}`);
 				}
 				renderApp();
 			} else if (data.action === "review_close") {
+				const sid = this._sessionId || "";
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				if (data.title) {
 					state.reviewDocuments.delete(data.title);
+					clearAnnotations(sid, data.title);
 					if (state.reviewActiveTab === data.title) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
@@ -1124,6 +1128,7 @@ export class RemoteAgent {
 				} else {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
+					clearAllAnnotations(sid);
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
 				renderApp();
