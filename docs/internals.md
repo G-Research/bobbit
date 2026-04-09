@@ -135,6 +135,71 @@ Two resolution modes:
 
 **Scalar resolution** (`resolveScalarConfig`): For `project.yaml` keys (build_command, test_command, default models, etc.), first defined value wins: project → server → global → built-in default. Returns both the resolved value and its source scope.
 
+### Config cascade
+
+The config cascade handles resolution of named config entities (roles, tools, personalities, workflows, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+
+#### Why a cascade?
+
+Without it, every project got a full independent copy of all config YAML via scaffolding. Editing the "global" version didn't propagate to existing projects, new Bobbit releases couldn't update defaults, and users couldn't tell which items were stock vs customised. The cascade makes builtins always-current and overrides explicit.
+
+#### Architecture
+
+```
+builtin (dist/server/defaults/)  →  server (<server-cwd>/.bobbit/config/)  →  project (<project>/.bobbit/config/)
+       lowest priority                                                              highest priority
+```
+
+Two modules implement this:
+
+- **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, PersonalityStore, etc.).
+
+- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolvePersonalities()`, `resolveWorkflows()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`.
+
+Each returned item is a `ResolvedItem<T>` with:
+- `item: T` — the config object
+- `origin: "builtin" | "server" | "project"` — which layer provided this item
+- `overrides?: ConfigOrigin` — which lower layer this item shadows, if any
+
+#### Resolution rules
+
+For each config type, items are merged by a unique key (roles by `name`, workflows by `id`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server). With `projectId`, adds the project layer. If `projectId` equals the default project ID, the project layer is skipped (it _is_ the server layer). Hidden workflows (e.g. `test-fast`) are filtered out at the cascade level.
+
+#### Server stores decoupling
+
+`ConfigCascade` accepts explicit `ServerStores` accessors rather than reading from `projectContextManager.getDefault()`. This matters because the standalone stores in `server.ts` may be backed by a different directory than the default project's stores (e.g. when `BOBBIT_DIR` is set in E2E tests). Using explicit accessors ensures PUT and GET use the same underlying stores.
+
+#### Builtin seeding
+
+On server startup, standalone stores are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores (e.g. `createGoal()` looking up workflows) work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding.
+
+#### Scaffolding
+
+`scaffoldBobbitDir()` creates empty `config/roles/`, `config/workflows/`, `config/personalities/` directories. These config types resolve at runtime via the cascade — no files are copied. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
+
+#### Session setup integration
+
+The session setup pipeline (`session-setup.ts`) resolves roles and tools through `ConfigCascade` when a `plan.projectId` is available. A `lookupRole()` helper in the pipeline prefers cascade-resolved roles, falling back to the standalone store. This ensures sessions see the full three-layer resolution even when project config dirs are empty.
+
+#### REST API
+
+Config list endpoints accept `?projectId=` for project-scoped resolution:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/roles?projectId=X` | Resolved roles with `origin` and `overrides` fields |
+| `GET` | `/api/personalities?projectId=X` | Resolved personalities |
+| `GET` | `/api/workflows?projectId=X` | Resolved workflows |
+| `GET` | `/api/tools?projectId=X` | Resolved tools |
+| `POST` | `/api/roles/:name/customize?scope=project&projectId=X` | Copy resolved item to target scope for editing |
+| `DELETE` | `/api/roles/:name/override?scope=project&projectId=X` | Remove override, revert to inherited |
+
+The customize/override endpoints follow the same pattern for personalities (`:name`) and workflows (`:id`). CRUD endpoints (`POST`, `PUT`, `DELETE`) accept optional `projectId` for scope-aware operations.
+
+#### UI
+
+All five config pages (Roles, Tools, Skills, Personalities, Workflows) display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`.
+
 ### Project assistant
 
 The project assistant guides users through registering a new project directory. It operates in two modes, selected automatically by the smart Add Project flow based on directory detection (`POST /api/projects/detect`):
@@ -275,7 +340,10 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 | `project-context.ts` | Scoped store container per project (with `open()`/`close()` lifecycle) |
 | `project-context-manager.ts` | Central registry of contexts, aggregation, store routing |
 | `state-migration.ts` | One-time migration from centralized to per-project state |
-| `config-resolver.ts` | 3-tier config cascade |
+| `config-resolver.ts` | 3-tier scalar config cascade (`project.yaml` keys) |
+| `builtin-config.ts` | Read-only provider for factory-default config from `dist/server/defaults/` |
+| `config-cascade.ts` | Three-layer entity resolution (builtin → server → project) with origin tags |
+| `config-scope.ts` | Shared UI scope row + origin badge helpers for config pages |
 | `project-assistant.ts` | Guided project registration |
 
 ---

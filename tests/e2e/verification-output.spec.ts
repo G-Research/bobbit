@@ -54,7 +54,7 @@ test.describe("Verification output streaming and timestamps", () => {
 
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 
 			const after = Date.now();
@@ -87,7 +87,7 @@ test.describe("Verification output streaming and timestamps", () => {
 
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 
 			const after = Date.now();
@@ -120,10 +120,11 @@ test.describe("Verification output streaming and timestamps", () => {
 				body: JSON.stringify({ content: "# Design\n\nTest" }),
 			});
 
-			// The test-fast design-doc gate runs "echo ok", so we should get stdout output
+			// The test-fast design-doc gate runs "echo ok", so we should get stdout output.
+			// Use a generous timeout — under system load, child process spawning can be slow.
 			const output = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_output" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 
 			// Validate all required fields

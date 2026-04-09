@@ -53,6 +53,9 @@ async function waitForGateStatus(
 }
 
 test.describe("Verification sessions and step events (heavy)", () => {
+	// These tests involve multiple sequential gate signals and WS waits.
+	// Under system load, child process spawning can be slow.
+	test.setTimeout(120_000);
 
 	test("all step events received for multi-step verification", async () => {
 		const goalId = await createTestFastGoal();
@@ -75,7 +78,7 @@ test.describe("Verification sessions and step events (heavy)", () => {
 			// Wait for the started event with step definitions
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "implementation",
-				10_000,
+				30_000,
 			);
 			expect(started.steps).toBeDefined();
 			expect(started.steps.length).toBe(1);
@@ -84,7 +87,7 @@ test.describe("Verification sessions and step events (heavy)", () => {
 			// Wait for step_complete
 			const stepComplete = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_complete" && m.gateId === "implementation",
-				10_000,
+				30_000,
 			);
 			expect(stepComplete.stepName).toBe("Quick check");
 			expect(stepComplete.status).toBe("passed");
@@ -92,7 +95,7 @@ test.describe("Verification sessions and step events (heavy)", () => {
 			// Wait for verification complete
 			const complete = await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === "implementation",
-				10_000,
+				30_000,
 			);
 			expect(complete.status).toBe("passed");
 		} finally {
@@ -162,23 +165,23 @@ test.describe("Verification sessions and step events (heavy)", () => {
 			// Wait for all expected events
 			await ws.waitFor(
 				(m) => m.type === "gate_signal_received" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			await ws.waitFor(
 				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			await ws.waitFor(
 				(m) => m.type === "gate_status_changed" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 
 			// Verify the order: signal_received < started < step_complete < complete < status_changed

@@ -61,6 +61,7 @@ import { renderWorkflowPage } from "./workflow-page.js";
 import "./workflow-page.css";
 import { renderPersonalityManagerPage } from "./personality-manager-page.js";
 import "./personality-manager.css";
+import "./config-scope.css";
 import { renderStaffPage } from "./staff-page.js";
 import { renderSkillsPage } from "./skills-page.js";
 import { renderSettingsPage } from "./settings-page.js";
@@ -1944,7 +1945,9 @@ function syncProposalFormState(): void {
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
 	_proposalSpec = proposal.spec;
-	_proposalCwd = proposal.cwd || "";
+	// Preserve project rootPath when proposal doesn't specify cwd
+	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
+	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
 	_proposalWorkflowId = proposal.workflow || "general";
 	_proposalSpecEditMode = false;
 	_proposalEnabledOptionalSteps = proposal.options

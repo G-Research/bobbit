@@ -3,9 +3,10 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchPersonalities, createPersonality, updatePersonality, deletePersonality, type PersonalityData } from "./api.js";
+import { createPersonality, updatePersonality, deletePersonality, gatewayFetch, type PersonalityData } from "./api.js";
 import { renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 
 // ============================================================================
 // STATE
@@ -31,6 +32,19 @@ let deleting = false;
 // DATA LOADING
 // ============================================================================
 
+async function fetchPersonalitiesScoped(): Promise<PersonalityData[]> {
+	const projectId = getConfigProjectId();
+	const url = projectId ? `/api/personalities?projectId=${encodeURIComponent(projectId)}` : "/api/personalities";
+	try {
+		const res = await gatewayFetch(url);
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.personalities || [];
+	} catch {
+		return [];
+	}
+}
+
 export async function loadPersonalityPageData(): Promise<void> {
 	currentView = "list";
 	selectedPersonality = null;
@@ -38,7 +52,7 @@ export async function loadPersonalityPageData(): Promise<void> {
 	saving = false;
 	deleting = false;
 	renderApp();
-	personalities = await fetchPersonalities();
+	personalities = await fetchPersonalitiesScoped();
 	loading = false;
 	renderApp();
 }
@@ -126,7 +140,7 @@ async function handleSave(): Promise<void> {
 			promptFragment: editPromptFragment,
 		});
 		if (ok) {
-			personalities = await fetchPersonalities();
+			personalities = await fetchPersonalitiesScoped();
 			showList();
 			return;
 		}
@@ -135,9 +149,9 @@ async function handleSave(): Promise<void> {
 			label: editLabel.trim(),
 			description: editDescription.trim(),
 			promptFragment: editPromptFragment,
-		});
+		}, getConfigProjectId() || undefined);
 		if (ok) {
-			personalities = await fetchPersonalities();
+			personalities = await fetchPersonalitiesScoped();
 			const updated = personalities.find((p) => p.name === selectedPersonality!.name);
 			if (updated) showEdit(updated);
 			else showList();
@@ -161,9 +175,9 @@ async function handleDelete(): Promise<void> {
 
 	deleting = true;
 	renderApp();
-	const ok = await deletePersonality(selectedPersonality.name);
+	const ok = await deletePersonality(selectedPersonality.name, getConfigProjectId() || undefined);
 	if (ok) {
-		personalities = await fetchPersonalities();
+		personalities = await fetchPersonalitiesScoped();
 		showList();
 	} else {
 		deleting = false;
@@ -181,9 +195,9 @@ async function handleDeleteFromList(personality: PersonalityData): Promise<void>
 	);
 	if (!confirmed) return;
 
-	const ok = await deletePersonality(personality.name);
+	const ok = await deletePersonality(personality.name, getConfigProjectId() || undefined);
 	if (ok) {
-		personalities = await fetchPersonalities();
+		personalities = await fetchPersonalitiesScoped();
 		renderApp();
 	}
 }
@@ -284,13 +298,25 @@ function renderNavBar(): TemplateResult {
 // RENDER: LIST VIEW
 // ============================================================================
 
+async function handleScopeChange(scope: string): Promise<void> {
+	setConfigScope(scope);
+	loading = true;
+	renderApp();
+	personalities = await fetchPersonalitiesScoped();
+	loading = false;
+	renderApp();
+}
+
 function renderPersonalityRow(personality: PersonalityData): TemplateResult {
+	const origin = (personality as any).origin as ConfigOrigin | undefined;
+	const overrides = (personality as any).overrides as ConfigOrigin | undefined;
+	const inherited = isInherited(origin);
 	return html`
-		<div class="personality-row" tabindex="0" role="button"
+		<div class="personality-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(personality)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(personality); } }}>
 			<div class="personality-row-info">
-				<span class="personality-row-label">${personality.label}</span>
+				<span class="personality-row-label">${personality.label} ${renderOriginBadge(origin, overrides)}</span>
 				<span class="personality-row-slug">${personality.name}</span>
 				${personality.description ? html`<span class="personality-row-desc">${personality.description}</span>` : nothing}
 			</div>
@@ -351,7 +377,13 @@ function renderEditView(): TemplateResult {
 		<div class="personalities-edit-container">
 			<!-- Identity section -->
 			<div class="personalities-edit-section">
-				<h2 class="personalities-section-title">Identity</h2>
+				<div class="flex items-center justify-between">
+					<h2 class="personalities-section-title">Identity</h2>
+					<span class="inline-flex items-center gap-2">
+						${selectedPersonality ? renderOriginBadge((selectedPersonality as any).origin, (selectedPersonality as any).overrides) : ""}
+						${renderCustomizeRevertButtons()}
+					</span>
+				</div>
 				<div class="personalities-edit-field">
 					<label class="personalities-field-label">Name</label>
 					${isCreate
@@ -403,10 +435,61 @@ function renderEditView(): TemplateResult {
 // MAIN RENDER
 // ============================================================================
 
+function renderCustomizeRevertButtons(): TemplateResult | string {
+	if (!selectedPersonality || currentView === "create") return "";
+	const origin = (selectedPersonality as any).origin as ConfigOrigin | undefined;
+	if (!origin) return "";
+
+	const scope = getConfigScope();
+	const projectId = getConfigProjectId();
+
+	if (scope === "system") {
+		if (origin === "builtin") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("personalities", selectedPersonality!.name, "server")) {
+					personalities = await fetchPersonalitiesScoped();
+					const updated = personalities.find(p => p.name === selectedPersonality!.name);
+					if (updated) showEdit(updated);
+				}
+			}}>Customize at Server Level</button>`;
+		}
+		if (origin === "server") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("personalities", selectedPersonality!.name, "server")) {
+					personalities = await fetchPersonalitiesScoped();
+					const updated = personalities.find(p => p.name === selectedPersonality!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Builtin</button>`;
+		}
+	} else {
+		if (origin === "builtin" || origin === "server") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("personalities", selectedPersonality!.name, "project", projectId)) {
+					personalities = await fetchPersonalitiesScoped();
+					const updated = personalities.find(p => p.name === selectedPersonality!.name);
+					if (updated) showEdit(updated);
+				}
+			}}>Customize for ${getCurrentProjectName()}</button>`;
+		}
+		if (origin === "project") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("personalities", selectedPersonality!.name, "project", projectId)) {
+					personalities = await fetchPersonalitiesScoped();
+					const updated = personalities.find(p => p.name === selectedPersonality!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Inherited</button>`;
+		}
+	}
+	return "";
+}
+
 export function renderPersonalityManagerPage(): TemplateResult {
 	return html`
 		<div class="personalities-container">
 			${renderNavBar()}
+			${currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange) : ""}
 			<div class="personalities-body">
 				${currentView === "list" ? renderListView() : renderEditView()}
 			</div>

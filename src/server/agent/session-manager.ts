@@ -172,6 +172,8 @@ export interface SessionManagerOptions {
 	projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	/** Project context manager for per-project store resolution */
 	projectContextManager?: ProjectContextManager;
+	/** Config cascade for three-layer resolution (builtin → server → project) */
+	configCascade?: import("./config-cascade.js").ConfigCascade;
 }
 
 export class SessionManager {
@@ -197,6 +199,7 @@ export class SessionManager {
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
+	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	/** @internal Non-PCM test path only. */
@@ -546,6 +549,7 @@ export class SessionManager {
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
+			configCascade: this.configCascade,
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,

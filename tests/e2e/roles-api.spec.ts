@@ -262,29 +262,40 @@ test.describe("DELETE /api/roles/:name", () => {
 		expect(resp.status).toBe(404);
 	});
 
-	test("can delete and re-create a default role", async () => {
+	test("deleting a builtin role removes local override but builtin remains via cascade", async () => {
+		// Verify builtin role exists
 		const getBeforeResp = await apiFetch("/api/roles/test-engineer");
 		expect(getBeforeResp.status).toBe(200);
-		const originalRole = await getBeforeResp.json();
 
-		const resp = await apiFetch("/api/roles/test-engineer", { method: "DELETE" });
-		expect(resp.status).toBe(200);
-
-		const getResp = await apiFetch("/api/roles/test-engineer");
-		expect(getResp.status).toBe(404);
-
-		// Restore so other tests aren't affected
-		const restoreResp = await apiFetch("/api/roles", {
+		// Create a local override
+		const createResp = await apiFetch("/api/roles", {
 			method: "POST",
 			body: JSON.stringify({
-				name: originalRole.name,
-				label: originalRole.label,
-				promptTemplate: originalRole.promptTemplate,
-				toolPolicies: originalRole.toolPolicies,
-				accessory: originalRole.accessory,
+				name: "test-engineer",
+				label: "Custom Test Engineer",
+				promptTemplate: "custom prompt",
+				accessory: "none",
 			}),
 		});
-		expect(restoreResp.status).toBe(201);
+		expect(createResp.status).toBe(201);
+
+		// Verify override is served (custom label)
+		const getOverride = await apiFetch("/api/roles/test-engineer");
+		expect(getOverride.status).toBe(200);
+		const overrideRole = await getOverride.json();
+		expect(overrideRole.label).toBe("Custom Test Engineer");
+
+		// Delete the override
+		const delResp = await apiFetch("/api/roles/test-engineer", { method: "DELETE" });
+		expect(delResp.status).toBe(200);
+
+		// Builtin should still be accessible — not 404
+		const getAfterResp = await apiFetch("/api/roles/test-engineer");
+		expect(getAfterResp.status).toBe(200);
+		const afterRole = await getAfterResp.json();
+		expect(afterRole.name).toBe("test-engineer");
+		// Label should revert to the builtin's label (not "Custom Test Engineer")
+		expect(afterRole.label).not.toBe("Custom Test Engineer");
 	});
 });
 

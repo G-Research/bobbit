@@ -126,6 +126,12 @@ export function markProposalDismissed(sessionId: string, proposal: { title: stri
 	} catch { /* ignore */ }
 }
 
+export function clearProposalDismissed(sessionId: string): void {
+	try {
+		localStorage.removeItem(dismissedProposalKey(sessionId));
+	} catch { /* ignore */ }
+}
+
 function clearDismissedProposal(sessionId: string): void {
 	try {
 		localStorage.removeItem(dismissedProposalKey(sessionId));
@@ -867,7 +873,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantType === "goal") {
 				state.activeGoalProposal = proposal;
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
-				if (!state.previewCwdEdited) state.previewCwd = proposal.cwd || "";
+				if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 				if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
 				if (proposal.workflow) setSelectedWorkflowId(proposal.workflow);
 				state.assistantHasProposal = true;
@@ -1067,6 +1073,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			const { type, fields } = e.detail || {};
 			if (!type || !fields) return;
+			// Clear any previous dismissal so the proposal re-opens
+			// (the user explicitly clicked "Open proposal")
+			if (type === "goal") clearProposalDismissed(sessionId);
 			const callbackMap: Record<string, ((p: any) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
@@ -1617,6 +1626,24 @@ export async function acceptProjectProposal(): Promise<void> {
 	state.activeProjectProposal = undefined;
 	state.assistantHasProposal = false;
 	if (proposal.sessionId) deleteProjectDraft(proposal.sessionId);
+
+	// Terminate the project assistant session silently (no confirmation dialog)
+	try {
+		uncacheSession(propSessionId);
+		if (activeSessionId() === propSessionId) {
+			state.remoteAgent?.disconnect();
+			state.remoteAgent = null;
+		}
+		await gatewayFetch(`/api/sessions/${propSessionId}/terminate`, { method: "POST" });
+		// Clean up drafts and navigate away
+		deleteGoalDraft(propSessionId);
+		deleteRoleDraft(propSessionId);
+		deletePersonalityDraft(propSessionId);
+		deleteProjectDraft(propSessionId);
+		setHashRoute("landing");
+	} catch (err) {
+		console.error('[project-proposal] Failed to terminate assistant session:', err);
+	}
 	renderApp();
 }
 

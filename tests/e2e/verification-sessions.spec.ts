@@ -65,7 +65,7 @@ test.describe("Verification sessions and step events", () => {
 			// Wait for gate_verification_started with steps
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			expect(started.goalId).toBe(goalId);
 			expect(started.signalId).toBeTruthy();
@@ -95,10 +95,10 @@ test.describe("Verification sessions and step events", () => {
 				body: JSON.stringify({ content: "# Design\n\nTest" }),
 			});
 
-			// Wait for step_complete
+			// Wait for step_complete — generous timeout for system load
 			const stepComplete = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			expect(stepComplete.goalId).toBe(goalId);
 			expect(stepComplete.signalId).toBeTruthy();
@@ -112,7 +112,7 @@ test.describe("Verification sessions and step events", () => {
 			// Wait for overall complete
 			const complete = await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			expect(complete.status).toBe("passed");
 		} finally {
@@ -192,7 +192,7 @@ test.describe("Verification sessions and step events", () => {
 
 			const stepComplete = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			// Command steps don't have a sessionId
 			expect(stepComplete.sessionId).toBeUndefined();

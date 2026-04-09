@@ -31,14 +31,17 @@ test.describe("Session worktree (UI)", () => {
 			expect(data.worktreePath).toBeTruthy();
 		}).toPass({ timeout: 30_000 });
 
-		// Verify git status widget shows a session/* branch
-		const gitStatusResp = await apiFetch(`/api/sessions/${created.id}/git-status`);
-		const gitStatus = await gitStatusResp.json();
-		expect(gitStatus.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
+		// Verify git status widget shows a session/* branch.
+		// Poll because the worktree may still be initializing right after status flips.
+		await expect(async () => {
+			const gitStatusResp = await apiFetch(`/api/sessions/${created.id}/git-status`);
+			const gitStatus = await gitStatusResp.json();
+			expect(gitStatus.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
+		}).toPass({ timeout: 30_000 });
 
 		// Navigate to the session in the UI and verify it loads
 		await openApp(page);
 		await navigateToHash(page, `#/session/${created.id}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 30_000 });
 	});
 });

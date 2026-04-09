@@ -61,16 +61,8 @@ export function scaffoldBobbitDir(projectRoot: string): void {
         }
       }
     }
-    // Incremental scaffolding: add roles/assistant/ sub-prompts if missing
-    const assistantConfigDir = path.join(dotBobbit, "config", "roles", "assistant");
-    if (!fs.existsSync(assistantConfigDir)) {
-      const defaultsDir2 = path.join(__dirname, "defaults");
-      const defaultAssistantDir = path.join(defaultsDir2, "roles", "assistant");
-      if (fs.existsSync(defaultAssistantDir)) {
-        console.log("Adding .bobbit/config/roles/assistant/ to existing installation...");
-        copyDir(defaultAssistantDir, assistantConfigDir);
-      }
-    }
+    // Note: roles/assistant/ sub-prompts are no longer scaffolded here — they
+    // resolve at runtime via the config cascade from dist/server/defaults/.
 
     return;
   }
@@ -91,31 +83,23 @@ export function scaffoldBobbitDir(projectRoot: string): void {
   });
   fs.mkdirSync(path.join(dotBobbit, "state", "tls"), { recursive: true });
 
-  // Copy default templates
+  // Roles, workflows, and personalities are resolved at runtime via ConfigCascade
+  // (seeded from builtins on startup). Only create empty directories for them.
+  // Tools are copied from defaults because they contain YAML files with provider
+  // configs and extension code that updateToolMetadata() modifies in-place.
   const defaultsDir = path.join(__dirname, "defaults");
   if (fs.existsSync(defaultsDir)) {
-    copyDir(
-      path.join(defaultsDir, "roles"),
-      path.join(dotBobbit, "config", "roles"),
-    );
-    copyDir(
-      path.join(defaultsDir, "workflows"),
-      path.join(dotBobbit, "config", "workflows"),
-    );
-    copyDir(
-      path.join(defaultsDir, "personalities"),
-      path.join(dotBobbit, "config", "personalities"),
-    );
-    copyDir(
-      path.join(defaultsDir, "tools"),
-      path.join(dotBobbit, "config", "tools"),
-    );
     const sysPromptSrc = path.join(defaultsDir, "system-prompt.md");
     if (fs.existsSync(sysPromptSrc)) {
       fs.copyFileSync(
         sysPromptSrc,
         path.join(dotBobbit, "config", "system-prompt.md"),
       );
+    }
+    // Copy tool YAML files (needed for in-place metadata updates)
+    const defaultToolsDir = path.join(defaultsDir, "tools");
+    if (fs.existsSync(defaultToolsDir)) {
+      copyDir(defaultToolsDir, path.join(dotBobbit, "config", "tools"));
     }
   }
 

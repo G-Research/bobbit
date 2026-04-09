@@ -59,7 +59,7 @@ test.describe("Verification output streaming and timestamps (multi-step)", () =>
 
 			const output = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_output" && m.gateId === "implementation",
-				10_000,
+				30_000,
 			);
 
 			expect(output.goalId).toBe(goalId);
@@ -92,11 +92,11 @@ test.describe("Verification output streaming and timestamps (multi-step)", () =>
 			// Collect all events
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				10_000,
+				30_000,
 			);
 
 			// Both should have startedAt

@@ -23,7 +23,7 @@ export class RoleManager {
 		if (!NAME_PATTERN.test(name)) {
 			throw new Error("Role name must be lowercase alphanumeric + hyphens (e.g. 'my-role')");
 		}
-		if (this.store.get(name)) {
+		if (this.store.getLocal(name)) {
 			throw new Error(`Role \"${name}\" already exists`);
 		}
 

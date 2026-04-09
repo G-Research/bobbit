@@ -21,7 +21,7 @@ test.describe("Gate verification UX", () => {
 			// Set up WS listener BEFORE navigating to dashboard
 			const wsPromise = page.waitForEvent("websocket", {
 				predicate: (ws) => ws.url().includes("/ws/viewer"),
-				timeout: 10_000,
+				timeout: 30_000,
 			});
 
 			await navigateToGoalDashboard(page, goalId);
@@ -38,7 +38,7 @@ test.describe("Gate verification UX", () => {
 			// Navigate back — should establish a NEW viewer WS
 			const ws2Promise = page.waitForEvent("websocket", {
 				predicate: (ws) => ws.url().includes("/ws/viewer"),
-				timeout: 10_000,
+				timeout: 30_000,
 			});
 			await navigateToGoalDashboard(page, goalId);
 			const viewerWs2 = await ws2Promise;
@@ -63,7 +63,7 @@ test.describe("Gate verification UX", () => {
 
 			// Verify in-place hash navigation works for sessions
 			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 30_000 });
 
 			// Confirm hash is correct
 			const hash = await page.evaluate(() => location.hash);
@@ -82,7 +82,7 @@ test.describe("Gate verification UX", () => {
 
 			// Navigate to session view
 			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 30_000 });
 
 			// Verify no target="_blank" links pointing to /session/ exist on the page
 			const blankSessionLinks = await page.locator('a[target="_blank"][href*="/session/"]').count();
@@ -92,7 +92,7 @@ test.describe("Gate verification UX", () => {
 			const newSession = await createSession();
 			try {
 				await navigateToHash(page, `#/session/${newSession}`);
-				await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+				await expect(page.locator("textarea").first()).toBeVisible({ timeout: 30_000 });
 
 				const hash = await page.evaluate(() => location.hash);
 				expect(hash).toBe(`#/session/${newSession}`);

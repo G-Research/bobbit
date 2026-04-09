@@ -21,6 +21,9 @@ class MockWorkflowStore {
 	get(id: string): Workflow | undefined {
 		return this.workflows.get(id);
 	}
+	getLocal(id: string): Workflow | undefined {
+		return this.workflows.get(id);
+	}
 	remove(id: string): void {
 		this.workflows.delete(id);
 	}
