@@ -666,6 +666,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewCwdEdited = false;
 		state.isPreviewSession = sessionData?.preview || false;
 		state.previewPanelHtml = "";
+		state.reviewDocuments = new Map();
+		state.reviewActiveTab = "";
+		state.reviewPanelOpen = false;
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
 
@@ -1136,6 +1139,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.setupFormSaved = false;
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelHtml = ""; // Clear stale preview from previous session
+		state.reviewDocuments = new Map();
+		state.reviewActiveTab = "";
+		state.reviewPanelOpen = false;
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
 
@@ -1672,6 +1678,9 @@ export function backToSessions(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewDocuments = new Map();
+	state.reviewActiveTab = "";
+	state.reviewPanelOpen = false;
 	stopPreviewPolling();
 	state.cwdDropdownOpen = false;
 	localStorage.removeItem(GW_SESSION_KEY);
@@ -1693,6 +1702,9 @@ export function disconnectGateway(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewDocuments = new Map();
+	state.reviewActiveTab = "";
+	state.reviewPanelOpen = false;
 	stopPreviewPolling();
 	state.appView = "disconnected";
 	localStorage.removeItem(GW_SESSION_KEY);
