@@ -338,7 +338,7 @@ export class McpManager {
     const required = (schema.required as string[]) || [];
     const lines: string[] = [];
 
-    lines.push("## Parameters\n");
+    lines.push("### Parameters\n");
     lines.push(
       "| Name | Type | Required | Description |",
       "|------|------|----------|-------------|",
@@ -377,8 +377,9 @@ export class McpManager {
       const dir = path.join(this.stateDir ?? bobbitStateDir(), 'mcp-tool-docs');
       fs.mkdirSync(dir, { recursive: true });
 
-      const cacheFile = path.join(dir, `${serverName}.cache.json`);
-      const mdFile = path.join(dir, `${serverName}.md`);
+      const safeName = path.basename(serverName);
+      const cacheFile = path.join(dir, `${safeName}.cache.json`);
+      const mdFile = path.join(dir, `${safeName}.md`);
 
       // Read existing cache
       let oldCache: McpToolDocCache = {};
@@ -425,7 +426,6 @@ export class McpManager {
           mdParts.push(`${tool.description || 'No description available.'}\n`);
           const paramDocs = this._generateToolParamDocs(tool);
           if (paramDocs) {
-            mdParts.push(`### Parameters\n`);
             mdParts.push(paramDocs + '\n');
           }
         }
