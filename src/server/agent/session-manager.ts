@@ -761,7 +761,7 @@ export class SessionManager {
 
 	async initMcp(cwd: string): Promise<void> {
 		try {
-			const mgr = new McpManager(cwd, this.projectConfigStore);
+			const mgr = new McpManager(cwd, this.projectConfigStore, bobbitStateDir());
 
 			// Register additional projects for multi-project MCP discovery
 			if (this.projectContextManager) {
@@ -782,7 +782,7 @@ export class SessionManager {
 				this.toolManager.registerExternalTools(infos.map(info => ({
 					name: info.name,
 					description: info.description,
-					summary: info.description,
+					summary: info.summary ?? info.description,
 					group: info.group,
 					docs: info.docs,
 					provider: { type: 'mcp' as const, server: info.serverName, mcpTool: info.mcpToolName },
