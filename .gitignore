@@ -18,6 +18,8 @@ tests/e2e/screenshots/
 *-report.html
 nul
 .pi/
+# .bobbit/config/ is runtime state (per-project overrides), not tracked in git
+.bobbit/config/
 # .bobbit/state/ is excluded by .bobbit/.gitignore
 .e2e-pi*
 .e2e-bobbit*
