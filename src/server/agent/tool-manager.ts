@@ -280,6 +280,25 @@ export class ToolManager {
 		}
 	}
 
+	/**
+	 * Returns only tools defined locally in the config dir (not inherited from builtins).
+	 * Used by the config cascade to determine which tools are server/project overrides.
+	 */
+	getLocalTools(): ToolInfo[] {
+		// Scan only the config-level tools dir — no builtins
+		const tools = scanToolsDir(this.toolsDir, this.toolsDir);
+		return tools.map((tool) => ({
+			name: tool.name,
+			description: tool.description,
+			group: tool.group,
+			docs: tool.docs,
+			detail_docs: tool.detail_docs,
+			hasRenderer: !!tool.renderer,
+			rendererFile: tool.renderer,
+			grantPolicy: tool.grantPolicy,
+		}));
+	}
+
 	/** Returns all tools, re-scanning the YAML directory on every call. */
 	getAvailableTools(): ToolInfo[] {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);

@@ -98,7 +98,7 @@ export class ConfigCascade {
 			t => t.name,
 			projectId,
 			this.serverStores.getTools(),
-			ctx => ctx.toolManager.getAvailableTools(),
+			ctx => ctx.toolManager.getLocalTools(),
 		);
 	}
 

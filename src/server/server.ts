@@ -457,7 +457,7 @@ export function createGateway(config: GatewayConfig) {
 		getRoles: () => roleStore.getAllLocal(),
 		getPersonalities: () => personalityStore.getAllLocal(),
 		getWorkflows: () => workflowStore.getAllLocal(),
-		getTools: () => toolManager.getAvailableTools(),
+		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
