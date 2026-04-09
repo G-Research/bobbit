@@ -126,6 +126,12 @@ export function markProposalDismissed(sessionId: string, proposal: { title: stri
 	} catch { /* ignore */ }
 }
 
+export function clearProposalDismissed(sessionId: string): void {
+	try {
+		localStorage.removeItem(dismissedProposalKey(sessionId));
+	} catch { /* ignore */ }
+}
+
 function clearDismissedProposal(sessionId: string): void {
 	try {
 		localStorage.removeItem(dismissedProposalKey(sessionId));
@@ -1067,6 +1073,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			const { type, fields } = e.detail || {};
 			if (!type || !fields) return;
+			// Clear any previous dismissal so the proposal re-opens
+			// (the user explicitly clicked "Open proposal")
+			if (type === "goal") clearProposalDismissed(sessionId);
 			const callbackMap: Record<string, ((p: any) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
