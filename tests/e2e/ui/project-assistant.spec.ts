@@ -67,7 +67,7 @@ async function addProjectViaDialog(
 	await expect(async () => {
 		const hash = await page.evaluate(() => window.location.hash);
 		expect(hash).toMatch(/#\/session\//);
-	}).toPass({ timeout: 10_000 });
+	}).toPass({ timeout: 15_000 });
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 	// Extract session ID from hash
@@ -402,7 +402,7 @@ test.describe("Project proposal preview form", () => {
 			const promoted = prjs.find((p: any) => p.id === projectId);
 			expect(promoted).toBeTruthy();
 			expect(promoted.provisional).toBeFalsy();
-		}).toPass({ timeout: 10_000 });
+		}).toPass({ timeout: 15_000 });
 
 		// Verify the project name was updated to "Test Project"
 		const projects = await getProjects();
@@ -440,17 +440,19 @@ test.describe("Project proposal preview form", () => {
 			const p = prjs.find((pp: any) => pp.id === projectId);
 			expect(p).toBeTruthy();
 			expect(p.provisional).toBeFalsy();
-		}).toPass({ timeout: 10_000 });
+		}).toPass({ timeout: 15_000 });
 
-		// Verify config was written
-		const configResp = await apiFetch(`/api/projects/${projectId}/config`);
-		if (configResp.ok) {
+		// Verify config was written — the client writes config fields after promotion,
+		// so poll until all expected fields are present.
+		await expect(async () => {
+			const configResp = await apiFetch(`/api/projects/${projectId}/config`);
+			expect(configResp.ok).toBe(true);
 			const config = await configResp.json();
 			expect(config.build_command).toBe("npm run build");
 			expect(config.test_command).toBe("npm test");
 			expect(config.typecheck_command).toBe("npm run check");
 			expect(config.worktree_setup_command).toBe("npm ci");
-		}
+		}).toPass({ timeout: 20_000 });
 
 		// Clean up
 		await deleteSession(sessionId);

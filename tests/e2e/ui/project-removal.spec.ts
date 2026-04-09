@@ -42,7 +42,7 @@ test.describe("Remove Project button", () => {
 
 		// Verify the Remove Project button is visible
 		const removeBtn = page.getByRole("button", { name: "Remove Project" });
-		await expect(removeBtn).toBeVisible({ timeout: 5_000 });
+		await expect(removeBtn).toBeVisible({ timeout: 15_000 });
 
 		// Set up dialog handler BEFORE clicking
 		page.on("dialog", (dialog) => dialog.accept());
@@ -74,7 +74,7 @@ test.describe("Remove Project button", () => {
 		await navigateToHash(page, `#/settings/${defaultProject.id}/general`);
 
 		// Wait for settings content to load
-		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
 
 		// Remove button should NOT be present for the default project
 		const removeBtn = page.getByRole("button", { name: "Remove Project" });

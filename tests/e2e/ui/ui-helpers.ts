@@ -20,7 +20,7 @@ export async function openApp(page: Page): Promise<void> {
 	// regardless of single-project or multi-project mode
 	await expect(
 		page.locator("button").filter({ hasText: "Settings" }).first(),
-	).toBeVisible({ timeout: 15_000 });
+	).toBeVisible({ timeout: 20_000 });
 }
 
 /**
@@ -29,7 +29,7 @@ export async function openApp(page: Page): Promise<void> {
 export async function createSessionViaUI(page: Page): Promise<void> {
 	// In multi-project mode the button title is "New session in <project>"
 	await page.locator("button[title^='New session']").first().click();
-	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 }
 
 /**

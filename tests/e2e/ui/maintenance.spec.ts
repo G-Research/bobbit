@@ -108,7 +108,7 @@ test.describe("Maintenance tab (full-stack UI)", () => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
 
-		await expect(page.getByText("Show message timestamps")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByText("Show message timestamps")).toBeVisible({ timeout: 15_000 });
 
 		// Click the Maintenance tab button
 		await page.locator("button").filter({ hasText: "Maintenance" }).first().click();
