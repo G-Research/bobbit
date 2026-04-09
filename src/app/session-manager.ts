@@ -481,6 +481,14 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 
 			if (text) {
 				editor.value = text;
+				// Guard against Lit re-renders that may reset the textarea.
+				// Re-apply the draft after a microtask to survive any pending
+				// requestUpdate() cycles triggered by connection state changes.
+				queueMicrotask(() => {
+					if (_draftSessionId !== sessionId) return;
+					const el = document.querySelector("message-editor") as any;
+					if (el && el.value !== text) el.value = text;
+				});
 			}
 		} catch { /* ignore */ }
 	})();
