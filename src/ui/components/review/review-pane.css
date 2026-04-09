@@ -1,0 +1,402 @@
+/* ============================================================
+   Review Pane — Styles for review components
+   Uses CSS variables from the app theme.
+   ============================================================ */
+
+/* --- Review Pane Container --- */
+.review-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--background, #fff);
+  color: var(--foreground, #1a1a1a);
+}
+
+/* --- Tab Bar --- */
+.review-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border, #e0e0e0);
+  overflow-x: auto;
+  flex-shrink: 0;
+  background: var(--background, #fff);
+}
+
+.review-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground, #888);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+
+.review-tab:hover {
+  background: var(--muted, rgba(0, 0, 0, 0.04));
+  color: var(--foreground, #1a1a1a);
+}
+
+.review-tab--active {
+  background: var(--muted, rgba(0, 0, 0, 0.06));
+  color: var(--foreground, #1a1a1a);
+  border-color: var(--border, #e0e0e0);
+  font-weight: 500;
+}
+
+.review-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.review-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--primary, #6366f1);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* --- Tab Overflow Dropdown --- */
+.review-tab-overflow-container {
+  position: relative;
+}
+
+.review-tab-overflow-trigger {
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.review-tab-overflow {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  min-width: 180px;
+  margin-top: 4px;
+  padding: 4px;
+  background: var(--background, #fff);
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.review-tab-overflow-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground, #1a1a1a);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.review-tab-overflow-item:hover {
+  background: var(--muted, rgba(0, 0, 0, 0.04));
+}
+
+.review-tab-overflow-item.review-tab--active {
+  font-weight: 500;
+  background: var(--muted, rgba(0, 0, 0, 0.06));
+}
+
+/* --- Document Area --- */
+.review-document-area {
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+}
+
+review-document {
+  display: block;
+  position: relative;
+  padding: 16px 24px 16px 48px;
+}
+
+/* --- Markdown Content Area --- */
+.review-document-content {
+  line-height: 1.6;
+  font-size: 14px;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.review-document-content h1,
+.review-document-content h2,
+.review-document-content h3,
+.review-document-content h4,
+.review-document-content h5,
+.review-document-content h6 {
+  margin-top: 1.2em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.review-document-content h1 { font-size: 1.5em; }
+.review-document-content h2 { font-size: 1.3em; }
+.review-document-content h3 { font-size: 1.15em; }
+
+.review-document-content p {
+  margin: 0.5em 0;
+}
+
+.review-document-content ul,
+.review-document-content ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.review-document-content code {
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: var(--muted, rgba(0, 0, 0, 0.06));
+  font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.review-document-content pre {
+  margin: 0.75em 0;
+  padding: 12px 16px;
+  border-radius: 6px;
+  background: var(--muted, rgba(0, 0, 0, 0.04));
+  overflow-x: auto;
+}
+
+.review-document-content pre code {
+  padding: 0;
+  background: none;
+  font-size: 13px;
+}
+
+.review-document-content blockquote {
+  margin: 0.5em 0;
+  padding: 4px 16px;
+  border-left: 3px solid var(--border, #e0e0e0);
+  color: var(--muted-foreground, #888);
+}
+
+.review-document-content table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  width: 100%;
+}
+
+.review-document-content th,
+.review-document-content td {
+  padding: 6px 12px;
+  border: 1px solid var(--border, #e0e0e0);
+  text-align: left;
+}
+
+.review-document-content th {
+  background: var(--muted, rgba(0, 0, 0, 0.04));
+  font-weight: 600;
+}
+
+.review-document-content a {
+  color: var(--primary, #6366f1);
+  text-decoration: none;
+}
+
+.review-document-content a:hover {
+  text-decoration: underline;
+}
+
+.review-document-content hr {
+  border: none;
+  border-top: 1px solid var(--border, #e0e0e0);
+  margin: 1em 0;
+}
+
+.review-document-content img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* --- Annotation Highlights --- */
+.review-highlight {
+  background: rgba(99, 102, 241, 0.15);
+  border-bottom: 2px solid var(--primary, #6366f1);
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+/* Recogito annotator highlight styles */
+.r6o-annotation {
+  background: rgba(99, 102, 241, 0.15) !important;
+  border-bottom: 2px solid var(--primary, #6366f1) !important;
+  cursor: pointer;
+}
+
+.r6o-annotation:hover {
+  background: rgba(99, 102, 241, 0.25) !important;
+}
+
+/* --- Gutter Markers --- */
+.review-gutter-marker {
+  position: absolute;
+  left: 16px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary, #6366f1);
+  transform: translateY(6px);
+}
+
+/* --- Re-anchoring Banner --- */
+.review-banner {
+  padding: 8px 16px;
+  margin: 8px 16px 0;
+  background: rgba(234, 179, 8, 0.1);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  border-radius: 6px;
+  color: var(--foreground, #1a1a1a);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* --- Detached Comments --- */
+.review-detached {
+  margin: 16px;
+  padding: 12px 16px;
+  background: var(--muted, rgba(0, 0, 0, 0.03));
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 8px;
+}
+
+.review-detached h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--foreground, #1a1a1a);
+}
+
+.review-detached-info {
+  font-size: 12px;
+  color: var(--muted-foreground, #888);
+  margin: 0 0 12px;
+}
+
+.review-detached-item {
+  position: relative;
+  padding: 8px 28px 8px 12px;
+  margin-bottom: 8px;
+  background: var(--background, #fff);
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+}
+
+.review-detached-item:last-child {
+  margin-bottom: 0;
+}
+
+.review-detached-quote {
+  font-size: 12px;
+  color: var(--muted-foreground, #888);
+  font-style: italic;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-detached-comment {
+  font-size: 13px;
+  color: var(--foreground, #1a1a1a);
+}
+
+.review-detached-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground, #888);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.review-detached-remove:hover {
+  background: var(--muted, rgba(0, 0, 0, 0.06));
+  color: var(--foreground, #1a1a1a);
+}
+
+/* --- Submit Bar --- */
+.review-submit-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border, #e0e0e0);
+  flex-shrink: 0;
+  background: var(--background, #fff);
+}
+
+.review-submit-count {
+  font-size: 13px;
+  color: var(--muted-foreground, #888);
+}
+
+.review-submit-btn {
+  padding: 6px 20px;
+  border: none;
+  border-radius: 6px;
+  background: var(--primary, #6366f1);
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.review-submit-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.review-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* --- Empty State --- */
+.review-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted-foreground, #888);
+  font-size: 14px;
+}
