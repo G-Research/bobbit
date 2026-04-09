@@ -15,6 +15,7 @@ interface BgParams {
 	lines?: number;
 	from?: number;
 	to?: number;
+	timeout?: number;
 }
 
 /** Extract the process name from result text like "Logs for bg-12 (branch cleanup):" */
@@ -23,35 +24,64 @@ function extractProcessName(result: ToolResultMessage | undefined): string | und
 	const text = typeof result.content === "string"
 		? result.content
 		: result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
-	// Match "bg-NN (process name)" in the first line
 	const match = text.match(/bg-\d+\s+\(([^)]+)\)/);
 	return match?.[1] ?? undefined;
 }
 
+/** Format seconds into a human-readable duration like "2m 30s" or "5m" */
+function formatDuration(seconds: number): string {
+	if (seconds < 60) return `${seconds}s`;
+	const m = Math.floor(seconds / 60);
+	const s = seconds % 60;
+	return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+/**
+ * Build the process label: "process name (bg-12)" or just "bg-12"
+ * Shows name prominently with the ID as a secondary reference.
+ */
+function processLabel(params: BgParams, result: ToolResultMessage | undefined): string {
+	const name = extractProcessName(result) || params.name;
+	const id = params.id || "";
+	if (name && id) return `${name} (${id})`;
+	if (name) return name;
+	return id;
+}
+
 function summarize(params: BgParams, result: ToolResultMessage | undefined): string {
-	const processName = extractProcessName(result) || params.name;
-	const idLabel = params.id || "";
-	const label = processName ? ` [${processName}]` : idLabel ? ` [${idLabel}]` : "";
+	const label = processLabel(params, result);
 
 	switch (params.action) {
-		case "create":
-			return `start${label || ""}: ${(params.command || "").slice(0, 60)}`;
-		case "logs":
-			return `logs${label}${params.tail ? ` (tail ${params.tail})` : ""}`;
-		case "grep":
-			return `grep${label}: ${params.pattern ? `/${params.pattern}/` : ""}`;
-		case "head":
-			return `head${label}${params.lines ? ` (${params.lines} lines)` : ""}`;
-		case "slice":
-			return `slice${label}: lines ${params.from || "?"}–${params.to || "?"}`;
+		case "create": {
+			const cmd = (params.command || "").slice(0, 60);
+			return label ? `start ${label} — ${cmd}` : `start: ${cmd}`;
+		}
+		case "logs": {
+			const tail = params.tail ? ` — tail ${params.tail}` : "";
+			return label ? `logs ${label}${tail}` : `logs${tail}`;
+		}
+		case "grep": {
+			const pat = params.pattern ? ` — /${params.pattern}/` : "";
+			return label ? `grep ${label}${pat}` : `grep${pat}`;
+		}
+		case "head": {
+			const n = params.lines ? ` — ${params.lines} lines` : "";
+			return label ? `head ${label}${n}` : `head${n}`;
+		}
+		case "slice": {
+			const range = ` — lines ${params.from || "?"}–${params.to || "?"}`;
+			return label ? `slice ${label}${range}` : `slice${range}`;
+		}
 		case "kill":
-			return `kill${label}`;
-		case "wait":
-			return `wait${label}`;
+			return label ? `kill ${label}` : "kill";
+		case "wait": {
+			const dur = params.timeout ? ` — up to ${formatDuration(params.timeout)}` : "";
+			return label ? `wait ${label}${dur}` : `wait${dur}`;
+		}
 		case "list":
 			return "list processes";
 		default:
-			return `${params.action}${label}`;
+			return label ? `${params.action} ${label}` : params.action;
 	}
 }
 
