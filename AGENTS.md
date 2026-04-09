@@ -81,13 +81,13 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add a tool renderer**: Create in `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. See `ProposalRenderer.ts` for multi-tool pattern.
 
-**Add a tool**: Create YAML in `.bobbit/config/tools/<group>/`. MCP tools are auto-discovered from `.mcp.json`. See [docs/internals.md — MCP servers](docs/internals.md#mcp-servers).
+**Add a tool**: Builtin tools live in `defaults/tools/<group>/` (tracked in git, shipped to all users). Project-specific tool overrides go in `.bobbit/config/tools/<group>/` (runtime only, gitignored). MCP tools are auto-discovered from `.mcp.json`. See [docs/internals.md — MCP servers](docs/internals.md#mcp-servers).
 
 **Add a slash skill**: Create `SKILL.md` in `.claude/skills/<name>/`. YAML frontmatter: `description`, optional `argument_hint`, `allowed_tools`, `context`, `agent`. Scoped per-project via `config_directories`. See [docs/internals.md — Config scan directories](docs/internals.md#config-scan-directories).
 
 **Add a UI component**: Create in `src/ui/components/`, export from `src/ui/index.ts`. Notable built-in components: `BobbitLoadingAnimation` — an animated pixel-art bouncing mascot used as a loading indicator during session connection and dashboard loading. Review pane components live in `src/ui/components/review/`: `<review-pane>` (tabbed container), `<review-document>` (markdown renderer + text annotator with mobile selection support), `<annotation-popover>` (comment input — supports `mode="popover"` for desktop and `mode="bottom-sheet"` for mobile, plus `existingComment` for edit pre-fill), and `AnnotationStore` (sessionStorage persistence). All use light DOM for annotator compatibility. Exported from `src/ui/index.ts`. Mobile annotation support uses `window.matchMedia('(pointer: coarse)')` to detect touch-primary devices and enables a custom selection flow: `selectionchange` listener with 300ms debounce → floating "Add Comment" button → bottom sheet comment input. Desktop flow is completely unaffected — all mobile paths are gated behind an `_isMobile` flag. See [docs/review-pane-mobile.md](docs/review-pane-mobile.md) for the full mobile annotation architecture.
 
-**Add a goal feature**: CRUD in `goal-manager.ts`/`goal-store.ts`, REST in `server.ts`, assistant prompt in `goal-assistant.ts`. Proposals use `propose_*` tool calls via `.bobbit/config/tools/proposals/extension.ts`. All goal operations route through `ProjectContextManager`. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+**Add a goal feature**: CRUD in `goal-manager.ts`/`goal-store.ts`, REST in `server.ts`, assistant prompt in `goal-assistant.ts`. Proposals use `propose_*` tool calls via `defaults/tools/proposals/extension.ts`. All goal operations route through `ProjectContextManager`. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 
 **Inter-agent git handoff**: Tasks carry `baseSha`, `headSha`, and `branch` for local merges between agents. See [docs/goals-workflows-tasks.md — Git handoff](docs/goals-workflows-tasks.md#git-handoff-fields).
 
@@ -99,7 +99,7 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add a config type to the cascade**: Add loader to `BuiltinConfigProvider`, add `resolveX()` to `ConfigCascade`, wire REST endpoint, add UI scope row + origin badges (import from `config-scope.ts`).
 
-**Change tool access policy**: Edit `.bobbit/config/tool-group-policies.yaml` (per-group) or role YAML `toolPolicies` (per-role). Three values: `allow`, `ask`, `never`. See [docs/internals.md — Tool access policies](docs/internals.md#tool-access-policies).
+**Change tool access policy**: Builtin group policies are in `defaults/tool-group-policies.yaml`. To override per-project, edit `.bobbit/config/tool-group-policies.yaml`. Per-role overrides go in role YAML `toolPolicies`. Three values: `allow`, `ask`, `never`. See [docs/internals.md — Tool access policies](docs/internals.md#tool-access-policies).
 
 **Change message rendering**: `src/ui/components/Messages.ts` for standard roles, `message-renderer-registry.ts` for custom types.
 

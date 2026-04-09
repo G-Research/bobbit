@@ -50,7 +50,7 @@ import { bobbitConfigDir } from "../bobbit-dir.js";
 
 
 /**
- * Tool definitions directory — .bobbit/config/tools/ (legacy export, deprecated).
+ * Tool definitions directory — .bobbit/config/tools/ (runtime config-layer, legacy export, deprecated).
  * @deprecated Use ToolManager.getExtensionPath() or ToolManager.getToolsDir() instead.
  */
 export const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
@@ -411,7 +411,7 @@ export class ToolManager {
 				const serverName = group.slice(5); // strip "MCP: "
 				sections.push(`\n_For detailed ${serverName} tool docs (parameters, usage), read \`.bobbit/state/mcp-tool-docs/${serverName}.md\`_\n`);
 			} else if (groupDir) {
-				sections.push(`\n_For detailed ${group} tool docs (examples, edge cases, full parameters), read the tool's YAML in \`.bobbit/config/tools/${groupDir}/<tool>.yaml\` — see the \`detail_docs\` field._\n`);
+				sections.push(`\n_For detailed ${group} tool docs (examples, edge cases, full parameters), read the tool's YAML in \`defaults/tools/${groupDir}/<tool>.yaml\` — see the \`detail_docs\` field._\n`);
 			}
 		}
 

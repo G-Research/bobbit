@@ -1,7 +1,7 @@
 /**
  * Read-only provider for built-in (factory default) config shipped with Bobbit.
  *
- * At build time, `scripts/copy-defaults.mjs` copies `.bobbit/config/` →
+ * At build time, `scripts/copy-defaults.mjs` copies `defaults/` →
  * `dist/server/defaults/`. This class reads those defaults at runtime so
  * they serve as the lowest-priority layer in the config cascade.
  *

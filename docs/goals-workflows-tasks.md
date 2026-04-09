@@ -12,7 +12,7 @@ Goals can run in **team mode**, where a Team Lead agent orchestrates multiple ro
 
 ### Workflows
 
-A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows are stored as YAML files in `.bobbit/config/workflows/`.
+A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows are stored as YAML files in `defaults/workflows/`.
 
 When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time.
 
@@ -57,7 +57,7 @@ interface Workflow {
 
 #### Workflow YAML format
 
-Workflows are defined in `.bobbit/config/workflows/<id>.yaml`:
+Workflows are defined in `defaults/workflows/<id>.yaml`:
 
 ```yaml
 id: general
@@ -429,7 +429,7 @@ State is per-project — each project has its own copies of these files in `<pro
 
 | Location | What |
 |---|---|
-| `.bobbit/config/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
+| `defaults/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
 | `<project>/.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
 | `<project>/.bobbit/state/gates.json` | Gate state and signal history |
 | `<project>/.bobbit/state/tasks.json` | Tasks with workflow gate links |
@@ -446,7 +446,7 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
-| `.bobbit/config/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `task_create` |
-| `.bobbit/config/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
-| `.bobbit/config/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |
-| `.bobbit/config/workflows/general.yaml` | Seed workflow: general-purpose lifecycle |
+| `defaults/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `task_create` |
+| `defaults/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
+| `defaults/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |
+| `defaults/workflows/general.yaml` | Seed workflow: general-purpose lifecycle |
