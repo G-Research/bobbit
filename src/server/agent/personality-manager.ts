@@ -21,7 +21,7 @@ export class PersonalityManager {
 		if (!NAME_PATTERN.test(name)) {
 			throw new Error("Personality name must be lowercase alphanumeric + hyphens (e.g. 'my-personality')");
 		}
-		if (this.store.get(name)) {
+		if (this.store.getLocal(name)) {
 			throw new Error(`Personality "${name}" already exists`);
 		}
 

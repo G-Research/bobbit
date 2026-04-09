@@ -36,6 +36,7 @@ class MockRoleStore {
 	private roles = new Map<string, Role>();
 	put(role: Role): void { this.roles.set(role.name, role); }
 	get(name: string): Role | undefined { return this.roles.get(name); }
+	getLocal(name: string): Role | undefined { return this.roles.get(name); }
 	remove(name: string): void { this.roles.delete(name); }
 	getAll(): Role[] { return Array.from(this.roles.values()); }
 	reload(): void { /* no-op */ }
@@ -51,6 +52,7 @@ class MockPersonalityStore {
 	private personalities = new Map<string, Personality>();
 	put(p: Personality): void { this.personalities.set(p.name, p); }
 	get(name: string): Personality | undefined { return this.personalities.get(name); }
+	getLocal(name: string): Personality | undefined { return this.personalities.get(name); }
 	remove(name: string): void { this.personalities.delete(name); }
 	getAll(): Personality[] { return Array.from(this.personalities.values()); }
 	reload(): void { /* no-op */ }

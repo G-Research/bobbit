@@ -27,7 +27,7 @@ export class WorkflowManager {
 		if (!ID_PATTERN.test(id)) {
 			throw new Error("Workflow id must be lowercase alphanumeric + hyphens (e.g. 'my-workflow')");
 		}
-		if (this.store.get(id)) {
+		if (this.store.getLocal(id)) {
 			throw new Error(`Workflow "${id}" already exists`);
 		}
 		if (!name || typeof name !== "string") {
