@@ -10,12 +10,13 @@
  * Prerequisites: `npm run build`, agent CLI in PATH, Docker for sandbox tests.
  *
  * Test phases (all serial, one gateway):
- *   A. Session variations   — 6 session configs (plain, worktree, sandbox, interrupt)
- *   B. Goal (non-sandboxed) — create via UI, team auto-start, gates, dashboard
- *   C. Goal (sandboxed)     — same as B but inside Docker container
- *   D. Gateway restart      — hard kill + restart on new port
- *   E. Post-restart verify  — sessions, goals, gates, teams all survive
- *   F. Combined HTML report — timing, screenshots, phase results
+ *   A.  Session variations    — 6 session configs (plain, worktree, sandbox, interrupt)
+ *   A2. Multi-project         — second project with sessions, goal, sidebar grouping
+ *   B.  Goal (non-sandboxed)  — create via UI, team auto-start, gates, dashboard
+ *   C.  Goal (sandboxed)      — same as B but inside Docker container
+ *   D.  Gateway restart       — hard kill + restart on new port
+ *   E.  Post-restart verify   — sessions, goals, gates, teams, multi-project all survive
+ *   F.  Combined HTML report  — timing, screenshots, phase results
  */
 import { test, expect, type Page } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -496,6 +497,14 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 	let sbxGoalTeamLeadId: string;
 	let sbxGoalGateCount: number;
 
+	// Second project state
+	let proj2Dir: string;
+	let proj2Id: string;
+	const proj2Sessions: Record<string, { id: string; cwd: string; branch: string }> = {};
+	let proj2GoalId: string;
+	let proj2GoalTitle: string;
+	let proj2GoalTeamLeadId: string;
+
 	test.beforeAll(async ({}, ti) => {
 		ti.setTimeout(180_000);
 		port = await freePort();
@@ -544,9 +553,14 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			try { await api(gw, `/api/goals/${sbxGoalId}/team/teardown`, { method: "POST" }); } catch {}
 			try { await api(gw, `/api/goals/${sbxGoalId}`, { method: "DELETE" }); } catch {}
 		}
+		if (gw && proj2GoalId) {
+			try { await api(gw, `/api/goals/${proj2GoalId}/team/teardown`, { method: "POST" }); } catch {}
+			try { await api(gw, `/api/goals/${proj2GoalId}`, { method: "DELETE" }); } catch {}
+		}
 		if (gw) await stopGW(gw);
 		cleanTestDockerContainers();
 		cleanDirs(dir);
+		if (proj2Dir) cleanDirs(proj2Dir);
 	});
 
 	// ---------------------------------------------------------------
@@ -612,6 +626,161 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 				console.log(`  ${v.name}: status=${(await getSession(gw, sessions[v.label].id)).status}`);
 			}
 		}
+	});
+
+	// ---------------------------------------------------------------
+	// A2. Multi-project — register second project, create sessions + goal,
+	//     verify sidebar grouping and CWD isolation
+	// ---------------------------------------------------------------
+	test("A2. multi-project sessions and goal", async ({ page }) => {
+		// 1. Create a separate git repo for the second project
+		const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
+		proj2Dir = join(tmp, `.bobbit-manual-proj2-${port}`);
+		rmSync(proj2Dir, { recursive: true, force: true });
+		mkdirSync(proj2Dir, { recursive: true });
+		execFileSync("git", ["init"], { cwd: proj2Dir, stdio: "ignore" });
+		execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/master"], { cwd: proj2Dir, stdio: "ignore" });
+		execFileSync("git", ["config", "user.email", "t@t"], { cwd: proj2Dir, stdio: "ignore" });
+		execFileSync("git", ["config", "user.name", "T"], { cwd: proj2Dir, stdio: "ignore" });
+		writeFileSync(join(proj2Dir, "README.md"), "# Second project\n");
+		writeFileSync(join(proj2Dir, "package.json"), JSON.stringify({
+			name: "second-project", version: "1.0.0",
+			scripts: { check: "echo ok", "test:unit": "echo ok" },
+		}, null, 2));
+		mkdirSync(join(proj2Dir, ".bobbit", "config"), { recursive: true });
+		mkdirSync(join(proj2Dir, ".bobbit", "state"), { recursive: true });
+		writeFileSync(join(proj2Dir, ".bobbit", "config", "project.yaml"), 'worktree_pool_size: "2"\n');
+		execFileSync("git", ["add", "."], { cwd: proj2Dir, stdio: "ignore" });
+		execFileSync("git", ["commit", "-m", "init second project"], { cwd: proj2Dir, stdio: "ignore" });
+
+		// 2. Register the second project via API
+		const regRes = await api(gw, "/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "Second Project", rootPath: proj2Dir }),
+		});
+		expect(regRes.status).toBe(201);
+		const regBody = await regRes.json() as any;
+		proj2Id = regBody.id;
+		console.log(`  Second project registered: id=${proj2Id} path=${proj2Dir}`);
+
+		// 3. Create two sessions in the second project.
+		// Sessions in a git repo auto-get worktrees, so both will have their own branch.
+		const proj2Variations = [
+			{ label: "s1", name: "Session 1" },
+			{ label: "s2", name: "Session 2" },
+		];
+		for (const v of proj2Variations) {
+			const t1 = performance.now();
+			const res = await api(gw, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ projectId: proj2Id }),
+			});
+			expect(res.status).toBe(201);
+			const id = ((await res.json()) as any).id;
+			await pollIdle(gw, id, 120_000);
+			const info = await getSession(gw, id);
+			expect(info.projectId).toBe(proj2Id);
+			// CWD should be inside a worktree derived from the second project (auto-worktree)
+			// The worktree is a sibling dir of proj2Dir, not the project root itself
+			const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+				cwd: info.cwd, encoding: "utf-8",
+			}).trim();
+			expect(branch).not.toBe("master");
+			// Verify the worktree's git root resolves back to a checkout of the second project
+			const wtRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+				cwd: info.cwd, encoding: "utf-8",
+			}).trim();
+			// The worktree root should be a sibling of the second project, not the default project
+			expect(normalize(wtRoot)).not.toBe(normalize(dir));
+			proj2Sessions[v.label] = { id, cwd: info.cwd, branch };
+			console.log(`  Proj2 ${v.name}: id=${id} cwd=${info.cwd} branch=${branch} (${Math.round(performance.now() - t1)}ms)`);
+		}
+		let t0 = performance.now();
+
+		// 5. Send a message to each session via the browser
+		for (const [label, s] of Object.entries(proj2Sessions)) {
+			await browserSend(page, gw, s.id,
+				`Multi-project test (${label}). Run \`pwd\` and \`git status\`.`);
+			console.log(`  Proj2 session ${label}: message sent`);
+		}
+
+		// 6. Create a goal in the second project via API
+		t0 = performance.now();
+		const goalRes = await api(gw, "/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "Proj2 Feature",
+				cwd: proj2Dir,
+				spec: "Add a feature to the second project. Create src/proj2-feature.ts.",
+				workflowId: "feature",
+				projectId: proj2Id,
+				autoStartTeam: true,
+			}),
+		});
+		expect(goalRes.status).toBe(201);
+		const goalBody = await goalRes.json() as any;
+		proj2GoalId = goalBody.id;
+		proj2GoalTitle = "Proj2 Feature";
+		expect(goalBody.projectId).toBe(proj2Id);
+		console.log(`  Proj2 goal created: id=${proj2GoalId} (${Math.round(performance.now() - t0)}ms)`);
+
+		// Wait for worktree setup
+		await pollGoalSetup(gw, proj2GoalId, 120_000);
+
+		// Goal's CWD should be inside a worktree derived from the second project, not the default
+		const goalInfo = await (await api(gw, `/api/goals/${proj2GoalId}`)).json() as any;
+		expect(normalize(goalInfo.cwd)).not.toBe(normalize(dir)); // not the default project
+		// repoPath should be the second project's git root
+		expect(normalize(goalInfo.repoPath)).toBe(normalize(proj2Dir));
+		console.log(`  Proj2 goal cwd=${goalInfo.cwd} repoPath=${goalInfo.repoPath}`);
+
+		// Wait for team to start
+		t0 = performance.now();
+		let team: any;
+		try {
+			team = await pollTeamStarted(gw, proj2GoalId, 180_000);
+		} catch {
+			const startRes = await api(gw, `/api/goals/${proj2GoalId}/team/start`, { method: "POST" });
+			if (!startRes.ok) throw new Error(`Proj2 team start failed: ${await startRes.text()}`);
+			team = await pollTeamStarted(gw, proj2GoalId, 120_000);
+		}
+		proj2GoalTeamLeadId = team.teamLeadSessionId;
+		console.log(`  Proj2 team started: lead=${proj2GoalTeamLeadId} (${Math.round(performance.now() - t0)}ms)`);
+
+		// Verify team lead session belongs to the second project
+		const leadInfo = await getSession(gw, proj2GoalTeamLeadId);
+		expect(leadInfo.projectId).toBe(proj2Id);
+		// Team lead's CWD should be in a worktree of the second project
+		expect(normalize(leadInfo.cwd)).not.toBe(normalize(dir));
+		console.log(`  Proj2 team lead cwd=${leadInfo.cwd} projectId=${leadInfo.projectId}`);
+
+		// 7. Verify sidebar grouping via browser
+		await page.goto(appUrl(gw));
+		await page.waitForSelector("button", { timeout: 15_000 });
+		// Wait for sessions to load in the sidebar
+		await page.waitForTimeout(3_000);
+
+		// The sidebar should show "Second Project" as a separate project group
+		const sidebarText = await page.locator('[class*="sidebar"], nav').first().textContent() || "";
+		expect(sidebarText).toContain("Second Project");
+		console.log(`  Sidebar contains "Second Project" ✓`);
+		await takeScreenshot(page, "multi-project-sidebar.png");
+
+		// 8. Verify API lists sessions and goals with correct projectId
+		const allSessions = await (await api(gw, "/api/sessions")).json() as any;
+		const proj2ApiSessions = allSessions.sessions.filter((s: any) => s.projectId === proj2Id);
+		// Should have at least the 2 sessions we created + the goal's team lead
+		expect(proj2ApiSessions.length).toBeGreaterThanOrEqual(3);
+		console.log(`  API: ${proj2ApiSessions.length} sessions in second project ✓`);
+
+		const allGoals = await (await api(gw, "/api/goals")).json() as any;
+		const proj2Goals = allGoals.goals.filter((g: any) => g.projectId === proj2Id);
+		expect(proj2Goals.length).toBeGreaterThanOrEqual(1);
+		expect(proj2Goals[0].id).toBe(proj2GoalId);
+		console.log(`  API: ${proj2Goals.length} goals in second project ✓`);
+
+		recordGoalPhase("goal", "Multi-project setup", performance.now() - 1, true,
+			`proj2=${proj2Id} sessions=${proj2ApiSessions.length} goals=${proj2Goals.length}`);
 	});
 
 	// ---------------------------------------------------------------
@@ -774,6 +943,14 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		expect(existsSync(join(dir, ".bobbit", "state", "goals.json"))).toBe(true);
 		expect(existsSync(join(dir, ".bobbit", "state", "gates.json"))).toBe(true);
 		expect(existsSync(join(dir, ".bobbit", "state", "team-state.json"))).toBe(true);
+		// Second project state should also be persisted
+		if (proj2Dir) {
+			expect(existsSync(join(proj2Dir, ".bobbit", "state", "sessions.json"))).toBe(true);
+			if (proj2GoalId) {
+				expect(existsSync(join(proj2Dir, ".bobbit", "state", "goals.json"))).toBe(true);
+			}
+			console.log("  Second project state files persisted ✓");
+		}
 
 		port = await freePort();
 		gw = await startGW(dir, port);
@@ -1007,6 +1184,73 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		t0 = performance.now();
 		const tdRes = await api(gw, `/api/goals/${sbxGoalId}/team/teardown`, { method: "POST" });
 		recordGoalPhase("goal-sandbox", "Teardown", t0, tdRes.ok || tdRes.status === 404, `status=${tdRes.status}`);
+	});
+
+	// ---------------------------------------------------------------
+	// E-3b. Verify second project survives restart
+	// ---------------------------------------------------------------
+	test("E-3b. verify second project after restart", async ({ page }) => {
+		if (!proj2Id) { console.log("  SKIP: no second project"); return; }
+
+		// Verify second project is still registered
+		const projRes = await api(gw, `/api/projects/${proj2Id}`);
+		expect(projRes.ok).toBe(true);
+		const proj = await projRes.json() as any;
+		expect(proj.name).toBe("Second Project");
+		console.log(`  Second project still registered: ${proj.name} ✓`);
+
+		// Verify sessions survived with correct CWDs and projectIds
+		for (const [label, s] of Object.entries(proj2Sessions)) {
+			const info = await getSession(gw, s.id);
+			expect(info.status).not.toBe("archived");
+			expect(normalize(info.cwd)).toBe(normalize(s.cwd));
+			expect(info.projectId).toBe(proj2Id);
+			console.log(`  Proj2 ${label}: status=${info.status} cwd_preserved=✓ projectId=✓`);
+
+			// Verify the session responds after restart
+			await pollIdle(gw, s.id, 120_000);
+			await browserSend(page, gw, s.id, "Run `pwd` and `git status`");
+			console.log(`  Proj2 ${label}: responds after restart ✓`);
+		}
+
+		// Verify goal survived
+		if (proj2GoalId) {
+			const goal = await (await api(gw, `/api/goals/${proj2GoalId}`)).json() as any;
+			expect(goal.id).toBe(proj2GoalId);
+			expect(goal.projectId).toBe(proj2Id);
+			expect(normalize(goal.repoPath)).toBe(normalize(proj2Dir));
+			console.log(`  Proj2 goal survived: projectId=✓ repoPath=✓`);
+
+			// Verify team lead survived
+			if (proj2GoalTeamLeadId) {
+				const lead = await getSession(gw, proj2GoalTeamLeadId);
+				expect(lead.projectId).toBe(proj2Id);
+				const alive = lead.status !== "archived" && lead.status !== "terminated";
+				if (alive) {
+					await interruptAndSend(page, gw, proj2GoalTeamLeadId,
+						"Run ONLY `pwd` and `git log --oneline -3`. Nothing else.");
+					console.log(`  Proj2 team lead responds after restart ✓`);
+				} else {
+					console.log(`  Proj2 team lead status: ${lead.status}`);
+				}
+			}
+
+			// Teardown the second project's goal
+			const tdRes = await api(gw, `/api/goals/${proj2GoalId}/team/teardown`, { method: "POST" });
+			console.log(`  Proj2 goal teardown: status=${tdRes.status}`);
+		}
+
+		// Verify sidebar still shows both projects
+		await page.goto(appUrl(gw));
+		await page.waitForSelector("button", { timeout: 15_000 });
+		await page.waitForTimeout(3_000);
+		const sidebarText = await page.locator('[class*="sidebar"], nav').first().textContent() || "";
+		expect(sidebarText).toContain("Second Project");
+		await takeScreenshot(page, "multi-project-sidebar-after-restart.png");
+		console.log(`  Sidebar still shows "Second Project" after restart ✓`);
+
+		recordGoalPhase("goal", "Multi-project post-restart", performance.now() - 1, true,
+			"sessions + goal + sidebar verified");
 	});
 
 	// ---------------------------------------------------------------
