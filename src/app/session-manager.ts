@@ -907,20 +907,23 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else {
 				// Non-goal-assistant session: check if this proposal was previously dismissed
 				if (isProposalDismissed(sessionId, proposal)) return;
-				// Show inline preview panel
+				// Show inline preview panel — only auto-switch tabs on the first proposal
+				const isFirstProposal = state.activeGoalProposal == null;
 				state.activeGoalProposal = proposal;
 				// Set projectId from current session so the goal is created in the correct project
 				const currentSess = state.gatewaySessions.find(s => s.id === sessionId);
 				if (currentSess?.projectId) {
 					state.previewProjectId = currentSess.projectId;
 				}
-				state.previewPanelActiveTab = "goal";
-				// Un-collapse panel on desktop
-				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
-				localStorage.removeItem(collapseKey);
-				// On mobile, switch to the panel tab so user sees the goal form
-				if (!isDesktop()) {
-					state.previewPanelTab = "preview";
+				if (isFirstProposal) {
+					state.previewPanelActiveTab = "goal";
+					// Un-collapse panel on desktop
+					const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
+					localStorage.removeItem(collapseKey);
+					// On mobile, switch to the goal tab so user sees the goal form
+					if (!isDesktop()) {
+						state.previewPanelTab = "goal";
+					}
 				}
 			}
 			renderApp();
@@ -1155,7 +1158,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Listen for suggest-goal events from assistant messages
 		state.chatPanel.addEventListener('suggest-goal', () => {
 			if (state.remoteAgent) {
-				state.remoteAgent.prompt("Based on our conversation, please create a goal proposal for the improvement you suggested. Format it as a <goal_proposal> block with <title>, <spec>, and optionally <cwd> tags.");
+				state.remoteAgent.prompt("Based on our conversation, please create a goal proposal for the improvement you suggested. Use the propose_goal tool with a title and spec.");
 			}
 		});
 
