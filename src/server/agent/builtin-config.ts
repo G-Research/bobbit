@@ -10,7 +10,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import type { Role, GrantPolicy } from "./role-store.js";
 import { normalizeGrantPolicy } from "./role-store.js";
 import type { Personality } from "./personality-store.js";
