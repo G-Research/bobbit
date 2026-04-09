@@ -215,6 +215,8 @@ async function main() {
 
 	const __cliDir = path.dirname(fileURLToPath(import.meta.url));
 	const pkgVersion = JSON.parse(fs.readFileSync(path.resolve(__cliDir, "../../package.json"), "utf-8")).version;
+	// Set terminal tab title
+	process.stdout.write(`\x1b]0;Bobbit Server\x07`);
 	console.log(`\nBobbit Gateway v${pkgVersion}`);
 	console.log(`  Listening:  ${baseUrl}`);
 	console.log(`  Auth token: ${authToken}`);
