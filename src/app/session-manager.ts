@@ -1617,6 +1617,13 @@ export async function acceptProjectProposal(): Promise<void> {
 	state.activeProjectProposal = undefined;
 	state.assistantHasProposal = false;
 	if (proposal.sessionId) deleteProjectDraft(proposal.sessionId);
+
+	// Terminate the project assistant session and navigate away
+	try {
+		await terminateSession(propSessionId);
+	} catch (err) {
+		console.error('[project-proposal] Failed to terminate assistant session:', err);
+	}
 	renderApp();
 }
 
