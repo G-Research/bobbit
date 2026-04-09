@@ -18,14 +18,51 @@ interface BgParams {
 	timeout?: number;
 }
 
+/**
+ * Client-side cache of bg process id → display name.
+ * Populated from `create` params (name is required for create)
+ * and from result text (which includes "bg-NN (name)").
+ * Looked up by all subsequent actions so the name is always available.
+ */
+const processNameCache = new Map<string, string>();
+
 /** Extract the process name from result text like "Logs for bg-12 (branch cleanup):" */
-function extractProcessName(result: ToolResultMessage | undefined): string | undefined {
-	if (!result) return undefined;
+function extractAndCacheProcessName(id: string | undefined, result: ToolResultMessage | undefined): void {
+	if (!result || !id) return;
 	const text = typeof result.content === "string"
 		? result.content
 		: result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
 	const match = text.match(/bg-\d+\s+\(([^)]+)\)/);
-	return match?.[1] ?? undefined;
+	if (match?.[1]) processNameCache.set(id, match[1]);
+}
+
+/** Resolve the display name for a process — cache first, then params.name fallback. */
+function resolveProcessName(params: BgParams, result: ToolResultMessage | undefined): string | undefined {
+	const id = params.id;
+
+	// On create, cache the name immediately from params (name is required for create)
+	if (params.action === "create" && params.name) {
+		// The id isn't known from params on create — it comes from the result.
+		// Extract "ID: bg-NN" from result text to populate cache.
+		if (result) {
+			const text = typeof result.content === "string"
+				? result.content
+				: result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
+			const idMatch = text.match(/ID:\s*(bg-\d+)/);
+			if (idMatch?.[1]) processNameCache.set(idMatch[1], params.name);
+		}
+		return params.name;
+	}
+
+	// For other actions, try cache first
+	if (id && processNameCache.has(id)) return processNameCache.get(id);
+
+	// Try extracting from result and caching
+	extractAndCacheProcessName(id, result);
+	if (id && processNameCache.has(id)) return processNameCache.get(id);
+
+	// Last resort: params.name (agent might pass it)
+	return params.name;
 }
 
 /** Format seconds into a human-readable duration like "2m 30s" or "5m" */
@@ -36,8 +73,8 @@ function formatDuration(seconds: number): string {
 	return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
-// Shared inline styles — keeps templates readable and consistent.
-// All use the same line-height so mixed font-sizes still share a baseline.
+// Shared inline styles — all use em-based sizing for proper scaling
+// and baseline alignment within the inline-flex container.
 const S = {
 	badge: "font-family:var(--font-mono,monospace);font-size:0.75em;font-weight:500;opacity:0.5;background:color-mix(in srgb, currentColor 10%, transparent);padding:0.1em 0.4em;border-radius:3px;vertical-align:baseline",
 	action: "font-weight:600",
@@ -47,24 +84,25 @@ const S = {
 	detail: "opacity:0.5",
 	mono: "font-family:var(--font-mono,monospace);font-size:0.85em;opacity:0.5;vertical-align:baseline",
 	codePill: "font-family:var(--font-mono,monospace);font-size:0.85em;opacity:0.65;background:color-mix(in srgb, currentColor 10%, transparent);padding:0.1em 0.4em;border-radius:3px;vertical-align:baseline",
+	wrap: "display:inline-flex;align-items:baseline;gap:0.4em;flex-wrap:wrap",
 } as const;
 
 /** Build the rich header as a TemplateResult with structured layout. */
 function buildHeader(params: BgParams, result: ToolResultMessage | undefined): TemplateResult {
-	const processName = extractProcessName(result) || params.name;
+	const processName = resolveProcessName(params, result);
 	const id = params.id || "";
 
-	// Wrap everything in an inline-flex span so mixed font-sizes align on baseline
-	// within the parent flex container from renderHeader.
 	const badge = html`<span style="${S.badge}">bash_bg</span>`;
 	const action = html`<span style="${S.action}">${params.action}</span>`;
 
-	// Show process name if known, otherwise show the raw ID as the label
-	const nameOrId = processName
+	// Show process name with ID in parens, or just ID, or nothing
+	const nameAndId = processName && id
 		? html` <span style="${S.name}">${processName}</span> <span style="${S.id}">(${id})</span>`
-		: id
-			? html` <span style="${S.id}">${id}</span>`
-			: html``;
+		: processName
+			? html` <span style="${S.name}">${processName}</span>`
+			: id
+				? html` <span style="${S.id}">${id}</span>`
+				: html``;
 
 	let detail: TemplateResult | string = "";
 	switch (params.action) {
@@ -89,12 +127,12 @@ function buildHeader(params: BgParams, result: ToolResultMessage | undefined): T
 			if (params.timeout) detail = html`<span style="${S.detail}">up to ${formatDuration(params.timeout)}</span>`;
 			break;
 		case "list":
-			return html`<span style="display:inline-flex;align-items:baseline;gap:0.4em;flex-wrap:wrap">${badge} ${action}</span>`;
+			return html`<span style="${S.wrap}">${badge} ${action}</span>`;
 	}
 
 	const sep = detail ? html`<span style="${S.sep}">—</span>` : html``;
 
-	return html`<span style="display:inline-flex;align-items:baseline;gap:0.4em;flex-wrap:wrap">${badge} ${action}${nameOrId} ${sep} ${detail}</span>`;
+	return html`<span style="${S.wrap}">${badge} ${action}${nameAndId} ${sep} ${detail}</span>`;
 }
 
 export class BgProcessRenderer implements ToolRenderer<BgParams> {
