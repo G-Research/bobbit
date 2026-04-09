@@ -73,8 +73,9 @@ gates:
         prompt: |
           Review the code changes on branch {{branch}} vs {{master}} for quality.
 
-          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see changes.
-          Read modified files for full context.
+          Start with `git diff --stat {{master}}...{{branch}} -- . ':!package-lock.json'` to see which files changed.
+          Then use `git diff {{master}}...{{branch}} -M -- . ':!package-lock.json'` (with rename detection) to see actual content changes — this collapses pure renames into one-line summaries.
+          For large diffs, review files individually with `read` rather than dumping the entire diff into context.
 
           Check:
           1. Correctness — logic errors, off-by-one, race conditions

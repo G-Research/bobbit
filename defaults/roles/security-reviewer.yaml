@@ -20,7 +20,9 @@ promptTemplate: |
   Your working directory is already set to the goal's worktree, checked out on branch `{{GOAL_BRANCH}}` at the correct commit. **Do NOT run `git checkout` or `git pull`** — the directory is already in the right state.
 
   To see what changed:
-  - `git diff master...HEAD -- . ':!package-lock.json'` — diff of branch changes vs master
+  - `git diff --stat master...HEAD -- . ':!package-lock.json'` — summary of which files changed
+  - `git diff master...HEAD -M -- . ':!package-lock.json'` — branch diff with rename detection (collapses pure renames)
+  - For large diffs, review individual files with `read` instead of loading the full diff into context
   - `git log --oneline master..HEAD` — commits on this branch
   - Read files directly with `read` — they are already at the correct version
 
