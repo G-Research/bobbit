@@ -26,7 +26,7 @@ export interface YamlStoreOptions<T> {
 	filter?: (item: T) => boolean;
 }
 
-export class YamlStore<T> {
+export class YamlStore<T extends object> {
 	private _local: Map<string, T> = new Map();
 	private _builtins: Map<string, T> = new Map();
 	protected readonly dir: string;
@@ -89,10 +89,20 @@ export class YamlStore<T> {
 		try { fs.unlinkSync(this.itemPath(key)); } catch { /* ignore */ }
 	}
 
-	/** Partial update of an existing local item. Returns false if not found locally. */
+	/**
+	 * Partial update of an existing item. Copy-on-write: if the item only
+	 * exists in builtins, it is cloned to the local layer before updating.
+	 * Returns false if not found in either layer.
+	 */
 	update(key: string, updates: Record<string, unknown>): boolean {
-		const existing = this._local.get(key);
-		if (!existing) return false;
+		let existing = this._local.get(key);
+		if (!existing) {
+			// Copy-on-write from builtins
+			const builtin = this._builtins.get(key);
+			if (!builtin) return false;
+			existing = { ...builtin };
+			this._local.set(key, existing);
+		}
 		const cleaned: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(updates)) {
 			if (v !== undefined) cleaned[k] = v;

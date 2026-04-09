@@ -332,6 +332,71 @@ Making manual tests parallelizable and faster is tempting but fundamentally limi
 
 The right answer is to **extract what makes manual tests valuable** (crash resilience, Docker paths, cross-feature verification) **into the automated suite** using deterministic mock agents and controlled infrastructure.
 
+## Test Infrastructure Reference
+
+### Harness selection
+
+The E2E suite provides two harnesses. Choose based on what your test needs:
+
+- **`in-process-harness.js`** — Default for API-only tests (no browser, no MCP, no process-level behavior). Faster startup (~2s vs ~5-8s per worker). Exposes `sessionManager` on `GatewayInfo` for sandbox token testing. Import `test, expect` from `./in-process-harness.js`.
+- **`gateway-harness.js`** — Required when the test uses a `page` fixture (browser), needs MCP servers enabled, or tests process-level behavior (port allocation, auth bypass). Import `test, expect` from `./gateway-harness.js`.
+
+### UI E2E page-object helpers
+
+Reusable helpers in `tests/e2e/ui/ui-helpers.ts`. Import from `./ui-helpers.js`:
+
+- `openApp(page)` — navigate with token auth, wait for sidebar to load
+- `createSessionViaUI(page)` — click "New session", wait for textarea
+- `sendMessage(page, text)` — fill textarea, press Enter
+- `waitForAgentResponse(page, opts?)` — wait for assistant message (default: "OK")
+- `navigateToHash(page, hash)` — set `location.hash`, wait for transition
+- `navigateToGoalDashboard(page, goalId)` — navigate to `#/goal/<id>`, wait for dashboard
+- `clickSidebarItem(page, label)` — click sidebar entry by text
+- `getVisibleSessions(page)` — return sidebar session titles
+- `waitForSessionIdle(sessionId)` — poll API until session is idle
+
+### Mock agent keywords
+
+The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `propose_goal` tool call response (with `options: "QA testing"`) — used to test the goal assistant flow without a real LLM.
+
+## Manual Integration Tests
+
+Full-stack resilience tests that use real agents and real Docker containers — no mocks. Defined in `tests/manual-integration/session-resilience.spec.ts`, configured by `playwright-manual.config.ts`. **Not included in `npm test`, `npm run test:unit`, or `npm run test:e2e`.**
+
+```bash
+npm run test:manual                 # Headless, API assertions only (~5 min)
+SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
+```
+
+**Prerequisites**: `npm run build`, a working agent CLI in PATH (claude, etc.), Docker running for sandbox tests.
+
+**What it tests**: Creates 6 session variations on a single gateway, sends messages through the browser, hard-kills the gateway (simulating a crash), restarts on a fresh port, and verifies each session survives:
+
+| Variation | Worktree | Sandbox | Interrupt |
+|---|---|---|---|
+| Plain (no worktree) | no | no | no |
+| Worktree | yes | no | no |
+| Worktree + interrupt | yes | no | yes (kill mid-tool-call) |
+| Sandbox plain | no | yes | no |
+| Sandbox worktree | yes | yes | no |
+| Sandbox worktree + interrupt | yes | yes | yes |
+
+**Assertions per variation**:
+
+- Session creation timing (create → idle, message round-trip)
+- `sessions.json` persisted to disk after crash
+- Session restores as `idle` (not archived)
+- `cwd` preserved across restart (exact path match)
+- Git working copy valid after restart (branch unchanged, `rev-parse --is-inside-work-tree`)
+- Agent responds to follow-up message after restart
+- Git status widget renders in the UI
+
+**HTML report**: When run with `SCREENSHOTS=1`, generates `test-results/manual-integration/report.html`.
+
+**Architecture**: The test creates an isolated git repo in a temp directory, pre-configures `project.yaml` (sandbox + worktree pool size), starts a gateway process, and manages its lifecycle. Sessions are created via API (worktree/sandbox flags aren't in the UI), but all agent messages go through the Playwright browser.
+
+**When to run**: After changes to session lifecycle, restore logic, sandbox wiring, worktree management, git status polling, or any server restart behavior. Not needed for UI-only or prompt-only changes.
+
 ## Target State
 
 | Layer | Tests | Runtime | Confidence |
