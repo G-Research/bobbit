@@ -91,25 +91,12 @@ export function scaffoldBobbitDir(projectRoot: string): void {
   });
   fs.mkdirSync(path.join(dotBobbit, "state", "tls"), { recursive: true });
 
-  // Copy default templates
+  // Create empty config directories — builtins are resolved at runtime via ConfigCascade.
+  // Only project-specific files (system-prompt.md) are copied from defaults.
+  fs.mkdirSync(path.join(dotBobbit, "config", "tools"), { recursive: true });
+
   const defaultsDir = path.join(__dirname, "defaults");
   if (fs.existsSync(defaultsDir)) {
-    copyDir(
-      path.join(defaultsDir, "roles"),
-      path.join(dotBobbit, "config", "roles"),
-    );
-    copyDir(
-      path.join(defaultsDir, "workflows"),
-      path.join(dotBobbit, "config", "workflows"),
-    );
-    copyDir(
-      path.join(defaultsDir, "personalities"),
-      path.join(dotBobbit, "config", "personalities"),
-    );
-    copyDir(
-      path.join(defaultsDir, "tools"),
-      path.join(dotBobbit, "config", "tools"),
-    );
     const sysPromptSrc = path.join(defaultsDir, "system-prompt.md");
     if (fs.existsSync(sysPromptSrc)) {
       fs.copyFileSync(

@@ -453,6 +453,7 @@ export function createGateway(config: GatewayConfig) {
 		getTools: () => toolManager.getAvailableTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
+	sessionManager.configCascade = configCascade;
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
