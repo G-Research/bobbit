@@ -91,10 +91,10 @@ export function scaffoldBobbitDir(projectRoot: string): void {
   });
   fs.mkdirSync(path.join(dotBobbit, "state", "tls"), { recursive: true });
 
-  // Create empty config directories — builtins are resolved at runtime via ConfigCascade.
-  // Only project-specific files (system-prompt.md) are copied from defaults.
-  fs.mkdirSync(path.join(dotBobbit, "config", "tools"), { recursive: true });
-
+  // Roles, workflows, and personalities are resolved at runtime via ConfigCascade
+  // (seeded from builtins on startup). Only create empty directories for them.
+  // Tools are copied from defaults because they contain YAML files with provider
+  // configs and extension code that updateToolMetadata() modifies in-place.
   const defaultsDir = path.join(__dirname, "defaults");
   if (fs.existsSync(defaultsDir)) {
     const sysPromptSrc = path.join(defaultsDir, "system-prompt.md");
@@ -103,6 +103,11 @@ export function scaffoldBobbitDir(projectRoot: string): void {
         sysPromptSrc,
         path.join(dotBobbit, "config", "system-prompt.md"),
       );
+    }
+    // Copy tool YAML files (needed for in-place metadata updates)
+    const defaultToolsDir = path.join(defaultsDir, "tools");
+    if (fs.existsSync(defaultToolsDir)) {
+      copyDir(defaultToolsDir, path.join(dotBobbit, "config", "tools"));
     }
   }
 
