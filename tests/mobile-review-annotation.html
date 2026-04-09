@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../src/ui/components/review/review-pane.css">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+
+  .review-pane {
+    width: 100%;
+    height: 100vh;
+  }
+
+  /* Minimal annotation-popover simulation (the real component uses Shadow DOM) */
+  .mock-popover {
+    position: absolute;
+    z-index: 1000;
+    display: none;
+  }
+  .mock-popover.open { display: block; }
+  .mock-popover[data-mode="bottom-sheet"] {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+  }
+</style>
+</head>
+<body>
+<div class="review-pane">
+  <div class="review-document-area">
+    <div id="review-doc" style="display:block;position:relative;padding:16px 24px 16px 48px;">
+      <div class="review-document-content" id="content">
+        <h1>Test Document</h1>
+        <p>This is a test document for review. It has enough text for selection.</p>
+        <h2>Section One</h2>
+        <p id="selectable">Some important text that could be commented on by reviewers.</p>
+        <h2>Section Two</h2>
+        <p>More content here with <code>code examples</code> and further details.</p>
+      </div>
+
+      <!-- Gutter markers (simulated) -->
+      <div class="review-gutter-marker" id="gutter1" style="top: 100px;"></div>
+      <div class="review-gutter-marker" id="gutter2" style="top: 200px;"></div>
+
+      <!-- Floating "Add Comment" button (hidden by default) -->
+      <button class="review-floating-btn" id="floating-btn" style="display:none; left:50px; top:80px;">+ Comment</button>
+
+      <!-- Toast (hidden by default) -->
+      <div class="review-toast" id="toast" style="display:none;">Selection lost — try again</div>
+
+      <!-- Mock popover for bottom sheet testing -->
+      <div class="mock-popover" id="popover" data-mode="popover">
+        <div class="review-popover">
+          <div class="review-popover-quote" id="popover-quote"></div>
+          <textarea id="popover-textarea" placeholder="Add your comment..."></textarea>
+          <div class="review-popover-actions">
+            <button class="review-popover-cancel" id="btn-cancel">Cancel</button>
+            <button class="review-popover-submit" id="btn-submit">Submit</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mock bottom sheet popover -->
+      <div class="mock-popover" id="sheet-popover" data-mode="bottom-sheet" style="position:absolute;bottom:0;left:0;right:0;">
+        <div class="review-popover review-popover--sheet">
+          <div class="review-sheet-handle">
+            <div class="review-sheet-handle-pill"></div>
+          </div>
+          <div class="review-popover-quote" id="sheet-quote"></div>
+          <textarea id="sheet-textarea" placeholder="Add your comment..."></textarea>
+          <div class="review-popover-actions">
+            <button class="review-popover-cancel" id="sheet-cancel">Cancel</button>
+            <button class="review-popover-submit" id="sheet-submit">Submit</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// matchMedia mock for mobile emulation
+const originalMatchMedia = window.matchMedia;
+window._forceMobile = false;
+window.matchMedia = function(query) {
+  if (query === '(pointer: coarse)' && window._forceMobile) {
+    return { matches: true, media: query, addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, onchange: null, dispatchEvent: () => true };
+  }
+  return originalMatchMedia.call(window, query);
+};
+
+// --- Simulated mobile selection flow ---
+window._mobileState = {
+  isMobile: false,
+  showFloatingBtn: false,
+  debounceTimer: null,
+  pendingSelection: null,
+  annotations: [],
+  toastTimer: null,
+};
+
+function initMobile() {
+  window._mobileState.isMobile = true;
+  document.addEventListener('selectionchange', onSelectionChange);
+}
+
+function onSelectionChange() {
+  if (!window._mobileState.isMobile) return;
+  if (window._mobileState.debounceTimer) clearTimeout(window._mobileState.debounceTimer);
+  window._mobileState.debounceTimer = setTimeout(() => {
+    handleMobileSelection();
+  }, 300);
+}
+
+function handleMobileSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    hideFloatingBtn();
+    return;
+  }
+  const content = document.getElementById('content');
+  if (!content || !content.contains(sel.anchorNode)) {
+    hideFloatingBtn();
+    return;
+  }
+  const text = sel.toString().trim();
+  if (text.length < 3) {
+    hideFloatingBtn();
+    return;
+  }
+
+  // Position floating button below selection
+  const range = sel.getRangeAt(0);
+  const rangeRect = range.getBoundingClientRect();
+  const containerRect = document.getElementById('review-doc').getBoundingClientRect();
+
+  const btn = document.getElementById('floating-btn');
+  btn.style.left = (rangeRect.left - containerRect.left + rangeRect.width / 2 - 50) + 'px';
+  btn.style.top = (rangeRect.bottom - containerRect.top + 8) + 'px';
+  btn.style.display = '';
+  window._mobileState.showFloatingBtn = true;
+}
+
+function hideFloatingBtn() {
+  document.getElementById('floating-btn').style.display = 'none';
+  window._mobileState.showFloatingBtn = false;
+}
+
+function onMobileAddComment() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+    showToast('Selection lost \u2014 try again');
+    hideFloatingBtn();
+    return;
+  }
+
+  const range = sel.getRangeAt(0);
+  const quote = range.toString();
+
+  window._mobileState.pendingSelection = { quote };
+  hideFloatingBtn();
+
+  // Open bottom sheet
+  const sheet = document.getElementById('sheet-popover');
+  sheet.classList.add('open');
+  document.getElementById('sheet-quote').textContent = quote.length > 80 ? quote.slice(0, 77) + '...' : quote;
+  document.getElementById('sheet-textarea').focus();
+}
+
+function showToast(message) {
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.style.display = '';
+  if (window._mobileState.toastTimer) clearTimeout(window._mobileState.toastTimer);
+  window._mobileState.toastTimer = setTimeout(() => {
+    toast.style.display = 'none';
+  }, 2000);
+}
+
+function submitComment() {
+  const textarea = document.getElementById('sheet-textarea');
+  const comment = textarea.value.trim();
+  if (!comment || !window._mobileState.pendingSelection) return;
+
+  const ann = {
+    id: 'ann-' + Date.now(),
+    quote: window._mobileState.pendingSelection.quote,
+    comment: comment,
+  };
+  window._mobileState.annotations.push(ann);
+
+  // Save to sessionStorage (same format as AnnotationStore)
+  const key = 'review-annotations-test-session-Test Document';
+  const existing = JSON.parse(sessionStorage.getItem(key) || '[]');
+  existing.push(ann);
+  sessionStorage.setItem(key, JSON.stringify(existing));
+
+  // Create highlight element
+  const highlight = document.createElement('span');
+  highlight.className = 'r6o-annotation';
+  highlight.setAttribute('data-annotation', ann.id);
+  highlight.textContent = ann.quote;
+  document.getElementById('content').appendChild(highlight);
+
+  // Close sheet
+  closeSheet();
+}
+
+function cancelComment() {
+  window._mobileState.pendingSelection = null;
+  closeSheet();
+}
+
+function closeSheet() {
+  document.getElementById('sheet-popover').classList.remove('open');
+  document.getElementById('sheet-textarea').value = '';
+}
+
+// Wire up buttons
+document.getElementById('floating-btn').addEventListener('click', onMobileAddComment);
+document.getElementById('sheet-submit').addEventListener('click', submitComment);
+document.getElementById('sheet-cancel').addEventListener('click', cancelComment);
+</script>
+</body>
+</html>
