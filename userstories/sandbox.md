@@ -1,146 +1,92 @@
-# Sandbox
+# Sandbox User Stories
 
-## SB-01: Enable sandbox for project
-
-**Preconditions:** Docker available, project registered.
+## SB-01: Enable sandbox
 
 **Steps:**
-1. Navigate to project settings
-2. Commands & Sandbox tab
-3. Enable sandbox toggle
-4. Save
+1. Go to project settings.
+2. Toggle sandbox on.
 
 **Expected:**
-- sandbox: "docker" written to project.yaml
-- Container creation starts in background
-- Sandbox status endpoint shows initializing → ready
+- Sandbox mode saved.
+- Container creation starts.
 
-**Coverage:** API-level (`sandbox-docker.spec.ts` — skipped without Docker). No UI test.
+**Coverage:** API only.
 
 ---
 
-## SB-02: Sandbox container lifecycle
-
-**Preconditions:** Sandbox enabled for project.
-
-**Steps:**
-1. Container auto-created on first sandbox session
-2. Container reused for subsequent sessions
-3. Container survives gateway restart
+## SB-02: Container lifecycle
 
 **Expected:**
-- One container per project (not per session)
-- Container labeled `bobbit-project=<projectId>`
-- Named volumes for workspace and worktrees
-- On restart: reconnects to existing container by label
+- One container per project (not per session).
+- Container uses persistent storage volumes that survive restarts.
+- On server restart: reconnects to the existing container if running, restarts it if stopped, or recreates it if gone — without losing data.
 
-**Coverage:** Manual integration test. `sandbox-docker.spec.ts` (skipped).
+**Coverage:** Manual only.
 
 ---
 
-## SB-03: Sandboxed session execution
-
-**Preconditions:** Sandbox container running.
-
-**Steps:**
-1. Create a session in sandboxed project
-2. Agent runs commands
+## SB-03: Sandboxed execution
 
 **Expected:**
-- Commands execute inside container via docker exec
-- File system changes inside container
-- Agent CWD is /workspace or /workspace-wt/<name>
-- Git operations work inside container
+- Agent commands run inside the container, not on the host.
+- File changes happen inside the container.
+- Git works inside the container.
 
-**Coverage:** `sandbox-docker.spec.ts` (skipped). Manual test.
+**Coverage:** Skipped.
 
 ---
 
-## SB-04: Sandbox security — mount blocklist
-
-**Preconditions:** Sandbox configured.
-
-**Steps:**
-1. Attempt to mount sensitive paths (docker.sock, .ssh, etc.)
+## SB-04: Mount security
 
 **Expected:**
-- All sensitive mounts rejected with warnings
-- docker.sock, /proc, /sys, /etc, /home blocked
-- .ssh, .aws, .gnupg, .config blocked
-- Drive roots blocked
+- Sensitive host paths are blocked from being mounted (e.g. SSH keys, cloud credentials, system directories).
+- Drive roots are blocked.
+- Path traversal attempts are rejected.
 
-**Coverage:** `sandbox-security.spec.ts` — thorough. `sandbox-pentest.spec.ts`.
+**Coverage:** Covered.
 
 ---
 
-## SB-05: Sandbox security — token isolation
-
-**Preconditions:** Sandbox container running.
-
-**Steps:**
-1. From inside container, attempt to read gateway token
-2. From inside container, attempt to access state files
+## SB-05: Token isolation
 
 **Expected:**
-- Gateway token not accessible
-- TLS keys not accessible
-- sessions.json not accessible
-- Only sessions/, tool-guard/, html-snapshots/ subdirs mounted
+- Agents inside the container cannot access the gateway authentication token, TLS keys, or session metadata.
+- Only the minimum necessary data directories are accessible from within the container.
 
-**Coverage:** `sandbox-security.spec.ts`, `sandbox-pentest.spec.ts`.
+**Coverage:** Covered.
 
 ---
 
-## SB-06: Sandbox branch reconciliation
-
-**Preconditions:** Team-spawned session in sandbox.
-
-**Steps:**
-1. Host creates worktree with branch A
-2. Container uses branch B (different naming)
-3. Check persisted session branch
+## SB-06: Branch reconciliation
 
 **Expected:**
-- Persisted branch matches actual container branch
-- PR status lookups use correct branch
-- Orphaned worktree detection uses correct branch
+- The branch shown in the UI and used for PR lookups matches the actual branch inside the container, even if they were named differently at creation time.
 
-**Coverage:** `sandbox-branch-reconcile.spec.ts` (non-Docker paths only). Manual test for full Docker path.
+**Coverage:** Partial.
 
 ---
 
-## SB-07: Sandbox container death and recovery
-
-**Preconditions:** Sessions running in sandbox container.
+## SB-07: Container death recovery
 
 **Steps:**
-1. Kill the container (docker kill)
-2. Health monitor detects death (20s)
-3. Container recreated
-4. Sessions recovered
+1. Container dies while sessions are active.
 
 **Expected:**
-- Health monitor logs container death
-- New container created with same volumes
-- Sessions: terminated → auto-recover → idle
-- Worktrees restored (repair or recreate from branch)
-- If recovery fails: session archived with log
+- Detected within ~30 seconds.
+- Container recreated automatically.
+- Sessions recover automatically.
+- If recovery fails, the session is archived.
 
-**Coverage:** `sandbox-recovery.spec.ts` (skipped without Docker). Manual test.
+**Coverage:** Skipped.
 
 ---
 
-## SB-08: Sandbox goal verification
+## SB-08: Sandbox verification
 
-**Preconditions:** Sandboxed goal, gate with command verify step.
-
-**Steps:**
-1. Signal gate
-2. Command verification step runs
+**Preconditions:** Gate with a command verification step on a sandboxed goal.
 
 **Expected:**
-- Command executes inside project container via docker exec
-- If container unavailable: falls back to host with warning
-- Verification result reflects container execution
+- Verification commands run inside the container.
+- If the container is unavailable, commands fall back to the host.
 
-**Coverage:** None — sandbox verification untested.
+**Coverage:** None.

@@ -1,146 +1,144 @@
-# Roles
+# Roles — User Stories
 
 ## R-01: View roles list
 
-**Preconditions:** App loaded.
+**As a** user
+**I want to** see all available roles on the Roles page
+**So that** I can understand what agent roles exist and where they come from
 
-**Steps:**
-1. Navigate to #/roles
+### Acceptance Criteria
 
-**Expected:**
-- All roles listed (builtin + server + project overrides)
-- Each role shows origin badge (grey=builtin, blue=server, green=project)
-- Inherited roles at 70% opacity
-- Project scope row visible if multiple projects
+- The Roles page displays all roles, including built-in defaults and any user-created ones.
+- Each role shows its **name**, **label**, and **icon** (if configured).
+- Each role displays an **origin badge**: grey for builtin, blue for server-level, green for project-level.
+- Inherited (non-overridden) roles appear **dimmed**.
+- When multiple projects are registered, a **scope selector** appears allowing the user to switch project context.
 
-**Coverage:** `tests/e2e/ui/config-scope.spec.ts` — partial (scope row, badges).
+### Coverage
 
----
-
-## R-02: Create a custom role
-
-**Preconditions:** On roles page.
-
-**Steps:**
-1. Click "New Role" button
-2. Fill in name, label, prompt
-3. Configure tool policies (optional)
-4. Save
-
-**Expected:**
-- Role appears in list with server or project origin
-- Role is available in session role picker
-- Role YAML written to config directory
-
-**Coverage:** `tests/e2e/roles-api.spec.ts` (API CRUD). No UI create test.
+**Partial.** The list page renders and shows roles, but E2E tests do not fully validate origin badges, dimming, or multi-project scope selector behavior.
 
 ---
 
-## R-03: Edit an existing role
+## R-02: Create role
 
-**Preconditions:** Custom role exists.
+**As a** user
+**I want to** create a new custom role
+**So that** I can define specialized agent behaviors for my project
 
-**Steps:**
-1. Click role in list
-2. Edit page loads with current values
-3. Modify prompt or policies
-4. Save
+### Acceptance Criteria
 
-**Expected:**
-- Changes persisted to YAML
-- Existing sessions using this role unaffected
-- New sessions pick up changes
+- Clicking "New Role" opens a creation form.
+- The user fills in: **name**, **label**, **prompt**, and optionally **tool policies** (per-tool: allow / ask / never).
+- On save, the role appears in the list.
+- The new role is immediately available when creating sessions.
 
-**Coverage:** `tests/e2e/roles-api.spec.ts` (API PUT). No UI edit test.
+### Coverage
 
----
-
-## R-04: Delete a custom role
-
-**Preconditions:** Custom role exists (not builtin).
-
-**Steps:**
-1. Click role in list
-2. Click Delete button
-3. Confirm
-
-**Expected:**
-- Role removed from list
-- YAML file deleted
-- Cannot select deleted role for new sessions
-- Existing sessions unaffected
-
-**Coverage:** `tests/e2e/roles-api.spec.ts` (API DELETE). No UI delete test.
+**Partial (API only).** API tests exist but no browser E2E test validates the full form interaction.
 
 ---
 
-## R-05: Customize a builtin role (project override)
+## R-03: Edit role
 
-**Preconditions:** Builtin role exists, multiple projects registered.
+**As a** user
+**I want to** edit an existing role's configuration
+**So that** I can refine agent behavior over time
 
-**Steps:**
-1. Navigate to roles page with project scope selected
-2. Click "Customize" on a builtin role
-3. Modify the prompt
-4. Save
+### Acceptance Criteria
 
-**Expected:**
-- Override created at project level
-- Role shows green origin badge
-- Project sessions use override
-- Other projects still see builtin
+- Clicking a role opens its edit view with current values loaded.
+- On save, changes are persisted.
+- Existing sessions using this role are **not** affected; only new sessions pick up the changes.
 
-**Coverage:** `tests/e2e/config-cascade-api.spec.ts` (API customize). `tests/e2e/ui/config-scope.spec.ts` (partial UI).
+### Coverage
+
+**Partial (API only).** No browser E2E test for the edit interaction.
 
 ---
 
-## R-06: Revert a role override
+## R-04: Delete role
 
-**Preconditions:** Project-level override exists for a role.
+**As a** user
+**I want to** delete a custom role I no longer need
+**So that** my role list stays clean and manageable
 
-**Steps:**
-1. Click "Revert" on the overridden role
-2. Confirm
+### Acceptance Criteria
 
-**Expected:**
-- Override deleted
-- Role reverts to inherited value (builtin or server)
-- Origin badge changes back
-- Opacity returns to 70% (inherited)
+- Clicking "Delete" on a role shows a confirmation dialog.
+- On confirm, the role is removed from the list.
+- Only **custom roles** can be deleted — builtin roles show no delete option.
 
-**Coverage:** `tests/e2e/config-cascade-api.spec.ts` (API revert). No UI revert test.
+### Coverage
 
----
-
-## R-07: Role used in session creation
-
-**Preconditions:** Custom role exists.
-
-**Steps:**
-1. Click role picker dropdown on New Session button
-2. Select custom role
-3. Create session
-
-**Expected:**
-- Session created with custom role's prompt
-- Tool policies from role applied
-- Context bar may show role indicator
-
-**Coverage:** None — role picker flow untested.
+**Partial (API only).** No browser E2E test for the delete confirmation flow.
 
 ---
 
-## R-08: Config cascade affects goal team
+## R-05: Customize builtin role (project override)
 
-**Preconditions:** Goal with team, role customized at project level.
+**As a** user
+**I want to** create a project-level override of a builtin role
+**So that** I can tailor builtin behavior for a specific project without affecting other projects
 
-**Steps:**
-1. Team spawns agent with a role
-2. Role resolves through cascade (project > server > builtin)
+### Acceptance Criteria
 
-**Expected:**
-- Agent gets project-level role override
-- Role prompt includes project customizations
-- This is the bug path where cascade broke goal creation
+- With a project scope selected, clicking "Customize" on a builtin role creates an editable copy for that project.
+- The role's origin badge changes from grey (builtin) to green (project).
+- Sessions in that project use the override; other projects continue to see the original builtin.
 
-**Coverage:** None — cascade effect on team roles untested.
+### Coverage
+
+**Partial.** API customization is tested but no browser E2E validates the Customize button flow, badge change, or multi-project isolation.
+
+---
+
+## R-06: Revert override
+
+**As a** user
+**I want to** revert a project-level role override back to the inherited value
+**So that** I can undo customizations and fall back to the builtin definition
+
+### Acceptance Criteria
+
+- Clicking "Revert" on an overridden role removes the project-level override.
+- The role's origin badge changes back (e.g., green → grey).
+- The role returns to its dimmed inherited appearance.
+
+### Coverage
+
+**Partial (API only).** No browser E2E test for the Revert button interaction or visual state change.
+
+---
+
+## R-07: Use role in session creation
+
+**As a** user
+**I want to** select a role when creating a new session
+**So that** the agent operates with the correct prompt and tool policies for the task
+
+### Acceptance Criteria
+
+- The session creation flow includes a **role picker** listing all available roles for the session's project.
+- Selecting a role and creating the session results in the agent using that role's prompt and tool policies.
+
+### Coverage
+
+**None.** No E2E test validates the role picker, role selection, or that the chosen role takes effect in the created session.
+
+---
+
+## R-08: Role cascade affects goals
+
+**As a** user
+**I want** project-level role customizations to apply to team agents in goals
+**So that** goal agents reflect project-specific role overrides
+
+### Acceptance Criteria
+
+- When a team agent is spawned for a goal, it uses the role as customized for that goal's project.
+- If a project-level override exists, the spawned agent uses the overridden prompt and tool policies — not the builtin defaults.
+
+### Coverage
+
+**None.** No E2E test validates that team agents correctly receive project-level role overrides. This is a known bug path.

@@ -1,98 +1,113 @@
-# Personalities
+# Personalities — User Stories
 
 ## P-01: View personalities list
 
-**Preconditions:** App loaded.
+**As a** user
+**I want to** see all available personalities on the Personalities page
+**So that** I can understand what personality options exist for agent customization
 
-**Steps:**
-1. Navigate to #/personalities
+### Acceptance Criteria
 
-**Expected:**
-- All personalities listed with origin badges
-- Config cascade scope row visible if multiple projects
+- The Personalities page displays all personalities, including built-in defaults and user-created ones.
+- Each personality shows its **name**, **label**, and **description** (if set).
+- Each personality displays an **origin badge**: grey for builtin, blue for server-level, green for project-level.
+- Inherited (non-overridden) personalities appear **dimmed**.
+- When multiple projects are registered, a **scope selector** appears above the list.
 
-**Coverage:** API-level only (`tests/e2e/personalities.spec.ts`).
+### Coverage
 
----
-
-## P-02: Create a personality
-
-**Preconditions:** On personalities page.
-
-**Steps:**
-1. Click "New Personality"
-2. Fill name, label, prompt fragment
-3. Save
-
-**Expected:**
-- Personality appears in list
-- Available in team_spawn personality picker
-- YAML persisted
-
-**Coverage:** API-level only. No UI create test.
+**API only.** API returns correct data but no browser E2E test validates the list page rendering, badges, or scope selector.
 
 ---
 
-## P-03: Edit a personality
+## P-02: Create personality
 
-**Preconditions:** Custom personality exists.
+**As a** user
+**I want to** create a new personality
+**So that** I can define custom behavioral modifiers for agents
 
-**Steps:**
-1. Click personality in list
-2. Modify prompt fragment
-3. Save
+### Acceptance Criteria
 
-**Expected:**
-- Changes persisted
-- New agent spawns use updated prompt
+- Clicking "New" opens a creation form.
+- The user fills in: **name**, **label**, **prompt fragment** (1–2 sentences that modify agent behavior), and optional **description**.
+- On save, the personality appears in the list.
+- The new personality is immediately available for use when spawning team agents.
 
-**Coverage:** API-level only. No UI edit test.
+### Coverage
 
----
-
-## P-04: Delete a personality
-
-**Preconditions:** Custom personality exists.
-
-**Steps:**
-1. Click personality, then delete
-2. Confirm
-
-**Expected:**
-- Personality removed from list
-- Existing agents using it unaffected
-
-**Coverage:** API-level only. No UI delete test.
+**API only.** CRUD API tests exist but no browser E2E test validates form interaction.
 
 ---
 
-## P-05: Customize builtin personality (override)
+## P-03: Edit personality
 
-**Preconditions:** Builtin personality, multiple projects.
+**As a** user
+**I want to** edit an existing personality
+**So that** I can refine how the personality modifies agent behavior
 
-**Steps:**
-1. Select project scope
-2. Customize builtin
-3. Modify and save
+### Acceptance Criteria
 
-**Expected:**
-- Project override created
-- Green badge, project sessions use override
+- Clicking a personality opens its edit view with current values loaded.
+- The user can modify the **prompt fragment**, **label**, and **description**.
+- On save, changes are persisted.
+- New agent spawns use the updated personality; existing running agents are unaffected.
 
-**Coverage:** API-level cascade tests. No UI test.
+### Coverage
+
+**API only.** No browser E2E test for the edit interaction.
 
 ---
 
-## P-06: Personality applied to spawned agent
+## P-04: Delete personality
 
-**Preconditions:** Personality exists, goal with team.
+**As a** user
+**I want to** delete a personality I no longer need
+**So that** my personality list stays clean
 
-**Steps:**
-1. Spawn agent with personality selected
-2. Agent receives system prompt
+### Acceptance Criteria
 
-**Expected:**
-- Personality prompt fragment appended to agent's system prompt
-- Agent behavior reflects personality
+- Clicking "Delete" on a personality shows a confirmation dialog.
+- On confirm, the personality is removed from the list.
+- Existing agents currently using this personality are **not** affected — only future spawns.
+- Only custom personalities can be deleted; builtins cannot.
 
-**Coverage:** None — personality application untested end-to-end.
+### Coverage
+
+**API only.** No browser E2E test for the delete flow.
+
+---
+
+## P-05: Customize builtin personality (project override)
+
+**As a** user
+**I want to** create a project-level override of a builtin personality
+**So that** I can tailor personality behavior for a specific project
+
+### Acceptance Criteria
+
+- With a project scope selected, clicking "Customize" on a builtin personality creates an editable copy for that project.
+- The origin badge changes from grey (builtin) to green (project).
+- Sessions in that project use the override; other projects see the original builtin.
+- Clicking "Revert" removes the override and restores the inherited value, changing the badge back.
+
+### Coverage
+
+**API only.** No browser E2E test for the Customize/Revert button interactions.
+
+---
+
+## P-06: Personality applied to agent
+
+**As a** user
+**I want** a personality to modify an agent's behavior when applied
+**So that** spawned agents reflect the personality I chose
+
+### Acceptance Criteria
+
+- When a team agent is spawned with a personality, its behavior reflects the personality's prompt fragment.
+- Multiple personalities can be applied — their effects combine.
+- Personality resolution respects project-level overrides for the goal's project.
+
+### Coverage
+
+**None.** No E2E test validates that personality prompt fragments actually modify agent behavior in a spawned session.

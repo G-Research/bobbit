@@ -1,192 +1,51 @@
-# Projects
+# Projects User Stories
 
-## PR-01: Add project (existing .bobbit directory)
+## PR-01: Add project (existing config)
+**Steps:** Click Add Project, enter path to a directory with existing `.bobbit/` config, click Continue.
+**Expected:** Project auto-imported with detected name. Appears in sidebar immediately.
+**Coverage:** covered.
 
-**Preconditions:** Directory with .bobbit/ exists.
+## PR-02: Add project (detection)
+**Steps:** Enter path to a directory with content but no `.bobbit/` config.
+**Expected:** Project assistant session opens. Sidebar shows the project with a "(setting up)" badge. Agent explores the directory and proposes configuration. A preview form appears with editable fields. On Accept: project finalized, config saved, worktree pool initialized.
+**Coverage:** covered (15 tests).
 
-**Steps:**
-1. Click "Add Project" in sidebar
-2. Enter or browse to directory path
-3. Click Continue
+## PR-03: Add project (scaffolding)
+**Steps:** Enter path to an empty or nonexistent directory.
+**Expected:** Scaffolding assistant opens. Guides through tech stack selection. Creates project structure and configuration.
+**Coverage:** partial.
 
-**Expected:**
-- Project auto-imported (Path A — no assistant needed)
-- Name detected from package.json or directory basename
-- Project appears in sidebar with folder
-- Sessions/goals scoped to project
+## PR-04: Remove project
+**Steps:** Project settings → Danger Zone → Remove Project.
+**Expected:** Project removed from sidebar. Files on disk not deleted. Cannot remove the default project.
+**Coverage:** covered.
 
-**Coverage:** `tests/e2e/ui/add-project-flow.spec.ts`.
+## PR-05: Project commands
+**Steps:** Project settings → Commands tab, edit build/test/typecheck commands, save.
+**Expected:** Commands saved. Used by new sessions and goals in this project.
+**Coverage:** partial.
 
----
+## PR-06: Project models
+**Steps:** Project settings → Models tab, set model preferences.
+**Expected:** Project-specific model preferences applied. Override system defaults for this project only.
+**Coverage:** API only.
 
-## PR-02: Add project (new directory, detection mode)
+## PR-07: Project appearance
+**Steps:** Project settings → Appearance tab.
+**Expected:** Choose a palette and accent colors. Sessions in this project use the selected theme. Other projects unaffected.
+**Coverage:** partial.
 
-**Preconditions:** Directory has content but no .bobbit/.
-
-**Steps:**
-1. Click "Add Project"
-2. Enter directory path
-3. Click Continue
-4. Project assistant session opens
-5. Assistant detects tech stack
-6. Agent calls propose_project
-7. Review form appears
-8. Click Accept
-
-**Expected:**
-- Provisional project created during assistant session
-- Sidebar shows project with "(setting up)" badge
-- On accept: project promoted, config written, worktree pool initialized
-- Assistant session terminated
-
-**Coverage:** `tests/e2e/ui/project-assistant.spec.ts` — 15 tests. Well-covered.
-
----
-
-## PR-03: Add project (empty directory, scaffolding)
-
-**Preconditions:** Directory is empty or doesn't exist.
-
-**Steps:**
-1. Click "Add Project"
-2. Enter empty directory path
-3. Scaffolding assistant opens
-4. Guide through tech stack selection
-5. Accept proposal
-
-**Expected:**
-- Directory created if needed
-- Project scaffolded with chosen stack
-- Config written
-
-**Coverage:** `tests/e2e/ui/project-assistant.spec.ts` — partial.
-
----
-
-## PR-04: Remove a project
-
-**Preconditions:** Non-default project exists.
-
-**Steps:**
-1. Navigate to project settings
-2. General tab → Danger Zone
-3. Click "Remove Project"
-4. Confirm
-
-**Expected:**
-- Project removed from sidebar
-- Worktree pool drained
-- Files on disk not deleted
-- Sessions/goals remain but lose project scope
-- Navigation returns to system settings
-
-**Coverage:** `tests/e2e/ui/project-removal.spec.ts`.
-
----
-
-## PR-05: Project settings — commands
-
-**Preconditions:** Project registered.
-
-**Steps:**
-1. Click gear icon on project header in sidebar
-2. Navigate to Commands & Sandbox tab
-3. Edit build/test/typecheck commands
-4. Save
-
-**Expected:**
-- Commands persisted to project.yaml
-- New sessions/goals use updated commands
-- Resolved config shows source (project vs system)
-
-**Coverage:** `tests/e2e/ui/settings.spec.ts` — partial.
-
----
-
-## PR-06: Project settings — models
-
-**Preconditions:** Project settings page.
-
-**Steps:**
-1. Navigate to Models tab
-2. Set project-specific model preferences
-3. Save
-
-**Expected:**
-- Model config persisted
-- New sessions in this project use project models
-- Other projects use system defaults
-
-**Coverage:** `tests/e2e/models-api.spec.ts` (API). No UI test.
-
----
-
-## PR-07: Project settings — appearance
-
-**Preconditions:** Project settings page.
-
-**Steps:**
-1. Navigate to Appearance tab
-2. Select palette
-3. Set accent colors (light/dark)
-4. Save
-
-**Expected:**
-- Project sessions use selected palette
-- Accent colors applied to project UI elements
-- Other projects unaffected
-
-**Coverage:** `tests/e2e/ui/palette-session.spec.ts` — partial.
-
----
-
-## PR-08: Browse directory dialog
-
-**Preconditions:** Add Project dialog open.
-
-**Steps:**
-1. Click Browse button
-2. Navigate directory tree
-3. Select directory
-
-**Expected:**
-- Directory browser shows real filesystem
-- Can navigate up/down
-- Selected path populates input
-
-**Coverage:** `tests/e2e/ui/add-project-flow.spec.ts`, `tests/e2e/project-detect-browse.spec.ts`.
-
----
+## PR-08: Browse directory
+**Steps:** In Add Project dialog, click Browse.
+**Expected:** Directory browser shows the real filesystem. Can navigate folders. Selection fills the path input.
+**Coverage:** covered.
 
 ## PR-09: Multi-project sidebar
+**Pre:** Multiple projects registered.
+**Expected:** Each project has its own section with sessions and goals grouped underneath. Collapse/expand per project. Gear icon navigates to that project's settings.
+**Coverage:** covered.
 
-**Preconditions:** Multiple projects registered.
-
-**Steps:**
-1. View sidebar
-2. Each project has its own folder/section
-3. Sessions and goals grouped under projects
-
-**Expected:**
-- Project headers with name and palette color
-- Collapse/expand per project
-- Gear icon navigates to project settings
-- "Add Goal" and "Add Staff" scoped to project
-
-**Coverage:** `tests/e2e/ui/project-management.spec.ts`. `tests/e2e/ui/single-project-sidebar.spec.ts`.
-
----
-
-## PR-10: Provisional project cleanup
-
-**Preconditions:** Project assistant session active (provisional project).
-
-**Steps:**
-1. Terminate assistant session without accepting proposal
-
-**Expected:**
-- Provisional project deleted
-- Sidebar updated
-- No orphaned state
-
-**Coverage:** `tests/e2e/ui/project-assistant.spec.ts`.
+## PR-10: Provisional cleanup
+**Steps:** Close the project assistant session without accepting the proposal.
+**Expected:** Provisional project deleted. Sidebar cleaned up.
+**Coverage:** covered.

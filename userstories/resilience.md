@@ -1,117 +1,98 @@
-# Resilience
+# Resilience User Stories
 
-## RE-01: Session survives gateway crash
-
-**Preconditions:** Active session with messages.
+## RE-01: Session survives crash
 
 **Steps:**
-1. Send message, receive response
-2. Kill gateway process
-3. Restart gateway (new port, same data dir)
-4. Connect to app
-5. Navigate to session
+1. Send a message in an active session.
+2. Kill the server (hard crash).
+3. Restart the server.
+4. Navigate to the session.
 
 **Expected:**
-- Session in sidebar, not archived
-- Messages preserved
-- CWD preserved
-- Can send follow-up messages
-- Git status widget renders (if worktree)
+- Session appears in the sidebar (not lost or archived).
+- Previous messages are preserved.
+- Can send a follow-up message and get a response.
+- Working directory is unchanged.
+- Git status works.
 
-**Coverage:** Manual integration test only.
+**Coverage:** Manual only.
 
 ---
 
-## RE-02: Goal survives gateway crash
-
-**Preconditions:** Goal with team running.
+## RE-02: Goal survives crash
 
 **Steps:**
-1. Kill gateway
-2. Restart
-3. Navigate to goal
+1. Have a goal with an active team.
+2. Kill the server.
+3. Restart the server.
+4. Navigate to the goal.
 
 **Expected:**
-- Goal in sidebar
-- Dashboard loads with correct state
-- Gates preserve status
-- Team sessions restored
+- Goal appears in the sidebar.
+- Dashboard loads correctly.
+- Gates preserved with their previous statuses.
+- Team members restored.
+- Goals that were mid-setup at crash time show an error status with a retry option.
 
-**Coverage:** Manual integration test only.
+**Coverage:** Manual only.
 
 ---
 
-## RE-03: Persistence files written before crash
-
-**Preconditions:** Sessions and goals exist.
+## RE-03: Data persisted before crash
 
 **Steps:**
-1. Kill gateway (hard crash, no graceful shutdown)
-2. Check data directory
+1. Kill the server (hard crash, no graceful shutdown).
 
 **Expected:**
-- sessions.json exists and is valid JSON
-- goals.json exists and is valid JSON
-- gates.json exists
-- team-state.json exists
-- Session .jsonl files exist
+- Sessions, goals, gates, and team state are all persisted to disk before the crash.
+- Session message history files exist on disk.
 
-**Coverage:** Manual integration test only.
+**Coverage:** Manual only.
 
 ---
 
-## RE-04: Worktree preserved across restart
-
-**Preconditions:** Session with worktree.
+## RE-04: Worktree preserved
 
 **Steps:**
-1. Create session (gets worktree)
-2. Verify worktree directory exists
-3. Kill and restart gateway
-4. Check session CWD
+1. Create a session with its own git worktree.
+2. Kill the server.
+3. Restart the server.
 
 **Expected:**
-- Worktree directory still exists
-- CWD points to same worktree
-- Git branch unchanged
-- Can continue working in worktree
+- Worktree directory still exists on disk.
+- Working directory is the same as before the crash.
+- Git branch is unchanged.
 
-**Coverage:** Manual integration test only.
+**Coverage:** Manual only.
 
 ---
 
 ## RE-05: Sandbox container recovery
 
-**Preconditions:** Sandboxed project with running sessions.
-
 **Steps:**
-1. Kill the Docker container
-2. Wait for health monitor to detect (20s)
+1. Kill the Docker container while sessions are active.
 
 **Expected:**
-- Container automatically recreated
-- Sessions transition: terminated → recovered → idle
-- Worktrees restored inside container
-- Can resume work
+- Container automatically recreated within ~30 seconds.
+- Sessions recover automatically.
+- Worktrees inside the container are restored.
+- If recovery fails, the session is archived.
 
-**Coverage:** `tests/e2e/sandbox-recovery.spec.ts` (skipped without Docker). Manual test only.
+**Coverage:** Skipped without Docker.
 
 ---
 
-## RE-06: Multiple sessions survive crash (stress)
+## RE-06: Multiple sessions survive
 
-**Preconditions:** 5+ sessions of mixed types (plain, worktree, sandbox).
+**Preconditions:** 5+ sessions of different types (plain, worktree, sandbox).
 
 **Steps:**
-1. Create sessions of each type
-2. Send messages to each
-3. Kill gateway
-4. Restart
-5. Verify each session individually
+1. Kill the server.
+2. Restart the server.
 
 **Expected:**
-- All sessions present (none archived)
-- Each has correct CWD, branch, messages
-- Can interact with each after restart
+- All sessions present after restart.
+- Each has correct working directory, branch, and messages.
+- Can interact with all of them.
 
-**Coverage:** Manual integration test — 6 variations.
+**Coverage:** Manual only.

@@ -1,91 +1,70 @@
-# Config Cascade
+# Config Cascade User Stories
 
-## CC-01: Three-layer resolution (builtin → server → project)
+## CC-01: Three-layer resolution
 
-**Preconditions:** Builtin role exists, server override exists, project override exists.
+**Action:** Builtin, server, and project overrides all exist for the same config item.
 
-**Steps:**
-1. Query resolved roles for project
+**Expected:** Project-level wins over server-level, which wins over builtin. Each item shows where it comes from. Overridden items indicate what they shadow.
 
-**Expected:**
-- Project override wins over server override
-- Server override wins over builtin
-- Each item tagged with correct origin
-- Items without overrides show builtin origin
-
-**Coverage:** `tests/e2e/config-cascade-api.spec.ts` — thorough API tests.
+**Coverage:** Covered.
 
 ---
 
 ## CC-02: Cascade UI display
 
-**Preconditions:** Config page (roles/tools/personalities/workflows) loaded.
-
-**Steps:**
-1. View items list
-2. Note origin badges
+**Action:** Open a config page (Roles, Personalities, Workflows, etc.).
 
 **Expected:**
-- Grey badge = builtin
-- Blue badge = server
-- Green badge = project
-- Inherited items at 70% opacity
-- Overridden items show "overrides: [layer]" indicator
+- Grey badge = builtin origin.
+- Blue badge = server origin.
+- Green badge = project origin.
+- Inherited items appear dimmed.
+- Overridden items show an indicator of what they override.
 
-**Coverage:** `tests/e2e/ui/config-scope.spec.ts` — 6 tests. Partial coverage.
+**Coverage:** Partial.
 
 ---
 
-## CC-03: Customize action
-
-**Preconditions:** Inherited item (builtin or server), project scope selected.
+## CC-03: Customize a builtin or inherited item
 
 **Steps:**
-1. Click "Customize" on inherited item
-2. Edit form pre-populated with inherited values
-3. Modify and save
+1. Select project scope.
+2. Click Customize on an inherited item.
+3. Modify and save.
 
 **Expected:**
-- Override created at selected scope
-- Origin badge changes to project/server
-- Opacity becomes 100%
-- Revert button appears
+- Form pre-populated with the inherited values.
+- After save, origin badge changes (e.g. to green for project).
+- Item no longer appears dimmed.
+- Revert button appears.
 
-**Coverage:** API-level (`config-cascade-api.spec.ts`). No UI test for customize flow.
+**Coverage:** Partial.
 
 ---
 
-## CC-04: Revert action
-
-**Preconditions:** Override exists at project or server level.
+## CC-04: Revert an override
 
 **Steps:**
-1. Click "Revert" on overridden item
-2. Confirm
+1. Click Revert on an overridden item.
 
 **Expected:**
-- Override deleted
-- Item reverts to inherited value
-- Badge and opacity update
-- Revert button disappears
+- Override removed.
+- Item reverts to the inherited value.
+- Badge and dimming update accordingly.
 
-**Coverage:** API-level. No UI test.
+**Coverage:** Partial.
 
 ---
 
-## CC-05: Cascade affects session creation
+## CC-05: Cascade affects sessions
 
 **Preconditions:** Role customized at project level.
 
-**Steps:**
-1. Create a session in that project
-2. Check which role prompt is used
+**Action:** Create a new session in that project.
 
-**Expected:**
-- Session gets project-level role override
-- Not the builtin or server version
+**Expected:** The new session uses the customized role, not the builtin or server-level version.
 
-**Coverage:** None — cascade effect on sessions untested.
+**Coverage:** None.
 
 ---
 
@@ -93,32 +72,23 @@
 
 **Preconditions:** Workflow customized at project level.
 
-**Steps:**
-1. Create a goal in that project
-2. Check which workflow gates are created
+**Action:** Create a new goal in that project.
 
-**Expected:**
-- Goal uses project-level workflow override
-- Gates match customized workflow
-- This is the exact path where builtin workflow resolution broke goal creation
+**Expected:** The new goal uses the customized workflow and its gates.
 
-**Coverage:** None — this is a known bug path with no automated test.
+**Coverage:** None.
 
 ---
 
-## CC-07: Scope switching on config pages
-
-**Preconditions:** Multiple projects, config page loaded.
+## CC-07: Scope switching
 
 **Steps:**
-1. View roles at system scope
-2. Switch to project A scope
-3. Switch to project B scope
+1. Open a config page with multiple projects registered.
+2. Switch between System, Project A, and Project B scope tabs.
 
 **Expected:**
-- Items update to reflect selected scope
-- Badges change per scope
-- No stale items from previous scope
-- Scope selection preserved in URL
+- Items update to reflect the selected scope.
+- Badges change per scope.
+- No stale items from the previous scope appear.
 
-**Coverage:** `tests/e2e/ui/config-scope.spec.ts` — partial.
+**Coverage:** Partial.

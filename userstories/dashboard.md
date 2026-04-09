@@ -1,166 +1,161 @@
-# Dashboard
+# Goal Dashboard — User Stories
 
-## D-01: Dashboard loads with correct state
+## D-01: Dashboard loads
 
-**Preconditions:** Goal exists with team and gates.
+**Preconditions:** Goal exists.
 
 **Steps:**
-1. Click goal in sidebar
+1. Click goal in sidebar.
 
 **Expected:**
-- Loading animation shows briefly
-- Title, spec, status displayed
-- Setup status badge (ready/pending/failed)
-- Team section populated
-- Gates section accessible
+- Loading animation shows briefly.
+- Title and spec displayed.
+- Setup status visible (preparing/ready/error).
+- Team section visible if team has been started.
+- Gates section accessible.
+- No flash of stale data from a previously viewed goal.
 
-**Coverage:** Minimal — team-lifecycle-ui checks dashboard renders.
+**Coverage:** Minimal.
 
 ---
 
-## D-02: Dashboard tabs navigation
+## D-02: Dashboard tabs
 
-**Preconditions:** Goal dashboard loaded.
+**Preconditions:** Dashboard loaded.
 
 **Steps:**
-1. Click each tab (Overview, Gates, Team, Tasks)
-2. Verify content switches
+1. Click each tab in turn.
 
 **Expected:**
-- Each tab shows relevant content
-- Active tab highlighted
-- Tab state preserved on return from session view
+- Tabs include Overview, Gates/Workflow, and Team/Agents.
+- Tab content switches on click.
+- Active tab is visually highlighted.
+- Tab state resets to default when navigating away and back.
 
-**Coverage:** None — tab navigation untested.
+**Coverage:** None.
 
 ---
 
 ## D-03: Gate status display
 
-**Preconditions:** Goal with gates in various states.
+**Preconditions:** Goal with gates in various states (pending, passed, failed, verifying).
 
 **Steps:**
-1. Navigate to gates tab
-2. Observe gate cards
+1. View the Gates tab.
 
 **Expected:**
-- Pending gates: grey/neutral indicator
-- Passed gates: green checkmark, signal content preview
-- Failed gates: red X, verification output link
-- Dependency arrows/lines between gates
-- Eligible gates have Signal button enabled
-- Blocked gates have Signal button disabled
+- Gates listed in dependency order.
+- Pending gates show a neutral/grey indicator.
+- Passed gates show green with content preview and timestamp.
+- Failed gates show red with a link to verification output.
+- Verifying gates show a spinner with phase info.
+- Signal button enabled only when all upstream dependencies have passed.
+- Blocked gates have a disabled Signal button.
 
-**Coverage:** None — gate visual display untested.
+**Coverage:** None.
 
 ---
 
 ## D-04: Verification output modal
 
-**Preconditions:** Gate verification running or completed.
+**Preconditions:** Verification running or completed on a gate.
 
 **Steps:**
-1. Click "View Output" on a gate
-2. Modal opens
+1. Click "View Output" on a gate.
 
 **Expected:**
-- Modal shows verification steps with status
-- Output streams in real-time during active verification
-- Completed steps show pass/fail/skip badges
-- Can close modal, re-open shows same state
-- Cancel button visible during active verification
+- Modal opens showing verification steps with status indicators.
+- Output streams in real-time for running steps.
+- Completed steps show pass/fail/skip badges.
+- Cancel button visible during an active verification.
+- Closing and re-opening the modal shows the same state.
 
-**Coverage:** `tests/e2e/ui/gate-verification-ux.spec.ts` — viewer WS and links. `tests/e2e/verification-output.spec.ts` (API). Modal display partially tested.
+**Coverage:** Partial.
 
 ---
 
-## D-05: PR status on dashboard
+## D-05: PR status
 
-**Preconditions:** Goal branch pushed, PR exists.
+**Preconditions:** Goal branch pushed to remote; PR exists.
 
 **Steps:**
-1. View dashboard
-2. PR status section visible
+1. View dashboard.
 
 **Expected:**
-- PR link displayed
-- Status badge (open/merged/closed)
-- CI status if available
-- Refreshes periodically
+- PR link displayed.
+- Status badge (open / merged / closed / draft).
+- CI check status shown.
+- Mergeable and review status shown.
+- Refreshes periodically.
+- Merge button visible if you have permission.
 
-**Coverage:** `tests/e2e/pr-cache.spec.ts` (API cache). No UI test.
+**Coverage:** API-level only.
 
 ---
 
-## D-06: Dashboard auto-refresh
+## D-06: Dashboard live updates
 
-**Preconditions:** Goal with active team.
+**Preconditions:** Goal with an active team.
 
 **Steps:**
-1. View dashboard
-2. Agent completes a task (in background)
-3. Observe dashboard update
+1. View dashboard.
+2. An agent completes a task in the background.
 
 **Expected:**
-- Team agent status updates without page refresh
-- Gate status updates when verification completes
-- Task status updates visible
+- Gate status updates appear without page refresh.
+- Team agent status updates without page refresh.
+- No manual reload needed for gate or verification changes.
 
-**Coverage:** None — auto-refresh untested.
+**Coverage:** None.
 
 ---
 
-## D-07: Navigate from dashboard to agent session and back
+## D-07: Navigate dashboard to agent and back
 
-**Preconditions:** Goal with team agent.
+**Preconditions:** Goal with at least one agent.
 
 **Steps:**
-1. Click agent link on dashboard
-2. View agent session
-3. Click back button or goal link
+1. Click the agent link on the dashboard.
+2. View the agent session.
+3. Navigate back.
 
 **Expected:**
-- Agent session loads with correct messages
-- Back navigation returns to dashboard
-- Dashboard state preserved (same tab, scroll position)
+- Agent session loads.
+- Back navigation returns to the goal dashboard.
+- Dashboard state is fresh (not cached from before).
 
-**Coverage:** None — back-navigation untested.
+**Coverage:** None.
 
 ---
 
 ## D-08: Retry goal setup
 
-**Preconditions:** Goal setup failed (e.g. worktree creation error).
+**Preconditions:** Goal setup failed (error status shown).
 
 **Steps:**
-1. View dashboard showing setup failure
-2. Click "Retry Setup"
+1. Click the "Retry Setup" button.
 
 **Expected:**
-- Setup re-runs
-- Status transitions: failed → pending → ready
-- Previous failed worktree cleaned up
-- Team can start after successful retry
+- Setup re-runs.
+- Status transitions from error back to preparing, then to ready.
+- Handles the case where a previous failed attempt left partial state — no manual cleanup needed.
 
-**Coverage:** None — retry setup untested.
+**Coverage:** None.
 
 ---
 
 ## D-09: Tasks view
 
-**Preconditions:** Goal with tasks created.
+**Preconditions:** Goal with tasks.
 
 **Steps:**
-1. Navigate to tasks tab
-2. View task list
+1. View the tasks section.
 
 **Expected:**
-- Tasks listed with type, status, assignee
-- Dependencies shown
-- Can see task details (spec, result)
-- Status badges: todo, in-progress, complete, blocked
+- Tasks listed with type, status, assignee, dependencies, spec, and result.
+- Git branch info shown per task.
 
-**Coverage:** `tests/e2e/tasks-api.spec.ts` (API). No UI test.
+**Coverage:** API-level only.
 
 ---
 
@@ -169,12 +164,11 @@
 **Preconditions:** Goal exists.
 
 **Steps:**
-1. Navigate to goal dashboard (first load)
+1. Navigate to the dashboard for the first time.
 
 **Expected:**
-- BobbitLoadingAnimation shows during data fetch
-- Animation clears when data loads
-- No flash of stale data from previous goal
-- Error state shown if goal not found
+- Loading animation shows.
+- Animation clears when data loads.
+- Error shown if goal not found.
 
-**Coverage:** Unit test `goal-dashboard-setup-poll.spec.ts` (polling). No UI loading test.
+**Coverage:** Unit test only.
