@@ -55,6 +55,8 @@ import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js"
 import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
+import { BuiltinConfigProvider } from "./agent/builtin-config.js";
+import { ConfigCascade } from "./agent/config-cascade.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 
@@ -443,6 +445,8 @@ export function createGateway(config: GatewayConfig) {
 			ctx.goalStore.bumpGeneration();
 		};
 	}
+	const builtinConfigProvider = new BuiltinConfigProvider();
+	const configCascade = new ConfigCascade(builtinConfigProvider, projectContextManager);
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
@@ -535,7 +539,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, sandboxScope, sandboxTokenStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore);
 
 			return;
 		}
@@ -1044,6 +1048,7 @@ async function handleApiRoute(
 	broadcastToAll: (event: any) => void,
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
+	configCascade: ConfigCascade,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
 ) {
@@ -2267,9 +2272,11 @@ async function handleApiRoute(
 
 	// ── Role endpoints ─────────────────────────────────────────────
 
-	// GET /api/tools — list available agent tools
+	// GET /api/tools — list available agent tools (with cascade origin)
 	if (url.pathname === "/api/tools" && req.method === "GET") {
-		json({ tools: toolManager.getAvailableTools() });
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = configCascade.resolveTools(projectId);
+		json({ tools: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
 		return;
 	}
 
@@ -2701,27 +2708,100 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/roles
+	// GET /api/roles (with cascade origin)
 	if (url.pathname === "/api/roles" && req.method === "GET") {
-		json({ roles: roleManager.listRoles() });
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = configCascade.resolveRoles(projectId);
+		json({ roles: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
 		return;
 	}
 
-	// POST /api/roles
+	// POST /api/roles (scope-aware: body.projectId → create in that project's store)
 	if (url.pathname === "/api/roles" && req.method === "POST") {
 		const body = await readBody(req);
+		const targetProjectId = body?.projectId;
 		try {
-			const role = roleManager.createRole({
-				name: body?.name,
-				label: body?.label,
-				promptTemplate: body?.promptTemplate || "",
-				accessory: body?.accessory,
-				toolPolicies: body?.toolPolicies,
-			});
-			json(role, 201);
+			if (targetProjectId) {
+				const ctx = projectContextManager.getOrCreate(targetProjectId);
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				const now = Date.now();
+				const role = {
+					name: body?.name,
+					label: body?.label ?? body?.name,
+					promptTemplate: body?.promptTemplate || "",
+					accessory: body?.accessory ?? "none",
+					toolPolicies: body?.toolPolicies,
+					createdAt: now,
+					updatedAt: now,
+				};
+				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
+				ctx.roleStore.put(role);
+				json(role, 201);
+			} else {
+				const role = roleManager.createRole({
+					name: body?.name,
+					label: body?.label,
+					promptTemplate: body?.promptTemplate || "",
+					accessory: body?.accessory,
+					toolPolicies: body?.toolPolicies,
+				});
+				json(role, 201);
+			}
 		} catch (err: any) {
 			json({ error: err.message }, 400);
 		}
+		return;
+	}
+
+	// POST /api/roles/:name/customize — copy resolved role to a target scope
+	const roleCustomizeMatch = url.pathname.match(/^\/api\/roles\/([^/]+)\/customize$/);
+	if (roleCustomizeMatch && req.method === "POST") {
+		const name = decodeURIComponent(roleCustomizeMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		const resolved = configCascade.resolveRoles(projectId);
+		const source = resolved.find(r => r.item.name === name);
+		if (!source) { json({ error: "Role not found" }, 404); return; }
+
+		let targetStore;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetStore = ctx.roleStore;
+		} else {
+			const ctx = projectContextManager.getDefaultOrNull();
+			if (!ctx) { json({ error: "No default project" }, 400); return; }
+			targetStore = ctx.roleStore;
+		}
+
+		const now = Date.now();
+		const copy = { ...source.item, createdAt: now, updatedAt: now };
+		targetStore.put(copy);
+		json(copy, 201);
+		return;
+	}
+
+	// DELETE /api/roles/:name/override — remove override at a scope, reverting to inherited
+	const roleOverrideMatch = url.pathname.match(/^\/api\/roles\/([^/]+)\/override$/);
+	if (roleOverrideMatch && req.method === "DELETE") {
+		const name = decodeURIComponent(roleOverrideMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		let targetStore;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetStore = ctx.roleStore;
+		} else {
+			const ctx = projectContextManager.getDefaultOrNull();
+			if (!ctx) { json({ error: "No default project" }, 400); return; }
+			targetStore = ctx.roleStore;
+		}
+
+		targetStore.remove(name);
+		json({ ok: true });
 		return;
 	}
 
@@ -2731,66 +2811,164 @@ async function handleApiRoute(
 		const name = decodeURIComponent(roleMatch[1]);
 
 		if (req.method === "GET") {
-			const role = roleManager.getRole(name);
-			if (!role) { json({ error: "Role not found" }, 404); return; }
-			json(role);
+			const qProjectId = url.searchParams.get("projectId") || undefined;
+			if (qProjectId) {
+				const resolved = configCascade.resolveRoles(qProjectId);
+				const found = resolved.find(r => r.item.name === name);
+				if (!found) { json({ error: "Role not found" }, 404); return; }
+				json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
+			} else {
+				const role = roleManager.getRole(name);
+				if (!role) { json({ error: "Role not found" }, 404); return; }
+				json(role);
+			}
 			return;
 		}
 
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const ok = roleManager.updateRole(name, {
-				label: body.label,
-				promptTemplate: body.promptTemplate,
-				accessory: body.accessory,
-				toolPolicies: body.toolPolicies !== undefined ? (() => {
-					// Validate toolPolicies values
-					const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
-					const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
-					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
-						for (const [k, v] of Object.entries(body.toolPolicies)) {
-							if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v as import("./agent/role-store.js").GrantPolicy;
+			const qProjectId = url.searchParams.get("projectId") || undefined;
+			if (qProjectId) {
+				const ctx = projectContextManager.getOrCreate(qProjectId);
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				const existing = ctx.roleStore.get(name);
+				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
+				const updated = { ...existing, ...body, name, updatedAt: Date.now() };
+				ctx.roleStore.put(updated);
+				json({ ok: true });
+			} else {
+				const ok = roleManager.updateRole(name, {
+					label: body.label,
+					promptTemplate: body.promptTemplate,
+					accessory: body.accessory,
+					toolPolicies: body.toolPolicies !== undefined ? (() => {
+						const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
+						const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
+						if (body.toolPolicies && typeof body.toolPolicies === 'object') {
+							for (const [k, v] of Object.entries(body.toolPolicies)) {
+								if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v as import("./agent/role-store.js").GrantPolicy;
+							}
 						}
-					}
-					return cleaned;
-				})() : undefined,
-			});
-			if (!ok) { json({ error: "Role not found" }, 404); return; }
-			json({ ok: true });
+						return cleaned;
+					})() : undefined,
+				});
+				if (!ok) { json({ error: "Role not found" }, 404); return; }
+				json({ ok: true });
+			}
 			return;
 		}
 
 		if (req.method === "DELETE") {
-			const ok = roleManager.deleteRole(name);
-			if (!ok) { json({ error: "Role not found" }, 404); return; }
-			json({ ok: true });
+			const qProjectId = url.searchParams.get("projectId") || undefined;
+			if (qProjectId) {
+				const ctx = projectContextManager.getOrCreate(qProjectId);
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				ctx.roleStore.remove(name);
+				json({ ok: true });
+			} else {
+				const ok = roleManager.deleteRole(name);
+				if (!ok) { json({ error: "Role not found" }, 404); return; }
+				json({ ok: true });
+			}
 			return;
 		}
 	}
 
 	// ── Personality endpoints ──────────────────────────────────────
 
-	// GET /api/personalities
+	// GET /api/personalities (with cascade origin)
 	if (url.pathname === "/api/personalities" && req.method === "GET") {
-		json({ personalities: personalityManager.listPersonalities() });
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = configCascade.resolvePersonalities(projectId);
+		json({ personalities: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
 		return;
 	}
 
-	// POST /api/personalities
+	// POST /api/personalities (scope-aware)
 	if (url.pathname === "/api/personalities" && req.method === "POST") {
 		const body = await readBody(req);
+		const targetProjectId = body?.projectId;
 		try {
-			const personality = personalityManager.createPersonality({
-				name: body?.name,
-				label: body?.label,
-				description: body?.description || "",
-				promptFragment: body?.promptFragment || "",
-			});
-			json(personality, 201);
+			if (targetProjectId) {
+				const ctx = projectContextManager.getOrCreate(targetProjectId);
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				const now = Date.now();
+				const personality = {
+					name: body?.name,
+					label: body?.label ?? body?.name,
+					description: body?.description || "",
+					promptFragment: body?.promptFragment || "",
+					createdAt: now,
+					updatedAt: now,
+				};
+				if (!personality.name || typeof personality.name !== "string") throw new Error("Missing name");
+				ctx.personalityStore.put(personality);
+				json(personality, 201);
+			} else {
+				const personality = personalityManager.createPersonality({
+					name: body?.name,
+					label: body?.label,
+					description: body?.description || "",
+					promptFragment: body?.promptFragment || "",
+				});
+				json(personality, 201);
+			}
 		} catch (err: any) {
 			json({ error: err.message }, 400);
 		}
+		return;
+	}
+
+	// POST /api/personalities/:name/customize — copy resolved personality to a target scope
+	const personalityCustomizeMatch = url.pathname.match(/^\/api\/personalities\/([^/]+)\/customize$/);
+	if (personalityCustomizeMatch && req.method === "POST") {
+		const name = decodeURIComponent(personalityCustomizeMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		const resolved = configCascade.resolvePersonalities(projectId);
+		const source = resolved.find(r => r.item.name === name);
+		if (!source) { json({ error: "Personality not found" }, 404); return; }
+
+		let targetStore;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetStore = ctx.personalityStore;
+		} else {
+			const ctx = projectContextManager.getDefaultOrNull();
+			if (!ctx) { json({ error: "No default project" }, 400); return; }
+			targetStore = ctx.personalityStore;
+		}
+
+		const now = Date.now();
+		const copy = { ...source.item, createdAt: now, updatedAt: now };
+		targetStore.put(copy);
+		json(copy, 201);
+		return;
+	}
+
+	// DELETE /api/personalities/:name/override — remove override at a scope
+	const personalityOverrideMatch = url.pathname.match(/^\/api\/personalities\/([^/]+)\/override$/);
+	if (personalityOverrideMatch && req.method === "DELETE") {
+		const name = decodeURIComponent(personalityOverrideMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		let targetStore;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetStore = ctx.personalityStore;
+		} else {
+			const ctx = projectContextManager.getDefaultOrNull();
+			if (!ctx) { json({ error: "No default project" }, 400); return; }
+			targetStore = ctx.personalityStore;
+		}
+
+		targetStore.remove(name);
+		json({ ok: true });
 		return;
 	}
 
@@ -2800,29 +2978,56 @@ async function handleApiRoute(
 		const name = decodeURIComponent(personalityMatch[1]);
 
 		if (req.method === "GET") {
-			const personality = personalityManager.getPersonality(name);
-			if (!personality) { json({ error: "Personality not found" }, 404); return; }
-			json(personality);
+			const qProjectId = url.searchParams.get("projectId") || undefined;
+			if (qProjectId) {
+				const resolved = configCascade.resolvePersonalities(qProjectId);
+				const found = resolved.find(r => r.item.name === name);
+				if (!found) { json({ error: "Personality not found" }, 404); return; }
+				json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
+			} else {
+				const personality = personalityManager.getPersonality(name);
+				if (!personality) { json({ error: "Personality not found" }, 404); return; }
+				json(personality);
+			}
 			return;
 		}
 
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const ok = personalityManager.updatePersonality(name, {
-				label: body.label,
-				description: body.description,
-				promptFragment: body.promptFragment,
-			});
-			if (!ok) { json({ error: "Personality not found" }, 404); return; }
-			json({ ok: true });
+			const qProjectId = url.searchParams.get("projectId") || undefined;
+			if (qProjectId) {
+				const ctx = projectContextManager.getOrCreate(qProjectId);
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				const existing = ctx.personalityStore.get(name);
+				if (!existing) { json({ error: "Personality not found in project" }, 404); return; }
+				const updated = { ...existing, ...body, name, updatedAt: Date.now() };
+				ctx.personalityStore.put(updated);
+				json({ ok: true });
+			} else {
+				const ok = personalityManager.updatePersonality(name, {
+					label: body.label,
+					description: body.description,
+					promptFragment: body.promptFragment,
+				});
+				if (!ok) { json({ error: "Personality not found" }, 404); return; }
+				json({ ok: true });
+			}
 			return;
 		}
 
 		if (req.method === "DELETE") {
-			const ok = personalityManager.deletePersonality(name);
-			if (!ok) { json({ error: "Personality not found" }, 404); return; }
-			json({ ok: true });
+			const qProjectId = url.searchParams.get("projectId") || undefined;
+			if (qProjectId) {
+				const ctx = projectContextManager.getOrCreate(qProjectId);
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				ctx.personalityStore.remove(name);
+				json({ ok: true });
+			} else {
+				const ok = personalityManager.deletePersonality(name);
+				if (!ok) { json({ error: "Personality not found" }, 404); return; }
+				json({ ok: true });
+			}
 			return;
 		}
 	}
@@ -4492,70 +4697,169 @@ async function handleApiRoute(
 
 	// ── Workflow endpoints ──────────────────────────────────────────
 
-	// GET /api/workflows
+	// GET /api/workflows (with cascade origin)
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
-		json({ workflows: workflowManager.listWorkflows() });
+		const projectId = url.searchParams.get("projectId") || undefined;
+		const resolved = configCascade.resolveWorkflows(projectId);
+		json({ workflows: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
 		return;
 	}
 
-	// POST /api/workflows
+	// POST /api/workflows (scope-aware)
 	if (workflowsMatch && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
+		const targetProjectId = body?.projectId;
 		try {
-			const workflow = workflowManager.createWorkflow({
-				id: body.id,
-				name: body.name,
-				description: body.description,
-				gates: body.gates || [],
-			});
-			json(workflow, 201);
+			if (targetProjectId) {
+				const ctx = projectContextManager.getOrCreate(targetProjectId);
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				const now = Date.now();
+				const workflow = {
+					id: body.id as string,
+					name: (body.name as string) ?? body.id,
+					description: (body.description as string) ?? "",
+					gates: body.gates || [],
+					createdAt: now,
+					updatedAt: now,
+				};
+				if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
+				ctx.workflowStore.put(workflow);
+				json(workflow, 201);
+			} else {
+				const workflow = workflowManager.createWorkflow({
+					id: body.id,
+					name: body.name,
+					description: body.description,
+					gates: body.gates || [],
+				});
+				json(workflow, 201);
+			}
 		} catch (err: any) {
 			json({ error: err.message }, 400);
 		}
+		return;
+	}
+
+	// POST /api/workflows/:id/customize — copy resolved workflow to a target scope
+	const workflowCustomizeMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/customize$/);
+	if (workflowCustomizeMatch && req.method === "POST") {
+		const id = decodeURIComponent(workflowCustomizeMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		const resolved = configCascade.resolveWorkflows(projectId);
+		const source = resolved.find(r => r.item.id === id);
+		if (!source) { json({ error: "Workflow not found" }, 404); return; }
+
+		let targetStore;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetStore = ctx.workflowStore;
+		} else {
+			const ctx = projectContextManager.getDefaultOrNull();
+			if (!ctx) { json({ error: "No default project" }, 400); return; }
+			targetStore = ctx.workflowStore;
+		}
+
+		const now = Date.now();
+		const copy = { ...source.item, createdAt: now, updatedAt: now };
+		targetStore.put(copy);
+		json(copy, 201);
+		return;
+	}
+
+	// DELETE /api/workflows/:id/override — remove override at a scope
+	const workflowOverrideMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/override$/);
+	if (workflowOverrideMatch && req.method === "DELETE") {
+		const id = decodeURIComponent(workflowOverrideMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		let targetStore;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetStore = ctx.workflowStore;
+		} else {
+			const ctx = projectContextManager.getDefaultOrNull();
+			if (!ctx) { json({ error: "No default project" }, 400); return; }
+			targetStore = ctx.workflowStore;
+		}
+
+		targetStore.remove(id);
+		json({ ok: true });
 		return;
 	}
 
 	// GET /api/workflows/:id
 	const workflowMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
 	if (workflowMatch && req.method === "GET") {
-		const wf = workflowManager.getWorkflow(decodeURIComponent(workflowMatch[1]));
-		if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-		json(wf);
+		const id = decodeURIComponent(workflowMatch[1]);
+		const qProjectId = url.searchParams.get("projectId") || undefined;
+		if (qProjectId) {
+			const resolved = configCascade.resolveWorkflows(qProjectId);
+			const found = resolved.find(r => r.item.id === id);
+			if (!found) { json({ error: "Workflow not found" }, 404); return; }
+			json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
+		} else {
+			const wf = workflowManager.getWorkflow(id);
+			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
+			json(wf);
+		}
 		return;
 	}
 
-	// PUT /api/workflows/:id
+	// PUT /api/workflows/:id (scope-aware)
 	if (workflowMatch && req.method === "PUT") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
-		try {
-			const ok = workflowManager.updateWorkflow(id, body);
-			if (!ok) { json({ error: "Workflow not found" }, 404); return; }
-			const updated = workflowManager.getWorkflow(id);
+		const qProjectId = url.searchParams.get("projectId") || undefined;
+		if (qProjectId) {
+			const ctx = projectContextManager.getOrCreate(qProjectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			const existing = ctx.workflowStore.get(id);
+			if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
+			const updated = { ...existing, ...body, id, updatedAt: Date.now() };
+			ctx.workflowStore.put(updated);
 			json(updated);
-		} catch (err: any) {
-			json({ error: err.message }, 400);
+		} else {
+			try {
+				const ok = workflowManager.updateWorkflow(id, body);
+				if (!ok) { json({ error: "Workflow not found" }, 404); return; }
+				const updated = workflowManager.getWorkflow(id);
+				json(updated);
+			} catch (err: any) {
+				json({ error: err.message }, 400);
+			}
 		}
 		return;
 	}
 
-	// DELETE /api/workflows/:id
+	// DELETE /api/workflows/:id (scope-aware)
 	if (workflowMatch && req.method === "DELETE") {
 		const id = decodeURIComponent(workflowMatch[1]);
-		const wf = workflowManager.getWorkflow(id);
-		if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-		// Check if any active goal references this workflow
-		const allGoals = projectContextManager.getAllLiveGoals();
-		if (allGoals.some((g: any) => g.workflowId === id && g.state !== "complete")) {
-			json({ error: "Cannot delete: workflow is in use by active goals" }, 409);
-			return;
+		const qProjectId = url.searchParams.get("projectId") || undefined;
+		if (qProjectId) {
+			const ctx = projectContextManager.getOrCreate(qProjectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			ctx.workflowStore.remove(id);
+			json({ ok: true });
+		} else {
+			const wf = workflowManager.getWorkflow(id);
+			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
+			const allGoals = projectContextManager.getAllLiveGoals();
+			if (allGoals.some((g: any) => g.workflowId === id && g.state !== "complete")) {
+				json({ error: "Cannot delete: workflow is in use by active goals" }, 409);
+				return;
+			}
+			workflowManager.deleteWorkflow(id);
+			res.writeHead(204);
+			res.end();
 		}
-		workflowManager.deleteWorkflow(id);
-		res.writeHead(204);
-		res.end();
 		return;
 	}
 
