@@ -1,9 +1,0 @@
-name: general
-label: General
-accessory: none
-toolPolicies:
-  Gates: ask
-  Tasks: ask
-createdAt: 0
-updatedAt: 1775083871266
-promptTemplate: ""

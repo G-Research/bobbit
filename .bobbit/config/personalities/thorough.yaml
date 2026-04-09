@@ -1,7 +1,0 @@
-name: thorough
-label: Thorough
-description: Check edge cases, validate assumptions, prefer completeness over speed
-promptFragment: >-
-  Check edge cases, validate assumptions, and don't cut corners. Prefer completeness over speed.
-createdAt: 1700000000000
-updatedAt: 1700000000000
