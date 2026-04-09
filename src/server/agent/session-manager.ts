@@ -2138,7 +2138,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -2207,6 +2207,8 @@ export class SessionManager {
 				projectId,
 				sandboxBranch: opts?.sandboxBranch,
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
+				skipAutoModel: opts?.skipAutoModel,
+				skipAutoThinking: opts?.skipAutoThinking,
 				bridgeOptions: { cwd },
 			};
 
@@ -2262,6 +2264,8 @@ export class SessionManager {
 			projectId,
 			sandboxBranch: opts?.sandboxBranch,
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
+			skipAutoModel: opts?.skipAutoModel,
+			skipAutoThinking: opts?.skipAutoThinking,
 			bridgeOptions: { cwd },
 		};
 

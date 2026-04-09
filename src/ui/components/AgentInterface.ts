@@ -331,6 +331,11 @@ export class AgentInterface extends LitElement {
 				}
 				return;
 			}
+			if ((ev as any).type === "cost_update") {
+				// Server-authoritative cost data — re-render stats bar
+				this.requestUpdate();
+				return;
+			}
 			if ((ev as any).type === "render") {
 				// Generic re-render request (e.g. tool permission card added)
 				this.requestUpdate();
@@ -623,7 +628,10 @@ export class AgentInterface extends LitElement {
 				} satisfies Usage,
 			);
 
-		const costText = totals.cost?.total ? formatCost(totals.cost.total) : "";
+		// Prefer server-authoritative cost when available (via cost_update WS messages)
+		const serverCost = (this.session as any)?.state?.serverCost;
+		const costValue = serverCost?.totalCost ?? totals.cost?.total;
+		const costText = costValue ? formatCost(costValue) : "";
 
 		// Compute context usage from the last assistant message's usage
 		let contextHtml = html``;
