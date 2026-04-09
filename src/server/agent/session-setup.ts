@@ -30,7 +30,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts } from "./system-prompt.js";
-import type { GrantPolicy } from "./role-store.js";
+
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -136,7 +136,7 @@ export interface PipelineContext {
 	searchIndex: SearchIndex;
 	sessions: Map<string, SessionInfo>;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
-	buildToolRestrictionsText: (tools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }) => string;
+
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }) => Promise<boolean>;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
@@ -322,13 +322,6 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 		// Normal / worktree sessions: global base + AGENTS.md + goal spec
 		const goal = plan.goalId ? ctx.goalManager.getGoal(plan.goalId) : undefined;
 
-		// Build tool restrictions text
-		let toolRestrictionsText: string | undefined;
-		if (plan.effectiveAllowedTools && plan.effectiveAllowedTools.length > 0) {
-			const effectiveRole = plan.roleName ? lookupRole(plan.roleName, plan, ctx) : undefined;
-			toolRestrictionsText = ctx.buildToolRestrictionsText(plan.effectiveAllowedTools, effectiveRole ?? undefined);
-		}
-
 		// Build task context
 		let taskTitle: string | undefined;
 		let taskType: string | undefined;
@@ -358,7 +351,6 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 			goalSpec: goal?.spec,
 			rolePrompt: plan.rolePrompt,
 			roleName: plan.roleName,
-			toolRestrictions: toolRestrictionsText,
 			taskTitle,
 			taskType,
 			taskSpec,
