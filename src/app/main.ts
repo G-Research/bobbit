@@ -540,12 +540,16 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "toggle-preview", label: "Toggle preview panel", category: "UI",
+		id: "toggle-preview", label: "Collapse/expand preview panel", category: "UI",
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
 			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null);
 			if (hasPanel) {
+				// If fullscreen, exit fullscreen and collapse in one step
+				if (state.previewPanelFullscreen) {
+					state.previewPanelFullscreen = false;
+				}
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
 				localStorage.setItem(key, String(!collapsed));
@@ -555,12 +559,18 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "exit-fullscreen-preview", label: "Exit fullscreen preview", category: "UI",
-		defaultBindings: [{ key: "Escape", ctrlOrMeta: false, shift: false, alt: false }],
+		id: "toggle-fullscreen-preview", label: "Toggle fullscreen preview", category: "UI",
+		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			if (state.previewPanelFullscreen) {
-				state.previewPanelFullscreen = false;
+			const hasPanel = !state.assistantType && state.isPreviewSession;
+			if (hasPanel) {
+				state.previewPanelFullscreen = !state.previewPanelFullscreen;
+				// If entering fullscreen, ensure panel is not collapsed
+				if (state.previewPanelFullscreen) {
+					const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+					localStorage.setItem(key, "false");
+				}
 				renderApp();
 			}
 		},
