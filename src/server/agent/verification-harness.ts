@@ -12,6 +12,17 @@ import type { ProjectConfigStore } from "./project-config-store.js";
 import { GIT_BASH, getShellConfig } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
+import {
+	substituteVars as _substituteVars,
+	isTransientReviewError,
+	isTransientQaError,
+	matchExpectFailure,
+	groupStepsByPhase,
+	getSortedPhases,
+	partitionOptionalSteps,
+	buildStepCache,
+	canSkipAllSteps,
+} from "./verification-logic.js";
 
 /** Create a deferred promise with exposed resolve/reject. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: any) => void } {
@@ -41,38 +52,8 @@ export const VERIFICATION_RESULT_REMINDER =
  * as gate_signal, task_update, etc.
  */
 
-/** Patterns that indicate a transient/infrastructure failure worth retrying. */
-const TRANSIENT_ERROR_PATTERNS = [
-	"timed out",
-	"Agent process not running",
-	"process exited",
-	"Session lost during server restart",
-	"ECONNRESET",
-	"EPIPE",
-	"spawn UNKNOWN",
-	"socket hang up",
-	"connect ECONNREFUSED",
-];
-
-/**
- * Patterns that are transient for LLM reviews but NOT for agent-qa steps.
- * "Agent did not call verification_result" means the agent burned its budget
- * without producing results — retrying will just waste more time/cost.
- */
-const QA_NON_TRANSIENT_PATTERNS = [
-	"Agent did not call verification_result",
-];
-
-/** Check if an LLM review error output matches a transient failure pattern. */
-export function isTransientReviewError(output: string): boolean {
-	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
-}
-
-/** Check if an agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
-export function isTransientQaError(output: string): boolean {
-	if (QA_NON_TRANSIENT_PATTERNS.some(pattern => output.includes(pattern))) return false;
-	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
-}
+// Re-export transient error detection from verification-logic.ts for backward compatibility.
+export { isTransientReviewError, isTransientQaError } from "./verification-logic.js";
 
 /** In-flight verification state for REST bootstrapping */
 export interface ActiveVerification {
@@ -768,24 +749,10 @@ export class VerificationHarness {
 
 			// Build cache of previously-passed step results for the same commit SHA.
 			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
-			const cachedSteps = new Map<string, GateSignalStep>();
-			if (signal.commitSha) {
-				const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
-				if (gateState) {
-					for (const prev of gateState.signals) {
-						if (prev.id === signal.id) continue;
-						if (prev.commitSha !== signal.commitSha) continue;
-						if (!prev.verification?.status || prev.verification.status === "running") continue;
-						for (const s of prev.verification.steps) {
-							if (s.passed && !cachedSteps.has(s.name)) {
-								cachedSteps.set(s.name, s);
-							}
-						}
-					}
-				}
-				if (cachedSteps.size > 0) {
-					console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
-				}
+			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
+			const cachedSteps = buildStepCache(gateState?.signals ?? [], signal.id, signal.commitSha);
+			if (cachedSteps.size > 0) {
+				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 			}
 
 			// --- Optional step skipping ---
@@ -794,15 +761,7 @@ export class VerificationHarness {
 			const enabledOptional = goalForOptional?.enabledOptionalSteps ?? [];
 
 			// Partition steps into active and skipped
-			const activeSteps: typeof steps = [];
-			const skippedIndices: number[] = [];
-			steps.forEach((step, index) => {
-				if (step.optional && !enabledOptional.includes(step.name)) {
-					skippedIndices.push(index);
-				} else {
-					activeSteps.push(step);
-				}
-			});
+			const { active: activeSteps, skippedIndices } = partitionOptionalSteps(steps, enabledOptional);
 
 			// Immediately resolve skipped optional steps
 			for (const idx of skippedIndices) {
@@ -827,7 +786,7 @@ export class VerificationHarness {
 			}
 
 			// If ALL active steps can be served from cache, skip spawning agents entirely
-			if (cachedSteps.size >= activeSteps.length && activeSteps.every(s => cachedSteps.has(s.name))) {
+			if (canSkipAllSteps(cachedSteps, activeSteps)) {
 				console.log(`[verification] All ${activeSteps.length} active step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
 				const results: GateSignalStep[] = steps.map((s, i) => {
 					if (allResults[i]) return allResults[i]!; // skipped optional step
@@ -866,14 +825,8 @@ export class VerificationHarness {
 			// --- Phased execution ---
 			// Group active steps by phase (default 0), execute phases sequentially,
 			// steps within each phase run in parallel. Skipped optional steps are excluded.
-			const phaseGroups = new Map<number, Array<{ step: VerifyStep; index: number }>>();
-			activeSteps.forEach((step) => {
-				const originalIndex = steps.indexOf(step);
-				const phase = step.phase ?? 0;
-				if (!phaseGroups.has(phase)) phaseGroups.set(phase, []);
-				phaseGroups.get(phase)!.push({ step, index: originalIndex });
-			});
-			const sortedPhases = [...phaseGroups.keys()].sort((a, b) => a - b);
+			const phaseGroups = groupStepsByPhase(activeSteps, steps);
+			const sortedPhases = getSortedPhases(phaseGroups);
 
 			// Sync the goal worktree with the latest commits before running verification.
 			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
@@ -1900,39 +1853,7 @@ export class VerificationHarness {
 		agentVars: Record<string, string>,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 	): string {
-		return template.replace(/\{\{([^}]+)\}\}/g, (match, key: string) => {
-			const trimmed = key.trim();
-
-			// {{project.key}} — project config
-			if (trimmed.startsWith("project.")) {
-				const field = trimmed.slice("project.".length);
-				if (field in projectVars) return projectVars[field];
-				return match;
-			}
-
-			// {{agent.key}} — signal metadata from the agent
-			if (trimmed.startsWith("agent.")) {
-				const field = trimmed.slice("agent.".length);
-				if (field in agentVars) return agentVars[field];
-				return match;
-			}
-
-			// {{gate_id.meta.key}} — upstream gate metadata
-			const metaMatch = trimmed.match(/^([^.]+)\.meta\.(.+)$/);
-			if (metaMatch && allGateStates) {
-				const [, gateId, field] = metaMatch;
-				const gateState = allGateStates.get(gateId);
-				if (gateState?.metadata && field in gateState.metadata) {
-					return gateState.metadata[field];
-				}
-				return match;
-			}
-
-			// Bare variables — builtins only (branch, master, cwd, goal_spec)
-			if (trimmed in builtinVars) return builtinVars[trimmed];
-
-			return match; // Leave unresolved
-		});
+		return _substituteVars(template, builtinVars, projectVars, agentVars, allGateStates);
 	}
 
 	private runCommandStep(
@@ -2018,27 +1939,11 @@ export class VerificationHarness {
 			});
 			child.on("close", (code) => {
 				const output = (stdout + "\n" + stderr).trim().slice(-5000);
-				const exitedNonZero = code !== 0;
 				if (expectFailure) {
-					if (!exitedNonZero) {
-						resolve({ passed: false, output: `Command succeeded (exit code 0) but was expected to fail.\n\n${output}` });
-					} else if (!errorPattern) {
-						resolve({ passed: false, output: `Command failed as expected (exit code ${code}), but no error_pattern metadata was provided. Gates with expect: failure verification require error_pattern metadata containing a regex that matches the expected error output.\n\nActual output (first 500 chars):\n${(output || '').slice(0, 500)}` });
-					} else {
-						try {
-							const regex = new RegExp(errorPattern, 'i');
-							if (regex.test(output)) {
-								resolve({ passed: true, output: output || `exit code ${code}` });
-							} else {
-								resolve({ passed: false, output: `Command failed (exit code ${code}) but output did not match expected error pattern.\n\nExpected pattern: /${errorPattern}/i\n\nActual output (first 500 chars):\n${(output || '').slice(0, 500)}` });
-							}
-						} catch (regexErr: any) {
-							resolve({ passed: false, output: `Invalid error_pattern regex: ${regexErr.message}\n\nPattern was: ${errorPattern}` });
-						}
-					}
+					resolve(matchExpectFailure(code, output, errorPattern));
 					return;
 				}
-				resolve({ passed: !exitedNonZero, output: output || `exit code ${code}` });
+				resolve({ passed: code === 0, output: output || `exit code ${code}` });
 			});
 			child.on("error", (err) => {
 				if (expectFailure && errorPattern) {
