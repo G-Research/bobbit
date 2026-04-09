@@ -56,3 +56,12 @@ export interface McpToolResult {
   content: McpContentBlock[];
   isError?: boolean;
 }
+
+/** Cached summary + content hash for a single MCP tool */
+export interface McpToolDocCacheEntry {
+  hash: string;      // first 16 chars of SHA-256 of JSON.stringify({ description, inputSchema })
+  summary: string;   // generated one-liner
+}
+
+/** Per-server cache file: toolName → entry */
+export type McpToolDocCache = Record<string, McpToolDocCacheEntry>;
