@@ -400,3 +400,71 @@ review-document {
   color: var(--muted-foreground, #888);
   font-size: 14px;
 }
+
+/* --- Floating "Add Comment" Button (mobile) --- */
+.review-floating-btn {
+  position: absolute;
+  z-index: 100;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px;
+  min-height: 44px;
+  min-width: 44px;
+  border: none;
+  border-radius: 20px;
+  background: var(--primary, #6366f1);
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.review-floating-btn:active {
+  opacity: 0.85;
+}
+
+/* --- Toast Message --- */
+.review-toast {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  font-size: 13px;
+  white-space: nowrap;
+  z-index: 200;
+  pointer-events: none;
+  animation: review-toast-fade 2s ease-in-out forwards;
+}
+@keyframes review-toast-fade {
+  0%, 70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* --- Mobile Gutter Markers (larger tap targets) --- */
+@media (pointer: coarse) {
+  .review-gutter-marker {
+    width: 44px;
+    height: 44px;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border-radius: 0;
+  }
+  .review-gutter-marker::after {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--primary, #6366f1);
+  }
+}
