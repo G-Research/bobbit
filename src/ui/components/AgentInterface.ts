@@ -574,7 +574,7 @@ export class AgentInterface extends LitElement {
 				<streaming-message-container
 					.tools=${state.tools}
 					.isStreaming=${state.isStreaming}
-					.archived=${this.readOnly}
+					.archived=${this.readOnly && !this.nonInteractive}
 					.pendingToolCalls=${state.pendingToolCalls}
 					.toolResultsById=${toolResultsById}
 					.toolPartialResults=${(state as any).toolPartialResults}
