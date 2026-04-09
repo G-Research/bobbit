@@ -71,24 +71,21 @@ test.describe("Review Pane", () => {
 		await expect(reviewTab).not.toBeVisible({ timeout: 10_000 });
 	});
 
-	test("switches between chat and review tabs", async ({ page }) => {
+	test("shows review pane in side panel on desktop", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "REVIEW_OPEN");
 		await waitForAgentResponse(page, { text: "Done. Used review_open tool." });
 
-		// Both Chat and Review tabs should be visible in the unified tab bar
-		const chatTab = page.locator(".goal-tab-pill", { hasText: "Chat" });
-		const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" });
-		await expect(chatTab).toBeVisible({ timeout: 10_000 });
+		// On desktop, the review pane appears in the side panel (goal-preview-panel)
+		// The Review tab should appear in the side panel header
+		const reviewTab = page.locator(".goal-preview-panel .goal-tab-pill", { hasText: "Review" });
 		await expect(reviewTab).toBeVisible({ timeout: 10_000 });
 
-		// Switch to Review tab — review pane should be visible
-		await reviewTab.click();
+		// Review pane should be visible in the side panel
 		await expect(page.locator("review-pane")).toBeVisible({ timeout: 5_000 });
 
-		// Switch back to Chat tab — textarea should be visible again
-		await chatTab.click();
+		// Chat textarea should still be visible alongside (desktop split view)
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 5_000 });
 	});
 
