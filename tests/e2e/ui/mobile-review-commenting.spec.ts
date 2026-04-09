@@ -225,6 +225,108 @@ test.describe("Mobile review commenting", () => {
 		expect(toastText).toContain("Selection lost");
 	});
 
+	test("annotations persist after page reload", async ({ page }) => {
+		await setupMobileEmulation(page);
+		await page.setViewportSize({ width: 375, height: 667 });
+		await openApp(page);
+		await createSessionViaUI(page);
+		await openReviewTab(page);
+
+		// Create annotation via mobile flow
+		await selectReviewText(page);
+		await page.waitForTimeout(500);
+
+		const floatingBtn = page.locator(".review-floating-btn");
+		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
+		await floatingBtn.click();
+
+		await page.evaluate(() => {
+			const ap = document.querySelector("annotation-popover")!;
+			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
+			textarea.value = "Persisted comment";
+			textarea.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await page.evaluate(() => {
+			const ap = document.querySelector("annotation-popover")!;
+			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-submit")!.click();
+		});
+
+		// Verify badge shows 1 before reload
+		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+
+		// Reload — sessionStorage persists in the same tab
+		await page.reload();
+
+		// Re-open app and re-send REVIEW_OPEN (client state is gone after reload)
+		await openApp(page);
+		await openReviewTab(page);
+
+		// Badge should still show 1 (annotations restored from sessionStorage)
+		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+	});
+
+	test("view and edit existing comment on mobile", async ({ page }) => {
+		await setupMobileEmulation(page);
+		await page.setViewportSize({ width: 375, height: 667 });
+		await openApp(page);
+		await createSessionViaUI(page);
+		await openReviewTab(page);
+
+		// Create annotation via mobile flow
+		await selectReviewText(page);
+		await page.waitForTimeout(500);
+
+		const floatingBtn = page.locator(".review-floating-btn");
+		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
+		await floatingBtn.click();
+
+		await page.evaluate(() => {
+			const ap = document.querySelector("annotation-popover")!;
+			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
+			textarea.value = "Original comment";
+			textarea.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await page.evaluate(() => {
+			const ap = document.querySelector("annotation-popover")!;
+			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-submit")!.click();
+		});
+
+		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+
+		// Tap on the annotation highlight to open edit mode
+		const highlight = page.locator(".r6o-annotation").first();
+		await expect(highlight).toBeVisible({ timeout: 3_000 });
+		await highlight.click();
+
+		// Bottom sheet should open with existing comment pre-filled
+		const popover = page.locator("annotation-popover");
+		await expect(popover).toHaveAttribute("mode", "bottom-sheet", { timeout: 3_000 });
+		await expect(popover).toHaveAttribute("open", "", { timeout: 3_000 });
+
+		// Verify existing comment is pre-filled in the textarea
+		const existingText = await page.evaluate(() => {
+			const ap = document.querySelector("annotation-popover")!;
+			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
+			return textarea.value;
+		});
+		expect(existingText).toBe("Original comment");
+
+		// Edit the comment
+		await page.evaluate(() => {
+			const ap = document.querySelector("annotation-popover")!;
+			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
+			textarea.value = "Edited comment";
+			textarea.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await page.evaluate(() => {
+			const ap = document.querySelector("annotation-popover")!;
+			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-submit")!.click();
+		});
+
+		// Badge should still show 1 (edit replaces, not duplicates)
+		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+	});
+
 	test("cancel bottom sheet removes uncommitted annotation on mobile", async ({ page }) => {
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
