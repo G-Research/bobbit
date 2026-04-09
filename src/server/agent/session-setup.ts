@@ -100,6 +100,10 @@ export interface SessionSetupPlan {
 	// Project association
 	projectId?: string;
 
+	// Skip fire-and-forget model/thinking-level selection (verification sessions set their own)
+	skipAutoModel?: boolean;
+	skipAutoThinking?: boolean;
+
 	// Sandbox worktree: branch to create inside the container
 	sandboxBranch?: string;
 	sandboxBaseBranch?: string;
@@ -627,7 +631,7 @@ export async function executeWorktreeAsync(
 	ctx.broadcast(session.clients, { type: "session_status", status: "idle" });
 
 	// Fire model + thinking level immediately (non-blocking)
-	postSpawnFireAndForget(session, ctx);
+	postSpawnFireAndForget(session, plan, ctx);
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
@@ -713,24 +717,28 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 async function postSpawn(session: SessionInfo, plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	// For delegates, model + thinking level are awaited (delegate needs model before prompt)
 	if (plan.mode === "delegate") {
-		await Promise.all([
-			ctx.tryAutoSelectModel(session),
-			ctx.tryApplyDefaultThinkingLevel(session),
-		]);
+		const tasks: Promise<void>[] = [];
+		if (!plan.skipAutoModel) tasks.push(ctx.tryAutoSelectModel(session));
+		if (!plan.skipAutoThinking) tasks.push(ctx.tryApplyDefaultThinkingLevel(session));
+		await Promise.all(tasks);
 	} else {
 		// Normal sessions: fire-and-forget
-		postSpawnFireAndForget(session, ctx);
+		postSpawnFireAndForget(session, plan, ctx);
 	}
 }
 
 /** Fire model + thinking level setup as non-blocking (fire-and-forget). */
-function postSpawnFireAndForget(session: SessionInfo, ctx: PipelineContext): void {
-	ctx.tryAutoSelectModel(session).catch((err) => {
-		console.warn(`[session-setup] Early model selection failed for ${session.id}:`, err);
-	});
-	ctx.tryApplyDefaultThinkingLevel(session).catch((err) => {
-		console.warn(`[session-setup] Early thinking level failed for ${session.id}:`, err);
-	});
+function postSpawnFireAndForget(session: SessionInfo, plan: SessionSetupPlan, ctx: PipelineContext): void {
+	if (!plan.skipAutoModel) {
+		ctx.tryAutoSelectModel(session).catch((err) => {
+			console.warn(`[session-setup] Early model selection failed for ${session.id}:`, err);
+		});
+	}
+	if (!plan.skipAutoThinking) {
+		ctx.tryApplyDefaultThinkingLevel(session).catch((err) => {
+			console.warn(`[session-setup] Early thinking level failed for ${session.id}:`, err);
+		});
+	}
 }
 
 // ── Delegate prompt ────────────────────────────────────────────────────────
