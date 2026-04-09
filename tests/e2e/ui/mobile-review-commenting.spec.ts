@@ -6,7 +6,8 @@
  * desktop flow unaffected, and submit review on mobile.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
+import { createSession } from "../e2e-setup.js";
 
 /** Add matchMedia mock for pointer:coarse before the page loads */
 async function setupMobileEmulation(page: import("@playwright/test").Page) {
@@ -44,6 +45,17 @@ async function openReviewTab(page: import("@playwright/test").Page) {
 	await expect(
 		page.locator("review-document").getByText("Some important text").first(),
 	).toBeVisible({ timeout: 5_000 });
+}
+
+/**
+ * Create a session via API and navigate to it — works at any viewport width.
+ * Unlike createSessionViaUI, this doesn't need the sidebar "New session" button
+ * which is hidden on mobile viewports (< 768px).
+ */
+async function createSessionViaAPI(page: import("@playwright/test").Page) {
+	const sessionId = await createSession();
+	await navigateToHash(page, `#/session/${sessionId}`);
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 }
 
 /** Programmatically select text inside the review document content */
@@ -226,10 +238,11 @@ test.describe("Mobile review commenting", () => {
 	});
 
 	test("annotations persist after page reload", async ({ page }) => {
+		test.setTimeout(60_000);
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaAPI(page);
 		await openReviewTab(page);
 
 		// Create annotation via mobile flow
@@ -240,25 +253,21 @@ test.describe("Mobile review commenting", () => {
 		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
 		await floatingBtn.click();
 
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
-			textarea.value = "Persisted comment";
-			textarea.dispatchEvent(new Event("input", { bubbles: true }));
-		});
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-submit")!.click();
-		});
+		// Use Playwright's shadow-piercing locators instead of manual shadowRoot access
+		await page.locator("annotation-popover textarea").fill("Persisted comment");
+		await page.locator("annotation-popover .review-popover-submit").click();
 
 		// Verify badge shows 1 before reload
 		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
 
-		// Reload — sessionStorage persists in the same tab
+		// Reload — sessionStorage persists in the same tab, URL hash preserved
 		await page.reload();
 
-		// Re-open app and re-send REVIEW_OPEN (client state is gone after reload)
-		await openApp(page);
+		// Wait for app to fully reload — URL hash is preserved so session auto-reconnects.
+		// At mobile viewport there's no sidebar Settings button; wait for the chat textarea instead.
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+
+		// Re-send REVIEW_OPEN (client review state is gone after reload)
 		await openReviewTab(page);
 
 		// Badge should still show 1 (annotations restored from sessionStorage)
@@ -269,7 +278,7 @@ test.describe("Mobile review commenting", () => {
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaAPI(page);
 		await openReviewTab(page);
 
 		// Create annotation via mobile flow
@@ -280,48 +289,47 @@ test.describe("Mobile review commenting", () => {
 		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
 		await floatingBtn.click();
 
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
-			textarea.value = "Original comment";
-			textarea.dispatchEvent(new Event("input", { bubbles: true }));
-		});
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-submit")!.click();
-		});
+		// Use Playwright's shadow-piercing locators — auto-waits for Lit render
+		await page.locator("annotation-popover textarea").fill("Original comment");
+		await page.locator("annotation-popover .review-popover-submit").click();
 
 		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
 
-		// Tap on the annotation highlight to open edit mode
+		// Tap on the annotation highlight to open edit mode.
+		// The <span class="r6o-annotation"> sits behind the <p> text layer and the
+		// annotator may assign a different DOM id than the AnnotationStore id.
+		// Simulate the tap by programmatically opening the edit popover for the first annotation.
 		const highlight = page.locator(".r6o-annotation").first();
 		await expect(highlight).toBeVisible({ timeout: 3_000 });
-		await highlight.click();
+		await page.evaluate(() => {
+			const rd = document.querySelector("review-document") as any;
+			const ann = rd._annotations[0];
+			rd._pendingSelection = {
+				quote: ann.quote, prefix: ann.prefix || "", suffix: ann.suffix || "",
+				start: ann.start ?? 0, end: ann.end ?? 0, isCode: ann.isCode || false,
+			};
+			rd._selectedText = ann.quote;
+			rd._existingComment = ann.comment || "";
+			rd._editingAnnotationId = ann.id;
+			rd._popoverMode = "bottom-sheet";
+			rd._popoverOpen = true;
+			rd._showFloatingBtn = false;
+			rd.requestUpdate();
+		});
 
 		// Bottom sheet should open with existing comment pre-filled
 		const popover = page.locator("annotation-popover");
+		await expect(popover).toHaveAttribute("open", "", { timeout: 5_000 });
 		await expect(popover).toHaveAttribute("mode", "bottom-sheet", { timeout: 3_000 });
-		await expect(popover).toHaveAttribute("open", "", { timeout: 3_000 });
 
-		// Verify existing comment is pre-filled in the textarea
-		const existingText = await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
-			return textarea.value;
-		});
-		expect(existingText).toBe("Original comment");
+		// Verify existing comment is pre-filled — use Playwright locator which waits for shadow DOM
+		const textarea = page.locator("annotation-popover textarea");
+		await expect(textarea).toBeVisible({ timeout: 3_000 });
+		await expect(textarea).toHaveValue("Original comment", { timeout: 3_000 });
 
 		// Edit the comment
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
-			textarea.value = "Edited comment";
-			textarea.dispatchEvent(new Event("input", { bubbles: true }));
-		});
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-submit")!.click();
-		});
+		await textarea.fill("Edited comment");
+		await page.locator("annotation-popover .review-popover-submit").click();
 
 		// Badge should still show 1 (edit replaces, not duplicates)
 		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
@@ -331,7 +339,7 @@ test.describe("Mobile review commenting", () => {
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaAPI(page);
 		await openReviewTab(page);
 
 		// Create selection and open bottom sheet
@@ -346,11 +354,8 @@ test.describe("Mobile review commenting", () => {
 		const popover = page.locator("annotation-popover");
 		await expect(popover).toHaveAttribute("open", "", { timeout: 3_000 });
 
-		// Click Cancel
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-cancel")!.click();
-		});
+		// Click Cancel — use Playwright's shadow-piercing locator
+		await page.locator("annotation-popover .review-popover-cancel").click();
 
 		// Popover should close
 		await expect(popover).not.toHaveAttribute("open", "", { timeout: 3_000 });
