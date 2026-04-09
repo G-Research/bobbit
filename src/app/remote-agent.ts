@@ -947,8 +947,14 @@ export class RemoteAgent {
 	 * message_end of non-assistant clears it, agent_end clears it) so the
 	 * tool call never appears in both message-list and streaming-container.
 	 */
-	/** Check an assistant message for propose_* tool calls and fire the matching callback. */
-	private _checkToolProposals(message: any): void {
+	/**
+	 * Check an assistant message for propose_* tool calls and fire the matching callback.
+	 * @param streaming — true during message_update (live streaming). In streaming mode,
+	 *   the callback fires on every update for live preview sync, but the block is NOT
+	 *   marked as processed. Only non-streaming calls (message_end, full re-scan) mark
+	 *   blocks as processed and persist the dedup state.
+	 */
+	private _checkToolProposals(message: any, streaming = false): void {
 		if (!Array.isArray(message.content)) return;
 		for (const block of message.content) {
 			if (block.type !== "tool_use" && block.type !== "toolCall") continue;
@@ -960,7 +966,8 @@ export class RemoteAgent {
 			const callback = (this as any)[callbackName];
 			if (!callback) continue;
 
-			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh)
+			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh).
+			// During streaming we still check this so we don't re-fire after message_end marks it.
 			const blockId = block.id || block.toolCallId || "";
 			if (blockId && this._processedProposalIds.has(blockId)) continue;
 
@@ -973,10 +980,15 @@ export class RemoteAgent {
 				input = block.arguments;
 			}
 			if (!input || typeof input !== "object") continue;
+			// During streaming, tool arguments arrive incrementally (e.g. "{}" → {"title":""} → full).
+			// Skip empty objects to avoid firing with no meaningful data.
+			if (Object.keys(input).length === 0) continue;
 			callback(input);
 
-			// Mark this block as processed after firing the callback
-			if (blockId) {
+			// Only mark as processed on non-streaming calls (message_end, full re-scan).
+			// During streaming we fire the callback repeatedly for live preview sync
+			// without marking processed — so the final complete arguments always fire too.
+			if (!streaming && blockId) {
 				this._processedProposalIds.add(blockId);
 				// Persist to sessionStorage so it survives page refresh
 				if (this._sessionId) {
@@ -1138,8 +1150,10 @@ export class RemoteAgent {
 				this.flushDeferredMessage();
 				if (event.message) {
 					this._state.streamMessage = event.message;
-					// Check for proposals during streaming so preview syncs live
-					this._checkToolProposals(event.message);
+					// Check for proposals during streaming so preview syncs live.
+					// Pass streaming=true so blocks are NOT marked as processed —
+					// the final fire on message_end marks them.
+					this._checkToolProposals(event.message, /* streaming */ true);
 					this._checkProposals(event.message);
 				}
 				break;

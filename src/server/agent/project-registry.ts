@@ -258,8 +258,7 @@ export class ProjectRegistry {
   promote(id: string, updates: { name?: string }): RegisteredProject {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
-    if (!project.provisional) throw new Error(`Project ${id} is not provisional`);
-
+    // Idempotent — if already promoted, just update the name and return
     delete project.provisional;
     if (updates.name !== undefined) project.name = updates.name;
 

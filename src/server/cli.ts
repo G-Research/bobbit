@@ -213,7 +213,9 @@ async function main() {
 	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
 	fs.writeFileSync(gatewayUrlPath, baseUrl, "utf-8");
 
-	console.log(`\nBobbit Gateway v0.1.0`);
+	const __cliDir = path.dirname(fileURLToPath(import.meta.url));
+	const pkgVersion = JSON.parse(fs.readFileSync(path.resolve(__cliDir, "../../package.json"), "utf-8")).version;
+	console.log(`\nBobbit Gateway v${pkgVersion}`);
 	console.log(`  Listening:  ${baseUrl}`);
 	console.log(`  Auth token: ${authToken}`);
 	console.log(`  Agent CWD:  ${args.cwd}`);
