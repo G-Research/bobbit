@@ -65,7 +65,7 @@ let deleting = false;
 // Group policies loaded from server
 let groupPolicies: Record<string, string> = {};
 
-// Collapsible group state for Tool Access tab (all expanded by default)
+// Collapsible group state for Tool Access tab (all collapsed by default)
 let collapsedGroups = new Set<string>();
 
 // Assistant sub-prompt state
@@ -175,7 +175,8 @@ function initEditState(role: RoleData): void {
 	editTab = "prompt";
 	saving = false;
 	deleting = false;
-	collapsedGroups = new Set<string>();
+	// Collapse all tool groups by default
+	collapsedGroups = new Set<string>(availableTools.map(t => t.group || "Other"));
 	activePromptTab = "baseline";
 	editedPrompts = new Map();
 	originalPrompts = new Map();
