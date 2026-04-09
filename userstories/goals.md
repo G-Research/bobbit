@@ -1,226 +1,253 @@
-# Goals
+# Goal Management — User Stories
 
 ## G-01: Create a goal via assistant
-
-**Preconditions:** App loaded, project registered.
-
-**Steps:**
-1. Click "New Goal" in sidebar
-2. Assistant session opens with auto-prompt
-3. Type goal description (or use GOAL_PROPOSAL keyword in tests)
-4. Agent calls `propose_goal` tool
-5. Goal preview form appears in right panel
-6. Review/edit title, spec, workflow selection
-7. Toggle optional steps (e.g. QA testing)
-8. Click "Create Goal"
-
-**Expected:**
-- Goal appears in sidebar under project
-- Navigates to goal dashboard
-- Assistant session is terminated
-- Workflow gates are created per selected workflow
-- Optional steps reflect toggles
-
-**Coverage:** `tests/e2e/ui/goal-creation.spec.ts` — "goal creation via assistant flow"
-
----
-
-## G-02: Create a goal via API (direct)
 
 **Preconditions:** Project registered.
 
 **Steps:**
-1. POST /api/goals with title, spec, workflow
+1. Click "New Goal" in the sidebar.
+2. An assistant session opens with an auto-prompt.
+3. Type a description (or the `GOAL_PROPOSAL` keyword in test environments).
+4. The agent calls the `propose_goal` tool with:
+   - `title`: 2–5 words, under 29 characters
+   - `spec`: Markdown content
+   - `workflow`: a workflow ID (e.g. `"general"`)
+   - `options`: comma-separated optional step names
+5. A preview form appears in the right panel with editable fields.
+6. Review and edit the title, spec, workflow, and optional step toggles.
+7. Click "Create Goal".
 
 **Expected:**
-- Goal created with correct fields
-- Gates created per workflow
-- Goal appears in sidebar on next refresh
+- `POST /api/goals` is called with the form fields.
+- The goal appears in the sidebar under the project folder.
+- The browser navigates to the goal dashboard (`#/goal/<id>`).
+- The assistant session is terminated.
+- Workflow gates are created per the selected workflow (snapshotted from the config cascade).
+- Optional steps reflect the toggles (`enabledOptionalSteps` array).
+- A goal branch is created as `goal/<sanitized-title-10chars>-<uuid8>`.
 
-**Coverage:** `tests/e2e/ui/goal-creation.spec.ts` — "direct API creation"
+**Coverage:** Covered.
+
+---
+
+## G-02: Create a goal via API
+
+**Preconditions:** Project registered.
+
+**Steps:**
+1. `POST /api/goals` with body containing:
+   - `title` (required)
+   - `spec` (required)
+   - `workflowId` (default `"general"`)
+   - `sandboxed` (optional boolean)
+   - `autoStartTeam` (default `true`)
+   - `enabledOptionalSteps` (optional array)
+   - `projectId` (optional)
+
+**Expected:**
+- Goal is created with `setupStatus: "preparing"`.
+- Gates are created per the specified workflow.
+- Worktree setup runs asynchronously (does not block the response).
+- The goal appears in the sidebar on the next refresh.
+
+**Coverage:** Covered.
 
 ---
 
 ## G-03: Goal worktree setup
 
-**Preconditions:** Goal created, project is a git repo.
+**Preconditions:** Goal created; project root is inside a git repo.
 
 **Steps:**
-1. Goal is created (auto-start enabled)
-2. Server sets up worktree for goal branch
-3. Poll setupStatus
+1. Goal is created.
+2. Server runs `setupWorktree` asynchronously.
+3. Poll `setupStatus` via `GET /api/goals/:id`.
 
 **Expected:**
-- setupStatus transitions: pending → ready
-- Goal branch exists in git
-- Worktree directory created
-- worktree_setup_command runs if configured
+- `setupStatus` transitions from `"preparing"` → `"ready"`.
+- A goal branch exists at `goal/<title-slug>-<uuid8>`.
+- A worktree directory is created at `<repo>-wt-goal/<branch-hyphened>`.
+- `worktree_setup_command` runs if configured in `project.yaml`.
+- On failure, retries once after a 1-second delay.
+- If both attempts fail, `setupStatus` becomes `"error"` with a message.
+- CWD offset is applied if the project root is a subdirectory of the git repo.
+- `_setupsInFlight` prevents concurrent setup for the same goal.
 
-**Coverage:** `tests/e2e/auto-start-team.spec.ts` (API-level)
+**Coverage:** API-level.
 
 ---
 
 ## G-04: Team auto-start
 
-**Preconditions:** Goal created with autoStartTeam enabled.
+**Preconditions:** Goal created with `autoStartTeam: true` (the default).
 
 **Steps:**
-1. Worktree setup completes
-2. Server automatically starts team
+1. Worktree setup completes successfully.
+2. Server calls `GoalManager.setupWorktreeAndStartTeam()`.
 
 **Expected:**
-- Team lead session created
-- teamLeadSessionId populated on goal
-- Team lead appears in sidebar
-- Dashboard shows team section
+- A team lead session is created with the team tools extension.
+- `teamLeadSessionId` is set on the goal.
+- The team lead appears in the sidebar.
+- The goal dashboard shows a team section.
+- The team lead receives role `"team-lead"` with the team prompt template (goal branch, agent ID, and available roles injected).
 
-**Coverage:** `tests/e2e/auto-start-team.spec.ts` (API-level), `tests/e2e/ui/team-lifecycle-ui.spec.ts` (partial)
+**Coverage:** Partial.
 
 ---
 
-## G-05: Goal dashboard — overview
+## G-05: Goal dashboard overview
 
-**Preconditions:** Goal exists with team started.
+**Preconditions:** Goal exists.
 
 **Steps:**
-1. Click goal in sidebar
-2. Dashboard loads
+1. Click the goal in the sidebar.
 
 **Expected:**
-- Title and spec visible
-- Setup status shown (ready/pending)
-- Team section shows agents with status
-- Gates/workflow tab accessible
-- PR status shown if branch pushed
+- URL becomes `#/goal/<id>`.
+- A loading animation displays during the fetch.
+- Title and spec are visible.
+- Setup status badge shows one of: `preparing`, `ready`, or `error` (with a "Retry" button).
+- Team section lists agents with role, status, and branch.
+- PR status shown if the branch has been pushed (link, state badge, CI status, mergeable indicator).
+- Last activity timestamp is displayed.
 
-**Coverage:** Minimal — `tests/e2e/ui/team-lifecycle-ui.spec.ts` checks dashboard loads but doesn't assert content deeply.
+**Coverage:** Partial.
 
 ---
 
-## G-06: Goal dashboard — gates tab
+## G-06: Goal dashboard gates tab
 
-**Preconditions:** Goal with workflow gates.
+**Preconditions:** Goal has an associated workflow.
 
 **Steps:**
-1. Navigate to goal dashboard
-2. Click Gates/Workflow tab
+1. Navigate to the goal dashboard.
+2. Click the "Gates" tab.
 
 **Expected:**
-- All gates listed with status (pending/passed/failed)
-- Dependencies shown (which gates block which)
-- Signal button available for eligible gates
-- Passed gates show green checkmark
-- Failed gates show red X with verification output
+- All gates are listed with status (`pending`, `passed`, or `failed`).
+- Dependencies between gates are shown.
+- The "Signal" button is enabled only for eligible gates (all upstream dependencies must be `passed`; server enforces this with HTTP 409).
+- Passed gates show green with a content preview.
+- Failed gates show red with a link to the verification output.
+- Gates currently being verified show a progress indicator.
 
-**Coverage:** `tests/e2e/ui/gate-verification-ux.spec.ts` — partial (viewer WS, session links). Gate status display untested.
+**Coverage:** Partial.
 
 ---
 
 ## G-07: Signal a gate
 
-**Preconditions:** Gate is eligible (dependencies met).
+**Preconditions:** Gate is eligible (all upstream dependencies have `passed` status).
 
 **Steps:**
-1. Navigate to gates tab
-2. Enter gate content (markdown)
-3. Click Signal
-4. Verification runs asynchronously
+1. Navigate to the gates tab.
+2. Enter content (Markdown).
+3. Click "Signal".
 
 **Expected:**
-- Gate status transitions to verifying
-- Verification output streams in modal (if open)
-- On pass: gate shows passed status
-- On fail: gate shows failed with output
-- Downstream gates become eligible
+- `POST /api/goals/:id/gates/:gateId/signal` is called with `content` and `metadata`.
+- Gate status transitions to `"verifying"`.
+- Verification runs asynchronously in phases (phase 1 steps run in parallel, then phase 2, etc.).
+- Output streams via the `/ws/viewer` WebSocket.
+- On pass: gate shows `passed`.
+- On fail: gate shows `failed` with verification output.
+- Downstream gates become eligible.
+- Zombie verifications (all reviewer sessions dead) are auto-cancelled on re-signal.
 
-**Coverage:** `tests/e2e/gates-api.spec.ts` (API-level thorough), `tests/e2e/ui/cancel-verification.spec.ts` (cancel flow). UI signal flow untested.
+**Coverage:** Partial.
 
 ---
 
 ## G-08: Cancel verification
 
-**Preconditions:** Verification is running on a gate.
+**Preconditions:** A verification is currently running.
 
 **Steps:**
-1. Open verification output modal
-2. Click Cancel button
+1. Open the verification output modal.
+2. Click "Cancel".
 
 **Expected:**
-- Verification stops
-- Gate reverts to previous status
-- Modal closes or shows cancellation
-- Can re-signal the gate
+- `POST /api/goals/:id/gates/:gateId/cancel-verification` is called.
+- The verification stops.
+- The gate reverts to its previous status.
+- The modal shows a cancellation indicator.
+- The gate can be re-signaled.
 
-**Coverage:** `tests/e2e/ui/cancel-verification.spec.ts`
+**Coverage:** Covered.
 
 ---
 
 ## G-09: Goal with sandbox
 
-**Preconditions:** Docker available, sandbox configured in project.
+**Preconditions:** Docker is available; `sandbox: "docker"` is set in `project.yaml`.
 
 **Steps:**
-1. Create goal with sandbox toggle enabled
-2. Wait for setup
+1. Create a goal with the sandbox toggle enabled.
 
 **Expected:**
-- Container created/reused for project
-- Worktree created inside container
-- Team agents run inside container
-- Git status works through container exec
+- A per-project container is created or reused (labeled `bobbit-project=<projectId>`).
+- The worktree is created inside the container at `/workspace-wt/<name>`.
+- Team agents execute commands via `docker exec`.
+- Git status works through container exec.
+- Named volumes provide persistence:
+  - `bobbit-workspace-<projectId>` → `/workspace`
+  - `bobbit-worktrees-<projectId>` → `/workspace-wt`
 
-**Coverage:** Manual integration test only (test C). All automated sandbox tests skipped without Docker.
+**Coverage:** Manual only.
 
 ---
 
 ## G-10: Re-attempt a failed goal
 
-**Preconditions:** Goal exists that previously failed or was abandoned.
+**Preconditions:** A previous goal has failed or been abandoned.
 
 **Steps:**
-1. Start new goal assistant session
-2. System detects previous attempt (same title/spec)
-3. Re-attempt context injected
+1. Open a new goal assistant.
+2. The system detects `reattemptGoalId` from context.
+3. Previous goal context is injected into the assistant.
 
 **Expected:**
-- Assistant acknowledges previous attempt
-- Can reuse or modify previous spec
-- New goal created with fresh gates
+- The assistant receives the previous goal's title, branch, PR URL, workflow, and spec.
+- Three approaches are offered: revert & fresh, fix up, or revert & fix up.
+- The assistant composes a new spec incorporating the original spec, failure details, and the chosen approach.
 
-**Coverage:** None — re-attempt flow is untested.
+**Coverage:** None.
 
 ---
 
 ## G-11: Dismiss goal proposal
 
-**Preconditions:** Assistant has proposed a goal.
+**Preconditions:** The assistant has proposed a goal (preview form is visible).
 
 **Steps:**
-1. Goal preview form visible
-2. Click "Dismiss" or navigate away
+1. Click "Dismiss" on the preview form.
 
 **Expected:**
-- Proposal dismissed
-- Assistant session continues (not terminated)
-- Can request a new proposal
+- The proposal is dismissed.
+- The assistant session continues (it is **not** terminated).
+- `state.activeGoalProposal` is cleared.
+- The user can request a new proposal from the assistant.
+- Deduplication by `tool_use` block ID prevents re-fires on reconnect.
 
-**Coverage:** `tests/e2e/ui/goal-creation.spec.ts` — "dismiss and re-propose"
+**Coverage:** Covered.
 
 ---
 
 ## G-12: Goal survives gateway crash
 
-**Preconditions:** Goal exists with team running.
+**Preconditions:** A goal with a running team exists.
 
 **Steps:**
-1. Gateway crashes
-2. Gateway restarts
+1. The gateway process crashes.
+2. The gateway restarts.
 
 **Expected:**
-- Goal appears in sidebar
-- Dashboard loads with correct status
-- Team sessions restored
-- Gates preserve their status
-- Can continue working on the goal
+- `goals.json` is persisted to disk before the crash.
+- The goal appears in the sidebar after restart.
+- The goal dashboard loads successfully.
+- Gate statuses are preserved.
+- Team sessions are restored from `sessions.json`.
+- Goals stuck in `setupStatus: "preparing"` at restart are marked as `"error"`.
 
-**Coverage:** Manual integration test only.
+**Coverage:** Manual only.

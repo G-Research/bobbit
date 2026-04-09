@@ -1,102 +1,31 @@
-# Staff
+# Staff User Stories
 
-## ST-01: View staff list
+## ST-01: View staff
+**Action:** Navigate to #/staff or view sidebar.
+**Expected:** Staff listed with name, description, state (idle/active/terminated), lastWakeAt, currentSessionId. Staff visible in sidebar under project in collapsible Staff section.
+**Coverage:** none.
 
-**Preconditions:** App loaded.
+## ST-02: Create staff
+**Action:** Click New Staff or sidebar Add Staff.
+**Expected:** Fill name, prompt, description, optional triggers, optional cwd. Creates staff agent, appears in sidebar, session created.
+**Coverage:** none.
 
-**Steps:**
-1. Navigate to #/staff or view staff section in sidebar
+## ST-03: Edit staff
+**Action:** Click staff entry, modify prompt/triggers, save.
+**Expected:** Changes persisted, behavior updated on next interaction.
+**Coverage:** none.
 
-**Expected:**
-- All staff agents listed
-- Each shows name, description, status (idle/active)
-- Staff visible in sidebar under project
+## ST-04: Delete staff
+**Action:** Delete staff, confirm.
+**Expected:** Removed from list and sidebar, session terminated.
+**Coverage:** none.
 
-**Coverage:** None — staff UI completely untested.
-
----
-
-## ST-02: Create a staff agent
-
-**Preconditions:** On staff page.
-
-**Steps:**
-1. Click "New Staff" or use sidebar "Add Staff" button
-2. Fill name, prompt, triggers, CWD
-3. Save
-
-**Expected:**
-- Staff agent created
-- Appears in sidebar under project
-- Session created for staff agent
-- Can interact with staff session
-
-**Coverage:** None — staff creation untested.
-
----
-
-## ST-03: Edit staff agent
-
-**Preconditions:** Staff agent exists.
-
-**Steps:**
-1. Click staff agent in list
-2. Modify prompt or triggers
-3. Save
-
-**Expected:**
-- Changes persisted
-- Staff behavior updated on next interaction
-
-**Coverage:** None.
-
----
-
-## ST-04: Delete staff agent
-
-**Preconditions:** Staff agent exists.
-
-**Steps:**
-1. Click staff agent, then delete
-2. Confirm
-
-**Expected:**
-- Staff removed from list and sidebar
-- Session terminated
-
-**Coverage:** None.
-
----
-
-## ST-05: Staff agent in sidebar
-
-**Preconditions:** Staff agent exists.
-
-**Steps:**
-1. View sidebar
-2. Staff section visible under project
-3. Click staff agent
-
-**Expected:**
-- Staff session opens
-- Can send messages
-- Staff section collapsible (per-project)
-
-**Coverage:** None.
-
----
+## ST-05: Staff in sidebar
+**Action:** View sidebar.
+**Expected:** Staff section under project, collapsible (per-project collapse state in localStorage `bobbit-collapsed-staff`), click opens staff session, active staff show status indicator.
+**Coverage:** none.
 
 ## ST-06: Staff triggers
-
-**Preconditions:** Staff agent with triggers configured.
-
-**Steps:**
-1. Trigger condition met (e.g. file change, schedule)
-2. Staff agent activates
-
-**Expected:**
-- Staff session receives trigger prompt
-- Processes and responds
-- Status updates in sidebar
-
-**Coverage:** None.
+**Action:** Trigger condition met.
+**Expected:** Staff session receives trigger prompt, processes, responds, status updates.
+**Coverage:** none.

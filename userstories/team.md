@@ -1,20 +1,18 @@
-# Team
+# Team Management — User Stories
 
 ## T-01: View team agents on dashboard
 
 **Preconditions:** Goal with team started.
 
 **Steps:**
-1. Navigate to goal dashboard
-2. View team/agents section
+1. Navigate to goal dashboard.
+2. View team section.
 
 **Expected:**
-- All team agents listed with role, status, branch
-- Active agents show "streaming" or "idle"
-- Terminated agents show "terminated"
-- Can click agent to navigate to its session
+- All agents listed with role label, status (idle/streaming/terminated), branch name, worktree path, and session link.
+- Click agent navigates to session view.
 
-**Coverage:** `tests/e2e/ui/team-lifecycle-ui.spec.ts` — partial.
+**Coverage:** Partial.
 
 ---
 
@@ -23,119 +21,122 @@
 **Preconditions:** Team agent exists.
 
 **Steps:**
-1. On dashboard, click agent name/link
-2. Session view opens
+1. Click agent name/link on dashboard.
 
 **Expected:**
-- Agent's chat messages visible
-- Context bar shows agent's model
-- Can send follow-up messages to agent
-- Back button returns to dashboard
+- Navigates to `#/session/<agentSessionId>`.
+- Agent's chat messages visible.
+- Context bar shows agent model.
+- Can send follow-up messages via `team_prompt`.
+- Back button returns to dashboard.
 
-**Coverage:** None — navigation to agent session untested from dashboard.
+**Coverage:** None.
 
 ---
 
 ## T-03: Dismiss a team agent
 
-**Preconditions:** Team agent exists, idle.
+**Preconditions:** Team agent exists.
 
 **Steps:**
-1. On dashboard, click dismiss button for agent
-2. Confirm if prompted
+1. Click dismiss on dashboard.
 
 **Expected:**
-- Agent session terminated
-- Agent disappears from team list (or shows terminated)
-- Agent's worktree cleaned up
-- Other agents unaffected
+- Agent session terminated.
+- Worktree cleaned up (git worktree remove + branch delete).
+- Agent removed from team state.
+- Other agents unaffected.
+- `team-state.json` updated.
 
-**Coverage:** `tests/e2e/ui/team-lifecycle-ui.spec.ts` — "dismiss agent".
+**Coverage:** Partial.
 
 ---
 
 ## T-04: Abort entire team
 
-**Preconditions:** Goal with multiple agents running.
+**Preconditions:** Goal with agents running.
 
 **Steps:**
-1. Click "Abort" on goal dashboard
-2. Confirm
+1. Click Abort on dashboard.
+2. Confirm.
 
 **Expected:**
-- All agent sessions terminated
-- All worktrees cleaned up
-- Goal status reflects abort
-- Dashboard shows no active agents
+- All agent sessions terminated.
+- All worktrees cleaned up.
+- Goal status reflects abort.
+- Dashboard shows no active agents.
+- `team-state.json` updated.
 
-**Coverage:** `tests/e2e/team-abort.spec.ts` (API-level). No UI test.
+**Coverage:** API-level only.
 
 ---
 
-## T-05: Complete team (merge and finish)
+## T-05: Complete team
 
-**Preconditions:** All work done, review gate passed.
+**Preconditions:** All work done, review gate passed (server enforces).
 
 **Steps:**
-1. Click "Complete" on goal dashboard
+1. Click Complete on dashboard.
 
 **Expected:**
-- All agents dismissed
-- Worktrees cleaned up
-- Goal marked complete
-- PR created (if configured)
+- Server requires review gate passed first (409 if not).
+- All agents dismissed.
+- Worktrees cleaned up.
+- Goal marked complete.
+- PR created if configured.
 
-**Coverage:** None — team completion flow untested in UI.
+**Coverage:** None.
 
 ---
 
 ## T-06: Steer a running agent
 
-**Preconditions:** Agent is mid-turn (streaming).
+**Preconditions:** Agent mid-turn (streaming).
 
 **Steps:**
-1. Navigate to agent session
-2. Type a steer message
-3. Send while agent is still working
+1. Navigate to agent session.
+2. Type steer message.
+3. Send while busy.
 
 **Expected:**
-- Steer message injected into agent's conversation
-- Agent acknowledges and adjusts behavior
-- Both the steer and the agent's response visible in chat
+- Steer message injected as user message into agent's conversation mid-turn.
+- Agent sees it interleaved with current work.
+- Both steer and response visible in chat.
+- Use sparingly — prefer letting agents finish.
 
-**Coverage:** `tests/e2e/steer-midturn.spec.ts` (API-level), `tests/e2e/team-steer-prompt.spec.ts` (API). No UI test.
+**Coverage:** API-level only.
 
 ---
 
-## T-07: Send follow-up prompt to idle agent
+## T-07: Send follow-up to idle agent
 
-**Preconditions:** Team agent exists, idle.
+**Preconditions:** Team agent idle.
 
 **Steps:**
-1. Navigate to agent session via dashboard
-2. Type a follow-up message
-3. Send
+1. Navigate via dashboard.
+2. Type message.
+3. Send.
 
 **Expected:**
-- Message sent to agent
-- Agent processes and responds
-- Response visible in chat
+- `team_prompt` sends follow-up.
+- Agent processes and responds.
+- Supports `workflowGateId`/`inputGateIds` for context injection from upstream gates.
 
-**Coverage:** None — follow-up to team agent via UI untested.
+**Coverage:** None.
 
 ---
 
 ## T-08: Team agent git handoff
 
-**Preconditions:** Agent has completed a task with commits.
+**Preconditions:** Agent completed task with commits.
 
 **Steps:**
-1. Agent sets headSha on task completion
-2. Team lead merges agent's branch
+1. Agent sets `headSha` via `task_update`.
+2. Team lead merges.
 
 **Expected:**
-- Task shows baseSha, headSha, branch
-- Merge succeeds
-- Changes visible on goal branch
+- Task has `baseSha` (auto-set on spawn), `headSha` (set by agent on completion), `branch` (auto-set on spawn).
+- Team lead runs `git merge <task.branch>`.
+- In sandbox, agents use standard git worktrees inside container with post-commit hook that pushes to remote.
 
-**Coverage:** `tests/e2e/task-git-fields.spec.ts` (API-level). No UI test.
+**Coverage:** API-level only.

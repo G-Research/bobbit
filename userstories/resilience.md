@@ -1,117 +1,31 @@
-# Resilience
+# Resilience User Stories
 
-## RE-01: Session survives gateway crash
+## RE-01: Session survives crash
+**Action:** Active session exists. Send message, kill server, restart on new port with same data directory, navigate to session.
+**Expected:** Session not archived. Messages restored from .jsonl. CWD preserved. Follow-up message works. Git widget renders. Existing worktrees reused (not recreated).
+**Coverage:** manual only.
 
-**Preconditions:** Active session with messages.
+## RE-02: Goal survives crash
+**Action:** Goal with team exists, kill server, restart.
+**Expected:** goals.json persisted. Dashboard loads. Gates preserved. Team restored. Goals stuck in setupStatus "preparing" marked "error" on restart.
+**Coverage:** manual only.
 
-**Steps:**
-1. Send message, receive response
-2. Kill gateway process
-3. Restart gateway (new port, same data dir)
-4. Connect to app
-5. Navigate to session
+## RE-03: Persistence files on crash
+**Action:** Kill server hard (no graceful shutdown).
+**Expected:** sessions.json is valid JSON. goals.json is valid. gates.json exists. team-state.json exists. .jsonl session files exist (proactive creation ensures this).
+**Coverage:** manual only.
 
-**Expected:**
-- Session in sidebar, not archived
-- Messages preserved
-- CWD preserved
-- Can send follow-up messages
-- Git status widget renders (if worktree)
-
-**Coverage:** Manual integration test only.
-
----
-
-## RE-02: Goal survives gateway crash
-
-**Preconditions:** Goal with team running.
-
-**Steps:**
-1. Kill gateway
-2. Restart
-3. Navigate to goal
-
-**Expected:**
-- Goal in sidebar
-- Dashboard loads with correct state
-- Gates preserve status
-- Team sessions restored
-
-**Coverage:** Manual integration test only.
-
----
-
-## RE-03: Persistence files written before crash
-
-**Preconditions:** Sessions and goals exist.
-
-**Steps:**
-1. Kill gateway (hard crash, no graceful shutdown)
-2. Check data directory
-
-**Expected:**
-- sessions.json exists and is valid JSON
-- goals.json exists and is valid JSON
-- gates.json exists
-- team-state.json exists
-- Session .jsonl files exist
-
-**Coverage:** Manual integration test only.
-
----
-
-## RE-04: Worktree preserved across restart
-
-**Preconditions:** Session with worktree.
-
-**Steps:**
-1. Create session (gets worktree)
-2. Verify worktree directory exists
-3. Kill and restart gateway
-4. Check session CWD
-
-**Expected:**
-- Worktree directory still exists
-- CWD points to same worktree
-- Git branch unchanged
-- Can continue working in worktree
-
-**Coverage:** Manual integration test only.
-
----
+## RE-04: Worktree preserved
+**Action:** Session with worktree, kill and restart.
+**Expected:** Worktree directory exists. CWD matches exactly. Branch unchanged. Worktrees reused, not recreated on restart.
+**Coverage:** manual only.
 
 ## RE-05: Sandbox container recovery
+**Action:** Kill Docker container.
+**Expected:** Health monitor detects within 20s. Container recreated with same named volumes. Sessions: terminated → recovered → idle within ~30s. Worktrees restored via 3-tier strategy: verify exists → git worktree repair → recreate from branch. If all fail, session archived.
+**Coverage:** skipped without Docker.
 
-**Preconditions:** Sandboxed project with running sessions.
-
-**Steps:**
-1. Kill the Docker container
-2. Wait for health monitor to detect (20s)
-
-**Expected:**
-- Container automatically recreated
-- Sessions transition: terminated → recovered → idle
-- Worktrees restored inside container
-- Can resume work
-
-**Coverage:** `tests/e2e/sandbox-recovery.spec.ts` (skipped without Docker). Manual test only.
-
----
-
-## RE-06: Multiple sessions survive crash (stress)
-
-**Preconditions:** 5+ sessions of mixed types (plain, worktree, sandbox).
-
-**Steps:**
-1. Create sessions of each type
-2. Send messages to each
-3. Kill gateway
-4. Restart
-5. Verify each session individually
-
-**Expected:**
-- All sessions present (none archived)
-- Each has correct CWD, branch, messages
-- Can interact with each after restart
-
-**Coverage:** Manual integration test — 6 variations.
+## RE-06: Multiple sessions survive
+**Action:** 5+ mixed session types (plain, worktree, sandbox), kill and restart.
+**Expected:** All sessions present. Correct CWD, branch, messages for each. Can interact with all.
+**Coverage:** manual only.
