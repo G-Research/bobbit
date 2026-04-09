@@ -454,6 +454,16 @@ export function createGateway(config: GatewayConfig) {
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
+
+	// Seed standalone stores with builtins that aren't already present.
+	// This ensures goal creation, session setup, etc. work even when
+	// scaffolding no longer copies defaults into config dirs.
+	for (const wf of builtinConfigProvider.getWorkflows()) {
+		if (!workflowStore.get(wf.id)) {
+			workflowStore.put(wf);
+		}
+	}
+
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
