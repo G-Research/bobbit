@@ -29,9 +29,25 @@ export interface ResolvedPolicy {
 	overrides?: ConfigOrigin;
 }
 
+/**
+ * Explicit server-level store accessors.
+ *
+ * These decouple the cascade's server layer from the default project's stores,
+ * ensuring the cascade reads from the same stores that PUT/POST endpoints
+ * write to (which matters when BOBBIT_DIR differs from rootPath/.bobbit/).
+ */
+export interface ServerStores {
+	getRoles(): Role[];
+	getPersonalities(): Personality[];
+	getWorkflows(): Workflow[];
+	getTools(): ToolInfo[];
+	getToolGroupPolicies(): Record<string, GrantPolicy>;
+}
+
 export class ConfigCascade {
 	constructor(
 		private builtins: BuiltinConfigProvider,
+		private serverStores: ServerStores,
 		private projectContextManager: ProjectContextManager,
 	) {}
 
@@ -42,6 +58,7 @@ export class ConfigCascade {
 			this.builtins.getRoles(),
 			r => r.name,
 			projectId,
+			this.serverStores.getRoles(),
 			ctx => ctx.roleStore.getAll(),
 		);
 	}
@@ -53,6 +70,7 @@ export class ConfigCascade {
 			this.builtins.getPersonalities(),
 			p => p.name,
 			projectId,
+			this.serverStores.getPersonalities(),
 			ctx => ctx.personalityStore.getAll(),
 		);
 	}
@@ -64,6 +82,7 @@ export class ConfigCascade {
 			this.builtins.getWorkflows(),
 			w => w.id,
 			projectId,
+			this.serverStores.getWorkflows(),
 			ctx => ctx.workflowStore.getAll(),
 		);
 	}
@@ -75,6 +94,7 @@ export class ConfigCascade {
 			this.builtins.getTools(),
 			t => t.name,
 			projectId,
+			this.serverStores.getTools(),
 			ctx => ctx.toolManager.getAvailableTools(),
 		);
 	}
@@ -89,17 +109,14 @@ export class ConfigCascade {
 			merged.set(group, { policy, origin: "builtin" });
 		}
 
-		// Layer 2: server-level (default project)
-		const defaultCtx = this.projectContextManager.getDefaultOrNull();
-		if (defaultCtx) {
-			for (const [group, policy] of Object.entries(defaultCtx.toolGroupPolicyStore.getAll())) {
-				const existing = merged.get(group);
-				merged.set(group, {
-					policy,
-					origin: "server",
-					overrides: existing?.origin,
-				});
-			}
+		// Layer 2: server-level (explicit server stores)
+		for (const [group, policy] of Object.entries(this.serverStores.getToolGroupPolicies())) {
+			const existing = merged.get(group);
+			merged.set(group, {
+				policy,
+				origin: "server",
+				overrides: existing?.origin,
+			});
 		}
 
 		// Layer 3: project-level (if specified and different from default)
@@ -136,7 +153,8 @@ export class ConfigCascade {
 		builtinItems: T[],
 		keyFn: (item: T) => string,
 		projectId: string | undefined,
-		getStoreItems: (ctx: import("./project-context.js").ProjectContext) => T[],
+		serverItems: T[],
+		getProjectItems: (ctx: import("./project-context.js").ProjectContext) => T[],
 	): ResolvedItem<T>[] {
 		const merged = new Map<string, ResolvedItem<T>>();
 
@@ -145,18 +163,15 @@ export class ConfigCascade {
 			merged.set(keyFn(item), { item, origin: "builtin" });
 		}
 
-		// Layer 2: server-level (default project's config store)
-		const defaultCtx = this.projectContextManager.getDefaultOrNull();
-		if (defaultCtx) {
-			for (const item of getStoreItems(defaultCtx)) {
-				const key = keyFn(item);
-				const existing = merged.get(key);
-				merged.set(key, {
-					item,
-					origin: "server",
-					overrides: existing?.origin,
-				});
-			}
+		// Layer 2: server-level (explicit server stores)
+		for (const item of serverItems) {
+			const key = keyFn(item);
+			const existing = merged.get(key);
+			merged.set(key, {
+				item,
+				origin: "server",
+				overrides: existing?.origin,
+			});
 		}
 
 		// Layer 3: project-level (only if projectId differs from default)
@@ -164,7 +179,7 @@ export class ConfigCascade {
 		if (projectId && projectId !== defaultId) {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);
 			if (projectCtx) {
-				for (const item of getStoreItems(projectCtx)) {
+				for (const item of getProjectItems(projectCtx)) {
 					const key = keyFn(item);
 					const existing = merged.get(key);
 					merged.set(key, {

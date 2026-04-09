@@ -446,7 +446,13 @@ export function createGateway(config: GatewayConfig) {
 		};
 	}
 	const builtinConfigProvider = new BuiltinConfigProvider();
-	const configCascade = new ConfigCascade(builtinConfigProvider, projectContextManager);
+	const configCascade = new ConfigCascade(builtinConfigProvider, {
+		getRoles: () => roleStore.getAll(),
+		getPersonalities: () => personalityStore.getAll(),
+		getWorkflows: () => workflowStore.getAll(),
+		getTools: () => toolManager.getAvailableTools(),
+		getToolGroupPolicies: () => groupPolicyStore.getAll(),
+	}, projectContextManager);
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);

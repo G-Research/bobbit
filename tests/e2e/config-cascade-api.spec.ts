@@ -167,6 +167,7 @@ test.describe("Config Cascade API", () => {
 			const beforeData = await before.json();
 			const coder = beforeData.roles.find((r: any) => r.name === "coder");
 			const initialOrigin = coder.origin;
+			const initialOverrides = coder.overrides;
 
 			// Customize then revert
 			await apiFetch(
@@ -180,12 +181,12 @@ test.describe("Config Cascade API", () => {
 			);
 			expect(revertRes.status).toBe(200);
 
-			// Verify it reverted
+			// Verify it reverted to the same state as before customization
 			const after = await apiFetch(`/api/roles?projectId=${proj.id}`);
 			const afterData = await after.json();
 			const coderAfter = afterData.roles.find((r: any) => r.name === "coder");
 			expect(coderAfter.origin).toBe(initialOrigin);
-			expect(coderAfter.overrides).toBeUndefined();
+			expect(coderAfter.overrides).toBe(initialOverrides);
 		} finally {
 			await deleteProject(proj.id);
 			rmSync(tmpDir, { recursive: true, force: true });
