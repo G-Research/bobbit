@@ -446,7 +446,7 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
-| `.bobbit/config/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `task_create` |
-| `.bobbit/config/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
+| `defaults/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `task_create` |
+| `defaults/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
 | `defaults/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |
 | `defaults/workflows/general.yaml` | Seed workflow: general-purpose lifecycle |
