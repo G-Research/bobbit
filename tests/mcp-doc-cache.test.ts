@@ -435,3 +435,4 @@ describe("McpManager.getToolInfos — summary and docs wiring", () => {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	});
 });
+
