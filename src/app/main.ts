@@ -554,6 +554,18 @@ async function initApp() {
 		},
 	});
 
+	registerShortcut({
+		id: "exit-fullscreen-preview", label: "Exit fullscreen preview", category: "UI",
+		defaultBindings: [{ key: "Escape", ctrlOrMeta: false, shift: false, alt: false }],
+		allowInInput: true,
+		handler: () => {
+			if (state.previewPanelFullscreen) {
+				state.previewPanelFullscreen = false;
+				renderApp();
+			}
+		},
+	});
+
 	// NEW shortcuts
 	registerShortcut({
 		id: "new-goal", label: "New goal", category: "Goals",

@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, MessagesSquare, ChevronDown, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -2619,9 +2619,15 @@ export function doRenderApp(): void {
 							>Goal <span class="goal-tab-dot"></span></button>
 						` : ""}
 					</div>
-					<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Collapse preview (Ctrl+])">
-						${icon(PanelRightClose, "sm")}
-					</button>
+					<div class="flex items-center gap-0.5">
+						${showPreviewTab ? html`
+						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview">
+							${icon(Maximize2, "sm")}
+						</button>` : ""}
+						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Collapse preview (Ctrl+])">
+							${icon(PanelRightClose, "sm")}
+						</button>
+					</div>
 				</div>
 				<!-- Tab content -->
 				${state.previewPanelActiveTab === "preview" && showPreviewTab
@@ -2715,6 +2721,33 @@ export function doRenderApp(): void {
 			`;
 		}
 		if (connected && hasUnifiedPanel()) {
+			if (desktop && state.previewPanelFullscreen && state.isPreviewSession) {
+				return html`
+					${reconnectBanner()}
+					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
+						<!-- Fullscreen preview header -->
+						<div class="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0" style="background:var(--color-background, hsl(var(--background)));">
+							<span class="text-xs font-medium text-muted-foreground">Preview</span>
+							<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title="Exit fullscreen (Esc)">
+								${icon(Minimize2, "sm")}
+							</button>
+						</div>
+						<!-- Preview iframe fills available space -->
+						<div style="position:relative;flex:1;min-height:0;">
+							<iframe
+								class="w-full border-0"
+								style="position:absolute;inset:0;height:100%;"
+								sandbox="allow-scripts allow-same-origin"
+								.srcdoc=${state.previewPanelHtml + PREVIEW_SWIPE_SCRIPT}
+							></iframe>
+						</div>
+						<!-- Compact prompt bar at bottom -->
+						<div class="preview-fullscreen-prompt shrink-0 border-t border-border">
+							${state.chatPanel}
+						</div>
+					</div>
+				`;
+			}
 			if (desktop) {
 				const collapsed = isPreviewCollapsed();
 				return html`
