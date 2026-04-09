@@ -456,13 +456,9 @@ export function createGateway(config: GatewayConfig) {
 	sessionManager.configCascade = configCascade;
 
 	// Seed standalone stores with builtins that aren't already present.
-	// This ensures goal creation, session setup, team start, etc. work even when
-	// scaffolding no longer copies defaults into config dirs.
-	for (const wf of builtinConfigProvider.getWorkflows()) {
-		if (!workflowStore.get(wf.id)) {
-			workflowStore.put(wf);
-		}
-	}
+	// Workflows are NOT seeded here — goal creation resolves them through the config cascade.
+	// Roles and personalities are still seeded because many code paths use direct store lookups
+	// (roleManager.getRole(), verification-harness, session-setup, etc.).
 	for (const role of builtinConfigProvider.getRoles()) {
 		if (!roleStore.get(role.name)) {
 			roleStore.put(role);
@@ -2147,10 +2143,14 @@ async function handleApiRoute(
 				return;
 			}
 			const targetGoalManager = targetCtx.goalManager;
+			// Resolve workflow through the config cascade (builtin → server → project)
+			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
 				workflowStore: workflowManager.store,
+				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
 			});
