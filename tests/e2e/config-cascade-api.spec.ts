@@ -379,7 +379,7 @@ test.describe("Config Cascade API", () => {
 			expect(data.tools.length).toBeGreaterThan(0);
 			for (const t of data.tools) {
 				expect(t.origin).toBeDefined();
-				expect(["builtin", "server"]).toContain(t.origin);
+				expect(["builtin", "server", "project"]).toContain(t.origin);
 			}
 		} finally {
 			await deleteProject(proj.id);
