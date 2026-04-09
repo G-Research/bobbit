@@ -307,6 +307,21 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
+				// Helper: resolve process name for an id (used in headers for readability)
+				const resolveProcessName = async (processId: string): Promise<string> => {
+					try {
+						const data = await api("GET", `/api/sessions/${sessionId}/bg-processes`) as any;
+						const proc = (data.processes || []).find((p: any) => p.id === processId);
+						return proc?.name || processId;
+					} catch { return processId; }
+				};
+
+				// Format a header like "bg-12 (branch cleanup)" when a name exists
+				const header = async (processId: string): Promise<string> => {
+					const pName = await resolveProcessName(processId);
+					return pName !== processId ? `${processId} (${pName})` : processId;
+				};
+
 				switch (action) {
 					case "create": {
 						if (!command) return text("Error: 'command' is required for create");
@@ -316,9 +331,12 @@ export default function (pi: ExtensionAPI) {
 					}
 					case "logs": {
 						if (!id) return text("Error: 'id' is required for logs");
-						const logs = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail || 200}`) as any;
+						const [logs, hdr] = await Promise.all([
+							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail || 200}`) as any,
+							header(id),
+						]);
 						const output = logs.log?.map((e: any) => typeof e === "string" ? e : e.text ?? String(e)).join("\n") || "(no output)";
-						return text(`Logs for ${id}:\n${output}`);
+						return text(`Logs for ${hdr}:\n${output}`);
 					}
 					case "grep": {
 						if (!id) return text("Error: 'id' is required for grep");
@@ -326,45 +344,58 @@ export default function (pi: ExtensionAPI) {
 						const params = new URLSearchParams({ pattern });
 						if (context) params.set("context", String(context));
 						if (max_results) params.set("max", String(max_results));
-						const grepResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/grep?${params}`) as any;
-						if (grepResult.matches.length === 0) return text(`No matches for "${pattern}" in ${id} (${grepResult.total} total lines searched)`);
+						const [grepResult, hdr] = await Promise.all([
+							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/grep?${params}`) as any,
+							header(id),
+						]);
+						if (grepResult.matches.length === 0) return text(`No matches for "${pattern}" in ${hdr} (${grepResult.total} total lines searched)`);
 						const matchLines = grepResult.matches.map((m: any) => `${String(m.line).padStart(5)}  ${m.text}`).join("\n");
-						return text(`${grepResult.total} match${grepResult.total !== 1 ? "es" : ""} for "${pattern}" in ${id}${grepResult.total > grepResult.matches.length ? ` (showing first ${grepResult.matches.length})` : ""}:\n${matchLines}`);
+						return text(`${grepResult.total} match${grepResult.total !== 1 ? "es" : ""} for "${pattern}" in ${hdr}${grepResult.total > grepResult.matches.length ? ` (showing first ${grepResult.matches.length})` : ""}:\n${matchLines}`);
 					}
 					case "head": {
 						if (!id) return text("Error: 'id' is required for head");
-						const headResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/head?lines=${lines || 50}`) as any;
+						const [headResult, hdr] = await Promise.all([
+							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/head?lines=${lines || 50}`) as any,
+							header(id),
+						]);
 						const headOutput = headResult.log?.map((e: any) => typeof e === "string" ? e : e.text ?? String(e)).join("\n") || "(no output)";
-						return text(`First ${headResult.log?.length ?? 0} of ${headResult.totalLines} lines from ${id}:\n${headOutput}`);
+						return text(`First ${headResult.log?.length ?? 0} of ${headResult.totalLines} lines from ${hdr}:\n${headOutput}`);
 					}
 					case "slice": {
 						if (!id) return text("Error: 'id' is required for slice");
 						if (!from || !to) return text("Error: 'from' and 'to' are required for slice (1-indexed line numbers)");
-						const sliceResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/slice?from=${from}&to=${to}`) as any;
+						const [sliceResult, hdr] = await Promise.all([
+							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/slice?from=${from}&to=${to}`) as any,
+							header(id),
+						]);
 						const sliceOutput = sliceResult.log?.map((e: any, i: number) => `${String(from + i).padStart(5)}  ${typeof e === "string" ? e : e.text ?? String(e)}`).join("\n") || "(no output)";
-						return text(`Lines ${from}-${to} of ${sliceResult.totalLines} from ${id}:\n${sliceOutput}`);
+						return text(`Lines ${from}-${to} of ${sliceResult.totalLines} from ${hdr}:\n${sliceOutput}`);
 					}
 					case "kill": {
 						if (!id) return text("Error: 'id' is required for kill");
+						const hdr = await header(id);
 						await api("DELETE", `/api/sessions/${sessionId}/bg-processes/${id}`);
-						return text(`Background process ${id} killed.`);
+						return text(`Background process ${hdr} killed.`);
 					}
 					case "wait": {
 						if (!id) return text("Error: 'id' is required for wait");
 						const waitSec = timeout || 300;
-						const waitResult = await api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/wait?timeout=${waitSec}`) as any;
+						const [waitResult, hdr] = await Promise.all([
+							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/wait?timeout=${waitSec}`) as any,
+							header(id),
+						]);
 						const info = waitResult.info;
 						if (waitResult.timedOut) {
-							return text(`Process ${id} still running after ${waitSec}s (pid=${info.pid}, status=${info.status}). Use "logs", "grep", or "kill" to manage it.`);
+							return text(`Process ${hdr} still running after ${waitSec}s (pid=${info.pid}, status=${info.status}). Use "logs", "grep", or "kill" to manage it.`);
 						}
-						return text(`Process ${id} exited with code ${info.exitCode}.\nUse bash_bg with action "grep" and id "${id}" to search output, or "logs" to see the tail.`);
+						return text(`Process ${hdr} exited with code ${info.exitCode}.\nUse bash_bg with action "grep" and id "${id}" to search output, or "logs" to see the tail.`);
 					}
 					case "list": {
 						const data = await api("GET", `/api/sessions/${sessionId}/bg-processes`) as any;
 						const procs = data.processes || [];
 						if (procs.length === 0) return text("No background processes.");
 						const lines = procs.map((p: any) =>
-							`${p.id} [${p.status}] pid=${p.pid} cmd="${p.command}"${p.exitCode !== null ? ` exit=${p.exitCode}` : ""}`
+							`${p.id} (${p.name || p.id}) [${p.status}] pid=${p.pid} cmd="${p.command}"${p.exitCode !== null ? ` exit=${p.exitCode}` : ""}`
 						);
 						return text(`Background processes:\n${lines.join("\n")}`);
 					}

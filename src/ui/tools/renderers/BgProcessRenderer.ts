@@ -11,15 +11,47 @@ interface BgParams {
 	name?: string;
 	id?: string;
 	tail?: number;
+	pattern?: string;
+	lines?: number;
+	from?: number;
+	to?: number;
 }
 
-function summarize(params: BgParams): string {
+/** Extract the process name from result text like "Logs for bg-12 (branch cleanup):" */
+function extractProcessName(result: ToolResultMessage | undefined): string | undefined {
+	if (!result) return undefined;
+	const text = typeof result.content === "string"
+		? result.content
+		: result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
+	// Match "bg-NN (process name)" in the first line
+	const match = text.match(/bg-\d+\s+\(([^)]+)\)/);
+	return match?.[1] ?? undefined;
+}
+
+function summarize(params: BgParams, result: ToolResultMessage | undefined): string {
+	const processName = extractProcessName(result) || params.name;
+	const idLabel = params.id || "";
+	const label = processName ? ` [${processName}]` : idLabel ? ` [${idLabel}]` : "";
+
 	switch (params.action) {
-		case "create": return `bg start: ${params.name || (params.command || "").slice(0, 40)}`;
-		case "logs": return `bg logs: ${params.id || ""}`;
-		case "kill": return `bg kill: ${params.id || ""}`;
-		case "list": return "bg list";
-		default: return `bg ${params.action}`;
+		case "create":
+			return `start${label || ""}: ${(params.command || "").slice(0, 60)}`;
+		case "logs":
+			return `logs${label}${params.tail ? ` (tail ${params.tail})` : ""}`;
+		case "grep":
+			return `grep${label}: ${params.pattern ? `/${params.pattern}/` : ""}`;
+		case "head":
+			return `head${label}${params.lines ? ` (${params.lines} lines)` : ""}`;
+		case "slice":
+			return `slice${label}: lines ${params.from || "?"}–${params.to || "?"}`;
+		case "kill":
+			return `kill${label}`;
+		case "wait":
+			return `wait${label}`;
+		case "list":
+			return "list processes";
+		default:
+			return `${params.action}${label}`;
 	}
 }
 
@@ -29,7 +61,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 		result: ToolResultMessage | undefined,
 		_isStreaming?: boolean,
 	): ToolRenderResult {
-		const summary = params ? summarize(params) : "background process";
+		const summary = params ? summarize(params, result) : "background process";
 		const state = getToolState(result, !result);
 
 		const output = typeof result?.content === "string"
