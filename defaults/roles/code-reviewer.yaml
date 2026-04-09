@@ -3,6 +3,8 @@ label: Code Reviewer
 accessory: magnifier
 toolPolicies:
   edit: never
+  bash_bg: never
+  delegate: never
 createdAt: 1775322000000
 updatedAt: 1775322000000
 promptTemplate: |
