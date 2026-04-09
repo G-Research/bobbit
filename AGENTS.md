@@ -41,7 +41,7 @@ Test filter flags: `--failures` (default), `--verbose`, `--full`.
 UI-only changes need only unit tests. Server changes need E2E too. Session lifecycle, sandbox, or restart changes should be validated with `npm run test:manual`. Docker-dependent tests skip automatically when Docker is unavailable.
 
 **Test types:**
-- **Unit** (`tests/*.spec.ts`, `tests/*.test.ts`): Playwright `file://` fixtures + Node test runner. See `mobile-header.spec.ts`.
+- **Unit** (`tests/*.spec.ts`, `tests/*.test.ts`): Playwright `file://` fixtures + Node test runner. See `mobile-header.spec.ts` for Playwright fixtures, `verification-logic.test.ts` for pure Node test runner tests.
 - **API E2E** (`tests/e2e/*.spec.ts`): Import `test` from `./in-process-harness.js` — the gateway runs in the same Node process (no child process spawn). Covers HTTP/WS API tests, CRUD, agent protocol, etc. Runs as the `api` project in `playwright-e2e.config.ts` with 4 workers.
 - **Browser E2E** (`tests/e2e/ui/*.spec.ts` + select non-ui files): Import `test` from `./gateway-harness.js` — spawns a real gateway child process. Used for tests that need a browser (`page` fixture), MCP integration, or process-level behavior (port allocation, localhost auth bypass). Runs as the `browser` project with 2 workers.
 - **UI E2E** (`tests/e2e/ui/*.spec.ts`): A subset of browser E2E — fullstack tests that exercise user journeys (click buttons, fill forms, verify outcomes) through UI → WebSocket → server → mock agent → UI. Covers project management, goal creation, team lifecycle, session interactions, navigation, and settings. Run with: `npx playwright test --config playwright-e2e.config.ts --project browser tests/e2e/ui/`

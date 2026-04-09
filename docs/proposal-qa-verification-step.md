@@ -346,7 +346,8 @@ No data migration is needed. The `enabledOptionalSteps` field defaults to `undef
 | `src/server/agent/gate-store.ts` | Add `artifact` to `GateSignalStep` |
 | `src/server/agent/goal-store.ts` | Add `enabledOptionalSteps` to `PersistedGoal` |
 | `src/server/agent/goal-manager.ts` | Accept `enabledOptionalSteps` in `createGoal()` |
-| `src/server/agent/verification-harness.ts` | Phased execution, `agent-qa` type, optional step skipping, artifact population |
+| `src/server/agent/verification-harness.ts` | `agent-qa` type orchestration, artifact population |
+| `src/server/agent/verification-logic.ts` | Phased execution, optional step skipping, variable substitution, cache reuse, error pattern matching |
 | `src/server/agent/goal-assistant.ts` | Add `<options>` tag to proposal format |
 | `src/server/server.ts` | Pass `enabledOptionalSteps` through goal creation API |
 | `src/app/goal-dashboard.ts` | Artifact rendering, phase display |
