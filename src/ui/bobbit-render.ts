@@ -393,7 +393,26 @@ export function startCanvasEyeAnimation(
  * eyes at any DPR/zoom level. CSS animations use -canvas keyframe variants
  * (no scale(4), translates ×4).
  */
-export function renderBlobSpriteCanvas(isIdle: boolean): TemplateResult {
+export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): TemplateResult {
+	if (archived) {
+		// Static frame: center gaze, no blink, no animation loop
+		const onRef = (el: Element | undefined) => {
+			if (el && el instanceof HTMLCanvasElement) {
+				const cache = buildEyePixelCache(CANONICAL_PALETTE, [{ pct: 0, gaze: "center", blink: false }]);
+				const pixels = cache.get("center-false");
+				if (pixels) {
+					const dpr = window.devicePixelRatio || 1;
+					const devW = Math.round(BODY_WIDTH * CSS_SCALE * dpr);
+					const devH = Math.round(BODY_HEIGHT * CSS_SCALE * dpr);
+					el.width = devW;
+					el.height = devH;
+					const ctx = el.getContext("2d")!;
+					drawPixelsBresenham(ctx, pixels, devW, devH);
+				}
+			}
+		};
+		return html`<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>`;
+	}
 	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
 	let cleanup: (() => void) | null = null;
 	const onRef = (el: Element | undefined) => {
@@ -409,8 +428,8 @@ export function renderBlobSpriteCanvas(isIdle: boolean): TemplateResult {
 }
 
 /** @deprecated Use renderBlobSpriteCanvas instead. Kept for backward compat. */
-export function renderBlobSpriteImg(isIdle: boolean): TemplateResult {
-	return renderBlobSpriteCanvas(isIdle);
+export function renderBlobSpriteImg(isIdle: boolean, archived = false): TemplateResult {
+	return renderBlobSpriteCanvas(isIdle, archived);
 }
 
 // ============================================================================

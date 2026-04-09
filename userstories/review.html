@@ -5,131 +5,176 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>User Story Review</title>
 <style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface2: #1a2744;
+    --border: #2a3a5c;
+    --text: #e0e0e0;
+    --text-dim: #8899aa;
+    --accent: #4fc3f7;
+    --green: #66bb6a;
+    --orange: #ffa726;
+    --red: #ef5350;
+    --purple: #b388ff;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: inherit;
-    background: var(--background);
-    color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
     line-height: 1.5;
     height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
   }
+
   .topbar {
-    background: var(--sidebar, var(--card));
+    background: var(--surface);
     border-bottom: 1px solid var(--border);
     padding: 12px 20px;
-    display: flex; align-items: center; gap: 16px; flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
   }
   .topbar h1 { font-size: 16px; font-weight: 600; }
-  .topbar .stats { margin-left: auto; font-size: 13px; color: var(--muted-foreground); display: flex; gap: 14px; }
+  .topbar .stats { margin-left: auto; font-size: 13px; color: var(--text-dim); display: flex; gap: 14px; }
+
   .layout { display: flex; flex: 1; overflow: hidden; }
+
   .sidebar {
-    width: 520px; background: var(--sidebar, var(--card));
-    border-right: 1px solid var(--border); overflow-y: auto; flex-shrink: 0;
+    width: 260px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    flex-shrink: 0;
   }
   .sidebar-label {
-    font-size: 11px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.5px; color: var(--muted-foreground); padding: 14px 16px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    padding: 14px 16px 4px;
   }
   .sidebar-item {
-    padding: 6px 16px; cursor: pointer; font-size: 13px;
-    display: flex; align-items: center; gap: 8px; transition: background 0.1s;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.1s;
   }
-  .sidebar-item:hover { background: var(--accent); }
-  .sidebar-item.active { background: var(--accent); color: var(--primary); }
-  .sidebar-item .id { color: var(--muted-foreground); font-size: 11px; font-family: monospace; min-width: 40px; }
+  .sidebar-item:hover { background: var(--surface2); }
+  .sidebar-item.active { background: var(--surface2); color: var(--accent); }
+  .sidebar-item .id { color: var(--text-dim); font-size: 11px; font-family: monospace; min-width: 40px; }
   .sidebar-item .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sidebar-item .badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 600; flex-shrink: 0; }
-  .badge-covered { background: oklch(0.35 0.1 145); color: oklch(0.75 0.15 145); }
-  .badge-partial { background: oklch(0.35 0.08 70); color: oklch(0.75 0.12 70); }
-  .badge-none { background: oklch(0.35 0.08 25); color: oklch(0.75 0.15 25); }
-  .badge-manual { background: oklch(0.30 0.08 290); color: oklch(0.75 0.15 290); }
+  .sidebar-item .badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 600; flex-shrink: 0;
+  }
+  .badge-covered { background: #1b5e20; color: var(--green); }
+  .badge-partial { background: #4e342e; color: var(--orange); }
+  .badge-none { background: #4a1c1c; color: var(--red); }
+  .badge-manual { background: #311b60; color: var(--purple); }
+
   .main { flex: 1; overflow-y: auto; padding: 28px 36px; }
+
   .story-card { display: none; }
   .story-card.visible { display: block; }
+
   .story-header {
     display: flex; align-items: baseline; gap: 12px;
     margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border);
   }
   .story-id {
-    font-family: monospace; font-size: 14px; color: var(--primary);
-    background: color-mix(in oklch, var(--primary) 10%, transparent); padding: 2px 10px; border-radius: 4px;
+    font-family: monospace; font-size: 14px; color: var(--accent);
+    background: rgba(79,195,247,0.1); padding: 2px 10px; border-radius: 4px;
   }
   .story-title { font-size: 20px; font-weight: 600; }
   .area-tag {
-    font-size: 11px; color: var(--muted-foreground); background: var(--accent);
+    font-size: 11px; color: var(--text-dim); background: var(--surface2);
     padding: 2px 8px; border-radius: 4px; margin-left: auto;
   }
+
   .section { margin-bottom: 20px; }
   .section-label {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.8px; color: var(--muted-foreground); margin-bottom: 8px;
+    letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 8px;
   }
   .preconditions {
-    background: color-mix(in oklch, var(--primary) 6%, transparent); border-left: 3px solid var(--primary);
+    background: rgba(79,195,247,0.06); border-left: 3px solid var(--accent);
     padding: 10px 14px; font-size: 14px; border-radius: 0 6px 6px 0;
   }
+
   .steps-list { list-style: none; counter-reset: steps; }
   .steps-list li {
     counter-increment: steps; padding: 8px 0 8px 40px; position: relative;
-    font-size: 14px; border-bottom: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
+    font-size: 14px; border-bottom: 1px solid rgba(255,255,255,0.03);
   }
   .steps-list li:last-child { border-bottom: none; }
   .steps-list li::before {
     content: counter(steps); position: absolute; left: 0;
-    width: 26px; height: 26px; background: var(--accent); border: 1px solid var(--border);
+    width: 26px; height: 26px; background: var(--surface2); border: 1px solid var(--border);
     border-radius: 50%; text-align: center; line-height: 24px;
-    font-size: 12px; font-weight: 600; color: var(--primary);
+    font-size: 12px; font-weight: 600; color: var(--accent);
   }
+
   .expected-list { list-style: none; }
   .expected-list li { padding: 5px 0 5px 26px; position: relative; font-size: 14px; }
-  .expected-list li::before { content: "\2713"; position: absolute; left: 0; color: oklch(0.65 0.2 145); font-weight: bold; }
+  .expected-list li::before { content: "✓"; position: absolute; left: 0; color: var(--green); font-weight: bold; }
+
   .coverage-box { padding: 12px 16px; border-radius: 6px; font-size: 13px; }
-  .coverage-covered { background: oklch(0.35 0.06 145 / 0.3); border: 1px solid oklch(0.5 0.1 145 / 0.4); color: oklch(0.75 0.15 145); }
-  .coverage-partial { background: oklch(0.35 0.06 70 / 0.3); border: 1px solid oklch(0.5 0.1 70 / 0.4); color: oklch(0.75 0.12 70); }
-  .coverage-none { background: oklch(0.35 0.06 25 / 0.3); border: 1px solid oklch(0.5 0.1 25 / 0.4); color: oklch(0.75 0.15 25); }
-  .coverage-manual { background: oklch(0.30 0.06 290 / 0.3); border: 1px solid oklch(0.5 0.1 290 / 0.4); color: oklch(0.75 0.15 290); }
+  .coverage-covered { background: rgba(102,187,106,0.1); border: 1px solid rgba(102,187,106,0.25); color: var(--green); }
+  .coverage-partial { background: rgba(255,167,38,0.1); border: 1px solid rgba(255,167,38,0.25); color: var(--orange); }
+  .coverage-none { background: rgba(239,83,80,0.1); border: 1px solid rgba(239,83,80,0.25); color: var(--red); }
+  .coverage-manual { background: rgba(179,136,255,0.1); border: 1px solid rgba(179,136,255,0.25); color: var(--purple); }
+
   .review-bar {
-    background: var(--sidebar, var(--card)); border-top: 1px solid var(--border);
+    background: var(--surface); border-top: 1px solid var(--border);
     padding: 10px 20px; display: flex; align-items: center; gap: 12px; flex-shrink: 0;
   }
   .review-bar button {
     padding: 6px 18px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--accent); color: var(--foreground); cursor: pointer;
+    background: var(--surface2); color: var(--text); cursor: pointer;
     font-size: 13px; transition: all 0.15s;
   }
-  .review-bar button:hover { border-color: var(--primary); color: var(--primary); }
+  .review-bar button:hover { border-color: var(--accent); color: var(--accent); }
   .review-bar button:disabled { opacity: 0.3; cursor: default; }
   .review-bar .spacer { flex: 1; }
-  .review-bar .progress { font-size: 13px; color: var(--muted-foreground); }
+  .review-bar .progress { font-size: 13px; color: var(--text-dim); }
+
   .filter-row { display: flex; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
   .filter-btn {
     font-size: 11px; padding: 3px 10px; border-radius: 4px;
     border: 1px solid var(--border); background: transparent;
-    color: var(--muted-foreground); cursor: pointer; transition: all 0.1s;
+    color: var(--text-dim); cursor: pointer; transition: all 0.1s;
   }
   .filter-btn:hover, .filter-btn.active {
-    border-color: var(--primary); color: var(--primary); background: color-mix(in oklch, var(--primary) 8%, transparent);
+    border-color: var(--accent); color: var(--accent); background: rgba(79,195,247,0.08);
   }
+
   kbd {
-    font-size: 11px; background: var(--accent); border: 1px solid var(--border);
-    padding: 1px 5px; border-radius: 3px; font-family: monospace; color: var(--muted-foreground);
+    font-size: 11px; background: var(--surface2); border: 1px solid var(--border);
+    padding: 1px 5px; border-radius: 3px; font-family: monospace; color: var(--text-dim);
   }
 </style>
 </head>
 <body>
+
 <div class="topbar">
   <h1>User Story Review</h1>
   <div class="stats">
     <span id="stat-total"></span>
-    <span id="stat-covered" style="color:oklch(0.75 0.15 145)"></span>
-    <span id="stat-partial" style="color:oklch(0.75 0.12 70)"></span>
-    <span id="stat-none" style="color:oklch(0.75 0.15 25)"></span>
-    <span id="stat-manual" style="color:oklch(0.75 0.15 290)"></span>
+    <span id="stat-covered" style="color:var(--green)"></span>
+    <span id="stat-partial" style="color:var(--orange)"></span>
+    <span id="stat-none" style="color:var(--red)"></span>
+    <span id="stat-manual" style="color:var(--purple)"></span>
   </div>
 </div>
+
 <div class="layout">
   <div class="sidebar">
     <div class="filter-row">
@@ -142,15 +187,17 @@
   </div>
   <div class="main" id="main-content"></div>
 </div>
+
 <div class="review-bar">
-  <button id="btn-prev">&larr; Prev</button>
-  <button id="btn-next">Next &rarr;</button>
-  <span style="font-size:12px;color:var(--muted-foreground);margin-left:8px">
-    <kbd>&uarr;</kbd><kbd>&darr;</kbd> or <kbd>&larr;</kbd><kbd>&rarr;</kbd> to navigate
+  <button id="btn-prev">← Prev</button>
+  <button id="btn-next">Next →</button>
+  <span style="font-size:12px; color:var(--text-dim); margin-left:8px">
+    <kbd>↑</kbd><kbd>↓</kbd> or <kbd>←</kbd><kbd>→</kbd> to navigate
   </span>
   <div class="spacer"></div>
   <div class="progress" id="progress-text"></div>
 </div>
+
 <script>
 const STORIES = [
   // ── Sessions ──────────────────────────────────────────────────

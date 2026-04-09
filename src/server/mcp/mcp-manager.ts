@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,8 +7,9 @@ import type {
   McpServerConfig,
   McpToolDef,
   McpToolResult,
+  McpToolDocCache,
 } from "./mcp-types.js";
-import { bobbitConfigDir } from "../bobbit-dir.js";
+import { bobbitConfigDir, bobbitStateDir } from "../bobbit-dir.js";
 import { parseCustomDirectories } from "../agent/config-directories.js";
 import type { ProjectConfigReader } from "../agent/config-directories.js";
 
@@ -26,6 +28,7 @@ export interface McpToolInfo {
   description: string;
   group: string;
   docs?: string;
+  summary?: string;
   serverName: string;
   mcpToolName: string;
   inputSchema: Record<string, unknown>;
@@ -47,12 +50,16 @@ export class McpManager {
   private errors = new Map<string, string>();
   /** Maps truncated Bobbit tool names back to original MCP tool names. */
   private _toolNameMap = new Map<string, { serverName: string; mcpToolName: string }>();
+  /** In-memory cache: serverName → toolName → summary */
+  private _summaryCache = new Map<string, Map<string, string>>();
 
   private projectConfigStore: ProjectConfigReader | null;
   private additionalProjects: Array<{cwd: string, configStore: ProjectConfigReader}> = [];
+  private stateDir: string | undefined;
 
-  constructor(private cwd: string, projectConfigStore?: ProjectConfigReader) {
+  constructor(private cwd: string, projectConfigStore?: ProjectConfigReader, stateDir?: string) {
     this.projectConfigStore = projectConfigStore ?? null;
+    this.stateDir = stateDir;
   }
 
   /** Register additional project directories for MCP server discovery. */
@@ -220,6 +227,9 @@ export class McpManager {
       const tools = await client.listTools();
       this.toolDefs.set(name, tools);
 
+      // Generate/update doc cache and summaries
+      this._updateDocCache(name, tools);
+
       console.log(
         `[mcp] Connected to server "${name}" — ${tools.length} tool(s) available`,
       );
@@ -294,11 +304,17 @@ export class McpManager {
 
     for (const [serverName, tools] of this.toolDefs) {
       for (const tool of tools) {
+        const summary = this._summaryCache.get(serverName)?.get(tool.name);
+        const fullDesc = tool.description || `MCP tool ${tool.name} from ${serverName}`;
+        const paramDocs = this._generateToolParamDocs(tool);
+        const docs = paramDocs ? `${fullDesc}\n\n${paramDocs}` : fullDesc;
+
         infos.push({
           name: this._makeBobbitToolName(serverName, tool.name),
           description: tool.description || `MCP tool ${tool.name} from ${serverName}`,
           group: `MCP: ${serverName}`,
-          docs: undefined,
+          docs,
+          summary,
           serverName,
           mcpToolName: tool.name,
           inputSchema: tool.inputSchema as Record<string, unknown>,
@@ -309,9 +325,8 @@ export class McpManager {
     return infos;
   }
 
-  /** Auto-generate docs from inputSchema. Kept for potential use in Tools UI detail view. */
-  // @ts-expect-error Intentionally unused — kept for future use
-  private _generateToolDocs(tool: McpToolDef): string {
+  /** Generate a parameter table from a tool's inputSchema. */
+  private _generateToolParamDocs(tool: McpToolDef): string {
     const schema = tool.inputSchema;
     if (!schema || typeof schema !== "object") return "";
 
@@ -323,7 +338,7 @@ export class McpManager {
     const required = (schema.required as string[]) || [];
     const lines: string[] = [];
 
-    lines.push("## Parameters\n");
+    lines.push("### Parameters\n");
     lines.push(
       "| Name | Type | Required | Description |",
       "|------|------|----------|-------------|",
@@ -340,6 +355,85 @@ export class McpManager {
     }
 
     return lines.join("\n");
+  }
+
+  /** Generate a deterministic one-line summary from a tool description. */
+  private _generateSummary(description: string | undefined, toolName: string, serverName: string): string {
+    if (!description) return `MCP tool ${toolName} from ${serverName}`;
+    const match = description.match(/^(.+?[.!?])\s/);
+    let summary = match ? match[1] : description;
+    if (summary.length > 120) {
+      summary = summary.slice(0, 117).replace(/\s+\S*$/, '') + '...';
+    }
+    return summary;
+  }
+
+  /**
+   * Update the doc cache and MD file for an MCP server's tools.
+   * Uses content hashing to skip regeneration when nothing changed.
+   */
+  private _updateDocCache(serverName: string, tools: McpToolDef[]): void {
+    try {
+      const dir = path.join(this.stateDir ?? bobbitStateDir(), 'mcp-tool-docs');
+      fs.mkdirSync(dir, { recursive: true });
+
+      const safeName = path.basename(serverName);
+      const cacheFile = path.join(dir, `${safeName}.cache.json`);
+      const mdFile = path.join(dir, `${safeName}.md`);
+
+      // Read existing cache
+      let oldCache: McpToolDocCache = {};
+      try {
+        oldCache = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
+      } catch { /* no existing cache */ }
+
+      // Build new cache
+      const newCache: McpToolDocCache = {};
+      const serverSummaries = new Map<string, string>();
+      let changed = Object.keys(oldCache).length !== tools.length;
+
+      for (const tool of tools) {
+        const hash = crypto
+          .createHash('sha256')
+          .update(JSON.stringify({ description: tool.description, inputSchema: tool.inputSchema }))
+          .digest('hex')
+          .slice(0, 16);
+
+        const oldEntry = oldCache[tool.name];
+        let summary: string;
+        if (oldEntry && oldEntry.hash === hash) {
+          summary = oldEntry.summary;
+        } else {
+          summary = this._generateSummary(tool.description, tool.name, serverName);
+          changed = true;
+        }
+
+        newCache[tool.name] = { hash, summary };
+        serverSummaries.set(tool.name, summary);
+      }
+
+      // Update in-memory cache
+      this._summaryCache.set(serverName, serverSummaries);
+
+      // Write to disk only if something changed
+      if (changed) {
+        fs.writeFileSync(cacheFile, JSON.stringify(newCache, null, 2));
+
+        // Generate MD file
+        const mdParts: string[] = [`# ${serverName} — MCP Tool Documentation\n`];
+        for (const tool of tools) {
+          mdParts.push(`## ${tool.name}\n`);
+          mdParts.push(`${tool.description || 'No description available.'}\n`);
+          const paramDocs = this._generateToolParamDocs(tool);
+          if (paramDocs) {
+            mdParts.push(paramDocs + '\n');
+          }
+        }
+        fs.writeFileSync(mdFile, mdParts.join('\n'));
+      }
+    } catch (err) {
+      console.error(`[mcp] Failed to update doc cache for "${serverName}":`, (err as Error).message);
+    }
   }
 
   /** Get status for all known servers (discovered + connected + errored). */
