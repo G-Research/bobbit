@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
-import { TOOLS_DIR } from "./tool-manager.js";
+import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+/** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
+const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
 
 /** Redact sensitive env vars (-e KEY=VALUE) from Docker arg arrays for logging. */
 function redactDockerArgs(args: string[]): string {
@@ -42,6 +46,8 @@ export interface RpcBridgeOptions {
 	gatewayToken?: string;
 	/** Container ID to use with docker exec (from sandbox pool) */
 	containerId?: string;
+	/** Tool manager for resolving extension paths (optional — falls back to TOOLS_DIR). */
+	toolManager?: ToolManager;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -79,7 +85,9 @@ export class RpcBridge {
 		// For sessions that don't go through tool activation (no role, fallback path),
 		// force-load shell/extension.ts so bash/bash_bg remain available.
 		if (!args.includes("--no-extensions")) {
-			const bashExtPath = path.join(TOOLS_DIR, "shell", "extension.ts");
+			const bashExtPath = this.options.toolManager
+				? this.options.toolManager.getExtensionPath("shell", "extension.ts")
+				: path.join(TOOLS_DIR, "shell", "extension.ts");
 			if (!args.includes(bashExtPath)) {
 				args.push("--extension", bashExtPath);
 			}
@@ -425,6 +433,11 @@ export class RpcBridge {
 		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
 		const normalizedStateDir = stateDir.replace(/\\/g, "/");
 		const normalizedMcpExtDir = mcpExtDir.replace(/\\/g, "/");
+
+		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths
+		const builtinToolsDir = this.options.toolManager?.getBuiltinToolsDir();
+		const normalizedBuiltinToolsDir = builtinToolsDir?.replace(/\\/g, "/");
+
 		const remappedArgs: string[] = [];
 
 		for (let i = 0; i < agentArgs.length; i++) {
@@ -446,9 +459,13 @@ export class RpcBridge {
 			} else {
 				const normalized = arg.replace(/\\/g, "/");
 				if (normalized.startsWith(normalizedToolsDir)) {
-					// Remap tool extension paths: TOOLS_DIR/... → /tools/...
+					// Remap tool extension paths: config TOOLS_DIR/... → /tools/...
 					const relative = normalized.substring(normalizedToolsDir.length);
 					remappedArgs.push(`/tools${relative}`);
+				} else if (normalizedBuiltinToolsDir && normalized.startsWith(normalizedBuiltinToolsDir)) {
+					// Remap builtin tool extension paths: dist/.../defaults/tools/... → /tools-builtin/...
+					const relative = normalized.substring(normalizedBuiltinToolsDir.length);
+					remappedArgs.push(`/tools-builtin${relative}`);
 				} else if (normalized.startsWith(normalizedMcpExtDir)) {
 					// Remap MCP extension paths: .bobbit/state/mcp-extensions/... → /mcp-extensions/...
 					const relative = normalized.substring(normalizedMcpExtDir.length);
@@ -530,8 +547,10 @@ interface MountMapping {
  * Build the mount table that describes container ↔ host path mappings.
  * This is the single source of truth — both containerPathToHost() and
  * hostPathToContainer() derive from it.
+ *
+ * Accepts optional builtinToolsDir to handle cascade-resolved builtin paths.
  */
-function buildMountTable(): MountMapping[] {
+function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 	const stateDir = bobbitStateDir();
 	const agentSessionsDir = path.join(globalAgentDir(), "sessions");
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
@@ -539,7 +558,7 @@ function buildMountTable(): MountMapping[] {
 
 	// Order matters: most specific prefixes first so /home/node/.bobbit/agent/sessions
 	// matches before a hypothetical /home/node/.bobbit/agent would.
-	return [
+	const table: MountMapping[] = [
 		{ containerPrefix: CONTAINER_AGENT_DIR + "sessions", hostPath: agentSessionsDir },
 		{ containerPrefix: "/tmp/session-prompts", hostPath: sessionPromptsDir },
 		{ containerPrefix: "/mcp-extensions", hostPath: mcpExtDir },
@@ -550,6 +569,14 @@ function buildMountTable(): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
+
+	// Add builtin tools dir mapping (for cascade-resolved builtin paths)
+	if (builtinToolsDir) {
+		// Insert before /tools so /tools-builtin matches first
+		table.splice(table.length - 1, 0, { containerPrefix: "/tools-builtin", hostPath: builtinToolsDir });
+	}
+
+	return table;
 }
 
 /**
@@ -561,7 +588,7 @@ function buildMountTable(): MountMapping[] {
  */
 export function containerPathToHost(containerPath: string): string {
 	const normalized = containerPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath } of buildMountTable()) {
+	for (const { containerPrefix, hostPath } of buildMountTable(BUILTIN_TOOLS_DIR)) {
 		// Match exact prefix or prefix followed by "/" to avoid collisions
 		// (e.g. "/bobbit-state/sessions" must not match "/bobbit-state/sessions.json")
 		if (normalized === containerPrefix || normalized.startsWith(containerPrefix + "/")) {
@@ -580,7 +607,7 @@ export function containerPathToHost(containerPath: string): string {
  */
 export function hostPathToContainer(hostPath: string): string {
 	const normalized = hostPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath: hp } of buildMountTable()) {
+	for (const { containerPrefix, hostPath: hp } of buildMountTable(BUILTIN_TOOLS_DIR)) {
 		const normalizedHost = hp.replace(/\\/g, "/");
 		if (normalized.startsWith(normalizedHost)) {
 			const relative = normalized.substring(normalizedHost.length);

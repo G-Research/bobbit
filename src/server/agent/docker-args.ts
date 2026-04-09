@@ -12,6 +12,7 @@ import path from "node:path";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import { TOOLS_DIR } from "./tool-manager.js";
+import type { ToolManager } from "./tool-manager.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,8 @@ export interface DockerRunConfig {
 	sandboxCredentials?: Record<string, string>;
 	/** Docker network to attach the container to (e.g. "bobbit-sandbox-net"). */
 	sandboxNetwork?: string;
+	/** Tool manager for resolving builtin tools directory (optional — falls back to TOOLS_DIR only). */
+	toolManager?: ToolManager;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
@@ -63,6 +66,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	} = config;
 
 	const toolsDir = TOOLS_DIR;
+	const builtinToolsDir = config.toolManager?.getBuiltinToolsDir();
 
 	const baseHostArgs = ["--add-host=host.docker.internal:host-gateway"];
 
@@ -108,6 +112,11 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// pi-coding-agent is baked into the Docker image (avoids 20x slower
 	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
 	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
+
+	// Mount builtin tools directory for cascade-resolved builtin extensions
+	if (builtinToolsDir && builtinToolsDir !== toolsDir) {
+		args.push("-v", `${toDockerPath(builtinToolsDir)}:/tools-builtin:ro`);
+	}
 
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
