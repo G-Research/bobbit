@@ -2042,6 +2042,72 @@ function goalProposalPanel() {
 }
 
 // ============================================================================
+// PREVIEW THEME BRIDGE
+// ============================================================================
+
+/** Script injected into preview iframes to sync the app's theme, palette, and
+ *  CSS custom properties into the iframe document. Observes changes so toggling
+ *  dark/light mode or switching palettes updates the preview in real time. */
+const PREVIEW_THEME_BRIDGE = `<script>
+(function() {
+	try {
+		var root = document.documentElement;
+		var parentRoot = parent.document.documentElement;
+		var parentStyles = parent.getComputedStyle(parentRoot);
+
+		function sync() {
+			/* Mirror dark class */
+			root.classList.toggle('dark', parentRoot.classList.contains('dark'));
+
+			/* Mirror data-palette attribute */
+			var palette = parentRoot.getAttribute('data-palette');
+			if (palette) root.setAttribute('data-palette', palette);
+			else root.removeAttribute('data-palette');
+
+			/* Copy all CSS custom properties from the app stylesheet */
+			var vars = [];
+			try {
+				for (var s = 0; s < parent.document.styleSheets.length; s++) {
+					var sheet = parent.document.styleSheets[s];
+					try {
+						var rules = sheet.cssRules || sheet.rules;
+						for (var r = 0; r < rules.length; r++) {
+							var rule = rules[r];
+							if (rule.style) {
+								for (var i = 0; i < rule.style.length; i++) {
+									var name = rule.style[i];
+									if (name.startsWith('--')) vars.push(name);
+								}
+							}
+						}
+					} catch(e) { /* cross-origin sheet, skip */ }
+				}
+			} catch(e) {}
+
+			/* Deduplicate and copy computed values */
+			var seen = {};
+			for (var v = 0; v < vars.length; v++) {
+				if (seen[vars[v]]) continue;
+				seen[vars[v]] = true;
+				var val = parentStyles.getPropertyValue(vars[v]);
+				if (val) root.style.setProperty(vars[v], val);
+			}
+		}
+
+		/* Copy the app font stack */
+		root.style.fontFamily = parentStyles.fontFamily;
+
+		/* Initial sync */
+		sync();
+
+		/* Watch for class/attribute changes on the parent root element */
+		var observer = new MutationObserver(sync);
+		observer.observe(parentRoot, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] });
+	} catch(e) { /* cross-origin or other error — degrade gracefully */ }
+})();
+<\/script>`;
+
+// ============================================================================
 // PREVIEW SWIPE (mobile)
 // ============================================================================
 
@@ -2580,7 +2646,7 @@ export function doRenderApp(): void {
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
 					sandbox="allow-scripts allow-same-origin"
-					.srcdoc=${state.previewPanelHtml + PREVIEW_SWIPE_SCRIPT}
+					.srcdoc=${state.previewPanelHtml + PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIPT}
 				></iframe>
 			</div>
 		`;
@@ -2738,7 +2804,7 @@ export function doRenderApp(): void {
 								class="w-full border-0"
 								style="position:absolute;inset:0;height:100%;"
 								sandbox="allow-scripts allow-same-origin"
-								.srcdoc=${state.previewPanelHtml + PREVIEW_SWIPE_SCRIPT}
+								.srcdoc=${state.previewPanelHtml + PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIPT}
 							></iframe>
 						</div>
 						<!-- Compact prompt bar at bottom -->
