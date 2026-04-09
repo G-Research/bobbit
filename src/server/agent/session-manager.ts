@@ -26,7 +26,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
 import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
-import { TOOLS_DIR } from "./tool-manager.js";
+
 import { McpManager } from "../mcp/mcp-manager.js";
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
@@ -36,7 +36,7 @@ import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
-import { bobbitStateDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
 import { WorktreePool } from "./worktree-pool.js";
@@ -53,14 +53,7 @@ import {
 
 const execFileAsync = promisify(execFileCb);
 
-/** Goal tools extension — task + gate management for any goal session. */
-const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
 
-/** Team lead extension — team management tools. */
-const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
-
-/** Proposal tools extension — propose_* tools for assistant sessions. */
-const PROPOSAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "proposals", "extension.ts");
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "terminated";
 
@@ -381,6 +374,24 @@ export class SessionManager {
 			this._testGoalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
+	}
+
+	/** Resolve goal tools extension path via toolManager cascade (with fallback). */
+	private getGoalToolsExtensionPath(): string {
+		if (this.toolManager) return this.toolManager.getExtensionPath("tasks", "extension.ts");
+		return path.join(bobbitConfigDir(), "tools", "tasks", "extension.ts");
+	}
+
+	/** Resolve team lead extension path via toolManager cascade (with fallback). */
+	private getTeamLeadExtensionPath(): string {
+		if (this.toolManager) return this.toolManager.getExtensionPath("team", "extension.ts");
+		return path.join(bobbitConfigDir(), "tools", "team", "extension.ts");
+	}
+
+	/** Resolve proposal tools extension path via toolManager cascade (with fallback). */
+	private getProposalToolsExtensionPath(): string {
+		if (this.toolManager) return this.toolManager.getExtensionPath("proposals", "extension.ts");
+		return path.join(bobbitConfigDir(), "tools", "proposals", "extension.ts");
 	}
 
 	getProjectContextManager(): ProjectContextManager | null {
@@ -1917,17 +1928,18 @@ export class SessionManager {
 			const isTeamLead = ps.role === "team-lead";
 			if (isTeamLead) {
 				// Team leads need both: team tools + goal tools (tasks/gates)
-				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
 			} else {
-				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 			}
 		}
 
 		// Restore proposal tools extension for assistant sessions
 		if (ps.assistantType) {
 			bridgeOptions.args = bridgeOptions.args || [];
-			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
-				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+			const proposalExtPath = this.getProposalToolsExtensionPath();
+			if (!bridgeOptions.args.includes(proposalExtPath)) {
+				bridgeOptions.args.push("--extension", proposalExtPath);
 			}
 		}
 
@@ -2951,17 +2963,18 @@ export class SessionManager {
 			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
 			const isTeamLead = session.role === "team-lead";
 			if (isTeamLead) {
-				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
 			} else if (!bridgeOptions.args?.includes("--extension")) {
-				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 			}
 		}
 
 		// Re-attach proposal tools extension for assistant sessions
 		if (session.assistantType) {
 			bridgeOptions.args = bridgeOptions.args || [];
-			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
-				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+			const proposalExtPath = this.getProposalToolsExtensionPath();
+			if (!bridgeOptions.args.includes(proposalExtPath)) {
+				bridgeOptions.args.push("--extension", proposalExtPath);
 			}
 		}
 
@@ -3101,17 +3114,18 @@ export class SessionManager {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 			const isTeamLead2 = session.role === "team-lead";
 			if (isTeamLead2) {
-				bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
 			} else if (!bridgeOptions.args?.includes("--extension")) {
-				bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 			}
 		}
 
 		// Re-attach proposal tools extension for assistant sessions
 		if (session.assistantType) {
 			bridgeOptions.args = bridgeOptions.args || [];
-			if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
-				bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+			const proposalExtPath = this.getProposalToolsExtensionPath();
+			if (!bridgeOptions.args.includes(proposalExtPath)) {
+				bridgeOptions.args.push("--extension", proposalExtPath);
 			}
 		}
 
@@ -3933,17 +3947,18 @@ export class SessionManager {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 				const isTeamLead = session.role === "team-lead";
 				if (isTeamLead) {
-					bridgeOptions.args = ["--extension", TEAM_LEAD_EXTENSION_PATH, "--extension", GOAL_TOOLS_EXTENSION_PATH];
+					bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
 				} else {
-					bridgeOptions.args = ["--extension", GOAL_TOOLS_EXTENSION_PATH];
+					bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 				}
 			}
 
 			// Restore proposal tools extension for assistant sessions
 			if (session.assistantType) {
 				bridgeOptions.args = bridgeOptions.args || [];
-				if (!bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
-					bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+				const proposalExtPath = this.getProposalToolsExtensionPath();
+				if (!bridgeOptions.args.includes(proposalExtPath)) {
+					bridgeOptions.args.push("--extension", proposalExtPath);
 				}
 			}
 

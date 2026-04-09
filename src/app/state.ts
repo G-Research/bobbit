@@ -245,12 +245,17 @@ export const state = {
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
-	previewPanelTab: "chat" as "chat" | "preview" | "goal",
+	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review",
 	previewPanelHtml: "" as string,
 	previewPanelFullscreen: false,
 
 	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
-	previewPanelActiveTab: "preview" as "preview" | "goal",
+	previewPanelActiveTab: "preview" as "preview" | "goal" | "review",
+
+	// Review pane state (agent-initiated markdown review documents)
+	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,
+	reviewActiveTab: "" as string,
+	reviewPanelOpen: false,
 
 	/** Currently viewed goal dashboard (null = not on dashboard) */
 	goalDashboardId: null as string | null,

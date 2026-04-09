@@ -3,12 +3,13 @@
  * Build builtins into dist/server/defaults/ for the config cascade.
  *
  * Sources (in order, later wins for same file):
- *   1. defaults/          — canonical builtin configs (roles, personalities, workflows)
- *   2. .bobbit/config/    — tools (with extension code), system-prompt, tool-group-policies
+ *   1. defaults/          — canonical builtin configs (roles, personalities, workflows,
+ *                           tools with extension code, tool-group-policies)
+ *   2. .bobbit/config/    — system-prompt, user overrides
  *
  * The defaults/ directory is the source of truth for builtins that participate
- * in the config cascade. .bobbit/config/ still provides tools (which have
- * co-located extension.ts files) and other non-cascade configs.
+ * in the config cascade. .bobbit/config/ provides the system prompt and any
+ * user-created overrides (which are NOT copied into builtins).
  *
  * Excludes project-specific files (project.yaml, mcp.json) that shouldn't be scaffolded.
  */

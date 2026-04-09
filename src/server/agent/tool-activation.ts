@@ -20,7 +20,6 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ToolManager, ToolProvider } from "./tool-manager.js";
-import { TOOLS_DIR } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
 import { generateToolGuardExtension, type ToolPolicyEntry } from "./tool-guard-extension.js";
@@ -154,10 +153,10 @@ export interface ToolActivationResult {
 
 /**
  * Resolve the absolute path for a bobbit-extension provider.
- * Path is: .bobbit/config/tools/<groupDir>/<extension>
+ * Uses the provider's baseDir (resolved from the cascade) instead of a hardcoded TOOLS_DIR.
  */
-function resolveExtensionPath(provider: ToolProvider & { groupDir: string }): string {
-	return path.join(TOOLS_DIR, provider.groupDir, provider.extension!);
+function resolveExtensionPath(provider: ToolProvider & { groupDir: string; baseDir: string }): string {
+	return path.join(provider.baseDir, provider.groupDir, provider.extension!);
 }
 
 /** Convert a JSON Schema object to a TypeBox code string. */
@@ -455,9 +454,9 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 					const bashProvider = providers.get("bash_bg");
 					if (bashProvider?.type === "bobbit-extension" && bashProvider.extension) {
 						extensionPaths.add(resolveExtensionPath(bashProvider));
-					} else {
-						// Fallback: load shell/extension.ts directly
-						extensionPaths.add(path.join(TOOLS_DIR, "shell", "extension.ts"));
+					} else if (toolManager) {
+						// Fallback: load shell/extension.ts via cascade resolution
+						extensionPaths.add(toolManager.getExtensionPath("shell", "extension.ts"));
 					}
 					continue;
 				}
@@ -497,7 +496,9 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 			// Skip bash from --tools — it's provided by shell/extension.ts
 			if (provider.tool === "bash") {
 				// bash is allowed: ensure shell/extension.ts is loaded
-				neededExtensions.add(path.join(TOOLS_DIR, "shell", "extension.ts"));
+				if (toolManager) {
+					neededExtensions.add(toolManager.getExtensionPath("shell", "extension.ts"));
+				}
 				continue;
 			}
 			activeBaseTools.push(provider.tool);

@@ -103,6 +103,37 @@ function respondToPrompt(text) {
 		};
 	}
 
+	// Review tool keywords — emit review_open / review_close tool calls
+	if (lower.includes("review_multi")) {
+		const docs = [
+			{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
+			{ title: "Document B", markdown: "# Document B\n\nSecond document content." },
+			{ title: "Document C", markdown: "# Document C\n\nThird document content." },
+		];
+		return {
+			multiTool: docs.map(d => ({
+				tool: "review_open",
+				input: { title: d.title, markdown: d.markdown },
+				output: JSON.stringify({ action: "review_open", title: d.title, markdown: d.markdown, replace: true }),
+			})),
+		};
+	}
+	if (lower.includes("review_open")) {
+		const md = "# Test Document\n\nThis is a test document for review.\n\n## Section One\n\nSome important text that could be commented on.\n\n## Section Two\n\nMore content here with `code examples` and details.";
+		return {
+			tool: "review_open",
+			input: { title: "Test Document", markdown: md },
+			output: JSON.stringify({ action: "review_open", title: "Test Document", markdown: md, replace: true }),
+		};
+	}
+	if (lower.includes("review_close")) {
+		return {
+			tool: "review_close",
+			input: { title: "Test Document" },
+			output: JSON.stringify({ action: "review_close", title: "Test Document" }),
+		};
+	}
+
 	// MOCK_ERROR keyword — simulate an error turn (stopReason: "error")
 	if (lower.includes("mock_error")) {
 		return { mockError: true };
@@ -261,6 +292,34 @@ async function handlePrompt(requestId, text) {
 			conversationMessages.push(assistantMsg);
 			emit({ type: "message_end", message: assistantMsg });
 		}
+	} else if (toolAction && toolAction.multiTool) {
+		// Multiple tool calls in a single turn
+		const contentBlocks = [];
+		for (const action of toolAction.multiTool) {
+			const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+			emit({ type: "tool_execution_start", toolName: action.tool, toolId, input: action.input });
+			emit({ type: "tool_execution_update", toolId, toolName: action.tool, status: "complete", output: action.output });
+			emit({ type: "tool_execution_end", toolCallId: toolId, toolName: action.tool, isError: false });
+
+			contentBlocks.push({ type: "toolCall", id: toolId, name: action.tool, arguments: action.input, input: action.input });
+
+			// Emit tool result message for each tool call
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: action.tool,
+				isError: false,
+				content: [{ type: "text", text: action.output }],
+			};
+			conversationMessages.push(toolResultMsg);
+			emit({ type: "message_end", message: toolResultMsg });
+		}
+
+		contentBlocks.push({ type: "text", text: `Done. Used ${toolAction.multiTool.length} tools.` });
+		const assistantMsg = { role: "assistant", content: contentBlocks };
+		conversationMessages.push(assistantMsg);
+		emit({ type: "message_end", message: assistantMsg });
 	} else if (toolAction && toolAction.mockError) {
 		// Simulate an error turn — the message_end has stopReason "error"
 		const assistantMsg = {
