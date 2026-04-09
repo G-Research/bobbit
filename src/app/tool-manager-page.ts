@@ -6,7 +6,7 @@ import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchG
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 
 // ============================================================================
 // CONSTANTS
@@ -771,7 +771,7 @@ function renderEditView(): TemplateResult {
 			<div class="tools-edit-main">
 				<!-- Compact identity rows -->
 				<div class="tools-identity-section">
-					${(selectedTool as any).origin ? html`<div class="mb-1">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides)}</div>` : ""}
+					${(selectedTool as any).origin ? html`<div class="mb-1 inline-flex items-center gap-2">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides)}${renderCustomizeRevertButtons()}</div>` : ""}
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Name</label>
 						<div class="tools-field-readonly">${selectedTool.name}</div>
@@ -808,6 +808,60 @@ function renderEditView(): TemplateResult {
 			</div>
 		</div>
 	`;
+}
+
+// ============================================================================
+// CUSTOMIZE / REVERT
+// ============================================================================
+
+function renderCustomizeRevertButtons(): TemplateResult | string {
+	if (!selectedTool) return "";
+	const origin = (selectedTool as any).origin as ConfigOrigin | undefined;
+	if (!origin) return "";
+
+	const scope = getConfigScope();
+	const projectId = getConfigProjectId();
+
+	if (scope === "system") {
+		if (origin === "builtin") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("tools", selectedTool!.name, "server")) {
+					tools = await fetchToolsScoped();
+					const updated = tools.find(t => t.name === selectedTool!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Customize at Server Level</button>`;
+		}
+		if (origin === "server") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("tools", selectedTool!.name, "server")) {
+					tools = await fetchToolsScoped();
+					const updated = tools.find(t => t.name === selectedTool!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Builtin</button>`;
+		}
+	} else {
+		if (origin === "builtin" || origin === "server") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("tools", selectedTool!.name, "project", projectId)) {
+					tools = await fetchToolsScoped();
+					const updated = tools.find(t => t.name === selectedTool!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Customize for ${getCurrentProjectName()}</button>`;
+		}
+		if (origin === "project") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("tools", selectedTool!.name, "project", projectId)) {
+					tools = await fetchToolsScoped();
+					const updated = tools.find(t => t.name === selectedTool!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Inherited</button>`;
+		}
+	}
+	return "";
 }
 
 // ============================================================================

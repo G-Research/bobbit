@@ -103,7 +103,7 @@ export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope
 
 /** Copy a config item to a target scope for editing. */
 export async function customizeItem(
-	type: "roles" | "personalities" | "workflows",
+	type: "roles" | "personalities" | "workflows" | "tools",
 	name: string,
 	scope: "server" | "project",
 	projectId?: string,
@@ -120,7 +120,7 @@ export async function customizeItem(
 
 /** Remove an override at a specific scope, reverting to inherited. */
 export async function revertOverride(
-	type: "roles" | "personalities" | "workflows",
+	type: "roles" | "personalities" | "workflows" | "tools",
 	name: string,
 	scope: "server" | "project",
 	projectId?: string,
