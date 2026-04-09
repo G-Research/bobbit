@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+/** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
+const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
+
 /** Redact sensitive env vars (-e KEY=VALUE) from Docker arg arrays for logging. */
 function redactDockerArgs(args: string[]): string {
 	const sensitiveKeys = /^(BOBBIT_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|AWS_SECRET|.*_API_KEY|.*_OAUTH_TOKEN|.*_ACCESS_KEY)/i;
@@ -584,7 +588,7 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
  */
 export function containerPathToHost(containerPath: string): string {
 	const normalized = containerPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath } of buildMountTable()) {
+	for (const { containerPrefix, hostPath } of buildMountTable(BUILTIN_TOOLS_DIR)) {
 		// Match exact prefix or prefix followed by "/" to avoid collisions
 		// (e.g. "/bobbit-state/sessions" must not match "/bobbit-state/sessions.json")
 		if (normalized === containerPrefix || normalized.startsWith(containerPrefix + "/")) {
@@ -603,7 +607,7 @@ export function containerPathToHost(containerPath: string): string {
  */
 export function hostPathToContainer(hostPath: string): string {
 	const normalized = hostPath.replace(/\\/g, "/");
-	for (const { containerPrefix, hostPath: hp } of buildMountTable()) {
+	for (const { containerPrefix, hostPath: hp } of buildMountTable(BUILTIN_TOOLS_DIR)) {
 		const normalizedHost = hp.replace(/\\/g, "/");
 		if (normalized.startsWith(normalizedHost)) {
 			const relative = normalized.substring(normalizedHost.length);

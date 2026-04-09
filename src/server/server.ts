@@ -773,6 +773,7 @@ export function createGateway(config: GatewayConfig) {
 								sandboxMounts: poolMounts,
 								sandboxCredentials: poolCredentials,
 								githubToken,
+								toolManager,
 							});
 							console.log(`[sandbox] Initialized per-project sandbox for default project`);
 						}
