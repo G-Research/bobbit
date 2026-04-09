@@ -42,7 +42,7 @@ Custom role definitions that control agent behaviour and tool access.
 
 - **Built-in tools**: `role-manager.ts` maintains `AVAILABLE_TOOLS` — the master list of agent tool names.
 - **Per-role configuration**: Each role has a name, label, prompt template, allowed tools list, accessory (for the mascot), and optional default traits.
-- **Storage**: Roles persist as YAML files under `.bobbit/config/roles/`.
+- **Storage**: Roles persist as YAML files under `defaults/roles/`.
 
 ## Personalities
 
@@ -86,11 +86,11 @@ See [prompt-queue.md](prompt-queue.md) for the full architecture.
 
 ## Workflows
 
-Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Stored as YAML in `.bobbit/config/workflows/`. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md).
+Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Stored as YAML in `defaults/workflows/`. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md).
 
 ## Assistant Registry
 
-A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles. Definitions load from YAML files in `.bobbit/config/roles/assistant/`, falling back to hardcoded defaults:
+A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles. Definitions load from YAML files in `defaults/roles/assistant/`, falling back to hardcoded defaults:
 
 - `goal` — Goal creation assistant
 - `role` — Role creation assistant
