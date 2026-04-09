@@ -1,51 +1,51 @@
 # Projects User Stories
 
-## PR-01: Add project (existing .bobbit)
-**Action:** Click Add Project, enter/browse path, Continue.
-**Expected:** POST /api/projects/detect. Path A: `.bobbit/` exists → auto-import, name from package.json or directory basename, project appears in sidebar.
+## PR-01: Add project (existing config)
+**Steps:** Click Add Project, enter path to a directory with existing `.bobbit/` config, click Continue.
+**Expected:** Project auto-imported with detected name. Appears in sidebar immediately.
 **Coverage:** covered.
 
-## PR-02: Add project (detection mode)
-**Action:** Directory has content, no `.bobbit/`.
-**Expected:** Path B: provisional project created (provisional:true), project assistant session opens with assistant type "project", sidebar shows "(setting up)" badge, auto-sends initial prompt with directory path, agent explores and calls propose_project, preview form appears. On Accept: POST /api/projects/:id/promote clears provisional flag, config written atomically via PUT /api/projects/:id/config, worktree pool initialized if git repo.
+## PR-02: Add project (detection)
+**Steps:** Enter path to a directory with content but no `.bobbit/` config.
+**Expected:** Project assistant session opens. Sidebar shows the project with a "(setting up)" badge. Agent explores the directory and proposes configuration. A preview form appears with editable fields. On Accept: project finalized, config saved, worktree pool initialized.
 **Coverage:** covered (15 tests).
 
 ## PR-03: Add project (scaffolding)
-**Action:** Empty directory.
-**Expected:** Path C: assistant type "project-scaffolding", guides through tech stack, scaffolds, configures.
+**Steps:** Enter path to an empty or nonexistent directory.
+**Expected:** Scaffolding assistant opens. Guides through tech stack selection. Creates project structure and configuration.
 **Coverage:** partial.
 
 ## PR-04: Remove project
-**Action:** Project settings → General → Danger Zone → Remove Project.
-**Expected:** DELETE /api/projects/:id, worktree pool drained, unregistered from server, files on disk NOT deleted, hidden for default project (server CWD), navigates to system settings, sidebar refreshes.
+**Steps:** Project settings → Danger Zone → Remove Project.
+**Expected:** Project removed from sidebar. Files on disk not deleted. Cannot remove the default project.
 **Coverage:** covered.
 
-## PR-05: Project settings commands
-**Action:** Gear icon → Commands & Sandbox tab.
-**Expected:** Edit build_command, test_command, typecheck_command, test_unit_command, test_e2e_command, worktree_setup_command. Persisted to project.yaml via PUT /api/projects/:id/config. New sessions/goals use updated commands. GET /api/projects/:id/config/resolved shows {value, source} annotations.
+## PR-05: Project commands
+**Steps:** Project settings → Commands tab, edit build/test/typecheck commands, save.
+**Expected:** Commands saved. Used by new sessions and goals in this project.
 **Coverage:** partial.
 
-## PR-06: Project settings models
-**Action:** Models tab.
-**Expected:** Project-specific model preferences. New sessions use project models, other projects use system defaults.
+## PR-06: Project models
+**Steps:** Project settings → Models tab, set model preferences.
+**Expected:** Project-specific model preferences applied. Override system defaults for this project only.
 **Coverage:** API only.
 
-## PR-07: Project settings appearance
-**Action:** Appearance tab.
-**Expected:** Palette picker (10 built-in palettes), dual accent color inputs (colorLight/colorDark). Project sessions use selected palette. data-palette attribute set on root. Palette applied on session connect (twice: immediately and after refreshSessions for recently-spawned sessions).
+## PR-07: Project appearance
+**Steps:** Project settings → Appearance tab.
+**Expected:** Choose a palette and accent colors. Sessions in this project use the selected theme. Other projects unaffected.
 **Coverage:** partial.
 
 ## PR-08: Browse directory
-**Action:** Add Project dialog, click Browse.
-**Expected:** GET /api/browse?path=<dir> returns directory listing, navigate up/down, select populates input.
+**Steps:** In Add Project dialog, click Browse.
+**Expected:** Directory browser shows the real filesystem. Can navigate folders. Selection fills the path input.
 **Coverage:** covered.
 
 ## PR-09: Multi-project sidebar
-**Action:** Multiple projects registered.
-**Expected:** Project headers with name+palette color. Collapse/expand per project (localStorage `bobbit-collapsed-ungrouped`). Gear icon navigates to #/settings/<projectId>/project. Add Goal and Add Staff scoped to project. Sessions and goals grouped under projects.
+**Pre:** Multiple projects registered.
+**Expected:** Each project has its own section with sessions and goals grouped underneath. Collapse/expand per project. Gear icon navigates to that project's settings.
 **Coverage:** covered.
 
 ## PR-10: Provisional cleanup
-**Action:** Terminate assistant without accepting.
-**Expected:** Provisional project deleted via DELETE /api/projects/:id, sidebar updated, no orphaned state.
+**Steps:** Close the project assistant session without accepting the proposal.
+**Expected:** Provisional project deleted. Sidebar cleaned up.
 **Coverage:** covered.

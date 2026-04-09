@@ -8,16 +8,12 @@
 1. Click goal in sidebar.
 
 **Expected:**
-- URL changes to `#/goal/<id>`.
-- `BobbitLoadingAnimation` shows during data fetch.
+- Loading animation shows briefly.
 - Title and spec displayed.
-- Setup status badge:
-  - **preparing** — spinner.
-  - **ready** — green badge.
-  - **error** — red badge with Retry button.
+- Setup status visible (preparing/ready/error).
 - Team section visible if team has been started.
 - Gates section accessible.
-- No flash of stale data from a previous goal (`goalDashboardId` state tracks the current goal and prevents stale renders).
+- No flash of stale data from a previously viewed goal.
 
 **Coverage:** Minimal.
 
@@ -34,7 +30,7 @@
 - Tabs include Overview, Gates/Workflow, and Team/Agents.
 - Tab content switches on click.
 - Active tab is visually highlighted.
-- Tab state is **not** preserved when navigating away and back (resets to the default tab).
+- Tab state resets to default when navigating away and back.
 
 **Coverage:** None.
 
@@ -48,11 +44,11 @@
 1. View the Gates tab.
 
 **Expected:**
-- Gates listed respecting dependency ordering.
-- **Pending** — grey indicator.
-- **Passed** — green checkmark with content preview and timestamp.
-- **Failed** — red X with a link to verification output.
-- **Verifying** — spinner with phase info.
+- Gates listed in dependency order.
+- Pending gates show a neutral/grey indicator.
+- Passed gates show green with content preview and timestamp.
+- Failed gates show red with a link to verification output.
+- Verifying gates show a spinner with phase info.
 - Signal button enabled only when all upstream dependencies have passed.
 - Blocked gates have a disabled Signal button.
 
@@ -68,12 +64,9 @@
 1. Click "View Output" on a gate.
 
 **Expected:**
-- Modal opens.
-- Content bootstraps from the API (`/api/goals/:id/verifications/active`).
-- After bootstrap, streams live updates via the `/ws/viewer` WebSocket.
-- Steps displayed with status indicators (running / pass / fail / skip).
+- Modal opens showing verification steps with status indicators.
 - Output streams in real-time for running steps.
-- Completed steps show status badges.
+- Completed steps show pass/fail/skip badges.
 - Cancel button visible during an active verification.
 - Closing and re-opening the modal shows the same state.
 
@@ -92,16 +85,15 @@
 - PR link displayed.
 - Status badge (open / merged / closed / draft).
 - CI check status shown.
-- Mergeable indicator shown.
-- Review decision shown.
-- Refreshes periodically (60 s throttle via `PR_POLL_INTERVAL_MS`).
-- Merge button visible if the viewer is an admin.
+- Mergeable and review status shown.
+- Refreshes periodically.
+- Merge button visible if you have permission.
 
 **Coverage:** API-level only.
 
 ---
 
-## D-06: Dashboard auto-refresh
+## D-06: Dashboard live updates
 
 **Preconditions:** Goal with an active team.
 
@@ -110,9 +102,9 @@
 2. An agent completes a task in the background.
 
 **Expected:**
-- Gate status updates arrive via `/ws/viewer` WebSocket broadcasts (`broadcastToGoal`).
-- Team agent status updates without a page refresh.
-- No manual polling needed for gate or verification changes.
+- Gate status updates appear without page refresh.
+- Team agent status updates without page refresh.
+- No manual reload needed for gate or verification changes.
 
 **Coverage:** None.
 
@@ -125,12 +117,12 @@
 **Steps:**
 1. Click the agent link on the dashboard.
 2. View the agent session.
-3. Click back / navigate back.
+3. Navigate back.
 
 **Expected:**
-- Agent session loads at `#/session/<id>`.
-- Back navigation returns to `#/goal/<goalId>`.
-- Dashboard state is reloaded (not cached).
+- Agent session loads.
+- Back navigation returns to the goal dashboard.
+- Dashboard state is fresh (not cached from before).
 
 **Coverage:** None.
 
@@ -138,16 +130,15 @@
 
 ## D-08: Retry goal setup
 
-**Preconditions:** Goal setup failed (`setupStatus` is `"error"`).
+**Preconditions:** Goal setup failed (error status shown).
 
 **Steps:**
 1. Click the "Retry Setup" button.
 
 **Expected:**
-- POST triggers `retrySetup()`, which resets status to `"preparing"`.
-- Worktree setup re-runs.
-- `createWorktree()` is idempotent — handles a pre-existing branch from the previous failed attempt.
-- Status transitions: error → preparing → ready.
+- Setup re-runs.
+- Status transitions from error back to preparing, then to ready.
+- Handles the case where a previous failed attempt left partial state — no manual cleanup needed.
 
 **Coverage:** None.
 
@@ -161,13 +152,8 @@
 1. View the tasks section.
 
 **Expected:**
-- Tasks listed with:
-  - **Type** — implementation / code-review / testing / bug-fix / refactor / custom.
-  - **Status** — todo / in-progress / complete / blocked / skipped.
-  - **Assignee** session.
-  - **Dependencies** (`depends_on`).
-  - **Spec** and **result** fields.
-  - Git handoff fields: `baseSha`, `headSha`, `branch`.
+- Tasks listed with type, status, assignee, dependencies, spec, and result.
+- Git branch info shown per task.
 
 **Coverage:** API-level only.
 
@@ -181,9 +167,8 @@
 1. Navigate to the dashboard for the first time.
 
 **Expected:**
-- `BobbitLoadingAnimation` shows.
+- Loading animation shows.
 - Animation clears when data loads.
-- `state.goalDashboardId` is set to prevent stale data from a previously viewed goal.
-- Error state shown if goal not found (404).
+- Error shown if goal not found.
 
 **Coverage:** Unit test only.

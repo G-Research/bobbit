@@ -5,12 +5,11 @@
 **Preconditions:** Goal with team started.
 
 **Steps:**
-1. Navigate to goal dashboard.
-2. View team section.
+1. Open the goal dashboard.
 
 **Expected:**
-- All agents listed with role label, status (idle/streaming/terminated), branch name, worktree path, and session link.
-- Click agent navigates to session view.
+- All agents listed with their role, status, and branch.
+- Each agent is clickable to navigate to its session.
 
 **Coverage:** Partial.
 
@@ -21,14 +20,12 @@
 **Preconditions:** Team agent exists.
 
 **Steps:**
-1. Click agent name/link on dashboard.
+1. Click an agent on the dashboard.
 
 **Expected:**
-- Navigates to `#/session/<agentSessionId>`.
-- Agent's chat messages visible.
-- Context bar shows agent model.
-- Can send follow-up messages via `team_prompt`.
-- Back button returns to dashboard.
+- The agent's chat opens showing its messages.
+- Can send follow-up messages to the agent.
+- Back button returns to the dashboard.
 
 **Coverage:** None.
 
@@ -39,14 +36,12 @@
 **Preconditions:** Team agent exists.
 
 **Steps:**
-1. Click dismiss on dashboard.
+1. Click dismiss on the dashboard.
 
 **Expected:**
-- Agent session terminated.
-- Worktree cleaned up (git worktree remove + branch delete).
-- Agent removed from team state.
-- Other agents unaffected.
-- `team-state.json` updated.
+- The agent's session ends.
+- The agent's worktree is cleaned up.
+- Other agents are unaffected.
 
 **Coverage:** Partial.
 
@@ -57,15 +52,13 @@
 **Preconditions:** Goal with agents running.
 
 **Steps:**
-1. Click Abort on dashboard.
-2. Confirm.
+1. Click Abort on the dashboard.
+2. Confirm the action.
 
 **Expected:**
-- All agent sessions terminated.
-- All worktrees cleaned up.
-- Goal status reflects abort.
+- All agents are terminated.
+- All worktrees are cleaned up.
 - Dashboard shows no active agents.
-- `team-state.json` updated.
 
 **Coverage:** API-level only.
 
@@ -73,17 +66,15 @@
 
 ## T-05: Complete team
 
-**Preconditions:** All work done, review gate passed (server enforces).
+**Preconditions:** All work done, review gate passed.
 
 **Steps:**
-1. Click Complete on dashboard.
+1. Click Complete on the dashboard.
 
 **Expected:**
-- Server requires review gate passed first (409 if not).
-- All agents dismissed.
-- Worktrees cleaned up.
-- Goal marked complete.
-- PR created if configured.
+- Only works if the review gate has passed.
+- All agents are dismissed and worktrees cleaned up.
+- Goal is marked complete.
 
 **Coverage:** None.
 
@@ -91,18 +82,17 @@
 
 ## T-06: Steer a running agent
 
-**Preconditions:** Agent mid-turn (streaming).
+**Preconditions:** Agent is mid-turn.
 
 **Steps:**
-1. Navigate to agent session.
-2. Type steer message.
-3. Send while busy.
+1. Navigate to the agent's session.
+2. Type a steer message.
+3. Send while the agent is working.
 
 **Expected:**
-- Steer message injected as user message into agent's conversation mid-turn.
-- Agent sees it interleaved with current work.
-- Both steer and response visible in chat.
-- Use sparingly — prefer letting agents finish.
+- The message is injected into the agent's conversation.
+- The agent adjusts its behavior based on the steer.
+- Both the steer and the agent's continued response are visible in chat.
 
 **Coverage:** API-level only.
 
@@ -110,33 +100,31 @@
 
 ## T-07: Send follow-up to idle agent
 
-**Preconditions:** Team agent idle.
+**Preconditions:** Team agent is idle.
 
 **Steps:**
-1. Navigate via dashboard.
-2. Type message.
-3. Send.
+1. Navigate to the agent via the dashboard.
+2. Send a message.
 
 **Expected:**
-- `team_prompt` sends follow-up.
-- Agent processes and responds.
-- Supports `workflowGateId`/`inputGateIds` for context injection from upstream gates.
+- The agent processes the message and responds.
+- The response is visible in chat.
 
 **Coverage:** None.
 
 ---
 
-## T-08: Team agent git handoff
+## T-08: Git handoff between agents
 
-**Preconditions:** Agent completed task with commits.
+**Preconditions:** Agent completed a task with commits.
 
 **Steps:**
-1. Agent sets `headSha` via `task_update`.
-2. Team lead merges.
+1. Agent finishes its work.
+2. Team lead merges the agent's branch.
 
 **Expected:**
-- Task has `baseSha` (auto-set on spawn), `headSha` (set by agent on completion), `branch` (auto-set on spawn).
-- Team lead runs `git merge <task.branch>`.
-- In sandbox, agents use standard git worktrees inside container with post-commit hook that pushes to remote.
+- The agent's commits are on its branch.
+- The team lead can merge the branch.
+- In sandbox mode, commits are pushed automatically for durability.
 
 **Coverage:** API-level only.

@@ -1,31 +1,29 @@
 # Staff User Stories
 
 ## ST-01: View staff
-**Action:** Navigate to #/staff or view sidebar.
-**Expected:** Staff listed with name, description, state (idle/active/terminated), lastWakeAt, currentSessionId. Staff visible in sidebar under project in collapsible Staff section.
+**Expected:** Staff listed with name, description, and status. Visible in sidebar under their project.
 **Coverage:** none.
 
 ## ST-02: Create staff
-**Action:** Click New Staff or sidebar Add Staff.
-**Expected:** Fill name, prompt, description, optional triggers, optional cwd. Creates staff agent, appears in sidebar, session created.
+**Steps:** Click New Staff, fill name, prompt, and triggers, save.
+**Expected:** Staff appears in sidebar. A session is created for the staff agent.
 **Coverage:** none.
 
 ## ST-03: Edit staff
-**Action:** Click staff entry, modify prompt/triggers, save.
-**Expected:** Changes persisted, behavior updated on next interaction.
+**Steps:** Click a staff entry, modify fields, save.
+**Expected:** Changes saved and reflected on next interaction.
 **Coverage:** none.
 
 ## ST-04: Delete staff
-**Action:** Delete staff, confirm.
-**Expected:** Removed from list and sidebar, session terminated.
+**Steps:** Delete staff, confirm.
+**Expected:** Removed from sidebar. Associated session terminated.
 **Coverage:** none.
 
 ## ST-05: Staff in sidebar
-**Action:** View sidebar.
-**Expected:** Staff section under project, collapsible (per-project collapse state in localStorage `bobbit-collapsed-staff`), click opens staff session, active staff show status indicator.
+**Expected:** Staff section under each project, collapsible separately from sessions. Clicking a staff entry opens its session.
 **Coverage:** none.
 
 ## ST-06: Staff triggers
-**Action:** Trigger condition met.
-**Expected:** Staff session receives trigger prompt, processes, responds, status updates.
+**Pre:** Triggers configured on a staff agent.
+**Expected:** Staff activates automatically when its trigger condition fires. Status updates in sidebar.
 **Coverage:** none.
