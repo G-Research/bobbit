@@ -1,275 +1,279 @@
-# Sessions
+# Sessions — User Stories
 
 ## S-01: Create a new session
 
-**Preconditions:** App loaded, at least one project registered.
+**Preconditions:** App loaded, project in a git repo.
 
 **Steps:**
-1. Click the "+" (New Session) button in the sidebar
-2. Wait for session to appear in sidebar and textarea to be visible
+1. Click "+" in the sidebar.
+2. Wait for session to appear.
 
 **Expected:**
-- New session appears in sidebar with a default title
-- Session is selected (highlighted) in sidebar
-- Main panel shows empty chat with textarea focused
-- Context bar shows model name and provider
-- Session status is `idle` via API
+- New session appears in sidebar with default title
+- Session is highlighted as active
+- Empty chat with textarea focused
+- Context bar shows current model
+- Session gets its own worktree with a dedicated branch
+- Working directory is inside the worktree, not the main project directory
+- If the project is in a subdirectory of the repo, the working directory is the equivalent subdirectory in the worktree
+- Git status widget shows the session's branch name
+- Setup command runs if configured (e.g. npm ci)
 
-**Coverage:** `tests/e2e/ui/session-interactions.spec.ts` — "create and send message"
+**Coverage:** partial
 
 ---
 
 ## S-02: Send a message and receive a response
 
-**Preconditions:** Active session connected.
+**Preconditions:** Active session.
 
 **Steps:**
-1. Type a message in the textarea
-2. Press Enter (or click Send)
-3. Wait for response
+1. Type message.
+2. Press Enter.
+3. Wait.
 
 **Expected:**
 - User message appears in chat
-- Agent response appears below user message
-- Session status transitions: idle → streaming → idle
-- Textarea is re-enabled after response
-- Session title auto-updates if this is the first message
+- Agent response appears below
+- Textarea re-enables after response
+- Session title auto-generates after first message
 
-**Coverage:** `tests/e2e/ui/session-interactions.spec.ts` — "create and send message"
+**Coverage:** covered
 
 ---
 
 ## S-03: Draft isolation across sessions
 
-**Preconditions:** Two active sessions exist.
+**Preconditions:** Two sessions exist.
 
 **Steps:**
-1. Navigate to session A
-2. Type "draft for A" in textarea (don't send)
-3. Navigate to session B
-4. Type "draft for B" in textarea (don't send)
-5. Navigate back to session A
-6. Navigate back to session B
+1. Go to session A.
+2. Type "draft for A" (don't send).
+3. Go to session B.
+4. Type "draft for B" (don't send).
+5. Go back to A.
+6. Go back to B.
 
 **Expected:**
-- Session A textarea shows "draft for A" on return
-- Session B textarea shows "draft for B" on return
+- Session A shows "draft for A" on return
+- Session B shows "draft for B" on return
 - Drafts never leak between sessions
-- Drafts survive page reload (persisted to sessionStorage)
+- Drafts survive page reload
+- A sent message does not reappear as a draft
 
-**Coverage:** None — draft isolation is untested.
+**Coverage:** none
 
 ---
 
 ## S-04: Terminate a session
 
-**Preconditions:** Active session exists.
+**Preconditions:** Session exists.
 
 **Steps:**
-1. Hover over session in sidebar
-2. Click the X (terminate) button
-3. Confirm if prompted
+1. Hover session in sidebar.
+2. Click X.
+3. Confirm if prompted.
 
 **Expected:**
 - Session disappears from sidebar
-- If session was selected, main panel shows landing or next session
-- API confirms session is terminated/archived
-- Worktree is cleaned up (if session had one)
+- If it was selected, view switches to landing or another session
+- Worktree is cleaned up
 
-**Coverage:** `tests/e2e/ui/session-interactions.spec.ts` — "terminate session"
+**Coverage:** covered
 
 ---
 
 ## S-05: Switch between sessions
 
-**Preconditions:** Multiple sessions exist with messages.
+**Preconditions:** Multiple sessions with messages.
 
 **Steps:**
-1. Click session A in sidebar
-2. Verify messages load
-3. Click session B in sidebar
-4. Verify messages load
-5. Click back to session A
+1. Click session A.
+2. Verify messages.
+3. Click session B.
+4. Verify messages.
+5. Click A again.
 
 **Expected:**
-- Each session shows its own messages (never mixed)
+- Each session shows only its own messages
 - Sidebar highlights the active session
-- Context bar updates to show correct model/provider
-- Previous session's WebSocket is disconnected (or cached)
-- No console errors during switching
+- Context bar shows the correct model for each session
+- Loading animation shows briefly while connecting
+- No errors
 
-**Coverage:** `tests/e2e/ui/session-interactions.spec.ts` — "switch sessions", but rapid switching is untested.
+**Coverage:** partial
 
 ---
 
-## S-06: Rapid session switching (stress)
+## S-06: Rapid session switching
 
-**Preconditions:** 4+ sessions with messages exist.
+**Preconditions:** 4+ sessions with messages.
 
 **Steps:**
-1. Click session A
-2. Immediately click session B (don't wait for A to load)
-3. Immediately click session C
-4. Wait for C to fully load
+1. Click A.
+2. Immediately click B.
+3. Immediately click C.
+4. Wait for C to load.
 
 **Expected:**
-- Final session (C) loads correctly with its messages
+- Session C loads correctly with its own messages
 - No stale messages from A or B visible
-- No console errors
 - Sidebar shows C as active
-- Loading indicator shows during transition, clears when connected
+- No errors
 
-**Coverage:** None — rapid switching is untested.
+**Coverage:** none
 
 ---
 
 ## S-07: Session survives page reload
 
-**Preconditions:** Active session with messages.
+**Preconditions:** Session with messages.
 
 **Steps:**
-1. Send a message, wait for response
-2. Reload the page (F5)
-3. Wait for app to reconnect
+1. Send message, get response.
+2. Reload page.
+3. Wait for reconnect.
 
 **Expected:**
 - Session appears in sidebar
-- Clicking it shows previous messages
+- Previous messages visible
 - Can send new messages
-- Context bar shows correct model info
+- Context bar shows correct model
 
-**Coverage:** `tests/e2e/ui/session-interactions.spec.ts` — "reload preserves session"
+**Coverage:** covered
 
 ---
 
-## S-08: Session with worktree
+## S-08: Session worktree details
 
 **Preconditions:** Project is a git repo.
 
 **Steps:**
-1. Create a new session
-2. Check session info via API
+1. Create session.
+2. Check git status widget.
 
 **Expected:**
-- Session CWD is in a worktree directory (not project root)
-- Session has its own git branch (not master)
-- Git status widget renders in the UI
+- Working directory is in a worktree, not the main project directory
+- Session has its own branch (not master)
+- Git status widget shows the branch name
+- If project is in a subdirectory of the repo, working directory is the equivalent subdirectory in the worktree
+- Setup command runs if configured (e.g. npm ci)
 
-**Coverage:** `tests/e2e/ui/session-worktree.spec.ts`
+**Coverage:** partial
 
 ---
 
 ## S-09: Rename a session
 
-**Preconditions:** Active session exists.
+**Preconditions:** Session exists.
 
 **Steps:**
-1. Right-click (or long-press) session in sidebar
-2. Select "Rename"
-3. Type new title
-4. Confirm
+1. Double-click title or right-click → Rename.
+2. Type new title.
+3. Confirm.
 
 **Expected:**
-- Session title updates in sidebar immediately
+- Title updates in sidebar immediately
 - Title persists across page reload
-- Title visible in session header
 
-**Coverage:** None — rename UI flow is untested.
+**Coverage:** none
 
 ---
 
 ## S-10: Change model mid-session
 
-**Preconditions:** Active session connected.
+**Preconditions:** Active session.
 
 **Steps:**
-1. Click model selector in context bar
-2. Select a different model
-3. Send a message
+1. Click model selector in context bar.
+2. Select different model.
+3. Send a message.
 
 **Expected:**
-- Context bar updates to show new model
-- Agent uses new model for next response
+- Context bar shows new model
+- Agent uses the new model
 - Model choice persists across reconnect
 
-**Coverage:** `tests/e2e/context-bar-reconnect.spec.ts` (API-level), no UI E2E.
+**Coverage:** partial
 
 ---
 
 ## S-11: Abort a running agent
 
-**Preconditions:** Agent is streaming a response.
+**Preconditions:** Agent is streaming.
 
 **Steps:**
-1. Send a message that triggers a long response
-2. Click the Stop button while agent is streaming
+1. Send a message.
+2. Click Stop while streaming.
 
 **Expected:**
 - Agent stops generating
 - Partial response is visible
 - Textarea re-enables
-- Session returns to idle
-- Can send new messages after abort
+- Can send new messages
 
-**Coverage:** `tests/e2e/steer-midturn.spec.ts` (API-level abort), no UI click test.
+**Coverage:** partial
 
 ---
 
 ## S-12: Queue management
 
-**Preconditions:** Agent is busy (streaming).
+**Preconditions:** Agent is busy.
 
 **Steps:**
-1. Send a message while agent is busy
-2. Verify it appears in the queue
-3. Send another message
-4. Reorder the queue (drag or API)
-5. Remove one queued message
+1. Send message while busy.
+2. Verify it appears in queue.
+3. Send another.
+4. Reorder via drag.
+5. Remove one.
 
 **Expected:**
-- Queued messages appear in queue UI
-- Reordering changes execution order
-- Removed message does not execute
-- When agent finishes current turn, next queued message is sent automatically
+- Queued messages appear as pills below the textarea
+- Can drag to reorder
+- Can remove a queued message
+- Can steer (send immediately, interrupting current turn)
+- Can edit (puts text back in textarea)
+- When agent finishes, next queued message sends automatically
 
-**Coverage:** `tests/e2e/ui/queue-ui.spec.ts` — 5 tests covering queue display, send-while-busy, reorder, remove, steer-from-queue.
+**Coverage:** covered
 
 ---
 
 ## S-13: Tool permission grant/deny
 
-**Preconditions:** Session active, tool policy set to "ask".
+**Preconditions:** Tool policy set to "ask".
 
 **Steps:**
-1. Send a message that triggers a guarded tool
-2. Tool permission dialog appears
-3. Click "Allow" (or "Deny")
+1. Agent tries to use a guarded tool.
+2. Permission dialog appears.
+3. Click Allow or Deny.
 
 **Expected:**
-- Allow: tool executes, response includes tool output
-- Deny: agent receives denial, responds accordingly
-- Dialog disappears after action
-- If "Allow always" selected, subsequent uses don't prompt
+- Allow: tool executes, result visible
+- Deny: agent told permission was denied
+- Dialog closes after action
+- "Allow for session" means no more prompts this session
+- "Allow always" means no more prompts ever for this tool
 
-**Coverage:** `tests/e2e/ui/tool-ask-policy.spec.ts` — 3 tests.
+**Coverage:** covered
 
 ---
 
 ## S-14: Session survives gateway crash
 
-**Preconditions:** Active session with messages, gateway running.
+**Preconditions:** Session with messages, gateway running.
 
 **Steps:**
-1. Send a message, wait for response
-2. Gateway process is killed (hard crash)
-3. Gateway restarts on new port
-4. Navigate to the session
+1. Send message.
+2. Gateway killed.
+3. Gateway restarts.
+4. Navigate to session.
 
 **Expected:**
-- Session appears in sidebar (not archived)
-- Previous messages are visible
+- Session appears in sidebar, not lost
+- Previous messages visible
 - Can send new messages
-- CWD is preserved
-- Git status widget renders (if worktree session)
+- Working directory unchanged
+- Git status widget works
 
-**Coverage:** Manual integration tests only — `tests/manual-integration/session-resilience.spec.ts`
+**Coverage:** manual only

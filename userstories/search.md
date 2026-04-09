@@ -1,83 +1,27 @@
-# Search
+# Search User Stories
 
 ## SR-01: Search from sidebar
-
-**Preconditions:** Sessions with messages exist.
-
-**Steps:**
-1. Click search icon/box in sidebar
-2. Type a search query
-3. Results appear
-
-**Expected:**
-- Results show matching sessions/messages
-- Snippets highlight matching text
-- Can click result to navigate to session
-
-**Coverage:** None — search UI completely untested.
-
----
+**Steps:** Click the search icon in the sidebar. Type a query into the search field.
+**Expected:** Results appear showing matching sessions and messages with highlighted snippets. Clicking a result navigates to that session or message.
+**Coverage:** none.
 
 ## SR-02: Search results page
-
-**Preconditions:** Search query entered.
-
-**Steps:**
-1. Navigate to #/search?q=query
-2. View results
-
-**Expected:**
-- Full search results page
-- Grouped by session
-- Message context shown
-- Pagination if many results
-
-**Coverage:** None.
-
----
+**Steps:** Navigate to the search page with a query.
+**Expected:** A full results page is displayed. Results are grouped by session. Message context is shown around each match.
+**Coverage:** none.
 
 ## SR-03: Search across projects
+**Pre-condition:** Multiple projects are registered.
+**Steps:** Perform a search.
+**Expected:** Results include matches from all projects.
+**Coverage:** none.
 
-**Preconditions:** Multiple projects with sessions.
+## SR-04: Empty state
+**Steps:** Search for a query that matches nothing.
+**Expected:** A "No results" message is displayed. No errors are shown.
+**Coverage:** none.
 
-**Steps:**
-1. Search for a term that exists in different projects
-
-**Expected:**
-- Results from all projects
-- Project name shown per result
-- Can filter by project (if supported)
-
-**Coverage:** None.
-
----
-
-## SR-04: Search empty state
-
-**Preconditions:** No matching results.
-
-**Steps:**
-1. Search for a term with no matches
-
-**Expected:**
-- "No results" message shown
-- No errors
-
-**Coverage:** None.
-
----
-
-## SR-05: Search index rebuild
-
-**Preconditions:** Search returning stale results.
-
-**Steps:**
-1. Delete search.db
-2. Restart server
-3. Search again
-
-**Expected:**
-- Index rebuilt automatically
-- Results reflect current data
-
-**Coverage:** None.
+## SR-05: Index rebuild
+**Steps:** Delete the search index file, then restart the server.
+**Expected:** The search index is rebuilt automatically. Search works again after restart.
+**Coverage:** none.
