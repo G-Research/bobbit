@@ -12,32 +12,40 @@ import type { ToolProvider } from "../dist/server/agent/tool-manager.js";
  *   npx playwright test tests/tool-activation.spec.ts --config tests/playwright.config.ts
  */
 
-/** Provider with groupDir — matches ToolManager.getToolProviders() return type */
-type ProviderWithGroup = ToolProvider & { groupDir: string };
+import path from "node:path";
+
+/** Provider with groupDir and baseDir — matches ToolManager.getToolProviders() return type */
+type ProviderWithGroup = ToolProvider & { groupDir: string; baseDir: string };
+
+/** Fake base dir for mock tool providers */
+const MOCK_TOOLS_DIR = "/mock/tools";
 
 /** Minimal mock that satisfies the ToolManager interface used by computeToolActivationArgs */
 function mockToolManager(providers: Map<string, ProviderWithGroup>) {
-	return { getToolProviders: () => providers } as any;
+	return {
+		getToolProviders: () => providers,
+		getExtensionPath: (groupDir: string, filename: string) => path.join(MOCK_TOOLS_DIR, groupDir, filename),
+	} as any;
 }
 
 /** Standard provider map matching real tools/<group>/*.yaml definitions */
 function standardProviders(): Map<string, ProviderWithGroup> {
 	return new Map<string, ProviderWithGroup>([
-		["read", { type: "builtin", tool: "read", groupDir: "filesystem" }],
-		["write", { type: "builtin", tool: "write", groupDir: "filesystem" }],
-		["edit", { type: "builtin", tool: "edit", groupDir: "filesystem" }],
-		["bash", { type: "builtin", tool: "bash", groupDir: "shell" }],
-		["grep", { type: "builtin", tool: "grep", groupDir: "filesystem" }],
-		["find", { type: "builtin", tool: "find", groupDir: "filesystem" }],
-		["ls", { type: "builtin", tool: "ls", groupDir: "filesystem" }],
-		["web_search", { type: "bobbit-extension", extension: "extension.ts", groupDir: "web" }],
-		["web_fetch", { type: "bobbit-extension", extension: "extension.ts", groupDir: "web" }],
-		["delegate", { type: "bobbit-extension", extension: "extension.ts", groupDir: "agent" }],
-		["browser_navigate", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser" }],
-		["browser_click", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser" }],
-		["task_create", { type: "bobbit-extension", extension: "extension.ts", groupDir: "tasks" }],
-		["team_spawn", { type: "bobbit-extension", extension: "extension.ts", groupDir: "team" }],
-		["bash_bg", { type: "bobbit-extension", extension: "extension.ts", groupDir: "shell" }],
+		["read", { type: "builtin", tool: "read", groupDir: "filesystem", baseDir: MOCK_TOOLS_DIR }],
+		["write", { type: "builtin", tool: "write", groupDir: "filesystem", baseDir: MOCK_TOOLS_DIR }],
+		["edit", { type: "builtin", tool: "edit", groupDir: "filesystem", baseDir: MOCK_TOOLS_DIR }],
+		["bash", { type: "builtin", tool: "bash", groupDir: "shell", baseDir: MOCK_TOOLS_DIR }],
+		["grep", { type: "builtin", tool: "grep", groupDir: "filesystem", baseDir: MOCK_TOOLS_DIR }],
+		["find", { type: "builtin", tool: "find", groupDir: "filesystem", baseDir: MOCK_TOOLS_DIR }],
+		["ls", { type: "builtin", tool: "ls", groupDir: "filesystem", baseDir: MOCK_TOOLS_DIR }],
+		["web_search", { type: "bobbit-extension", extension: "extension.ts", groupDir: "web", baseDir: MOCK_TOOLS_DIR }],
+		["web_fetch", { type: "bobbit-extension", extension: "extension.ts", groupDir: "web", baseDir: MOCK_TOOLS_DIR }],
+		["delegate", { type: "bobbit-extension", extension: "extension.ts", groupDir: "agent", baseDir: MOCK_TOOLS_DIR }],
+		["browser_navigate", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser", baseDir: MOCK_TOOLS_DIR }],
+		["browser_click", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser", baseDir: MOCK_TOOLS_DIR }],
+		["task_create", { type: "bobbit-extension", extension: "extension.ts", groupDir: "tasks", baseDir: MOCK_TOOLS_DIR }],
+		["team_spawn", { type: "bobbit-extension", extension: "extension.ts", groupDir: "team", baseDir: MOCK_TOOLS_DIR }],
+		["bash_bg", { type: "bobbit-extension", extension: "extension.ts", groupDir: "shell", baseDir: MOCK_TOOLS_DIR }],
 	]);
 }
 

@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, parseDocument } from "yaml";
+import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export interface ToolProvider {
 	type: 'builtin' | 'bobbit-extension' | 'mcp';
@@ -27,6 +30,8 @@ interface BaseToolInfo {
 	groupDir: string;
 	/** Absolute path to the YAML file on disk. */
 	filePath: string;
+	/** Absolute path to the tools/ parent directory where this tool was found. */
+	baseDir: string;
 }
 
 export interface ToolInfo {
@@ -44,17 +49,23 @@ export interface ToolInfo {
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
 
-/** Tool definitions directory — .bobbit/config/tools/ (legacy export for callers that need the default path) */
+/**
+ * Tool definitions directory — .bobbit/config/tools/ (legacy export, deprecated).
+ * @deprecated Use ToolManager.getExtensionPath() or ToolManager.getToolsDir() instead.
+ */
 export const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
 
+/** Default builtins tools directory: dist/server/defaults/tools/ */
+function defaultBuiltinToolsDir(): string {
+	return path.join(__dirname, "..", "defaults", "tools");
+}
+
 /**
- * Scan the tools/ YAML directory and return all tool definitions.
+ * Scan a single tools/ directory and return all tool definitions.
  * Supports both grouped layout (tools/<group>/*.yaml) and flat layout (tools/*.yaml).
- * Called on every request so new/edited YAML files are picked up without restart.
  */
-function loadToolDefinitions(toolsDir: string): BaseToolInfo[] {
+function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 	const tools: BaseToolInfo[] = [];
-	const seen = new Set<string>();
 
 	try {
 		const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
@@ -73,8 +84,6 @@ function loadToolDefinitions(toolsDir: string): BaseToolInfo[] {
 						const raw = fs.readFileSync(filePath, "utf-8");
 						const data = parse(raw);
 						if (data && typeof data === "object" && data.name) {
-							if (seen.has(data.name)) continue;
-							seen.add(data.name);
 							tools.push({
 								name: data.name,
 								description: data.description || "",
@@ -87,6 +96,7 @@ function loadToolDefinitions(toolsDir: string): BaseToolInfo[] {
 								grantPolicy: data.grantPolicy,
 								groupDir,
 								filePath,
+								baseDir,
 							});
 						}
 					} catch (err) {
@@ -106,8 +116,6 @@ function loadToolDefinitions(toolsDir: string): BaseToolInfo[] {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
 				if (data && typeof data === "object" && data.name) {
-					if (seen.has(data.name)) continue; // Group dir version takes precedence
-					seen.add(data.name);
 					tools.push({
 						name: data.name,
 						description: data.description || "",
@@ -120,6 +128,7 @@ function loadToolDefinitions(toolsDir: string): BaseToolInfo[] {
 						grantPolicy: data.grantPolicy,
 						groupDir: "",
 						filePath,
+						baseDir,
 					});
 				}
 			} catch (err) {
@@ -133,16 +142,128 @@ function loadToolDefinitions(toolsDir: string): BaseToolInfo[] {
 }
 
 /**
+ * Load tool definitions with group-level cascade: builtins first, then overlay
+ * from config-level toolsDir. A group in the higher layer replaces the entire group.
+ */
+function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string): BaseToolInfo[] {
+	const seen = new Set<string>();     // tool name dedup
+	const seenGroups = new Set<string>(); // track which groups came from overlay
+
+	// Scan overlay (config-level) first to determine which groups are overridden
+	const overlayTools = scanToolsDir(toolsDir, toolsDir);
+	for (const t of overlayTools) {
+		if (t.groupDir) seenGroups.add(t.groupDir);
+	}
+
+	const result: BaseToolInfo[] = [];
+
+	// Add builtin tools whose group is NOT overridden
+	if (builtinToolsDir) {
+		const builtinTools = scanToolsDir(builtinToolsDir, builtinToolsDir);
+		for (const t of builtinTools) {
+			// Skip if the group is overridden by the config level
+			if (t.groupDir && seenGroups.has(t.groupDir)) continue;
+			if (seen.has(t.name)) continue;
+			seen.add(t.name);
+			result.push(t);
+		}
+	}
+
+	// Add overlay tools (these take precedence)
+	for (const t of overlayTools) {
+		if (seen.has(t.name)) continue;
+		seen.add(t.name);
+		result.push(t);
+	}
+
+	return result;
+}
+
+/** Recursively copy a directory. */
+function copyDirRecursive(src: string, dest: string): void {
+	if (!fs.existsSync(src)) return;
+	fs.mkdirSync(dest, { recursive: true });
+	for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+		const srcPath = path.join(src, entry.name);
+		const destPath = path.join(dest, entry.name);
+		if (entry.isDirectory()) {
+			copyDirRecursive(srcPath, destPath);
+		} else {
+			fs.copyFileSync(srcPath, destPath);
+		}
+	}
+}
+
+/**
  * Manages tool definitions and metadata.
  * Tool definitions are loaded from tools/<group>/*.yaml on every read.
- * Metadata updates write directly to the YAML files.
+ * Supports a two-layer cascade: builtinToolsDir (read-only) → toolsDir (overrides).
  */
 export class ToolManager {
 	private externalTools = new Map<string, { name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>();
 	private readonly toolsDir: string;
+	private readonly builtinToolsDir: string | undefined;
 
-	constructor(configDir: string) {
+	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
+		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
+	}
+
+	/** Get the config-level tools directory. */
+	getToolsDir(): string {
+		return this.toolsDir;
+	}
+
+	/** Get the builtins tools directory (dist/server/defaults/tools/). */
+	getBuiltinToolsDir(): string | undefined {
+		return this.builtinToolsDir;
+	}
+
+	/**
+	 * Resolve which tools/ parent directory contains a given group.
+	 * Config-level (toolsDir) takes priority over builtins.
+	 */
+	getToolGroupBaseDir(groupDir: string): string {
+		// Check config-level first
+		const configGroup = path.join(this.toolsDir, groupDir);
+		try {
+			if (fs.statSync(configGroup).isDirectory()) return this.toolsDir;
+		} catch { /* not found */ }
+
+		// Check builtins
+		if (this.builtinToolsDir) {
+			const builtinGroup = path.join(this.builtinToolsDir, groupDir);
+			try {
+				if (fs.statSync(builtinGroup).isDirectory()) return this.builtinToolsDir;
+			} catch { /* not found */ }
+		}
+
+		// Fallback to config dir (for new user-created groups)
+		return this.toolsDir;
+	}
+
+	/**
+	 * Resolve the absolute path to a file within a tool group, respecting the cascade.
+	 * This is the primary method for resolving extension paths — replaces direct TOOLS_DIR usage.
+	 */
+	getExtensionPath(groupDir: string, filename: string): string {
+		const baseDir = this.getToolGroupBaseDir(groupDir);
+		return path.join(baseDir, groupDir, filename);
+	}
+
+	/**
+	 * Delete a tool group from the config-level tools directory, reverting to the builtin version.
+	 * Returns true if the group was deleted, false if it didn't exist.
+	 */
+	revertToolGroup(groupDir: string): boolean {
+		const configGroup = path.join(this.toolsDir, groupDir);
+		try {
+			if (fs.statSync(configGroup).isDirectory()) {
+				fs.rmSync(configGroup, { recursive: true, force: true });
+				return true;
+			}
+		} catch { /* not found */ }
+		return false;
 	}
 
 	/** Register tools from external sources (e.g. MCP servers). */
@@ -161,7 +282,7 @@ export class ToolManager {
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */
 	getAvailableTools(): ToolInfo[] {
-		const tools = loadToolDefinitions(this.toolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 		const result = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
@@ -196,7 +317,7 @@ export class ToolManager {
 				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined };
 			}
 		}
-		const tools = loadToolDefinitions(this.toolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
 		if (!base) return undefined;
 		return {
@@ -219,7 +340,7 @@ export class ToolManager {
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
 	getToolDocsForPrompt(toolNames?: string[]): string {
-		const tools = loadToolDefinitions(this.toolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 
 		// Build grouped data: group → { groupDir, entries }
 		const grouped = new Map<string, { groupDir: string; entries: Array<{ name: string; summary: string; docs?: string }> }>();
@@ -282,38 +403,52 @@ export class ToolManager {
 	getToolProvider(name: string): ToolProvider | undefined {
 		const ext = this.externalTools.get(name);
 		if (ext) return ext.provider;
-		const tools = loadToolDefinitions(this.toolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 		const base = tools.find((t) => t.name === name);
 		return base?.provider;
 	}
 
-	/** Returns all tool providers with groupDir in a single YAML scan. */
-	getToolProviders(): Map<string, ToolProvider & { groupDir: string }> {
-		const tools = loadToolDefinitions(this.toolsDir);
-		const map = new Map<string, ToolProvider & { groupDir: string }>();
+	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
+	getToolProviders(): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+		const map = new Map<string, ToolProvider & { groupDir: string; baseDir: string }>();
 		for (const tool of tools) {
-			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir });
+			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir, baseDir: tool.baseDir });
 		}
 		for (const [name, ext] of this.externalTools) {
-			map.set(name, { ...ext.provider, groupDir: '' });
+			map.set(name, { ...ext.provider, groupDir: '', baseDir: '' });
 		}
 		return map;
 	}
 
 	/** Returns all tool names from YAML definitions. */
 	getAllToolNames(): string[] {
-		const yamlNames = loadToolDefinitions(this.toolsDir).map((t) => t.name);
+		const yamlNames = loadToolDefinitions(this.toolsDir, this.builtinToolsDir).map((t) => t.name);
 		return [...yamlNames, ...this.externalTools.keys()];
 	}
 
-	/** Updates tool metadata (description, group, docs) by writing directly to the YAML file. */
+	/**
+	 * Updates tool metadata (description, group, docs) by writing directly to the YAML file.
+	 * If the tool's group only exists in builtins, copies the entire group to toolsDir first.
+	 */
 	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string }): boolean {
-		const tools = loadToolDefinitions(this.toolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 		const base = tools.find((t) => t.name === name);
 		if (!base) return false;
 
+		// If the tool is from builtins, copy the entire group to config dir first
+		let filePath = base.filePath;
+		if (base.baseDir !== this.toolsDir && base.groupDir && this.builtinToolsDir) {
+			const srcGroup = path.join(this.builtinToolsDir, base.groupDir);
+			const destGroup = path.join(this.toolsDir, base.groupDir);
+			copyDirRecursive(srcGroup, destGroup);
+			// Update filePath to point to the new copy
+			const relPath = path.relative(path.join(base.baseDir, base.groupDir), base.filePath);
+			filePath = path.join(destGroup, relPath);
+		}
+
 		try {
-			const raw = fs.readFileSync(base.filePath, "utf-8");
+			const raw = fs.readFileSync(filePath, "utf-8");
 			const doc = parseDocument(raw);
 
 			if (updates.description !== undefined) doc.set("description", updates.description);
@@ -322,10 +457,10 @@ export class ToolManager {
 			if (updates.detail_docs !== undefined) doc.set("detail_docs", updates.detail_docs);
 			if (updates.grantPolicy !== undefined) doc.set("grantPolicy", updates.grantPolicy);
 
-			fs.writeFileSync(base.filePath, doc.toString(), "utf-8");
+			fs.writeFileSync(filePath, doc.toString(), "utf-8");
 			return true;
 		} catch (err) {
-			console.error(`[tool-manager] Failed to update ${name} at ${base.filePath}:`, err);
+			console.error(`[tool-manager] Failed to update ${name} at ${filePath}:`, err);
 			return false;
 		}
 	}
