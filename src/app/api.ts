@@ -794,9 +794,10 @@ export async function createWorkflow(workflow: { id: string; name: string; descr
 	}
 }
 
-export async function updateWorkflow(id: string, updates: Partial<Workflow>): Promise<boolean> {
+export async function updateWorkflow(id: string, updates: Partial<Workflow>, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/workflows/${encodeURIComponent(id)}`, {
+		const url = projectId ? `/api/workflows/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}` : `/api/workflows/${encodeURIComponent(id)}`;
+		const res = await gatewayFetch(url, {
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
@@ -811,9 +812,10 @@ export async function updateWorkflow(id: string, updates: Partial<Workflow>): Pr
 	}
 }
 
-export async function deleteWorkflow(id: string): Promise<boolean> {
+export async function deleteWorkflow(id: string, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/workflows/${encodeURIComponent(id)}`, {
+		const url = projectId ? `/api/workflows/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}` : `/api/workflows/${encodeURIComponent(id)}`;
+		const res = await gatewayFetch(url, {
 			method: "DELETE",
 		});
 		return res.ok || res.status === 204;
@@ -1055,9 +1057,10 @@ export async function createPersonality(data: { name: string; label: string; des
 	}
 }
 
-export async function updatePersonality(name: string, updates: Partial<Pick<PersonalityData, "label" | "description" | "promptFragment">>): Promise<boolean> {
+export async function updatePersonality(name: string, updates: Partial<Pick<PersonalityData, "label" | "description" | "promptFragment">>, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/personalities/${encodeURIComponent(name)}`, {
+		const url = projectId ? `/api/personalities/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/personalities/${encodeURIComponent(name)}`;
+		const res = await gatewayFetch(url, {
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
@@ -1072,9 +1075,10 @@ export async function updatePersonality(name: string, updates: Partial<Pick<Pers
 	}
 }
 
-export async function deletePersonality(name: string): Promise<boolean> {
+export async function deletePersonality(name: string, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/personalities/${encodeURIComponent(name)}`, {
+		const url = projectId ? `/api/personalities/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/personalities/${encodeURIComponent(name)}`;
+		const res = await gatewayFetch(url, {
 			method: "DELETE",
 		});
 		if (!res.ok) {
@@ -1249,9 +1253,10 @@ export async function createRole(role: {
 	}
 }
 
-export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "toolPolicies" | "accessory">>): Promise<boolean> {
+export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "toolPolicies" | "accessory">>, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/roles/${encodeURIComponent(name)}`, {
+		const url = projectId ? `/api/roles/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/roles/${encodeURIComponent(name)}`;
+		const res = await gatewayFetch(url, {
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
@@ -1266,9 +1271,10 @@ export async function updateRole(name: string, updates: Partial<Pick<RoleData, "
 	}
 }
 
-export async function deleteRole(name: string): Promise<boolean> {
+export async function deleteRole(name: string, projectId?: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/roles/${encodeURIComponent(name)}`, {
+		const url = projectId ? `/api/roles/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/roles/${encodeURIComponent(name)}`;
+		const res = await gatewayFetch(url, {
 			method: "DELETE",
 		});
 		if (!res.ok) {

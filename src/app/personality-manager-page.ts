@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchPersonalities, createPersonality, updatePersonality, deletePersonality, gatewayFetch, type PersonalityData } from "./api.js";
+import { createPersonality, updatePersonality, deletePersonality, gatewayFetch, type PersonalityData } from "./api.js";
 import { renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
@@ -140,7 +140,7 @@ async function handleSave(): Promise<void> {
 			promptFragment: editPromptFragment,
 		});
 		if (ok) {
-			personalities = await fetchPersonalities();
+			personalities = await fetchPersonalitiesScoped();
 			showList();
 			return;
 		}
@@ -149,9 +149,9 @@ async function handleSave(): Promise<void> {
 			label: editLabel.trim(),
 			description: editDescription.trim(),
 			promptFragment: editPromptFragment,
-		});
+		}, getConfigProjectId() || undefined);
 		if (ok) {
-			personalities = await fetchPersonalities();
+			personalities = await fetchPersonalitiesScoped();
 			const updated = personalities.find((p) => p.name === selectedPersonality!.name);
 			if (updated) showEdit(updated);
 			else showList();
@@ -175,9 +175,9 @@ async function handleDelete(): Promise<void> {
 
 	deleting = true;
 	renderApp();
-	const ok = await deletePersonality(selectedPersonality.name);
+	const ok = await deletePersonality(selectedPersonality.name, getConfigProjectId() || undefined);
 	if (ok) {
-		personalities = await fetchPersonalities();
+		personalities = await fetchPersonalitiesScoped();
 		showList();
 	} else {
 		deleting = false;
@@ -195,9 +195,9 @@ async function handleDeleteFromList(personality: PersonalityData): Promise<void>
 	);
 	if (!confirmed) return;
 
-	const ok = await deletePersonality(personality.name);
+	const ok = await deletePersonality(personality.name, getConfigProjectId() || undefined);
 	if (ok) {
-		personalities = await fetchPersonalities();
+		personalities = await fetchPersonalitiesScoped();
 		renderApp();
 	}
 }

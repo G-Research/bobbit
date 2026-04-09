@@ -3,7 +3,6 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Terminal, TestTube, Trash2 } from "lucide";
 import {
-	fetchWorkflows,
 	createWorkflow,
 	updateWorkflow,
 	deleteWorkflow,
@@ -378,7 +377,7 @@ async function handleSave(): Promise<void> {
 			gates: gatesWithDeps,
 		});
 		if (result) {
-			workflows = await fetchWorkflows();
+			workflows = await fetchWorkflowsScoped();
 			showEdit(result);
 			return;
 		}
@@ -387,9 +386,9 @@ async function handleSave(): Promise<void> {
 			name: editName,
 			description: editDescription,
 			gates: gatesWithDeps,
-		});
+		}, getConfigProjectId() || undefined);
 		if (ok) {
-			workflows = await fetchWorkflows();
+			workflows = await fetchWorkflowsScoped();
 			const updated = workflows.find((w) => w.id === selectedWorkflow!.id);
 			if (updated) showEdit(updated);
 			else showList();
@@ -410,9 +409,9 @@ async function handleDelete(workflow: Workflow): Promise<void> {
 	);
 	if (!confirmed) return;
 
-	const ok = await deleteWorkflow(workflow.id);
+	const ok = await deleteWorkflow(workflow.id, getConfigProjectId() || undefined);
 	if (ok) {
-		workflows = await fetchWorkflows();
+		workflows = await fetchWorkflowsScoped();
 		if (selectedWorkflow?.id === workflow.id) {
 			showList();
 		}
@@ -886,7 +885,7 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 			if (result) {
 				selectedWorkflow = result;
 				isNew = false;
-				workflows = await fetchWorkflows();
+				workflows = await fetchWorkflowsScoped();
 				renderApp();
 				return true;
 			}
@@ -896,9 +895,9 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 				name: editName,
 				description: editDescription,
 				gates: compactedGates,
-			});
+			}, getConfigProjectId() || undefined);
 			if (ok) {
-				workflows = await fetchWorkflows();
+				workflows = await fetchWorkflowsScoped();
 				const updated = workflows.find((w) => w.id === selectedWorkflow!.id);
 				if (updated) {
 					selectedWorkflow = updated;

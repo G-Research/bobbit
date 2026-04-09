@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
-import { fetchRoles, fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
+import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
 import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
@@ -240,12 +240,13 @@ async function handleSave(): Promise<void> {
 	renderApp();
 
 	if (selectedRole) {
+		const projectId = getConfigProjectId();
 		const ok = await updateRole(selectedRole.name, {
 			label: editLabel,
 			promptTemplate: editPrompt,
 			accessory: editAccessory,
 			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : {},
-		});
+		}, projectId || undefined);
 
 		// Save dirty sub-prompts
 		const dirtyPrompts = Array.from(editedPrompts.entries()).filter(
@@ -258,7 +259,7 @@ async function handleSave(): Promise<void> {
 		}
 
 		if (ok) {
-			const [r] = await Promise.all([fetchRoles()]);
+			const [r] = await Promise.all([fetchRolesScoped()]);
 			roles = r;
 			const updated = roles.find((r) => r.name === selectedRole!.name);
 			if (updated) showEdit(updated);
@@ -283,9 +284,9 @@ async function handleDelete(): Promise<void> {
 
 	deleting = true;
 	renderApp();
-	const ok = await deleteRole(selectedRole.name);
+	const ok = await deleteRole(selectedRole.name, getConfigProjectId() || undefined);
 	if (ok) {
-		const [r] = await Promise.all([fetchRoles()]);
+		const [r] = await Promise.all([fetchRolesScoped()]);
 		roles = r;
 		showList();
 	} else {
@@ -379,9 +380,9 @@ async function handleDeleteFromList(role: RoleData): Promise<void> {
 	);
 	if (!confirmed) return;
 
-	const ok = await deleteRole(role.name);
+	const ok = await deleteRole(role.name, getConfigProjectId() || undefined);
 	if (ok) {
-		const [r] = await Promise.all([fetchRoles()]);
+		const [r] = await Promise.all([fetchRolesScoped()]);
 		roles = r;
 		renderApp();
 	}
