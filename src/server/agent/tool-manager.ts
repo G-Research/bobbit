@@ -214,17 +214,15 @@ export class ToolManager {
 	/**
 	 * Returns formatted tool documentation for inclusion in system prompts.
 	 *
-	 * Generates two sections:
-	 * 1. **Tool Overview** — grouped by `group`, one-line `summary` per tool
-	 * 2. **Tool Documentation** — grouped by `group`, full `docs` per tool
+	 * Generates a single `# Tools` section with per-group summaries, docs, and footer links.
 	 *
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
 	getToolDocsForPrompt(toolNames?: string[]): string {
 		const tools = loadToolDefinitions(this.toolsDir);
 
-		// Build grouped data: group → [{ name, summary, docs }]
-		const grouped = new Map<string, Array<{ name: string; summary: string; docs?: string }>>();
+		// Build grouped data: group → { groupDir, entries }
+		const grouped = new Map<string, { groupDir: string; entries: Array<{ name: string; summary: string; docs?: string }> }>();
 
 		for (const tool of tools) {
 			if (toolNames && !toolNames.includes(tool.name)) continue;
@@ -232,12 +230,8 @@ export class ToolManager {
 			const summary = tool.summary ?? tool.description;
 			const docs = tool.docs?.trim();
 
-			if (!grouped.has(group)) grouped.set(group, []);
-			grouped.get(group)!.push({
-				name: tool.name,
-				summary,
-				docs,
-			});
+			if (!grouped.has(group)) grouped.set(group, { groupDir: tool.groupDir, entries: [] });
+			grouped.get(group)!.entries.push({ name: tool.name, summary, docs });
 		}
 
 		// Include external tools (e.g. MCP)
@@ -246,36 +240,39 @@ export class ToolManager {
 			const group = ext.group;
 			const summary = ext.summary ?? ext.description;
 			const docs = ext.docs?.trim();
-			if (!grouped.has(group)) grouped.set(group, []);
-			grouped.get(group)!.push({ name: ext.name, summary, docs });
+			if (!grouped.has(group)) grouped.set(group, { groupDir: '', entries: [] });
+			grouped.get(group)!.entries.push({ name: ext.name, summary, docs });
 		}
 
 		if (grouped.size === 0) return "";
 
-		// Part 1: Tool Overview
 		const sections: string[] = ["# Tools"];
-		for (const [group, entries] of grouped) {
+
+		for (const [group, { groupDir, entries }] of grouped) {
 			sections.push(`\n## ${group}\n`);
+
+			// Summary lines
 			for (const entry of entries) {
 				sections.push(`- **${entry.name}**: ${entry.summary}`);
 			}
-		}
 
-		// Part 2: Tool Documentation (only tools that have docs)
-		const docSections: string[] = [];
-		for (const [group, entries] of grouped) {
+			// Docs for tools that have them
 			const withDocs = entries.filter((e) => e.docs);
-			if (withDocs.length === 0) continue;
-			docSections.push(`\n## ${group}\n`);
-			for (const entry of withDocs) {
-				docSections.push(`### ${entry.name}\n\n${entry.docs}\n`);
+			if (withDocs.length > 0) {
+				sections.push('');
+				for (const entry of withDocs) {
+					sections.push(`### ${entry.name}\n\n${entry.docs}\n`);
+				}
 			}
-		}
 
-		if (docSections.length > 0) {
-			sections.push("\n# Tool Documentation");
-			sections.push(...docSections);
-			sections.push("\n_For detailed tool documentation (examples, edge cases, full parameter descriptions), read the tool's YAML file in `.bobbit/config/tools/<group>/<tool>.yaml` — see the `detail_docs` field._");
+			// Per-group footer link
+			const isMcp = group.startsWith('MCP: ');
+			if (isMcp) {
+				const serverName = group.slice(5); // strip "MCP: "
+				sections.push(`\n_For detailed ${serverName} tool docs (parameters, usage), read \`.bobbit/state/mcp-tool-docs/${serverName}.md\`_\n`);
+			} else if (groupDir) {
+				sections.push(`\n_For detailed ${group} tool docs (examples, edge cases, full parameters), read the tool's YAML in \`.bobbit/config/tools/${groupDir}/<tool>.yaml\` — see the \`detail_docs\` field._\n`);
+			}
 		}
 
 		return sections.join("\n");
