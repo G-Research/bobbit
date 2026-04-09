@@ -19,9 +19,11 @@ import { parse } from "yaml";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-/** Scan tool YAML files from .bobbit/config/tools/<group>/*.yaml and return all tools as {name, docs} objects */
+/** Scan tool YAML files from defaults/tools/ (canonical builtins) or .bobbit/config/tools/ (fallback) */
 function loadToolDefs(): Array<{ name: string; docs?: string }> {
-	const toolsDir = resolve(__dirname, "..", ".bobbit", "config", "tools");
+	const defaultsDir = resolve(__dirname, "..", "defaults", "tools");
+	const configDir = resolve(__dirname, "..", ".bobbit", "config", "tools");
+	const toolsDir = readdirSync(defaultsDir, { withFileTypes: true }).some(e => e.isDirectory()) ? defaultsDir : configDir;
 	const tools: Array<{ name: string; docs?: string }> = [];
 	for (const group of readdirSync(toolsDir, { withFileTypes: true })) {
 		if (!group.isDirectory()) continue;

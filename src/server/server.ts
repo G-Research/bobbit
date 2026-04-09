@@ -20,7 +20,7 @@ import { discoverSlashSkills, getSkillDirectories } from "./skills/slash-skills.
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager } from "./agent/tool-manager.js";
+import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 import { PersonalityStore } from "./agent/personality-store.js";
 import { PersonalityManager } from "./agent/personality-manager.js";
 
@@ -476,6 +476,7 @@ export function createGateway(config: GatewayConfig) {
 		roleStore,
 		personalityManager,
 		projectContextManager,
+		toolManager,
 	});
 	const bgProcessManager = new BgProcessManager((sessionId: string) => {
 		const session = sessionManager.getSession(sessionId);
@@ -2327,6 +2328,36 @@ async function handleApiRoute(
 		}
 	}
 
+	// Shared helper: find which group subdirectory contains a tool by scanning YAML files.
+	function findToolGroupDir(toolName: string, toolsDir: string): string | null {
+		try {
+			const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+			for (const entry of entries) {
+				if (!entry.isDirectory()) continue;
+				const groupPath = path.join(toolsDir, entry.name);
+				try {
+					const files = fs.readdirSync(groupPath);
+					for (const file of files) {
+						if (!file.endsWith(".yaml")) continue;
+						try {
+							const raw = fs.readFileSync(path.join(groupPath, file), "utf-8");
+							// Quick check without full YAML parse
+							if (raw.includes(`name: ${toolName}`) || raw.includes(`name: "${toolName}"`)) {
+								// Verify with proper field check
+								const lines = raw.split("\n");
+								for (const line of lines) {
+									const m = line.match(/^name:\s*"?([^"\n]+)"?\s*$/);
+									if (m && m[1].trim() === toolName) return entry.name;
+								}
+							}
+						} catch { /* skip unreadable */ }
+					}
+				} catch { /* skip */ }
+			}
+		} catch { /* dir doesn't exist */ }
+		return null;
+	}
+
 	// POST /api/tools/:name/customize — copy tool group to a target scope
 	const toolCustomizeMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/customize$/);
 	if (toolCustomizeMatch && req.method === "POST") {
@@ -2342,35 +2373,6 @@ async function handleApiRoute(
 		// Find the groupDir by scanning tool directories to locate this tool's YAML
 		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
 		const serverToolsDir = path.join(bobbitConfigDir(), "tools");
-
-		function findToolGroupDir(toolName: string, toolsDir: string): string | null {
-			try {
-				const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
-				for (const entry of entries) {
-					if (!entry.isDirectory()) continue;
-					const groupPath = path.join(toolsDir, entry.name);
-					try {
-						const files = fs.readdirSync(groupPath);
-						for (const file of files) {
-							if (!file.endsWith(".yaml")) continue;
-							try {
-								const raw = fs.readFileSync(path.join(groupPath, file), "utf-8");
-								// Quick check without full YAML parse
-								if (raw.includes(`name: ${toolName}`) || raw.includes(`name: "${toolName}"`)) {
-									// Verify with proper field check
-									const lines = raw.split("\n");
-									for (const line of lines) {
-										const m = line.match(/^name:\s*"?([^"\n]+)"?\s*$/);
-										if (m && m[1].trim() === toolName) return entry.name;
-									}
-								}
-							} catch { /* skip unreadable */ }
-						}
-					} catch { /* skip */ }
-				}
-			} catch { /* dir doesn't exist */ }
-			return null;
-		}
 
 		// Find groupDir from the source layer
 		let groupDir: string | null = null;
@@ -2413,12 +2415,8 @@ async function handleApiRoute(
 
 		if (!fs.existsSync(srcDir)) { json({ error: "Source tool group not found" }, 404); return; }
 
-		// Copy entire group directory
-		fs.mkdirSync(destDir, { recursive: true });
-		const files = fs.readdirSync(srcDir);
-		for (const file of files) {
-			fs.copyFileSync(path.join(srcDir, file), path.join(destDir, file));
-		}
+		// Copy entire group directory (recursively handles nested files)
+		copyDirRecursive(srcDir, destDir);
 
 		json({ ok: true, groupDir }, 201);
 		return;
@@ -2443,35 +2441,11 @@ async function handleApiRoute(
 
 		// Find which group directory contains this tool
 		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
-		function findToolGroupDirInScope(toolName: string, toolsDir: string): string | null {
-			try {
-				const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
-				for (const entry of entries) {
-					if (!entry.isDirectory()) continue;
-					const groupPath = path.join(toolsDir, entry.name);
-					try {
-						const files = fs.readdirSync(groupPath);
-						for (const file of files) {
-							if (!file.endsWith(".yaml")) continue;
-							try {
-								const raw = fs.readFileSync(path.join(groupPath, file), "utf-8");
-								const lines = raw.split("\n");
-								for (const line of lines) {
-									const m = line.match(/^name:\s*"?([^"\n]+)"?\s*$/);
-									if (m && m[1].trim() === toolName) return entry.name;
-								}
-							} catch { /* skip */ }
-						}
-					} catch { /* skip */ }
-				}
-			} catch { /* dir doesn't exist */ }
-			return null;
-		}
 
 		// Find groupDir in the target scope (the override we're deleting)
-		let groupDir = findToolGroupDirInScope(name, targetToolsDir);
+		let groupDir = findToolGroupDir(name, targetToolsDir);
 		// If not found in target, try builtins to at least know the group name
-		if (!groupDir) groupDir = findToolGroupDirInScope(name, builtinToolsDir);
+		if (!groupDir) groupDir = findToolGroupDir(name, builtinToolsDir);
 		if (!groupDir) { json({ error: "Could not determine tool group directory" }, 400); return; }
 
 		const dirToRemove = path.join(targetToolsDir, groupDir);
@@ -2487,7 +2461,8 @@ async function handleApiRoute(
 
 	// GET /api/tool-group-policies
 	if (url.pathname === "/api/tool-group-policies" && req.method === "GET") {
-		json(groupPolicyStore.getAll());
+		const projectId = url.searchParams.get("projectId") || undefined;
+		json(configCascade.resolveToolGroupPolicies(projectId));
 		return;
 	}
 

@@ -187,6 +187,11 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 			BOBBIT_DELEGATE_OF: plan.delegateOf,
 		};
 	}
+
+	// Wire tool manager for extension path resolution in RpcBridge
+	if (ctx.toolManager) {
+		plan.bridgeOptions.toolManager = ctx.toolManager;
+	}
 }
 
 /** Step 2: Add goal/team extension paths to bridge args. */
