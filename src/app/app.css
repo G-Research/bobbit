@@ -300,15 +300,24 @@ theme-toggle button {
 .preview-fullscreen-prompt .flex.flex-col.gap-3 {
 	display: none !important;
 }
-/* Ensure the prompt bar stretches to full width */
-.preview-fullscreen-prompt,
-.preview-fullscreen-prompt pi-chat-panel,
-.preview-fullscreen-prompt pi-chat-panel > div,
-.preview-fullscreen-prompt agent-interface,
-.preview-fullscreen-prompt agent-interface > div,
+/* Ensure the prompt bar and all children stretch full width */
+.preview-fullscreen-prompt {
+	display: flex !important;
+}
+.preview-fullscreen-prompt > * {
+	width: 100% !important;
+}
+.preview-fullscreen-prompt pi-chat-panel > div {
+	width: 100% !important;
+}
+.preview-fullscreen-prompt agent-interface > div {
+	width: 100% !important;
+}
 .preview-fullscreen-prompt message-editor {
 	width: 100% !important;
-	display: block !important;
+}
+.preview-fullscreen-prompt message-editor > div {
+	width: 100% !important;
 }
 
 /* Tab bar pills */
