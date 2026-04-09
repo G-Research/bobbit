@@ -1357,6 +1357,8 @@ export class VerificationHarness {
 				roleName,
 				sandboxed: isSandboxed,
 				sessionId,
+				skipAutoModel: true,
+				skipAutoThinking: true,
 			});
 
 			// Set title and metadata
@@ -1557,6 +1559,8 @@ export class VerificationHarness {
 				roleName: qaRoleName,
 				sandboxed: qaIsSandboxed,
 				sessionId: qaSessionId,
+				skipAutoModel: true,
+				skipAutoThinking: true,
 			});
 			qaSessionId = session.id;
 

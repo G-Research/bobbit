@@ -152,6 +152,7 @@ export class RemoteAgent {
 			isArchived: false,
 			isPreparing: false,
 			archivedAt: null as number | null,
+			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } | null,
 			streamMessage: null as any,
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
@@ -890,6 +891,11 @@ export class RemoteAgent {
 			case "bg_process_output":
 			case "bg_process_exited":
 				this.onBgProcessEvent?.(msg as any);
+				break;
+
+			case "cost_update":
+				this._state.serverCost = msg.cost;
+				this.emit({ type: "cost_update" as any, cost: msg.cost });
 				break;
 
 			case "pr_status_changed":
