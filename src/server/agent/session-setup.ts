@@ -35,16 +35,24 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
-import { TOOLS_DIR } from "./tool-manager.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 
-// ── Constants ──────────────────────────────────────────────────────────────
+import { TOOLS_DIR } from "./tool-manager.js";
 
-/** Goal tools extension — task + gate management for any goal session. */
-const GOAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "tasks", "extension.ts");
+// ── Extension path helpers ─────────────────────────────────────────────────
 
-/** Proposal tools extension — propose_* tools for assistant sessions. */
-const PROPOSAL_TOOLS_EXTENSION_PATH = path.join(TOOLS_DIR, "proposals", "extension.ts");
+/** Resolve goal tools extension path via the cascade (lazy, not module-level). */
+function resolveGoalToolsExtPath(ctx: PipelineContext): string {
+	if (ctx.toolManager) return ctx.toolManager.getExtensionPath("tasks", "extension.ts");
+	// Fallback: use deprecated TOOLS_DIR for backward compat
+	return path.join(TOOLS_DIR, "tasks", "extension.ts");
+}
+
+/** Resolve proposal tools extension path via the cascade (lazy, not module-level). */
+function resolveProposalToolsExtPath(ctx: PipelineContext): string {
+	if (ctx.toolManager) return ctx.toolManager.getExtensionPath("proposals", "extension.ts");
+	return path.join(TOOLS_DIR, "proposals", "extension.ts");
+}
 
 /** Delegate spawn timeout (30 seconds). */
 export const DELEGATE_SPAWN_TIMEOUT_MS = 30_000;
@@ -182,14 +190,13 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 }
 
 /** Step 2: Add goal/team extension paths to bridge args. */
-export function resolveGoalExtensions(plan: SessionSetupPlan, _ctx: PipelineContext): void {
+export function resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	if (plan.goalId && !plan.assistantType) {
 		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
 		// Add goal tools extension (task + gate management) if not already present.
-		// Check for the specific path — not just any "--extension" flag — because
-		// team lead sessions already have --extension for the team tools extension.
-		if (!plan.bridgeOptions.args.includes(GOAL_TOOLS_EXTENSION_PATH)) {
-			plan.bridgeOptions.args.push("--extension", GOAL_TOOLS_EXTENSION_PATH);
+		const goalExtPath = resolveGoalToolsExtPath(ctx);
+		if (!plan.bridgeOptions.args.includes(goalExtPath)) {
+			plan.bridgeOptions.args.push("--extension", goalExtPath);
 		}
 		plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };
 	}
@@ -197,8 +204,9 @@ export function resolveGoalExtensions(plan: SessionSetupPlan, _ctx: PipelineCont
 	// Add proposal tools extension for assistant sessions (goal assistant, role assistant, etc.)
 	if (plan.assistantType) {
 		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
-		if (!plan.bridgeOptions.args.includes(PROPOSAL_TOOLS_EXTENSION_PATH)) {
-			plan.bridgeOptions.args.push("--extension", PROPOSAL_TOOLS_EXTENSION_PATH);
+		const proposalExtPath = resolveProposalToolsExtPath(ctx);
+		if (!plan.bridgeOptions.args.includes(proposalExtPath)) {
+			plan.bridgeOptions.args.push("--extension", proposalExtPath);
 		}
 	}
 }

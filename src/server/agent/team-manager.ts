@@ -11,7 +11,7 @@ import { TeamStore } from "./team-store.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { PersistedTeamEntry } from "./team-store.js";
 import { generateTeamName } from "./team-names.js";
-import { TOOLS_DIR } from "./tool-manager.js";
+import type { ToolManager } from "./tool-manager.js";
 import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
@@ -56,8 +56,7 @@ export function formatElapsed(sinceMs: number): string {
 	return `${h}h ${m}m`;
 }
 
-/** Resolve the absolute path to the team-lead extension (raw .ts, loaded by jiti). */
-const TEAM_LEAD_EXTENSION_PATH = path.join(TOOLS_DIR, "team", "extension.ts");
+// Team lead extension path is resolved lazily via ToolManager.getExtensionPath().
 import { TaskManager } from "./task-manager.js";
 
 
@@ -121,6 +120,8 @@ export interface TeamManagerConfig {
 	broadcastToGoal?: (goalId: string, event: any) => void;
 	/** Project context manager for per-project store resolution */
 	projectContextManager?: ProjectContextManager;
+	/** Tool manager for resolving extension paths via the cascade */
+	toolManager?: ToolManager;
 }
 
 export class TeamManager {
@@ -567,9 +568,17 @@ export class TeamManager {
 		// When sandboxed, create a worktree inside the per-project container for the goal branch.
 		const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 
+		// Resolve team-lead extension via cascade (ToolManager) or fall back to deprecated TOOLS_DIR
+		let teamLeadExtPath: string;
+		if (this.config.toolManager) {
+			teamLeadExtPath = this.config.toolManager.getExtensionPath("team", "extension.ts");
+		} else {
+			const { TOOLS_DIR } = await import("./tool-manager.js");
+			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");
+		}
 		const session = await this.sessionManager.createSession(
 			cwd,
-			["--extension", TEAM_LEAD_EXTENSION_PATH],
+			["--extension", teamLeadExtPath],
 			goalId,
 			undefined,
 			{
