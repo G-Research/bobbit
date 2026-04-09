@@ -8,6 +8,7 @@ import "./LiveTimer.js";
 export class StreamingMessageContainer extends LitElement {
 	@property({ type: Array }) tools: AgentTool[] = [];
 	@property({ type: Boolean }) isStreaming = false;
+	@property({ type: Boolean }) archived = false;
 
 	@property({ type: Object }) pendingToolCalls?: Set<string>;
 	@property({ type: Object }) toolResultsById?: Map<string, ToolResultMessage>;
@@ -37,6 +38,7 @@ export class StreamingMessageContainer extends LitElement {
 	}
 
 	override updated(changed: Map<string, unknown>) {
+		if (this.archived) return; // No animation state transitions when archived
 		if (changed.has("isStreaming")) {
 			// Don't let agent_start/agent_end events override the compaction animation
 			if (this._blobState === 'compact-shake' || this._blobState === 'compacting' || this._blobState === 'compact-pop' || this._compactEntryTimer) {
@@ -68,10 +70,13 @@ export class StreamingMessageContainer extends LitElement {
 	}
 
 	private get _blobVisible() {
+		if (this.archived) return true;
 		return this._blobState !== 'hidden';
 	}
 
 	private get _blobClass() {
+		if (this.archived) return 'bobbit-blob bobbit-blob--archived';
+
 		if (this._blobState === 'entering') return `bobbit-blob bobbit-blob--${this._entryVariant}`;
 		if (this._blobState === 'exiting') return `bobbit-blob bobbit-blob--${this._exitVariant}`;
 		if (this._blobState === 'idle') return 'bobbit-blob bobbit-blob--idle';
@@ -204,7 +209,7 @@ export class StreamingMessageContainer extends LitElement {
 			if (this._blobVisible)
 				return html`<div class="flex flex-col gap-3 mb-3">
 					<div class="${this._blobClass}">
-						${renderBlobSpriteImg(this._blobClass.includes("idle"))}
+						${renderBlobSpriteImg(this._blobClass.includes("idle"), this.archived)}
 						<div class="bobbit-blob__crown"></div>
 						<div class="bobbit-blob__bandana"></div>
 						<div class="bobbit-blob__magnifier"></div>
@@ -251,7 +256,7 @@ export class StreamingMessageContainer extends LitElement {
 						.turnStartTime=${this.turnStartTime}
 					></assistant-message>
 					${this._blobVisible ? html`<div class="${this._blobClass}">
-						${renderBlobSpriteImg(this._blobClass.includes("idle"))}
+						${renderBlobSpriteImg(this._blobClass.includes("idle"), this.archived)}
 						<div class="bobbit-blob__crown"></div>
 						<div class="bobbit-blob__bandana"></div>
 						<div class="bobbit-blob__magnifier"></div>
