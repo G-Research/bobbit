@@ -247,6 +247,7 @@ export const state = {
 	isPreviewSession: false,
 	previewPanelTab: "chat" as "chat" | "preview" | "goal",
 	previewPanelHtml: "" as string,
+	previewPanelFullscreen: false,
 
 	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
 	previewPanelActiveTab: "preview" as "preview" | "goal",

@@ -1663,6 +1663,7 @@ export function backToSessions(): void {
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
+	state.previewPanelFullscreen = false;
 	stopPreviewPolling();
 	state.cwdDropdownOpen = false;
 	localStorage.removeItem(GW_SESSION_KEY);
@@ -1683,6 +1684,7 @@ export function disconnectGateway(): void {
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
+	state.previewPanelFullscreen = false;
 	stopPreviewPolling();
 	state.appView = "disconnected";
 	localStorage.removeItem(GW_SESSION_KEY);
