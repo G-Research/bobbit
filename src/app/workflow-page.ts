@@ -3,7 +3,6 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Terminal, TestTube, Trash2 } from "lucide";
 import {
-	fetchWorkflows,
 	createWorkflow,
 	updateWorkflow,
 	deleteWorkflow,
@@ -14,6 +13,7 @@ import {
 } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 
 // ============================================================================
 // CONSTANTS
@@ -59,6 +59,19 @@ let emptyPhases: Map<number, Set<number>> = new Map();
 // DATA LOADING
 // ============================================================================
 
+async function fetchWorkflowsScoped(): Promise<Workflow[]> {
+	const projectId = getConfigProjectId();
+	const url = projectId ? `/api/workflows?projectId=${encodeURIComponent(projectId)}` : "/api/workflows";
+	try {
+		const res = await gatewayFetch(url);
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.workflows || [];
+	} catch {
+		return [];
+	}
+}
+
 export async function loadWorkflowPageData(): Promise<void> {
 	currentView = "list";
 	selectedWorkflow = null;
@@ -74,7 +87,7 @@ export async function loadWorkflowPageData(): Promise<void> {
 	vstepDropTarget = null;
 	emptyPhases = new Map();
 	renderApp();
-	workflows = await fetchWorkflows();
+	workflows = await fetchWorkflowsScoped();
 	loading = false;
 	renderApp();
 }
@@ -364,7 +377,7 @@ async function handleSave(): Promise<void> {
 			gates: gatesWithDeps,
 		});
 		if (result) {
-			workflows = await fetchWorkflows();
+			workflows = await fetchWorkflowsScoped();
 			showEdit(result);
 			return;
 		}
@@ -373,9 +386,9 @@ async function handleSave(): Promise<void> {
 			name: editName,
 			description: editDescription,
 			gates: gatesWithDeps,
-		});
+		}, getConfigProjectId() || undefined);
 		if (ok) {
-			workflows = await fetchWorkflows();
+			workflows = await fetchWorkflowsScoped();
 			const updated = workflows.find((w) => w.id === selectedWorkflow!.id);
 			if (updated) showEdit(updated);
 			else showList();
@@ -396,9 +409,9 @@ async function handleDelete(workflow: Workflow): Promise<void> {
 	);
 	if (!confirmed) return;
 
-	const ok = await deleteWorkflow(workflow.id);
+	const ok = await deleteWorkflow(workflow.id, getConfigProjectId() || undefined);
 	if (ok) {
-		workflows = await fetchWorkflows();
+		workflows = await fetchWorkflowsScoped();
 		if (selectedWorkflow?.id === workflow.id) {
 			showList();
 		}
@@ -872,7 +885,7 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 			if (result) {
 				selectedWorkflow = result;
 				isNew = false;
-				workflows = await fetchWorkflows();
+				workflows = await fetchWorkflowsScoped();
 				renderApp();
 				return true;
 			}
@@ -882,9 +895,9 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 				name: editName,
 				description: editDescription,
 				gates: compactedGates,
-			});
+			}, getConfigProjectId() || undefined);
 			if (ok) {
-				workflows = await fetchWorkflows();
+				workflows = await fetchWorkflowsScoped();
 				const updated = workflows.find((w) => w.id === selectedWorkflow!.id);
 				if (updated) {
 					selectedWorkflow = updated;
@@ -978,13 +991,25 @@ function renderNavBar(): TemplateResult {
 // RENDER: LIST VIEW
 // ============================================================================
 
+async function handleScopeChange(scope: string): Promise<void> {
+	setConfigScope(scope);
+	loading = true;
+	renderApp();
+	workflows = await fetchWorkflowsScoped();
+	loading = false;
+	renderApp();
+}
+
 function renderWorkflowRow(wf: Workflow): TemplateResult {
+	const origin = (wf as any).origin as ConfigOrigin | undefined;
+	const overrides = (wf as any).overrides as ConfigOrigin | undefined;
+	const inherited = isInherited(origin);
 	return html`
-		<div class="wf-row" tabindex="0" role="button"
+		<div class="wf-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(wf)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(wf); } }}>
 			<div class="wf-row-info">
-				<span class="wf-row-name">${wf.name}</span>
+				<span class="wf-row-name">${wf.name} ${renderOriginBadge(origin, overrides)}</span>
 				<span class="wf-row-desc">${wf.description}</span>
 			</div>
 			<div class="wf-row-badges">
@@ -1199,6 +1224,10 @@ function renderEditView(): TemplateResult {
 	return html`
 		<div class="wf-edit-container">
 			<div class="wf-edit-identity">
+				<div class="flex items-center justify-between mb-1">
+					<span>${selectedWorkflow ? renderOriginBadge((selectedWorkflow as any).origin, (selectedWorkflow as any).overrides) : ""}</span>
+					${renderCustomizeRevertButtons()}
+				</div>
 				<div class="wf-identity-row">
 					<label class="wf-field-label">ID</label>
 					${isNew ? html`
@@ -1236,10 +1265,61 @@ function renderEditView(): TemplateResult {
 // MAIN RENDER
 // ============================================================================
 
+function renderCustomizeRevertButtons(): TemplateResult | string {
+	if (!selectedWorkflow || isNew) return "";
+	const origin = (selectedWorkflow as any).origin as ConfigOrigin | undefined;
+	if (!origin) return "";
+
+	const scope = getConfigScope();
+	const projectId = getConfigProjectId();
+
+	if (scope === "system") {
+		if (origin === "builtin") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("workflows", selectedWorkflow!.id, "server")) {
+					workflows = await fetchWorkflowsScoped();
+					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
+					if (updated) showEdit(updated);
+				}
+			}}>Customize at Server Level</button>`;
+		}
+		if (origin === "server") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("workflows", selectedWorkflow!.id, "server")) {
+					workflows = await fetchWorkflowsScoped();
+					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Builtin</button>`;
+		}
+	} else {
+		if (origin === "builtin" || origin === "server") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("workflows", selectedWorkflow!.id, "project", projectId)) {
+					workflows = await fetchWorkflowsScoped();
+					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
+					if (updated) showEdit(updated);
+				}
+			}}>Customize for ${getCurrentProjectName()}</button>`;
+		}
+		if (origin === "project") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("workflows", selectedWorkflow!.id, "project", projectId)) {
+					workflows = await fetchWorkflowsScoped();
+					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Inherited</button>`;
+		}
+	}
+	return "";
+}
+
 export function renderWorkflowPage(): TemplateResult {
 	return html`
 		<div class="wf-container">
 			${renderNavBar()}
+			${currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange) : ""}
 			<div class="wf-body">
 				${currentView === "list" ? renderListView() : renderEditView()}
 			</div>

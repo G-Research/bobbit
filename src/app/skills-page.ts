@@ -5,6 +5,7 @@ import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, FolderOpen, Plus, X, Za
 import { renderApp } from "./state.js";
 import { gatewayFetch } from "./api.js";
 import { setHashRoute } from "./routing.js";
+import { getConfigScope, setConfigScope, getConfigProjectId, renderConfigScopeRow } from "./config-scope.js";
 
 // Module-level state
 let slashSkills: Array<{ name: string; description: string; source: string; filePath: string; content: string }> = [];
@@ -35,7 +36,11 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 	}
 
 	try {
-		const slashRes = await gatewayFetch("/api/slash-skills/details");
+		const projectId = getConfigProjectId();
+		const skillsUrl = projectId
+			? `/api/slash-skills/details?projectId=${encodeURIComponent(projectId)}`
+			: "/api/slash-skills/details";
+		const slashRes = await gatewayFetch(skillsUrl);
 
 		if (slashRes.ok) {
 			const data = await slashRes.json();
@@ -71,6 +76,11 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 function toggleSkill(id: string): void {
 	expandedSkill = expandedSkill === id ? null : id;
 	renderApp();
+}
+
+async function handleScopeChange(scope: string): Promise<void> {
+	setConfigScope(scope);
+	await loadSkillsPageData();
 }
 
 function renderNavBar(): TemplateResult {
@@ -280,6 +290,7 @@ export function renderSkillsPage(): TemplateResult {
 	return html`
 		<div class="flex-1 flex flex-col h-full">
 			${renderNavBar()}
+			${renderConfigScopeRow(getConfigScope(), handleScopeChange)}
 			<div class="flex-1 overflow-y-auto">
 				<div class="max-w-3xl mx-auto px-4 py-6 flex flex-col gap-6">
 					<div class="flex items-center justify-between">

@@ -61,6 +61,7 @@ import { renderWorkflowPage } from "./workflow-page.js";
 import "./workflow-page.css";
 import { renderPersonalityManagerPage } from "./personality-manager-page.js";
 import "./personality-manager.css";
+import "./config-scope.css";
 import { renderStaffPage } from "./staff-page.js";
 import { renderSkillsPage } from "./skills-page.js";
 import { renderSettingsPage } from "./settings-page.js";

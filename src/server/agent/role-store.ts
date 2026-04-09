@@ -72,7 +72,12 @@ export class RoleStore {
 	}
 
 	private roleFilePath(name: string): string {
-		return path.join(this.rolesDir, `${name}.yaml`);
+		const filePath = path.join(this.rolesDir, `${name}.yaml`);
+		const resolved = path.resolve(filePath);
+		if (!resolved.startsWith(path.resolve(this.rolesDir))) {
+			throw new Error("Invalid role name: path traversal detected");
+		}
+		return filePath;
 	}
 
 	private loadAll(): void {

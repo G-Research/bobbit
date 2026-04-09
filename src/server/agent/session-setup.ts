@@ -31,6 +31,7 @@ import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts } from "./system-prompt.js";
 import type { GrantPolicy } from "./role-store.js";
+import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
@@ -117,6 +118,7 @@ export interface PipelineContext {
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	groupPolicyStore: ToolGroupPolicyStore | null;
+	configCascade: ConfigCascade | null;
 	costTracker: CostTracker;
 	store: SessionStore;
 	searchIndex: SearchIndex;
@@ -207,15 +209,32 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 
 	// Fall back to general role's allowed tools
 	if ((!effectiveAllowedTools || effectiveAllowedTools.length === 0) && ctx.roleManager) {
-		const generalRole = ctx.roleManager.getRole(plan.roleName || "general");
-		if (generalRole && ctx.toolManager) {
+		// Use cascade-resolved role when a projectId is available
+		const roleName = plan.roleName || "general";
+		let role = ctx.roleManager.getRole(roleName);
+		if (plan.projectId && ctx.configCascade) {
+			const resolved = ctx.configCascade.resolveRoles(plan.projectId);
+			const match = resolved.find(r => r.item.name === roleName);
+			if (match) role = match.item;
+		}
+		if (role && ctx.toolManager) {
 			effectiveAllowedTools = computeEffectiveAllowedTools(
-				ctx.toolManager, generalRole, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
+				ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined,
 			);
 		}
 	}
 
 	plan.effectiveAllowedTools = effectiveAllowedTools;
+}
+
+/** Look up a role by name, preferring the cascade-resolved version when available. */
+function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext): import("./role-store.js").Role | undefined {
+	if (plan.projectId && ctx.configCascade) {
+		const resolved = ctx.configCascade.resolveRoles(plan.projectId);
+		const match = resolved.find(r => r.item.name === name);
+		if (match) return match.item;
+	}
+	return ctx.roleManager?.getRole(name);
 }
 
 /** Step 4: Assemble system prompt (handles assistant, normal, delegate variants). */
@@ -224,7 +243,7 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 
 	if (assistantDef) {
 		// Assistant sessions (goal/role/tool assistants)
-		const assistantRole = ctx.roleManager?.getRole("assistant");
+		const assistantRole = lookupRole("assistant", plan, ctx);
 		let assistantGoalSpec = "";
 		if (assistantRole?.promptTemplate) {
 			assistantGoalSpec = assistantRole.promptTemplate.replace(
@@ -289,7 +308,7 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 		// Build tool restrictions text
 		let toolRestrictionsText: string | undefined;
 		if (plan.effectiveAllowedTools && plan.effectiveAllowedTools.length > 0) {
-			const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
+			const effectiveRole = plan.roleName ? lookupRole(plan.roleName, plan, ctx) : undefined;
 			toolRestrictionsText = ctx.buildToolRestrictionsText(plan.effectiveAllowedTools, effectiveRole ?? undefined);
 		}
 
