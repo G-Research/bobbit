@@ -456,11 +456,21 @@ export function createGateway(config: GatewayConfig) {
 	sessionManager.configCascade = configCascade;
 
 	// Seed standalone stores with builtins that aren't already present.
-	// This ensures goal creation, session setup, etc. work even when
+	// This ensures goal creation, session setup, team start, etc. work even when
 	// scaffolding no longer copies defaults into config dirs.
 	for (const wf of builtinConfigProvider.getWorkflows()) {
 		if (!workflowStore.get(wf.id)) {
 			workflowStore.put(wf);
+		}
+	}
+	for (const role of builtinConfigProvider.getRoles()) {
+		if (!roleStore.get(role.name)) {
+			roleStore.put(role);
+		}
+	}
+	for (const p of builtinConfigProvider.getPersonalities()) {
+		if (!personalityStore.get(p.name)) {
+			personalityStore.put(p);
 		}
 	}
 
