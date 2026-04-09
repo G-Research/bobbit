@@ -268,56 +268,22 @@ theme-toggle button {
 /* ── Fullscreen preview: show only the message editor ─────────────── */
 .preview-fullscreen-prompt {
 	overflow: hidden;
+	max-height: 150px;
 }
 /* Hide chat messages, streaming container, context bar, stats, artifacts */
 .preview-fullscreen-prompt message-list,
 .preview-fullscreen-prompt streaming-message-container,
 .preview-fullscreen-prompt git-status-widget,
-.preview-fullscreen-prompt .bobbit-stats {
-	display: none !important;
-}
-/* Collapse all containers to fit the editor's natural height */
-.preview-fullscreen-prompt pi-chat-panel,
-.preview-fullscreen-prompt pi-chat-panel > div,
-.preview-fullscreen-prompt agent-interface {
-	height: auto !important;
-	min-height: 0 !important;
-	flex: 0 0 auto !important;
-}
-/* The scroll container inside agent-interface — remove scroll, collapse */
-.preview-fullscreen-prompt agent-interface > div {
-	height: auto !important;
-	min-height: 0 !important;
-	overflow: visible !important;
-	flex: 0 0 auto !important;
-}
-.preview-fullscreen-prompt .overflow-y-auto {
-	overflow: visible !important;
-	height: auto !important;
-	flex: 0 0 auto !important;
-}
-/* Hide the message gap container but keep the editor child visible */
+.preview-fullscreen-prompt .bobbit-stats,
 .preview-fullscreen-prompt .flex.flex-col.gap-3 {
 	display: none !important;
 }
-/* Ensure the prompt bar and all children stretch full width */
-.preview-fullscreen-prompt {
+/* The scroll container must not scroll — just show the editor at the bottom */
+.preview-fullscreen-prompt .overflow-y-auto {
+	overflow: hidden !important;
 	display: flex !important;
-}
-.preview-fullscreen-prompt > * {
-	width: 100% !important;
-}
-.preview-fullscreen-prompt pi-chat-panel > div {
-	width: 100% !important;
-}
-.preview-fullscreen-prompt agent-interface > div {
-	width: 100% !important;
-}
-.preview-fullscreen-prompt message-editor {
-	width: 100% !important;
-}
-.preview-fullscreen-prompt message-editor > div {
-	width: 100% !important;
+	flex-direction: column !important;
+	justify-content: flex-end !important;
 }
 
 /* Tab bar pills */
