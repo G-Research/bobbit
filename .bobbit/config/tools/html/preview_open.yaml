@@ -61,16 +61,24 @@ detail_docs: |-
   **Default behavior: match the app theme.** Unless the user explicitly asks for a different style, always write preview HTML that uses the inherited CSS variables rather than hardcoded colors. This makes previews feel integrated into the app.
 
   ```html
-  <!-- DO: use CSS variables from the app -->
-  <body style="background: oklch(var(--background)); color: oklch(var(--foreground));">
-    <div style="border: 1px solid oklch(var(--border)); padding: 16px;">
+  <!-- DO: use CSS variables from the app (variables already contain full oklch values) -->
+  <body style="background: var(--background); color: var(--foreground);">
+    <div style="border: 1px solid var(--border); padding: 16px;">
       Content that matches the app theme
+    </div>
+    <!-- For alpha/transparency, use color-mix: -->
+    <div style="background: color-mix(in oklch, var(--primary) 10%, transparent);">
+      Translucent primary
     </div>
   </body>
 
   <!-- DON'T: hardcode colors -->
   <body style="background: #1a1a2e; color: #e0e0e0;">
+  <!-- DON'T: double-wrap oklch (variables already contain oklch()) -->
+  <body style="background: oklch(var(--background));">
   ```
+
+  Key variables: `--background`, `--foreground`, `--border`, `--primary`, `--accent`, `--muted`, `--muted-foreground`, `--card`, `--sidebar`, `--ring`, `--input`, `--secondary`. All contain full `oklch(...)` values — use them directly with `var()`.
 
   For full Bobbit styling, reference the app CSS directly (same-origin):
   ```html
