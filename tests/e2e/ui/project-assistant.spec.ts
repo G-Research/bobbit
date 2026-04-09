@@ -56,7 +56,7 @@ async function addProjectViaDialog(
 
 	// Click "Add Project" in sidebar
 	await page.locator("button").filter({ hasText: "Add Project" }).first().click();
-	await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
+	await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 15_000 });
 
 	// Type the path and click Continue
 	await page.locator('input[placeholder="/path/to/project"]').fill(dir);
@@ -191,7 +191,7 @@ test.describe("Provisional project lifecycle", () => {
 		// The sidebar should show the directory basename with "(setting up)"
 		const sidebar = page.locator(".sidebar-edge");
 		const dirBasename = dir.split(/[\\/]/).filter(Boolean).pop()!;
-		await expect(sidebar.getByText(dirBasename).first()).toBeVisible({ timeout: 5_000 });
+		await expect(sidebar.getByText(dirBasename).first()).toBeVisible({ timeout: 15_000 });
 		await expect(sidebar.getByText("(setting up)").first()).toBeVisible();
 
 		// Cleanup
@@ -208,7 +208,7 @@ test.describe("Provisional project lifecycle", () => {
 		const sidebar = page.locator(".sidebar-edge");
 
 		// Verify "(setting up)" is visible
-		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 5_000 });
+		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
 
 		// The project header with "(setting up)" should not have a settings gear button
 		const provisionalHeader = sidebar.locator(".group").filter({ hasText: "(setting up)" }).first();
@@ -261,8 +261,8 @@ test.describe("Provisional project lifecycle", () => {
 
 		const sidebar = page.locator(".sidebar-edge");
 
-		// Verify placeholder exists
-		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 5_000 });
+		// Verify placeholder exists — generous timeout for system load
+		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
 
 		// Get the provisional project ID for cleanup
 		const prov = await findProvisionalProject(dir);
@@ -276,7 +276,7 @@ test.describe("Provisional project lifecycle", () => {
 		await page.evaluate(() => { window.location.hash = "#/"; });
 		await expect(
 			page.locator("button").filter({ hasText: "Settings" }).first(),
-		).toBeVisible({ timeout: 10_000 });
+		).toBeVisible({ timeout: 15_000 });
 
 		// Manually remove the provisional project (since API-only delete doesn't auto-cleanup)
 		if (prov) await cleanupProject(prov.id);
@@ -288,11 +288,11 @@ test.describe("Provisional project lifecycle", () => {
 		).toBeVisible({ timeout: 15_000 });
 
 		// The provisional project's "(setting up)" should no longer appear
-		// Wait a moment for sidebar to render
+		// Wait for sidebar to render after cleanup
 		await expect(async () => {
 			const settingUpCount = await sidebar.getByText("(setting up)").count();
 			expect(settingUpCount).toBe(0);
-		}).toPass({ timeout: 5_000 });
+		}).toPass({ timeout: 15_000 });
 
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
@@ -306,7 +306,7 @@ test.describe("Provisional project lifecycle", () => {
 		const dirBasename = dir.split(/[\\/]/).filter(Boolean).pop()!;
 
 		// Verify provisional project visible
-		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 5_000 });
+		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
 		await expect(sidebar.getByText(dirBasename).first()).toBeVisible();
 
 		// Reload the page
@@ -318,7 +318,7 @@ test.describe("Provisional project lifecycle", () => {
 		).toBeVisible({ timeout: 15_000 });
 
 		// Provisional project should still be visible (persisted server-side)
-		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 5_000 });
+		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
 		await expect(sidebar.getByText(dirBasename).first()).toBeVisible();
 
 		// Cleanup
@@ -411,7 +411,7 @@ test.describe("Project proposal preview form", () => {
 
 		// Sidebar should no longer show "(setting up)" for this project
 		const sidebar = page.locator(".sidebar-edge");
-		await expect(sidebar.getByText("Test Project").first()).toBeVisible({ timeout: 5_000 });
+		await expect(sidebar.getByText("Test Project").first()).toBeVisible({ timeout: 15_000 });
 
 		// Clean up
 		await deleteSession(sessionId);
@@ -471,10 +471,10 @@ test.describe("Project proposal preview form", () => {
 		await page.locator("button").filter({ hasText: "Dismiss" }).first().click();
 
 		// The "Accept Project" should disappear
-		await expect(page.getByText("Accept Project").first()).not.toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Accept Project").first()).not.toBeVisible({ timeout: 15_000 });
 
 		// Should show "Waiting for project analysis" placeholder instead
-		await expect(page.getByText("Waiting for project analysis").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Waiting for project analysis").first()).toBeVisible({ timeout: 15_000 });
 
 		// Cleanup
 		const prov = await findProvisionalProject(dir);

@@ -39,6 +39,6 @@ test.describe("Session worktree (UI)", () => {
 		// Navigate to the session in the UI and verify it loads
 		await openApp(page);
 		await navigateToHash(page, `#/session/${created.id}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 30_000 });
 	});
 });

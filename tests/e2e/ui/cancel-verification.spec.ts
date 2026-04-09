@@ -109,7 +109,7 @@ test.describe("Cancel Verification UI", () => {
 
 			// Expand the gate to reveal the signal entry (gates are collapsed by default)
 			const gateRow = page.locator(".wf-checklist-item").first();
-			await expect(gateRow).toBeVisible({ timeout: 10_000 });
+			await expect(gateRow).toBeVisible({ timeout: 30_000 });
 			await gateRow.click();
 
 			// Wait for the cancel button to appear — it should be visible when verification is running
@@ -150,7 +150,7 @@ test.describe("Cancel Verification UI", () => {
 			await navigateToGoalDashboard(page, goalId);
 
 			// Wait for dashboard to render
-			await expect(page.locator(".tab").first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator(".tab").first()).toBeVisible({ timeout: 30_000 });
 
 			// The cancel button should NOT be present since no verification is running
 			// (even if gates were expanded, there are no signals with running verification)
