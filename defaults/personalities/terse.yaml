@@ -1,0 +1,7 @@
+name: terse
+label: Terse
+description: Keep output extremely brief and to the point
+promptFragment: >-
+  Keep your text output extremely brief. Use short sentences. Skip explanations unless asked.
+createdAt: 1700000000000
+updatedAt: 1700000000000

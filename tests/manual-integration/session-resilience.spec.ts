@@ -505,11 +505,14 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		initRepo(dir);
 
 		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+		mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
 		const yaml = [
 			'worktree_pool_size: "6"',
 			HAS_DOCKER ? 'sandbox: "docker"' : "",
 		].filter(Boolean).join("\n") + "\n";
 		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), yaml);
+		// Create empty projects.json so the gateway auto-registers the default project
+		writeFileSync(join(dir, ".bobbit", "state", "projects.json"), "[]");
 
 		gw = await startGW(dir, port);
 		console.log(`  Gateway :${port}  cwd=${dir}  docker=${HAS_DOCKER}`);

@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 /**
- * Copy .bobbit/config/ → dist/server/defaults/ for scaffolding into new projects.
+ * Build builtins into dist/server/defaults/ for the config cascade.
+ *
+ * Sources (in order, later wins for same file):
+ *   1. defaults/          — canonical builtin configs (roles, personalities, workflows)
+ *   2. .bobbit/config/    — tools (with extension code), system-prompt, tool-group-policies
+ *
+ * The defaults/ directory is the source of truth for builtins that participate
+ * in the config cascade. .bobbit/config/ still provides tools (which have
+ * co-located extension.ts files) and other non-cascade configs.
+ *
  * Excludes project-specific files (project.yaml, mcp.json) that shouldn't be scaffolded.
  */
 import fs from "node:fs";
 import path from "node:path";
 
-const SRC = ".bobbit/config";
+const DEFAULTS_SRC = "defaults";
+const CONFIG_SRC = ".bobbit/config";
 const DEST = "dist/server/defaults";
 
 /** Files that are project-specific and should NOT be scaffolded into user projects. */
@@ -27,5 +37,9 @@ function copyDir(src, dest) {
   }
 }
 
-copyDir(SRC, DEST);
-console.log(`Copied ${SRC}/ → ${DEST}/ (excluding ${[...EXCLUDE].join(", ")})`);
+// Copy .bobbit/config/ first (tools, system-prompt, tool-group-policies)
+copyDir(CONFIG_SRC, DEST);
+// Then overlay defaults/ (canonical builtins — roles, personalities, workflows)
+// Builtins always win: if a file exists in both, defaults/ takes priority.
+copyDir(DEFAULTS_SRC, DEST);
+console.log(`Built ${DEST}/ from ${CONFIG_SRC}/ + ${DEFAULTS_SRC}/ (excluding ${[...EXCLUDE].join(", ")})`);

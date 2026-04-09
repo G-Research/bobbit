@@ -1,0 +1,7 @@
+name: rigid
+label: Rigid
+description: Follow established patterns and conventions exactly
+promptFragment: >-
+  Follow established patterns and conventions exactly. Don't introduce new patterns or deviate from existing code style.
+createdAt: 1700000000000
+updatedAt: 1700000000000

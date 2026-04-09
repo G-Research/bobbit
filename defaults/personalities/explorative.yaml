@@ -1,0 +1,7 @@
+name: explorative
+label: Explorative
+description: Read and understand the codebase thoroughly before changes
+promptFragment: >-
+  Read and understand the codebase thoroughly before making changes. Explore related files and patterns to inform your approach.
+createdAt: 1700000000000
+updatedAt: 1700000000000
