@@ -973,6 +973,10 @@ export class RemoteAgent {
 				input = block.arguments;
 			}
 			if (!input || typeof input !== "object") continue;
+			// During streaming, tool arguments may arrive as partial JSON (e.g. "{}").
+			// Skip empty objects so we don't fire the callback with no fields and
+			// mark the block as processed — the full arguments arrive in a later update.
+			if (Object.keys(input).length === 0) continue;
 			callback(input);
 
 			// Mark this block as processed after firing the callback
