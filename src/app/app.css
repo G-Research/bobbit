@@ -300,6 +300,13 @@ theme-toggle button {
 .preview-fullscreen-prompt .flex.flex-col.gap-3 {
 	display: none !important;
 }
+/* Ensure the prompt bar stretches to full width */
+.preview-fullscreen-prompt pi-chat-panel,
+.preview-fullscreen-prompt pi-chat-panel > div,
+.preview-fullscreen-prompt agent-interface,
+.preview-fullscreen-prompt agent-interface > div {
+	width: 100% !important;
+}
 
 /* Tab bar pills */
 .goal-tab-bar {
