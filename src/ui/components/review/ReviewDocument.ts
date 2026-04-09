@@ -49,6 +49,8 @@ export class ReviewDocument extends LitElement {
   private _boundSelectionChange: (() => void) | null = null;
   private _boundMobileAnnotationTap: ((e: Event) => void) | null = null;
   private _toastTimer: number | undefined;
+  private _editingAnnotationId: string | null = null;
+  private _pendingAnnId: string | null = null;
 
   // Render into light DOM so annotator can access elements
   createRenderRoot() {
@@ -303,6 +305,7 @@ export class ReviewDocument extends LitElement {
 
     // Add highlight via annotator
     const annId = `ann-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this._pendingAnnId = annId;
     if (this._annotator) {
       try {
         this._annotator.addAnnotation({
@@ -349,6 +352,7 @@ export class ReviewDocument extends LitElement {
     };
     this._selectedText = ann.quote;
     this._existingComment = ann.comment || "";
+    this._editingAnnotationId = ann.id;
     this._popoverMode = "bottom-sheet";
     this._popoverOpen = true;
     this._showFloatingBtn = false;
@@ -369,6 +373,12 @@ export class ReviewDocument extends LitElement {
     const { comment } = e.detail;
     if (!comment || !this._pendingSelection) return;
 
+    // If editing an existing annotation, remove the old one first
+    if (this._editingAnnotationId) {
+      removeAnnotation(this.sessionId, this.docTitle, this._editingAnnotationId);
+      try { this._annotator?.removeAnnotation(this._editingAnnotationId); } catch { /* ignore */ }
+    }
+
     const sel = this._pendingSelection;
     const ann: ReviewAnnotation = {
       id: `ann-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -387,6 +397,8 @@ export class ReviewDocument extends LitElement {
     this._popoverOpen = false;
     this._popoverMode = "popover";
     this._existingComment = "";
+    this._editingAnnotationId = null;
+    this._pendingAnnId = null;
 
     // Clear browser selection
     window.getSelection()?.removeAllRanges();
@@ -417,10 +429,16 @@ export class ReviewDocument extends LitElement {
   }
 
   private _onAnnotationCancel(): void {
+    // Remove orphaned highlight from a cancelled "Add Comment" flow
+    if (this._pendingAnnId) {
+      try { this._annotator?.removeAnnotation(this._pendingAnnId); } catch { /* ignore */ }
+      this._pendingAnnId = null;
+    }
     this._pendingSelection = null;
     this._popoverOpen = false;
     this._popoverMode = "popover";
     this._existingComment = "";
+    this._editingAnnotationId = null;
     window.getSelection()?.removeAllRanges();
   }
 
