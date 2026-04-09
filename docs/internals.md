@@ -467,6 +467,21 @@ Config format matches Claude Code `.mcp.json`:
 
 Tools exposed as `mcp__<server>__<tool>`. Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`.
 
+### MCP tool documentation
+
+When an MCP server connects, `McpManager` auto-generates documentation for its tools so they follow the same two-tier pattern as built-in tools: enriched one-line summaries in the system prompt, full parameter docs on disk.
+
+**Summary generation** — deterministic, no LLM dependency:
+- First sentence of the tool description (terminated by `.`, `!`, or `?`)
+- Truncated at ~120 characters on a word boundary with `...` if needed
+- Falls back to `"MCP tool <name> from <server>"` when no description exists
+
+**Disk cache** — stored in `<project-root>/.bobbit/state/mcp-tool-docs/`:
+- `<serverName>.cache.json` — per-tool SHA-256 content hash (of description + inputSchema) and generated summary. On each connect, hashes are compared; only changed tools trigger regeneration.
+- `<serverName>.md` — full Markdown reference with tool descriptions and parameter tables (name, type, required, description). Rewritten only when any tool in the server changes.
+
+**Prompt layout** — `getToolDocsForPrompt()` in `tool-manager.ts` produces a single `# Tools` section (not two separate sections). Each group renders: summary lines → per-tool doc blocks → a footer link. Built-in groups link to `.bobbit/config/tools/<groupDir>/<tool>.yaml` (`detail_docs` field); MCP groups link to `.bobbit/state/mcp-tool-docs/<serverName>.md`.
+
 **API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`
 
 ---
@@ -789,6 +804,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.db` | `SearchIndex` | FTS5 search index |
 | `costs/` | `CostTracker` | Token/cost data |
+| `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 
 ### `<server-cwd>/.bobbit/state/` — global, gitignored
 
