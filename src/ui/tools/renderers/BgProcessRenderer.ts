@@ -1,5 +1,5 @@
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
-import { html } from "lit";
+import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { SquareTerminal } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
@@ -36,53 +36,45 @@ function formatDuration(seconds: number): string {
 	return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
-/**
- * Build the process label: "process name (bg-12)" or just "bg-12"
- * Shows name prominently with the ID as a secondary reference.
- */
-function processLabel(params: BgParams, result: ToolResultMessage | undefined): string {
-	const name = extractProcessName(result) || params.name;
+/** Build the rich header as a TemplateResult with structured layout. */
+function buildHeader(params: BgParams, result: ToolResultMessage | undefined): TemplateResult {
+	const processName = extractProcessName(result) || params.name;
 	const id = params.id || "";
-	if (name && id) return `${name} (${id})`;
-	if (name) return name;
-	return id;
-}
 
-function summarize(params: BgParams, result: ToolResultMessage | undefined): string {
-	const label = processLabel(params, result);
+	const badge = html`<span style="font-family:var(--font-mono,monospace);font-size:0.7rem;font-weight:500;opacity:0.55;background:var(--badge-bg, rgba(128,128,128,0.15));padding:1px 5px;border-radius:3px">bash_bg</span>`;
+	const action = html`<span style="font-weight:600">${params.action}</span>`;
+	const name = processName ? html`<span style="font-weight:500">${processName}</span>` : html``;
+	const idSpan = id ? html`<span style="font-family:var(--font-mono,monospace);font-size:0.7rem;opacity:0.55">(${id})</span>` : html``;
 
+	let detail: TemplateResult | string = "";
 	switch (params.action) {
-		case "create": {
-			const cmd = (params.command || "").slice(0, 60);
-			return label ? `start ${label} — ${cmd}` : `start: ${cmd}`;
-		}
-		case "logs": {
-			const tail = params.tail ? ` — tail ${params.tail}` : "";
-			return label ? `logs ${label}${tail}` : `logs${tail}`;
-		}
-		case "grep": {
-			const pat = params.pattern ? ` — /${params.pattern}/` : "";
-			return label ? `grep ${label}${pat}` : `grep${pat}`;
-		}
-		case "head": {
-			const n = params.lines ? ` — ${params.lines} lines` : "";
-			return label ? `head ${label}${n}` : `head${n}`;
-		}
-		case "slice": {
-			const range = ` — lines ${params.from || "?"}–${params.to || "?"}`;
-			return label ? `slice ${label}${range}` : `slice${range}`;
-		}
-		case "kill":
-			return label ? `kill ${label}` : "kill";
-		case "wait": {
-			const dur = params.timeout ? ` — up to ${formatDuration(params.timeout)}` : "";
-			return label ? `wait ${label}${dur}` : `wait${dur}`;
-		}
+		case "create":
+			detail = params.command
+				? html`<span style="font-family:var(--font-mono,monospace);font-size:0.7rem;opacity:0.55">${params.command.slice(0, 60)}</span>`
+				: "";
+			break;
+		case "logs":
+			if (params.tail) detail = html`<span style="opacity:0.55">tail ${params.tail}</span>`;
+			break;
+		case "grep":
+			if (params.pattern) detail = html`<code style="font-family:var(--font-mono,monospace);font-size:0.7rem;opacity:0.7;background:var(--badge-bg, rgba(128,128,128,0.15));padding:1px 5px;border-radius:3px">/${params.pattern}/</code>`;
+			break;
+		case "head":
+			if (params.lines) detail = html`<span style="opacity:0.55">${params.lines} lines</span>`;
+			break;
+		case "slice":
+			detail = html`<span style="opacity:0.55">lines ${params.from || "?"}–${params.to || "?"}</span>`;
+			break;
+		case "wait":
+			if (params.timeout) detail = html`<span style="opacity:0.55">up to ${formatDuration(params.timeout)}</span>`;
+			break;
 		case "list":
-			return "list processes";
-		default:
-			return label ? `${params.action} ${label}` : params.action;
+			return html`${badge} ${action}`;
 	}
+
+	const sep = detail ? html`<span style="opacity:0.4">—</span>` : html``;
+
+	return html`${badge} ${action} ${name} ${idSpan} ${sep} ${detail}`;
 }
 
 export class BgProcessRenderer implements ToolRenderer<BgParams> {
@@ -91,7 +83,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 		result: ToolResultMessage | undefined,
 		_isStreaming?: boolean,
 	): ToolRenderResult {
-		const summary = params ? summarize(params, result) : "background process";
+		const headerContent = params ? buildHeader(params, result) : html`<span>background process</span>`;
 		const state = getToolState(result, !result);
 
 		const output = typeof result?.content === "string"
@@ -103,7 +95,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 
 		if (!result) {
 			return {
-				content: renderHeader(state, SquareTerminal, summary),
+				content: renderHeader(state, SquareTerminal, headerContent),
 				isCustom: false,
 			};
 		}
@@ -114,7 +106,7 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 		return {
 			content: html`
 				<div>
-					${renderCollapsibleHeader(state, SquareTerminal, summary, contentRef, chevronRef, false)}
+					${renderCollapsibleHeader(state, SquareTerminal, headerContent, contentRef, chevronRef, false)}
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 						<console-block .content=${output || "(no output)"}></console-block>
 					</div>
