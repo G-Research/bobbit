@@ -255,6 +255,16 @@ export async function cleanupWorktree(
 		} catch {
 			// branch may not exist
 		}
+		// Also delete the remote branch (best-effort — remote may be unreachable,
+		// or the repo may have no remote configured, e.g. in E2E tests).
+		try {
+			await execFile("git", ["push", "origin", "--delete", branchName], {
+				cwd: repoPath,
+				timeout: 15_000,
+			});
+		} catch {
+			// Remote may not exist, branch may not be pushed, or network unreachable
+		}
 	}
 }
 
