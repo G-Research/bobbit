@@ -61,8 +61,26 @@ export class ReviewDocument extends LitElement {
     // Destroy previous annotator before re-rendering content
     this._destroyAnnotator();
 
+    // Escape HTML tags before markdown parsing (same pattern as MarkdownBlock)
+    // to prevent XSS from agent-supplied content
+    let safeContent = this.markdown;
+    const codeBlocks: string[] = [];
+    safeContent = safeContent.replace(/```[\s\S]*?```|`[^`\n]+`/g, (match) => {
+      const index = codeBlocks.length;
+      codeBlocks.push(match);
+      return `__CODE_BLOCK_${index}__`;
+    });
+    safeContent = safeContent
+      .replace(/<(\w+)([^>]*)>/g, "&lt;$1$2&gt;")
+      .replace(/<\/(\w+)>/g, "&lt;/$1&gt;")
+      .replace(/<(\w+)([^>]*)\s*\/>/g, "&lt;$1$2/&gt;")
+      .replace(/<(?![^\s])/g, "&lt;");
+    codeBlocks.forEach((block, index) => {
+      safeContent = safeContent.replace(`__CODE_BLOCK_${index}__`, block);
+    });
+
     // Render markdown to HTML
-    const htmlContent = marked.parse(this.markdown, { async: false }) as string;
+    const htmlContent = marked.parse(safeContent, { async: false }) as string;
     container.innerHTML = htmlContent;
 
     // Restore and re-anchor existing annotations
