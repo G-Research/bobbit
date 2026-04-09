@@ -23,7 +23,7 @@ import type { ColorStore } from "./color-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, resolveGrantPolicy, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
 import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 
@@ -566,7 +566,7 @@ export class SessionManager {
 			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
-			buildToolRestrictionsText: (tools, role) => this.buildToolRestrictionsText(tools, role),
+
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
@@ -821,51 +821,6 @@ export class SessionManager {
 		}).join('\n');
 	}
 
-	/** Build tool restrictions text including available-but-ungranted tools (MCP + builtin/extension).
-	 *  Only tools with `ask` policy are listed — `never` tools are hidden,
-	 *  and `allow` tools should already be in allowedTools. */
-	private buildToolRestrictionsText(allowedTools: string[], role?: { toolPolicies?: Record<string, GrantPolicy> }): string {
-		const toolList = allowedTools.join(", ");
-		let text = `## Tool Restrictions\n\nYou are ONLY allowed to use the following tools: ${toolList}\n\nDo NOT use any other tools that are not listed above or mentioned below.`;
-
-		// Collect all available-but-not-granted tools (MCP + builtin/extension)
-		// so the agent knows it can attempt them (the guard extension blocks and triggers
-		// a permission grant prompt in the UI).
-		const ungrantedTools: Array<{ name: string; description: string }> = [];
-		const allowedLower = new Set(allowedTools.map(a => a.toLowerCase()));
-
-		// MCP tools
-		if (this.mcpManager) {
-			for (const t of this.mcpManager.getToolInfos()) {
-				if (allowedLower.has(t.name.toLowerCase())) continue;
-				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
-				if (policy === 'ask') {
-					ungrantedTools.push({ name: t.name, description: t.description });
-				}
-			}
-		}
-
-		// Builtin/extension tools
-		if (this.toolManager) {
-			const allTools = this.toolManager.getAvailableTools();
-			for (const t of allTools) {
-				if (allowedLower.has(t.name.toLowerCase())) continue;
-				if (t.name.toLowerCase().startsWith("mcp__")) continue; // already handled above
-				const policy = resolveGrantPolicy(t.name, t.group, role as any, this.toolManager, this.groupPolicyStore);
-				if (policy === 'ask') {
-					ungrantedTools.push({ name: t.name, description: t.description });
-				}
-			}
-		}
-
-		if (ungrantedTools.length > 0) {
-			const ungrantedList = ungrantedTools.map(t => `- **${t.name}**: ${t.description}`).join("\n");
-			text += `\n\n### Additional tools available with permission\n\nThe following tools exist but are not currently granted to your role. If a task would benefit from one of these tools, go ahead and attempt to call it — the user will be prompted to grant you access.\n\n${ungrantedList}`;
-		}
-
-		return text;
-	}
-
 	/**
 	 * Build the full set of CLI args for tool activation, including guard extensions,
 	 * MCP proxies, and builtin/extension activation.
@@ -979,7 +934,6 @@ export class SessionManager {
 
 			let rolePrompt: string | undefined;
 			let roleName: string | undefined;
-			let toolRestrictionsText: string | undefined;
 			if (session.role && this.roleManager) {
 				const role = this.roleManager.getRole(session.role);
 				if (role?.promptTemplate) {
@@ -988,12 +942,6 @@ export class SessionManager {
 					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.id).slice(0, 8)}`);
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
 					roleName = session.role;
-				}
-				if (role) {
-					const effective = this.resolveEffectiveAllowedTools(role);
-					if (effective.length > 0) {
-						toolRestrictionsText = this.buildToolRestrictionsText(effective, role);
-					}
 				}
 			}
 
@@ -1005,7 +953,6 @@ export class SessionManager {
 				goalSpec: goal?.spec,
 				rolePrompt,
 				roleName,
-				toolRestrictions: toolRestrictionsText,
 				personalities: resolvedPersonalities,
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
@@ -2016,7 +1963,6 @@ export class SessionManager {
 			const goalSpec = goal?.spec;
 			let rolePrompt: string | undefined;
 			let roleName: string | undefined;
-			let toolRestrictionsText: string | undefined;
 			if (ps.role && this.roleManager) {
 				const role = this.roleManager.getRole(ps.role);
 				if (role?.promptTemplate) {
@@ -2025,10 +1971,6 @@ export class SessionManager {
 					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
 					roleName = ps.role;
-				}
-				const effectiveTools = restoredAllowedTools ?? this.resolveEffectiveAllowedTools(role);
-				if (effectiveTools && effectiveTools.length > 0) {
-					toolRestrictionsText = this.buildToolRestrictionsText(effectiveTools, role);
 				}
 			}
 
@@ -2040,7 +1982,6 @@ export class SessionManager {
 				goalSpec,
 				rolePrompt,
 				roleName,
-				toolRestrictions: toolRestrictionsText,
 				personalities: resolvedPersonalities,
 				allowedTools: restoredAllowedTools,
 				projectConfigStore: this.projectConfigStore,
@@ -2925,13 +2866,9 @@ export class SessionManager {
 		// Reassemble system prompt with role instructions as separate fields
 		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
-		let toolRestrictionsText: string | undefined;
 		// Look up the full role (with toolPolicies) from roleManager if available
 		const fullRole = this.roleManager?.getRole(role.name);
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
-		if (effectiveAllowed.length > 0) {
-			toolRestrictionsText = this.buildToolRestrictionsText(effectiveAllowed, fullRole);
-		}
 
 		// Resolve personalities for system prompt
 		const personalityNames = opts?.personalities ?? session.personalities;
@@ -2947,7 +2884,6 @@ export class SessionManager {
 			goalSpec,
 			rolePrompt: role.promptTemplate,
 			roleName: role.name,
-			toolRestrictions: toolRestrictionsText,
 			personalities: resolvedPersonalities,
 			allowedTools: effectiveAllowed.length > 0 ? effectiveAllowed : undefined,
 			projectConfigStore: this.projectConfigStore,
@@ -3072,7 +3008,6 @@ export class SessionManager {
 		// If the session has a role, include its prompt template as separate fields
 		let rolePrompt: string | undefined;
 		let roleName: string | undefined;
-		let toolRestrictionsText: string | undefined;
 		let roleAllowedTools: string[] | undefined;
 		if (session.role && this.roleManager) {
 			const role = this.roleManager.getRole(session.role);
@@ -3082,7 +3017,6 @@ export class SessionManager {
 				const effective = this.resolveEffectiveAllowedTools(role);
 				if (effective.length > 0) {
 					roleAllowedTools = effective;
-					toolRestrictionsText = this.buildToolRestrictionsText(effective, role);
 				}
 			}
 		}
@@ -3099,7 +3033,6 @@ export class SessionManager {
 			goalSpec,
 			rolePrompt,
 			roleName,
-			toolRestrictions: toolRestrictionsText,
 			personalities: resolvedPersonalities,
 			allowedTools: roleAllowedTools,
 			projectConfigStore: this.projectConfigStore,

@@ -131,8 +131,7 @@ export interface PromptParts {
 	rolePrompt?: string;
 	/** Role name for display */
 	roleName?: string;
-	/** Tool restrictions text (separate from goalSpec for section display) */
-	toolRestrictions?: string;
+
 	/** Task title */
 	taskTitle?: string;
 	/** Task type (e.g. 'implementation', 'code-review', etc.) */
@@ -203,14 +202,11 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 		);
 	}
 
-	// 3. Goal spec (merge rolePrompt and toolRestrictions into goalSpec section for backward compat)
+	// 3. Goal spec (merge rolePrompt into goalSpec section for backward compat)
 	{
 		let effectiveGoalSpec = parts.goalSpec || "";
 		if (parts.rolePrompt?.trim()) {
 			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + parts.rolePrompt.trim();
-		}
-		if (parts.toolRestrictions?.trim()) {
-			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + parts.toolRestrictions.trim();
 		}
 		if (effectiveGoalSpec.trim()) {
 			const header = parts.goalTitle
@@ -341,12 +337,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim(), tokens: estimateTokens(parts.rolePrompt.trim()) });
 	}
 
-	// 5. Tool restrictions
-	if (parts.toolRestrictions?.trim()) {
-		sections.push({ label: "Tool Restrictions", source: "Allowed tools filter", content: parts.toolRestrictions.trim(), tokens: estimateTokens(parts.toolRestrictions.trim()) });
-	}
-
-	// 6. Personalities
+	// 5. Personalities
 	if (parts.personalities && parts.personalities.length > 0) {
 		const lines = parts.personalities.map(p => `- **${p.label}**: ${p.promptFragment}`);
 		const personalityContent = lines.join("\n");
