@@ -873,7 +873,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantType === "goal") {
 				state.activeGoalProposal = proposal;
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
-				if (!state.previewCwdEdited) state.previewCwd = proposal.cwd || "";
+				if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 				if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
 				if (proposal.workflow) setSelectedWorkflowId(proposal.workflow);
 				state.assistantHasProposal = true;

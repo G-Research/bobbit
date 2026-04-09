@@ -1945,7 +1945,9 @@ function syncProposalFormState(): void {
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
 	_proposalSpec = proposal.spec;
-	_proposalCwd = proposal.cwd || "";
+	// Preserve project rootPath when proposal doesn't specify cwd
+	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
+	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
 	_proposalWorkflowId = proposal.workflow || "general";
 	_proposalSpecEditMode = false;
 	_proposalEnabledOptionalSteps = proposal.options
