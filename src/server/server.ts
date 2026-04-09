@@ -32,7 +32,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
-import { isGitRepo, getRepoRoot, stripTokenFromGitUrl } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, stripTokenFromGitUrl, shouldSkipRemotePush } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -4394,11 +4394,13 @@ async function handleApiRoute(
 			json(result);
 
 			// Auto-push: for feature branches with unpushed commits, push in background
-			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
-				execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
-			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-				// Session branches without upstream: set up tracking and push
-				execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			if (!shouldSkipRemotePush()) {
+				if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
+					execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+				} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
+					// Session branches without upstream: set up tracking and push
+					execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+				}
 			}
 		} catch (err) {
 			json({ error: String(err) }, 500);
@@ -4548,6 +4550,7 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-push — push local commits to remote
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-push')) {
+		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
@@ -4566,6 +4569,7 @@ async function handleApiRoute(
 
 	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to master
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-squash-push')) {
+		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }

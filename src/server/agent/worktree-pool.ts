@@ -14,7 +14,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePush, type WorktreeResult } from "../skills/git.js";
 
 const execFile = promisify(execFileCb);
 
@@ -127,12 +127,14 @@ export class WorktreePool {
 		}
 
 		// Push the renamed branch to origin (fire-and-forget, non-blocking)
-		execFile("git", ["push", "-u", "origin", targetBranch], {
-			cwd: entry.worktreePath,
-			timeout: 30_000,
-		}).catch(() => {
-			// Push failure is non-fatal (offline, auth issues, etc.)
-		});
+		if (!shouldSkipRemotePush()) {
+			execFile("git", ["push", "-u", "origin", targetBranch], {
+				cwd: entry.worktreePath,
+				timeout: 30_000,
+			}).catch(() => {
+				// Push failure is non-fatal (offline, auth issues, etc.)
+			});
+		}
 
 		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${entry.worktreePath} (pool: ${this.pool.length}/${this.targetSize})`);
 		return { worktreePath: entry.worktreePath, branchName: targetBranch };

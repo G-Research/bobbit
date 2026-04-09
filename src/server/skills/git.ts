@@ -9,6 +9,14 @@ import { resolveShell } from "../agent/shell-util.js";
 const execFile = promisify(execFileCb);
 
 /**
+ * Whether remote git push operations should be skipped.
+ * Set BOBBIT_TEST_NO_PUSH=1 in E2E tests to prevent any network traffic to GitHub.
+ */
+export function shouldSkipRemotePush(): boolean {
+	return process.env.BOBBIT_TEST_NO_PUSH === "1";
+}
+
+/**
  * Strip embedded credentials from a git remote URL.
  * e.g. "https://ghp_abc123@github.com/user/repo.git" → "https://github.com/user/repo.git"
  * Prevents tokens from leaking into .git/config inside sandbox containers.
@@ -177,7 +185,7 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 
 	// Push the new branch and set upstream tracking so git-status can report ahead/behind
 	// and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
-	if (!opts?.skipPush) {
+	if (!opts?.skipPush && !shouldSkipRemotePush()) {
 		try {
 			await execFile("git", ["push", "-u", "origin", branchName], {
 				cwd: worktreePath,
@@ -257,13 +265,15 @@ export async function cleanupWorktree(
 		}
 		// Also delete the remote branch (best-effort — remote may be unreachable,
 		// or the repo may have no remote configured, e.g. in E2E tests).
-		try {
-			await execFile("git", ["push", "origin", "--delete", branchName], {
-				cwd: repoPath,
-				timeout: 15_000,
-			});
-		} catch {
-			// Remote may not exist, branch may not be pushed, or network unreachable
+		if (!shouldSkipRemotePush()) {
+			try {
+				await execFile("git", ["push", "origin", "--delete", branchName], {
+					cwd: repoPath,
+					timeout: 15_000,
+				});
+			} catch {
+				// Remote may not exist, branch may not be pushed, or network unreachable
+			}
 		}
 	}
 }

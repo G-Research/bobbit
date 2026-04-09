@@ -97,6 +97,7 @@ async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; 
 			BOBBIT_AGENT_DIR: agentDir,
 			BOBBIT_LLM_REVIEW_SKIP: "1",
 			BOBBIT_SKIP_NPM_CI: "1",
+			BOBBIT_TEST_NO_PUSH: "1",
 			// Don't skip MCP — the mcp-integration tests need it
 			BOBBIT_NO_OPEN: "1",
 			// Clear host/sandbox gateway credentials to prevent agent subprocesses

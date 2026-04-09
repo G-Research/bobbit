@@ -19,7 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
-import { stripTokenFromGitUrl } from "../skills/git.js";
+import { stripTokenFromGitUrl, shouldSkipRemotePush } from "../skills/git.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -220,9 +220,11 @@ export class ProjectSandbox {
 		await this._installPostCommitHook(containerId, worktreePath);
 
 		// Set upstream tracking (non-fatal)
-		try {
-			await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: worktreePath });
-		} catch { /* push may fail if branch doesn't exist on remote yet */ }
+		if (!shouldSkipRemotePush()) {
+			try {
+				await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: worktreePath });
+			} catch { /* push may fail if branch doesn't exist on remote yet */ }
+		}
 
 		console.log(`[project-sandbox] Created worktree ${name} (branch: ${branch}) at ${worktreePath}`);
 		return worktreePath;
@@ -573,6 +575,8 @@ export class ProjectSandbox {
 	// ── Private: Post-commit hook ──────────────────────────────────────
 
 	private async _installPostCommitHook(containerId: string, worktreePath: string): Promise<void> {
+		if (shouldSkipRemotePush()) return; // No push hook in test mode
+
 		// Determine the .git dir for this worktree (may be a file pointing to the main repo)
 		const hookScript = [
 			"#!/bin/sh",
