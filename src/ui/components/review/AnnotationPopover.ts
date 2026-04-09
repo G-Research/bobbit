@@ -6,6 +6,10 @@ import { customElement, property, query } from "lit/decorators.js";
  *
  * Positioned absolutely at (x, y). Contains a textarea + Submit/Cancel buttons.
  * Dispatches `annotation-submit` (detail: { comment }) and `annotation-cancel`.
+ *
+ * Supports two modes:
+ *  - "popover" (default): Desktop inline popover positioned at (x, y)
+ *  - "bottom-sheet": Mobile bottom sheet that slides up from the bottom
  */
 @customElement("annotation-popover")
 export class AnnotationPopover extends LitElement {
@@ -13,8 +17,13 @@ export class AnnotationPopover extends LitElement {
   @property({ type: Number }) x = 0;
   @property({ type: Number }) y = 0;
   @property({ type: String }) selectedText = "";
+  @property({ type: String, reflect: true }) mode: "popover" | "bottom-sheet" = "popover";
+  @property({ type: String }) existingComment = "";
 
   @query("textarea") private _textarea!: HTMLTextAreaElement;
+
+  private _touchStartY = 0;
+  private _vpResizeHandler: (() => void) | null = null;
 
   static styles = css`
     :host {
@@ -25,6 +34,20 @@ export class AnnotationPopover extends LitElement {
     :host([open]) {
       display: block;
     }
+
+    /* --- Bottom Sheet host positioning --- */
+    :host([mode="bottom-sheet"]) {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      top: auto;
+      z-index: 1000;
+    }
+    :host([mode="bottom-sheet"][open]) {
+      display: block;
+    }
+
     .review-popover {
       background: var(--background, #fff);
       color: var(--foreground, #1a1a1a);
@@ -95,17 +118,101 @@ export class AnnotationPopover extends LitElement {
     .review-popover-submit:hover {
       opacity: 0.9;
     }
+
+    /* --- Bottom Sheet Styles --- */
+    .review-popover--sheet {
+      width: 100%;
+      max-height: 50vh;
+      border-radius: 12px 12px 0 0;
+      box-sizing: border-box;
+      animation: slide-up 200ms ease-out;
+    }
+    @keyframes slide-up {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+    .review-sheet-handle {
+      display: flex;
+      justify-content: center;
+      padding: 8px 0 4px;
+      cursor: grab;
+      touch-action: none;
+    }
+    .review-sheet-handle-pill {
+      width: 40px;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--border, #ddd);
+    }
+    :host([mode="bottom-sheet"]) .review-popover-cancel,
+    :host([mode="bottom-sheet"]) .review-popover-submit {
+      min-height: 44px;
+      font-size: 15px;
+    }
+    :host([mode="bottom-sheet"]) textarea {
+      min-height: 80px;
+      font-size: 15px;
+    }
   `;
 
   protected updated(changed: Map<string, unknown>): void {
     if (changed.has("open") && this.open) {
-      // Update position
-      this.style.left = `${this.x}px`;
-      this.style.top = `${this.y}px`;
-      // Auto-focus textarea
+      if (this.mode === "popover") {
+        // Update position for popover mode
+        this.style.left = `${this.x}px`;
+        this.style.top = `${this.y}px`;
+      } else {
+        // Bottom sheet: clear popover-style positioning
+        this.style.left = "";
+        this.style.top = "";
+      }
+      // Auto-focus textarea, pre-fill if editing existing
       requestAnimationFrame(() => {
-        this._textarea?.focus();
+        if (this._textarea) {
+          if (this.existingComment) {
+            this._textarea.value = this.existingComment;
+          }
+          this._textarea.focus();
+        }
       });
+
+      // Attach visualViewport listener in bottom-sheet mode
+      if (this.mode === "bottom-sheet") {
+        this._attachViewportListener();
+      }
+    }
+
+    // Clean up viewport listener when closed
+    if (changed.has("open") && !this.open) {
+      this._detachViewportListener();
+    }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._detachViewportListener();
+  }
+
+  private _attachViewportListener(): void {
+    if (!window.visualViewport || this._vpResizeHandler) return;
+    this._vpResizeHandler = () => {
+      if (this.mode !== "bottom-sheet" || !this.open) return;
+      const offset = window.innerHeight - window.visualViewport!.height;
+      this.style.bottom = `${offset}px`;
+    };
+    window.visualViewport.addEventListener("resize", this._vpResizeHandler);
+    // Apply immediately in case keyboard is already up
+    this._vpResizeHandler();
+  }
+
+  private _detachViewportListener(): void {
+    if (this._vpResizeHandler && window.visualViewport) {
+      window.visualViewport.removeEventListener("resize", this._vpResizeHandler);
+    }
+    this._vpResizeHandler = null;
+    // Reset bottom offset
+    if (this.mode === "bottom-sheet") {
+      this.style.bottom = "0";
     }
   }
 
@@ -117,6 +224,22 @@ export class AnnotationPopover extends LitElement {
     } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       this._submit();
+    }
+  }
+
+  private _onTouchStart(e: TouchEvent): void {
+    this._touchStartY = e.touches[0].clientY;
+  }
+
+  private _onTouchMove(e: TouchEvent): void {
+    // Prevent scrolling while swiping the handle
+    e.preventDefault();
+  }
+
+  private _onTouchEnd(e: TouchEvent): void {
+    const deltaY = e.changedTouches[0].clientY - this._touchStartY;
+    if (deltaY > 50) {
+      this._cancel();
     }
   }
 
@@ -145,6 +268,7 @@ export class AnnotationPopover extends LitElement {
 
   private _reset(): void {
     if (this._textarea) this._textarea.value = "";
+    this.existingComment = "";
     this.open = false;
   }
 
@@ -154,6 +278,29 @@ export class AnnotationPopover extends LitElement {
       this.selectedText.length > 80
         ? this.selectedText.slice(0, 77) + "..."
         : this.selectedText;
+
+    if (this.mode === "bottom-sheet") {
+      return html`
+        <div class="review-popover review-popover--sheet" @keydown=${this._onKeyDown}>
+          <div class="review-sheet-handle"
+            @touchstart=${this._onTouchStart}
+            @touchmove=${this._onTouchMove}
+            @touchend=${this._onTouchEnd}>
+            <div class="review-sheet-handle-pill"></div>
+          </div>
+          <div class="review-popover-quote">${truncated}</div>
+          <textarea
+            placeholder="Add your comment..."
+            @keydown=${this._onKeyDown}
+          ></textarea>
+          <div class="review-popover-actions">
+            <button class="review-popover-cancel" @click=${this._cancel}>Cancel</button>
+            <button class="review-popover-submit" @click=${this._submit}>Submit</button>
+          </div>
+        </div>
+      `;
+    }
+
     return html`
       <div class="review-popover" @keydown=${this._onKeyDown}>
         <div class="review-popover-quote">${truncated}</div>
