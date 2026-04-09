@@ -11,3 +11,11 @@
 - Gateway binds to NordLynx mesh IP if available, otherwise `localhost` — never `0.0.0.0` unless explicitly requested
 - TLS on by default for non-loopback addresses; disabled for localhost unless `--tls` is passed
 - OAuth PKCE flow for obtaining API credentials securely
+
+## Preview endpoint hardening
+
+The `GET/POST /api/preview` endpoints accept an optional `sessionId` query parameter to scope preview HTML per session. Security measures:
+
+- **UUID validation**: `sessionId` is validated against a strict regex (`/^[a-f0-9-]{36}$/i`). Non-UUID values (including path traversal sequences like `../`, backslashes, or colons) return 400. This prevents sandbox agents from writing `.html` files outside the state directory.
+- **Vite filesystem deny**: `server.fs.deny` rules block the `.bobbit` directory and `node_modules/.vite`, preventing Vite's `/@fs/` route from serving sensitive files.
+- **Vite plugin hardening**: `blockDangerousGlobs` rejects `import.meta.glob` calls targeting `.bobbit` paths. `localhostGuard` rejects non-localhost requests to the Vite dev server, preventing sandbox containers from reaching it over the Docker bridge network.
