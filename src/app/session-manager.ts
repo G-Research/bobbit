@@ -1618,9 +1618,20 @@ export async function acceptProjectProposal(): Promise<void> {
 	state.assistantHasProposal = false;
 	if (proposal.sessionId) deleteProjectDraft(proposal.sessionId);
 
-	// Terminate the project assistant session and navigate away
+	// Terminate the project assistant session silently (no confirmation dialog)
 	try {
-		await terminateSession(propSessionId);
+		uncacheSession(propSessionId);
+		if (activeSessionId() === propSessionId) {
+			state.remoteAgent?.disconnect();
+			state.remoteAgent = null;
+		}
+		await gatewayFetch(`/api/sessions/${propSessionId}/terminate`, { method: "POST" });
+		// Clean up drafts and navigate away
+		deleteGoalDraft(propSessionId);
+		deleteRoleDraft(propSessionId);
+		deletePersonalityDraft(propSessionId);
+		deleteProjectDraft(propSessionId);
+		setHashRoute("landing");
 	} catch (err) {
 		console.error('[project-proposal] Failed to terminate assistant session:', err);
 	}
