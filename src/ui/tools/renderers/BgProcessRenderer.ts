@@ -36,45 +36,65 @@ function formatDuration(seconds: number): string {
 	return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
+// Shared inline styles — keeps templates readable and consistent.
+// All use the same line-height so mixed font-sizes still share a baseline.
+const S = {
+	badge: "font-family:var(--font-mono,monospace);font-size:0.75em;font-weight:500;opacity:0.5;background:color-mix(in srgb, currentColor 10%, transparent);padding:0.1em 0.4em;border-radius:3px;vertical-align:baseline",
+	action: "font-weight:600",
+	name: "font-weight:500",
+	id: "font-family:var(--font-mono,monospace);font-size:0.85em;opacity:0.5;vertical-align:baseline",
+	sep: "opacity:0.35",
+	detail: "opacity:0.5",
+	mono: "font-family:var(--font-mono,monospace);font-size:0.85em;opacity:0.5;vertical-align:baseline",
+	codePill: "font-family:var(--font-mono,monospace);font-size:0.85em;opacity:0.65;background:color-mix(in srgb, currentColor 10%, transparent);padding:0.1em 0.4em;border-radius:3px;vertical-align:baseline",
+} as const;
+
 /** Build the rich header as a TemplateResult with structured layout. */
 function buildHeader(params: BgParams, result: ToolResultMessage | undefined): TemplateResult {
 	const processName = extractProcessName(result) || params.name;
 	const id = params.id || "";
 
-	const badge = html`<span style="font-family:var(--font-mono,monospace);font-size:0.7rem;font-weight:500;opacity:0.55;background:var(--badge-bg, rgba(128,128,128,0.15));padding:1px 5px;border-radius:3px">bash_bg</span>`;
-	const action = html`<span style="font-weight:600">${params.action}</span>`;
-	const name = processName ? html`<span style="font-weight:500">${processName}</span>` : html``;
-	const idSpan = id ? html`<span style="font-family:var(--font-mono,monospace);font-size:0.7rem;opacity:0.55">(${id})</span>` : html``;
+	// Wrap everything in an inline-flex span so mixed font-sizes align on baseline
+	// within the parent flex container from renderHeader.
+	const badge = html`<span style="${S.badge}">bash_bg</span>`;
+	const action = html`<span style="${S.action}">${params.action}</span>`;
+
+	// Show process name if known, otherwise show the raw ID as the label
+	const nameOrId = processName
+		? html` <span style="${S.name}">${processName}</span> <span style="${S.id}">(${id})</span>`
+		: id
+			? html` <span style="${S.id}">${id}</span>`
+			: html``;
 
 	let detail: TemplateResult | string = "";
 	switch (params.action) {
 		case "create":
 			detail = params.command
-				? html`<span style="font-family:var(--font-mono,monospace);font-size:0.7rem;opacity:0.55">${params.command.slice(0, 60)}</span>`
+				? html`<span style="${S.mono}">${params.command.slice(0, 60)}</span>`
 				: "";
 			break;
 		case "logs":
-			if (params.tail) detail = html`<span style="opacity:0.55">tail ${params.tail}</span>`;
+			if (params.tail) detail = html`<span style="${S.detail}">tail ${params.tail}</span>`;
 			break;
 		case "grep":
-			if (params.pattern) detail = html`<code style="font-family:var(--font-mono,monospace);font-size:0.7rem;opacity:0.7;background:var(--badge-bg, rgba(128,128,128,0.15));padding:1px 5px;border-radius:3px">/${params.pattern}/</code>`;
+			if (params.pattern) detail = html`<span style="${S.codePill}">/${params.pattern}/</span>`;
 			break;
 		case "head":
-			if (params.lines) detail = html`<span style="opacity:0.55">${params.lines} lines</span>`;
+			if (params.lines) detail = html`<span style="${S.detail}">${params.lines} lines</span>`;
 			break;
 		case "slice":
-			detail = html`<span style="opacity:0.55">lines ${params.from || "?"}–${params.to || "?"}</span>`;
+			detail = html`<span style="${S.detail}">lines ${params.from || "?"}–${params.to || "?"}</span>`;
 			break;
 		case "wait":
-			if (params.timeout) detail = html`<span style="opacity:0.55">up to ${formatDuration(params.timeout)}</span>`;
+			if (params.timeout) detail = html`<span style="${S.detail}">up to ${formatDuration(params.timeout)}</span>`;
 			break;
 		case "list":
-			return html`${badge} ${action}`;
+			return html`<span style="display:inline-flex;align-items:baseline;gap:0.4em;flex-wrap:wrap">${badge} ${action}</span>`;
 	}
 
-	const sep = detail ? html`<span style="opacity:0.4">—</span>` : html``;
+	const sep = detail ? html`<span style="${S.sep}">—</span>` : html``;
 
-	return html`${badge} ${action} ${name} ${idSpan} ${sep} ${detail}`;
+	return html`<span style="display:inline-flex;align-items:baseline;gap:0.4em;flex-wrap:wrap">${badge} ${action}${nameOrId} ${sep} ${detail}</span>`;
 }
 
 export class BgProcessRenderer implements ToolRenderer<BgParams> {
