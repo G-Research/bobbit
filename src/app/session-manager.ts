@@ -314,6 +314,28 @@ export function savePersonalityDraft(sessionId: string): void { personalityDraft
 async function restorePersonalityDraft(sessionId: string): Promise<boolean> { return personalityDraft.restore(sessionId); }
 export function deletePersonalityDraft(sessionId: string): void { personalityDraft.delete(sessionId); }
 
+// ============================================================================
+// PROJECT DRAFT
+// ============================================================================
+
+const projectDraft = createDraftManager({
+	type: 'project',
+	serialize: (sessionId) => ({
+		sessionId,
+		activeProjectProposal: state.activeProjectProposal ?? undefined,
+		hasReceivedProposal: state.assistantHasProposal,
+		assistantTab: state.assistantTab,
+	}),
+	restore: (_sessionId, draft: any) => {
+		state.activeProjectProposal = draft.activeProjectProposal ?? undefined;
+		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+		state.assistantTab = draft.assistantTab ?? "chat";
+	},
+});
+
+export function saveProjectDraft(sessionId: string): void { projectDraft.save(sessionId); }
+async function restoreProjectDraft(sessionId: string): Promise<boolean> { return projectDraft.restore(sessionId); }
+export function deleteProjectDraft(sessionId: string): void { projectDraft.delete(sessionId); }
 
 // ============================================================================
 // AUTHENTICATE GATEWAY
@@ -1035,6 +1057,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantTab === "chat" && !isDesktop()) {
 				state.assistantTab = "preview";
 			}
+			saveProjectDraft(sessionId);
 			renderApp();
 		};
 
@@ -1354,6 +1377,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.staffPreviewTriggersEdited = false;
 				state.staffPreviewCwdEdited = false;
 				state.assistantHasProposal = false;
+			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
+				const restored = await restoreProjectDraft(sessionId);
+				if (isStale()) return;
+				if (!restored) {
+					state.assistantTab = "chat";
+					state.activeProjectProposal = undefined;
+					state.assistantHasProposal = false;
+				}
 			} else if (state.assistantType === "workflow") {
 				state.assistantTab = "chat";
 				state.workflowPreviewId = "";
@@ -1517,6 +1548,7 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	deleteGoalDraft(sessionId);
 	deleteRoleDraft(sessionId);
 	deletePersonalityDraft(sessionId);
+	deleteProjectDraft(sessionId);
 	clearDismissedProposal(sessionId);
 
 	// Clean up provisional project if this was a project assistant session
@@ -1584,6 +1616,7 @@ export async function acceptProjectProposal(): Promise<void> {
 	setProjects(await fetchProjects());
 	state.activeProjectProposal = undefined;
 	state.assistantHasProposal = false;
+	if (proposal.sessionId) deleteProjectDraft(proposal.sessionId);
 	renderApp();
 }
 

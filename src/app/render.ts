@@ -20,7 +20,7 @@ import {
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
-import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, markProposalDismissed } from "./session-manager.js";
+import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
 import { searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
@@ -1840,6 +1840,7 @@ function projectProposalPanel() {
 	};
 
 	const handleDismiss = () => {
+		if (proposal?.sessionId) deleteProjectDraft(proposal.sessionId);
 		state.activeProjectProposal = undefined;
 		state.assistantHasProposal = false;
 		renderApp();
@@ -1857,6 +1858,7 @@ function projectProposalPanel() {
 						onInput: (e: Event) => {
 							if (state.activeProjectProposal) {
 								state.activeProjectProposal.fields.name = (e.target as HTMLInputElement).value;
+								saveProjectDraft(state.activeProjectProposal.sessionId);
 								renderApp();
 							}
 						},
@@ -1878,6 +1880,7 @@ function projectProposalPanel() {
 							onInput: (e: Event) => {
 								if (state.activeProjectProposal) {
 									state.activeProjectProposal.fields[key] = (e.target as HTMLInputElement).value;
+									saveProjectDraft(state.activeProjectProposal.sessionId);
 								}
 							},
 						})}
