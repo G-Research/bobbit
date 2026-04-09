@@ -180,7 +180,7 @@ function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string): BaseTo
 }
 
 /** Recursively copy a directory. */
-function copyDirRecursive(src: string, dest: string): void {
+export function copyDirRecursive(src: string, dest: string): void {
 	if (!fs.existsSync(src)) return;
 	fs.mkdirSync(dest, { recursive: true });
 	for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
@@ -438,7 +438,7 @@ export class ToolManager {
 
 		// If the tool is from builtins, copy the entire group to config dir first
 		let filePath = base.filePath;
-		if (base.baseDir !== this.toolsDir && base.groupDir && this.builtinToolsDir) {
+		if (base.baseDir === this.builtinToolsDir && base.groupDir && this.builtinToolsDir) {
 			const srcGroup = path.join(this.builtinToolsDir, base.groupDir);
 			const destGroup = path.join(this.toolsDir, base.groupDir);
 			copyDirRecursive(srcGroup, destGroup);

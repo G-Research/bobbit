@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
+import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush } from "../skills/git.js";
 
 const execFileAsync = promisify(execFileCb);
@@ -98,6 +99,8 @@ export interface ProjectSandboxOptions {
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
 	githubToken?: string;      // for git push/PR inside container
+	/** Tool manager for resolving builtin tools directory in Docker mounts. */
+	toolManager?: ToolManager;
 }
 
 export interface ContainerState {
@@ -456,6 +459,7 @@ export class ProjectSandbox {
 			sandboxMounts,
 			sandboxCredentials,
 			sandboxNetwork,
+			toolManager: this.options.toolManager,
 		});
 
 		// Inject GITHUB_TOKEN for git push/PR inside container
