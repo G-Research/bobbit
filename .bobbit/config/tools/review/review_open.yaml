@@ -1,0 +1,26 @@
+name: review_open
+description: "Open a markdown document in the review pane for inline commenting and annotation"
+summary: "Open markdown in the review pane for text annotation and commenting."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Review
+docs: |-
+  Opens a markdown document in the review side-panel. Pass `markdown` for inline content or `file` to load from disk. Each unique title creates a new tab; same title replaces content (unless replace=false).
+detail_docs: |-
+  ## Parameters
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | title | string | No | Tab label. Defaults to filename or "Review" |
+  | markdown | string | No | Inline markdown content |
+  | file | string | No | Path to a markdown file on disk |
+  | replace | boolean | No | Replace existing tab content (default: true) |
+  
+  Exactly one of `markdown` or `file` should be provided. If both, `markdown` takes priority.
+  
+  ## Examples
+  ```
+  review_open(title="Architecture", markdown="# Architecture\n\nOur system uses...")
+  review_open(file="docs/api.md")
+  review_open(title="Updated", markdown="# V2", replace=true)
+  ```

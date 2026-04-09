@@ -27,6 +27,10 @@ import { searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated 
 // Register search web components
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
+// Register review pane web components
+import "../ui/components/review/ReviewPane.js";
+import "../ui/components/review/ReviewDocument.js";
+import "../ui/components/review/AnnotationPopover.js";
 
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT, getProjectAccentColor } from "./render-helpers.js";
 
@@ -2149,13 +2153,14 @@ const PREVIEW_SWIPE_SCRIPT = `<script>
 
 /** Whether the unified panel is active for the current non-assistant session. */
 function hasUnifiedPanel(): boolean {
-	return !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null);
+	return !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null || state.reviewPanelOpen);
 }
 
 /** Ordered list of available unified panel tabs for the current session. */
-function unifiedPanelTabs(): Array<"chat" | "preview" | "goal"> {
-	const tabs: Array<"chat" | "preview" | "goal"> = ["chat"];
+function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review"> {
+	const tabs: Array<"chat" | "preview" | "goal" | "review"> = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
+	if (state.reviewPanelOpen) tabs.push("review");
 	if (state.activeGoalProposal != null) tabs.push("goal");
 	return tabs;
 }
@@ -2619,6 +2624,13 @@ export function doRenderApp(): void {
 						@click=${() => { state.previewPanelTab = "preview"; renderApp(); }}
 					>Preview</button>
 				` : ""}
+				${state.reviewPanelOpen ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "review" ? "goal-tab-pill--active" : ""}"
+						title="Review"
+						@click=${() => { state.previewPanelTab = "review"; renderApp(); }}
+					>Review</button>
+				` : ""}
 				${state.activeGoalProposal != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
@@ -2654,9 +2666,26 @@ export function doRenderApp(): void {
 
 	/** Unified preview panel with tab header + content dispatch.
 	 *  Used on desktop for non-assistant sessions that have preview or goal proposal. */
+	const reviewPaneContent = () => html`
+		<div class="flex-1 min-h-0 overflow-auto">
+			<review-pane
+				.documents=${state.reviewDocuments}
+				.activeTab=${state.reviewActiveTab}
+				.sessionId=${activeSessionId() || ""}
+				@review-tab-change=${(e: CustomEvent) => { state.reviewActiveTab = e.detail.title; renderApp(); }}
+				@review-submit=${(e: CustomEvent) => {
+					const agent = state.remoteAgent;
+					if (agent) agent.followUp(e.detail.feedback);
+				}}
+			></review-pane>
+		</div>
+	`;
+
 	const unifiedPreviewPanel = () => {
 		// Auto-correct tab if the active tab's content is no longer available
-		if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeGoalProposal != null) {
+		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeGoalProposal != null ? "goal" : "preview");
+		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeGoalProposal != null) {
 			state.previewPanelActiveTab = "goal";
 		} else if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal == null && state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
@@ -2664,6 +2693,7 @@ export function doRenderApp(): void {
 
 		const showPreviewTab = state.isPreviewSession;
 		const showGoalTab = state.activeGoalProposal != null;
+		const showReviewTab = state.reviewPanelOpen;
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -2676,6 +2706,13 @@ export function doRenderApp(): void {
 								title="Preview"
 								@click=${() => { state.previewPanelActiveTab = "preview"; renderApp(); }}
 							>Preview</button>
+						` : ""}
+						${showReviewTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "review" ? "goal-tab-pill--active" : ""}"
+								title="Review"
+								@click=${() => { state.previewPanelActiveTab = "review"; renderApp(); }}
+							>Review</button>
 						` : ""}
 						${showGoalTab ? html`
 							<button
@@ -2696,11 +2733,13 @@ export function doRenderApp(): void {
 					</div>
 				</div>
 				<!-- Tab content -->
-				${state.previewPanelActiveTab === "preview" && showPreviewTab
-					? htmlPreviewContent()
-					: state.previewPanelActiveTab === "goal" && showGoalTab
-						? goalProposalPanel()
-						: ""}
+				${state.previewPanelActiveTab === "review" && showReviewTab
+					? reviewPaneContent()
+					: state.previewPanelActiveTab === "preview" && showPreviewTab
+						? htmlPreviewContent()
+						: state.previewPanelActiveTab === "goal" && showGoalTab
+							? goalProposalPanel()
+							: ""}
 			</div>
 		`;
 	};
@@ -2711,10 +2750,13 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: "chat" | "preview" | "goal") => {
+	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review") => {
 		if (tab === "chat") return state.chatPanel;
 		if (tab === "preview" && state.isPreviewSession) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${htmlPreviewContent()}</div>`;
+		}
+		if (tab === "review" && state.reviewPanelOpen) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${reviewPaneContent()}</div>`;
 		}
 		if (tab === "goal" && state.activeGoalProposal != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${goalProposalPanel()}</div>`;

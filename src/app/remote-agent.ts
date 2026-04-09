@@ -1,9 +1,10 @@
 import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
-import { state } from "./state.js";
+import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
+import { clearAnnotations, clearAllAnnotations } from "../ui/components/review/AnnotationStore.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
@@ -740,6 +741,13 @@ export class RemoteAgent {
 							}
 						}
 					}
+					// Rebuild review pane state from message history (handles reconnect/refresh)
+					state.reviewDocuments = new Map();
+					state.reviewActiveTab = "";
+					state.reviewPanelOpen = false;
+					for (const m of this._state.messages) {
+						this._checkReviewToolResult(m);
+					}
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -1075,6 +1083,65 @@ export class RemoteAgent {
 		}
 	}
 
+	/**
+	 * Check if a message contains review tool results (from the review_open/review_close
+	 * extension) and update the review pane state accordingly. Scans message text content
+	 * for JSON payloads with action "review_open" or "review_close".
+	 */
+	private _checkReviewToolResult(msg: any): void {
+		// Extract text content from the message
+		const texts: string[] = [];
+		if (typeof msg.content === "string") texts.push(msg.content);
+		else if (Array.isArray(msg.content)) {
+			for (const block of msg.content) {
+				if (typeof block === "string") texts.push(block);
+				else if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
+				else if (typeof block.content === "string") texts.push(block.content);
+			}
+		}
+
+		for (const text of texts) {
+			const trimmed = text.trim();
+			if (!trimmed.startsWith('{"action":"review_')) continue;
+			let data: any;
+			try { data = JSON.parse(trimmed); } catch { continue; }
+
+			if (data.action === "review_open" && data.title && data.markdown) {
+				const replace = data.replace !== false;
+				state.reviewDocuments = new Map(state.reviewDocuments);
+				if (replace || !state.reviewDocuments.has(data.title)) {
+					state.reviewDocuments.set(data.title, { title: data.title, markdown: data.markdown });
+				}
+				state.reviewPanelOpen = true;
+				state.reviewActiveTab = data.title;
+				state.previewPanelActiveTab = "review";
+				state.previewPanelTab = "review";
+				// Un-collapse panel on desktop
+				if (this._sessionId) {
+					localStorage.removeItem(`bobbit-preview-collapsed-${this._sessionId}`);
+				}
+				renderApp();
+			} else if (data.action === "review_close") {
+				const sid = this._sessionId || "";
+				state.reviewDocuments = new Map(state.reviewDocuments);
+				if (data.title) {
+					state.reviewDocuments.delete(data.title);
+					clearAnnotations(sid, data.title);
+					if (state.reviewActiveTab === data.title) {
+						const keys = [...state.reviewDocuments.keys()];
+						state.reviewActiveTab = keys[0] || "";
+					}
+				} else {
+					state.reviewDocuments = new Map();
+					state.reviewActiveTab = "";
+					clearAllAnnotations(sid);
+				}
+				state.reviewPanelOpen = state.reviewDocuments.size > 0;
+				renderApp();
+			}
+		}
+	}
+
 	private _applyPreferences(prefs: Record<string, unknown>): void {
 		if (!prefs || typeof prefs !== "object") return;
 
@@ -1232,6 +1299,9 @@ export class RemoteAgent {
 						}
 
 						this._state.messages = [...this._state.messages, msg];
+
+						// Check for review tool results (review_open/review_close JSON)
+						this._checkReviewToolResult(msg);
 
 						// Track user messages from live events so they survive
 						// a wholesale messages refresh (reconnect, compaction).

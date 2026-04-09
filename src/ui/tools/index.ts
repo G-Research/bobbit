@@ -26,6 +26,7 @@ import "./renderers/GateVerificationLive.js"; // registers <gate-verification-li
 import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
 import { PersonalitiesListRenderer, PersonalitiesCreateRenderer } from "./renderers/PersonalityToolRenderers.js";
 import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
+import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRenderer.js";
 import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
 import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
 import type { ToolRenderResult } from "./types.js";
@@ -66,6 +67,8 @@ registerToolRenderer("gate_list", new GateListRenderer());
 registerToolRenderer("gate_signal", new GateSignalRenderer());
 registerToolRenderer("gate_status", new GateStatusRenderer());
 registerToolRenderer("preview_open", new PreviewOpenRenderer());
+registerToolRenderer("review_open", new ReviewOpenRenderer());
+registerToolRenderer("review_close", new ReviewCloseRenderer());
 registerToolRenderer("verification_result", new VerificationResultRenderer());
 
 // Proposal tools — one renderer per proposal type
