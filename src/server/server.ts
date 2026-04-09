@@ -2327,6 +2327,162 @@ async function handleApiRoute(
 		}
 	}
 
+	// POST /api/tools/:name/customize — copy tool group to a target scope
+	const toolCustomizeMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/customize$/);
+	if (toolCustomizeMatch && req.method === "POST") {
+		const name = decodeURIComponent(toolCustomizeMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		// Find the tool in the cascade to get its origin
+		const resolved = configCascade.resolveTools(projectId);
+		const source = resolved.find(r => r.item.name === name);
+		if (!source) { json({ error: "Tool not found" }, 404); return; }
+
+		// Find the groupDir by scanning tool directories to locate this tool's YAML
+		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		const serverToolsDir = path.join(bobbitConfigDir(), "tools");
+
+		function findToolGroupDir(toolName: string, toolsDir: string): string | null {
+			try {
+				const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+				for (const entry of entries) {
+					if (!entry.isDirectory()) continue;
+					const groupPath = path.join(toolsDir, entry.name);
+					try {
+						const files = fs.readdirSync(groupPath);
+						for (const file of files) {
+							if (!file.endsWith(".yaml")) continue;
+							try {
+								const raw = fs.readFileSync(path.join(groupPath, file), "utf-8");
+								// Quick check without full YAML parse
+								if (raw.includes(`name: ${toolName}`) || raw.includes(`name: "${toolName}"`)) {
+									// Verify with proper field check
+									const lines = raw.split("\n");
+									for (const line of lines) {
+										const m = line.match(/^name:\s*"?([^"\n]+)"?\s*$/);
+										if (m && m[1].trim() === toolName) return entry.name;
+									}
+								}
+							} catch { /* skip unreadable */ }
+						}
+					} catch { /* skip */ }
+				}
+			} catch { /* dir doesn't exist */ }
+			return null;
+		}
+
+		// Find groupDir from the source layer
+		let groupDir: string | null = null;
+		let sourceToolsDir: string;
+		if (source.origin === "builtin") {
+			sourceToolsDir = builtinToolsDir;
+			groupDir = findToolGroupDir(name, builtinToolsDir);
+		} else if (source.origin === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			sourceToolsDir = ctx ? path.join(ctx.configDir, "tools") : serverToolsDir;
+			groupDir = findToolGroupDir(name, sourceToolsDir);
+		} else {
+			sourceToolsDir = serverToolsDir;
+			groupDir = findToolGroupDir(name, serverToolsDir);
+		}
+		// Fallback: try all layers
+		if (!groupDir) groupDir = findToolGroupDir(name, builtinToolsDir) || findToolGroupDir(name, serverToolsDir);
+		if (!groupDir) { json({ error: "Could not determine tool group directory" }, 400); return; }
+
+		// Determine target directory
+		let targetToolsDir: string;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetToolsDir = path.join(ctx.configDir, "tools");
+		} else {
+			targetToolsDir = serverToolsDir;
+		}
+
+		// Determine the actual source dir for copying
+		let actualSourceDir = sourceToolsDir;
+		// If the source layer doesn't have this group, try builtins then server
+		if (!fs.existsSync(path.join(actualSourceDir, groupDir))) {
+			if (fs.existsSync(path.join(builtinToolsDir, groupDir))) actualSourceDir = builtinToolsDir;
+			else if (fs.existsSync(path.join(serverToolsDir, groupDir))) actualSourceDir = serverToolsDir;
+		}
+
+		const srcDir = path.join(actualSourceDir, groupDir);
+		const destDir = path.join(targetToolsDir, groupDir);
+
+		if (!fs.existsSync(srcDir)) { json({ error: "Source tool group not found" }, 404); return; }
+
+		// Copy entire group directory
+		fs.mkdirSync(destDir, { recursive: true });
+		const files = fs.readdirSync(srcDir);
+		for (const file of files) {
+			fs.copyFileSync(path.join(srcDir, file), path.join(destDir, file));
+		}
+
+		json({ ok: true, groupDir }, 201);
+		return;
+	}
+
+	// DELETE /api/tools/:name/override — remove tool group override at a scope
+	const toolOverrideMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/override$/);
+	if (toolOverrideMatch && req.method === "DELETE") {
+		const name = decodeURIComponent(toolOverrideMatch[1]);
+		const scope = url.searchParams.get("scope") || "server";
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		// Determine the tools directory for the target scope
+		let targetToolsDir: string;
+		if (scope === "project" && projectId) {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			targetToolsDir = path.join(ctx.configDir, "tools");
+		} else {
+			targetToolsDir = path.join(bobbitConfigDir(), "tools");
+		}
+
+		// Find which group directory contains this tool
+		const builtinToolsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
+		function findToolGroupDirInScope(toolName: string, toolsDir: string): string | null {
+			try {
+				const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+				for (const entry of entries) {
+					if (!entry.isDirectory()) continue;
+					const groupPath = path.join(toolsDir, entry.name);
+					try {
+						const files = fs.readdirSync(groupPath);
+						for (const file of files) {
+							if (!file.endsWith(".yaml")) continue;
+							try {
+								const raw = fs.readFileSync(path.join(groupPath, file), "utf-8");
+								const lines = raw.split("\n");
+								for (const line of lines) {
+									const m = line.match(/^name:\s*"?([^"\n]+)"?\s*$/);
+									if (m && m[1].trim() === toolName) return entry.name;
+								}
+							} catch { /* skip */ }
+						}
+					} catch { /* skip */ }
+				}
+			} catch { /* dir doesn't exist */ }
+			return null;
+		}
+
+		// Find groupDir in the target scope (the override we're deleting)
+		let groupDir = findToolGroupDirInScope(name, targetToolsDir);
+		// If not found in target, try builtins to at least know the group name
+		if (!groupDir) groupDir = findToolGroupDirInScope(name, builtinToolsDir);
+		if (!groupDir) { json({ error: "Could not determine tool group directory" }, 400); return; }
+
+		const dirToRemove = path.join(targetToolsDir, groupDir);
+		if (fs.existsSync(dirToRemove)) {
+			fs.rmSync(dirToRemove, { recursive: true, force: true });
+		}
+
+		json({ ok: true });
+		return;
+	}
+
 	// ── Tool group policies ──
 
 	// GET /api/tool-group-policies
