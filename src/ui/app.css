@@ -1060,6 +1060,31 @@ html {
 	transform: scale(4) translateX(-7px);
 }
 
+/* Archived blob — fully desaturated, all animations killed */
+.bobbit-blob--archived {
+  filter: grayscale(1);
+  opacity: 0.8;
+  transform: none !important;
+}
+.bobbit-blob--archived,
+.bobbit-blob--archived .bobbit-blob__sprite,
+.bobbit-blob--archived .bobbit-blob__shadow,
+.bobbit-blob--archived .bobbit-blob__crown,
+.bobbit-blob--archived .bobbit-blob__bandana,
+.bobbit-blob--archived .bobbit-blob__magnifier,
+.bobbit-blob--archived .bobbit-blob__palette,
+.bobbit-blob--archived .bobbit-blob__pencil,
+.bobbit-blob--archived .bobbit-blob__shield,
+.bobbit-blob--archived .bobbit-blob__set-square,
+.bobbit-blob--archived .bobbit-blob__flask,
+.bobbit-blob--archived .bobbit-blob__wand,
+.bobbit-blob--archived .bobbit-blob__wizard-hat,
+.bobbit-blob--archived .bobbit-blob__stamp,
+.bobbit-blob--archived .bobbit-blob__clipboard {
+  animation: none !important;
+  transition: none !important;
+}
+
 /* Shadow follows sprite horizontally during transitions */
 .bobbit-blob--exit .bobbit-blob__shadow {
 	animation: blob-shadow-exit 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
