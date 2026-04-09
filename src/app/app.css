@@ -301,11 +301,14 @@ theme-toggle button {
 	display: none !important;
 }
 /* Ensure the prompt bar stretches to full width */
+.preview-fullscreen-prompt,
 .preview-fullscreen-prompt pi-chat-panel,
 .preview-fullscreen-prompt pi-chat-panel > div,
 .preview-fullscreen-prompt agent-interface,
-.preview-fullscreen-prompt agent-interface > div {
+.preview-fullscreen-prompt agent-interface > div,
+.preview-fullscreen-prompt message-editor {
 	width: 100% !important;
+	display: block !important;
 }
 
 /* Tab bar pills */
