@@ -2741,6 +2741,8 @@ async function handleApiRoute(
 					updatedAt: now,
 				};
 				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
+				const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
+				if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
 				ctx.roleStore.put(role);
 				json(role, 201);
 			} else {
@@ -2840,7 +2842,26 @@ async function handleApiRoute(
 				if (!ctx) { json({ error: "Project not found" }, 404); return; }
 				const existing = ctx.roleStore.get(name);
 				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
-				const updated = { ...existing, ...body, name, updatedAt: Date.now() };
+				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
+				let toolPolicies = existing.toolPolicies;
+				if (body.toolPolicies !== undefined) {
+					const cleaned: Record<string, any> = {};
+					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
+						for (const [k, v] of Object.entries(body.toolPolicies)) {
+							if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v;
+						}
+					}
+					toolPolicies = cleaned;
+				}
+				const updated = {
+					...existing,
+					label: body.label ?? existing.label,
+					promptTemplate: body.promptTemplate ?? existing.promptTemplate,
+					accessory: body.accessory ?? existing.accessory,
+					toolPolicies,
+					name,
+					updatedAt: Date.now(),
+				};
 				ctx.roleStore.put(updated);
 				json({ ok: true });
 			} else {
@@ -3007,7 +3028,14 @@ async function handleApiRoute(
 				if (!ctx) { json({ error: "Project not found" }, 404); return; }
 				const existing = ctx.personalityStore.get(name);
 				if (!existing) { json({ error: "Personality not found in project" }, 404); return; }
-				const updated = { ...existing, ...body, name, updatedAt: Date.now() };
+				const updated = {
+					...existing,
+					label: body.label ?? existing.label,
+					description: body.description ?? existing.description,
+					promptFragment: body.promptFragment ?? existing.promptFragment,
+					name,
+					updatedAt: Date.now(),
+				};
 				ctx.personalityStore.put(updated);
 				json({ ok: true });
 			} else {
@@ -4829,7 +4857,14 @@ async function handleApiRoute(
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			const existing = ctx.workflowStore.get(id);
 			if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-			const updated = { ...existing, ...body, id, updatedAt: Date.now() };
+			const updated = {
+				...existing,
+				name: body.name ?? existing.name,
+				description: body.description ?? existing.description,
+				gates: Array.isArray(body.gates) ? body.gates : existing.gates,
+				id,
+				updatedAt: Date.now(),
+			};
 			ctx.workflowStore.put(updated);
 			json(updated);
 		} else {
