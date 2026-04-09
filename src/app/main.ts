@@ -565,11 +565,21 @@ async function initApp() {
 		handler: () => {
 			const hasPanel = !state.assistantType && state.isPreviewSession;
 			if (hasPanel) {
-				state.previewPanelFullscreen = !state.previewPanelFullscreen;
-				// If entering fullscreen, ensure panel is not collapsed
+				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				if (state.previewPanelFullscreen) {
-					const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+					// Exiting fullscreen — restore whatever state we saved on entry
+					state.previewPanelFullscreen = false;
+					const restore = sessionStorage.getItem("bobbit-pre-fullscreen-collapsed");
+					if (restore === "true") {
+						localStorage.setItem(key, "true");
+					}
+					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
+				} else {
+					// Entering fullscreen — remember current collapsed state
+					const wasCollapsed = localStorage.getItem(key) === "true";
+					sessionStorage.setItem("bobbit-pre-fullscreen-collapsed", String(wasCollapsed));
 					localStorage.setItem(key, "false");
+					state.previewPanelFullscreen = true;
 				}
 				renderApp();
 			}
