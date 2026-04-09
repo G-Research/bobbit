@@ -8,6 +8,7 @@ import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
 
 // ============================================================================
 // HELPERS
@@ -116,6 +117,20 @@ function policySource(toolName: string, toolGroup: string): string {
 // DATA LOADING
 // ============================================================================
 
+async function fetchRolesScoped(): Promise<RoleData[]> {
+	const projectId = getConfigProjectId();
+	const url = projectId ? `/api/roles?projectId=${encodeURIComponent(projectId)}` : "/api/roles";
+	try {
+		const res = await gatewayFetch(url);
+		if (!res.ok) return [];
+		const data = await res.json();
+		const rolesList: RoleData[] = data.roles || data || [];
+		return rolesList;
+	} catch {
+		return [];
+	}
+}
+
 export async function loadRolePageData(): Promise<void> {
 	currentView = "list";
 	selectedRole = null;
@@ -123,7 +138,7 @@ export async function loadRolePageData(): Promise<void> {
 	saving = false;
 	deleting = false;
 	renderApp();
-	const [r, t, gp] = await Promise.all([fetchRoles(), fetchTools(), fetchGroupPolicies()]);
+	const [r, t, gp] = await Promise.all([fetchRolesScoped(), fetchTools(), fetchGroupPolicies()]);
 	roles = r;
 	availableTools = t;
 	groupPolicies = gp;
@@ -372,13 +387,25 @@ async function handleDeleteFromList(role: RoleData): Promise<void> {
 	}
 }
 
+async function handleScopeChange(scope: string): Promise<void> {
+	setConfigScope(scope);
+	loading = true;
+	renderApp();
+	roles = await fetchRolesScoped();
+	loading = false;
+	renderApp();
+}
+
 function renderRoleRow(role: RoleData, index: number): TemplateResult {
+	const origin = (role as any).origin as ConfigOrigin | undefined;
+	const overrides = (role as any).overrides as ConfigOrigin | undefined;
+	const inherited = isInherited(origin);
 	return html`
-		<div class="role-row" tabindex="0" role="button" @click=${() => showEdit(role)} @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(role); } }}>
+		<div class="role-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button" @click=${() => showEdit(role)} @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(role); } }}>
 			${idleBlob(role.accessory ?? "none", 42, index, index)}
 			<div class="role-row-info">
 				<span class="role-row-label">${role.label}</span>
-				<span class="role-row-slug">${role.name}</span>
+				<span class="role-row-slug">${role.name} ${renderOriginBadge(origin, overrides)}</span>
 			</div>
 			<div class="role-row-actions">
 				<button class="role-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(role); }} title="Edit">
@@ -572,7 +599,13 @@ function renderEditView(): TemplateResult {
 			<div class="roles-edit-main">
 				<!-- Identity section -->
 				<div class="roles-edit-section">
-					<h2 class="roles-section-title">Identity</h2>
+					<div class="flex items-center justify-between">
+						<h2 class="roles-section-title">Identity</h2>
+						<span class="inline-flex items-center gap-2">
+							${renderOriginBadge((selectedRole as any)?.origin, (selectedRole as any)?.overrides)}
+							${renderCustomizeRevertButtons()}
+						</span>
+					</div>
 					<div class="roles-identity-row">
 						<div class="roles-edit-field">
 							<label class="roles-field-label">Id</label>
@@ -633,10 +666,61 @@ function renderEditView(): TemplateResult {
 // MAIN RENDER
 // ============================================================================
 
+function renderCustomizeRevertButtons(): TemplateResult | string {
+	if (!selectedRole) return "";
+	const origin = (selectedRole as any).origin as ConfigOrigin | undefined;
+	if (!origin) return "";
+
+	const scope = getConfigScope();
+	const projectId = getConfigProjectId();
+
+	if (scope === "system") {
+		if (origin === "builtin") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("roles", selectedRole!.name, "server")) {
+					roles = await fetchRolesScoped();
+					const updated = roles.find(r => r.name === selectedRole!.name);
+					if (updated) showEdit(updated);
+				}
+			}}>Customize at Server Level</button>`;
+		}
+		if (origin === "server") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("roles", selectedRole!.name, "server")) {
+					roles = await fetchRolesScoped();
+					const updated = roles.find(r => r.name === selectedRole!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Builtin</button>`;
+		}
+	} else {
+		if (origin === "builtin" || origin === "server") {
+			return html`<button class="config-action-btn" @click=${async () => {
+				if (await customizeItem("roles", selectedRole!.name, "project", projectId)) {
+					roles = await fetchRolesScoped();
+					const updated = roles.find(r => r.name === selectedRole!.name);
+					if (updated) showEdit(updated);
+				}
+			}}>Customize for ${getCurrentProjectName()}</button>`;
+		}
+		if (origin === "project") {
+			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+				if (await revertOverride("roles", selectedRole!.name, "project", projectId)) {
+					roles = await fetchRolesScoped();
+					const updated = roles.find(r => r.name === selectedRole!.name);
+					if (updated) showEdit(updated); else showList();
+				}
+			}}>Revert to Inherited</button>`;
+		}
+	}
+	return "";
+}
+
 export function renderRoleManagerPage(): TemplateResult {
 	return html`
 		<div class="roles-container">
 			${renderNavBar()}
+			${currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange) : ""}
 			<div class="roles-body">
 				${currentView === "list" ? renderListView() : renderEditView()}
 			</div>

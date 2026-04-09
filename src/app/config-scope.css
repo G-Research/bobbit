@@ -1,0 +1,75 @@
+/* ============================================================================
+ * Config Scope — shared styles for origin badges and scope-aware config pages
+ * ============================================================================ */
+
+.config-origin-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	font-size: 10px;
+	font-weight: 500;
+	border-radius: 4px;
+	line-height: 1.4;
+	white-space: nowrap;
+}
+
+.config-origin-server {
+	background: hsl(217 91% 60% / 0.12);
+	color: hsl(217 91% 40%);
+}
+
+:root.dark .config-origin-server {
+	background: hsl(217 91% 60% / 0.15);
+	color: hsl(217 91% 75%);
+}
+
+.config-origin-project {
+	background: hsl(142 71% 45% / 0.12);
+	color: hsl(142 76% 28%);
+}
+
+:root.dark .config-origin-project {
+	background: hsl(142 71% 45% / 0.15);
+	color: hsl(142 71% 65%);
+}
+
+.config-origin-overrides {
+	font-size: 10px;
+	color: var(--muted-foreground);
+}
+
+/* Muted inherited items in project scope */
+.config-item-inherited {
+	opacity: 0.7;
+}
+
+/* Customize / Revert action buttons */
+.config-action-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 8px;
+	font-size: 11px;
+	border-radius: 4px;
+	border: 1px solid var(--border);
+	background: var(--background);
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: background 0.15s, color 0.15s;
+	white-space: nowrap;
+}
+
+.config-action-btn:hover {
+	background: var(--secondary);
+	color: var(--foreground);
+}
+
+.config-action-btn--revert {
+	border-color: hsl(0 84% 60% / 0.3);
+	color: hsl(0 84% 50%);
+}
+
+.config-action-btn--revert:hover {
+	background: hsl(0 84% 60% / 0.1);
+	color: hsl(0 84% 45%);
+}

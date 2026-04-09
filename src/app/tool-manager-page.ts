@@ -6,6 +6,7 @@ import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchG
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow } from "./config-scope.js";
 
 // ============================================================================
 // CONSTANTS
@@ -248,13 +249,30 @@ function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Re
 // DATA LOADING
 // ============================================================================
 
+async function fetchToolsScoped(): Promise<ToolInfo[]> {
+	const projectId = getConfigProjectId();
+	const url = projectId ? `/api/tools?projectId=${encodeURIComponent(projectId)}` : "/api/tools";
+	try {
+		const res = await gatewayFetch(url);
+		if (!res.ok) return [];
+		const data = await res.json();
+		const toolsList = data.tools || data || [];
+		if (toolsList.length > 0 && typeof toolsList[0] === "string") {
+			return toolsList.map((name: string) => ({ name, description: "", group: "Other" }));
+		}
+		return toolsList;
+	} catch {
+		return [];
+	}
+}
+
 export async function loadToolPageData(): Promise<void> {
 	currentView = "list";
 	selectedTool = null;
 	loading = true;
 	saving = false;
 	renderApp();
-	const [t, r, gp] = await Promise.all([fetchTools(), fetchRoles(), fetchGroupPolicies()]);
+	const [t, r, gp] = await Promise.all([fetchToolsScoped(), fetchRoles(), fetchGroupPolicies()]);
 	tools = t;
 	roles = r;
 	groupPolicies = gp;
@@ -504,12 +522,30 @@ function renderNavBar(): TemplateResult {
 // RENDER: LIST VIEW
 // ============================================================================
 
+async function handleScopeChange(scope: string): Promise<void> {
+	setConfigScope(scope);
+	loading = true;
+	renderApp();
+	tools = await fetchToolsScoped();
+	// Rebuild collapsed groups
+	collapsedGroups = new Set(TOOL_GROUPS);
+	for (const tool of tools) {
+		const g = tool.group || "Other";
+		collapsedGroups.add(g);
+	}
+	loading = false;
+	renderApp();
+}
+
 function renderToolRow(tool: ToolInfo): TemplateResult {
+	const origin = (tool as any).origin as ConfigOrigin | undefined;
+	const overrides = (tool as any).overrides as ConfigOrigin | undefined;
+	const inherited = isInherited(origin);
 	return html`
-		<div class="tool-row" tabindex="0" role="button"
+		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(tool)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
-			<span class="tool-row-name">${tool.name}</span>
+			<span class="tool-row-name">${tool.name} ${renderOriginBadge(origin, overrides)}</span>
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
 				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
@@ -735,6 +771,7 @@ function renderEditView(): TemplateResult {
 			<div class="tools-edit-main">
 				<!-- Compact identity rows -->
 				<div class="tools-identity-section">
+					${(selectedTool as any).origin ? html`<div class="mb-1">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides)}</div>` : ""}
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Name</label>
 						<div class="tools-field-readonly">${selectedTool.name}</div>
@@ -781,6 +818,7 @@ export function renderToolManagerPage(): TemplateResult {
 	return html`
 		<div class="tools-container">
 			${renderNavBar()}
+			${currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange) : ""}
 			<div class="tools-body">
 				${currentView === "list" ? renderListView() : renderEditView()}
 			</div>
