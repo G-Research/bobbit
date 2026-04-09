@@ -446,29 +446,21 @@ export function createGateway(config: GatewayConfig) {
 		};
 	}
 	const builtinConfigProvider = new BuiltinConfigProvider();
+	// Wire builtin defaults into stores (in-memory only, no disk writes).
+	// Direct store lookups (roleStore.get(), workflowStore.get()) transparently
+	// fall back to builtins, so no seeding to disk is needed.
+	roleStore.setBuiltins(builtinConfigProvider.getRoles());
+	personalityStore.setBuiltins(builtinConfigProvider.getPersonalities());
+	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
+
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
-		getRoles: () => roleStore.getAll(),
-		getPersonalities: () => personalityStore.getAll(),
-		getWorkflows: () => workflowStore.getAll(),
+		getRoles: () => roleStore.getAllLocal(),
+		getPersonalities: () => personalityStore.getAllLocal(),
+		getWorkflows: () => workflowStore.getAllLocal(),
 		getTools: () => toolManager.getAvailableTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
-
-	// Seed standalone stores with builtins that aren't already present.
-	// Workflows are NOT seeded here — goal creation resolves them through the config cascade.
-	// Roles and personalities are still seeded because many code paths use direct store lookups
-	// (roleManager.getRole(), verification-harness, session-setup, etc.).
-	for (const role of builtinConfigProvider.getRoles()) {
-		if (!roleStore.get(role.name)) {
-			roleStore.put(role);
-		}
-	}
-	for (const p of builtinConfigProvider.getPersonalities()) {
-		if (!personalityStore.get(p.name)) {
-			personalityStore.put(p);
-		}
-	}
 
 	const workflowManager = new WorkflowManager(workflowStore);
 	const staffManager = new StaffManager(projectContextManager);

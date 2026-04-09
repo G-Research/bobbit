@@ -1,6 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
-import { stringify, parse } from "yaml";
+import { YamlStore } from "./yaml-store.js";
 
 /** Grant policy controlling what happens when an agent uses an ungranted tool. */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
@@ -56,130 +54,58 @@ export interface Role {
 	updatedAt: number;
 }
 
+function parseRole(data: Record<string, unknown>): Role | null {
+	if (!data.name) return null;
+	return {
+		name: data.name as string,
+		label: (data.label as string) ?? (data.name as string),
+		promptTemplate: (data.promptTemplate as string) ?? "",
+		accessory: (data.accessory as string) ?? "none",
+		defaultPersonalities: Array.isArray(data.defaultPersonalities) ? data.defaultPersonalities : undefined,
+		toolPolicies: normalizeToolPolicies(data.toolPolicies as Record<string, unknown> | undefined),
+		createdAt: (data.createdAt as number) ?? 0,
+		updatedAt: (data.updatedAt as number) ?? 0,
+	};
+}
+
+function serializeRole(role: Role): Record<string, unknown> {
+	const obj: Record<string, unknown> = {
+		name: role.name,
+		label: role.label,
+		accessory: role.accessory,
+	};
+	if (role.defaultPersonalities && role.defaultPersonalities.length > 0) {
+		obj.defaultPersonalities = role.defaultPersonalities;
+	}
+	if (role.toolPolicies && Object.keys(role.toolPolicies).length > 0) {
+		obj.toolPolicies = role.toolPolicies;
+	}
+	obj.createdAt = role.createdAt;
+	obj.updatedAt = role.updatedAt;
+	obj.promptTemplate = role.promptTemplate;
+	return obj;
+}
+
 /**
- * File-backed role store. Each role is a YAML file in roles/<name>.yaml
- * at the repo root. Version controlled — edits via the UI write back
- * to the same files so they can be committed.
+ * File-backed role store with builtin cascade support.
+ * Each role is a YAML file in roles/<name>.yaml.
  */
-export class RoleStore {
-	private roles: Map<string, Role> = new Map();
-	private readonly rolesDir: string;
-
+export class RoleStore extends YamlStore<Role> {
 	constructor(configDir: string) {
-		this.rolesDir = path.join(configDir, "roles");
-		fs.mkdirSync(this.rolesDir, { recursive: true });
-		this.loadAll();
+		super(configDir, {
+			subdir: "roles",
+			keyFn: r => r.name,
+			parseItem: parseRole,
+			serializeItem: serializeRole,
+			logPrefix: "[role-store]",
+		});
 	}
 
-	private roleFilePath(name: string): string {
-		const filePath = path.join(this.rolesDir, `${name}.yaml`);
-		const resolved = path.resolve(filePath);
-		if (!resolved.startsWith(path.resolve(this.rolesDir))) {
-			throw new Error("Invalid role name: path traversal detected");
-		}
-		return filePath;
-	}
-
-	private loadAll(): void {
-		let entries: fs.Dirent[];
-		try {
-			entries = fs.readdirSync(this.rolesDir, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-			const filePath = path.join(this.rolesDir, entry.name);
-			try {
-				const raw = fs.readFileSync(filePath, "utf-8");
-				const data = parse(raw);
-				if (data && typeof data === "object" && data.name) {
-					const toolPolicies: Record<string, GrantPolicy> | undefined =
-						normalizeToolPolicies(data.toolPolicies);
-
-					const role: Role = {
-						name: data.name,
-						label: data.label ?? data.name,
-						promptTemplate: data.promptTemplate ?? "",
-						accessory: data.accessory ?? "none",
-						defaultPersonalities: Array.isArray(data.defaultPersonalities) ? data.defaultPersonalities : undefined,
-						toolPolicies,
-						createdAt: data.createdAt ?? 0,
-						updatedAt: data.updatedAt ?? 0,
-					};
-
-					this.roles.set(data.name, role);
-				}
-			} catch (err) {
-				console.error(`[role-store] Failed to load ${filePath}:`, err);
-			}
-		}
-	}
-
-	private saveOne(role: Role): void {
-		const filePath = this.roleFilePath(role.name);
-		try {
-			const obj: Record<string, unknown> = {
-				name: role.name,
-				label: role.label,
-				accessory: role.accessory,
-			};
-			if (role.defaultPersonalities && role.defaultPersonalities.length > 0) {
-				obj.defaultPersonalities = role.defaultPersonalities;
-			}
-			if (role.toolPolicies && Object.keys(role.toolPolicies).length > 0) {
-				obj.toolPolicies = role.toolPolicies;
-			}
-			obj.createdAt = role.createdAt;
-			obj.updatedAt = role.updatedAt;
-			obj.promptTemplate = role.promptTemplate;
-			const content = stringify(obj, { lineWidth: 0 });
-			fs.writeFileSync(filePath, content, "utf-8");
-		} catch (err) {
-			console.error(`[role-store] Failed to save ${filePath}:`, err);
-		}
-	}
-
+	/** Override put to normalize legacy tool policies before saving. */
 	put(role: Role): void {
-		// Normalize any legacy policy values
 		if (role.toolPolicies) {
 			role.toolPolicies = normalizeToolPolicies(role.toolPolicies) ?? {};
 		}
-		this.roles.set(role.name, role);
-		this.saveOne(role);
-	}
-
-	get(name: string): Role | undefined {
-		return this.roles.get(name);
-	}
-
-	remove(name: string): void {
-		this.roles.delete(name);
-		const filePath = this.roleFilePath(name);
-		try { fs.unlinkSync(filePath); } catch { /* ignore */ }
-	}
-
-	/** Re-read all YAML files from disk, picking up external changes */
-	reload(): void {
-		this.roles.clear();
-		this.loadAll();
-	}
-
-	getAll(): Role[] {
-		this.reload();
-		return Array.from(this.roles.values());
-	}
-
-	update(name: string, updates: Partial<Omit<Role, "name" | "createdAt">>): boolean {
-		const existing = this.roles.get(name);
-		if (!existing) return false;
-		const cleaned: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(updates)) {
-			if (v !== undefined) cleaned[k] = v;
-		}
-
-		Object.assign(existing, cleaned, { updatedAt: Date.now() });
-		this.saveOne(existing);
-		return true;
+		super.put(role);
 	}
 }

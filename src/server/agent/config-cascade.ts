@@ -59,7 +59,7 @@ export class ConfigCascade {
 			r => r.name,
 			projectId,
 			this.serverStores.getRoles(),
-			ctx => ctx.roleStore.getAll(),
+			ctx => ctx.roleStore.getAllLocal(),
 		);
 	}
 
@@ -71,7 +71,7 @@ export class ConfigCascade {
 			p => p.name,
 			projectId,
 			this.serverStores.getPersonalities(),
-			ctx => ctx.personalityStore.getAll(),
+			ctx => ctx.personalityStore.getAllLocal(),
 		);
 	}
 
@@ -86,7 +86,7 @@ export class ConfigCascade {
 			w => w.id,
 			projectId,
 			this.serverStores.getWorkflows(),
-			ctx => ctx.workflowStore.getAll(),
+			ctx => ctx.workflowStore.getAllLocal(),
 		).filter(r => !r.item.hidden);
 	}
 

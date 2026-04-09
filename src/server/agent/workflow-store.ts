@@ -1,6 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
-import { stringify, parse } from "yaml";
+import { YamlStore } from "./yaml-store.js";
 
 export interface VerifyStep {
 	name: string;
@@ -38,196 +36,109 @@ export interface Workflow {
 	hidden?: boolean;
 }
 
-/**
- * File-backed workflow store. Each workflow is a YAML file in
- * workflows/<id>.yaml at the repo root. Version controlled —
- * edits via the UI write back to the same files so they can be committed.
- */
-export class WorkflowStore {
-	private workflows: Map<string, Workflow> = new Map();
-	private readonly workflowsDir: string;
+// ── Normalization helpers ────────────────────────────────────────
 
-	constructor(configDir: string) {
-		this.workflowsDir = path.join(configDir, "workflows");
-		fs.mkdirSync(this.workflowsDir, { recursive: true });
-		this.loadAll();
-		// Seed defaults if directory is empty
-		if (this.workflows.size === 0) {
-			this.seedDefaults();
-		}
+function normalizeGate(data: Record<string, unknown>): WorkflowGate {
+	const gate: WorkflowGate = {
+		id: (data.id as string) ?? "",
+		name: (data.name as string) ?? "",
+		dependsOn: Array.isArray(data.depends_on) ? data.depends_on
+			: Array.isArray(data.dependsOn) ? data.dependsOn
+			: [],
+	};
+	if (data.content === true) gate.content = true;
+	if (data.inject_downstream === true || data.injectDownstream === true) gate.injectDownstream = true;
+	if (data.optional === true) gate.optional = true;
+	if (data.metadata && typeof data.metadata === "object") {
+		gate.metadata = data.metadata as Record<string, string>;
 	}
-
-	private workflowFilePath(id: string): string {
-		const filePath = path.join(this.workflowsDir, `${id}.yaml`);
-		const resolved = path.resolve(filePath);
-		if (!resolved.startsWith(path.resolve(this.workflowsDir))) {
-			throw new Error(`Invalid workflow id: path traversal detected`);
-		}
-		return filePath;
+	if (Array.isArray(data.verify)) {
+		gate.verify = (data.verify as Record<string, unknown>[]).map(normalizeVerifyStep);
 	}
+	return gate;
+}
 
-	private loadAll(): void {
-		let entries: fs.Dirent[];
-		try {
-			entries = fs.readdirSync(this.workflowsDir, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-			const filePath = path.join(this.workflowsDir, entry.name);
-			try {
-				const raw = fs.readFileSync(filePath, "utf-8");
-				const data = parse(raw);
-				if (data && typeof data === "object" && data.id) {
-					this.workflows.set(data.id, this.normalizeWorkflow(data));
-				}
-			} catch (err) {
-				console.error(`[workflow-store] Failed to load ${filePath}:`, err);
+function normalizeVerifyStep(data: Record<string, unknown>): VerifyStep {
+	const step: VerifyStep = {
+		name: (data.name as string) ?? "",
+		type: (data.type as "command" | "llm-review" | "agent-qa") ?? "command",
+	};
+	if (typeof data.run === "string") step.run = data.run;
+	if (typeof data.prompt === "string") step.prompt = data.prompt;
+	if (data.expect === "success" || data.expect === "failure") step.expect = data.expect;
+	if (typeof data.timeout === "number") step.timeout = data.timeout;
+	if (typeof data.phase === "number") step.phase = data.phase;
+	if (data.optional === true) step.optional = true;
+	if (typeof data.label === "string") step.label = data.label;
+	if (typeof data.role === "string") step.role = data.role;
+	if (typeof data.description === "string") step.description = data.description;
+	return step;
+}
+
+function parseWorkflow(data: Record<string, unknown>): Workflow | null {
+	if (!data.id) return null;
+	const gates = Array.isArray(data.gates) ? data.gates : [];
+	const wf: Workflow = {
+		id: data.id as string,
+		name: (data.name as string) ?? (data.id as string),
+		description: (data.description as string) ?? "",
+		gates: gates.map((g: Record<string, unknown>) => normalizeGate(g)),
+		createdAt: (data.createdAt as number) ?? 0,
+		updatedAt: (data.updatedAt as number) ?? 0,
+	};
+	if (data.hidden === true) wf.hidden = true;
+	return wf;
+}
+
+function serializeWorkflow(workflow: Workflow): Record<string, unknown> {
+	return {
+		id: workflow.id,
+		name: workflow.name,
+		description: workflow.description,
+		...(workflow.hidden ? { hidden: true } : {}),
+		gates: workflow.gates.map((g) => {
+			const out: Record<string, unknown> = { id: g.id, name: g.name };
+			if (g.content) out.content = true;
+			if (g.injectDownstream) out.inject_downstream = true;
+			if (g.optional) out.optional = true;
+			if (g.dependsOn && g.dependsOn.length > 0) out.depends_on = g.dependsOn;
+			if (g.metadata) out.metadata = g.metadata;
+			if (g.verify && g.verify.length > 0) {
+				out.verify = g.verify.map(v => {
+					const s: Record<string, unknown> = { name: v.name, type: v.type };
+					if (v.run) s.run = v.run;
+					if (v.prompt) s.prompt = v.prompt;
+					if (v.expect) s.expect = v.expect;
+					if (v.timeout) s.timeout = v.timeout;
+					if (v.phase) s.phase = v.phase;
+					if (v.optional) s.optional = v.optional;
+					if (v.label) s.label = v.label;
+					if (v.role) s.role = v.role;
+					if (v.description) s.description = v.description;
+					return s;
+				});
 			}
-		}
-	}
+			return out;
+		}),
+		createdAt: workflow.createdAt,
+		updatedAt: workflow.updatedAt,
+	};
+}
 
-	private normalizeWorkflow(data: Record<string, unknown>): Workflow {
-		const gates = Array.isArray(data.gates) ? data.gates : [];
-		const wf: Workflow = {
-			id: data.id as string,
-			name: (data.name as string) ?? (data.id as string),
-			description: (data.description as string) ?? "",
-			gates: gates.map((g: Record<string, unknown>) => this.normalizeGate(g)),
-			createdAt: (data.createdAt as number) ?? 0,
-			updatedAt: (data.updatedAt as number) ?? 0,
-		};
-		if (data.hidden === true) wf.hidden = true;
-		return wf;
-	}
-
-	private normalizeGate(data: Record<string, unknown>): WorkflowGate {
-		const gate: WorkflowGate = {
-			id: (data.id as string) ?? "",
-			name: (data.name as string) ?? "",
-			dependsOn: Array.isArray(data.depends_on) ? data.depends_on
-				: Array.isArray(data.dependsOn) ? data.dependsOn
-				: [],
-		};
-		if (data.content === true) gate.content = true;
-		if (data.inject_downstream === true || data.injectDownstream === true) gate.injectDownstream = true;
-		if (data.optional === true) gate.optional = true;
-		if (data.metadata && typeof data.metadata === "object") {
-			gate.metadata = data.metadata as Record<string, string>;
-		}
-		if (Array.isArray(data.verify)) {
-			gate.verify = (data.verify as Record<string, unknown>[]).map(v => this.normalizeVerifyStep(v));
-		}
-		return gate;
-	}
-
-	private normalizeVerifyStep(data: Record<string, unknown>): VerifyStep {
-		const step: VerifyStep = {
-			name: (data.name as string) ?? "",
-			type: (data.type as "command" | "llm-review" | "agent-qa") ?? "command",
-		};
-		if (typeof data.run === "string") step.run = data.run;
-		if (typeof data.prompt === "string") step.prompt = data.prompt;
-		if (data.expect === "success" || data.expect === "failure") step.expect = data.expect;
-		if (typeof data.timeout === "number") step.timeout = data.timeout;
-		if (typeof data.phase === "number") step.phase = data.phase;
-		if (data.optional === true) step.optional = true;
-		if (typeof data.label === "string") step.label = data.label;
-		if (typeof data.role === "string") step.role = data.role;
-		if (typeof data.description === "string") step.description = data.description;
-		return step;
-	}
-
-	private saveOne(workflow: Workflow): void {
-		const filePath = this.workflowFilePath(workflow.id);
-		try {
-			const obj: Record<string, unknown> = {
-				id: workflow.id,
-				name: workflow.name,
-				description: workflow.description,
-				...(workflow.hidden ? { hidden: true } : {}),
-				gates: workflow.gates.map((g) => {
-					const out: Record<string, unknown> = {
-						id: g.id,
-						name: g.name,
-					};
-					if (g.content) out.content = true;
-					if (g.injectDownstream) out.inject_downstream = true;
-					if (g.optional) out.optional = true;
-					if (g.dependsOn && g.dependsOn.length > 0) out.depends_on = g.dependsOn;
-					if (g.metadata) out.metadata = g.metadata;
-					if (g.verify && g.verify.length > 0) {
-						out.verify = g.verify.map(v => {
-							const s: Record<string, unknown> = { name: v.name, type: v.type };
-							if (v.run) s.run = v.run;
-							if (v.prompt) s.prompt = v.prompt;
-							if (v.expect) s.expect = v.expect;
-							if (v.timeout) s.timeout = v.timeout;
-							if (v.phase) s.phase = v.phase;
-							if (v.optional) s.optional = v.optional;
-							if (v.label) s.label = v.label;
-							if (v.role) s.role = v.role;
-							if (v.description) s.description = v.description;
-							return s;
-						});
-					}
-					return out;
-				}),
-				createdAt: workflow.createdAt,
-				updatedAt: workflow.updatedAt,
-			};
-			const content = stringify(obj, { lineWidth: 0 });
-			fs.writeFileSync(filePath, content, "utf-8");
-		} catch (err) {
-			console.error(`[workflow-store] Failed to save ${filePath}:`, err);
-		}
-	}
-
-	private seedDefaults(): void {
-		const bugFixPath = path.join(this.workflowsDir, "bug-fix.yaml");
-		if (fs.existsSync(bugFixPath)) {
-			this.loadAll();
-		} else {
-			console.warn("[workflow-store] No seed workflows found in workflows/ directory. Expected bug-fix.yaml to be committed to the repo.");
-		}
-	}
-
-	put(workflow: Workflow): void {
-		this.workflows.set(workflow.id, workflow);
-		this.saveOne(workflow);
-	}
-
-	get(id: string): Workflow | undefined {
-		return this.workflows.get(id);
-	}
-
-	remove(id: string): void {
-		this.workflows.delete(id);
-		const filePath = this.workflowFilePath(id);
-		try { fs.unlinkSync(filePath); } catch { /* ignore */ }
-	}
-
-	/** Re-read all YAML files from disk, picking up external changes */
-	reload(): void {
-		this.workflows.clear();
-		this.loadAll();
-	}
-
-	getAll(): Workflow[] {
-		this.reload();
-		return Array.from(this.workflows.values()).filter(w => !w.hidden);
-	}
-
-	update(id: string, updates: Partial<Omit<Workflow, "id" | "createdAt">>): boolean {
-		const existing = this.workflows.get(id);
-		if (!existing) return false;
-		const cleaned: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(updates)) {
-			if (v !== undefined && k !== "id" && k !== "createdAt") cleaned[k] = v;
-		}
-		Object.assign(existing, cleaned, { updatedAt: Date.now() });
-		this.saveOne(existing);
-		return true;
+/**
+ * File-backed workflow store with builtin cascade support.
+ * Each workflow is a YAML file in workflows/<id>.yaml.
+ * Hidden workflows (e.g. test-only) are filtered from getAll/getAllLocal.
+ */
+export class WorkflowStore extends YamlStore<Workflow> {
+	constructor(configDir: string) {
+		super(configDir, {
+			subdir: "workflows",
+			keyFn: w => w.id,
+			parseItem: parseWorkflow,
+			serializeItem: serializeWorkflow,
+			logPrefix: "[workflow-store]",
+			filter: w => !w.hidden,
+		});
 	}
 }
