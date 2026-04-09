@@ -1328,6 +1328,12 @@ async function createProjectAssistantSession(dirPath: string, scaffolding: boole
 		});
 		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
 		const { id } = await res.json();
+		// Refresh projects so the sidebar sees the newly-created provisional project
+		// before connectToSession renders. Without this, the session falls into the
+		// default project bucket because state.projects doesn't contain the new ID yet.
+		const { fetchProjects } = await import("./api.js");
+		const { setProjects } = await import("./state.js");
+		setProjects(await fetchProjects());
 		const { connectToSession } = await import("./session-manager.js");
 		const actualType = scaffolding ? "project-scaffolding" : "project";
 		await connectToSession(id, false, { assistantType: actualType, projectDirPath: dirPath });
