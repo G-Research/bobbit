@@ -1123,6 +1123,26 @@ export function showProjectDialog(): void {
 	let browseLoading = false;
 	let browseError = "";
 
+	// Live detection state — updated as the user types/selects a path
+	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
+	let detectTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const runDetection = async (dirPath: string) => {
+		if (!dirPath.trim()) { detectionResult = null; renderDialog(); return; }
+		try {
+			const { detectProject } = await import("./api.js");
+			detectionResult = await detectProject(dirPath.trim());
+		} catch {
+			detectionResult = null;
+		}
+		renderDialog();
+	};
+
+	const debouncedDetect = (dirPath: string) => {
+		if (detectTimer) clearTimeout(detectTimer);
+		detectTimer = setTimeout(() => runDetection(dirPath), 400);
+	};
+
 	const cleanup = () => {
 		render(html``, container);
 		container.remove();
@@ -1205,6 +1225,7 @@ export function showProjectDialog(): void {
 		pathValue = browseCurrent;
 		browsing = false;
 		renderDialog();
+		runDetection(pathValue);
 	};
 
 	const renderDialog = () => {
@@ -1255,7 +1276,7 @@ export function showProjectDialog(): void {
 				children: html`
 					${DialogContent({
 						children: html`
-							${DialogHeader({ title: "Add Project" })}
+							${DialogHeader({ title: detectionResult?.hasBobbit ? "Register Project" : "Add Project" })}
 							<div class="mt-4 flex flex-col gap-4">
 								${!browsing ? html`
 									<div>
@@ -1266,7 +1287,11 @@ export function showProjectDialog(): void {
 													type: "text",
 													placeholder: "/path/to/project",
 													value: pathValue,
-													onInput: (e: Event) => { pathValue = (e.target as HTMLInputElement).value; renderDialog(); },
+													onInput: (e: Event) => {
+														pathValue = (e.target as HTMLInputElement).value;
+														debouncedDetect(pathValue);
+														renderDialog();
+													},
 													onKeyDown: (e: KeyboardEvent) => {
 														if (e.key === "Enter") { e.preventDefault(); doContinue(); }
 														if (e.key === "Escape") cleanup();
@@ -1279,6 +1304,15 @@ export function showProjectDialog(): void {
 												children: "Browse",
 											})}
 										</div>
+										${detectionResult && pathValue.trim() ? html`
+											<p class="text-xs mt-1.5 ${detectionResult.hasBobbit ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}">
+												${detectionResult.hasBobbit
+													? html`An existing Bobbit project was found in this directory. Click <strong>Continue</strong> to register it.`
+													: detectionResult.exists && !detectionResult.isEmpty
+														? "This directory will be set up as a new Bobbit project."
+														: "A new project will be scaffolded in this directory."}
+											</p>
+										` : ""}
 									</div>
 								` : browseContent}
 								${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
