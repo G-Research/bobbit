@@ -50,7 +50,7 @@ import { bobbitConfigDir } from "../bobbit-dir.js";
 
 
 /**
- * Tool definitions directory — defaults/tools/ (legacy export, deprecated).
+ * Tool definitions directory — .bobbit/config/tools/ (runtime config-layer, legacy export, deprecated).
  * @deprecated Use ToolManager.getExtensionPath() or ToolManager.getToolsDir() instead.
  */
 export const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
