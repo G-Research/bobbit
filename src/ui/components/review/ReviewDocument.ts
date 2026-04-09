@@ -398,6 +398,9 @@ export class ReviewDocument extends LitElement {
     this._popoverMode = "popover";
     this._existingComment = "";
     this._editingAnnotationId = null;
+    if (this._pendingAnnId) {
+      try { this._annotator?.removeAnnotation(this._pendingAnnId); } catch { /* ignore */ }
+    }
     this._pendingAnnId = null;
 
     // Clear browser selection
