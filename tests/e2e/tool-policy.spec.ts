@@ -37,7 +37,7 @@ test.describe("PUT /api/tool-group-policies/:group", () => {
 		const getResp = await apiFetch("/api/tool-group-policies");
 		expect(getResp.status).toBe(200);
 		const data = await getResp.json();
-		expect(data["Browser"]).toBe("ask");
+		expect(data["Browser"].policy).toBe("ask");
 	});
 
 	test("clears a group policy with null", async () => {
@@ -56,7 +56,7 @@ test.describe("PUT /api/tool-group-policies/:group", () => {
 
 		const getResp = await apiFetch("/api/tool-group-policies");
 		const data = await getResp.json();
-		expect(data["TestGroup"]).toBeUndefined();
+		expect(data["TestGroup"]).toBeUndefined(); // cleared policy should not appear
 	});
 
 	test("supports all valid policy values", async () => {
@@ -69,7 +69,7 @@ test.describe("PUT /api/tool-group-policies/:group", () => {
 
 			const getResp = await apiFetch("/api/tool-group-policies");
 			const data = await getResp.json();
-			expect(data[`TestGroup-${policy}`]).toBe(policy);
+			expect(data[`TestGroup-${policy}`].policy).toBe(policy);
 		}
 	});
 });

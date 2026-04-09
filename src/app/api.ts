@@ -1217,7 +1217,17 @@ export async function fetchGroupPolicies(): Promise<Record<string, string>> {
 	try {
 		const res = await gatewayFetch("/api/tool-group-policies");
 		if (!res.ok) return {};
-		return await res.json();
+		const raw = await res.json();
+		// The cascade endpoint returns { group: { policy, origin } } — normalize to flat { group: policy }
+		const result: Record<string, string> = {};
+		for (const [key, value] of Object.entries(raw)) {
+			if (typeof value === "string") {
+				result[key] = value; // backward compat: old format
+			} else if (value && typeof value === "object" && "policy" in (value as Record<string, unknown>)) {
+				result[key] = (value as Record<string, unknown>).policy as string;
+			}
+		}
+		return result;
 	} catch {
 		return {};
 	}
