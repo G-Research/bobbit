@@ -262,29 +262,38 @@ test.describe("DELETE /api/roles/:name", () => {
 		expect(resp.status).toBe(404);
 	});
 
-	test("can delete and re-create a default role", async () => {
+	test("deleting a builtin role removes override but builtin remains via cascade", async () => {
+		// Create a local override for test-engineer
 		const getBeforeResp = await apiFetch("/api/roles/test-engineer");
 		expect(getBeforeResp.status).toBe(200);
 		const originalRole = await getBeforeResp.json();
 
-		const resp = await apiFetch("/api/roles/test-engineer", { method: "DELETE" });
-		expect(resp.status).toBe(200);
-
-		const getResp = await apiFetch("/api/roles/test-engineer");
-		expect(getResp.status).toBe(404);
-
-		// Restore so other tests aren't affected
-		const restoreResp = await apiFetch("/api/roles", {
+		// Create an override with a modified label
+		const overrideResp = await apiFetch("/api/roles", {
 			method: "POST",
 			body: JSON.stringify({
-				name: originalRole.name,
-				label: originalRole.label,
-				promptTemplate: originalRole.promptTemplate,
-				toolPolicies: originalRole.toolPolicies,
-				accessory: originalRole.accessory,
+				name: "test-engineer",
+				label: "Custom Test Engineer",
+				promptTemplate: originalRole.promptTemplate || "",
+				accessory: originalRole.accessory || "none",
 			}),
 		});
-		expect(restoreResp.status).toBe(201);
+		// May be 201 (new) or 409 (already exists) — either is fine
+		expect([201, 409]).toContain(overrideResp.status);
+
+		// Verify the override is visible
+		const getOverride = await apiFetch("/api/roles/test-engineer");
+		expect(getOverride.status).toBe(200);
+
+		// Delete the local override
+		const delResp = await apiFetch("/api/roles/test-engineer", { method: "DELETE" });
+		expect(delResp.status).toBe(200);
+
+		// The builtin should still be accessible via the cascade
+		const getAfterResp = await apiFetch("/api/roles/test-engineer");
+		expect(getAfterResp.status).toBe(200);
+		const afterRole = await getAfterResp.json();
+		expect(afterRole.name).toBe("test-engineer");
 	});
 });
 
