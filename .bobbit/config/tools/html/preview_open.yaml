@@ -48,9 +48,40 @@ detail_docs: |-
   preview_open(html="<h1>Updated</h1><p>Content refreshed automatically</p>")
   ```
 
+  ## Theme Integration
+
+  The preview panel automatically inherits the app's theme. A bridge script injected into every preview iframe syncs:
+  - The `.dark` class (light/dark mode)
+  - The `data-palette` attribute (color palette)
+  - All CSS custom properties (`--background`, `--foreground`, `--border`, `--muted`, etc.)
+  - The app's font stack
+
+  Changes are live — toggling dark/light mode in the app instantly updates the preview.
+
+  **Default behavior: match the app theme.** Unless the user explicitly asks for a different style, always write preview HTML that uses the inherited CSS variables rather than hardcoded colors. This makes previews feel integrated into the app.
+
+  ```html
+  <!-- DO: use CSS variables from the app -->
+  <body style="background: oklch(var(--background)); color: oklch(var(--foreground));">
+    <div style="border: 1px solid oklch(var(--border)); padding: 16px;">
+      Content that matches the app theme
+    </div>
+  </body>
+
+  <!-- DON'T: hardcode colors -->
+  <body style="background: #1a1a2e; color: #e0e0e0;">
+  ```
+
+  For full Bobbit styling, reference the app CSS directly (same-origin):
+  ```html
+  <link rel="stylesheet" href="/src/ui/app.css">
+  ```
+
+  For interactive tools, reports, or dashboards that the agent builds for the user, the default is always to inherit the theme. Only use custom styling when the user requests a specific look or when the preview is showing a mockup of an external product.
+
   ## Notes / Gotchas
 
   - **Same-origin with Vite dev server** — the preview iframe can reference real app CSS via `<link rel='stylesheet' href='/src/ui/app.css'>` for pixel-accurate mockups.
   - **Auto-updates** — the panel polls every second. Multiple rapid calls are fine; only the latest content is shown.
   - **One preview per session** — each session has its own preview. Switching sessions shows the correct preview.
-  - **User may need to refresh once** — after the first `preview_open`, the user may need to refresh the page to pick up the split-pane layout.
+  - **Fullscreen mode** — the user can click the maximize icon in the preview panel header to expand the preview to fill the main area, with a compact prompt bar at the bottom. Press Escape to exit fullscreen.
