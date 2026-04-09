@@ -440,7 +440,8 @@ State is per-project — each project has its own copies of these files in `<pro
 |---|---|
 | `src/server/agent/workflow-store.ts` | YAML persistence for workflow templates |
 | `src/server/agent/workflow-manager.ts` | Workflow CRUD, DAG validation, cloning |
-| `src/server/agent/verification-harness.ts` | Async verification (phased execution, command + LLM review + agent-qa, artifact population) |
+| `src/server/agent/verification-harness.ts` | Async verification orchestration (command + LLM review + agent-qa, session lifecycle, artifact population) |
+| `src/server/agent/verification-logic.ts` | Pure verification logic — variable substitution, phase grouping, optional step skipping, cache reuse, error pattern matching (unit-testable without server state) |
 | `src/server/agent/gate-store.ts` | Gate state and signal history persistence |
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
