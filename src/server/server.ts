@@ -46,6 +46,7 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
+import { ReviewAnnotationStore } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
@@ -412,6 +413,7 @@ export function createGateway(config: GatewayConfig) {
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
+	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
 	const projectConfigStore = new ProjectConfigStore(configDir);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
@@ -555,7 +557,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore);
 
 			return;
 		}
@@ -1068,6 +1070,7 @@ async function handleApiRoute(
 	configCascade: ConfigCascade,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
+	reviewAnnotationStore?: ReviewAnnotationStore,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -5435,6 +5438,74 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		sessionManager.deleteDraft(id, type);
+		json({ ok: true });
+		return;
+	}
+
+	// ── Review annotation endpoints ────────────────────────────────
+
+	// GET /api/sessions/:id/review/annotations
+	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
+		const sessionId = url.pathname.split("/")[3];
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const data = reviewAnnotationStore.getAll(sessionId);
+		json(data);
+		return;
+	}
+
+	// POST /api/sessions/:id/review/annotations
+	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
+		const sessionId = url.pathname.split("/")[3];
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = await readBody(req);
+		if (!body?.docTitle || !body?.annotation) {
+			json({ error: "docTitle and annotation required" }, 400);
+			return;
+		}
+		reviewAnnotationStore.addAnnotation(sessionId, body.docTitle, body.annotation);
+		json({ ok: true });
+		return;
+	}
+
+	// DELETE /api/sessions/:id/review/annotations[/:annotationId]
+	if (req.method === "DELETE" && url.pathname.startsWith("/api/sessions/") && url.pathname.includes("/review/annotations")) {
+		const parts = url.pathname.split("/");
+		const sessionId = parts[3];
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		if (parts.length >= 7 && parts[6]) {
+			// DELETE /api/sessions/:id/review/annotations/:annotationId
+			const annotationId = decodeURIComponent(parts[6]);
+			const docTitle = url.searchParams.get("docTitle") || "";
+			reviewAnnotationStore.removeAnnotation(sessionId, docTitle, annotationId);
+			json({ ok: true });
+		} else {
+			// DELETE /api/sessions/:id/review/annotations — clear all or by docTitle
+			const body = await readBody(req);
+			const docTitle = body?.docTitle;
+			if (docTitle) {
+				reviewAnnotationStore.clearAnnotations(sessionId, docTitle);
+			} else {
+				reviewAnnotationStore.clearAll(sessionId);
+			}
+			json({ ok: true });
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/review/submitted
+	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
+		const sessionId = url.pathname.split("/")[3];
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		json({ submitted: reviewAnnotationStore.isSubmitted(sessionId) });
+		return;
+	}
+
+	// PUT /api/sessions/:id/review/submitted
+	if (req.method === "PUT" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
+		const sessionId = url.pathname.split("/")[3];
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = await readBody(req);
+		reviewAnnotationStore.setSubmitted(sessionId, !!body?.submitted);
 		json({ ok: true });
 		return;
 	}
