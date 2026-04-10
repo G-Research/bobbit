@@ -11,8 +11,6 @@ export interface QueuedMessage {
 	/** True if this message was already dispatched mid-turn via steer RPC.
 	 *  Kept in queue so the UI shows "Sent" until the turn ends. */
 	dispatched?: boolean;
-	/** True if this message should be dispatched via followUp() instead of prompt(). */
-	isFollowUp?: boolean;
 	createdAt: number;
 }
 
@@ -21,7 +19,6 @@ export type ClientMessage =
 	| { type: "auth"; token: string }
 	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[] }
 	| { type: "steer"; text: string }
-	| { type: "follow_up"; text: string }
 	| { type: "steer_queued"; messageId: string }
 	| { type: "remove_queued"; messageId: string }
 	| { type: "abort" }

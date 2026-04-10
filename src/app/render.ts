@@ -20,6 +20,7 @@ import {
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
+import { clearAllAnnotations } from "../ui/components/review/AnnotationStore.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
@@ -2675,7 +2676,15 @@ export function doRenderApp(): void {
 				@review-tab-change=${(e: CustomEvent) => { state.reviewActiveTab = e.detail.title; renderApp(); }}
 				@review-submit=${(e: CustomEvent) => {
 					const agent = state.remoteAgent;
-					if (agent) agent.followUp(e.detail.feedback);
+					if (agent) {
+						agent.prompt(e.detail.feedback);
+						const sid = activeSessionId() || "";
+						clearAllAnnotations(sid);
+						state.reviewDocuments = new Map();
+						state.reviewPanelOpen = false;
+						state.reviewActiveTab = "";
+						renderApp();
+					}
 				}}
 			></review-pane>
 		</div>

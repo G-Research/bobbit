@@ -982,14 +982,13 @@ export class SessionManager {
 	}
 
 	/**
-	 * Enqueue a prompt (or follow_up). If the agent is idle and queue was empty,
+	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
 	 * If the agent is idle but queue has items, enqueue and drain.
 	 */
 	async enqueuePrompt(sessionId: string, text: string, opts?: {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
-		isFollowUp?: boolean;
 		isSteered?: boolean;
 	}): Promise<void> {
 		const session = this.sessions.get(sessionId);
@@ -1002,7 +1001,6 @@ export class SessionManager {
 				images: opts?.images,
 				attachments: opts?.attachments,
 				isSteered: opts?.isSteered,
-				isFollowUp: opts?.isFollowUp,
 			});
 			this.broadcastQueue(session);
 			return;
@@ -1013,11 +1011,7 @@ export class SessionManager {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			session.lastPromptText = text;
 			session.lastPromptImages = opts?.images;
-			if (opts?.isFollowUp) {
-				await session.rpcClient.followUp(text);
-			} else {
-				await session.rpcClient.prompt(text, opts?.images);
-			}
+			await session.rpcClient.prompt(text, opts?.images);
 			return;
 		}
 
@@ -1026,7 +1020,6 @@ export class SessionManager {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
-			isFollowUp: opts?.isFollowUp,
 		});
 		this.broadcastQueue(session);
 
@@ -1125,10 +1118,7 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 		broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
 
-		// Dispatch via appropriate method — followUp for follow_up messages, prompt otherwise
-		const dispatchPromise = next.isFollowUp
-			? session.rpcClient.followUp(next.text)
-			: session.rpcClient.prompt(next.text, next.images);
+		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
 		dispatchPromise.catch((err: any) => {
 			console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
 			// Revert optimistic status on failure
@@ -1295,8 +1285,7 @@ export class SessionManager {
 			// Fresh response error — re-send the original prompt
 			await session.rpcClient.prompt(session.lastPromptText, session.lastPromptImages);
 		} else {
-			// Fallback (e.g. session predates error tracking) — use prompt, not followUp,
-			// because followUp may not be accepted when the agent is idle.
+			// Fallback (e.g. session predates error tracking)
 			await session.rpcClient.prompt(
 				"[SYSTEM: The model API returned an error on your last response. " +
 				"Please review your conversation history and retry what you were doing.]"

@@ -20,13 +20,11 @@ export class PromptQueue {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
-		isFollowUp?: boolean;
 	}): QueuedMessage {
 		const msg: QueuedMessage = {
 			id: randomUUID(),
 			text,
 			isSteered: opts?.isSteered ?? false,
-			isFollowUp: opts?.isFollowUp ?? false,
 			createdAt: Date.now(),
 		};
 		if (opts?.images?.length) msg.images = opts.images;

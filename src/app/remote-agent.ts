@@ -472,11 +472,6 @@ export class RemoteAgent {
 		this.send({ type: "steer", text });
 	}
 
-	followUp(message: any): void {
-		const text = typeof message === "string" ? message : extractText(message);
-		this.send({ type: "follow_up", text });
-	}
-
 	get isAborting(): boolean { return this._isAborting; }
 
 	abort(): void {

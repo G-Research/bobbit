@@ -295,10 +295,6 @@ export class RpcBridge {
 		return this.sendCommand({ type: "steer", message: text });
 	}
 
-	followUp(text: string) {
-		return this.sendCommand({ type: "follow_up", message: text });
-	}
-
 	abort() {
 		return this.sendCommand({ type: "abort" });
 	}

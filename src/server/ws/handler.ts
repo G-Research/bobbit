@@ -253,7 +253,6 @@ export function handleWebSocketConnection(
 					send(ws, { type: "messages", data: [] });
 					return;
 				case "prompt":
-				case "follow_up":
 					// Allow prompts — they'll be queued by enqueuePrompt since status != idle
 					break;
 				default:
@@ -335,9 +334,6 @@ export function handleWebSocketConnection(
 					} else {
 						await sessionManager.enqueuePrompt(sessionId, msg.text, { isSteered: true });
 					}
-					break;
-				case "follow_up":
-					await sessionManager.enqueuePrompt(sessionId, msg.text, { isFollowUp: true });
 					break;
 				case "steer_queued":
 					sessionManager.steerQueued(sessionId, msg.messageId);
