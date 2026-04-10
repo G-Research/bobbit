@@ -2297,7 +2297,17 @@ async function handleApiRoute(
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveTools(projectId);
-		json({ tools: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
+		const tools: Array<Record<string, unknown>> = resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) }));
+		// Include MCP/external tools not covered by the config cascade
+		if (toolManager) {
+			const resolvedNames = new Set(resolved.map(r => r.item.name));
+			for (const t of toolManager.getAvailableTools()) {
+				if (!resolvedNames.has(t.name)) {
+					tools.push({ ...t, origin: "mcp" });
+				}
+			}
+		}
+		json({ tools });
 		return;
 	}
 
