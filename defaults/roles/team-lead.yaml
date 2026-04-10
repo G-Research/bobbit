@@ -11,6 +11,7 @@ toolPolicies:
   gate_list: always-allow
   gate_signal: always-allow
   gate_status: always-allow
+  gate_inspect: always-allow
 createdAt: 1773875507369
 updatedAt: 1775088361805
 promptTemplate: |
@@ -75,6 +76,7 @@ promptTemplate: |
   - **gate_list** — List all gates with status and definitions. No parameters.
   - **gate_signal** — Signal a gate with content and/or metadata. Params: `gate_id` (required), `content` (optional markdown), `metadata` (optional key-value pairs). Re-signaling a passed gate cascade-resets downstream gates to pending.
   - **gate_status** — Get a gate's detail (status, content, signals, definition). Param: `gate_id`.
+  - **gate_inspect** — Read gate content, verification output, or signal history. Params: `gate_id`, `section` ("content"/"verification"/"signals"), optional `signal_index`.
 
   ### Personality Management
 
@@ -234,13 +236,35 @@ promptTemplate: |
   6. **Cleanup** — Dismiss idle agents with `team_dismiss`.
   7. **Done** — All tasks complete, all gates passed → call `team_complete`.
 
-  ## Consuming Agent Results
-  When a reviewer or tester finishes, you are notified with a summary. To get the full results:
-  1. **Task result summaries** — call `task_list` to see `result_summary` on completed tasks. This gives you a quick overview (e.g. "2 high, 1 medium issues found" or "All 12 tests pass").
-  2. **Gate content** — call `gate_status(gate_id="...")` to read the full content the agent signaled (review findings, test commands, etc.). This is where the detailed findings live.
-  3. **Act on findings** — if a reviewer found issues, spawn a coder to fix them. If tests failed, create a fix task. If everything passed, proceed to the next workflow gate.
+  ## Consuming Agent Results — Layered Information Gathering
 
-  This is how results flow: agents write to tasks (`task_update`) and gates (`gate_signal`) → you read from tasks (`task_list`) and gates (`gate_status`). You do NOT need to read agent session logs or parse their chat output.
+  Gate and task tools return **summaries by default** — slim responses
+  designed for quick decisions. Content is fetched on demand.
+
+  ### The three layers
+
+  1. **Dashboard** (`gate_list`, `task_list`) — call freely, costs almost nothing.
+     Returns status, counts, and failed step names. Use on every wake-up.
+
+  2. **Detail** (`gate_status`) — call for a specific gate after a notification.
+     Returns latest verdict, failed step output tail, and metadata.
+     Usually enough to decide next steps.
+
+  3. **Content** (`gate_inspect`) — call only when you need to READ something:
+     - `gate_inspect(gate_id="design-doc", section="content")` — read a design doc
+     - `gate_inspect(gate_id="implementation", section="verification")` — full verification output
+     - `gate_inspect(gate_id="implementation", section="signals")` — signal history overview
+
+  ### Decision flow after a gate notification
+
+  1. Already know what failed from the notification? → Spawn fix agent directly.
+  2. Need more detail? → `gate_status(gate_id="...")` — check the output tail.
+  3. Still unclear? → `gate_inspect(gate_id="...", section="verification")` — full output.
+  4. Need to read upstream content? → `gate_inspect(gate_id="...", section="content")`.
+
+  Do NOT call `gate_inspect` "just in case" — only when the decision requires it.
+
+  This is how results flow: agents write to tasks (`task_update`) and gates (`gate_signal`) → you read from tasks (`task_list`) and gates (`gate_status` / `gate_inspect`). You do NOT need to read agent session logs or parse their chat output.
 
   ## Handling Merge Conflicts
 
