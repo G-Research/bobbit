@@ -4,7 +4,7 @@ import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
-import { clearAnnotations, clearAllAnnotations } from "../ui/components/review/AnnotationStore.js";
+import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted } from "../ui/components/review/AnnotationStore.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
@@ -736,11 +736,16 @@ export class RemoteAgent {
 							}
 						}
 					}
-					// Clear review pane on reconnect — review state is transient UI,
-					// not something that should be restored from message history replay.
+					// Rebuild review pane state from message history (same persistence as preview pane).
+					// Skip if the user already submitted the review for this session.
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
 					state.reviewPanelOpen = false;
+					if (!isReviewSubmitted(this._sessionId || "")) {
+						for (const m of this._state.messages) {
+							this._checkReviewToolResult(m);
+						}
+					}
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -1101,6 +1106,8 @@ export class RemoteAgent {
 
 			if (data.action === "review_open" && data.title && data.markdown) {
 				const replace = data.replace !== false;
+				// New review opened — clear any prior submitted flag so it persists across reconnects
+				if (this._sessionId) clearReviewSubmitted(this._sessionId);
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				if (replace || !state.reviewDocuments.has(data.title)) {
 					state.reviewDocuments.set(data.title, { title: data.title, markdown: data.markdown });

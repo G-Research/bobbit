@@ -83,6 +83,36 @@ export function clearAllAnnotations(sessionId: string): void {
 }
 
 /**
+ * Mark that the review has been submitted for a session.
+ * Prevents review pane from reopening on reconnect/replay.
+ */
+export function markReviewSubmitted(sessionId: string): void {
+  try {
+    sessionStorage.setItem(`review-submitted-${sessionId}`, "1");
+  } catch { /* ignore */ }
+}
+
+/**
+ * Check whether the review was already submitted for a session.
+ */
+export function isReviewSubmitted(sessionId: string): boolean {
+  try {
+    return sessionStorage.getItem(`review-submitted-${sessionId}`) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clear the submitted flag (e.g. when a new review is opened).
+ */
+export function clearReviewSubmitted(sessionId: string): void {
+  try {
+    sessionStorage.removeItem(`review-submitted-${sessionId}`);
+  } catch { /* ignore */ }
+}
+
+/**
  * Count total annotations across all open documents for a session.
  */
 export function getTotalAnnotationCount(
