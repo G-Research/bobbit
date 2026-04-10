@@ -12,9 +12,9 @@ detail_docs: >-
   ## Purpose
 
 
-  List all tasks for the current goal with their full metadata: state, type,
-  assignment, dependencies, spec, and results. This is the dashboard view of the
-  goal's task board.
+  List all tasks for the current goal with a slim summary: state, type,
+  assignment, and dependencies. This is the dashboard view of the goal's task
+  board. Full spec and result details are available via individual task detail.
 
 
   ## Parameters
@@ -42,20 +42,15 @@ detail_docs: >-
 
   - `dependsOn` — array of task IDs this task depends on
 
-  - `spec` — detailed task specification
-
-  - `resultSummary` — completion summary (populated when task is completed)
-
-  - `baseSha` — commit the agent started from (set by system at spawn)
+  - `branch` — agent's working branch name (set by system at spawn)
 
   - `headSha` — tip of the agent's finished work (set by agent on completion)
 
-  - `branch` — agent's working branch name (set by system at spawn)
+  - `workflowGateId` — linked workflow gate ID (if any)
 
-  - `parentTaskId` — ID of the parent task (null if top-level)
 
-  - `completedAt` — timestamp when the task was completed (null if not yet
-  complete)
+  Does **not** return: `spec`, `resultSummary`, `baseSha`, `parentTaskId`,
+  `completedAt`. Use `GET /api/tasks/:id` for full task detail.
 
 
   ## When to Use
@@ -106,6 +101,10 @@ detail_docs: >-
 
   ## Notes / Gotchas
 
+
+  - **Slim summary** — returns only orchestration fields. `spec` and
+  `resultSummary` are omitted to keep responses small. Use individual task
+  detail (`GET /api/tasks/:id`) when you need the full spec or result.
 
   - **Lightweight and fast** — no parameters, instant response. Call frequently
   to stay informed.

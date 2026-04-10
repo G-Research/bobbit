@@ -1,0 +1,188 @@
+name: gate_inspect
+description: "Read gate content, verification output, or signal history"
+summary: "Read detailed gate data by section: content, verification output, or signal history."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Gates
+docs: >-
+  Scoped read tool for gate data. Fetches exactly one section per call:
+  content (markdown body), verification (full step output), or signals
+  (summary list of all signals). Use after gate_status when you need to
+  drill deeper.
+detail_docs: >-
+  ## Purpose
+
+
+  Read detailed gate data by section. This is the Layer 3 content retrieval
+  tool — use it when `gate_list` (Layer 1) and `gate_status` (Layer 2) don't
+  have enough detail. Each call fetches exactly one piece of data to keep
+  responses focused.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Default | Description |
+
+  |------|------|----------|---------|-------------|
+
+  | `gate_id` | string | **Yes** | — | Gate ID (e.g. "design-doc",
+  "implementation") |
+
+  | `section` | `"content"` / `"verification"` / `"signals"` | **Yes** | — |
+  What to read |
+
+  | `signal_index` | number | No | -1 (latest) | Which signal. 0-based,
+  negative from end. |
+
+
+  ## Returns
+
+
+  ### section="content" — Read gate content
+
+
+  Returns the markdown content from the specified signal.
+
+
+  - `gateId` — gate identifier
+
+  - `section` — `"content"`
+
+  - `signalIndex` — resolved 0-based index
+
+  - `signalId` — signal identifier
+
+  - `text` — the markdown content body (or null if no content)
+
+
+  Typical size: 2–8KB for a design doc.
+
+
+  ### section="verification" — Read full verification output
+
+
+  Returns all verification steps with full (untruncated) output.
+
+
+  - `gateId` — gate identifier
+
+  - `section` — `"verification"`
+
+  - `signalIndex` — resolved 0-based index
+
+  - `signalId` — signal identifier
+
+  - `steps[]` — array of verification step results:
+    - `name` — step name
+    - `type` — step type (e.g. "command", "llm-review")
+    - `passed` — boolean
+    - `skipped` — boolean (if skipped)
+    - `duration_ms` — execution time in milliseconds
+    - `output` — full output text (untruncated)
+
+
+  Can be large (10–50KB for LLM review steps).
+
+
+  ### section="signals" — Browse signal history
+
+
+  Summary-only listing of all signals. No content bodies, no verification
+  output.
+
+
+  - `gateId` — gate identifier
+
+  - `section` — `"signals"`
+
+  - `signals[]` — array of signal summaries:
+    - `index` — 0-based position
+    - `id` — signal identifier
+    - `timestamp` — when the signal was sent
+    - `sessionId` — which session sent it
+    - `commitSha` — git commit SHA (if provided)
+    - `verdict` — `"passed"`, `"failed"`, or `"running"`
+    - `hasContent` — whether this signal included content
+    - `metadataKeys` — array of metadata key names
+
+
+  Each entry is ~150 bytes. Even 22 signals = ~3.3KB.
+
+
+  ## When to Use
+
+
+  - **Reading a design doc** —
+  `gate_inspect(gate_id="design-doc", section="content")`
+
+  - **Getting full verification output** — when the 40-line tail from
+  `gate_status` wasn't enough to diagnose the issue
+
+  - **Browsing signal history** — to see how many attempts were made, compare
+  versions, or find a specific signal
+
+  - **Reading upstream content for planning** — get the content from any gate
+  to understand requirements
+
+
+  ## When NOT to Use
+
+
+  - **Quick status check** — use `gate_list` (Layer 1) instead.
+
+  - **Latest verdict and truncated output** — use `gate_status` (Layer 2)
+  instead.
+
+  - **Do NOT call "just in case"** — only when the decision requires reading
+  the actual content or full output.
+
+
+  ## Examples
+
+
+  ```
+
+  # Read the design document content
+
+  gate_inspect(gate_id="design-doc", section="content")
+
+
+  # Get full verification output for the latest signal
+
+  gate_inspect(gate_id="implementation", section="verification")
+
+
+  # Browse all signals to see attempt history
+
+  gate_inspect(gate_id="implementation", section="signals")
+
+
+  # Read content from a specific earlier signal (comparing versions)
+
+  gate_inspect(gate_id="implementation", section="content", signal_index=0)
+
+
+  # Read verification from second-to-last signal
+
+  gate_inspect(gate_id="implementation", section="verification",
+  signal_index=-2)
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **signal_index** defaults to -1 (latest). Use 0 for the first signal,
+  -2 for second-to-last, etc.
+
+  - **section="signals" ignores signal_index** — it always returns all
+  signals as summaries.
+
+  - **Large responses possible** — `section="verification"` can return
+  10–50KB for LLM review steps. Only call when needed.
+
+  - **404 if signal not found** — if the signal_index is out of range, the
+  endpoint returns a 404 error.
