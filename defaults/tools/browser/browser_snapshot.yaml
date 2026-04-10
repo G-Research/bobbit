@@ -6,7 +6,7 @@ provider:
   extension: extension.ts
 group: Browser
 docs: |-
-  Returns ARIA YAML showing page structure (headings, buttons, links, etc.). Better than screenshots for understanding page layout. Use after browser_navigate.
+  Better than screenshots for understanding page layout. Use after browser_navigate.
 detail_docs: >-
   ## Purpose
 

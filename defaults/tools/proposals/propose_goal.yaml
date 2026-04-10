@@ -6,6 +6,4 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Call this tool when you have gathered enough information to propose a goal.
-  The proposal will be displayed to the user for review and acceptance.
   Parameters: title (required), spec (required), cwd, workflow, options.

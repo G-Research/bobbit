@@ -7,7 +7,7 @@ provider:
 group: Team
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Inject a mid-turn correction into a running agent's conversation. The agent sees it as a user message interleaved with its current work. Use sparingly — prefer letting agents finish their turn first.
+  The agent sees it as a user message interleaved with its current work. Use sparingly — prefer letting agents finish their turn first.
 detail_docs: >-
   ## Purpose
 

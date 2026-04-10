@@ -6,7 +6,5 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Call this tool when you have detected or configured a project.
-  The proposal will be displayed to the user for review and acceptance.
   Parameters: name (required), root_path (required), build_command, test_command,
   typecheck_command, test_unit_command, test_e2e_command, worktree_setup_command.

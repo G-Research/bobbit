@@ -7,7 +7,7 @@ provider:
 group: Team
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Returns all team agents with session ID, role, status, branch, and worktree path. Call frequently to monitor progress and detect finished agents.
+  Call frequently to monitor progress and detect finished agents.
 detail_docs: >-
   ## Purpose
 

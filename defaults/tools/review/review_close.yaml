@@ -5,8 +5,6 @@ provider:
   type: bobbit-extension
   extension: extension.ts
 group: Review
-docs: |-
-  Close a specific review tab by title, or close all tabs if no title provided.
 detail_docs: |-
   ## Parameters
   | Name | Type | Required | Description |

@@ -8,7 +8,7 @@ provider:
 group: Shell
 renderer: src/ui/tools/renderers/BashRenderer.ts
 docs: |-
-  Output truncated to last 2000 lines / 50KB. **Never start background processes** (`node server.js &`, `nohup`) — stdout/stderr pipes stay open and hang the agent session forever. Use `bash_bg` instead. Exit code reported alongside output. Use `--` before rg/grep patterns starting with `--`.
+  **Never start background processes** (`node server.js &`, `nohup`) — stdout/stderr pipes stay open and hang the agent session forever. Use `bash_bg` instead. Exit code reported alongside output. Use `--` before rg/grep patterns starting with `--`.
 detail_docs: >-
   ## Purpose
 

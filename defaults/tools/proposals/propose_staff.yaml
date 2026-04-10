@@ -6,6 +6,4 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Call this tool when you have designed a custom staff configuration.
-  The proposal will be displayed to the user for review and acceptance.
   Parameters: name (required), prompt (required), description, triggers, cwd.

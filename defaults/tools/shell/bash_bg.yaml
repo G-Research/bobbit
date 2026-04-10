@@ -7,7 +7,7 @@ provider:
 group: Shell
 renderer: src/ui/tools/renderers/BgProcessRenderer.ts
 docs: |-
-  Manage background shell processes. Actions: create, logs, grep, head, slice, kill, list. Use `bash_bg` instead of `bash` for any command that might take longer than 2 minutes or produce large output you may not need to read in full. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/grep/head/slice/kill), `tail` (log lines, default 200), `pattern` (for grep — string or regex), `context` (grep context lines, default 0), `max_results` (grep max matches, default 50), `lines` (for head, default 50), `from`/`to` (1-indexed line range for slice).
+  Actions: create, logs, grep, head, slice, kill, list. Use `bash_bg` instead of `bash` for any command that might take longer than 2 minutes or produce large output you may not need to read in full. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/grep/head/slice/kill), `tail` (log lines, default 200), `pattern` (for grep — string or regex), `context` (grep context lines, default 0), `max_results` (grep max matches, default 50), `lines` (for head, default 50), `from`/`to` (1-indexed line range for slice).
 detail_docs: |
   Manage background shell processes that don't block the agent.
 

@@ -6,7 +6,7 @@ provider:
   extension: extension.ts
 group: HTML
 docs: |-
-  Pass `html` for inline content or `file` to load from disk. The preview panel appears as a split-pane beside the chat and auto-updates on each call. Use for design mockups, data visualizations, and interactive prototypes.
+  Pass `html` for inline content or `file` to load from disk. Use for design mockups, data visualizations, and interactive prototypes.
 detail_docs: |-
   ## Purpose
 
