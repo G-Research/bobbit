@@ -20,7 +20,7 @@ import {
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
-import { clearAllAnnotations, markReviewSubmitted } from "../ui/components/review/AnnotationStore.js";
+import { clearAllAnnotations, clearAnnotations, markReviewSubmitted } from "../ui/components/review/AnnotationStore.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
@@ -2686,6 +2686,28 @@ export function doRenderApp(): void {
 						state.reviewActiveTab = "";
 						renderApp();
 					}
+				}}
+			@review-close-tab=${(e: CustomEvent) => {
+					const sid = activeSessionId() || "";
+					const title = e.detail.title as string;
+					clearAnnotations(sid, title);
+					state.reviewDocuments = new Map(state.reviewDocuments);
+					state.reviewDocuments.delete(title);
+					if (state.reviewActiveTab === title) {
+						const keys = [...state.reviewDocuments.keys()];
+						state.reviewActiveTab = keys[0] || "";
+					}
+					state.reviewPanelOpen = state.reviewDocuments.size > 0;
+					renderApp();
+				}}
+				@review-dismiss=${() => {
+					const sid = activeSessionId() || "";
+					clearAllAnnotations(sid);
+					markReviewSubmitted(sid);
+					state.reviewDocuments = new Map();
+					state.reviewPanelOpen = false;
+					state.reviewActiveTab = "";
+					renderApp();
 				}}
 			></review-pane>
 		</div>

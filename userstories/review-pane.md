@@ -62,6 +62,11 @@ The review pane allows users to annotate markdown documents opened by the agent,
 5. Click the "Doc A" tab.
    - Doc A's content is displayed with both highlights intact.
    - Doc B's annotation is preserved — switch back to Doc B to verify badge still shows "1".
+   - Each tab shows a small "×" close button on hover.
+6. Hover over the "Doc B" tab and click the "×" close button.
+   - A confirmation dialog warns that 1 unsaved comment will be lost.
+   - Confirm: "Doc B" tab is removed. Its annotation is cleared. Submit bar updates to "2 comments".
+   - Cancel: nothing happens, Doc B tab and annotation remain.
 6. Agent calls `review_open` with titles "Doc C" through "Doc F" (4 more documents).
    - First 5 tabs display normally in the tab bar.
    - 6th tab appears under an overflow "..." button.
@@ -180,6 +185,39 @@ The review pane allows users to annotate markdown documents opened by the agent,
    - Submit bar updates to "1 comment". Button becomes enabled (full opacity, pointer cursor).
 4. Delete the annotation.
    - Submit bar reverts to "No comments yet". Button becomes disabled again.
+
+**Coverage:** none
+
+---
+
+## RP-07b: Dismiss review with no comments
+
+**Preconditions:** Review pane open, no annotations added.
+
+**Steps and expectations:**
+1. Click "Dismiss" button (left of "Submit Review" in the submit bar).
+   - Review pane closes immediately. No confirmation dialog (no comments to lose).
+   - No message sent to the agent.
+   - Review pane does not reopen on reload.
+
+**Coverage:** none
+
+---
+
+## RP-07c: Dismiss review with unsaved comments
+
+**Preconditions:** Review pane open with 3 annotations across two documents.
+
+**Steps and expectations:**
+1. Click "Dismiss" button.
+   - A confirmation dialog warns: "Dismiss review? 3 unsaved comments will be lost."
+2. Click Cancel on the dialog.
+   - Nothing happens. Review pane stays open. All annotations intact.
+3. Click "Dismiss" again, then confirm.
+   - Review pane closes.
+   - All annotations are cleared from storage.
+   - No message sent to the agent.
+   - Review pane does not reopen on reload.
 
 **Coverage:** none
 

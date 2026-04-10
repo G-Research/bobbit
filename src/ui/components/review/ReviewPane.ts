@@ -71,6 +71,34 @@ export class ReviewPane extends LitElement {
     );
   }
 
+  private _closeTab(title: string, e: Event): void {
+    e.stopPropagation();
+    const count = this._annotationCounts.get(title) || 0;
+    if (count > 0) {
+      if (!confirm(`Close "${title}"? ${count} unsaved comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+    }
+    this.dispatchEvent(
+      new CustomEvent("review-close-tab", {
+        detail: { title },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private _dismiss(): void {
+    const totalCount = getTotalAnnotationCount(this.sessionId, this.documents);
+    if (totalCount > 0) {
+      if (!confirm(`Dismiss review? ${totalCount} unsaved comment${totalCount !== 1 ? "s" : ""} will be lost.`)) return;
+    }
+    this.dispatchEvent(
+      new CustomEvent("review-dismiss", {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   private _toggleOverflow(e: Event): void {
     e.stopPropagation();
     this._overflowOpen = !this._overflowOpen;
@@ -101,6 +129,11 @@ export class ReviewPane extends LitElement {
                 ${count > 0
                   ? html`<span class="review-tab-badge">${count}</span>`
                   : ""}
+                <span
+                  class="review-tab-close"
+                  @click=${(e: Event) => this._closeTab(title, e)}
+                  title="Close tab"
+                >×</span>
               </button>
             `;
           })}
@@ -160,11 +193,17 @@ export class ReviewPane extends LitElement {
               ? `${totalCount} comment${totalCount !== 1 ? "s" : ""}`
               : "No comments yet"}
           </span>
-          <button
-            class="review-submit-btn"
-            ?disabled=${totalCount === 0}
-            @click=${this._submitReview}
-          >Submit Review</button>
+          <div class="review-submit-actions">
+            <button
+              class="review-dismiss-btn"
+              @click=${this._dismiss}
+            >Dismiss</button>
+            <button
+              class="review-submit-btn"
+              ?disabled=${totalCount === 0}
+              @click=${this._submitReview}
+            >Submit Review</button>
+          </div>
         </div>
       </div>
     `;
