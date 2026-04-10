@@ -5457,6 +5457,7 @@ async function handleApiRoute(
 	// POST /api/sessions/:id/review/annotations/bulk — bulk save all annotations + submitted flag (used by sendBeacon on page unload)
 	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations/bulk")) {
 		const sessionId = url.pathname.split("/")[3];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Invalid body" }, 400); return; }
@@ -5477,6 +5478,7 @@ async function handleApiRoute(
 	// GET /api/sessions/:id/review/annotations
 	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
 		const sessionId = url.pathname.split("/")[3];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		const data = reviewAnnotationStore.getAll(sessionId);
 		json(data);
@@ -5486,6 +5488,7 @@ async function handleApiRoute(
 	// POST /api/sessions/:id/review/annotations
 	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
 		const sessionId = url.pathname.split("/")[3];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		const body = await readBody(req);
 		if (!body?.docTitle || !body?.annotation) {
@@ -5501,6 +5504,7 @@ async function handleApiRoute(
 	if (req.method === "DELETE" && url.pathname.startsWith("/api/sessions/") && url.pathname.includes("/review/annotations")) {
 		const parts = url.pathname.split("/");
 		const sessionId = parts[3];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		if (parts.length >= 7 && parts[6]) {
 			// DELETE /api/sessions/:id/review/annotations/:annotationId
@@ -5525,6 +5529,7 @@ async function handleApiRoute(
 	// GET /api/sessions/:id/review/submitted
 	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		json({ submitted: reviewAnnotationStore.isSubmitted(sessionId) });
 		return;
@@ -5533,6 +5538,7 @@ async function handleApiRoute(
 	// PUT /api/sessions/:id/review/submitted
 	if (req.method === "PUT" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		const body = await readBody(req);
 		reviewAnnotationStore.setSubmitted(sessionId, !!body?.submitted);
