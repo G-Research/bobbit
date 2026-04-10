@@ -422,6 +422,7 @@ export function createGateway(config: GatewayConfig) {
 	const roleStore = new RoleStore(configDir);
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
+	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const workflowStore = new WorkflowStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
@@ -5409,7 +5410,7 @@ async function handleApiRoute(
 		// Ensure tool docs are populated (they may have been injected at assemblePrompt time,
 		// but re-inject if missing to handle edge cases)
 		if (!parts.toolDocs && toolManager) {
-			parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools);
+			parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
 
 		const sections = getPromptSections(parts);

@@ -77,21 +77,23 @@ describe("getToolDocsForPrompt — collapsed layout", () => {
 		);
 	});
 
-	it("contains built-in group footer linking to defaults/tools/<groupDir>/", () => {
+	it("contains built-in group footer linking to tool-docs/<group>.md", () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-docs-state-"));
 		const tm = new ToolManager(tmpConfigDir);
-		const output = tm.getToolDocsForPrompt();
+		tm.generateDetailDocs(stateDir);
+		const output = tm.getToolDocsForPrompt(undefined, stateDir);
 		assert.ok(
 			output.includes("_For detailed Shell tool docs"),
 			"Should contain Shell group footer",
 		);
+		const expectedPath = path.join(stateDir, "tool-docs", "shell.md");
 		assert.ok(
-			output.includes("defaults/tools/shell/"),
-			"Footer should reference defaults/tools/shell/",
+			output.includes(expectedPath),
+			`Footer should reference ${expectedPath}`,
 		);
-		assert.ok(
-			output.includes("detail_docs"),
-			"Footer should mention detail_docs field",
-		);
+		// Verify the generated file exists
+		assert.ok(fs.existsSync(expectedPath), "shell.md should have been generated");
+		fs.rmSync(stateDir, { recursive: true, force: true });
 	});
 
 	it("has ### heading per built-in tool with merged summary + docs", () => {
@@ -116,12 +118,15 @@ describe("getToolDocsForPrompt — collapsed layout", () => {
 	});
 
 	it("has docs content before footer", () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-docs-order-"));
 		const tm = new ToolManager(tmpConfigDir);
-		const output = tm.getToolDocsForPrompt();
+		tm.generateDetailDocs(stateDir);
+		const output = tm.getToolDocsForPrompt(undefined, stateDir);
 		const bashDocsIdx = output.indexOf("Output truncated to last 2000 lines");
 		const shellFooterIdx = output.indexOf("_For detailed Shell tool docs");
 		assert.ok(bashDocsIdx > 0, "bash docs should be present");
 		assert.ok(bashDocsIdx < shellFooterIdx, "bash docs should come before Shell footer");
+		fs.rmSync(stateDir, { recursive: true, force: true });
 	});
 
 	it("groups are separate sections with ## headings", () => {
