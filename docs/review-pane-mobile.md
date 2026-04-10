@@ -97,7 +97,7 @@ Both properties are used by `<review-document>` when opening the popover on mobi
 
 ## Data format
 
-Mobile annotations use the **same format** as desktop annotations — the `AnnotationStore` is unchanged. Both flows produce W3C Web Annotation objects with `TextQuoteSelector` and `TextPositionSelector`, persisted to `sessionStorage`. Mobile and desktop annotations are interchangeable.
+Mobile annotations use the **same format** as desktop annotations — the `AnnotationStore` is unchanged. Both flows produce W3C Web Annotation objects with `TextQuoteSelector` and `TextPositionSelector`, persisted to the server via REST API (with an in-memory cache for synchronous reads). Mobile and desktop annotations are interchangeable.
 
 ## Testing
 
