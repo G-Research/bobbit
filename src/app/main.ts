@@ -348,6 +348,10 @@ async function initApp() {
 	}
 	renderApp();
 
+	// Listen for browser back/forward navigation — register early so hash changes
+	// during async init (gateway wait, session refresh) are not silently missed.
+	window.addEventListener("hashchange", handleHashChange);
+
 	if (savedUrl && savedToken) {
 		try {
 			await waitForGateway(savedUrl, savedToken);
@@ -427,9 +431,6 @@ async function initApp() {
 			renderApp();
 		}
 	}
-
-	// Listen for browser back/forward navigation
-	window.addEventListener("hashchange", handleHashChange);
 
 	// ========================================================================
 	// KEYBOARD SHORTCUT REGISTRY
