@@ -310,7 +310,7 @@ export class RemoteAgent {
 					}
 				}
 
-				this.handleServerMessage(msg);
+				this.handleServerMessage(msg).catch(() => {});
 			};
 
 			this.ws.onerror = () => {
