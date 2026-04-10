@@ -139,7 +139,7 @@ describe("getToolDocsForPrompt — MCP tools", () => {
 				description: "Does a thing via MCP.",
 				summary: "Does a thing.",
 				group: "MCP: test-server",
-				docs: "Full description of do_thing.\n\n| Name | Type | Required | Description |\n|------|------|----------|-------------|\n| arg1 | string | Yes | The argument |",
+				docs: "Does a thing via MCP. Parameters: arg1",
 				provider: { type: "mcp", server: "test-server", mcpTool: "do_thing" },
 			},
 		]);

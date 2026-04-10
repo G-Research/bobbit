@@ -306,8 +306,9 @@ export class McpManager {
       for (const tool of tools) {
         const summary = this._summaryCache.get(serverName)?.get(tool.name);
         const fullDesc = tool.description || `MCP tool ${tool.name} from ${serverName}`;
-        const paramDocs = this._generateToolParamDocs(tool);
-        const docs = paramDocs ? `${fullDesc}\n\n${paramDocs}` : fullDesc;
+        // Compact inline docs — full parameter tables live in the MD file
+        const paramNames = this._getParamNames(tool);
+        const docs = paramNames ? `${fullDesc}. Parameters: ${paramNames}` : fullDesc;
 
         infos.push({
           name: this._makeBobbitToolName(serverName, tool.name),
@@ -323,6 +324,15 @@ export class McpManager {
     }
 
     return infos;
+  }
+
+  /** Return a compact comma-separated list of parameter names, or empty string. */
+  private _getParamNames(tool: McpToolDef): string {
+    const schema = tool.inputSchema;
+    if (!schema || typeof schema !== "object") return "";
+    const properties = schema.properties as Record<string, unknown> | undefined;
+    if (!properties) return "";
+    return Object.keys(properties).join(", ");
   }
 
   /** Generate a parameter table from a tool's inputSchema. */
