@@ -105,7 +105,7 @@ export function composeReviewFeedback(
 ): string {
   const sections: string[] = [];
 
-  for (const [title, _doc] of documents) {
+  for (const [title, doc] of documents) {
     const annotations = load(sessionId, title);
     if (annotations.length === 0) continue;
 
@@ -114,7 +114,13 @@ export function composeReviewFeedback(
 
     for (const ann of annotations) {
       const quotedText = ann.isCode ? `\`${ann.quote}\`` : `"${ann.quote}"`;
-      sections.push(`> ${quotedText}\n${ann.comment}`);
+      // Compute line number from character offset
+      const lineNum = ann.start != null ? doc.markdown.substring(0, ann.start).split("\n").length : undefined;
+      const locationParts: string[] = [];
+      if (lineNum != null) locationParts.push(`line ${lineNum}`);
+      if (ann.start != null) locationParts.push(`offset ${ann.start}-${ann.end}`);
+      const location = locationParts.length > 0 ? ` (${locationParts.join(", ")})` : "";
+      sections.push(`> ${quotedText}${location}\n${ann.comment}`);
     }
   }
 
