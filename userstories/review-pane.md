@@ -17,15 +17,17 @@ The review pane allows users to annotate markdown documents opened by the agent,
    - Panel auto-selects the "Review" tab in the unified panel.
    - If the panel was collapsed, it un-collapses.
    - Document renders as formatted markdown.
-2. Select a passage of text in the rendered document.
-   - A comment popover appears near the selection.
-   - The popover shows the selected text (truncated if long) and a textarea.
+2. Select a passage of text in the rendered document (test on both desktop and mobile).
+   - **Desktop:** A comment popover appears near the selection.
+   - **Mobile:** A floating "Add Comment" button appears; tapping it opens a bottom sheet.
+   - The popover/sheet shows the selected text (truncated if long) and a textarea.
 3. Type a comment in the popover textarea.
-4. Press Enter to submit the comment.
+4. Press Enter to submit the comment (or click the Submit button).
    - The popover closes.
    - The selected text is highlighted in the document.
    - The tab badge shows "1".
    - The submit bar at the bottom shows "1 comment".
+   - Clicking the comment count opens a popover listing all comments. Clicking a comment scrolls to and highlights that annotation in the document.
 5. Select a different passage and add a second comment.
    - Both highlights are visible.
    - Tab badge shows "2". Submit bar shows "2 comments".
