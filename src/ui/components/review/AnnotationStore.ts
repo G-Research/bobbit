@@ -33,6 +33,12 @@ const _annotationCache = new Map<string, Map<string, ReviewAnnotation[]>>();
 /** sessionId → submitted flag */
 const _submittedCache = new Map<string, boolean>();
 
+/**
+ * Monotonically increasing version counter, bumped on cache hydration.
+ * Used internally to track mutations; not exported.
+ */
+let _cacheVersion = 0;
+
 // ── Pending write tracking ───────────────────────────────────────────
 
 /** All in-flight server write promises (cleaned up on resolve). */
@@ -48,8 +54,20 @@ export async function flushPendingWrites(): Promise<void> {
 
 // ── Internal helpers ─────────────────────────────────────────────────
 
+/** Build auth headers from localStorage (same token used by gatewayFetch in api.ts). */
+function _authHeaders(): Record<string, string> {
+  const token = (typeof localStorage !== "undefined" && localStorage.getItem("gateway.token")) || "";
+  return {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+}
+
 function _serverFetch(url: string, options?: RequestInit): void {
-  const p = fetch(url, options).then(() => {}).catch(() => {
+  const p = fetch(url, {
+    ...options,
+    headers: { ..._authHeaders(), ...options?.headers },
+  }).then(() => {}).catch(() => {
     // Fire-and-forget — server down is non-fatal
   });
   _pendingWrites.push(p);
@@ -76,7 +94,9 @@ function _ensureSessionCache(sessionId: string): Map<string, ReviewAnnotation[]>
  */
 export async function initAnnotationStore(sessionId: string): Promise<void> {
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/review/annotations`);
+    const res = await fetch(`/api/sessions/${sessionId}/review/annotations`, {
+      headers: _authHeaders(),
+    });
     if (!res.ok) {
       // Server doesn't have data yet or session not found — start empty
       _annotationCache.set(sessionId, new Map());
@@ -94,6 +114,13 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
     }
     _annotationCache.set(sessionId, sessionCache);
     _submittedCache.set(sessionId, !!data.submitted);
+    _cacheVersion++;
+    // Notify any open review panes so they can refresh annotation counts.
+    // This handles the race where a review pane was created (via a concurrent
+    // event) before initAnnotationStore finished hydrating the cache.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("annotation-cache-ready", { detail: { sessionId } }));
+    }
   } catch {
     // Network error — initialize empty caches for graceful degradation
     _annotationCache.set(sessionId, new Map());

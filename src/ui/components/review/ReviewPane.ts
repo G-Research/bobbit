@@ -25,9 +25,17 @@ export class ReviewPane extends LitElement {
     return this;
   }
 
+  private _boundCacheReady = () => this._refreshCounts();
+
   connectedCallback(): void {
     super.connectedCallback();
     this._refreshCounts();
+    window.addEventListener("annotation-cache-ready", this._boundCacheReady);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener("annotation-cache-ready", this._boundCacheReady);
   }
 
   protected updated(changed: Map<string, unknown>): void {
