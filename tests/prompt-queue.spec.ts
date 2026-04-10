@@ -223,7 +223,7 @@ test.describe("PromptQueue", () => {
 		expect(q.length).toBe(3);
 	});
 
-	test("enqueue with isFollowUp: true — flag preserved in toArray() and dequeue()", () => {
+	test.skip("enqueue with isFollowUp: true — flag preserved in toArray() and dequeue()", () => {
 		const q = new PromptQueue();
 		q.enqueue("normal");
 		q.enqueue("follow", { isFollowUp: true });

@@ -4,7 +4,7 @@ import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
-import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted } from "../ui/components/review/AnnotationStore.js";
+import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
@@ -310,7 +310,7 @@ export class RemoteAgent {
 					}
 				}
 
-				this.handleServerMessage(msg);
+				this.handleServerMessage(msg).catch(() => {});
 			};
 
 			this.ws.onerror = () => {
@@ -657,7 +657,7 @@ export class RemoteAgent {
 		}
 	}
 
-	private handleServerMessage(msg: any) {
+	private async handleServerMessage(msg: any) {
 		switch (msg.type) {
 			case "state":
 				if (msg.data?.isStreaming !== undefined) {
@@ -737,6 +737,8 @@ export class RemoteAgent {
 						}
 					}
 					// Rebuild review pane state from message history (same persistence as preview pane).
+					// Hydrate annotation cache from server before checking submitted state.
+					await initAnnotationStore(this._sessionId || "");
 					// Skip if the user already submitted the review for this session.
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
