@@ -67,6 +67,8 @@ Per-session review annotations are stored server-side so they survive browser cl
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals/:id/gates` | List gates for a goal |
+| `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
+| `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
 
@@ -256,6 +258,134 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 |---|---|---|
 | `GET` | `/api/preview` | Get preview HTML for a session (`?sessionId=`) |
 | `POST` | `/api/preview` | Set preview HTML for a session (`?sessionId=`, `{ html }`) |
+
+### Summary views (`?view=summary`)
+
+Three endpoints support a `?view=summary` query parameter that returns slim responses optimized for agent tool calls. Without this parameter, the full response is returned (used by the UI dashboard).
+
+**Why this exists:** Full gate and task responses include signal history, content bodies, verification output, and task specs — often hundreds of KB. Agent tools call these endpoints frequently, and every byte enters the LLM context window permanently. Summary views strip non-essential data, reducing typical `gate_list` responses from ~436KB to ~500B.
+
+**`GET /api/goals/:id/gates?view=summary`**
+
+Returns status, dependency, and signal count per gate — no signal arrays or content bodies.
+
+```json
+{
+  "gates": [{
+    "gateId": "implementation",
+    "name": "Implementation",
+    "status": "failed",
+    "dependsOn": ["design-doc"],
+    "signalCount": 22,
+    "updatedAt": 1775853741666,
+    "failedSteps": ["E2E tests"]
+  }]
+}
+```
+
+Fields: `gateId`, `name`, `status`, `dependsOn`, `signalCount`. Conditional: `updatedAt` (if signaled), `failedSteps` (if failed — names of non-passed, non-skipped verification steps).
+
+**`GET /api/goals/:id/gates/:gateId?view=summary`**
+
+Returns the latest signal only, with truncated output for failed verification steps (last 40 lines). Content body is replaced with `hasContent` + `contentLength`.
+
+```json
+{
+  "gateId": "implementation",
+  "name": "Implementation",
+  "status": "failed",
+  "dependsOn": ["design-doc"],
+  "signalCount": 22,
+  "updatedAt": 1775853741666,
+  "hasContent": true,
+  "contentLength": 15234,
+  "currentMetadata": { "new_regressions": "1" },
+  "latestSignal": {
+    "id": "sig-22",
+    "sessionId": "08c8adf2",
+    "timestamp": 1775853741666,
+    "commitSha": "bd8fc7b",
+    "verification": {
+      "status": "failed",
+      "steps": [
+        { "name": "Type check passes", "passed": true },
+        { "name": "E2E tests", "passed": false, "output": "… last 40 lines …" }
+      ]
+    }
+  }
+}
+```
+
+Passed verification steps include only `name` and `passed: true` — no output. Failed steps include a tail of their output (40 lines max).
+
+**`GET /api/goals/:id/tasks?view=summary`**
+
+Strips `spec`, `resultSummary`, `baseSha`, timestamps (`createdAt`, `updatedAt`, `completedAt`), and `inputGateIds`.
+
+```json
+{
+  "tasks": [{
+    "id": "743d021a",
+    "title": "Server-side annotation store",
+    "type": "implementation",
+    "state": "complete",
+    "assignedSessionId": "d425cf52",
+    "branch": "goal-...-coder-d425cf52",
+    "headSha": "def456",
+    "workflowGateId": "implementation",
+    "dependsOn": []
+  }]
+}
+```
+
+### Gate inspect endpoint
+
+**`GET /api/goals/:id/gates/:gateId/inspect`**
+
+A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspect` agent tool.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `section` | `"content"` \| `"verification"` \| `"signals"` | yes | — | What data to retrieve |
+| `signal_index` | integer | no | -1 (latest) | Which signal. 0-based, negative indexes from end. |
+
+**`section=content`** — Returns the markdown content body from a specific signal.
+```json
+{
+  "gateId": "design-doc",
+  "section": "content",
+  "signalIndex": 0,
+  "signalId": "sig-1",
+  "text": "## Design Document\n\n..."
+}
+```
+
+**`section=verification`** — Returns full verification step output (all steps, not truncated).
+```json
+{
+  "gateId": "implementation",
+  "section": "verification",
+  "signalIndex": 21,
+  "signalId": "sig-22",
+  "steps": [
+    { "name": "Type check", "type": "command", "passed": true, "duration_ms": 12400, "output": "Found 0 errors.\n" },
+    { "name": "E2E tests", "type": "command", "passed": false, "duration_ms": 95200, "output": "..." }
+  ]
+}
+```
+
+**`section=signals`** — Returns a summary list of all signals (no content bodies or verification output).
+```json
+{
+  "gateId": "implementation",
+  "section": "signals",
+  "signals": [
+    { "index": 0, "id": "sig-1", "timestamp": 1775812345000, "sessionId": "efed71fb", "commitSha": "abc123", "verdict": "failed", "hasContent": true, "metadataKeys": ["new_regressions"] }
+  ]
+}
+```
+
+Returns 400 if `section` is missing or invalid. Returns 404 if the resolved signal index is out of range.
 
 ### Generation counters (conditional fetch)
 
