@@ -164,11 +164,9 @@ export class ReviewDocument extends LitElement {
         this._handleSelection(annotation);
       });
 
-      // Mobile: listen for taps on existing annotation highlights
-      if (this._isMobile) {
-        this._boundMobileAnnotationTap = this._onMobileAnnotationTap.bind(this);
-        this._contentEl?.addEventListener("click", this._boundMobileAnnotationTap);
-      }
+      // Listen for clicks on existing annotation highlights (edit/delete)
+      this._boundMobileAnnotationTap = this._onMobileAnnotationTap.bind(this);
+      this._contentEl?.addEventListener("click", this._boundMobileAnnotationTap);
     } catch (e) {
       console.warn("[review-document] Failed to attach text annotator:", e);
     }
@@ -353,9 +351,19 @@ export class ReviewDocument extends LitElement {
     this._selectedText = ann.quote;
     this._existingComment = ann.comment || "";
     this._editingAnnotationId = ann.id;
-    this._popoverMode = "bottom-sheet";
+    this._popoverMode = this._isMobile ? "bottom-sheet" : "popover";
     this._popoverOpen = true;
     this._showFloatingBtn = false;
+
+    // Position popover near the clicked highlight for desktop
+    if (!this._isMobile) {
+      const rect = target.getBoundingClientRect();
+      const containerRect = this._contentEl?.getBoundingClientRect();
+      if (containerRect) {
+        this._popoverX = rect.left - containerRect.left;
+        this._popoverY = rect.bottom - containerRect.top + 4;
+      }
+    }
   }
 
   private _showToast(message: string): void {
