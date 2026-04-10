@@ -85,8 +85,8 @@ describe("getToolDocsForPrompt — collapsed layout", () => {
 			"Should contain Shell group footer",
 		);
 		assert.ok(
-			output.includes(".bobbit/config/tools/shell/"),
-			"Footer should reference .bobbit/config/tools/shell/",
+			output.includes("defaults/tools/shell/"),
+			"Footer should reference defaults/tools/shell/",
 		);
 		assert.ok(
 			output.includes("detail_docs"),
