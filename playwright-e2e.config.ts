@@ -51,6 +51,8 @@ export default defineConfig({
 				"**/mobile-review-commenting*",
 				"**/team-lifecycle-ui*",
 				"**/navigation.spec*",
+				"**/mcp-integration*",
+				"**/cancel-verification*",
 			],
 			workers: 2,
 		},
