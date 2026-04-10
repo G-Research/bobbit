@@ -3231,6 +3231,21 @@ async function handleApiRoute(
 	const goalTasksMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tasks$/);
 	if (goalTasksMatch && req.method === "GET") {
 		const tasks = getTaskManagerForGoal(goalTasksMatch[1]).getTasksForGoal(goalTasksMatch[1]);
+		if (url.searchParams.get("view") === "summary") {
+			const slim = tasks.map(t => ({
+				id: t.id,
+				title: t.title,
+				type: t.type,
+				state: t.state,
+				assignedSessionId: t.assignedSessionId,
+				branch: t.branch,
+				headSha: t.headSha,
+				workflowGateId: t.workflowGateId,
+				dependsOn: t.dependsOn || [],
+			}));
+			json({ tasks: slim });
+			return;
+		}
 		json({ tasks });
 		return;
 	}
@@ -3285,6 +3300,29 @@ async function handleApiRoute(
 			const def = goal.workflow?.gates.find(wg => wg.id === g.gateId);
 			return { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
 		});
+		if (url.searchParams.get("view") === "summary") {
+			const slim = enriched.map(g => {
+				const base: Record<string, unknown> = {
+					gateId: g.gateId,
+					name: g.name,
+					status: g.status,
+					dependsOn: g.dependsOn || [],
+					signalCount: g.signalCount,
+				};
+				if (g.signals.length > 0) base.updatedAt = g.updatedAt;
+				if (g.status === "failed") {
+					const latest = g.signals[g.signals.length - 1];
+					if (latest?.verification?.steps) {
+						base.failedSteps = latest.verification.steps
+							.filter((s: any) => !s.passed && !s.skipped)
+							.map((s: any) => s.name);
+					}
+				}
+				return base;
+			});
+			json({ gates: slim });
+			return;
+		}
 		json({ gates: enriched });
 		return;
 	}
@@ -3300,8 +3338,120 @@ async function handleApiRoute(
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
 		const goal = getGoalAcrossProjects(goalId);
 		const def = goal?.workflow?.gates.find(wg => wg.id === gateId);
+		if (url.searchParams.get("view") === "summary") {
+			const latestSignal = gate.signals[gate.signals.length - 1];
+			const MAX_TAIL_LINES = 40;
+			const slim: Record<string, unknown> = {
+				gateId: gate.gateId,
+				name: def?.name,
+				status: gate.status,
+				dependsOn: def?.dependsOn || [],
+				signalCount: gate.signals.length,
+				updatedAt: gate.updatedAt,
+				hasContent: !!gate.currentContent,
+				contentLength: gate.currentContent?.length || 0,
+			};
+			if (gate.currentMetadata) slim.currentMetadata = gate.currentMetadata;
+			if (latestSignal) {
+				slim.latestSignal = {
+					id: latestSignal.id,
+					sessionId: latestSignal.sessionId,
+					timestamp: latestSignal.timestamp,
+					commitSha: latestSignal.commitSha,
+					verification: latestSignal.verification ? {
+						status: latestSignal.verification.status,
+						steps: latestSignal.verification.steps.map(s => {
+							const base: Record<string, unknown> = { name: s.name, passed: s.passed };
+							if (!s.passed && !s.skipped && s.output) {
+								const lines = s.output.split("\n");
+								base.output = lines.length > MAX_TAIL_LINES
+									? lines.slice(-MAX_TAIL_LINES).join("\n")
+									: s.output;
+							}
+							return base;
+						}),
+					} : undefined,
+				};
+			}
+			json(slim);
+			return;
+		}
 		json({ ...gate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream });
 		return;
+	}
+
+	// GET /api/goals/:goalId/gates/:gateId/inspect — scoped gate data retrieval
+	const gateInspectMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/inspect$/);
+	if (gateInspectMatch && req.method === "GET") {
+		const [, goalId, gateId] = gateInspectMatch;
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) { json({ error: "Goal not found" }, 404); return; }
+		const gate = ctx.gateStore.getGate(goalId, gateId);
+		if (!gate) { json({ error: "Gate not found" }, 404); return; }
+
+		const section = url.searchParams.get("section");
+		if (!section || !["content", "verification", "signals"].includes(section)) {
+			json({ error: "section query parameter is required: 'content', 'verification', or 'signals'" }, 400);
+			return;
+		}
+
+		const resolveSignal = () => {
+			const idxStr = url.searchParams.get("signal_index");
+			let idx = idxStr !== null ? parseInt(idxStr, 10) : -1;
+			if (isNaN(idx)) idx = -1;
+			if (idx < 0) idx = gate.signals.length + idx;
+			if (idx < 0 || idx >= gate.signals.length) return null;
+			return { signal: gate.signals[idx], index: idx };
+		};
+
+		if (section === "content") {
+			const resolved = resolveSignal();
+			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+			json({
+				gateId, section: "content",
+				signalIndex: resolved.index,
+				signalId: resolved.signal.id,
+				text: resolved.signal.content || null,
+			});
+			return;
+		}
+
+		if (section === "verification") {
+			const resolved = resolveSignal();
+			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+			const v = resolved.signal.verification;
+			json({
+				gateId, section: "verification",
+				signalIndex: resolved.index,
+				signalId: resolved.signal.id,
+				steps: v ? v.steps.map(s => ({
+					name: s.name,
+					type: s.type,
+					passed: s.passed,
+					skipped: s.skipped || undefined,
+					duration_ms: s.duration_ms,
+					output: s.output,
+				})) : [],
+			});
+			return;
+		}
+
+		if (section === "signals") {
+			json({
+				gateId, section: "signals",
+				signals: gate.signals.map((s, i) => ({
+					index: i,
+					id: s.id,
+					timestamp: s.timestamp,
+					sessionId: s.sessionId,
+					commitSha: s.commitSha,
+					verdict: s.verification?.status || "running",
+					hasContent: !!s.content,
+					metadataKeys: s.metadata ? Object.keys(s.metadata) : [],
+				})),
+			});
+			return;
+		}
 	}
 
 	// POST /api/goals/:goalId/gates/:gateId/signal — signal a gate
