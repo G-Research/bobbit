@@ -352,13 +352,46 @@ export class ToolManager {
 	}
 
 	/**
+	 * Generate per-group detail docs markdown files in the state directory.
+	 * These are the full reference docs that the system prompt footer links to.
+	 * Call once at startup (or when tool definitions change).
+	 */
+	generateDetailDocs(stateDir: string): void {
+		const dir = path.join(stateDir, 'tool-docs');
+		fs.mkdirSync(dir, { recursive: true });
+
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+
+		// Group tools by groupDir
+		const grouped = new Map<string, Array<{ name: string; detail_docs?: string; description: string }>>();
+		for (const tool of tools) {
+			if (!tool.groupDir) continue;
+			if (!grouped.has(tool.groupDir)) grouped.set(tool.groupDir, []);
+			grouped.get(tool.groupDir)!.push({ name: tool.name, detail_docs: tool.detail_docs, description: tool.description });
+		}
+
+		for (const [groupDir, tools] of grouped) {
+			const parts: string[] = [`# ${groupDir} — Tool Reference\n`];
+			for (const tool of tools) {
+				parts.push(`## ${tool.name}\n`);
+				if (tool.detail_docs?.trim()) {
+					parts.push(tool.detail_docs.trim() + '\n');
+				} else {
+					parts.push(tool.description + '\n');
+				}
+			}
+			fs.writeFileSync(path.join(dir, `${groupDir}.md`), parts.join('\n'));
+		}
+	}
+
+	/**
 	 * Returns formatted tool documentation for inclusion in system prompts.
 	 *
 	 * Generates a single `# Tools` section with per-group summaries, docs, and footer links.
 	 *
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
-	getToolDocsForPrompt(toolNames?: string[]): string {
+	getToolDocsForPrompt(toolNames?: string[], stateDir?: string): string {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 
 		// Build grouped data: group → { groupDir, entries }
@@ -411,12 +444,16 @@ export class ToolManager {
 				}
 			}
 
-			// Per-group footer link
+			// Per-group footer link to detail docs
 			if (isMcp) {
 				const serverName = group.slice(5); // strip "MCP: "
-				sections.push(`\n_For detailed ${serverName} tool docs (parameters, usage), read \`.bobbit/state/mcp-tool-docs/${serverName}.md\`_\n`);
-			} else if (groupDir) {
-				sections.push(`\n_For detailed ${group} tool docs (examples, edge cases, full parameters), read the tool's YAML in \`defaults/tools/${groupDir}/<tool>.yaml\` — see the \`detail_docs\` field._\n`);
+				const docPath = stateDir
+					? path.join(stateDir, 'mcp-tool-docs', `${serverName}.md`)
+					: `.bobbit/state/mcp-tool-docs/${serverName}.md`;
+				sections.push(`\n_For detailed ${serverName} tool docs (parameters, usage), read \`${docPath}\`_\n`);
+			} else if (groupDir && stateDir) {
+				const docPath = path.join(stateDir, 'tool-docs', `${groupDir}.md`);
+				sections.push(`\n_For detailed ${group} tool docs (examples, edge cases, full parameters), read \`${docPath}\`_\n`);
 			}
 		}
 

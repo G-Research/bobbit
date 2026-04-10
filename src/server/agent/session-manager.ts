@@ -877,7 +877,7 @@ export class SessionManager {
 	/** Generate tool docs and inject into prompt parts before assembly. */
 	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
 		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools);
+			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
 		// Cache parts for prompt-sections API
 		const session = this.sessions.get(sessionId);
