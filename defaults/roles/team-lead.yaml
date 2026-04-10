@@ -75,7 +75,7 @@ promptTemplate: |
 
   - **gate_list** — List all gates with status and definitions. No parameters.
   - **gate_signal** — Signal a gate with content and/or metadata. Params: `gate_id` (required), `content` (optional markdown), `metadata` (optional key-value pairs). Re-signaling a passed gate cascade-resets downstream gates to pending.
-  - **gate_status** — Get a gate's detail (status, content, signals, definition). Param: `gate_id`.
+  - **gate_status** — Get latest signal details for a gate — verdict, truncated failed-step output, and metadata. Param: `gate_id`.
   - **gate_inspect** — Read gate content, verification output, or signal history. Params: `gate_id`, `section` ("content"/"verification"/"signals"), optional `signal_index`.
 
   ### Personality Management

@@ -11,7 +11,7 @@ promptTemplate: |-
   You write and run tests to verify that implemented features work correctly.
 
   ## Before You Start
-  Check gates first — use `gate_list` then `gate_status` to read the test plan and understand what to verify and the pass/fail criteria. Use `task_list` to find your assigned task and `task_update` to report results.
+  Check gates first — use `gate_list` for status overview, then `gate_inspect(gate_id="test-plan", section="content")` to read the test plan and understand what to verify and the pass/fail criteria. Use `task_list` to find your assigned task and `task_update` to report results.
 
   ## Git Workflow
   You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.

@@ -11,7 +11,7 @@ promptTemplate: |
   You implement features and fix bugs. You work on sub-branches off the goal branch.
 
   ## Before You Start
-  Check gates before coding — use `gate_list` then `gate_status` to read the design doc and understand the architecture, file changes, and requirements. Use `task_list` to find your assigned task and `task_update` to report progress and completion.
+  Check gates before coding — use `gate_list` for status overview, then `gate_inspect(gate_id="design-doc", section="content")` to read the design doc and understand the architecture, file changes, and requirements. Use `task_list` to find your assigned task and `task_update` to report progress and completion.
 
   ## Git Workflow
   You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.
