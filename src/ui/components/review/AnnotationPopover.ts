@@ -221,7 +221,8 @@ export class AnnotationPopover extends LitElement {
       e.preventDefault();
       e.stopPropagation();
       this._cancel();
-    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    } else if (e.key === "Enter" && !e.shiftKey) {
+      // Enter submits, Shift+Enter inserts newline
       e.preventDefault();
       this._submit();
     }
