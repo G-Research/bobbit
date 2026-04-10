@@ -31,6 +31,17 @@ export function scaffoldBobbitDir(projectRoot: string): void {
       fs.mkdirSync(toolsConfigDir, { recursive: true });
     }
 
+    // Ensure system-prompt.md exists (may be missing if installation
+    // predates this feature or user deleted it)
+    const sysPromptDest = path.join(dotBobbit, "config", "system-prompt.md");
+    if (!fs.existsSync(sysPromptDest)) {
+      const defaultsDir = path.join(__dirname, "defaults");
+      const sysPromptSrc = path.join(defaultsDir, "system-prompt.md");
+      if (fs.existsSync(sysPromptSrc)) {
+        fs.copyFileSync(sysPromptSrc, sysPromptDest);
+      }
+    }
+
     return;
   }
 
