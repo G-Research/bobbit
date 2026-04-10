@@ -37,7 +37,7 @@ function cleanTestDockerContainers() {
 	try {
 		const ids = execFileSync("docker", [
 			"ps", "-aq", "--filter", "label=bobbit-project",
-		], { encoding: "utf-8", timeout: 10_000 }).trim();
+		], { encoding: "utf-8", timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] }).trim();
 		if (!ids) return;
 
 		for (const id of ids.split(/\s+/).filter(Boolean)) {
