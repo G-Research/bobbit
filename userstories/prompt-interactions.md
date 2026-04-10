@@ -215,6 +215,26 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 
 ---
 
+## PI-10b: Batch multiple steers
+
+**Preconditions:** Active session, agent is currently streaming a response.
+
+**Steps:**
+1. While agent is streaming, send a steer message.
+2. Before the agent acknowledges the first steer, send a second steer.
+3. Send a third steer immediately after.
+
+**Expected:**
+- All steer messages appear as user turns in the chat
+- Steers are batched and delivered to the agent together at the next tool boundary
+- Agent receives the combined context of all steers, not just the last one
+- No steers are dropped or lost
+- Chat shows the correct chronological order of all steers and agent responses
+
+**Coverage:** none
+
+---
+
 ## PI-11: Queue messages while agent is busy
 
 **Preconditions:** Active session, agent is streaming.
