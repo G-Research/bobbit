@@ -736,13 +736,11 @@ export class RemoteAgent {
 							}
 						}
 					}
-					// Rebuild review pane state from message history (handles reconnect/refresh)
+					// Clear review pane on reconnect — review state is transient UI,
+					// not something that should be restored from message history replay.
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
 					state.reviewPanelOpen = false;
-					for (const m of this._state.messages) {
-						this._checkReviewToolResult(m);
-					}
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
