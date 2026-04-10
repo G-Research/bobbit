@@ -46,7 +46,7 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
-import { ReviewAnnotationStore } from "./review-annotation-store.js";
+import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
@@ -5443,6 +5443,26 @@ async function handleApiRoute(
 	}
 
 	// ── Review annotation endpoints ────────────────────────────────
+
+	// POST /api/sessions/:id/review/annotations/bulk — bulk save all annotations + submitted flag (used by sendBeacon on page unload)
+	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations/bulk")) {
+		const sessionId = url.pathname.split("/")[3];
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Invalid body" }, 400); return; }
+		const annotations: Record<string, ReviewAnnotation[]> = {};
+		if (body.annotations && typeof body.annotations === "object") {
+			for (const [docTitle, anns] of Object.entries(body.annotations)) {
+				if (Array.isArray(anns)) {
+					annotations[docTitle] = anns as ReviewAnnotation[];
+				}
+			}
+		}
+		const submitted = typeof body.submitted === "boolean" ? body.submitted : false;
+		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
+		json({ ok: true });
+		return;
+	}
 
 	// GET /api/sessions/:id/review/annotations
 	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {

@@ -110,6 +110,13 @@ export class ReviewAnnotationStore {
 		return this.read(sessionId).submitted;
 	}
 
+	/**
+	 * Overwrite the entire state for a session (used by bulk save / sendBeacon).
+	 */
+	writeAll(sessionId: string, annotations: Record<string, ReviewAnnotation[]>, submitted: boolean): void {
+		this.write(sessionId, { annotations, submitted });
+	}
+
 	deleteFile(sessionId: string): void {
 		try {
 			const fp = this.filePath(sessionId);
