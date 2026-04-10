@@ -392,20 +392,22 @@ export class ToolManager {
 			const isMcp = group.startsWith('MCP: ');
 			sections.push(`\n## ${group}\n`);
 
-			// Summary lines — for MCP tools, append param names inline
-			for (const entry of entries) {
-				if (isMcp && entry.docs) {
-					sections.push(`- **${entry.name}**: ${entry.summary}. ${entry.docs}`);
-				} else {
-					sections.push(`- **${entry.name}**: ${entry.summary}`);
+			if (isMcp) {
+				// MCP tools: compact bullet list, param names inline
+				for (const entry of entries) {
+					if (entry.docs) {
+						sections.push(`- **${entry.name}**: ${entry.summary}. ${entry.docs}`);
+					} else {
+						sections.push(`- **${entry.name}**: ${entry.summary}`);
+					}
 				}
-			}
-			const withDocs = entries.filter((e) => e.docs);
-			if (!isMcp && withDocs.length > 0) {
-				// Built-in tools have hand-authored docs with usage notes
-				sections.push('');
-				for (const entry of withDocs) {
-					sections.push(`### ${entry.name}\n\n${entry.docs}\n`);
+			} else {
+				// Built-in tools: one ### block per tool, summary + docs merged
+				for (const entry of entries) {
+					const body = entry.docs
+						? `${entry.summary} ${entry.docs}`
+						: entry.summary;
+					sections.push(`### ${entry.name}\n\n${body}\n`);
 				}
 			}
 

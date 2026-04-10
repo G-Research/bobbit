@@ -94,31 +94,33 @@ describe("getToolDocsForPrompt — collapsed layout", () => {
 		);
 	});
 
-	it("contains summary lines for built-in tools", () => {
+	it("has ### heading per built-in tool with merged summary + docs", () => {
 		const tm = new ToolManager(tmpConfigDir);
 		const output = tm.getToolDocsForPrompt();
-		assert.ok(output.includes("- **bash**: Execute shell commands."), "Should have bash summary");
-		assert.ok(output.includes("- **bash_bg**: Start, monitor, and kill background processes."), "Should have bash_bg summary");
-		assert.ok(output.includes("- **read**: Read file contents."), "Should have read summary");
-	});
-
-	it("contains doc sections under ### headings", () => {
-		const tm = new ToolManager(tmpConfigDir);
-		const output = tm.getToolDocsForPrompt();
+		// All tools get ### headings (even those without docs)
 		assert.ok(output.includes("### bash\n"), "Should have ### bash heading");
+		assert.ok(output.includes("### bash_bg\n"), "Should have ### bash_bg heading");
 		assert.ok(output.includes("### read\n"), "Should have ### read heading");
-		// bash_bg has no docs, so no ### heading for it
-		assert.ok(!output.includes("### bash_bg\n"), "bash_bg has no docs, should not have ### heading");
+		// bash: summary merged with docs
+		assert.ok(
+			output.includes("Execute shell commands. Output truncated"),
+			"bash should have summary + docs merged",
+		);
+		// bash_bg: summary only (no docs)
+		assert.ok(
+			output.includes("Start, monitor, and kill background processes."),
+			"bash_bg should have summary as body",
+		);
+		// No bullet-style summary lines for built-in tools
+		assert.ok(!output.includes("- **bash**:"), "Built-in tools should not have bullet summaries");
 	});
 
-	it("has docs content between summary lines and footer", () => {
+	it("has docs content before footer", () => {
 		const tm = new ToolManager(tmpConfigDir);
 		const output = tm.getToolDocsForPrompt();
-		// bash docs should appear after the summary lines and before the footer
-		const bashSummaryIdx = output.indexOf("- **bash**: ");
 		const bashDocsIdx = output.indexOf("Output truncated to last 2000 lines");
 		const shellFooterIdx = output.indexOf("_For detailed Shell tool docs");
-		assert.ok(bashSummaryIdx < bashDocsIdx, "bash docs should come after summary");
+		assert.ok(bashDocsIdx > 0, "bash docs should be present");
 		assert.ok(bashDocsIdx < shellFooterIdx, "bash docs should come before Shell footer");
 	});
 
@@ -233,8 +235,8 @@ describe("getToolDocsForPrompt — MCP tools", () => {
 			},
 		]);
 		const output = tm.getToolDocsForPrompt(["bash", "mcp__srv__tool_a"]);
-		assert.ok(output.includes("- **bash**:"), "Should include bash");
+		assert.ok(output.includes("### bash\n"), "Should include bash");
 		assert.ok(output.includes("- **mcp__srv__tool_a**:"), "Should include MCP tool");
-		assert.ok(!output.includes("- **read**:"), "Should not include read (not in filter)");
+		assert.ok(!output.includes("### read\n"), "Should not include read (not in filter)");
 	});
 });
