@@ -17,7 +17,6 @@ interface ReviewAnnotationData {
 	submitted: boolean;
 }
 
-const EMPTY_DATA: ReviewAnnotationData = { annotations: {}, submitted: false };
 
 /**
  * Server-side store for review annotations. One JSON file per session.
