@@ -198,6 +198,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	renderApp();
 
 	connectDashboardWs();
+	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	document.addEventListener("gate-verification-event", handleLiveVerificationEvent);
 	startAgentPolling(goalId);
 	startTaskPolling(goalId);
