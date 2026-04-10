@@ -2,7 +2,7 @@
 
 The review pane allows users to annotate markdown documents opened by the agent, add inline comments, and submit structured feedback that the agent acts on.
 
-**Architectural note — annotation storage:** Annotations are stored server-side (not sessionStorage) so they survive server restarts, browser changes, and are visible from any connected client. There is exactly one set of annotations per document per session — all browsers see the same annotations. No live collaboration or conflict resolution needed; browsers simply append and on refresh pick up all annotations.
+**Architectural note — annotation storage:** Annotations are currently stored in `sessionStorage` (per-browser, per-tab). This means they do NOT survive browser close/reopen, are not shared across browsers, and are lost on server restart. RP-16 describes the desired future state (server-side storage). Until that is implemented, stories that depend on cross-browser or server-restart persistence are marked as **not yet implemented**.
 
 ---
 
@@ -16,21 +16,29 @@ The review pane allows users to annotate markdown documents opened by the agent,
    - Tab bar shows "Session Stories" as the active tab.
    - Panel auto-selects the "Review" tab in the unified panel.
    - If the panel was collapsed, it un-collapses.
-   - Document renders as formatted markdown.
-2. Select a passage of text in the rendered document (test on both desktop and mobile).
-   - **Desktop:** A comment popover appears near the selection.
-   - **Mobile:** A floating "Add Comment" button appears; tapping it opens a bottom sheet.
-   - The popover/sheet shows the selected text (truncated if long) and a textarea.
-3. Type a comment in the popover textarea.
-4. Press Enter to submit the comment (or click the Submit button).
+   - Document renders as formatted markdown (headings, lists, code blocks, links all render correctly).
+2. Select a passage of plain text in the rendered document (test on both desktop and mobile).
+   - **Desktop:** A comment popover appears positioned near the selection.
+   - **Mobile:** A floating "Add Comment" button appears near the selection; tapping it opens a bottom sheet.
+   - The popover/sheet shows the selected text (truncated to ~80 chars if long) and a textarea with placeholder "Add your comment...".
+3. Select text inside a code block.
+   - Popover appears. The selection is flagged as code (`isCode: true`).
+   - In the feedback output, this annotation's quote will be formatted with backticks.
+4. Select text that spans a code block boundary (partially inside, partially outside).
+   - Selection should still work. The annotation captures the full quoted text.
+5. Type a comment in the popover textarea.
+6. Press Enter to submit the comment (or click the Submit button).
    - The popover closes.
-   - The selected text is highlighted in the document.
+   - The selected text is highlighted with a purple/indigo underline span.
    - The tab badge shows "1".
    - The submit bar at the bottom shows "1 comment".
-   - Clicking the comment count opens a popover listing all comments. Clicking a comment scrolls to and highlights that annotation in the document.
-5. Select a different passage and add a second comment.
+7. Press Enter with an empty comment textarea.
+   - Nothing happens — the popover stays open. No annotation is created. **[Current behavior: silent no-op. Desired: visual hint or auto-cancel.]**
+8. Select a different passage and add a second comment.
    - Both highlights are visible.
    - Tab badge shows "2". Submit bar shows "2 comments".
+
+**Not yet implemented:** Clicking the comment count to open a list of all comments with jump-to-annotation navigation.
 
 **Coverage:** none
 
@@ -42,22 +50,25 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 **Steps and expectations:**
 1. Agent calls `review_open` with title "Doc A" and some markdown.
-   - Review pane opens showing "Doc A". One tab visible.
+   - Review pane opens showing "Doc A". One tab visible in the tab bar.
 2. Add two annotations to Doc A.
-   - Tab badge shows "2". Submit bar shows "2 comments".
+   - "Doc A" tab badge shows "2". Submit bar shows "2 comments" (total across all docs).
 3. Agent calls `review_open` with title "Doc B" and different markdown.
    - A second tab "Doc B" appears in the tab bar.
    - "Doc B" is now the active tab, displaying its content.
-   - Tab badge on "Doc A" still shows "2".
+   - "Doc A" tab badge still shows "2".
+   - Submit bar still shows "2 comments" (total is across all docs, not just the active one).
 4. Add one annotation to Doc B.
    - "Doc B" tab badge shows "1". Submit bar shows "3 comments" (total).
 5. Click the "Doc A" tab.
-   - Doc A's content and both highlights are displayed.
-   - Doc B's annotation is preserved (switch back to Doc B to verify — badge still shows "1").
+   - Doc A's content is displayed with both highlights intact.
+   - Doc B's annotation is preserved — switch back to Doc B to verify badge still shows "1".
 6. Agent calls `review_open` with titles "Doc C" through "Doc F" (4 more documents).
-   - First 5 tabs display normally.
-   - 6th tab appears under an overflow "..." menu.
-   - Clicking "..." reveals the overflow tab. Selecting it switches the view.
+   - First 5 tabs display normally in the tab bar.
+   - 6th tab appears under an overflow "..." button.
+   - Clicking "..." reveals a dropdown menu with the overflow tab(s).
+   - Selecting an overflow tab switches the view and closes the dropdown.
+   - **[Bug: clicking outside the overflow dropdown does not close it — only clicking a tab or the "..." button again closes it.]**
 
 **Coverage:** none
 
@@ -65,20 +76,25 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 ## RP-03: Annotation keyboard shortcuts
 
-**Preconditions:** Review pane open with a document, comment popover visible.
+**Preconditions:** Review pane open with a document.
 
 **Steps and expectations:**
-1. Select text and observe the popover.
-2. Type a comment. Press Enter.
-   - Comment is saved. Popover closes. Highlight appears.
+1. Select text in the document. Popover appears with textarea focused.
+2. Type "my comment". Press Enter.
+   - Comment is saved. Popover closes. Highlight appears. Count increments.
 3. Select new text. Popover opens.
-4. Type a multi-line comment: type "line one", press Shift+Enter, type "line two".
+4. Type "line one". Press Shift+Enter. Type "line two".
    - Shift+Enter inserts a newline in the textarea (does not submit).
+   - Textarea now shows two lines.
 5. Press Enter.
-   - The full multi-line comment is saved.
+   - The full multi-line comment is saved (both lines preserved).
 6. Select new text. Popover opens.
 7. Press Escape.
    - Popover closes without saving. No highlight added. Comment count unchanged.
+8. Select new text. Popover opens. Press Tab.
+   - Tab moves focus within the popover (e.g. to the Submit button). It does not submit or close.
+9. Press Enter with empty textarea (nothing typed).
+   - Popover stays open. No annotation is created. **[Current: silent no-op.]**
 
 **Coverage:** none
 
@@ -86,17 +102,24 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 ## RP-04: Edit an existing annotation
 
-**Preconditions:** Review document has at least one annotation.
+**Preconditions:** Review document has at least two annotations.
 
 **Steps and expectations:**
-1. Click on a highlighted annotation in the document.
-   - Popover opens with the existing comment pre-filled in the textarea.
+1. Click on the first highlighted annotation in the document.
+   - Popover opens positioned near the highlight.
+   - Existing comment is pre-filled in the textarea.
+   - Textarea is focused.
+   - **Desktop:** Popover mode. **Mobile:** Bottom sheet mode.
 2. Modify the comment text.
 3. Press Enter to save.
-   - Popover closes. Highlight remains. Comment count unchanged.
-   - Switching tabs and returning shows the updated comment.
+   - Popover closes. Highlight remains in the same position.
+   - Comment count is unchanged (edit, not add).
+   - **[Known issue: edit is implemented as remove-then-add, so the annotation ID changes and the highlight briefly flickers.]**
 4. Click the same highlight again.
-   - Popover shows the updated comment text.
+   - Popover shows the updated comment text (confirming the edit persisted).
+5. While one popover is open (editing annotation A), click on annotation B's highlight.
+   - The first popover should close (cancel or auto-save), and a new popover opens for annotation B.
+   - **[Current behavior: untested — may leave orphaned popover.]**
 
 **Coverage:** none
 
@@ -108,13 +131,15 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 **Steps and expectations:**
 1. Click on the first highlighted annotation.
-   - Popover opens showing the comment.
+   - Popover opens showing the existing comment.
 2. Click the delete/remove action in the popover.
+   - **[Not yet implemented: the popover has no delete button. Only Submit and Cancel exist. Delete must be added as a third action.]**
    - Highlight is removed from the document.
    - Comment count decrements from 2 to 1.
    - The popover closes.
-3. Reload the page and navigate back to the session.
+3. Reload the page (F5, not browser close) and navigate back to the session.
    - Only one highlight remains. Comment count is 1.
+   - (Note: this relies on sessionStorage surviving soft reload, which it does.)
 
 **Coverage:** none
 
@@ -129,14 +154,19 @@ The review pane allows users to annotate markdown documents opened by the agent,
 2. Click "Submit Review".
    - Review pane closes immediately.
    - A user message appears in the chat containing structured feedback:
-     - "## Review Feedback" heading.
-     - Section for "Doc A" with 2 quoted passages, line numbers, offsets, and comments.
-     - Section for "Doc B" with 1 quoted passage, line number, offset, and comment.
+     - `## Review Feedback` heading.
+     - Section for "Doc A" with 2 annotations: each has quoted text, line number, character offset range, and the user's comment.
+     - Section for "Doc B" with 1 annotation in the same format.
+     - Annotations within each document section are ordered by their position in the document (ascending offset), not by insertion order.
    - Agent receives the message and begins streaming a response.
+   - **[No loading/sending indicator on the button — the pane closes instantly. If the WebSocket is slow or the agent is busy, the message queues silently.]**
 3. After agent responds, verify:
    - The review feedback message persists in chat history.
    - The review pane does not reappear.
-   - Annotations are cleared from storage.
+   - Annotations are cleared from sessionStorage.
+4. If the agent is currently streaming when you click Submit:
+   - The feedback is sent as a regular prompt and queued behind the current turn.
+   - The queued message appears as a pill below the textarea (same as any queued message).
 
 **Coverage:** none
 
@@ -149,11 +179,13 @@ The review pane allows users to annotate markdown documents opened by the agent,
 **Steps and expectations:**
 1. Observe the submit bar.
    - Shows "No comments yet".
-   - Submit Review button is disabled (greyed out).
+   - Submit Review button is disabled (greyed out, `opacity: 0.5`, `cursor: not-allowed`).
 2. Click the disabled button.
    - Nothing happens. No message sent. Pane stays open.
 3. Add one annotation.
-   - Submit bar updates to "1 comment". Button becomes enabled.
+   - Submit bar updates to "1 comment". Button becomes enabled (full opacity, pointer cursor).
+4. Delete the annotation (once delete is implemented).
+   - Submit bar reverts to "No comments yet". Button becomes disabled again.
 
 **Coverage:** none
 
@@ -166,13 +198,17 @@ The review pane allows users to annotate markdown documents opened by the agent,
 **Steps and expectations:**
 1. Agent opens a review document. User adds 2 annotations.
    - Tab badge shows "2". Highlights visible.
-2. Reload the page (F5).
+2. Reload the page (F5 — soft reload, same browser tab).
 3. Navigate back to the session.
-   - Review pane reopens with the same document (rebuilt from message history).
-   - Both annotations are present with highlights and correct comment text.
+   - Review pane reopens with the same document (rebuilt from message history replay — the `review_open` tool result is found in the messages).
+   - Both annotations are present with highlights and correct comment text (loaded from sessionStorage, which survives soft reload).
    - Tab badge shows "2". Submit bar shows "2 comments".
 4. Add a third annotation. Submit the review.
    - All 3 annotations appear in the feedback message.
+5. Close the browser entirely, reopen, navigate to the session.
+   - Review pane reopens (from message history), but annotations are **gone** (sessionStorage is cleared on browser close).
+   - Tab badge shows "0". Submit bar shows "No comments yet".
+   - **[This is the sessionStorage limitation. Server-side storage (RP-16) would fix this.]**
 
 **Coverage:** none
 
@@ -186,10 +222,12 @@ The review pane allows users to annotate markdown documents opened by the agent,
 1. Submit review feedback. Review pane closes.
 2. Reload the page (F5).
 3. Navigate back to the session.
-   - Review pane stays closed.
+   - Review pane stays closed (submitted flag in sessionStorage prevents replay).
    - The submitted feedback message is visible in chat history.
-4. Server restarts. Navigate back to the session.
-   - Review pane still stays closed.
+4. Close browser, reopen, navigate to the session.
+   - **[Bug: Review pane reopens because the submitted flag is in sessionStorage, which is cleared on browser close. The message history replay sees `review_open` and reopens the pane.]**
+5. Server restarts. Navigate back to the session (same browser tab).
+   - Review pane stays closed (sessionStorage persists across server restart within the same tab).
 
 **Coverage:** none
 
@@ -202,12 +240,14 @@ The review pane allows users to annotate markdown documents opened by the agent,
 **Steps and expectations:**
 1. Agent calls `review_open` with new content and title "Round 2".
    - Review pane reopens with "Round 2" document.
-   - No leftover annotations from the previous review.
+   - The `clearReviewSubmitted()` function is called, clearing the submitted flag.
+   - No leftover annotations from the previous review (annotations were cleared on submit).
+   - No leftover tabs from the previous review (documents map was cleared on submit).
 2. Add annotations and submit.
    - Second feedback message appears in chat after the first one.
    - Both feedback messages are in the chat history.
 3. Reload the page.
-   - Review pane stays closed (second review was submitted).
+   - Review pane stays closed (second review's submitted flag is set).
    - Both feedback messages visible in chat.
 
 **Coverage:** none
@@ -216,16 +256,18 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 ## RP-11: Collapse and expand with Ctrl+]
 
-**Preconditions:** Review pane is open with a document.
+**Preconditions:** Review pane is open with a document and at least one annotation.
 
 **Steps and expectations:**
 1. Press Ctrl+] (Cmd+] on Mac).
    - Review panel collapses. Chat expands to full width.
+   - Collapsed state is stored in localStorage keyed by session ID.
 2. Press Ctrl+] again.
-   - Review panel expands back. Document and annotations are intact.
+   - Review panel expands back.
+   - Document content and all annotation highlights are intact (collapse is CSS-only, no component destruction).
 3. Close the review pane entirely (submit or agent closes).
 4. Press Ctrl+].
-   - Nothing happens (no panel to toggle).
+   - Nothing happens (no panel to toggle — `hasUnifiedPanel()` returns false).
 
 **Coverage:** none
 
@@ -239,9 +281,11 @@ The review pane allows users to annotate markdown documents opened by the agent,
 1. Press Ctrl+# (Cmd+# on Mac).
    - Review pane goes fullscreen. Chat panel is hidden.
    - Document fills the available space.
+   - Pre-fullscreen collapsed state is saved to sessionStorage.
 2. Press Ctrl+# again.
    - Fullscreen exits. Chat reappears.
-   - Previous collapsed/expanded state is restored.
+   - Previous collapsed/expanded state is restored from the saved value.
+3. Annotations added in fullscreen mode persist when exiting fullscreen.
 
 **Coverage:** none
 
@@ -249,16 +293,23 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 ## RP-13: Close review via agent
 
-**Preconditions:** Review pane is open with two documents: "Doc A" and "Doc B".
+**Preconditions:** Review pane is open with two documents: "Doc A" and "Doc B". Doc A has 1 annotation, Doc B has 2 annotations. The user is viewing Doc A with the popover open (mid-edit).
 
 **Steps and expectations:**
 1. Agent calls `review_close` with title "Doc A".
-   - "Doc A" tab is removed. "Doc B" becomes the active tab.
-   - Annotations for Doc A are cleared.
-   - Doc B's annotations are unaffected.
+   - "Doc A" tab is removed from the tab bar.
+   - "Doc B" becomes the active tab, displaying its content and 2 highlights.
+   - Annotations for Doc A are cleared from sessionStorage.
+   - Doc B's annotations and highlights are unaffected.
+   - The popover that was open on Doc A is dismissed.
+   - Submit bar updates to show "2 comments" (only Doc B's).
 2. Agent calls `review_close` with no title (close all).
    - Review pane hides entirely.
-   - All remaining annotations are cleared.
+   - All remaining annotations (Doc B's) are cleared from sessionStorage.
+   - Submit bar is no longer visible.
+3. On reload, the review pane behavior depends on message history:
+   - If both `review_open` and `review_close` tool results are in the message history, the replay processes them in order and ends with the pane closed.
+   - **[Potential issue: if the `review_close` tool result is in a different message than the `review_open`, and message compaction removes it, the pane may reopen on replay.]**
 
 **Coverage:** none
 
@@ -266,19 +317,29 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 ## RP-14: Review pane on mobile
 
-**Preconditions:** Mobile device (touch-primary), review pane open.
+**Preconditions:** Mobile device (touch-primary, detected via `window.matchMedia('(pointer: coarse)')`), review pane open.
 
 **Steps and expectations:**
-1. Long-press and drag to select text.
-   - A floating "Add Comment" button appears near the selection (not the desktop popover).
+1. Long-press and drag to select text in the document.
+   - Browser native selection handles appear.
+   - After a 300ms debounce, a floating "Add Comment" button appears positioned below the selection.
+   - The button does NOT appear if the selection is empty or collapsed.
 2. Tap "Add Comment".
-   - A bottom sheet slides up from the bottom of the screen.
-   - Shows the selected text and a textarea.
+   - A bottom sheet slides up from the bottom of the screen with a spring animation.
+   - Shows the selected text (truncated) and a textarea.
    - Touch targets (Cancel, Submit buttons) are at least 44x44px.
+   - Textarea auto-focuses.
 3. Type a comment. Tap Submit.
    - Bottom sheet closes. Annotation is highlighted in the document.
-4. Swipe down on the bottom sheet handle.
-   - Bottom sheet dismisses (cancel).
+   - A brief toast message confirms the annotation was added (e.g. "Comment added").
+4. Tap an existing highlighted annotation.
+   - Bottom sheet opens with the existing comment pre-filled (edit mode).
+   - User can modify and tap Submit to update.
+5. Swipe down on the bottom sheet handle (drag gesture).
+   - If swiped more than 50px, the bottom sheet dismisses (cancel behavior).
+   - If swiped less than 50px, the sheet snaps back.
+6. Tap outside the selection (on non-annotated text).
+   - The floating "Add Comment" button disappears if it was visible.
 
 **Coverage:** none (CSS unit tests for mobile styles exist)
 
@@ -289,15 +350,17 @@ The review pane allows users to annotate markdown documents opened by the agent,
 **Preconditions:** Review pane open, document loaded from a file the agent can edit.
 
 **Steps and expectations:**
-1. Add an annotation on a heading near the top of the document.
-2. Add an annotation on a paragraph further down.
-3. Submit review.
-4. Inspect the feedback message in chat:
-   - Each annotation includes the quoted text.
-   - Each includes a line number (e.g. "line 5", "line 42") computed from character offset.
-   - Each includes a character offset range (e.g. "offset 120-156").
-   - Code block selections are formatted with backticks.
-   - The agent uses this data to make precise edits (e.g. via the `edit` tool targeting the exact text).
+1. Add an annotation on a heading near line 3 of the document.
+2. Add an annotation on a paragraph near line 40.
+3. Add an annotation on text inside a code block.
+4. Submit review.
+5. Inspect the feedback message in chat:
+   - Structure is: `## Review Feedback` → `### "Doc Title" — N comments` → individual annotations.
+   - Each annotation has: `> "quoted text" (line N, offset X-Y)` followed by the comment on the next line.
+   - The code block annotation uses backtick formatting: `` > `code text` (line N, offset X-Y) ``.
+   - Annotations within each document are in document order (ascending by offset/line number).
+   - Line numbers are computed from character offsets against the source markdown (1-indexed).
+6. Agent uses the line numbers and quoted text to make precise edits (e.g. via the `edit` tool with `oldText` matching the quoted text).
 
 **Coverage:** none
 
@@ -305,7 +368,9 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 ## RP-16: Annotations are shared across browsers
 
-**Preconditions:** Same session open in two different browsers (or tabs simulating different clients).
+**Status: NOT YET IMPLEMENTED.** Annotations are currently in `sessionStorage` (per-browser, per-tab).
+
+**Preconditions:** Same session open in two different browsers (or tabs simulating different clients). Server-side annotation storage API exists.
 
 **Steps and expectations:**
 1. In browser A, add an annotation to the review document.
@@ -314,9 +379,14 @@ The review pane allows users to annotate markdown documents opened by the agent,
 3. In browser B, add a second annotation.
 4. Reload browser A.
    - Browser A sees both annotations.
-5. Annotations are stored server-side, not in browser-local storage.
-   - Server restart preserves all annotations.
-   - Logging in from a new device shows all annotations.
+5. Server restart preserves all annotations.
+6. Logging in from a new device shows all annotations.
+
+**Implementation required:**
+- Server-side annotation storage API (`GET/POST/DELETE /api/sessions/:id/annotations`).
+- `AnnotationStore` must be rewritten to use the API instead of sessionStorage.
+- Submitted flag must also be server-side.
+- No live sync needed — refresh picks up all annotations.
 
 **Coverage:** none
 
@@ -324,15 +394,58 @@ The review pane allows users to annotate markdown documents opened by the agent,
 
 ## RP-17: Replace an existing document with updated content
 
-**Preconditions:** Review pane open with a document titled "Draft".
+**Preconditions:** Review pane open with a document titled "Draft" that has 3 annotations.
 
 **Steps and expectations:**
-1. Agent calls `review_open` with the same title "Draft" but updated markdown content.
-   - The document content updates in place (replace mode is default).
-   - The tab remains — no duplicate tab created.
-2. Previous annotations may no longer align with the new content.
-   - Annotations whose anchor text no longer exists are either orphaned or hidden.
-   - Annotations whose anchor text still exists re-anchor correctly.
-3. User can add new annotations to the updated content.
+1. Agent calls `review_open` with the same title "Draft" but updated markdown content (replace mode, which is the default).
+   - The document content updates in place. The tab remains — no duplicate tab created.
+2. Re-anchoring occurs automatically:
+   - Annotations whose quoted text still exists at the same or nearby position are re-anchored. Highlights appear in the updated document.
+   - A yellow banner appears at the top of the document: "Document updated. X of 3 comments re-anchored, Y could not be placed."
+   - The banner auto-dismisses or can be dismissed by the user.
+3. Annotations that cannot be re-anchored (quoted text no longer exists in the document):
+   - Appear in a "Detached Comments" section below the main document content.
+   - Each detached comment shows the original quoted text and the user's comment.
+   - Each has a "×" button to remove it permanently.
+4. User can add new annotations to the updated content.
+5. Submit review includes both re-anchored annotations (with updated line numbers/offsets) and detached comments (with original quote but no location data).
+
+**Coverage:** none
+
+---
+
+## RP-18: Session switch with review pane open
+
+**Preconditions:** Two sessions exist. Session A has a review pane open with annotations. Session B has no review pane.
+
+**Steps and expectations:**
+1. Switch from session A to session B.
+   - Review pane closes (review state is per-session).
+   - Chat shows session B's messages.
+2. Switch back to session A.
+   - Review pane reopens with session A's document (rebuilt from message history).
+   - Annotations are restored from sessionStorage (keyed by session A's ID).
+   - Tab badges and submit bar are correct.
+3. Switch to session B again. Session B's agent opens its own review document.
+   - Session B's review pane appears with its own document and zero annotations.
+   - Session A's annotations are not visible (isolated by session ID).
+
+**Coverage:** none
+
+---
+
+## RP-19: Error handling for malformed review_open
+
+**Preconditions:** Active session with a connected agent.
+
+**Steps and expectations:**
+1. Agent calls `review_open` with empty markdown (empty string).
+   - Review pane opens but shows an empty document area.
+   - User can still add the tab and switch away — no crash.
+2. Agent calls `review_open` with missing title (null or empty).
+   - The tool call is ignored. Review pane does not open. No crash or error in console.
+3. Agent calls `review_open` with extremely large markdown (>1MB).
+   - Document renders (may be slow). No crash. Scrolling works.
+   - Annotation selection works on the large document.
 
 **Coverage:** none
