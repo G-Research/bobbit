@@ -5509,7 +5509,8 @@ async function handleApiRoute(
 		if (parts.length >= 7 && parts[6]) {
 			// DELETE /api/sessions/:id/review/annotations/:annotationId
 			const annotationId = decodeURIComponent(parts[6]);
-			const docTitle = url.searchParams.get("docTitle") || "";
+			const docTitle = url.searchParams.get("docTitle");
+			if (!docTitle) { json({ error: "docTitle query parameter is required" }, 400); return; }
 			reviewAnnotationStore.removeAnnotation(sessionId, docTitle, annotationId);
 			json({ ok: true });
 		} else {

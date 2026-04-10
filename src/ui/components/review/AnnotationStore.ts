@@ -242,6 +242,7 @@ export function composeReviewFeedback(
 
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
+    const beaconedSessions = new Set<string>();
     for (const [sessionId, sessionCache] of _annotationCache) {
       if (sessionCache.size === 0 && !_submittedCache.has(sessionId)) continue;
       const annotations: Record<string, ReviewAnnotation[]> = {};
@@ -252,6 +253,16 @@ if (typeof window !== "undefined") {
       navigator.sendBeacon(
         `/api/sessions/${sessionId}/review/annotations/bulk`,
         new Blob([JSON.stringify({ annotations, submitted })], { type: "application/json" }),
+      );
+      beaconedSessions.add(sessionId);
+    }
+    // Beacon submitted sessions not already covered by _annotationCache
+    // (e.g. after clearAllAnnotations removed the session from the cache)
+    for (const [sessionId, submitted] of _submittedCache) {
+      if (beaconedSessions.has(sessionId) || !submitted) continue;
+      navigator.sendBeacon(
+        `/api/sessions/${sessionId}/review/annotations/bulk`,
+        new Blob([JSON.stringify({ annotations: {}, submitted: true })], { type: "application/json" }),
       );
     }
   });

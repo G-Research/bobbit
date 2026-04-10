@@ -20,7 +20,7 @@ import {
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
-import { clearAllAnnotations, clearAnnotations, markReviewSubmitted } from "../ui/components/review/AnnotationStore.js";
+import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
@@ -2674,13 +2674,14 @@ export function doRenderApp(): void {
 				.activeTab=${state.reviewActiveTab}
 				.sessionId=${activeSessionId() || ""}
 				@review-tab-change=${(e: CustomEvent) => { state.reviewActiveTab = e.detail.title; renderApp(); }}
-				@review-submit=${(e: CustomEvent) => {
+				@review-submit=${async (e: CustomEvent) => {
 					const agent = state.remoteAgent;
 					if (agent) {
 						agent.prompt(e.detail.feedback);
 						const sid = activeSessionId() || "";
 						clearAllAnnotations(sid);
 						markReviewSubmitted(sid);
+						await flushPendingWrites();
 						state.reviewDocuments = new Map();
 						state.reviewPanelOpen = false;
 						state.reviewActiveTab = "";
