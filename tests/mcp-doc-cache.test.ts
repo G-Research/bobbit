@@ -410,11 +410,8 @@ describe("McpManager.getToolInfos — summary and docs wiring", () => {
 		const infos = mgr.getToolInfos();
 		assert.equal(infos.length, 1);
 		assert.equal(infos[0].summary, "Does a thing.");
-		assert.ok(infos[0].docs, "Should have docs");
-		assert.ok(infos[0].docs!.includes("Does a thing."), "Docs should include description");
-		// Inline docs should be compact (param names only), not a full table
-		assert.ok(!infos[0].docs!.includes("| Name | Type"), "Docs should NOT include param table inline");
-		assert.ok(infos[0].docs!.includes("Parameters: arg"), "Docs should list param names compactly");
+		// Inline docs should only carry param names (description is in summary line)
+		assert.equal(infos[0].docs, "Parameters: arg");
 		assert.equal(infos[0].group, "MCP: test-srv");
 
 		fs.rmSync(stateDir, { recursive: true, force: true });

@@ -305,10 +305,10 @@ export class McpManager {
     for (const [serverName, tools] of this.toolDefs) {
       for (const tool of tools) {
         const summary = this._summaryCache.get(serverName)?.get(tool.name);
-        const fullDesc = tool.description || `MCP tool ${tool.name} from ${serverName}`;
-        // Compact inline docs — full parameter tables live in the MD file
+        // Compact inline docs — description is already in the summary line,
+        // so docs only carry parameter names. Full tables live in the MD file.
         const paramNames = this._getParamNames(tool);
-        const docs = paramNames ? `${fullDesc}. Parameters: ${paramNames}` : fullDesc;
+        const docs = paramNames ? `Parameters: ${paramNames}` : undefined;
 
         infos.push({
           name: this._makeBobbitToolName(serverName, tool.name),

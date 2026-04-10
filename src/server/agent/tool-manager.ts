@@ -389,16 +389,20 @@ export class ToolManager {
 		const sections: string[] = ["# Tools"];
 
 		for (const [group, { groupDir, entries }] of grouped) {
+			const isMcp = group.startsWith('MCP: ');
 			sections.push(`\n## ${group}\n`);
 
-			// Summary lines
+			// Summary lines — for MCP tools, append param names inline
 			for (const entry of entries) {
-				sections.push(`- **${entry.name}**: ${entry.summary}`);
+				if (isMcp && entry.docs) {
+					sections.push(`- **${entry.name}**: ${entry.summary}. ${entry.docs}`);
+				} else {
+					sections.push(`- **${entry.name}**: ${entry.summary}`);
+				}
 			}
-
-			// Docs for tools that have them
 			const withDocs = entries.filter((e) => e.docs);
-			if (withDocs.length > 0) {
+			if (!isMcp && withDocs.length > 0) {
+				// Built-in tools have hand-authored docs with usage notes
 				sections.push('');
 				for (const entry of withDocs) {
 					sections.push(`### ${entry.name}\n\n${entry.docs}\n`);
@@ -406,7 +410,6 @@ export class ToolManager {
 			}
 
 			// Per-group footer link
-			const isMcp = group.startsWith('MCP: ');
 			if (isMcp) {
 				const serverName = group.slice(5); // strip "MCP: "
 				sections.push(`\n_For detailed ${serverName} tool docs (parameters, usage), read \`.bobbit/state/mcp-tool-docs/${serverName}.md\`_\n`);

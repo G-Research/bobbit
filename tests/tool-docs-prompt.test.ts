@@ -77,7 +77,7 @@ describe("getToolDocsForPrompt — collapsed layout", () => {
 		);
 	});
 
-	it("contains built-in group footer linking to .bobbit/config/tools/<groupDir>/", () => {
+	it("contains built-in group footer linking to defaults/tools/<groupDir>/", () => {
 		const tm = new ToolManager(tmpConfigDir);
 		const output = tm.getToolDocsForPrompt();
 		assert.ok(
@@ -85,8 +85,8 @@ describe("getToolDocsForPrompt — collapsed layout", () => {
 			"Should contain Shell group footer",
 		);
 		assert.ok(
-			output.includes(".bobbit/config/tools/shell/"),
-			"Footer should reference .bobbit/config/tools/shell/",
+			output.includes("defaults/tools/shell/"),
+			"Footer should reference defaults/tools/shell/",
 		);
 		assert.ok(
 			output.includes("detail_docs"),
@@ -139,7 +139,7 @@ describe("getToolDocsForPrompt — MCP tools", () => {
 				description: "Does a thing via MCP.",
 				summary: "Does a thing.",
 				group: "MCP: test-server",
-				docs: "Does a thing via MCP. Parameters: arg1",
+				docs: "Parameters: arg1",
 				provider: { type: "mcp", server: "test-server", mcpTool: "do_thing" },
 			},
 		]);
@@ -173,7 +173,7 @@ describe("getToolDocsForPrompt — MCP tools", () => {
 		);
 	});
 
-	it("has MCP tool docs under ### heading", () => {
+	it("inlines MCP param docs in summary line, no ### heading", () => {
 		const tm = new ToolManager(tmpConfigDir);
 		tm.registerExternalTools([
 			{
@@ -181,13 +181,16 @@ describe("getToolDocsForPrompt — MCP tools", () => {
 				description: "Does a thing via MCP.",
 				summary: "Does a thing.",
 				group: "MCP: test-server",
-				docs: "Full description with param table.",
+				docs: "Parameters: arg1, arg2",
 				provider: { type: "mcp", server: "test-server", mcpTool: "do_thing" },
 			},
 		]);
 		const output = tm.getToolDocsForPrompt();
-		assert.ok(output.includes("### mcp__test_server__do_thing"), "Should have MCP tool ### heading");
-		assert.ok(output.includes("Full description with param table."), "Should include MCP tool docs");
+		assert.ok(!output.includes("### mcp__test_server__do_thing"), "MCP tools should NOT have ### heading");
+		assert.ok(
+			output.includes("- **mcp__test_server__do_thing**: Does a thing.. Parameters: arg1, arg2"),
+			"Param docs should be inlined in summary line",
+		);
 	});
 
 	it("still has only one # Tools heading with mixed built-in and MCP tools", () => {
