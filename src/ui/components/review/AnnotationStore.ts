@@ -33,11 +33,29 @@ const _annotationCache = new Map<string, Map<string, ReviewAnnotation[]>>();
 /** sessionId → submitted flag */
 const _submittedCache = new Map<string, boolean>();
 
+// ── Pending write tracking ───────────────────────────────────────────
+
+/** All in-flight server write promises (cleaned up on resolve). */
+const _pendingWrites: Promise<void>[] = [];
+
+/**
+ * Wait for all pending server writes to complete.
+ * Useful before page navigation/reload to ensure data is persisted.
+ */
+export async function flushPendingWrites(): Promise<void> {
+  await Promise.all([..._pendingWrites]);
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────
 
 function _serverFetch(url: string, options?: RequestInit): void {
-  fetch(url, options).catch(() => {
+  const p = fetch(url, options).then(() => {}).catch(() => {
     // Fire-and-forget — server down is non-fatal
+  });
+  _pendingWrites.push(p);
+  p.finally(() => {
+    const idx = _pendingWrites.indexOf(p);
+    if (idx >= 0) _pendingWrites.splice(idx, 1);
   });
 }
 
@@ -218,4 +236,23 @@ export function composeReviewFeedback(
   if (sections.length === 0) return "";
 
   return `## Review Feedback\n\n${sections.join("\n\n")}`;
+}
+
+// ── beforeunload: flush cache to server via sendBeacon ───────────────
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    for (const [sessionId, sessionCache] of _annotationCache) {
+      if (sessionCache.size === 0 && !_submittedCache.has(sessionId)) continue;
+      const annotations: Record<string, ReviewAnnotation[]> = {};
+      for (const [docTitle, anns] of sessionCache) {
+        annotations[docTitle] = anns;
+      }
+      const submitted = _submittedCache.get(sessionId) ?? false;
+      navigator.sendBeacon(
+        `/api/sessions/${sessionId}/review/annotations/bulk`,
+        new Blob([JSON.stringify({ annotations, submitted })], { type: "application/json" }),
+      );
+    }
+  });
 }
