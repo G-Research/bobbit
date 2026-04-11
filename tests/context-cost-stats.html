@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Context/Cost/Stats Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  :root {
+    --primary: #3b82f6;
+    --warning: #f59e0b;
+    --destructive: #ef4444;
+    --muted: #27272a;
+    --muted-foreground: #a1a1aa;
+    --foreground: #fafafa;
+    --popover: #1c1c2e;
+    --popover-foreground: #eee;
+    --border: #333;
+  }
+  .stats-bar {
+    display: flex; align-items: center; gap: 12px; font-size: 12px;
+    color: var(--muted-foreground); padding: 4px 8px;
+  }
+  .context-area { cursor: pointer; }
+  .cost-area { cursor: pointer; position: relative; }
+  .cost-popover {
+    position: absolute; bottom: 100%; right: 0; margin-bottom: 6px; z-index: 50;
+    background: var(--popover); color: var(--popover-foreground);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; min-width: 260px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div id="stats-bar" class="stats-bar">
+  <span id="model-btn" class="model-btn"></span>
+  <span id="context-area" class="context-area"></span>
+  <span id="cost-area" class="cost-area"></span>
+</div>
+
+<script>
+/**
+ * Replicates context bar, cost display, and stats bar rendering
+ * from AgentInterface (lines 640-760) for unit testing PI-17, PI-18, PI-23.
+ */
+
+// ---- Format helpers (mirrors src/ui/utils/format.ts) ----
+function formatCost(cost) {
+  if (cost < 1) return `$${cost.toFixed(1).replace(/\.0$/, '')}`;
+  return `$${Math.round(cost)}`;
+}
+
+function formatTokenCount(count) {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  return `${Math.round(count / 1000)}k`;
+}
+
+// ---- State ----
+let _contextTokens = 0;
+let _contextWindow = 0;
+let _costValue = 0;
+let _stale = false;
+let _modelId = 'claude-sonnet-4-20250514';
+let _costPopoverOpen = false;
+
+// ---- Rendering ----
+function renderContextBar() {
+  const el = document.getElementById('context-area');
+  if (_stale) {
+    el.innerHTML = `
+      <span class="flex items-center gap-1.5" title="Context usage unknown until next response">
+        <span style="display:inline-flex;align-items:center;width:48px;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden">
+          <span id="bar-fill" style="width:0%;height:100%;background:var(--primary,#3b82f6);border-radius:3px;transition:width 0.3s"></span>
+        </span>
+        <span id="pct-text">\u2014</span>
+      </span>`;
+    return;
+  }
+
+  if (!_contextWindow) {
+    el.innerHTML = '';
+    return;
+  }
+
+  const pct = Math.min(100, Math.round((_contextTokens / _contextWindow) * 100));
+  const barColor = pct >= 90 ? 'var(--destructive, #ef4444)' : pct >= 75 ? 'var(--warning, #f59e0b)' : 'var(--primary, #3b82f6)';
+  const tooltip = `Context: ${formatTokenCount(_contextTokens)} / ${formatTokenCount(_contextWindow)} tokens (${pct}%)`;
+
+  el.innerHTML = `
+    <span class="flex items-center gap-1.5" title="${tooltip}">
+      <span style="display:inline-flex;align-items:center;width:48px;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden">
+        <span id="bar-fill" style="width:${pct}%;height:100%;background:${barColor};border-radius:3px;transition:width 0.3s"></span>
+      </span>
+      <span id="pct-text">${pct}%</span>
+    </span>`;
+}
+
+function renderCost() {
+  const el = document.getElementById('cost-area');
+  if (!_costValue) {
+    el.innerHTML = '';
+    return;
+  }
+  const costText = formatCost(_costValue);
+  el.innerHTML = `<span id="cost-text">${costText}</span>`;
+  if (_costPopoverOpen) {
+    el.innerHTML += `<div id="cost-popover" class="cost-popover">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px;display:flex;justify-content:space-between;">
+        <span>Cost Breakdown</span>
+        <span style="font-weight:700">${costText}</span>
+      </div>
+      <div>Session cost details</div>
+    </div>`;
+  }
+}
+
+function renderModel() {
+  const el = document.getElementById('model-btn');
+  el.innerHTML = _modelId ? `<button id="model-button">${_modelId}</button>` : '';
+}
+
+function renderAll() {
+  renderModel();
+  renderContextBar();
+  renderCost();
+}
+
+// ---- Click handlers ----
+document.getElementById('cost-area').addEventListener('click', (e) => {
+  e.stopPropagation();
+  _costPopoverOpen = !_costPopoverOpen;
+  renderCost();
+});
+
+// ---- Public test API ----
+window.setUsage = function(input, output, contextWindow) {
+  _contextTokens = input + output;
+  _contextWindow = contextWindow;
+  _stale = false;
+  renderAll();
+};
+
+window.setCost = function(total) {
+  _costValue = total;
+  renderAll();
+};
+
+window.setStale = function(stale) {
+  _stale = stale;
+  if (stale) {
+    _contextTokens = 0;
+  }
+  renderAll();
+};
+
+window.setModel = function(id) {
+  _modelId = id;
+  renderAll();
+};
+
+window.getBarColor = function() {
+  const fill = document.getElementById('bar-fill');
+  return fill ? fill.style.background : '';
+};
+
+window.getBarWidth = function() {
+  const fill = document.getElementById('bar-fill');
+  return fill ? fill.style.width : '';
+};
+
+window.getTooltip = function() {
+  const span = document.querySelector('#context-area > span');
+  return span ? span.getAttribute('title') : '';
+};
+
+window.getCostText = function() {
+  const el = document.getElementById('cost-text');
+  return el ? el.textContent : '';
+};
+
+window.isPopoverOpen = function() {
+  return !!document.getElementById('cost-popover');
+};
+
+window.getPctText = function() {
+  const el = document.getElementById('pct-text');
+  return el ? el.textContent : '';
+};
+
+// Initial render
+renderAll();
+
+window._testReady = true;
+</script>
+</body>
+</html>
