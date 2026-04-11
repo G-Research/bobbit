@@ -33,7 +33,7 @@ Each file covers a feature area. Stories are numbered within each file (e.g. `S-
 | Search | [search.md](search.md) | 5 | None | Completely untested |
 | Config Cascade | [config-cascade.md](config-cascade.md) | 7 | API only | UI cascade effects untested |
 | Sandbox | [sandbox.md](sandbox.md) | 8 | Skipped | Docker-dependent, all skipped |
-| Prompt Interactions | [prompt-interactions.md](prompt-interactions.md) | 24 | Minimal | Nearly all untested |
+| Prompt Interactions | [prompt-interactions.md](prompt-interactions.md) | 34 | Minimal | Race conditions, steer/abort lifecycle |
 | Review Pane | [review-pane.md](review-pane.md) | 21 | None | Completely untested |
 | Resilience | [resilience.md](resilience.md) | 6 | Manual only | No automated crash tests |
 

@@ -608,3 +608,213 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Clicking in the review document moves focus to the document. Clicking back in the textarea restores focus there.
 
 **Coverage:** covered (abort-and-focus.spec.ts — auto-focus, focus after send, persistence)
+
+---
+
+## PI-25: Steer, abort, and queue drain lifecycle
+
+**Preconditions:** Active session with a connected agent.
+
+**Steps and expectations:**
+1. Ask the agent to run a long command (e.g. `bash sleep 60`).
+   - Agent begins streaming. Stop button appears. Textarea is editable.
+2. Type "Q1" and press Enter.
+   - Q1 appears as a queued pill above the textarea (muted styling, non-steered).
+3. Type "Q2" and press Enter.
+   - Q2 appears between Q1 and the textarea.
+4. Type "S1" and press Enter.
+   - S1 appears between Q2 and the textarea.
+5. Type "S2" and press Enter.
+   - S2 appears between S1 and the textarea.
+   - Queue order top-to-bottom: Q1, Q2, S1, S2.
+6. Click "Steer" on S1.
+   - S1 moves to the top of the queue area (above Q1). Pill gets amber steered styling.
+   - S1 is NOT dispatched immediately — it waits for the agent to be ready.
+7. Click "Steer" on S2.
+   - S2 moves below S1 (above Q1). Pill gets amber steered styling.
+   - Queue order top-to-bottom: S1, S2, Q1, Q2.
+8. Click Stop (or press Escape).
+   - The agent immediately terminates the tool run.
+   - UI transitions to idle (or briefly shows "aborting" state).
+9. After abort completes:
+   - Agent receives S1 and S2 as a batch (single user turn, combined text).
+   - Agent processes the steered messages and responds.
+   - S1 and S2 pills are consumed from the queue.
+10. Agent finishes responding to the steered batch.
+    - Q1 is dispatched as the next prompt.
+    - Agent processes Q1 and responds.
+11. Agent finishes responding to Q1.
+    - Q2 is dispatched as the next prompt.
+    - Agent processes Q2 and responds.
+12. All queue pills are now consumed. Textarea is ready for new input.
+
+**Coverage:** none
+
+---
+
+## PI-04b: Draft lost on rapid session switch
+
+**Suspected bug:** Draft save is debounced (100ms) and async. Switching sessions within 100ms of typing means the debounce timer hasn't fired. `_flushDraft` fires synchronously on switch, but `saveDraftToServer` is async — the subsequent `loadDraftFromServer` on switch-back can arrive at the server before the save completes, returning empty/stale data.
+
+**Preconditions:** Two sessions exist (A and B).
+
+**Steps and expectations:**
+1. Go to session A. Type "important draft".
+2. Immediately switch to session B (within <100ms of typing).
+3. Immediately switch back to session A.
+   - Textarea should show "important draft".
+   - **Suspected:** textarea is empty because the save hadn't completed before the load.
+4. Reload the page. Navigate to session A.
+   - Draft should still be present.
+   - **Suspected:** draft is missing because the race condition persisted the empty state.
+
+**Coverage:** none
+
+---
+
+## PI-04c: Draft clobbered by Lit re-render
+
+**Suspected bug:** Draft is restored via `editor.value = text` + a single `queueMicrotask` re-apply. But multiple Lit re-render cycles (connection status changes, message loading, session status updates) can reset `editor.value` after both the initial set and the microtask.
+
+**Preconditions:** Session with a saved draft.
+
+**Steps and expectations:**
+1. Reload the page.
+2. Navigate to a session that has a saved draft.
+   - During connection, multiple state changes occur: "connecting" → "connected", messages load, session status updates.
+   - **Expected:** Draft appears in textarea after connection settles.
+   - **Suspected:** Draft briefly appears then disappears as a later re-render resets the editor value.
+3. Wait 2 seconds. Check textarea.
+   - Draft should still be there.
+
+**Coverage:** none
+
+---
+
+## PI-10c: Steer sent to wrong session after fast switch
+
+**Suspected bug:** The `steer` WS message handler uses the session from the current WS connection, but the UI's `onSteer` callback captures a closure over the `session` object. If the user fast-switches sessions, the closure might reference the old session's remote agent.
+
+**Preconditions:** Two sessions. Session A has an agent streaming. Session B is idle.
+
+**Steps and expectations:**
+1. In session A, queue a message while the agent is streaming.
+2. Click "Steer" on the queued pill.
+3. Immediately switch to session B (before the steer RPC resolves).
+   - Steer should apply to session A, not session B.
+   - Session B should be unaffected.
+
+**Coverage:** none
+
+---
+
+## PI-11b: Queue not restored after page reload
+
+**Suspected bug:** Queued messages live in server-side `PromptQueue` (in-memory). They're broadcast via `queue_update` WS messages. But after page reload, the queue state needs to be re-sent — is it included in the session reconnection flow?
+
+**Preconditions:** Agent is streaming. 3 messages queued.
+
+**Steps and expectations:**
+1. Observe 3 queued pills below the textarea.
+2. Reload the page (F5).
+3. Navigate back to the session.
+   - **Expected:** 3 queued pills reappear.
+   - Queue should be re-broadcast on WS reconnection (check if `queue_update` is sent in the `connect` handler).
+4. Agent finishes. Queued messages drain in order.
+
+**Coverage:** none
+
+---
+
+## PI-11c: Queue drain race with concurrent prompt
+
+**Suspected bug:** `drainQueue` sets `session.status = "streaming"` optimistically to prevent double-dispatch. But `enqueuePrompt` also checks `status === "idle" && queue.isEmpty` for direct dispatch. If `agent_end` and a new prompt arrive simultaneously, two prompts could be dispatched concurrently.
+
+**Preconditions:** Agent is streaming. 1 message queued.
+
+**Steps and expectations:**
+1. Agent finishes its turn (`agent_end` fires).
+2. Simultaneously, user sends a new message (presses Enter at the exact moment the agent goes idle).
+   - Only one prompt should be dispatched at a time.
+   - The new message should be queued behind the existing queued message, not jump ahead.
+   - No "double prompt" where the agent receives two concurrent prompts.
+
+**Coverage:** none
+
+---
+
+## PI-21b: Abort during tool call shows stale streaming state
+
+**Suspected bug:** After abort, if the agent process is killed and restarted (3s grace period expired), there's a gap where the UI may show "streaming" status even though the process is dead. The `agent_end` is broadcast manually in `forceAbort`, but the client's `_isAborting` flag may not be cleared.
+
+**Preconditions:** Agent is running a long tool call (e.g. `bash sleep 60`).
+
+**Steps and expectations:**
+1. Click Stop (or press Escape).
+   - UI should immediately show "Aborting..." or similar feedback.
+   - **Suspected:** UI shows nothing for 3 seconds, then abruptly transitions to idle.
+2. After abort completes:
+   - Textarea re-enables. Send button appears.
+   - Session status is "idle".
+   - No ghost "streaming" indicator persists.
+3. Send a new message.
+   - Agent responds normally (process was restarted).
+
+**Coverage:** none
+
+---
+
+## PI-15b: Model change lost on session reconnect
+
+**Suspected bug:** Model selection may be stored client-side but not persisted to the server session. On reconnect or page reload, the model reverts to the default.
+
+**Preconditions:** Session with a non-default model selected.
+
+**Steps and expectations:**
+1. Change the model to a non-default option.
+2. Send a message. Verify agent responds using the new model.
+3. Reload the page. Navigate back to the session.
+   - Model selector should show the previously selected model.
+   - **Suspected:** Model reverts to default.
+4. Close browser entirely, reopen, navigate to session.
+   - Model should still be the one you selected.
+
+**Coverage:** none
+
+---
+
+## PI-03b: Command history lost after tab close
+
+**Suspected bug:** Command history is stored in `AppStorage.commandHistory` — need to verify this survives across browser sessions and page reloads. If it's in `sessionStorage` (not `localStorage` or server-side), it disappears on tab close.
+
+**Preconditions:** Session with 5+ sent messages.
+
+**Steps and expectations:**
+1. Send messages "msg1" through "msg5".
+2. Press ArrowUp — verify "msg5" appears.
+3. Reload the page. Navigate to session. Press ArrowUp.
+   - **Expected:** "msg5" appears (history survives reload).
+4. Close the browser tab entirely. Reopen. Navigate to session. Press ArrowUp.
+   - **Expected:** "msg5" appears (history survives tab close).
+   - **Suspected:** History is empty if stored in sessionStorage.
+
+**Coverage:** none
+
+---
+
+## PI-24b: Focus stolen by review pane annotation popover
+
+**Suspected bug:** When the review pane is open and the user clicks an annotation, the popover opens and steals focus. If the user then starts typing (expecting to type in the textarea), keystrokes go into the annotation popover instead.
+
+**Preconditions:** Session with review pane open, at least one annotation.
+
+**Steps and expectations:**
+1. Click on an annotation highlight in the review pane.
+   - Popover opens with textarea focused.
+2. Press Escape to close the popover.
+   - Focus should return to the message editor textarea.
+   - **Suspected:** Focus goes to the document body or the review pane, not the textarea.
+3. Without clicking anything, start typing.
+   - Characters should appear in the message editor textarea.
+
+**Coverage:** none
