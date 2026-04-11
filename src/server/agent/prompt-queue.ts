@@ -81,6 +81,17 @@ export class PromptQueue {
 		return this.queue.length < before;
 	}
 
+	/**
+	 * Clear the dispatched flag on all queue items.
+	 * Used after force-kill restart so drainQueue picks up messages that were
+	 * dispatched to stdin of a now-dead process.
+	 */
+	resetDispatched(): void {
+		for (const m of this.queue) {
+			m.dispatched = false;
+		}
+	}
+
 	/** Mark a message as dispatched (sent mid-turn, kept for UI display). */
 	markDispatched(messageId: string): boolean {
 		const msg = this.queue.find(m => m.id === messageId);
