@@ -36,7 +36,7 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `state` | `data` | Current agent state snapshot |
 | `messages` | `data` | Full message history array |
 | `event` | `data` | Streaming agent event (message_start, content_delta, tool calls, etc.) |
-| `session_status` | `status` | Session status change (idle, streaming, etc.) |
+| `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
 | `client_joined` | `clientId` | Another client connected |
 | `client_left` | `clientId` | A client disconnected |

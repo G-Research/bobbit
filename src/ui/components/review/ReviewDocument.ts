@@ -451,6 +451,12 @@ export class ReviewDocument extends LitElement {
     this._existingComment = "";
     this._editingAnnotationId = null;
     window.getSelection()?.removeAllRanges();
+    // Return focus to the message editor textarea (PI-24b)
+    requestAnimationFrame(() => {
+      const editor = document.querySelector("message-editor");
+      const textarea = editor?.querySelector("textarea");
+      if (textarea) (textarea as HTMLElement).focus();
+    });
   }
 
   private _removeAnnotation(annotationId: string): void {

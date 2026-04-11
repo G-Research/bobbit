@@ -648,7 +648,9 @@ The prompt area and context bar are the most-used parts of the UI. These stories
     - Agent processes Q2 and responds.
 12. All queue pills are now consumed. Textarea is ready for new input.
 
-**Coverage:** none
+**Coverage:** tests/queue-dispatch.spec.ts
+
+> **Implementation note:** Immediate dispatch was removed from `steerQueued()` per spec. Promoted messages now reorder in the queue and dispatch via `drainQueue()` after `agent_end` or abort+restart, batched via `dequeueAllSteered()`. Live steer (direct typing while streaming) uses a separate path (`rpcClient.steer()` via WS "steer" command) and is unaffected.
 
 ---
 
@@ -668,7 +670,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Draft should still be present.
    - **Suspected:** draft is missing because the race condition persisted the empty state.
 
-**Coverage:** none
+**Coverage:** tests/draft-persistence.spec.ts
 
 ---
 
@@ -687,7 +689,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Wait 2 seconds. Check textarea.
    - Draft should still be there.
 
-**Coverage:** none
+**Coverage:** tests/draft-persistence.spec.ts
 
 ---
 
@@ -704,7 +706,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Steer should apply to session A, not session B.
    - Session B should be unaffected.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — server scopes steerQueued by WS connection-bound sessionId (handler.ts:145)
 
 ---
 
@@ -722,7 +724,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Queue should be re-broadcast on WS reconnection (check if `queue_update` is sent in the `connect` handler).
 4. Agent finishes. Queued messages drain in order.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — queue_update sent on WS reconnect (handler.ts:195), existing E2E in tests/e2e/queue-e2e.spec.ts
 
 ---
 
@@ -739,7 +741,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - The new message should be queued behind the existing queued message, not jump ahead.
    - No "double prompt" where the agent receives two concurrent prompts.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — drainQueue sets status synchronously before async dispatch, Node single-threaded prevents double-dispatch
 
 ---
 
@@ -760,7 +762,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Send a new message.
    - Agent responds normally (process was restarted).
 
-**Coverage:** none
+**Coverage:** tests/queue-dispatch.spec.ts
 
 ---
 
@@ -779,7 +781,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 4. Close browser entirely, reopen, navigate to session.
    - Model should still be the one you selected.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — model persisted server-side via persistSessionModel(), sent on reconnect via sendPersistedModelInfo()
 
 ---
 
@@ -798,7 +800,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - **Expected:** "msg5" appears (history survives tab close).
    - **Suspected:** History is empty if stored in sessionStorage.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — CommandHistoryStore uses IndexedDB (persistent), not sessionStorage
 
 ---
 
@@ -817,4 +819,4 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Without clicking anything, start typing.
    - Characters should appear in the message editor textarea.
 
-**Coverage:** none
+**Coverage:** tests/review-annotation-focus.spec.ts

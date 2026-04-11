@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
-import type { ServerMessage } from "../ws/protocol.js";
+import type { ServerMessage, QueuedMessage } from "../ws/protocol.js";
 import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
@@ -55,7 +55,7 @@ const execFileAsync = promisify(execFileCb);
 
 
 
-export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "terminated";
+export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
 export interface SessionInfo {
 	id: string;
@@ -1043,31 +1043,11 @@ export class SessionManager {
 
 		this.broadcastQueue(session);
 
-		// If agent is streaming, batch-dispatch all steered+undispatched now
-		if (session.status === "streaming") {
-			this._dispatchSteeredMessages(session);
-		}
+		// Steered messages are NOT dispatched immediately on promotion.
+		// They reorder in the queue and dispatch via drainQueue after agent_end
+		// (or after abort+restart). Live steer (direct typing while streaming)
+		// uses a separate path: rpcClient.steer() via the WS "steer" command.
 		return true;
-	}
-
-	/**
-	 * Batch-dispatch all steered+undispatched messages via rpcClient.steer().
-	 * Messages are concatenated and sent as a single steer call, then marked
-	 * dispatched so they aren't sent again on abort or subsequent promotions.
-	 */
-	private _dispatchSteeredMessages(session: SessionInfo): void {
-		const steeredMessages = session.promptQueue.toArray()
-			.filter(m => m.isSteered && !m.dispatched);
-		if (steeredMessages.length === 0) return;
-
-		const batchText = steeredMessages.map(m => m.text).join('\n');
-		session.rpcClient.steer(batchText).catch((err) => {
-			console.error(`[session-manager] Failed to dispatch batched steer for ${session.id}:`, err);
-		});
-		for (const m of steeredMessages) {
-			session.promptQueue.markDispatched(m.id);
-		}
-		this.broadcastQueue(session);
 	}
 
 	/** Reorder queued messages to match the given ID list. */
@@ -1100,8 +1080,18 @@ export class SessionManager {
 	private drainQueue(session: SessionInfo): void {
 		if (session.promptQueue.isEmpty) return;
 
-		// Skip already-dispatched messages (steered mid-turn), then pop the next
-		const next = session.promptQueue.dequeueUndispatched();
+		// Batch all steered messages at the front into a single prompt
+		const steered = session.promptQueue.dequeueAllSteered();
+		let next: QueuedMessage | undefined;
+
+		if (steered.length > 0) {
+			const batchText = steered.map(m => m.text).join('\n');
+			next = { ...steered[0], text: batchText };
+		} else {
+			// Skip already-dispatched messages (steered mid-turn), then pop the next
+			next = session.promptQueue.dequeueUndispatched();
+		}
+
 		this.broadcastQueue(session);
 		if (!next) return;
 
@@ -3795,8 +3785,9 @@ export class SessionManager {
 		// If not streaming, nothing to abort
 		if (session.status !== "streaming") return;
 
-		// Dispatch any remaining steered messages before aborting
-		this._dispatchSteeredMessages(session);
+		// Broadcast aborting status so UI shows feedback during grace period
+		session.status = "aborting";
+		broadcast(session.clients, { type: "session_status", status: "aborting" });
 
 		// Try graceful abort first
 		try {
@@ -3807,7 +3798,7 @@ export class SessionManager {
 
 		// Wait for the agent to become idle
 		const settled = await new Promise<boolean>((resolve) => {
-			if (session.status !== "streaming") {
+			if (session.status !== "streaming" && session.status !== "aborting") {
 				resolve(true);
 				return;
 			}
@@ -3931,8 +3922,17 @@ export class SessionManager {
 			// Swap in the new bridge
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
+
+			// Reset dispatched flags so steered messages that were sent to the
+			// now-dead process are picked up by drainQueue after restart.
+			session.promptQueue.resetDispatched();
+
 			session.status = "idle";
+			broadcast(session.clients, { type: "session_status", status: "idle" });
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
+
+			// Drain any queued messages (steered first, then normal)
+			this.drainQueue(session);
 		} catch (err) {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			session.status = "terminated";

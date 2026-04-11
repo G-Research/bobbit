@@ -8,9 +8,9 @@ import type { QueuedMessage } from "../dist/server/ws/protocol.js";
  */
 class DispatchSimulator {
 	queue: PromptQueue;
-	status: "idle" | "streaming" = "idle";
+	status: "idle" | "streaming" | "aborting" = "idle";
 	dispatched: Array<{ message: QueuedMessage; method: "prompt" | "steer" | "followUp" }> = [];
-	statusTransitions: Array<"idle" | "streaming"> = [];
+	statusTransitions: Array<"idle" | "streaming" | "aborting"> = [];
 	lastTurnErrored = false;
 
 	constructor(queue?: PromptQueue) {
@@ -18,7 +18,7 @@ class DispatchSimulator {
 		this.statusTransitions.push(this.status);
 	}
 
-	private setStatus(s: "idle" | "streaming") {
+	private setStatus(s: "idle" | "streaming" | "aborting") {
 		if (this.status !== s) {
 			this.status = s;
 			this.statusTransitions.push(s);
@@ -62,11 +62,21 @@ class DispatchSimulator {
 		return msg;
 	}
 
-	/** Models drainQueue from SessionManager — uses followUp for isFollowUp messages. */
+	/** Models drainQueue from SessionManager — batches steered, then falls back to single. */
 	drain(): boolean {
 		if (this.queue.isEmpty) return false;
 
-		const next = this.queue.dequeueUndispatched();
+		// Batch all steered messages at the front into a single prompt
+		const steered = this.queue.dequeueAllSteered();
+		let next: QueuedMessage | undefined;
+
+		if (steered.length > 0) {
+			const batchText = steered.map(m => m.text).join('\n');
+			next = { ...steered[0], text: batchText };
+		} else {
+			next = this.queue.dequeueUndispatched();
+		}
+
 		if (!next) return false;
 
 		// Optimistic status update before dispatch (prevents double-dispatch race)
@@ -110,6 +120,9 @@ class DispatchSimulator {
 	 * mark all as dispatched.
 	 */
 	batchedSteerAbort(): void {
+		// Broadcast aborting status first
+		this.setStatus("aborting");
+
 		const steeredMessages = this.queue.toArray()
 			.filter(m => m.isSteered && !m.dispatched);
 		if (steeredMessages.length > 0) {
@@ -126,6 +139,21 @@ class DispatchSimulator {
 			}
 		}
 		// After abort, agent becomes idle and queue drains
+		this.setStatus("idle");
+		this.drain();
+	}
+
+	/**
+	 * Models the fixed forceAbort flow:
+	 * 1. Set aborting status
+	 * 2. Force-kill the process (steers dispatched to dead process are lost)
+	 * 3. resetDispatched() clears dispatched flags so messages are recovered
+	 * 4. Restart agent → drain queue
+	 */
+	forceAbortRestart(): void {
+		this.setStatus("aborting");
+		// After force-kill restart, reset dispatched flags
+		this.queue.resetDispatched();
 		this.setStatus("idle");
 		this.drain();
 	}
@@ -325,7 +353,7 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(order2).toEqual(order1);
 	});
 
-	test("(8) steer ordering: A,B,C enqueued, steer C then B, full drain is C,B,A", () => {
+	test("(8) steer ordering: A,B,C enqueued, steer C then B, drain batches steered C+B then A", () => {
 		const sim = new DispatchSimulator();
 
 		// Make agent busy first
@@ -347,22 +375,19 @@ test.describe("Queue Dispatch Integration", () => {
 		const queueOrder = sim.queue.toArray().map(m => m.text);
 		expect(queueOrder).toEqual(["C", "B", "A"]);
 
-		// Full drain sequence
-		sim.agentEnd(); // Setup done → C dispatched
-		expect(sim.dispatchedTexts).toEqual(["Setup", "C"]);
-		expect(sim.queue.length).toBe(2);
+		// First drain batches all steered messages (C+B) into a single prompt
+		sim.agentEnd(); // Setup done → C+B batched dispatch
+		expect(sim.dispatchedTexts).toEqual(["Setup", "C\nB"]);
+		expect(sim.queue.length).toBe(1); // only A left
 
-		sim.agentEnd(); // C done → B dispatched
-		expect(sim.dispatchedTexts).toEqual(["Setup", "C", "B"]);
-		expect(sim.queue.length).toBe(1);
-
-		sim.agentEnd(); // B done → A dispatched
-		expect(sim.dispatchedTexts).toEqual(["Setup", "C", "B", "A"]);
+		// Second drain dispatches A
+		sim.agentEnd(); // C+B batch done → A dispatched
+		expect(sim.dispatchedTexts).toEqual(["Setup", "C\nB", "A"]);
 		expect(sim.queue.isEmpty).toBe(true);
 
 		sim.agentEnd(); // A done → nothing left
 		expect(sim.status).toBe("idle");
-		expect(sim.dispatched.length).toBe(4);
+		expect(sim.dispatched.length).toBe(3); // Setup, C+B batch, A
 	});
 
 	test("steer during busy: steered messages dispatch before non-steered on drain", () => {
@@ -637,5 +662,127 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.dispatched.length).toBe(1);
 		expect(sim.dispatched[0].method).toBe("followUp");
 		expect(sim.dispatched[0].message.text).toBe("DirectFollowUp");
+	});
+
+	// ── BUG REPRODUCING TESTS ──────────────────────────────────────────
+	// These tests demonstrate confirmed bugs and SHOULD FAIL until fixed.
+
+	test("dequeueAllSteered pops all consecutive steered messages from front", () => {
+		const q = new PromptQueue();
+		const a = q.enqueue("A", { isSteered: true });
+		const b = q.enqueue("B", { isSteered: true });
+		const c = q.enqueue("C"); // not steered
+		const d = q.enqueue("D", { isSteered: true }); // steered but after a non-steered
+
+		// Reorder puts steered first: A, B, D, C
+		const arr = q.toArray();
+		expect(arr.map(m => m.text)).toEqual(["A", "B", "D", "C"]);
+
+		// dequeueAllSteered should pop all consecutive steered from front
+		const steered = q.dequeueAllSteered();
+		expect(steered.map(m => m.text)).toEqual(["A", "B", "D"]);
+
+		// Only C remains
+		expect(q.length).toBe(1);
+		expect(q.dequeue()?.text).toBe("C");
+		expect(q.isEmpty).toBe(true);
+	});
+
+	test("dequeueAllSteered returns empty array when front is not steered", () => {
+		const q = new PromptQueue();
+		q.enqueue("Normal1");
+		q.enqueue("Normal2");
+
+		const steered = q.dequeueAllSteered();
+		expect(steered).toEqual([]);
+		expect(q.length).toBe(2); // unchanged
+	});
+
+	test("steered messages recovered after dispatch + force-kill via resetDispatched (PI-25)", () => {
+		const q = new PromptQueue();
+		const a = q.enqueue("SteerA");
+		const b = q.enqueue("SteerB");
+		const c = q.enqueue("NormalC");
+
+		// User steers A and B
+		q.steer(a.id);
+		q.steer(b.id);
+
+		// _dispatchSteeredMessages() marks them dispatched (sent to stdin)
+		q.markDispatched(a.id);
+		q.markDispatched(b.id);
+
+		// Agent process is force-killed. The steer RPCs are lost.
+		// resetDispatched() clears the dispatched flag so they can be recovered.
+		expect(typeof q.resetDispatched).toBe("function");
+		q.resetDispatched();
+
+		// After restart, drainQueue calls dequeueUndispatched():
+		// Steered messages come first (A, B), then normal (C)
+		const first = q.dequeueUndispatched();
+		expect(first?.text).toBe("SteerA");
+
+		const second = q.dequeueUndispatched();
+		expect(second?.text).toBe("SteerB");
+
+		const third = q.dequeueUndispatched();
+		expect(third?.text).toBe("NormalC");
+
+		expect(q.isEmpty).toBe(true);
+	});
+
+	test("force-kill restart recovers steered messages as single batched prompt (PI-25)", () => {
+		const sim = new DispatchSimulator();
+
+		// Agent is streaming (processing first prompt)
+		sim.enqueue("LongRunning");
+		expect(sim.status).toBe("streaming");
+
+		// User queues M1, M2, M3 while agent is busy
+		const m1 = sim.enqueue("M1");
+		const m2 = sim.enqueue("M2");
+		const m3 = sim.enqueue("M3");
+
+		// User promotes M1 and M2 to steers
+		sim.steerQueued(m1!.id);
+		sim.steerQueued(m2!.id);
+
+		// Simulate _dispatchSteeredMessages() — marks steered msgs as dispatched
+		sim.queue.markDispatched(m1!.id);
+		sim.queue.markDispatched(m2!.id);
+
+		// User clicks abort. Agent is blocked, 3s grace expires, force-killed.
+		// forceAbortRestart: aborting → resetDispatched → idle → drain
+		sim.forceAbortRestart();
+
+		// M1+M2 should be dispatched as a SINGLE batched prompt (not two separate dispatches)
+		expect(sim.dispatched[1].message.text).toBe("M1\nM2");
+		expect(sim.dispatched[1].method).toBe("prompt"); // idle dispatch uses prompt
+
+		// M3 drains on next agent_end cycle
+		sim.agentEnd();
+		expect(sim.dispatched[2].message.text).toBe("M3");
+
+		expect(sim.queue.isEmpty).toBe(true);
+		expect(sim.dispatched.length).toBe(3); // LongRunning, M1+M2 batch, M3
+
+		// Verify aborting status was included
+		expect(sim.statusTransitions).toContain("aborting");
+	});
+
+	test("aborting status transition during force-abort (PI-21b)", () => {
+		const sim = new DispatchSimulator();
+
+		// Start streaming
+		sim.enqueue("Running");
+		expect(sim.status).toBe("streaming");
+		expect(sim.statusTransitions).toEqual(["idle", "streaming"]);
+
+		// User aborts — should see aborting status
+		sim.batchedSteerAbort();
+
+		// Transitions should include "aborting": streaming → aborting → idle
+		expect(sim.statusTransitions).toContain("aborting");
+		expect(sim.statusTransitions).toEqual(["idle", "streaming", "aborting", "idle"]);
 	});
 });

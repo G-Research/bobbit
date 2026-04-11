@@ -9,7 +9,7 @@ Each session is a running `pi-coding-agent` child process with its own conversat
 - **Persistence**: Session metadata (id, title, cwd, agent session file, `wasStreaming` flag) persists to `.bobbit/state/sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. If an agent was mid-turn when the server died, it is automatically re-prompted.
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
-- **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session.
+- **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session. An `"aborting"` status is broadcast immediately so the UI shows feedback during the grace period. After force-kill, any queued/steered messages are recovered via `resetDispatched()` + `drainQueue()`. See [prompt-queue.md](prompt-queue.md#abort-and-force-kill-recovery) for details.
 
 ## Goals
 
@@ -78,7 +78,7 @@ Server-side queuing of user messages when the agent is busy.
 - Queue auto-drains when the agent finishes a turn (suppressed on error — user must retry first).
 - Client can promote queued messages to steered (`steer_queued`), remove them (`remove_queued`), edit them (remove + populate textarea), or drag-reorder them (`reorder_queue`).
 - Queue pills show drag handle, edit (pencil), steer, and remove buttons. Steered pills show a "Sent" badge instead.
-- Steered messages are batched — they are held until the user presses Stop/Escape, then delivered as a single block on abort.
+- Steered messages are batched — they reorder to the front of the queue and are delivered as a single combined prompt when the agent next becomes idle (on normal turn completion or after abort+restart).
 - `follow_up` flag is preserved through the queue: messages enqueued with `isFollowUp: true` dispatch via `followUp()` RPC on drain.
 - Queue state broadcast to clients via `queue_update` events.
 
