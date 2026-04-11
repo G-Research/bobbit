@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Abort Streaming &amp; Focus Management Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  #editor-wrapper { position: relative; border: 1px solid #555; border-radius: 8px; padding: 8px; }
+  .btn { padding: 4px 12px; cursor: pointer; margin: 2px; }
+  #abort-btn { display: none; }
+  #abort-btn.visible { display: inline-block; }
+  #send-btn:disabled { opacity: 0.5; cursor: default; }
+</style>
+</head>
+<body>
+<div id="editor-wrapper">
+  <textarea id="textarea" rows="3" style="width:400px;display:block;" placeholder="Type a message..."></textarea>
+  <div id="button-row">
+    <button id="abort-btn" class="btn" title="Stop streaming">⏹ Stop</button>
+    <button id="send-btn" class="btn" title="Send message">Send</button>
+  </div>
+</div>
+
+<script>
+/**
+ * Replicates MessageEditor streaming/abort and focus behavior:
+ * - isStreaming toggles abort button visibility
+ * - onAbort callback tracked
+ * - Escape key triggers abort when streaming
+ * - Textarea auto-focuses on load (simulates firstUpdated)
+ * - Send clears textarea and refocuses
+ * - Send button always visible, disabled when no content + streaming
+ */
+
+let isStreaming = false;
+let abortCalls = 0;
+let sendCalls = [];
+
+const textarea = document.getElementById('textarea');
+const abortBtn = document.getElementById('abort-btn');
+const sendBtn = document.getElementById('send-btn');
+
+function updateUI() {
+  // Abort button visible only when streaming
+  if (isStreaming) {
+    abortBtn.classList.add('visible');
+  } else {
+    abortBtn.classList.remove('visible');
+  }
+  // Send button disabled when no content and streaming
+  const hasContent = textarea.value.trim().length > 0;
+  sendBtn.disabled = !hasContent;
+}
+
+function handleAbort() {
+  abortCalls++;
+}
+
+function handleSend() {
+  const text = textarea.value;
+  const hasContent = text.trim().length > 0;
+  if (!hasContent) return;
+
+  sendCalls.push({ text });
+
+  // Clear textarea and refocus (mirrors MessageEditor behavior)
+  textarea.value = '';
+  updateUI();
+  textarea.focus();
+}
+
+// Textarea input handler — update send button state
+textarea.addEventListener('input', () => {
+  updateUI();
+});
+
+// Keydown handler — mirrors MessageEditor.handleKeyDown
+textarea.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (textarea.value.trim()) {
+      handleSend();
+    }
+  } else if (e.key === 'Escape' && isStreaming) {
+    e.preventDefault();
+    handleAbort();
+  }
+});
+
+// Abort button click
+abortBtn.addEventListener('click', () => {
+  handleAbort();
+});
+
+// Send button click
+sendBtn.addEventListener('click', () => {
+  handleSend();
+});
+
+// Auto-focus on load (simulates firstUpdated)
+textarea.focus();
+
+// Update initial UI state
+updateUI();
+
+// Public API for tests
+window.setStreaming = (val) => {
+  isStreaming = val;
+  updateUI();
+};
+window.getAbortCalls = () => abortCalls;
+window.resetAbortCalls = () => { abortCalls = 0; };
+window.getSendCalls = () => sendCalls;
+window.resetSendCalls = () => { sendCalls = []; };
+window.isAbortVisible = () => abortBtn.classList.contains('visible');
+window.isSendVisible = () => sendBtn.offsetParent !== null;
+window.getActiveElement = () => document.activeElement?.id || document.activeElement?.tagName;
+
+window._testReady = true;
+</script>
+</body>
+</html>
