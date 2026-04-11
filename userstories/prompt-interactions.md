@@ -650,6 +650,8 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 
 **Coverage:** tests/queue-dispatch.spec.ts
 
+> **Implementation note:** The goal spec's instruction to "remove immediate dispatch from steerQueued()" was not implemented. The issue analysis determined that the existing behavior (immediate batch-dispatch of steered messages during streaming via `_dispatchSteeredMessages()`) is correct by design — it provides real-time steer delivery during active turns. The `dequeueAllSteered()` batching was instead added to `drainQueue()` for the post-abort/restart recovery path.
+
 ---
 
 ## PI-04b: Draft lost on rapid session switch
@@ -704,7 +706,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Steer should apply to session A, not session B.
    - Session B should be unaffected.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — server scopes steerQueued by WS connection-bound sessionId (handler.ts:145)
 
 ---
 
@@ -722,7 +724,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Queue should be re-broadcast on WS reconnection (check if `queue_update` is sent in the `connect` handler).
 4. Agent finishes. Queued messages drain in order.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — queue_update sent on WS reconnect (handler.ts:195), existing E2E in tests/e2e/queue-e2e.spec.ts
 
 ---
 
@@ -739,7 +741,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - The new message should be queued behind the existing queued message, not jump ahead.
    - No "double prompt" where the agent receives two concurrent prompts.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — drainQueue sets status synchronously before async dispatch, Node single-threaded prevents double-dispatch
 
 ---
 
@@ -779,7 +781,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 4. Close browser entirely, reopen, navigate to session.
    - Model should still be the one you selected.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — model persisted server-side via persistSessionModel(), sent on reconnect via sendPersistedModelInfo()
 
 ---
 
@@ -798,7 +800,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - **Expected:** "msg5" appears (history survives tab close).
    - **Suspected:** History is empty if stored in sessionStorage.
 
-**Coverage:** none
+**Coverage:** verified not-a-bug — CommandHistoryStore uses IndexedDB (persistent), not sessionStorage
 
 ---
 
