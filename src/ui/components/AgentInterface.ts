@@ -919,6 +919,13 @@ export class AgentInterface extends LitElement {
 							</div>
 						</div>
 						` : ''}
+						${(this.session as any)?.isAborting ? html`
+						<div class="flex items-center gap-2 px-4 py-1 text-muted-foreground text-sm">
+							<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+							</svg>
+							Aborting…
+						</div>` : nothing}
 						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
