@@ -119,6 +119,7 @@ Key quick checks:
 - **Session persistence**: `<project-root>/.bobbit/state/sessions.json` — missing `.jsonl` = session skipped on restore.
 - **Sandbox status**: `GET /api/sandbox-status`. Container label: `bobbit-project=<projectId>`.
 - **Stuck gate verification**: Cancel via `POST /api/goals/:id/gates/:gateId/cancel-verification` or the dashboard Cancel button.
+- **Gate/task tool bloat**: Agent tools (`gate_list`, `gate_status`, `task_list`) use `?view=summary` by default for slim responses. Use `gate_inspect` to drill into content, verification output, or signal history on demand. See [docs/rest-api.md — Summary views](docs/rest-api.md#summary-views-viewsummary).
 - **Search index**: Delete `<project-root>/.bobbit/state/search.db` and restart to rebuild.
 
 ## Git conventions

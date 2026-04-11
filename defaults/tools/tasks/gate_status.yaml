@@ -1,23 +1,22 @@
 name: gate_status
-description: "Get a gate's detail (status, content, signals)"
-summary: "Get a workflow gate's detail including status, content, signal
-  history, and definition."
+description: "Get latest signal details for a specific gate — verdict, truncated failed-step output, and metadata. Use gate_inspect for full content or history."
+summary: "Get latest signal details for a specific gate — verdict, truncated failed-step output, and metadata. Use gate_inspect for full content or history."
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Gates
 docs: >-
-  Use to read upstream gate content (e.g. design docs) before starting
-  downstream work. Returns content body, signal history, and verification
-  results.
+  Returns latest signal with truncated verification output (last 40 lines for
+  failed steps). Shows hasContent/contentLength instead of content body. Use
+  gate_inspect for full content, verification output, or signal history.
 detail_docs: >-
   ## Purpose
 
 
-  Get detailed information about a specific workflow gate, including its current
-  status, content, signal history, and definition. This is how agents read
-  upstream gate content (design docs, test plans, review findings) to understand
-  context.
+  Get the latest signal details for a specific workflow gate — verdict,
+  truncated failed-step output, and metadata. This is the Layer 2 detail view:
+  more than `gate_list` but less than `gate_inspect`. Returns enough to decide
+  next steps without dumping full content or history.
 
 
   ## Parameters
@@ -42,41 +41,61 @@ detail_docs: >-
 
   - `status` — current state: `pending`, `passed`, or `failed`
 
-  - `currentContent` — the latest passed content (markdown text)
-
-  - `currentContentVersion` — content version number
-
-  - `currentMetadata` — key-value metadata
-
   - `dependsOn` — array of upstream gate IDs
 
-  - `signals` — full signal history with verification results
+  - `signalCount` — total number of signals sent to this gate
 
   - `updatedAt` — last update timestamp
+
+  - `hasContent` — boolean, whether the gate has content
+
+  - `contentLength` — character length of the content body (0 if none)
+
+  - `currentMetadata` — key-value metadata from the latest signal (if any)
+
+  - `latestSignal` — the most recent signal object:
+    - `id` — signal identifier
+    - `sessionId` — which session sent it
+    - `timestamp` — when it was sent
+    - `commitSha` — git commit (if provided)
+    - `verification` — verification result:
+      - `status` — `passed`, `failed`, or `running`
+      - `steps[]` — array of step results:
+        - `name` — step name
+        - `passed` — boolean
+        - `output` — last 40 lines of output (failed steps only; omitted for passed steps)
+
+
+  Does **not** return: content body (use `gate_inspect section=content`), full
+  signal history (use `gate_inspect section=signals`), full verification output
+  (use `gate_inspect section=verification`).
 
 
   ## When to Use
 
 
-  - **Reading the design doc** — `gate_status(gate_id="design-doc")` to get the
-  full design content.
+  - **Checking verification results** — after a gate notification, see the
+  latest verdict and truncated error output.
 
-  - **Checking verification results** — see why a gate failed and what the
-  verification output was.
+  - **Seeing latest verdict** — quick check on what failed and why.
 
-  - **Reading upstream context** — get the content of any passed gate to
-  understand requirements.
-
-  - **Checking signal history** — see all previous signals, who sent them, and
-  their verification results.
+  - **Checking metadata** — read key-value metadata the signaling agent
+  attached.
 
 
   ## When NOT to Use
 
 
-  - **Listing all gates** — use `gate_list` for an overview of all gates.
+  - **Reading gate content** — use `gate_inspect(gate_id="...",
+  section="content")` instead.
 
-  - **Signaling a gate** — use `gate_signal` to submit work.
+  - **Reading full verification output** — use `gate_inspect(gate_id="...",
+  section="verification")` if the 40-line tail wasn't enough.
+
+  - **Browsing signal history** — use `gate_inspect(gate_id="...",
+  section="signals")` to see all past signals.
+
+  - **Quick overview of all gates** — use `gate_list` instead.
 
 
   ## Examples
@@ -84,14 +103,19 @@ detail_docs: >-
 
   ```
 
-  # Read the design document
+  # Check why implementation failed
+
+  gate_status(gate_id="implementation")
+
+  # → See latestSignal.verification.steps for which step failed and truncated
+  output
+
+
+  # Check if design doc has content worth reading
 
   gate_status(gate_id="design-doc")
 
-
-  # Check why implementation verification failed
-
-  gate_status(gate_id="implementation")
+  # → See hasContent=true, contentLength=4520 → then gate_inspect to read it
 
   ```
 
@@ -99,15 +123,14 @@ detail_docs: >-
   ## Notes / Gotchas
 
 
+  - **No content body** — the content text is NOT included. Check `hasContent`
+  and `contentLength`, then use `gate_inspect(section="content")` to read it.
+
+  - **Only the latest signal** — historical signals are not returned. Use
+  `gate_inspect(section="signals")` for history.
+
+  - **Truncated output** — failed verification steps show only the last 40
+  lines of output. Use `gate_inspect(section="verification")` for full output.
+
   - **Use `gate_list` first** — to discover gate IDs before querying specific
   gates.
-
-  - **Content may be large** — design docs and review findings can be
-  substantial. The full content is returned without truncation.
-
-  - **Signal history** — the `signals` array contains every signal ever sent to
-  this gate, including failed ones. Check the latest signal's verification
-  status for the current state.
-
-  - **Read before coding** — always read the design-doc gate before starting
-  implementation work.

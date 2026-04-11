@@ -40,10 +40,13 @@ detail_docs: >-
   - `dependsOn` — array of gate IDs that must pass before this gate can be
   signaled
 
-  - `content` — whether this gate accepts markdown content
+  - `signalCount` — number of times this gate has been signaled
 
-  - `injectDownstream` — whether passed content is auto-injected into downstream
-  agents
+  - `updatedAt` — last activity timestamp (only present if signaled at least
+  once)
+
+  - `failedSteps` — names of failed verification steps (only present if status
+  is `failed`)
 
 
   ## When to Use
@@ -65,8 +68,11 @@ detail_docs: >-
   ## When NOT to Use
 
 
-  - **Getting a single gate's full detail** — use `gate_status` for a specific
-  gate's content and signal history.
+  - **Getting a single gate's detail** — use `gate_status` for latest verdict
+  and truncated verification output.
+
+  - **Reading gate content** — use `gate_inspect` to read content, full
+  verification output, or signal history.
 
 
   ## Examples

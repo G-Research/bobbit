@@ -75,12 +75,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "task_list",
 		label: "List Tasks",
-		description: "List all tasks for the current goal with their state, type, assignment, and dependencies.",
+		description: "List all tasks for the current goal with their state, type, assignment, and dependencies. Returns a slim summary — use task detail for full spec or result.",
 		promptSnippet: "List all tasks for the goal.",
 		parameters: Type.Object({}),
 		async execute() {
 			try {
-				return ok(await api("GET", `/api/goals/${goalId}/tasks`));
+				return ok(await api("GET", `/api/goals/${goalId}/tasks?view=summary`));
 			} catch (e: any) { return err(e.message); }
 		},
 	});
@@ -155,12 +155,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gate_list",
 		label: "List Gates",
-		description: "List all gates for the current goal with their status, dependencies, and signal count.",
+		description: "List all gates for the current goal — status, dependencies, signal count, and failed step names. Slim summary with no content bodies.",
 		promptSnippet: "List all gates for the goal with status.",
 		parameters: Type.Object({}),
 		async execute() {
 			try {
-				return ok(await api("GET", `/api/goals/${goalId}/gates`));
+				return ok(await api("GET", `/api/goals/${goalId}/gates?view=summary`));
 			} catch (e: any) { return err(e.message); }
 		},
 	});
@@ -168,14 +168,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gate_status",
 		label: "Gate Status",
-		description: "Get current status of a specific gate (pending/passed/failed) plus latest verification results and signal history.",
-		promptSnippet: "Get gate status, verification results, and signal history.",
+		description: "Get latest signal details for a specific gate — verdict, truncated failed-step output, and metadata. Use gate_inspect for full content or history.",
+		promptSnippet: "Get gate status, latest verification results, and metadata.",
 		parameters: Type.Object({
 			gate_id: Type.String({ description: "Gate ID (e.g. 'issue-analysis', 'implementation')" }),
 		}),
 		async execute(_id, params) {
 			try {
-				return ok(await api("GET", `/api/goals/${goalId}/gates/${params.gate_id}`));
+				return ok(await api("GET", `/api/goals/${goalId}/gates/${params.gate_id}?view=summary`));
 			} catch (e: any) { return err(e.message); }
 		},
 	});
@@ -205,6 +205,34 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: "gate_inspect",
+		label: "Inspect Gate",
+		description: [
+			"Read gate content, verification output, or signal history.",
+			"section='content': returns the markdown content from a signal.",
+			"section='verification': returns full verification step output.",
+			"section='signals': returns summary list of all signals (no content bodies).",
+		].join(" "),
+		promptSnippet: "Read detailed gate data: content, verification output, or signal history.",
+		parameters: Type.Object({
+			gate_id: Type.String({ description: "Gate ID" }),
+			section: Type.Union([
+				Type.Literal("content"),
+				Type.Literal("verification"),
+				Type.Literal("signals"),
+			], { description: "What to read: 'content', 'verification', or 'signals'" }),
+			signal_index: Type.Optional(Type.Number({ description: "Which signal (0-based, negative from end, default: -1 = latest)" })),
+		}),
+		async execute(_id, params) {
+			try {
+				const qs = new URLSearchParams({ section: params.section });
+				if (params.signal_index !== undefined) qs.set("signal_index", String(params.signal_index));
+				return ok(await api("GET", `/api/goals/${goalId}/gates/${params.gate_id}/inspect?${qs}`));
+			} catch (e: any) { return err(e.message); }
+		},
+	});
+
 	// ── verification_result ──────────────────────────────────────────
 	pi.registerTool({
 		name: "verification_result",
@@ -230,5 +258,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log(`[goal-tools] Registered 7 task/gate tools for session ${sessionId}, goal ${goalId}`);
+	console.log(`[goal-tools] Registered 8 task/gate tools for session ${sessionId}, goal ${goalId}`);
 }

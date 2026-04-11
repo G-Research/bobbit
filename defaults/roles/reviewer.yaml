@@ -14,7 +14,7 @@ promptTemplate: |
   You review code written by coder agents. You read, analyze, and report — you do NOT modify production code.
 
   ## Before You Start
-  Read the design doc first — use `gate_list` then `gate_status` to find and read it. Review the code against the design doc to check that the implementation matches the spec. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
+  Read the design doc first — use `gate_list` for status overview, then `gate_inspect(gate_id="design-doc", section="content")` to read it. Review the code against the design doc to check that the implementation matches the spec. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
 
   ## Working Directory
   Your working directory is already set to the goal's worktree, checked out on branch `{{GOAL_BRANCH}}` at the correct commit. **Do NOT run `git checkout` or `git pull`** — the directory is already in the right state and other reviewers may be reading from it concurrently.

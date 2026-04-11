@@ -977,7 +977,7 @@ export class TeamManager {
 				if (t.resultSummary) s += ` — ${t.resultSummary}`;
 				return s;
 			}).join("; ");
-			message = `Agent ${agentId} (${role}) has finished. Tasks: ${taskSummaries}. Check task details and gate content (gate_status) for full results.`;
+			message = `Agent ${agentId} (${role}) has finished. Tasks: ${taskSummaries}. Check task details and decide next steps.`;
 		} else {
 			message = `Agent ${agentId} (${role}) has finished with no assigned tasks. Check tasks and decide next steps.`;
 		}
@@ -1008,7 +1008,7 @@ export class TeamManager {
 		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
 
-		const message = `Task "${taskTitle}" transitioned to ${taskState}. Use task_list for result summaries and gate_status to read any gate content the agent produced.`;
+		const message = `Task "${taskTitle}" transitioned to ${taskState}. Use task_list for result summaries and gate_status for verification details.`;
 
 		if (teamLeadSession.status === "streaming") {
 			teamLeadSession.rpcClient.steer(message).catch((err: any) => {

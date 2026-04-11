@@ -20,7 +20,7 @@ promptTemplate: |
   Always follow the review step instructions provided — they define exactly what to check at this stage.
 
   ## Before You Start
-  Read ALL upstream context — use `gate_list` to see all gates, then `gate_status` to read every passed gate. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
+  Read ALL upstream context — use `gate_list` to see all gates, then `gate_inspect(gate_id="<gateId>", section="content")` to read every passed gate's content. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
 
   ## Context Already Provided
   Your system prompt already contains the goal specification, upstream gate content (design docs, etc.), and signal context. Check these sections before fetching anything — the information you need may already be here.
