@@ -55,7 +55,7 @@ const execFileAsync = promisify(execFileCb);
 
 
 
-export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "terminated";
+export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
 export interface SessionInfo {
 	id: string;
@@ -3795,8 +3795,9 @@ export class SessionManager {
 		// If not streaming, nothing to abort
 		if (session.status !== "streaming") return;
 
-		// Dispatch any remaining steered messages before aborting
-		this._dispatchSteeredMessages(session);
+		// Broadcast aborting status so UI shows feedback during grace period
+		session.status = "aborting";
+		broadcast(session.clients, { type: "session_status", status: "aborting" });
 
 		// Try graceful abort first
 		try {
@@ -3807,7 +3808,7 @@ export class SessionManager {
 
 		// Wait for the agent to become idle
 		const settled = await new Promise<boolean>((resolve) => {
-			if (session.status !== "streaming") {
+			if (session.status !== "streaming" && session.status !== "aborting") {
 				resolve(true);
 				return;
 			}
@@ -3931,8 +3932,17 @@ export class SessionManager {
 			// Swap in the new bridge
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
+
+			// Reset dispatched flags so steered messages that were sent to the
+			// now-dead process are picked up by drainQueue after restart.
+			session.promptQueue.resetDispatched();
+
 			session.status = "idle";
+			broadcast(session.clients, { type: "session_status", status: "idle" });
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
+
+			// Drain any queued messages (steered first, then normal)
+			this.drainQueue(session);
 		} catch (err) {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			session.status = "terminated";

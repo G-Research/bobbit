@@ -8,9 +8,9 @@ import type { QueuedMessage } from "../dist/server/ws/protocol.js";
  */
 class DispatchSimulator {
 	queue: PromptQueue;
-	status: "idle" | "streaming" = "idle";
+	status: "idle" | "streaming" | "aborting" = "idle";
 	dispatched: Array<{ message: QueuedMessage; method: "prompt" | "steer" | "followUp" }> = [];
-	statusTransitions: Array<"idle" | "streaming"> = [];
+	statusTransitions: Array<"idle" | "streaming" | "aborting"> = [];
 	lastTurnErrored = false;
 
 	constructor(queue?: PromptQueue) {
@@ -18,7 +18,7 @@ class DispatchSimulator {
 		this.statusTransitions.push(this.status);
 	}
 
-	private setStatus(s: "idle" | "streaming") {
+	private setStatus(s: "idle" | "streaming" | "aborting") {
 		if (this.status !== s) {
 			this.status = s;
 			this.statusTransitions.push(s);
@@ -110,6 +110,9 @@ class DispatchSimulator {
 	 * mark all as dispatched.
 	 */
 	batchedSteerAbort(): void {
+		// Broadcast aborting status first
+		this.setStatus("aborting");
+
 		const steeredMessages = this.queue.toArray()
 			.filter(m => m.isSteered && !m.dispatched);
 		if (steeredMessages.length > 0) {
@@ -126,6 +129,21 @@ class DispatchSimulator {
 			}
 		}
 		// After abort, agent becomes idle and queue drains
+		this.setStatus("idle");
+		this.drain();
+	}
+
+	/**
+	 * Models the fixed forceAbort flow:
+	 * 1. Set aborting status
+	 * 2. Force-kill the process (steers dispatched to dead process are lost)
+	 * 3. resetDispatched() clears dispatched flags so messages are recovered
+	 * 4. Restart agent → drain queue
+	 */
+	forceAbortRestart(): void {
+		this.setStatus("aborting");
+		// After force-kill restart, reset dispatched flags
+		this.queue.resetDispatched();
 		this.setStatus("idle");
 		this.drain();
 	}
@@ -642,41 +660,40 @@ test.describe("Queue Dispatch Integration", () => {
 	// ── BUG REPRODUCING TESTS ──────────────────────────────────────────
 	// These tests demonstrate confirmed bugs and SHOULD FAIL until fixed.
 
-	test("BUG: steered messages lost after dispatch + force-kill — no resetDispatched method (PI-25)", () => {
-		// Bug 1: When steered messages are dispatched via rpcClient.steer() and then
-		// the agent process is force-killed, the messages are lost forever because:
-		// 1. They have dispatched=true (so dequeueUndispatched skips them)
-		// 2. No resetDispatched() method exists to clear the flag after force-kill restart
+	test("steered messages recovered after dispatch + force-kill via resetDispatched (PI-25)", () => {
 		const q = new PromptQueue();
 		const a = q.enqueue("SteerA");
 		const b = q.enqueue("SteerB");
 		const c = q.enqueue("NormalC");
 
-		// Simulate: user steers A and B
+		// User steers A and B
 		q.steer(a.id);
 		q.steer(b.id);
 
-		// Simulate: _dispatchSteeredMessages() marks them dispatched (sent to stdin)
+		// _dispatchSteeredMessages() marks them dispatched (sent to stdin)
 		q.markDispatched(a.id);
 		q.markDispatched(b.id);
 
-		// Simulate: agent process is force-killed. The steer RPCs are lost.
+		// Agent process is force-killed. The steer RPCs are lost.
+		// resetDispatched() clears the dispatched flag so they can be recovered.
+		expect(typeof q.resetDispatched).toBe("function");
+		q.resetDispatched();
+
 		// After restart, drainQueue calls dequeueUndispatched():
-		const next = q.dequeueUndispatched();
-		expect(next?.text).toBe("NormalC"); // C is dispatched fine
+		// Steered messages come first (A, B), then normal (C)
+		const first = q.dequeueUndispatched();
+		expect(first?.text).toBe("SteerA");
 
-		// But A and B were silently dropped — they had dispatched=true
-		// The queue is now empty. The steered messages are lost forever.
+		const second = q.dequeueUndispatched();
+		expect(second?.text).toBe("SteerB");
+
+		const third = q.dequeueUndispatched();
+		expect(third?.text).toBe("NormalC");
+
 		expect(q.isEmpty).toBe(true);
-
-		// THE FIX: PromptQueue needs a resetDispatched() method to clear
-		// the dispatched flag after a force-kill restart.
-		// This assertion FAILS because the method doesn't exist yet:
-		expect(typeof (q as any).resetDispatched).toBe("function");
 	});
 
-	test("BUG: force-kill restart loses steered messages in full simulation (PI-25)", () => {
-		// Full end-to-end simulation of the force-kill steered message loss bug.
+	test("force-kill restart recovers steered messages in full simulation (PI-25)", () => {
 		const sim = new DispatchSimulator();
 
 		// Agent is streaming (processing first prompt)
@@ -693,32 +710,31 @@ test.describe("Queue Dispatch Integration", () => {
 		sim.steerQueued(m2!.id);
 
 		// Simulate _dispatchSteeredMessages() — marks steered msgs as dispatched
-		// (In real code, this happens in steerQueued → _dispatchSteeredMessages)
 		sim.queue.markDispatched(m1!.id);
 		sim.queue.markDispatched(m2!.id);
 
-		// User clicks abort. Agent is blocked in a tool call, doesn't respond.
-		// 3 seconds pass, process is force-killed.
-		// After restart, drainQueue runs — but M1 and M2 are marked dispatched!
+		// User clicks abort. Agent is blocked, 3s grace expires, force-killed.
+		// forceAbortRestart: aborting → resetDispatched → idle → drain
+		sim.forceAbortRestart();
 
-		// Simulate: after force-kill restart, we SHOULD call resetDispatched()
-		// but the method doesn't exist yet. This is the bug.
-		// The fix: sim.queue.resetDispatched() would clear all dispatched flags.
+		// M1 should be dispatched first (steered, recovered by resetDispatched)
+		expect(sim.dispatched[1].message.text).toBe("M1");
+		expect(sim.dispatched[1].method).toBe("prompt"); // idle dispatch uses prompt
 
-		// Without the fix, drainQueue only gets M3:
-		const firstDrain = sim.queue.dequeueUndispatched();
-		expect(firstDrain?.text).toBe("M3");
-		expect(sim.queue.isEmpty).toBe(true); // M1, M2 are gone!
+		// M2 and M3 drain on subsequent agent_end cycles
+		sim.agentEnd();
+		expect(sim.dispatched[2].message.text).toBe("M2");
 
-		// THE FIX ASSERTION: resetDispatched must exist
-		expect(typeof (sim.queue as any).resetDispatched).toBe("function");
+		sim.agentEnd();
+		expect(sim.dispatched[3].message.text).toBe("M3");
+
+		expect(sim.queue.isEmpty).toBe(true);
+
+		// Verify aborting status was included
+		expect(sim.statusTransitions).toContain("aborting");
 	});
 
-	test("BUG: no aborting status transition during force-abort (PI-21b)", () => {
-		// Bug 2: When user clicks abort, there's no "aborting" status broadcast.
-		// The user sees no feedback for up to 3 seconds while the grace period runs.
-		// The status should transition: streaming → aborting → idle
-		// But currently it goes: streaming → idle (with a 3s gap of silence)
+	test("aborting status transition during force-abort (PI-21b)", () => {
 		const sim = new DispatchSimulator();
 
 		// Start streaming
@@ -726,13 +742,11 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.status).toBe("streaming");
 		expect(sim.statusTransitions).toEqual(["idle", "streaming"]);
 
-		// User aborts — the DispatchSimulator models the current behavior:
-		// batchedSteerAbort() goes directly to idle (no "aborting" intermediate)
+		// User aborts — should see aborting status
 		sim.batchedSteerAbort();
 
-		// EXPECTED (after fix): transitions should include "aborting"
-		// streaming → aborting → idle
-		// ACTUAL (current bug): streaming → idle (no aborting)
+		// Transitions should include "aborting": streaming → aborting → idle
 		expect(sim.statusTransitions).toContain("aborting");
+		expect(sim.statusTransitions).toEqual(["idle", "streaming", "aborting", "idle"]);
 	});
 });
