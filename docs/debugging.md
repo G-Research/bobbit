@@ -147,8 +147,9 @@ When a sandbox container is killed or removed, sessions auto-recover. Use this c
 - FTS5 on 10K docs < 10ms — slow search means network/serialization bottleneck
 - Purged sessions still showing? Check `purgeOneSession()` calls index cleanup
 - Staff not appearing in search? `StaffManager` uses per-project `searchIndex` from `ProjectContextManager` — verify the correct project context's search index is being used. `rebuildFromStores()` passes `staff.projectId` for correct project filtering
-- Sidebar filter not working? Check `state.searchContentMode` — `false` = client-side title filter, `true` = FTS API call. Toggle state persisted in `localStorage`
-- Full search page (`#/search`) manages its own state — independent from sidebar search
+- Sidebar filter not working? The sidebar uses client-side filtering only (no API calls). It matches goal titles, session titles, session agent roles, and staff names. Check `_applySearchFilter()` in `Sidebar.ts`
+- Full search page (`#/search`) is the sole consumer of the FTS API — it manages its own state, independent from sidebar filtering
+- Archived section not auto-opening on search match? Check `_archivedBySearch` flag — it distinguishes search-triggered expansion from manual clicks
 
 ## Paginated archives
 
