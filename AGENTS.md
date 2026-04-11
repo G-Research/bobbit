@@ -111,6 +111,8 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add QA testing**: Add `qa_start_command` (minimum) to `project.yaml`. Runs as optional `agent-qa` verification step. See [docs/qa-testing.md](docs/qa-testing.md).
 
+**Create a design mockup**: Use the `/mockup` skill or read [docs/design-mockups.md](docs/design-mockups.md) for the full guide on high-fidelity HTML previews, live preview panels, and mockup principles.
+
 ## Debugging
 
 See [docs/debugging.md](docs/debugging.md) for scannable checklists covering all subsystems — streaming, messages, sessions, sandbox, gates, search, multi-project, and more.
