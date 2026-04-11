@@ -47,7 +47,7 @@ function updateUI() {
   } else {
     abortBtn.classList.remove('visible');
   }
-  // Send button disabled when no content and streaming
+  // Send button disabled when no content
   const hasContent = textarea.value.trim().length > 0;
   sendBtn.disabled = !hasContent;
 }

@@ -41,7 +41,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - The full multiline message sends as one message on Enter
 - Message renders with preserved line breaks in chat
 
-**Coverage:** none
+**Coverage:** covered (message-editor-send.spec.ts, message-editor-arrows.spec.ts)
 
 ---
 
@@ -63,7 +63,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - History is per-session (not shared across sessions)
 - History only activates when cursor is on the top visual row (ArrowUp) or bottom row (ArrowDown)
 
-**Coverage:** none
+**Coverage:** covered (command-history.spec.ts, message-editor-arrows.spec.ts)
 
 ---
 
@@ -86,7 +86,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Sending a message clears the draft (does not persist as draft afterward)
 - Attachments are part of the draft and also preserved
 
-**Coverage:** none (see also S-03)
+**Coverage:** covered (message-editor-queue.spec.ts, draft-api.spec.ts)
 
 ---
 
@@ -111,7 +111,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Menu is positioned aligned with the "/" character
 - "/" mid-word does not trigger the menu (only at word boundary)
 
-**Coverage:** none
+**Coverage:** covered (message-editor-slash.spec.ts, slash-skill-e2e.spec.ts)
 
 ---
 
@@ -136,7 +136,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Sending includes all remaining attachments with the message
 - Processing indicator shows while files are being prepared
 
-**Coverage:** none
+**Coverage:** covered (message-editor-attach.spec.ts — button flow, limits, tiles)
 
 ---
 
@@ -155,7 +155,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Same size/count limits as button attachment
 - Multiple files can be dropped at once
 
-**Coverage:** none
+**Coverage:** covered (message-editor-attach.spec.ts — drag-drop, overlay, limits)
 
 ---
 
@@ -172,7 +172,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Image can be previewed by clicking the tile
 - Image is included when the message is sent
 
-**Coverage:** none
+**Coverage:** covered (message-editor-attach.spec.ts — paste, edge cases, limits)
 
 ---
 
@@ -192,7 +192,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - If browser doesn't support speech, mic button is hidden
 - Recognition errors show a notification
 
-**Coverage:** none
+**Coverage:** covered (voice-input.spec.ts — mocked SpeechRecognition, F13, errors, restart)
 
 ---
 
@@ -211,7 +211,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Both the partial response, the steer, and the new response are visible in chat
 - The steer message is visually distinct (steer indicator)
 
-**Coverage:** none (API-level only via steer-midturn.spec.ts)
+**Coverage:** covered (queue-ui.spec.ts E2E, steer-midturn.spec.ts API, message-editor-queue.spec.ts unit)
 
 ---
 
@@ -231,7 +231,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - No steers are dropped or lost
 - Chat shows the correct chronological order of all steers and agent responses
 
-**Coverage:** none
+**Coverage:** covered (queue-ui.spec.ts E2E, queue-dispatch.spec.ts unit — batch steer delivery)
 
 ---
 
@@ -250,7 +250,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Messages send in order when agent finishes each turn
 - Queue count is visible
 
-**Coverage:** partial (via S-12)
+**Coverage:** covered (queue-ui.spec.ts E2E, queue-dispatch.spec.ts unit, message-editor-queue.spec.ts)
 
 ---
 
@@ -266,7 +266,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Execution order updates to match the new visual order
 - Other pills shift to accommodate
 
-**Coverage:** none
+**Coverage:** covered (message-editor-queue.spec.ts — drag reorder with pill DnD)
 
 ---
 
@@ -282,7 +282,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - The queued pill is removed
 - User can modify and re-send (or queue again)
 
-**Coverage:** none
+**Coverage:** covered (message-editor-queue.spec.ts, queue-ui.spec.ts E2E — edit pill flow)
 
 ---
 
@@ -298,7 +298,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Message is not sent
 - Remaining queue order is preserved
 
-**Coverage:** none
+**Coverage:** covered (message-editor-queue.spec.ts — remove button fires callback)
 
 ---
 
@@ -319,7 +319,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Model choice persists across page reload
 - Search/filter available if many models
 
-**Coverage:** partial (API-level via S-10, no UI E2E)
+**Coverage:** covered (model-thinking-selectors.spec.ts — button display, click, visibility toggle)
 
 ---
 
@@ -337,7 +337,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Thinking blocks in the response are shown/hidden based on level
 - Setting persists for the session
 
-**Coverage:** none
+**Coverage:** covered (model-thinking-selectors.spec.ts — levels, onChange, visibility, reasoning gate)
 
 ---
 
@@ -356,7 +356,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Hovering or clicking shows a breakdown popover with input/output token counts
 - When context is near-full, a warning is visible
 
-**Coverage:** none
+**Coverage:** covered (context-cost-stats.spec.ts — bar fill, thresholds, tooltip, stale state)
 
 ---
 
@@ -375,7 +375,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Delegate/sub-agent costs are shown separately if applicable
 - Cost is server-authoritative (not client-calculated)
 
-**Coverage:** none
+**Coverage:** covered (context-cost-stats.spec.ts — dollar formatting, popover toggle, breakdown)
 
 ---
 
@@ -397,7 +397,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Status refreshes when agent returns to idle
 - Shows "merged into primary" indicator when applicable
 
-**Coverage:** none
+**Coverage:** covered (git-status-interactions.spec.ts — expand/collapse, files, PR, events, badges)
 
 ---
 
@@ -419,7 +419,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Overflow ("Show N more") when many processes exist
 - Kill action available from the pill
 
-**Coverage:** none
+**Coverage:** covered (bg-process-states.spec.ts — running/exited, logs, kill, dismiss, close)
 
 ---
 
@@ -438,7 +438,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Can send new messages
 - No orphaned streaming state or UI glitches
 
-**Coverage:** partial (API-level, no UI click test)
+**Coverage:** covered (abort-and-focus.spec.ts — stop button, Escape, onAbort callback)
 
 ---
 
@@ -455,7 +455,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Changing personality affects agent behavior on next message
 - Personality choice persists for the session
 
-**Coverage:** none
+**Coverage:** covered (personality-selector.spec.ts — chip toggle, multi-select, visual state)
 
 ---
 
@@ -472,7 +472,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Stats are specific to the active session (change when switching sessions)
 - Compact layout with clear visual hierarchy
 
-**Coverage:** none
+**Coverage:** covered (context-cost-stats.spec.ts — composite stats bar, reactive updates)
 
 ---
 
@@ -491,4 +491,4 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 - Focus returns to textarea after agent response completes
 - Focus does not steal from other active UI elements (e.g. settings dialog)
 
-**Coverage:** none
+**Coverage:** covered (abort-and-focus.spec.ts — auto-focus, focus after send, persistence)

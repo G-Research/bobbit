@@ -12,9 +12,11 @@ import path from "node:path";
 const TEST_PAGE = `file://${path.resolve("tests/personality-tool-renderer.html")}`;
 
 test.describe("PersonalitiesListRenderer", () => {
+	test.beforeEach(async ({ page }) => {
+		await page.waitForFunction(() => (window as any)._testReady === true);
+	});
 
 	test("loading state shows 'Listing personalities…'", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			return (window as any).renderList({}, undefined, true);
@@ -26,7 +28,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("loading state without streaming shows complete state", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			return (window as any).renderList({}, undefined, false);
@@ -38,7 +39,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("success with personality list shows count and names", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -65,7 +65,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("success with single personality uses singular form", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -82,7 +81,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("success with personalities object wrapper", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -102,7 +100,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("empty personality list shows 'No personalities defined'", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -119,7 +116,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("error result shows failure message", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -138,7 +134,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("skipped/aborted result shows warning styling", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -156,7 +151,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("long description is truncated to 50 chars", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const longDesc = "A".repeat(60);
@@ -174,7 +168,6 @@ test.describe("PersonalitiesListRenderer", () => {
 	});
 
 	test("missing description shows empty string", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -191,9 +184,12 @@ test.describe("PersonalitiesListRenderer", () => {
 });
 
 test.describe("PersonalitiesCreateRenderer", () => {
+	test.beforeEach(async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		await page.waitForFunction(() => (window as any)._testReady === true);
+	});
 
 	test("loading state shows 'Creating personality <name>'", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			return (window as any).renderCreate({ name: "pirate", description: "Talk like a pirate" }, undefined, true);
@@ -207,7 +203,6 @@ test.describe("PersonalitiesCreateRenderer", () => {
 	});
 
 	test("loading state defaults name to 'personality' when missing", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			return (window as any).renderCreate({}, undefined, true);
@@ -218,7 +213,6 @@ test.describe("PersonalitiesCreateRenderer", () => {
 	});
 
 	test("success shows 'Created personality <name>'", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -236,7 +230,6 @@ test.describe("PersonalitiesCreateRenderer", () => {
 	});
 
 	test("error result shows failure message", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -255,7 +248,6 @@ test.describe("PersonalitiesCreateRenderer", () => {
 	});
 
 	test("skipped/aborted result shows warning styling", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const mockResult = {
@@ -273,7 +265,6 @@ test.describe("PersonalitiesCreateRenderer", () => {
 	});
 
 	test("long description is truncated to 60 chars", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			const longDesc = "B".repeat(80);
@@ -285,7 +276,6 @@ test.describe("PersonalitiesCreateRenderer", () => {
 	});
 
 	test("no description param yields empty description", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
 			return (window as any).renderCreate({ name: "test" }, undefined, true);
@@ -296,9 +286,12 @@ test.describe("PersonalitiesCreateRenderer", () => {
 });
 
 test.describe("getToolState shared logic", () => {
+	test.beforeEach(async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		await page.waitForFunction(() => (window as any)._testReady === true);
+	});
 
 	test("returns correct states for all cases", async ({ page }) => {
-		await page.goto(TEST_PAGE);
 
 		const states = await page.evaluate(() => {
 			const fn = (window as any).getToolState;
