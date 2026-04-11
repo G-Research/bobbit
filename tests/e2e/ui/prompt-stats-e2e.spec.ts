@@ -153,6 +153,37 @@ test.describe("Prompt stats E2E", () => {
 		await expect(page.getByText("Cost Breakdown")).toBeVisible({ timeout: 5_000 });
 	});
 
+	test("PI-15: model name persists across page reload", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "Hello");
+		await waitForAgentResponse(page);
+
+		// Verify model name appears
+		const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+		await expect(async () => {
+			const text = await statsBar.textContent();
+			expect(text).toContain("mock-model");
+		}).toPass({ timeout: 10_000 });
+
+		// Reload page
+		await page.reload();
+
+		// Wait for app to load again
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 20_000 });
+
+		// The session should auto-load (last active session) — wait for textarea
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		// Verify model name still shown after reload
+		await expect(async () => {
+			const text = await statsBar.textContent();
+			expect(text).toContain("mock-model");
+		}).toPass({ timeout: 15_000 });
+	});
+
 	test("PI-15: model name button is clickable", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
