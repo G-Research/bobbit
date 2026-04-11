@@ -446,7 +446,10 @@ export function flushPendingDraft(): void {
 
 function _teardownDraftHandlers(): void {
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-	if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
+	// Don't abort in-flight flush saves — let them complete.
+	// _flushDraft() already cancels any previous in-flight save at the top
+	// via `if (_draftAbort) _draftAbort.abort()` before starting a new one.
+	_draftAbort = null;
 	_draftSessionId = null;
 	_draftGen = 0;
 	_draftSendGen = 0;
@@ -804,6 +807,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Set readOnly when archived status arrives (may come after initial connect)
 				if (status === "archived" && state.chatPanel?.agentInterface) {
 					state.chatPanel.agentInterface.readOnly = true;
+				}
+				// Trigger Lit re-render for aborting indicator — isAborting is read
+				// from the session object (same reference), so Lit won't detect the change.
+				if ((status === "aborting" || status === "idle") && state.chatPanel?.agentInterface) {
+					state.chatPanel.agentInterface.requestUpdate();
 				}
 			}
 			// Refresh git status when agent becomes idle (turn finished)
