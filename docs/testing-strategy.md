@@ -6,11 +6,11 @@
 
 | Layer | Files | Tests | Runtime | Parallelism |
 |-------|-------|-------|---------|-------------|
-| Unit (file:// fixtures + Node) | 93 | ~425 | <30s | Full (Playwright workers) |
+| Unit (file:// fixtures + Node) | ~105 | ~625 | <30s | Full (Playwright workers) |
 | API E2E (in-process gateway) | 69 | ~438 | ~60s | 4 workers |
-| Browser E2E (spawned gateway) | 30 | ~125 | ~90s | 2 workers |
+| Browser E2E (spawned gateway) | ~32 | ~140 | ~90s | 2 workers |
 | Manual integration (real agent + Docker) | 1 | 8 serial steps | ~5 min | **None** |
-| **Total** | **193** | **~996** | **~3 min + 5 min manual** | |
+| **Total** | **~207** | **~1,211** | **~3 min + 5 min manual** | |
 
 ### What Each Layer Actually Tests
 
@@ -31,6 +31,38 @@ The manual integration tests catch bugs that the automated suite misses because 
 3. **Cross-cutting browser verification** — git status widget rendering, session navigation post-restart, agent follow-up messages
 
 The automated E2E tests skip all three: Docker is unavailable (72+ `test.skip(!hasDocker)` guards), no crash simulation exists, and the mock agent can't exercise real sandbox paths.
+
+### Prompt Interaction Coverage
+
+All 24 prompt interaction user stories (PI-01 through PI-24) have automated test coverage. The stories are defined in `userstories/prompt-interactions.md` and cover every interactive element in the message editor, status bar, and context bar.
+
+**Unit fixture tests** cover isolated component behavior:
+
+| Test file | Stories | What it tests |
+|-----------|---------|---------------|
+| `message-editor-send.spec.ts` | PI-01, PI-02 | Enter to send, Shift+Enter multiline, empty prevention |
+| `message-editor-arrows.spec.ts` | PI-02, PI-03 | Arrow key navigation, history recall |
+| `command-history.spec.ts` | PI-03 | Command history up/down cycling |
+| `message-editor-queue.spec.ts` | PI-04, PI-11–14 | Draft preservation, queue dispatch, reorder, edit, remove |
+| `message-editor-slash.spec.ts` | PI-05 | Slash skill autocomplete |
+| `message-editor-attach.spec.ts` | PI-06, PI-07, PI-08 | File attach button, drag-drop, paste edge cases |
+| `voice-input.spec.ts` | PI-09 | Voice input with mocked SpeechRecognition API |
+| `model-thinking-selectors.spec.ts` | PI-15, PI-16 | Model selector dropdown, thinking level toggle |
+| `context-cost-stats.spec.ts` | PI-17, PI-18, PI-23 | Context usage bar, cost display, stats overview |
+| `git-status-interactions.spec.ts` | PI-19 | Git status widget expand/collapse, file list, action buttons |
+| `bg-process-states.spec.ts` | PI-20 | Background process pill states, log popup |
+| `abort-and-focus.spec.ts` | PI-21, PI-24 | Abort streaming (Stop button + Escape), textarea focus management |
+| `personality-selector.spec.ts` | PI-22 | Personality selector chip UI |
+| `personality-tool-renderer.spec.ts` | PI-22 | Personality tool renderers |
+
+**Browser E2E tests** cover flows that need a real server:
+
+| Test file | Stories | What it tests |
+|-----------|---------|---------------|
+| `prompt-stats-e2e.spec.ts` | PI-15, PI-17, PI-18, PI-23 | Model selector persistence, context/cost stats with real usage data |
+| `personality-e2e.spec.ts` | PI-22 | Personality selector with server-side config |
+
+PI-10 (steer) has API-level coverage in `steer-midturn.spec.ts`. PI-05 has E2E coverage in `slash-skill-e2e.spec.ts`.
 
 ## Root Causes of Escaped Bugs
 

@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Voice Input Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  #mic-btn { margin-top: 8px; padding: 4px 12px; cursor: pointer; }
+  #mic-btn.recording { color: red; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<textarea id="textarea" rows="3" style="width:400px;display:block;"></textarea>
+<button id="mic-btn">Mic</button>
+
+<script>
+/**
+ * Replicates MessageEditor speech recognition behavior for testing PI-09.
+ * Mocks window.SpeechRecognition with a controllable fake.
+ */
+
+// --- Mock SpeechRecognition ---
+let _mockInstance = null;
+
+class MockSpeechRecognition {
+  constructor() {
+    this.continuous = false;
+    this.interimResults = false;
+    this.lang = '';
+    this.onresult = null;
+    this.onerror = null;
+    this.onend = null;
+    this._started = false;
+    this._stopped = false;
+    _mockInstance = this;
+  }
+  start() {
+    if (this._started) throw new Error('Already started');
+    this._started = true;
+    this._stopped = false;
+  }
+  stop() {
+    this._started = false;
+    this._stopped = true;
+    // Real browsers fire onend after stop
+    setTimeout(() => { if (this.onend) this.onend(); }, 10);
+  }
+  abort() {
+    this._started = false;
+    this._stopped = true;
+    setTimeout(() => { if (this.onend) this.onend(); }, 10);
+  }
+}
+
+// Default: supported
+window.SpeechRecognition = MockSpeechRecognition;
+
+// --- State (mirrors MessageEditor) ---
+let speechRecognition = null;
+let speechSupported = true;
+let isRecording = false;
+let preSpeechText = '';
+let stopTimeout = null;
+let value = '';
+
+const textarea = document.getElementById('textarea');
+const micBtn = document.getElementById('mic-btn');
+
+function updateUI() {
+  micBtn.classList.toggle('recording', isRecording);
+  micBtn.textContent = isRecording ? 'Stop' : 'Mic';
+  micBtn.title = isRecording ? 'Stop recording' : 'Start recording';
+  if (!speechSupported) micBtn.classList.add('hidden');
+  else micBtn.classList.remove('hidden');
+}
+
+// --- Speech recognition logic (from MessageEditor) ---
+
+function toggleSpeechRecognition() {
+  if (isRecording) {
+    stopSpeechRecognition();
+  } else {
+    startSpeechRecognition();
+  }
+}
+
+function startSpeechRecognition() {
+  if (!speechSupported) return;
+
+  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recognition = new SpeechRecognitionCtor();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = navigator.language || 'en-US';
+
+  // Snapshot current textarea content
+  preSpeechText = value;
+
+  recognition.onresult = (event) => {
+    // Only display finalized results — same cumulative vs segment detection as MessageEditor
+    const nonEmptyFinals = [];
+    for (let i = 0; i < event.results.length; i++) {
+      const result = event.results[i];
+      if (result.isFinal) {
+        const t = result[0].transcript;
+        if (t) nonEmptyFinals.push(t);
+      }
+    }
+
+    if (nonEmptyFinals.length === 0) return;
+
+    const isCumulative =
+      nonEmptyFinals.length >= 2 &&
+      nonEmptyFinals[nonEmptyFinals.length - 1].startsWith(
+        nonEmptyFinals[nonEmptyFinals.length - 2]
+      );
+
+    let fullText;
+    if (isCumulative) {
+      fullText = nonEmptyFinals[nonEmptyFinals.length - 1];
+    } else {
+      fullText = nonEmptyFinals.join('');
+    }
+
+    const separator = preSpeechText && !preSpeechText.endsWith(' ') ? ' ' : '';
+    value = preSpeechText + separator + fullText;
+    textarea.value = value;
+  };
+
+  recognition.onerror = (event) => {
+    console.warn('Speech recognition error:', event.error);
+    if (event.error !== 'no-speech') {
+      stopSpeechRecognition();
+      updateUI();
+    }
+  };
+
+  recognition.onend = () => {
+    if (isRecording && speechRecognition === recognition) {
+      // Auto-restart: update preSpeechText to current value
+      preSpeechText = value;
+      try {
+        recognition.start();
+      } catch {
+        isRecording = false;
+        speechRecognition = null;
+        updateUI();
+      }
+    } else {
+      isRecording = false;
+      speechRecognition = null;
+      updateUI();
+    }
+  };
+
+  speechRecognition = recognition;
+  isRecording = true;
+  recognition.start();
+  updateUI();
+}
+
+function stopSpeechRecognition() {
+  if (stopTimeout) {
+    clearTimeout(stopTimeout);
+    stopTimeout = null;
+  }
+  if (speechRecognition) {
+    const recognition = speechRecognition;
+    stopTimeout = setTimeout(() => {
+      recognition.stop();
+      stopTimeout = null;
+    }, 500);
+    speechRecognition = null;
+  }
+  isRecording = false;
+  updateUI();
+}
+
+// --- Event handlers ---
+
+micBtn.addEventListener('click', toggleSpeechRecognition);
+
+textarea.addEventListener('input', (e) => {
+  value = e.target.value;
+});
+
+// F13 key handlers (global, like MessageEditor)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'F13' && !e.repeat) {
+    e.preventDefault();
+    startSpeechRecognition();
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'F13') {
+    e.preventDefault();
+    stopSpeechRecognition();
+  }
+});
+
+updateUI();
+
+// --- Test helpers ---
+
+window._triggerResult = (results) => {
+  // results: array of { transcript, isFinal }
+  // Build a SpeechRecognitionEvent-like object
+  const resultList = results.map(r => {
+    const res = [{ transcript: r.transcript }];
+    res.isFinal = r.isFinal;
+    return res;
+  });
+  resultList.length = results.length;
+  // Make it iterable and indexable
+  const event = { results: resultList };
+  if (_mockInstance && _mockInstance.onresult) {
+    _mockInstance.onresult(event);
+  }
+};
+
+window._triggerError = (errorType) => {
+  const event = { error: errorType };
+  if (_mockInstance && _mockInstance.onerror) {
+    _mockInstance.onerror(event);
+  }
+};
+
+window._triggerEnd = () => {
+  if (_mockInstance && _mockInstance.onend) {
+    _mockInstance.onend();
+  }
+};
+
+window.isRecording = () => isRecording;
+window.getTextareaValue = () => value;
+window.getMockInstance = () => _mockInstance;
+window.getPreSpeechText = () => preSpeechText;
+
+window.setSpeechSupported = (supported) => {
+  speechSupported = supported;
+  if (!supported) {
+    window.SpeechRecognition = undefined;
+    window.webkitSpeechRecognition = undefined;
+  } else {
+    window.SpeechRecognition = MockSpeechRecognition;
+  }
+  updateUI();
+};
+
+window.resetState = () => {
+  if (speechRecognition) {
+    speechRecognition = null;
+  }
+  if (stopTimeout) {
+    clearTimeout(stopTimeout);
+    stopTimeout = null;
+  }
+  isRecording = false;
+  value = '';
+  preSpeechText = '';
+  textarea.value = '';
+  _mockInstance = null;
+  speechSupported = true;
+  window.SpeechRecognition = MockSpeechRecognition;
+  updateUI();
+};
+
+window._testReady = true;
+</script>
+</body>
+</html>

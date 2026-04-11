@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PersonalityToolRenderers Test Fixture</title>
+</head>
+<body>
+<div id="container"></div>
+<script>
+/**
+ * Test fixture for PersonalitiesListRenderer and PersonalitiesCreateRenderer logic.
+ *
+ * Mirrors the rendering decisions in PersonalityToolRenderers.ts:
+ * - getToolState() resolves to inprogress/complete/error/warning
+ * - PersonalitiesListRenderer: no result → loading, error → failed/aborted, empty → "No personalities", success → collapsible list
+ * - PersonalitiesCreateRenderer: no result → creating, error → failed/aborted, success → created
+ */
+
+function getToolState(result, isStreaming) {
+	if (!result) return isStreaming ? "inprogress" : "complete";
+	if (result.isError) {
+		const text = (result.content || []).filter(c => c.type === "text").map(c => c.text).join("");
+		if (text.includes("Skipped due to queued user message")) return "warning";
+		return "error";
+	}
+	return "complete";
+}
+
+function getResult(result) {
+	const text = (result && result.content || [])
+		.filter(c => c.type === "text")
+		.map(c => c.text)
+		.join("\n") || "";
+	let data = null;
+	try { data = JSON.parse(text); } catch(e) {}
+	return { text, data };
+}
+
+function isSkippedToolResult(result) {
+	if (!result || !result.isError) return false;
+	const text = (result.content || []).filter(c => c.type === "text").map(c => c.text).join("");
+	return text.includes("Skipped due to queued user message");
+}
+
+function truncate(s, max) {
+	max = max || 60;
+	if (!s) return "";
+	return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+/**
+ * Mirrors PersonalitiesListRenderer.render() decisions.
+ */
+function renderList(params, result, isStreaming) {
+	const state = getToolState(result, isStreaming);
+
+	if (!result) {
+		return {
+			branch: "loading",
+			state,
+			headerText: "Listing personalities…",
+		};
+	}
+
+	const { data, text } = getResult(result);
+
+	if (result.isError) {
+		const skipped = isSkippedToolResult(result);
+		return {
+			branch: "error",
+			state,
+			isSkipped: skipped,
+			headerText: skipped ? "Aborted personality list" : "Personality list failed",
+			errorText: text,
+			errorClass: skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive",
+		};
+	}
+
+	const personalities = Array.isArray(data) ? data : (data && data.personalities || []);
+
+	if (personalities.length === 0) {
+		return {
+			branch: "empty",
+			state,
+			headerText: "No personalities defined",
+			count: 0,
+		};
+	}
+
+	return {
+		branch: "success",
+		state,
+		count: personalities.length,
+		headerText: personalities.length + " personalit" + (personalities.length !== 1 ? "ies" : "y"),
+		isCollapsible: true,
+		defaultExpanded: false,
+		personalities: personalities.map(function(p) {
+			return { name: p.name, description: truncate(p.description || "", 50) };
+		}),
+	};
+}
+
+/**
+ * Mirrors PersonalitiesCreateRenderer.render() decisions.
+ */
+function renderCreate(params, result, isStreaming) {
+	const state = getToolState(result, isStreaming);
+	const name = (params && params.name) || "personality";
+	const desc = (params && params.description) ? truncate(params.description, 60) : "";
+
+	if (!result) {
+		return {
+			branch: "loading",
+			state,
+			name: name,
+			description: desc,
+			headerText: "Creating personality " + name,
+		};
+	}
+
+	if (result.isError) {
+		const { text } = getResult(result);
+		const skipped = isSkippedToolResult(result);
+		return {
+			branch: "error",
+			state,
+			isSkipped: skipped,
+			name: name,
+			headerText: skipped
+				? "Aborted creation of personality " + name
+				: "Failed to create personality " + name,
+			errorText: text,
+			errorClass: skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive",
+		};
+	}
+
+	return {
+		branch: "success",
+		state,
+		name: name,
+		description: desc,
+		headerText: "Created personality " + name,
+	};
+}
+
+// Expose for Playwright
+window.getToolState = getToolState;
+window.renderList = renderList;
+window.renderCreate = renderCreate;
+window._testReady = true;
+</script>
+</body>
+</html>

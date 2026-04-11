@@ -15,6 +15,7 @@ const rl = createInterface({ input: process.stdin });
 
 /** Track conversation messages for get_messages */
 const conversationMessages = [];
+let currentModel = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384 };
 
 /** Session file path — created on first prompt, returned by get_state */
 let sessionFilePath = null;
@@ -399,10 +400,19 @@ async function handlePrompt(requestId, text) {
 		conversationMessages.push(assistantMsg);
 		emit({ type: "message_end", message: assistantMsg });
 	} else {
-		// Simple text response
+		// Simple text response — include realistic usage data so E2E tests
+		// can verify context bar, cost display, and stats bar rendering.
 		const assistantMsg = {
 			role: "assistant",
 			content: [{ type: "text", text: "OK" }],
+			usage: {
+				input: 150,
+				output: 25,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 175,
+				cost: { input: 0.00045, output: 0.0003, cacheRead: 0, cacheWrite: 0, total: 0.00075 },
+			},
 		};
 		conversationMessages.push(assistantMsg);
 		emit({ type: "message_end", message: assistantMsg });
@@ -483,7 +493,11 @@ rl.on("line", async (line) => {
 			const sf = ensureSessionFile();
 			const lines = conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
 			fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
-			send({ type: "response", id: msg.id, success: true, data: { status: "idle", sessionFile: sf } });
+			send({ type: "response", id: msg.id, success: true, data: {
+				status: "idle",
+				sessionFile: sf,
+				model: currentModel,
+			} });
 			break;
 		}
 
@@ -491,9 +505,20 @@ rl.on("line", async (line) => {
 			send({ type: "response", id: msg.id, success: true, data: conversationMessages });
 			break;
 
-		case "set_model":
+		case "set_model": {
+			// Track the model so get_state returns it
+			const knownModels = {
+				"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
+			};
+			const known = knownModels[msg.modelId];
+			if (known) {
+				currentModel = known;
+			} else {
+				currentModel = { provider: msg.provider || "mock", id: msg.modelId || "mock-model", contextWindow: 128000, maxTokens: 16384 };
+			}
 			send({ type: "response", id: msg.id, success: true });
 			break;
+		}
 
 		case "compact":
 			send({ type: "response", id: msg.id, success: true });

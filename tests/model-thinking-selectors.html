@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Model & Thinking Selector Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  .stats-bar { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
+  .model-btn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 12px; background: transparent; border: 1px solid #555; border-radius: 4px; color: #eee; cursor: pointer; height: 24px; }
+  .model-btn:hover { background: rgba(255,255,255,0.1); }
+  .model-btn .sparkles { width: 14px; height: 14px; }
+  .thinking-select { font-size: 12px; background: #27272a; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 2px 4px; height: 24px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="stats-bar" id="stats-bar">
+  <button id="model-btn" class="model-btn">
+    <svg class="sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M12 2l2 7h7l-5.5 4 2 7L12 16l-5.5 4 2-7L3 9h7z"/>
+    </svg>
+    <span id="model-label"></span>
+  </button>
+  <select id="thinking-select" class="thinking-select">
+    <option value="off">Off</option>
+    <option value="minimal">Minimal</option>
+    <option value="low">Low</option>
+    <option value="medium">Medium</option>
+    <option value="high">High</option>
+  </select>
+</div>
+
+<script>
+/**
+ * Replicates the model button and thinking level selector from AgentInterface.
+ * Tracks callbacks and supports toggling visibility.
+ */
+
+let modelClickCount = 0;
+let thinkingChanges = [];
+let showModelSelector = true;
+let showThinkingSelector = true;
+let model = { id: "claude-sonnet-4-20250514", reasoning: true, contextWindow: 200000 };
+
+const modelBtn = document.getElementById('model-btn');
+const modelLabel = document.getElementById('model-label');
+const thinkingSelect = document.getElementById('thinking-select');
+
+// Initial render
+modelLabel.textContent = model.id;
+thinkingSelect.value = "off";
+
+// Model button click
+modelBtn.addEventListener('click', () => {
+  modelClickCount++;
+});
+
+// Thinking level change
+thinkingSelect.addEventListener('change', (e) => {
+  thinkingChanges.push(e.target.value);
+});
+
+function updateVisibility() {
+  // Model button: hidden if showModelSelector=false OR no model
+  if (!showModelSelector || !model) {
+    modelBtn.classList.add('hidden');
+  } else {
+    modelBtn.classList.remove('hidden');
+  }
+
+  // Thinking selector: hidden if showThinkingSelector=false OR model doesn't support thinking
+  const supportsThinking = model && model.reasoning === true;
+  if (!showThinkingSelector || !supportsThinking) {
+    thinkingSelect.classList.add('hidden');
+  } else {
+    thinkingSelect.classList.remove('hidden');
+  }
+}
+
+updateVisibility();
+
+// Public API
+window.getModelClickCount = () => modelClickCount;
+window.getThinkingChanges = () => thinkingChanges;
+window.setShowModelSelector = (val) => { showModelSelector = val; updateVisibility(); };
+window.setShowThinkingSelector = (val) => { showThinkingSelector = val; updateVisibility(); };
+window.setModelReasoning = (val) => { model = { ...model, reasoning: val }; updateVisibility(); };
+window.setModel = (m) => { model = m; if (m) modelLabel.textContent = m.id; updateVisibility(); };
+window.setThinkingLevel = (val) => { thinkingSelect.value = val; };
+window.getModel = () => model;
+
+window._testReady = true;
+</script>
+</body>
+</html>
