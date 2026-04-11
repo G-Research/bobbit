@@ -13,6 +13,7 @@ const TEST_PAGE = `file://${path.resolve("tests/personality-tool-renderer.html")
 
 test.describe("PersonalitiesListRenderer", () => {
 	test.beforeEach(async ({ page }) => {
+		await page.goto(TEST_PAGE);
 		await page.waitForFunction(() => (window as any)._testReady === true);
 	});
 
