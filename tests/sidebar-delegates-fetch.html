@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar delegates fetch — dedup logic</title>
+</head>
+<body>
+<script>
+/**
+ * Replicates the delegate merging logic from src/app/api.ts fetchDelegates().
+ *
+ * Given current archivedSessions, liveSessions, and incoming delegates,
+ * returns the new archivedSessions array after dedup merge.
+ */
+function mergeDelegates(archivedSessions, liveSessions, incomingDelegates) {
+  const existingIds = new Set(archivedSessions.map(s => s.id));
+  const liveIds = new Set(liveSessions.map(s => s.id));
+  const result = [...archivedSessions];
+  for (const d of incomingDelegates) {
+    if (!existingIds.has(d.id) && !liveIds.has(d.id)) {
+      result.push(d);
+      existingIds.add(d.id);
+    }
+  }
+  return result;
+}
+
+/**
+ * Simulates the full flow: given a parent session ID, archived sessions,
+ * live sessions, and API response delegates, returns:
+ * - merged archived sessions
+ * - delegates visible under the parent (filtered by delegateOf)
+ */
+function simulateFetchAndRender(parentId, archivedSessions, liveSessions, apiDelegates) {
+  const merged = mergeDelegates(archivedSessions, liveSessions, apiDelegates);
+  const visibleDelegates = merged.filter(s => s.delegateOf === parentId);
+  return { merged, visibleDelegates };
+}
+
+// Expose for Playwright
+window.mergeDelegates = mergeDelegates;
+window.simulateFetchAndRender = simulateFetchAndRender;
+</script>
+</body>
+</html>
