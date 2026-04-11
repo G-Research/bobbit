@@ -7,6 +7,8 @@ Search has two modes:
 
 **Architecture:** Server-side SQLite FTS5 index (`search.db`) indexes goals (title + spec), sessions (title + role + goal title), messages (text content + tool names), and staff (name + description). Index is rebuilt from stores on startup if missing or schema-mismatched. Incremental indexing occurs as messages stream in.
 
+> **Note:** Gate content (e.g. design specs) is not currently indexed. This is a documented design decision deferred to a follow-up — see goal design doc for rationale.
+
 ---
 
 ## SR-01: Filter mode — sidebar filtering
@@ -39,7 +41,7 @@ Search has two modes:
    - Session opens. Search query remains in the input (not cleared on navigation).
    - Sidebar continues to show filtered results.
 
-**Coverage:** none
+**Coverage:** `tests/search-box.spec.ts` (Ctrl+K, debounce, escape, clear, controls visibility); `tests/e2e/ui/search-e2e.spec.ts` (sidebar filter mode — pending)
 
 ---
 
@@ -70,7 +72,7 @@ Search has two modes:
 7. Click a result.
    - Navigates to the corresponding session, goal, or staff item.
 
-**Coverage:** none
+**Coverage:** `tests/search-results.spec.ts` (result grouping, click navigation, empty state)
 
 ---
 
@@ -85,7 +87,7 @@ Search has two modes:
    - Each result shows its project name to disambiguate.
 3. If a project filter is applied (e.g. via `projectId` query param), only that project's results appear.
 
-**Coverage:** none
+**Coverage:** `tests/search-index.spec.ts` (projectId filtering)
 
 ---
 
@@ -111,7 +113,7 @@ Search has two modes:
    - Stale responses are discarded (guard: `state.searchQuery !== query`).
    - Only the final query's results display.
 
-**Coverage:** none
+**Coverage:** `tests/search-index.spec.ts` (special chars, empty/whitespace queries, long queries, prefix matching)
 
 ---
 
@@ -131,7 +133,7 @@ Search has two modes:
 5. While a dialog is open (e.g. settings), press Ctrl+K.
    - Keyboard shortcut is global (`document.addEventListener`). Should focus search or be suppressed if a dialog has focus.
 
-**Coverage:** none
+**Coverage:** `tests/search-box.spec.ts` (Ctrl+K focus, Escape clear+blur)
 
 ---
 
@@ -195,7 +197,7 @@ Search has two modes:
    - The index is rebuilt automatically from stores.
    - Search works again — all previously indexed content is available.
 
-**Coverage:** none
+**Coverage:** `tests/search-index.spec.ts` (indexing roundtrips: goal/session/message/staff, needsRebuild, removal)
 
 ---
 
@@ -211,7 +213,7 @@ Search has two modes:
    - No duplicate results or flickering.
 2. The final results correspond to the full query "deploy", not an intermediate one.
 
-**Coverage:** none
+**Coverage:** `tests/search-box.spec.ts` (debounce timing, rapid typing)
 
 ---
 
@@ -245,4 +247,4 @@ Search has two modes:
    - Navigates to the staff member's session or detail view.
 4. Retired staff members are filtered out of sidebar results in filter mode.
 
-**Coverage:** none
+**Coverage:** `tests/search-index.spec.ts` (staff indexing roundtrip, staff type filtering)
