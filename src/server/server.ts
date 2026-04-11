@@ -2308,6 +2308,10 @@ async function handleApiRoute(
 					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
 				}
 			}
+			// Capture agent branches BEFORE teardown erases the team store entry
+			const goalProjectCtx = projectContextManager.getContextForGoal(id);
+			const teamEntry = goalProjectCtx?.teamStore.get(id);
+
 			// Tear down any active team first (dismisses agents, cleans up their worktrees)
 			const teamState = teamManager.getTeamState(id);
 			if (teamState) {
@@ -2324,10 +2328,6 @@ async function handleApiRoute(
 			// Fire-and-forget: clean up remote branches for this goal
 			const archivedGoal = deleteGoalMgr.getGoal(id);
 			if (archivedGoal?.repoPath) {
-				const goalProjectCtx = projectContextManager
-					? projectContextManager.getContextForGoal(id)
-					: null;
-				const teamEntry = goalProjectCtx?.teamStore.get(id);
 				deleteRemoteGoalBranches(archivedGoal, teamEntry, archivedGoal.repoPath).catch(err => {
 					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
 				});
