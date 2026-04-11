@@ -5586,9 +5586,11 @@ async function handleApiRoute(
 	}
 	// ── Draft endpoints ─────────────────────────────────────────────
 
-	// PUT /api/sessions/:id/draft — upsert a draft
+	// PUT|POST /api/sessions/:id/draft — upsert a draft
+	// POST is accepted alongside PUT because navigator.sendBeacon (used for
+	// beforeunload draft flush) always sends POST requests.
 	const draftPutMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/draft$/);
-	if (draftPutMatch && req.method === "PUT") {
+	if (draftPutMatch && (req.method === "PUT" || req.method === "POST")) {
 		const id = draftPutMatch[1];
 		const body = await readBody(req);
 		if (!body || typeof body.type !== "string") {
