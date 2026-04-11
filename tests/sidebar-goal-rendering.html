@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar Goal Rendering — unit tests</title>
+</head>
+<body>
+<script>
+/**
+ * Extracted rendering logic from src/app/render-helpers.ts and src/app/sidebar.ts
+ * for unit-testing goal badge, PR badge, setup status, empty state, shelved opacity,
+ * and provisional project indicator.
+ */
+
+/**
+ * SB-09 / SB-10: Goal badge info (gate status or PR status).
+ *
+ * Replicates renderGoalBadge() logic from src/app/render-helpers.ts (~line 421).
+ *
+ * @param {string} goalId
+ * @param {Map} gateStatusCache - Map<goalId, {passed, total, verifying, verifyingCount}>
+ * @param {Map} prStatusCache - Map<goalId, {state, reviewDecision, mergeable, number, url}>
+ * @param {Array} sessions - Array of {goalId, teamGoalId, delegateOf, role, status, isCompacting}
+ * @returns {{ type: "pr"|"gate"|"none", ... }}
+ */
+function getGoalBadgeInfo(goalId, gateStatusCache, prStatusCache, sessions) {
+  // PR status takes priority over gate counts
+  const pr = prStatusCache.get(goalId);
+  if (pr) {
+    let color;
+    if (pr.state === "MERGED") color = "#a87fd4";
+    else if (pr.state === "CLOSED") color = "#c47070";
+    else if (pr.reviewDecision === "APPROVED") color = "#6bc485";
+    else if (pr.reviewDecision === "CHANGES_REQUESTED") color = "#c47070";
+    else if (pr.reviewDecision === "REVIEW_REQUIRED") color = "#d4a04a";
+    else color = "#6bc485";
+
+    const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
+    const url = pr.url || null;
+    return { type: "pr", state: pr.state, color, hasConflicts, url };
+  }
+
+  // Fall back to gate status
+  const gs = gateStatusCache.get(goalId);
+  if (!gs) return { type: "none" };
+
+  const goalAgents = sessions.filter(function(s) {
+    return (s.goalId === goalId || s.teamGoalId === goalId) && !s.delegateOf;
+  });
+  const hasTeam = goalAgents.some(function(s) {
+    return s.role === "team-lead" && s.status !== "terminated";
+  });
+  const anyAgentWorking = goalAgents.some(function(s) {
+    return s.status === "streaming" || s.status === "busy" || s.isCompacting;
+  });
+  const allPassed = gs.passed === gs.total;
+  const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : anyAgentWorking ? "#3b82f6" : "#7a8ea8";
+
+  return {
+    type: "gate",
+    passed: gs.passed,
+    total: gs.total,
+    verifying: !!gs.verifying,
+    verifyingCount: gs.verifyingCount || 0,
+    anyAgentWorking: anyAgentWorking,
+    hasTeam: hasTeam,
+    allPassed: allPassed,
+    color: color,
+  };
+}
+
+/**
+ * SB-12: Empty state logic.
+ * Replicates priority chain from renderGoalGroup() in src/app/render-helpers.ts.
+ */
+function getEmptyState(archived, canArchive, isTeamGoal) {
+  if (archived) return "archived";
+  if (canArchive) return "archive-goal";
+  if (isTeamGoal) return "start-team";
+  return "start-session";
+}
+
+/**
+ * SB-11: Goal setup status indicator.
+ * Replicates the inline conditional from renderGoalGroup() (~line 581).
+ */
+function getSetupIndicator(setupStatus) {
+  if (setupStatus === "preparing") return "spinner";
+  if (setupStatus === "error") return "warning";
+  return "none";
+}
+
+/**
+ * SB-13: Goal opacity for shelved state.
+ * Replicates the class conditional from renderGoalGroup() (~line 574).
+ */
+function getGoalOpacity(goalState) {
+  if (goalState === "shelved") return "opacity-60";
+  return "";
+}
+
+/**
+ * SB-30: Provisional project detection.
+ * Replicates the check from src/app/sidebar.ts (~line 751).
+ */
+function isProvisionalProject(project) {
+  return !!project.provisional;
+}
+
+// Expose all functions for Playwright
+window.getGoalBadgeInfo = getGoalBadgeInfo;
+window.getEmptyState = getEmptyState;
+window.getSetupIndicator = getSetupIndicator;
+window.getGoalOpacity = getGoalOpacity;
+window.isProvisionalProject = isProvisionalProject;
+</script>
+</body>
+</html>
