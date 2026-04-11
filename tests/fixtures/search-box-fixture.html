@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SearchBox &amp; SearchResults Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  :root {
+    --foreground: #fafafa;
+    --muted-foreground: #a1a1aa;
+    --primary: #3b82f6;
+    --accent: #27272a;
+    --input: #333;
+    --ring: #3b82f6;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<!-- ===== SearchBox replica ===== -->
+<div id="search-box-wrapper">
+  <div id="search-box-root">
+    <div class="relative pb-1">
+      <div class="relative flex items-center">
+        <span id="search-icon" class="search-icon"></span>
+        <input
+          data-search
+          id="search-input"
+          type="text"
+          placeholder="Search… (Ctrl+K)"
+        />
+        <button id="clear-btn" class="hidden" aria-label="Clear search">✕</button>
+      </div>
+    </div>
+    <div id="controls-row" style="max-height: 0; opacity: 0; overflow: hidden;">
+      <div style="display: flex; align-items: center; justify-content: flex-end; padding: 2px 8px;">
+        <button id="full-search-btn">Full Search</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SearchResults replica ===== -->
+<div id="search-results-root"></div>
+
+<script>
+/**
+ * SearchBox: Replicates search-box component behavior.
+ *
+ * - Ctrl+K focuses input
+ * - Typing fires search-input event after 200ms debounce
+ * - Escape clears and blurs
+ * - Clear button fires search-clear event
+ * - Full Search link fires full-search-click event
+ * - Controls row visible only when query is non-empty
+ * - No Content toggle (removed per design)
+ */
+
+let _query = "";
+let _debounceTimer = null;
+const _events = [];  // captured events: { type, detail, time }
+
+const searchInput = document.getElementById("search-input");
+const clearBtn = document.getElementById("clear-btn");
+const fullSearchBtn = document.getElementById("full-search-btn");
+const controlsRow = document.getElementById("controls-row");
+
+function _updateUI() {
+  // Clear button visibility
+  if (_query) {
+    clearBtn.classList.remove("hidden");
+  } else {
+    clearBtn.classList.add("hidden");
+  }
+  // Controls row (Full Search link) — visible when query non-empty
+  if (_query) {
+    controlsRow.style.maxHeight = "28px";
+    controlsRow.style.opacity = "1";
+  } else {
+    controlsRow.style.maxHeight = "0";
+    controlsRow.style.opacity = "0";
+  }
+}
+
+function _fireEvent(type, detail) {
+  const evt = new CustomEvent(type, { bubbles: true, composed: true, detail });
+  _events.push({ type, detail, time: Date.now() });
+  document.dispatchEvent(evt);
+}
+
+// Input handler with 200ms debounce
+searchInput.addEventListener("input", (e) => {
+  _query = e.target.value;
+  _updateUI();
+  if (_debounceTimer) clearTimeout(_debounceTimer);
+  _debounceTimer = setTimeout(() => {
+    _debounceTimer = null;
+    _fireEvent("search-input", { query: _query });
+  }, 200);
+});
+
+// Keydown on input: Escape clears + blurs
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    _query = "";
+    searchInput.value = "";
+    _updateUI();
+    if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null; }
+    _fireEvent("search-clear", {});
+    searchInput.blur();
+  }
+});
+
+// Global Ctrl+K focuses input
+document.addEventListener("keydown", (e) => {
+  if (e.key === "k" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    searchInput.focus();
+  }
+});
+
+// Clear button
+clearBtn.addEventListener("click", () => {
+  _query = "";
+  searchInput.value = "";
+  _updateUI();
+  if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null; }
+  _fireEvent("search-clear", {});
+});
+
+// Full Search link
+fullSearchBtn.addEventListener("click", () => {
+  _fireEvent("full-search-click", { query: _query });
+});
+
+_updateUI();
+
+// ===== SearchResults replica =====
+
+const resultsRoot = document.getElementById("search-results-root");
+let _resultsData = { results: [], loading: false, query: "" };
+
+function _renderResults() {
+  const { results, loading, query } = _resultsData;
+  resultsRoot.innerHTML = "";
+
+  // Loading state (no results yet)
+  if (loading && results.length === 0) {
+    resultsRoot.innerHTML = '<div class="search-loading" data-testid="loading">Searching…</div>';
+    return;
+  }
+
+  // Empty state
+  if (!loading && query && results.length === 0) {
+    resultsRoot.innerHTML = `<div class="search-empty" data-testid="empty">No matches for "${query}"</div>`;
+    return;
+  }
+
+  // No query
+  if (!query) return;
+
+  // Group by type
+  const groups = {};
+  for (const r of results) {
+    const key = r.type === "goal" ? "Goals" : r.type === "session" ? "Sessions" : r.type === "message" ? "Messages" : "Other";
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(r);
+  }
+
+  // Loading overlay when updating
+  if (loading) {
+    const updEl = document.createElement("div");
+    updEl.className = "search-updating";
+    updEl.dataset.testid = "updating";
+    updEl.textContent = "Updating…";
+    resultsRoot.appendChild(updEl);
+  }
+
+  for (const [label, items] of Object.entries(groups)) {
+    const groupEl = document.createElement("div");
+    groupEl.className = "result-group";
+    groupEl.dataset.group = label;
+
+    const header = document.createElement("div");
+    header.className = "group-header";
+    header.textContent = label;
+    groupEl.appendChild(header);
+
+    for (const item of items) {
+      const btn = document.createElement("button");
+      btn.className = "result-item";
+      btn.dataset.type = item.type;
+      btn.dataset.id = item.id;
+      btn.textContent = item.title || "Untitled";
+
+      if (item.snippet) {
+        const snip = document.createElement("div");
+        snip.className = "result-snippet";
+        snip.innerHTML = _sanitizeSnippet(item.snippet);
+        btn.appendChild(snip);
+      }
+
+      btn.addEventListener("click", () => {
+        _fireEvent("result-click", {
+          type: item.type,
+          id: item.id,
+          sessionId: item.sessionId,
+          goalId: item.goalId,
+        });
+      });
+
+      groupEl.appendChild(btn);
+    }
+
+    resultsRoot.appendChild(groupEl);
+  }
+}
+
+function _sanitizeSnippet(raw) {
+  return raw
+    .replace(/<b>/gi, "\x00B")
+    .replace(/<\/b>/gi, "\x00E")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\x00B/g, "<b>")
+    .replace(/\x00E/g, "</b>");
+}
+
+// ===== Public API for tests =====
+
+window.getQuery = () => _query;
+window.setQuery = (q) => { _query = q; searchInput.value = q; _updateUI(); };
+window.getEvents = () => [..._events];
+window.clearEvents = () => { _events.length = 0; };
+window.getActiveElement = () => document.activeElement?.id || document.activeElement?.tagName;
+window.isControlsRowVisible = () => controlsRow.style.opacity === "1";
+
+// SearchResults API
+window.setResultsState = (state) => { _resultsData = { ..._resultsData, ...state }; _renderResults(); };
+window.getResultsHTML = () => resultsRoot.innerHTML;
+
+window._testReady = true;
+</script>
+</body>
+</html>
