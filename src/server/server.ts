@@ -54,6 +54,7 @@ import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
+import type { PersistedTeamEntry } from "./agent/team-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
@@ -65,6 +66,36 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFileCb);
+
+/**
+ * Delete remote branches associated with a goal (integration + agent worktree branches).
+ * Fire-and-forget — errors are logged but never block the archive flow.
+ */
+async function deleteRemoteGoalBranches(
+	goal: PersistedGoal,
+	teamEntry: PersistedTeamEntry | undefined,
+	repoPath: string,
+): Promise<void> {
+	const branches = new Set<string>();
+	if (goal.branch) branches.add(goal.branch);
+	if (teamEntry?.agents) {
+		for (const agent of teamEntry.agents) {
+			if (agent.branch) branches.add(agent.branch);
+		}
+	}
+	if (branches.size === 0) return;
+	for (const branch of branches) {
+		try {
+			await execFileAsync("git", ["push", "origin", "--delete", branch], {
+				cwd: repoPath,
+				timeout: 15_000,
+			});
+			console.log(`[api] Deleted remote branch: ${branch}`);
+		} catch (err) {
+			console.warn(`[api] Failed to delete remote branch ${branch}:`, err);
+		}
+	}
+}
 
 /** Cached Docker availability result to avoid running `docker info` per session creation */
 let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null = null;
@@ -2289,6 +2320,19 @@ async function handleApiRoute(
 			// Archive instead of hard-delete — tasks, gates, team state remain intact
 			const deleteGoalMgr = getGoalManagerForGoal(id);
 			await deleteGoalMgr.archiveGoal(id);
+
+			// Fire-and-forget: clean up remote branches for this goal
+			const archivedGoal = deleteGoalMgr.getGoal(id);
+			if (archivedGoal?.repoPath) {
+				const goalProjectCtx = projectContextManager
+					? projectContextManager.getContextForGoal(id)
+					: null;
+				const teamEntry = goalProjectCtx?.teamStore.get(id);
+				deleteRemoteGoalBranches(archivedGoal, teamEntry, archivedGoal.repoPath).catch(err => {
+					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
+				});
+			}
+
 			prStatusStore.remove(id);
 			json({ ok: true });
 			return;
