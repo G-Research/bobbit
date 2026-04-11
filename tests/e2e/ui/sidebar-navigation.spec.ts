@@ -39,27 +39,32 @@ test.describe("Sidebar navigation", () => {
 	test("SB-01: project section collapses and persists across reload", async ({ page }) => {
 		await openApp(page);
 
-		// The sidebar should have at least one project header (FolderOpen icon + uppercase name).
-		// Project headers use text-[9px] uppercase tracking-wider inside a div with a chevron.
-		const projectHeaders = page.locator(".sidebar-edge >> div >> span.uppercase.tracking-wider").first();
-		await expect(projectHeaders).toBeVisible({ timeout: 10_000 });
+		// Get the first project's info from the API to know its name and ID
+		const projectInfo = await page.evaluate(async () => {
+			const resp = await fetch("/api/projects");
+			const projects = await resp.json();
+			return projects[0] as { id: string; name: string };
+		});
+		expect(projectInfo).toBeTruthy();
 
-		// Get the project name text for later verification
-		const projectName = await projectHeaders.textContent();
-		expect(projectName).toBeTruthy();
-
-		// The project should be expanded by default — look for the Sessions sub-section
+		// The project should be expanded by default — "Sessions" sub-header visible
 		const sessionsLabel = page.getByText("Sessions", { exact: true }).first();
-		await expect(sessionsLabel).toBeVisible({ timeout: 5_000 });
+		await expect(sessionsLabel).toBeVisible({ timeout: 10_000 });
 
-		// Click the project header row to collapse
-		const headerRow = projectHeaders.locator("xpath=ancestor::div[contains(@class, 'cursor-pointer')]").first();
-		await headerRow.click();
+		// Find the project header row — it's a div with cursor-pointer containing
+		// the chevron (▾ when expanded) and the project name
+		const projectHeader = page.locator(".sidebar-edge div.cursor-pointer").filter({
+			hasText: projectInfo.name,
+		}).first();
+		await expect(projectHeader).toBeVisible({ timeout: 5_000 });
 
-		// After collapse, the Sessions sub-section should be hidden
+		// Click to collapse
+		await projectHeader.click();
+
+		// After collapse, "Sessions" sub-section should be hidden
 		await expect(sessionsLabel).not.toBeVisible({ timeout: 5_000 });
 
-		// Reload page — collapsed state should persist (localStorage)
+		// Reload page — collapsed state should persist via localStorage
 		await page.reload();
 		await expect(
 			page.locator("button").filter({ hasText: "Settings" }).first(),
@@ -68,12 +73,11 @@ test.describe("Sidebar navigation", () => {
 		// Sessions label should still be hidden after reload
 		await expect(sessionsLabel).not.toBeVisible({ timeout: 3_000 });
 
-		// Now expand it back by clicking the project header again
-		const headerRowAfterReload = page.locator(".sidebar-edge >> div >> span.uppercase.tracking-wider")
-			.filter({ hasText: projectName!.trim() })
-			.locator("xpath=ancestor::div[contains(@class, 'cursor-pointer')]")
-			.first();
-		await headerRowAfterReload.click();
+		// Find the project header again after reload and expand
+		const projectHeaderAfterReload = page.locator(".sidebar-edge div.cursor-pointer").filter({
+			hasText: projectInfo.name,
+		}).first();
+		await projectHeaderAfterReload.click();
 
 		// Sessions should be visible again
 		await expect(page.getByText("Sessions", { exact: true }).first()).toBeVisible({ timeout: 5_000 });
