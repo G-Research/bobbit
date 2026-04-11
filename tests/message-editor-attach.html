@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MessageEditor Attachment Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  .editor-container { position: relative; border: 1px solid #555; border-radius: 8px; padding: 8px; }
+  .editor-container.isDragging { border: 2px solid #3b82f6; background: rgba(59,130,246,0.05); }
+  .drag-overlay { display: none; position: absolute; inset: 0; background: rgba(59,130,246,0.1); border-radius: 8px; pointer-events: none; z-index: 10; align-items: center; justify-content: center; }
+  .editor-container.isDragging .drag-overlay { display: flex; }
+  .attachments { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; }
+  .attachment-tile { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border: 1px solid #555; border-radius: 4px; font-size: 12px; }
+  .attachment-tile .remove-btn { cursor: pointer; background: none; border: none; color: #f87171; font-size: 14px; padding: 0 2px; }
+  #attach-btn { cursor: pointer; padding: 4px 12px; }
+  #textarea { width: 400px; display: block; }
+</style>
+</head>
+<body>
+<div id="editor-container" class="editor-container">
+  <div class="drag-overlay">Drop files here</div>
+  <div id="attachments" class="attachments"></div>
+  <textarea id="textarea" rows="3"></textarea>
+  <button id="attach-btn">Attach</button>
+  <input type="file" id="file-input" multiple accept="image/*,application/pdf,.txt,.md,.json" style="display:none;" />
+</div>
+
+<script>
+/**
+ * Replicates MessageEditor's attachment handling logic for testing:
+ * - File attachment via button (PI-06)
+ * - Drag and drop files (PI-07)
+ * - Image paste edge cases (PI-08)
+ *
+ * Mirrors: handleAttachmentClick, handleFilesSelected, handleDragOver,
+ *          handleDragLeave, handleDrop, handlePaste, removeFile
+ */
+
+const MAX_FILES = 10;
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+
+let attachments = [];
+let alerts = [];
+let processingFiles = false;
+let isDragging = false;
+
+// Mock window.alert to capture calls
+const _origAlert = window.alert;
+window.alert = (msg) => { alerts.push(msg); };
+
+const container = document.getElementById('editor-container');
+const attachmentsDiv = document.getElementById('attachments');
+const textarea = document.getElementById('textarea');
+const attachBtn = document.getElementById('attach-btn');
+const fileInput = document.getElementById('file-input');
+
+// --- Simulated loadAttachment (mirrors attachment-utils.ts for images/text) ---
+async function loadAttachment(file) {
+  return new Promise((resolve, reject) => {
+    const id = `${file.name}_${Date.now()}_${Math.random()}`;
+    const isImage = file.type.startsWith('image/');
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result.split(',')[1] || '';
+      resolve({
+        id,
+        type: isImage ? 'image' : 'document',
+        fileName: file.name,
+        mimeType: file.type,
+        size: file.size,
+        content: base64,
+        preview: isImage ? base64 : undefined,
+      });
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderAttachments() {
+  attachmentsDiv.innerHTML = '';
+  attachments.forEach((att) => {
+    const tile = document.createElement('div');
+    tile.className = 'attachment-tile';
+    tile.dataset.id = att.id;
+    tile.textContent = att.fileName;
+    const btn = document.createElement('button');
+    btn.className = 'remove-btn';
+    btn.textContent = '×';
+    btn.addEventListener('click', () => removeFile(att.id));
+    tile.appendChild(btn);
+    attachmentsDiv.appendChild(tile);
+  });
+}
+
+function removeFile(fileId) {
+  attachments = attachments.filter(f => f.id !== fileId);
+  renderAttachments();
+}
+
+// --- PI-06: Attach button ---
+attachBtn.addEventListener('click', () => {
+  fileInput.click();
+});
+
+fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  if (files.length === 0) return;
+
+  if (files.length + attachments.length > MAX_FILES) {
+    alert(`Maximum ${MAX_FILES} files allowed`);
+    fileInput.value = '';
+    return;
+  }
+
+  processingFiles = true;
+  const newAttachments = [];
+
+  for (const file of files) {
+    try {
+      if (file.size > MAX_FILE_SIZE) {
+        alert(`${file.name} exceeds maximum size of ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB`);
+        continue;
+      }
+      const attachment = await loadAttachment(file);
+      newAttachments.push(attachment);
+    } catch (error) {
+      alert(`Failed to process ${file.name}: ${String(error)}`);
+    }
+  }
+
+  attachments = [...attachments, ...newAttachments];
+  renderAttachments();
+  processingFiles = false;
+  fileInput.value = '';
+});
+
+// --- PI-07: Drag and drop ---
+container.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  if (!isDragging) {
+    isDragging = true;
+    container.classList.add('isDragging');
+  }
+});
+
+container.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  const rect = container.getBoundingClientRect();
+  const x = e.clientX;
+  const y = e.clientY;
+  if (x <= rect.left || x >= rect.right || y <= rect.top || y >= rect.bottom) {
+    isDragging = false;
+    container.classList.remove('isDragging');
+  }
+});
+
+container.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  isDragging = false;
+  container.classList.remove('isDragging');
+
+  const files = Array.from(e.dataTransfer?.files || []);
+  if (files.length === 0) return;
+
+  if (files.length + attachments.length > MAX_FILES) {
+    alert(`Maximum ${MAX_FILES} files allowed`);
+    return;
+  }
+
+  processingFiles = true;
+  const newAttachments = [];
+
+  for (const file of files) {
+    try {
+      if (file.size > MAX_FILE_SIZE) {
+        alert(`${file.name} exceeds maximum size of ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB`);
+        continue;
+      }
+      const attachment = await loadAttachment(file);
+      newAttachments.push(attachment);
+    } catch (error) {
+      alert(`Failed to process ${file.name}: ${String(error)}`);
+    }
+  }
+
+  attachments = [...attachments, ...newAttachments];
+  renderAttachments();
+  processingFiles = false;
+});
+
+// --- PI-08: Paste handler ---
+textarea.addEventListener('paste', async (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  const imageFiles = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) imageFiles.push(file);
+    }
+  }
+
+  if (imageFiles.length === 0) return;
+  e.preventDefault();
+
+  if (imageFiles.length + attachments.length > MAX_FILES) {
+    alert(`Maximum ${MAX_FILES} files allowed`);
+    return;
+  }
+
+  processingFiles = true;
+  const newAttachments = [];
+
+  for (const file of imageFiles) {
+    try {
+      if (file.size > MAX_FILE_SIZE) {
+        alert(`Image exceeds maximum size of ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB`);
+        continue;
+      }
+      const attachment = await loadAttachment(file);
+      newAttachments.push(attachment);
+    } catch (error) {
+      alert(`Failed to process pasted image: ${String(error)}`);
+    }
+  }
+
+  attachments = [...attachments, ...newAttachments];
+  renderAttachments();
+  processingFiles = false;
+});
+
+// --- Public test API ---
+window.getAttachments = () => attachments;
+window.getAlerts = () => alerts;
+window.clearAlerts = () => { alerts = []; };
+window.setAttachments = (arr) => { attachments = arr; renderAttachments(); };
+window.getIsDragging = () => isDragging;
+window.MAX_FILES = MAX_FILES;
+window.MAX_FILE_SIZE = MAX_FILE_SIZE;
+
+window._testReady = true;
+</script>
+</body>
+</html>
