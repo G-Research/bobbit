@@ -61,6 +61,12 @@ detail_docs: >-
   cost ~45K+ tokens in system prompts alone; three parallel `read` calls cost
   nothing extra.
 
+  There is no parallelism gain either — the delegate results return as tool
+  results that you read sequentially in your own context. You pay for the
+  content twice: once in the delegate's context window, and again in yours
+  when you read the result. Parallel `read`/`grep` calls skip the middleman
+  — the results appear directly in your context, once.
+
   **The decision threshold:** delegate only when the *work* the delegate does
   (analysis, code changes, multi-step investigation) justifies the startup
   cost. If the result is just file contents or grep output, do it inline.
