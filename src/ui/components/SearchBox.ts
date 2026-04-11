@@ -16,7 +16,6 @@ export class SearchBox extends LitElement {
 	@property({ type: String }) query = "";
 	@property({ type: Boolean }) collapsed = false;
 	@property({ type: Boolean }) loading = false;
-	@property({ type: Boolean }) contentMode = false;
 	@property({ type: Boolean }) showControls = false;
 
 	@state() private _focused = false;
@@ -91,13 +90,6 @@ export class SearchBox extends LitElement {
 		this.dispatchEvent(new CustomEvent("search-clear", { bubbles: true, composed: true }));
 	}
 
-	private _toggleContentMode() {
-		this.dispatchEvent(new CustomEvent("search-mode-change", {
-			bubbles: true, composed: true,
-			detail: { contentSearch: !this.contentMode },
-		}));
-	}
-
 	private _fullSearch() {
 		this.dispatchEvent(new CustomEvent("full-search-click", {
 			bubbles: true, composed: true,
@@ -141,19 +133,7 @@ export class SearchBox extends LitElement {
 					</div>
 				</div>
 				<div class="overflow-hidden transition-all duration-200 ease-in-out" style="max-height: ${this.showControls ? "28px" : "0"}; opacity: ${this.showControls ? "1" : "0"}">
-					<div class="flex items-center justify-between px-2 py-0.5 text-[11px]">
-						<button
-							class="flex items-center gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer select-none transition-colors"
-							@click=${this._toggleContentMode}
-							title="Search message content (slower)"
-						>
-							<span class="relative inline-flex items-center shrink-0 rounded-full transition-colors duration-200"
-								style="width:26px; height:14px; background: ${this.contentMode ? "var(--primary)" : "var(--muted)"};">
-								<span class="inline-block rounded-full bg-white shadow transition-transform duration-200"
-									style="width:10px; height:10px; margin:2px; transform: translateX(${this.contentMode ? "12px" : "0"});"></span>
-							</span>
-							<span>Content</span>
-						</button>
+					<div class="flex items-center justify-end px-2 py-0.5 text-[11px]">
 						<button class="text-primary hover:text-primary/80 hover:underline transition-colors" @click=${this._fullSearch}>
 							Full Search
 						</button>
