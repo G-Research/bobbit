@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>BgProcessPill States & Log Popup Test Fixture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; font-size: 14px; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+
+  :root {
+    --card: #2a2a3e;
+    --border: #444;
+    --foreground: #e0e0e0;
+    --muted-foreground: #999;
+    --background: #1a1a2e;
+  }
+
+  /* Tailwind-like utilities used by BgProcessPill */
+  .inline-flex { display: inline-flex; }
+  .inline-block { display: inline-block; }
+  .flex { display: flex; }
+  .items-center { align-items: center; }
+  .justify-center { justify-content: center; }
+  .justify-between { justify-content: space-between; }
+  .gap-1 { gap: 0.25rem; }
+  .gap-1\.5 { gap: 0.375rem; }
+  .gap-2 { gap: 0.5rem; }
+  .rounded-full { border-radius: 9999px; }
+  .rounded-lg { border-radius: 0.5rem; }
+  .rounded-l-full { border-radius: 9999px 0 0 9999px; }
+  .rounded-r-full { border-radius: 0 9999px 9999px 0; }
+  .rounded { border-radius: 0.25rem; }
+  .bg-card { background: var(--card); }
+  .bg-background { background: var(--background); }
+  .bg-muted { background: #333; }
+  .border { border: 1px solid var(--border); }
+  .border-border { border-color: var(--border); }
+  .border-l { border-left: 1px solid var(--border); }
+  .text-foreground { color: var(--foreground); }
+  .text-muted-foreground { color: var(--muted-foreground); }
+  .text-\[11px\] { font-size: 11px; }
+  .text-\[10px\] { font-size: 10px; }
+  .text-xs { font-size: 12px; }
+  .text-sm { font-size: 14px; }
+  .text-center { text-align: center; }
+  .leading-tight { line-height: 1.25; }
+  .leading-snug { line-height: 1.375; }
+  .font-mono { font-family: monospace; }
+  .font-medium { font-weight: 500; }
+  .font-semibold { font-weight: 600; }
+  .font-normal { font-weight: 400; }
+  .px-1 { padding-left: 0.25rem; padding-right: 0.25rem; }
+  .px-1\.5 { padding-left: 0.375rem; padding-right: 0.375rem; }
+  .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+  .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+  .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+  .py-1\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
+  .p-2 { padding: 0.5rem; }
+  .mb-1 { margin-bottom: 0.25rem; }
+  .mb-1\.5 { margin-bottom: 0.375rem; }
+  .min-w-0 { min-width: 0; }
+  .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .whitespace-pre-wrap { white-space: pre-wrap; }
+  .break-all { word-break: break-all; }
+  .overflow-y-auto { overflow-y: auto; }
+  .shadow-lg { box-shadow: 0 10px 15px -3px rgba(0,0,0,.1); }
+  .shrink-0 { flex-shrink: 0; }
+  .select-none { user-select: none; }
+  .cursor-pointer { cursor: pointer; }
+  .fixed { position: fixed; }
+  .z-50 { z-index: 50; }
+  .w-1\.5 { width: 6px; }
+  .h-1\.5 { height: 6px; }
+  .h-\[180px\] { height: 180px; }
+  .animate-pulse { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+  .transition-colors { transition: color 150ms, background-color 150ms; }
+
+  .bg-blue-600 { background: #2563eb; }
+  .bg-green-600 { background: #16a34a; }
+  .bg-green-400 { background: #4ade80; }
+  .bg-red-500\/20 { background: rgba(239,68,68,.2); }
+  .text-red-600 { color: #dc2626; }
+  .text-red-700 { color: #b91c1c; }
+  .text-red-400 { color: #f87171; }
+  .text-green-700 { color: #15803d; }
+  .text-green-400 { color: #4ade80; }
+  .hover\:bg-red-500\/30:hover { background: rgba(239,68,68,.3); }
+  .hover\:text-foreground:hover { color: var(--foreground); }
+
+  /* Dropdown animations */
+  @keyframes bg-dropdown-in {
+    0%   { opacity: 0; transform: translateY(8px) scale(0.92); }
+    70%  { opacity: 1; transform: translateY(-1px) scale(1.005); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes bg-dropdown-out {
+    0%   { opacity: 1; transform: translateY(0) scale(1); }
+    100% { opacity: 0; transform: translateY(6px) scale(0.95); }
+  }
+
+  #pill-container { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+</style>
+</head>
+<body>
+
+<div id="pill-container"></div>
+
+<script>
+/**
+ * Replicates BgProcessPill behavior from src/ui/components/BgProcessPill.ts
+ * for unit testing pill states, dropdown, kill/dismiss, outside-click, escape.
+ */
+
+// Track fetch calls for test assertions
+const fetchCalls = [];
+
+// Mock log data returned by the fetch
+let mockLogs = [
+  { ts: 1700000001000, text: 'Starting server...' },
+  { ts: 1700000002000, text: 'Listening on port 3000' },
+  { ts: 1700000003000, text: 'Ready.' },
+];
+
+// Override fetch globally
+const originalFetch = window.fetch;
+window.fetch = async function(url, opts) {
+  fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET', headers: opts && opts.headers });
+
+  // Log fetch
+  if (String(url).includes('/logs')) {
+    return { ok: true, json: async () => ({ log: mockLogs }) };
+  }
+  // Kill fetch
+  if (String(url).includes('/kill')) {
+    return { ok: true, json: async () => ({ success: true }) };
+  }
+  return originalFetch.apply(this, arguments);
+};
+
+/**
+ * BgProcessPill custom element — faithful reproduction of the real component's
+ * rendering and interaction logic.
+ */
+class BgProcessPill extends HTMLElement {
+  constructor() {
+    super();
+    this._process = null;
+    this._sessionId = '';
+    this._onKill = null;
+    this._onDismiss = null;
+    this._expanded = false;
+    this._closing = false;
+    this._logs = [];
+    this._loadingLogs = false;
+    this._portalEl = null;
+    this._fetchedUpTo = 0;
+
+    this._onDocumentClick = (e) => {
+      if (this._expanded && !this._closing && !this.contains(e.target) && !(this._portalEl && this._portalEl.contains(e.target))) {
+        this._closeDropdown();
+      }
+    };
+
+    this._onEscapeKey = (e) => {
+      if (e.key === 'Escape' && this._expanded && !this._closing) {
+        e.stopPropagation();
+        this._closeDropdown();
+      }
+    };
+  }
+
+  get process() { return this._process; }
+  set process(val) { this._process = val; this._render(); }
+
+  get sessionId() { return this._sessionId; }
+  set sessionId(val) { this._sessionId = val; }
+
+  get onKill() { return this._onKill; }
+  set onKill(fn) { this._onKill = fn; }
+
+  get onDismiss() { return this._onDismiss; }
+  set onDismiss(fn) { this._onDismiss = fn; }
+
+  get expanded() { return this._expanded; }
+
+  connectedCallback() {
+    this.style.display = 'inline-flex';
+    this.style.alignItems = 'center';
+    this.style.position = 'relative';
+    this.style.top = '1px';
+    document.addEventListener('click', this._onDocumentClick, true);
+    document.addEventListener('keydown', this._onEscapeKey, true);
+    this._render();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener('click', this._onDocumentClick, true);
+    document.removeEventListener('keydown', this._onEscapeKey, true);
+    this._removePortal();
+  }
+
+  _removePortal() {
+    if (this._portalEl) {
+      this._portalEl.remove();
+      this._portalEl = null;
+    }
+  }
+
+  _closeDropdown() {
+    this._closing = true;
+    this._renderPortal();
+    const dropdown = this._portalEl && this._portalEl.querySelector('#bg-process-dropdown');
+    if (dropdown) {
+      dropdown.addEventListener('animationend', () => {
+        this._closing = false;
+        this._expanded = false;
+        this._removePortal();
+      }, { once: true });
+    } else {
+      this._closing = false;
+      this._expanded = false;
+      this._removePortal();
+    }
+  }
+
+  async _toggle(e) {
+    e.stopPropagation();
+    if (this._expanded && !this._closing) {
+      this._closeDropdown();
+    } else if (!this._expanded) {
+      this._expanded = true;
+      await this._fetchLogs();
+      this._renderPortal();
+      this._positionDropdown();
+    }
+  }
+
+  async _fetchLogs() {
+    if (!this._sessionId || !this._process) return;
+    this._loadingLogs = true;
+    try {
+      const url = localStorage.getItem('gateway.url') || window.location.origin;
+      const token = localStorage.getItem('gateway.token') || '';
+      const res = await fetch(`${url}/api/sessions/${this._sessionId}/bg-processes/${this._process.id}/logs?tail=100`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this._logs = (data.log || []).map(e =>
+          typeof e === 'string' ? { ts: 0, text: e } : e
+        );
+        if (this._logs.length > 0) {
+          this._fetchedUpTo = this._logs[this._logs.length - 1].ts;
+        }
+      }
+    } catch { /* ignore */ } finally {
+      this._loadingLogs = false;
+    }
+  }
+
+  _kill(e) {
+    e.stopPropagation();
+    if (this._onKill) this._onKill(this._process.id);
+  }
+
+  _dismiss(e) {
+    e.stopPropagation();
+    if (this._onDismiss) this._onDismiss(this._process.id);
+  }
+
+  _fmtTime(ts) {
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  _displayName() {
+    return (this._process && this._process.name) || (this._process && this._process.id) || '';
+  }
+
+  _statusIndicatorHTML() {
+    const p = this._process;
+    if (!p) return '';
+    if (p.status === 'running') {
+      return '<span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse shrink-0" data-status="running"></span>';
+    }
+    if (p.exitCode === 0) {
+      return '<span class="inline-block w-1.5 h-1.5 rounded-full bg-green-600 shrink-0" data-status="exited-ok"></span>';
+    }
+    if (p.exitCode !== null) {
+      return '<span class="shrink-0 text-red-600" style="font-size:10px;line-height:1;font-weight:700" data-status="exited-error">!</span>';
+    }
+    return '<span class="inline-block w-1.5 h-1.5 rounded-full shrink-0" style="background:#999" data-status="unknown"></span>';
+  }
+
+  _renderPortal() {
+    if (!this._portalEl) {
+      this._portalEl = document.createElement('div');
+      this._portalEl.setAttribute('data-bg-portal', '');
+      document.body.appendChild(this._portalEl);
+    }
+    const p = this._process;
+    const isRunning = p.status === 'running';
+    const closingClass = this._closing ? 'closing' : '';
+
+    let logsHTML;
+    if (this._loadingLogs) {
+      logsHTML = '<div class="text-muted-foreground" data-loading>Loading...</div>';
+    } else if (this._logs.length > 0) {
+      logsHTML = `<div class="h-[180px] overflow-y-auto bg-background text-foreground rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output">${
+        this._logs.map(entry =>
+          `<div class="whitespace-pre-wrap" data-log-line>${entry.ts ? `<span class="text-muted-foreground select-none">${this._fmtTime(entry.ts)} </span>` : ''}${this._escapeHTML(entry.text)}</div>`
+        ).join('')
+      }</div>`;
+    } else {
+      logsHTML = '<div class="h-[180px] overflow-y-auto bg-background text-foreground rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output"><div class="text-muted-foreground text-center py-1" data-no-output>(no output yet)</div></div>';
+    }
+
+    const exitCodeHTML = (!isRunning && p.exitCode !== null)
+      ? `<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700' : 'text-red-700'}" data-exit-code>exit ${p.exitCode}</span>`
+      : '';
+
+    const actionHTML = isRunning
+      ? `<button class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-700 hover:bg-red-500/30 transition-colors" data-kill-btn>Kill</button>`
+      : `<button class="px-2 py-0.5 rounded text-[11px] bg-muted text-muted-foreground hover:text-foreground transition-colors" data-dismiss-btn>Remove</button>`;
+
+    this._portalEl.innerHTML = `
+      <style>
+        #bg-process-dropdown { animation: bg-dropdown-in 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        #bg-process-dropdown.closing { animation: bg-dropdown-out 200ms cubic-bezier(0.4, 0, 1, 1) forwards; }
+      </style>
+      <div class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-2 text-xs ${closingClass}"
+           style="max-width:calc(100vw - 1rem); width: min(900px, calc(100vw - 1rem));"
+           id="bg-process-dropdown">
+        <div class="flex items-center justify-between mb-1.5">
+          <div class="flex items-center gap-1.5 text-foreground font-medium text-sm min-w-0">
+            ${this._statusIndicatorHTML()}
+            <span class="truncate font-mono">${this._escapeHTML(this._displayName())}</span>
+            <span class="text-[10px] text-muted-foreground font-normal">${this._escapeHTML(p.id)} · pid ${p.pid}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            ${exitCodeHTML}
+            ${actionHTML}
+          </div>
+        </div>
+        <div class="text-muted-foreground mb-1.5 font-mono text-[11px] break-all leading-tight" data-command>${this._escapeHTML(p.command)}</div>
+        ${logsHTML}
+      </div>
+    `;
+
+    // Wire kill/dismiss buttons
+    const killBtn = this._portalEl.querySelector('[data-kill-btn]');
+    if (killBtn) killBtn.addEventListener('click', (e) => this._kill(e));
+    const dismissBtn = this._portalEl.querySelector('[data-dismiss-btn]');
+    if (dismissBtn) dismissBtn.addEventListener('click', (e) => this._dismiss(e));
+  }
+
+  _positionDropdown() {
+    const btn = this.querySelector('button');
+    const dropdown = this._portalEl && this._portalEl.querySelector('#bg-process-dropdown');
+    if (!btn || !dropdown) return;
+    const rect = btn.getBoundingClientRect();
+    dropdown.style.top = (rect.bottom + 4) + 'px';
+    dropdown.style.left = Math.max(8, rect.left) + 'px';
+  }
+
+  _escapeHTML(str) {
+    const div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  }
+
+  _render() {
+    if (!this._process) return;
+    const p = this._process;
+    const isRunning = p.status === 'running';
+
+    this.innerHTML = `
+      <span class="inline-flex items-center rounded-full bg-card border border-border text-[11px] leading-tight" style="max-width:200px">
+        <button
+          class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer rounded-l-full"
+          data-toggle-btn
+          title="${this._escapeHTML(p.command)}"
+        >
+          ${this._statusIndicatorHTML()}
+          <span class="truncate font-mono" data-pill-name>${this._escapeHTML(this._displayName())}</span>
+        </button>
+        <button
+          class="inline-flex items-center justify-center px-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer rounded-r-full border-l border-border"
+          style="font-size:10px; line-height:1; min-width:16px; align-self:stretch"
+          data-x-btn
+          title="${isRunning ? 'Kill process' : 'Remove'}"
+        >✕</button>
+      </span>
+    `;
+
+    const toggleBtn = this.querySelector('[data-toggle-btn]');
+    if (toggleBtn) toggleBtn.addEventListener('click', (e) => this._toggle(e));
+
+    const xBtn = this.querySelector('[data-x-btn]');
+    if (xBtn) {
+      xBtn.addEventListener('click', (e) => {
+        if (isRunning) this._kill(e);
+        else this._dismiss(e);
+      });
+    }
+  }
+}
+
+if (!customElements.get('bg-process-pill')) {
+  customElements.define('bg-process-pill', BgProcessPill);
+}
+
+/* ---- Test helpers ---- */
+
+function createPill(processInfo, sessionId) {
+  const pill = document.createElement('bg-process-pill');
+  pill.sessionId = sessionId || 'test-session';
+  pill.process = processInfo;
+  document.getElementById('pill-container').appendChild(pill);
+  return pill;
+}
+
+function getDropdownEl() {
+  return document.querySelector('#bg-process-dropdown');
+}
+
+function getPortalEl() {
+  return document.querySelector('[data-bg-portal]');
+}
+
+function getFetchCalls() {
+  return [...fetchCalls];
+}
+
+function clearFetchCalls() {
+  fetchCalls.length = 0;
+}
+
+function setMockLogs(logs) {
+  mockLogs = logs;
+}
+
+function clearPills() {
+  const container = document.getElementById('pill-container');
+  container.innerHTML = '';
+  // Remove any portals
+  document.querySelectorAll('[data-bg-portal]').forEach(el => el.remove());
+  clearFetchCalls();
+}
+
+// Expose helpers
+window.createPill = createPill;
+window.getDropdownEl = getDropdownEl;
+window.getPortalEl = getPortalEl;
+window.getFetchCalls = getFetchCalls;
+window.clearFetchCalls = clearFetchCalls;
+window.setMockLogs = setMockLogs;
+window.clearPills = clearPills;
+
+window._testReady = true;
+</script>
+</body>
+</html>
