@@ -8,7 +8,7 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/DelegateRenderer.ts
 docs: |-
-  Instructions must be self-contained — delegate has NO conversation context. Use `parallel` array for concurrent execution. 10min default timeout. Never delegate just to read files — use parallel `read` calls instead. Each delegate spawns an entire agent process (significant overhead).
+  Instructions must be self-contained — delegate has NO conversation context. Use `parallel` array for concurrent execution. 10min default timeout. Each delegate spawns an entire agent process with its own system prompt, costing thousands of tokens before it does anything. Never delegate to gather information — use parallel `read`/`grep`/`bash` calls instead, which are near-instant and return results directly into your context.
 detail_docs: >-
   ## Purpose
 
@@ -52,34 +52,54 @@ detail_docs: >-
   Default: **10 minutes**. |
 
 
+  ## Cost
+
+  Each delegate spawns a full agent process with its own system prompt (~15K+
+  tokens), tool definitions, and conversation context. A delegate that reads
+  one file costs thousands of input tokens just to boot — the same `read` call
+  inline costs zero overhead. Three parallel delegates to read three files
+  cost ~45K+ tokens in system prompts alone; three parallel `read` calls cost
+  nothing extra.
+
+  **The decision threshold:** delegate only when the *work* the delegate does
+  (analysis, code changes, multi-step investigation) justifies the startup
+  cost. If the result is just file contents or grep output, do it inline.
+
+
   ## When to Use
 
 
   - **Context isolation** — when the delegate must NOT see the current
   conversation (e.g., independent code review, unbiased analysis).
 
-  - **Mass parallelism** — 3 or more independent sub-tasks that benefit from
-  concurrent execution (e.g., reviewing multiple modules, generating docs for
-  multiple components, running analyses across different areas).
+  - **Independent multi-step work** — tasks requiring their own chain of
+  read → analyze → write → verify, where the intermediate steps are not
+  useful to the parent (e.g., fixing a bug in module A while you work on
+  module B).
+
+  - **Mass parallelism with real work** — 3+ independent sub-tasks that each
+  involve multiple tool calls and reasoning (e.g., reviewing different
+  modules, implementing non-overlapping features).
 
 
   ## When NOT to Use
 
 
-  - **Single tasks you can do yourself** — if there's no need for isolation or
-  parallelism, do the work inline. Delegating adds significant overhead
-  (spawning a new agent process) for zero benefit.
+  - **Gathering information** — never delegate to read files, grep for
+  patterns, run a command, or fetch a URL. These tools are available to you
+  directly. Launch parallel `read`/`grep`/`bash` calls in a single message
+  — they run concurrently, return instantly, and add results directly to
+  your context. Delegating the same work is 10-100x more expensive and
+  slower.
 
-  - **Reading files** — never delegate just to read files. `read` is instant;
-  delegating it wastes a full agent spawn.
+  - **Single tasks you can do yourself** — if there's no need for isolation
+  or parallelism, do the work inline. "The task is complex" or "the task
+  is long" are NOT valid reasons to delegate.
 
-  - **Parallelizing file reads** — even for many files, read them yourself with
-  parallel `read` calls in one message. Delegates are slower, not faster, for
-  this.
-
-  - **Simple sequential tasks** — "the task is complex" or "the task is long"
-  are NOT valid reasons to delegate. You can handle complex, long tasks
-  directly.
+  - **Tasks that need your conversation context** — delegates have NO access
+  to the current conversation. If the task requires understanding prior
+  decisions, user preferences, or earlier analysis, do it yourself or
+  include all relevant context in the instructions.
 
 
   ## Examples
