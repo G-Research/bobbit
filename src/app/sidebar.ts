@@ -20,12 +20,11 @@ import {
 	getSidebarData,
 	type Goal,
 	type Project,
-	setSearchContentMode,
 } from "./state.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
-import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
+import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -724,73 +723,21 @@ function _revertArchivedIfSearchOpened(): void {
 	}
 }
 
-async function _handleSearchInput(query: string): Promise<void> {
+function _handleSearchInput(query: string): void {
 	state.searchQuery = query;
 	if (!query.trim()) {
-		state.searchResults = null;
-		state.searchMatchIds = null;
-		state.searchLoading = false;
 		_revertArchivedIfSearchOpened();
 		renderApp();
 		return;
 	}
 	_ensureArchivedForSearch();
-	if (!state.searchContentMode) {
-		// Client-side title filter — no API call needed
-		state.searchLoading = false;
-		renderApp();
-		return;
-	}
-	// Content search mode — use FTS API
-	state.searchLoading = true;
-	renderApp();
-	const data = await searchApi(query);
-	// Guard against stale responses
-	if (state.searchQuery !== query) return;
-	state.searchResults = data.results;
-	// Build a Set of matching IDs for sidebar filtering
-	const ids = new Set<string>();
-	for (const r of data.results) {
-		if (r.type === "goal" && r.id) ids.add(r.id);
-		else if (r.type === "session" && r.id) ids.add(r.id);
-		else if (r.type === "staff" && r.id) ids.add(r.id);
-		else if (r.type === "message" && r.sessionId) {
-			ids.add(r.sessionId);
-			// Also include the parent goal so goal group is visible
-			// Check both live and archived sessions
-			const session = state.gatewaySessions.find(s => s.id === r.sessionId)
-				|| state.archivedSessions.find(s => s.id === r.sessionId);
-			if (session?.goalId) ids.add(session.goalId);
-			if (session?.teamGoalId) ids.add(session.teamGoalId);
-		}
-	}
-	state.searchMatchIds = ids;
-	state.searchLoading = false;
 	renderApp();
 }
 
 function _handleSearchClear(): void {
 	state.searchQuery = "";
-	state.searchResults = null;
-	state.searchMatchIds = null;
-	state.searchLoading = false;
 	_revertArchivedIfSearchOpened();
 	renderApp();
-}
-
-function _handleSearchModeChange(contentSearch: boolean): void {
-	setSearchContentMode(contentSearch);
-	// If switching modes with an active query, re-run the search
-	if (state.searchQuery) {
-		if (contentSearch) {
-			_handleSearchInput(state.searchQuery); // triggers API search
-		} else {
-			state.searchResults = null;
-			state.searchMatchIds = null;
-			state.searchLoading = false;
-			renderApp(); // will use client-side filter
-		}
-	}
 }
 
 function _handleFullSearchClick(query: string): void {
@@ -954,12 +901,9 @@ export function renderSidebar() {
 			${renderSetupBanner()}
 			<search-box
 				.query=${state.searchQuery}
-				.loading=${state.searchLoading}
-				.contentMode=${state.searchContentMode}
 				.showControls=${!!state.searchQuery}
 				@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
 				@search-clear=${() => { _handleSearchClear(); }}
-				@search-mode-change=${(e: CustomEvent) => { _handleSearchModeChange(e.detail.contentSearch); }}
 				@full-search-click=${(e: CustomEvent) => { _handleFullSearchClick(e.detail.query); }}
 			></search-box>
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
@@ -979,30 +923,16 @@ export function renderSidebar() {
 
 							if (state.searchQuery) {
 								const q = state.searchQuery.toLowerCase();
-								if (!state.searchContentMode) {
-									// Client-side title filter
-									filteredGoals = liveGoals.map(goal => {
-										const goalMatches = goal.title.toLowerCase().includes(q);
-										const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
-										const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q));
-										if (!goalMatches && !hasMatchingSession) return null as unknown as Goal;
-										return goal;
-									}).filter(Boolean);
-									filteredUngrouped = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q));
-									filteredStaff = filteredStaff.filter(s => s.name?.toLowerCase().includes(q));
-								} else if (state.searchMatchIds) {
-									// FTS content filter
-									const ids = state.searchMatchIds;
-									filteredGoals = liveGoals.map(goal => {
-										const goalMatches = ids.has(goal.id);
-										const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
-										const hasMatchingSession = goalSessions.some(s => ids.has(s.id));
-										if (!goalMatches && !hasMatchingSession) return null as unknown as Goal;
-										return goal;
-									}).filter(Boolean);
-									filteredUngrouped = ungroupedSessions.filter(s => ids.has(s.id));
-									filteredStaff = filteredStaff.filter(s => ids.has(s.id));
-								}
+								// Client-side title filter
+								filteredGoals = liveGoals.map(goal => {
+									const goalMatches = goal.title.toLowerCase().includes(q);
+									const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+									const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+									if (!goalMatches && !hasMatchingSession) return null as unknown as Goal;
+									return goal;
+								}).filter(Boolean);
+								filteredUngrouped = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+								filteredStaff = filteredStaff.filter(s => s.name?.toLowerCase().includes(q));
 							}
 							// No longer need to filter out pending project sessions — they have real projectIds now
 
@@ -1050,24 +980,13 @@ export function renderSidebar() {
 								let filteredStandaloneArchived = allStandaloneArchived;
 								if (state.searchQuery) {
 									const q = state.searchQuery.toLowerCase();
-									if (!state.searchContentMode) {
-										// Title filter
-										filteredArchivedGoals = archivedGoals.filter(goal => {
-											if (goal.title.toLowerCase().includes(q)) return true;
-											const goalSessions = [...state.gatewaySessions, ...state.archivedSessions].filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
-											return goalSessions.some(s => s.title?.toLowerCase().includes(q));
-										});
-										filteredStandaloneArchived = allStandaloneArchived.filter(s => s.title?.toLowerCase().includes(q));
-									} else if (state.searchMatchIds) {
-										// FTS content filter
-										const ids = state.searchMatchIds;
-										filteredArchivedGoals = archivedGoals.filter(goal => {
-											if (ids.has(goal.id)) return true;
-											const goalSessions = [...state.gatewaySessions, ...state.archivedSessions].filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
-											return goalSessions.some(s => ids.has(s.id));
-										});
-										filteredStandaloneArchived = allStandaloneArchived.filter(s => ids.has(s.id));
-									}
+									// Title filter
+									filteredArchivedGoals = archivedGoals.filter(goal => {
+										if (goal.title.toLowerCase().includes(q)) return true;
+										const goalSessions = [...state.gatewaySessions, ...state.archivedSessions].filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+										return goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+									});
+									filteredStandaloneArchived = allStandaloneArchived.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 								}
 
 								const showArchivedContent = state.showArchived;

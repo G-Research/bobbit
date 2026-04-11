@@ -442,7 +442,7 @@ This happens transparently in `normalizeGrantPolicy()` — existing role YAML an
 
 SQLite FTS5 via `better-sqlite3`. Each project has its own index at `<project-root>/.bobbit/state/search.db` (rebuildable cache). `ProjectContextManager.searchAll()` aggregates results across all project indexes.
 
-**Key files:** `search-index.ts`, `message-extractor.ts`, `SearchBox.ts`, `SearchResults.ts`, `search-page.ts`.
+**Key files:** `search-index.ts` (server-side FTS5 index), `message-extractor.ts` (text extraction from messages), `SearchBox.ts` (sidebar input component), `SearchResults.ts` (result display used by full search page), `search-page.ts` (full search route).
 
 **Indexed:** Goals (title, spec), sessions (title, role), messages (text blocks, tool call names), staff agents (name, description).
 
@@ -450,24 +450,25 @@ SQLite FTS5 via `better-sqlite3`. Each project has its own index at `<project-ro
 
 **Indexing:** Incremental via store hooks + `RpcBridge`. Staff indexing hooks live in `StaffManager` — index on create/update, remove on delete. Indexing methods (`indexGoal`, `indexSession`, `indexMessage`, `indexStaff`) accept a `projectId` parameter. Full rebuild on first run or schema version mismatch; `rebuildFromStores()` iterates all project contexts to re-index everything.
 
+**Query sanitisation:** User input is tokenised and special characters (`(`, `)`, `+`, `-`, `*`, `"`, etc.) are stripped from all tokens before constructing the FTS5 MATCH expression. Each token except the last is quoted as an exact term; the last token gets a `*` suffix for prefix matching. This prevents FTS5 syntax errors from user input while supporting incremental search-as-you-type.
+
 **API:** `GET /api/search?q=<query>&limit=20&offset=0&type=all|goals|sessions|messages|staff&projectId=<optional>` — when `projectId` is omitted, searches across all projects. Search results include `projectId` and `projectName` fields so the UI can show which project each result belongs to.
 
-### Dual-mode sidebar search
+### Two-mode search design
 
-The sidebar search box operates in two modes, controlled by a "Search Content" toggle that appears below the input when a query is active:
+Search has two distinct modes with clear separation of concerns:
 
-- **Title-only (default):** Client-side instant filtering. Filters goals by title, sessions by title, and staff by name using case-insensitive substring matching. No API call. The sidebar structure (goal groups, ungrouped sessions, staff, archived) is preserved — non-matching entries are hidden.
-- **Content search:** Uses `GET /api/search` (FTS5) and maps results back to sidebar entries by ID. Message matches resolve to their parent session/goal. 200ms debounce on input.
+**1. Filter mode (sidebar):** Instant client-side filtering — no API calls. Filters goals by title, sessions by title and agent role, and staff by name using case-insensitive substring matching. The sidebar structure (goal groups, ungrouped sessions, staff, archived) is preserved — non-matching entries are hidden. Archived sections auto-expand when a match is found inside them and auto-collapse when the query clears (tracked by an internal flag to distinguish search-triggered vs manual expansion). A "Full Search" link below the input navigates to the full search page with the current query.
 
-State field `searchContentMode` (persisted in `localStorage`) tracks which mode is active.
+**Key file:** `SearchBox.ts` handles the input with debounce, Escape-to-clear, and Ctrl+K shortcut. Filtering logic lives in `Sidebar.ts`.
 
-### Full search page
-
-Route: `#/search` (with optional `?q=<query>` parameter). Accessible via the "Full Search" button in the sidebar controls row or directly by URL.
+**2. Full search page (`#/search`):** The sole consumer of the FTS5 `GET /api/search` endpoint. Route: `#/search` (with optional `?q=<query>` parameter). Accessible via the "Full Search" link in the sidebar or directly by URL.
 
 Features: large auto-focused input, type filter toggles (Goals, Sessions, Staff, Messages), grouped results with snippets and `<b>` match highlighting, relative timestamps, archived badges, and "Load More" pagination. Clicking a result navigates to the relevant goal dashboard, session, or staff edit page.
 
 **Key file:** `search-page.ts` manages its own local state (query, results, type filters, pagination offset).
+
+> **Design note — gate content:** Gate content (design specs, review findings) is not currently indexed in the FTS tables. This is a deliberate deferral — adding it requires schema changes and a rebuild trigger. Tracked for future work.
 
 **Paginated archives:**
 - `GET /api/goals?archived=true&limit=50&after=<cursor>` — cursor is `archivedAt` timestamp
