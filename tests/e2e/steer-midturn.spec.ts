@@ -123,6 +123,72 @@ test.describe("Steer mid-turn delivery", () => {
 		}
 	});
 
+	test("PI-10b: batch steer_queued — two queued messages promoted to steer are delivered as a batch", async () => {
+		// Replicates the PI-10b user story:
+		// 1. Agent is streaming
+		// 2. User queues two messages (type: "prompt")
+		// 3. User clicks Steer on each pill (steer_queued)
+		// 4. Both steers are dispatched immediately
+		// 5. Agent receives both at the next tool boundary
+		sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+
+		try {
+			await conn.waitFor((m) => m.type === "queue_update");
+
+			// Make agent busy
+			conn.send({ type: "prompt", text: "STAY_BUSY:10000 working on multi-step task" });
+			await conn.waitFor(statusPredicate("streaming"));
+
+			// Queue two messages while streaming
+			conn.send({ type: "prompt", text: "STEER_BATCH_MSG_1" });
+			const q1 = await conn.waitFor(queueLenPredicate(1));
+			conn.send({ type: "prompt", text: "STEER_BATCH_MSG_2" });
+			const q2 = await conn.waitFor(queueLenPredicate(2));
+
+			const msg1Id = q1.queue![0].id;
+			const msg2Id = q2.queue![1].id;
+
+			// Clear messages to track only steer-related events
+			conn.messages.length = 0;
+
+			// Promote both to steered (this is what clicking Steer on each pill does)
+			conn.send({ type: "steer_queued", messageId: msg1Id });
+			await conn.waitFor(
+				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg1Id && q.isSteered),
+			);
+			conn.send({ type: "steer_queued", messageId: msg2Id });
+			await conn.waitFor(
+				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg2Id && q.isSteered),
+			);
+
+			// Each steer_queued dispatches immediately. The mock agent emits
+			// [STEER_RECEIVED] for each steer RPC. Wait for both to arrive
+			// BEFORE the original STAY_BUSY turn completes.
+			const steerAck1 = await conn.waitFor(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED") &&
+					m.data?.message?.content?.[0]?.text?.includes("STEER_BATCH_MSG_1"),
+				5000,
+			);
+			expect(steerAck1.data.message.content[0].text).toContain("STEER_BATCH_MSG_1");
+
+			const steerAck2 = await conn.waitFor(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED") &&
+					m.data?.message?.content?.[0]?.text?.includes("STEER_BATCH_MSG_2"),
+				5000,
+			);
+			expect(steerAck2.data.message.content[0].text).toContain("STEER_BATCH_MSG_2");
+		} finally {
+			conn.close();
+		}
+	});
+
 	test("prompt sent while streaming is correctly queued by the server", async () => {
 		// Verify the server correctly queues { type: "prompt" } during streaming.
 		// The UI fix sends { type: "steer" } instead (tested above), but the
