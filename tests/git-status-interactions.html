@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GitStatusWidget Interaction Test Fixture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; }
+
+  .inline-flex { display: inline-flex; }
+  .flex { display: flex; }
+  .flex-col { flex-direction: column; }
+  .items-center { align-items: center; }
+  .gap-0\.5 { gap: 0.125rem; }
+  .gap-1 { gap: 0.25rem; }
+  .gap-1\.5 { gap: 0.375rem; }
+  .gap-2 { gap: 0.5rem; }
+  .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+  .px-1 { padding-left: 0.25rem; padding-right: 0.25rem; }
+  .px-1\.5 { padding-left: 0.375rem; padding-right: 0.375rem; }
+  .p-3 { padding: 0.75rem; }
+  .pt-2 { padding-top: 0.5rem; }
+  .mt-2 { margin-top: 0.5rem; }
+  .mb-1 { margin-bottom: 0.25rem; }
+  .mb-2 { margin-bottom: 0.5rem; }
+  .-mx-1 { margin-left: -0.25rem; margin-right: -0.25rem; }
+  .rounded-full { border-radius: 9999px; }
+  .rounded-lg { border-radius: 0.5rem; }
+  .text-xs { font-size: 0.75rem; line-height: 1rem; }
+  .text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+  .text-\[11px\] { font-size: 11px; }
+  .text-\[10px\] { font-size: 10px; }
+  .leading-tight { line-height: 1.25; }
+  .font-medium { font-weight: 500; }
+  .font-mono { font-family: ui-monospace, SFMono-Regular, monospace; }
+  .shrink-0 { flex-shrink: 0; }
+  .min-w-0 { min-width: 0; }
+  .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .break-all { word-break: break-all; }
+  .cursor-pointer { cursor: pointer; }
+  .transition-colors { transition-property: color, background-color, border-color; transition-duration: 150ms; }
+  .fixed { position: fixed; }
+  .z-\[9999\] { z-index: 9999; }
+  .border { border-width: 1px; border-style: solid; }
+  .border-t { border-top-width: 1px; border-top-style: solid; }
+  .shadow-lg { box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); }
+  .overflow-y-auto { overflow-y: auto; }
+  .text-right { text-align: right; }
+  .w-\[70px\] { width: 70px; }
+  .flex-wrap { flex-wrap: wrap; }
+  .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+  @keyframes git-spin { to { transform: rotate(360deg); } }
+
+  .text-foreground { color: #e0e0e0; }
+  .text-muted-foreground { color: #888; }
+  .text-amber-600 { color: #fbbf24; }
+  .text-green-600 { color: #4ade80; }
+  .text-red-600 { color: #f87171; }
+  .text-blue-600 { color: #60a5fa; }
+  .text-purple-600 { color: rgba(147, 51, 234, 0.7); }
+  .text-amber-warn { color: rgba(251, 191, 36, 0.7); }
+  .bg-card { background: #1e1e30; }
+  .border-border { border-color: #333; }
+  .hover\:underline:hover { text-decoration: underline; }
+
+  :root {
+    --border: #333;
+    --card: #1e1e30;
+    --foreground: #e0e0e0;
+    --muted-foreground: #888;
+    --destructive: #f87171;
+  }
+
+  .test-area { padding: 2rem; }
+  #widget-host { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="test-area">
+  <div id="widget-host"></div>
+</div>
+
+<script>
+/**
+ * Minimal GitStatusWidget replica using plain JS (no Lit).
+ * Replicates rendering and event dispatch logic from the real component.
+ */
+
+const state = {
+  branch: '',
+  primaryBranch: 'master',
+  isOnPrimary: true,
+  summary: '',
+  clean: true,
+  hasUpstream: false,
+  ahead: 0,
+  behind: 0,
+  aheadOfPrimary: 0,
+  behindPrimary: 0,
+  mergedIntoPrimary: false,
+  unpushed: false,
+  statusFiles: [],
+  loading: false,
+  prState: undefined,
+  prUrl: undefined,
+  prNumber: undefined,
+  prTitle: undefined,
+  prMergeable: undefined,
+  viewerIsAdmin: false,
+  reviewDecision: undefined,
+  headRefName: undefined,
+  expanded: false,
+  mergeMethod: 'squash',
+};
+
+let dropdownEl = null;
+const events = [];
+
+function statusColor(s) {
+  switch (s) {
+    case 'M': return 'text-amber-600';
+    case 'A': return 'text-green-600';
+    case 'D': return 'text-red-600';
+    case '?': return 'text-muted-foreground';
+    case 'R': return 'text-blue-600';
+    case 'U': return 'text-red-600';
+    default: return 'text-muted-foreground';
+  }
+}
+
+function statusLabel(s) {
+  switch (s) {
+    case 'M': return 'modified';
+    case 'A': return 'added';
+    case 'D': return 'deleted';
+    case '?': return 'untracked';
+    case 'R': return 'renamed';
+    case 'U': return 'unmerged';
+    default: return s;
+  }
+}
+
+function dispatch(name, detail) {
+  events.push({ type: name, detail: detail || null });
+}
+
+function renderPill() {
+  const host = document.getElementById('widget-host');
+  if (!state.branch && !state.loading) {
+    host.innerHTML = '';
+    return;
+  }
+
+  const segments = [];
+  if (!state.clean && state.statusFiles.length > 0) {
+    segments.push(`<span class="text-amber-600 shrink-0" style="font-weight:500" data-segment="dirty">~${state.statusFiles.length}</span>`);
+  }
+  if (!state.isOnPrimary && state.behindPrimary > 0) {
+    segments.push(`<span class="text-red-600 shrink-0" style="font-weight:500" data-segment="behind">↓${state.behindPrimary}</span>`);
+  }
+  if (!state.isOnPrimary && state.aheadOfPrimary > 0) {
+    segments.push(`<span class="text-blue-600 shrink-0" style="font-weight:500" data-segment="ahead">↑${state.aheadOfPrimary}</span>`);
+  }
+
+  const showClean = state.clean && segments.length === 0 && !state.prState
+    && (state.isOnPrimary || state.mergedIntoPrimary)
+    && (state.isOnPrimary || state.aheadOfPrimary === 0);
+
+  let prIcon = '';
+  if (state.prState) {
+    let colorClass, title;
+    if (state.prState === 'MERGED') { colorClass = 'text-purple-600'; title = `PR #${state.prNumber} merged`; }
+    else if (state.prState === 'CLOSED') { colorClass = 'text-red-600'; title = `PR #${state.prNumber} closed`; }
+    else if (state.reviewDecision === 'APPROVED') { colorClass = 'text-green-600'; title = `PR #${state.prNumber} approved`; }
+    else if (state.reviewDecision === 'CHANGES_REQUESTED') { colorClass = 'text-red-600'; title = `PR #${state.prNumber} changes requested`; }
+    else if (state.reviewDecision === 'REVIEW_REQUIRED') { colorClass = 'text-amber-warn'; title = `PR #${state.prNumber} awaiting review`; }
+    else { colorClass = 'text-green-600'; title = `PR #${state.prNumber} open`; }
+    prIcon = `<span class="${colorClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title="${title}" data-pr-icon><span style="font-size:10px">⦿</span>${state.prNumber != null ? `<span style="font-size:10px">#${state.prNumber}</span>` : ''}</span>`;
+  }
+
+  const loadingIcon = state.loading
+    ? '<span class="animate-pulse shrink-0" data-loading-icon>⎇</span>'
+    : '<span class="shrink-0">⎇</span>';
+
+  const cleanBadge = showClean
+    ? '<span class="text-green-600 font-medium shrink-0" data-clean-badge>clean</span>'
+    : '';
+
+  host.innerHTML = `
+    <button
+      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground transition-colors cursor-pointer text-[11px] leading-tight"
+      style="max-width:100%"
+      data-pill-button
+    >
+      ${loadingIcon}
+      <span class="truncate" data-pill-branch>${state.branch}</span>
+      ${cleanBadge}
+      ${segments.join('')}
+      ${prIcon}
+    </button>
+  `;
+
+  host.querySelector('[data-pill-button]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (state.expanded) {
+      closeDropdown();
+    } else {
+      state.expanded = true;
+      dispatch('git-fetch');
+      renderDropdown();
+    }
+  });
+}
+
+function renderPrimaryStatus() {
+  if (state.isOnPrimary) {
+    return `<div class="text-green-600" data-primary-status>Up to date with origin/${state.primaryBranch}</div>`;
+  }
+  if (state.mergedIntoPrimary && state.behindPrimary === 0) {
+    return `<div class="text-green-600" data-primary-status>Merged into origin/${state.primaryBranch}</div>`;
+  }
+  if (state.aheadOfPrimary > 0 && state.behindPrimary > 0) {
+    return `<div class="text-muted-foreground" data-primary-status>
+      <span class="text-blue-600">${state.aheadOfPrimary} ahead</span>,
+      <span class="text-red-600">${state.behindPrimary} behind</span>
+      origin/${state.primaryBranch}
+      <button data-action="merge-primary" style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);cursor:pointer;margin-left:4px">Rebase on master</button>
+    </div>`;
+  }
+  if (state.aheadOfPrimary > 0) {
+    const askPr = !state.prState
+      ? `<button data-action="ask-pr" style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);cursor:pointer;margin-left:4px">Ask agent to raise PR</button>`
+      : '';
+    return `<div class="text-muted-foreground" data-primary-status>
+      <span class="text-blue-600">${state.aheadOfPrimary} ahead</span>
+      of origin/${state.primaryBranch}
+      ${askPr}
+    </div>`;
+  }
+  if (state.behindPrimary > 0) {
+    return `<div class="text-muted-foreground" data-primary-status>
+      <span class="text-red-600">${state.behindPrimary} behind</span>
+      origin/${state.primaryBranch}
+      <button data-action="merge-primary" style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);cursor:pointer;margin-left:4px">Rebase on master</button>
+    </div>`;
+  }
+  return `<div class="text-green-600" data-primary-status>Up to date with origin/${state.primaryBranch}</div>`;
+}
+
+function renderRemoteStatus() {
+  if (!state.isOnPrimary) return '';
+  if (state.ahead > 0 && state.behind > 0) {
+    return `<div class="text-muted-foreground" data-remote-status>
+      Remote: <span class="text-amber-600">${state.ahead} ahead</span>,
+      <span class="text-amber-600">${state.behind} behind</span>
+      <button data-action="pull" style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);cursor:pointer;margin-left:4px">Pull</button>
+    </div>`;
+  }
+  if (state.ahead > 0) {
+    return `<div class="text-muted-foreground" data-remote-status>
+      <span class="text-amber-600">${state.ahead} unpushed</span> to remote
+      <button data-action="push" style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);cursor:pointer;margin-left:4px">Push</button>
+    </div>`;
+  }
+  if (state.behind > 0) {
+    return `<div class="text-muted-foreground" data-remote-status>
+      <span class="text-amber-600">${state.behind} behind</span> remote
+      <button data-action="pull" style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);cursor:pointer;margin-left:4px">Pull</button>
+    </div>`;
+  }
+  return '';
+}
+
+function renderPrSection() {
+  if (!state.prState) return '';
+  const badgeColor = state.prState === 'OPEN' ? 'oklch(0.68 0.12 145)' : state.prState === 'MERGED' ? 'oklch(0.62 0.13 300)' : 'oklch(0.62 0.14 25)';
+  const badgeBg = state.prState === 'OPEN' ? 'oklch(0.68 0.12 145 / 0.12)' : state.prState === 'MERGED' ? 'oklch(0.62 0.13 300 / 0.12)' : 'oklch(0.62 0.14 25 / 0.12)';
+  const link = state.prUrl
+    ? `<a href="${state.prUrl}" target="_blank" rel="noopener" class="text-blue-600 hover:underline" style="font-size:12px" data-pr-link>#${state.prNumber} ${state.prTitle || ''}</a>`
+    : `<span style="font-size:12px">#${state.prNumber} ${state.prTitle || ''}</span>`;
+  const mergeControls = state.prState === 'OPEN' ? `
+    <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+      <select data-merge-method style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--foreground)">
+        <option value="merge" ${state.mergeMethod === 'merge' ? 'selected' : ''}>Merge</option>
+        <option value="squash" ${state.mergeMethod === 'squash' ? 'selected' : ''}>Squash</option>
+        <option value="rebase" ${state.mergeMethod === 'rebase' ? 'selected' : ''}>Rebase</option>
+      </select>
+      <button data-action="merge-pr" ${state.prMergeable !== 'MERGEABLE' ? 'disabled' : ''} style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);cursor:pointer;font-weight:500">Merge PR</button>
+    </div>
+  ` : '';
+  return `
+    <div class="border-t border-border pt-2 mt-2" data-pr-section>
+      <div class="text-muted-foreground mb-1 font-medium">Pull Request</div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        ${link}
+        <span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:${badgeColor};background:${badgeBg}" data-pr-badge>${state.prState}</span>
+      </div>
+      ${mergeControls}
+    </div>
+  `;
+}
+
+function renderDropdownContent() {
+  const filesSection = state.statusFiles.length > 0
+    ? `<div class="border-t border-border pt-2 mt-2" data-files-section>
+        <div class="text-muted-foreground mb-1 flex items-center gap-2">
+          <span class="text-amber-600" data-file-count>${state.statusFiles.length} uncommitted change${state.statusFiles.length !== 1 ? 's' : ''}</span>
+          <button data-action="ask-commit" style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);cursor:pointer">Ask agent to commit</button>
+        </div>
+        <div class="flex flex-col gap-0.5 overflow-y-auto" style="max-height:200px" data-file-list>
+          ${state.statusFiles.map(f => `
+            <div class="flex items-center gap-2 py-0.5 min-w-0 rounded px-1 -mx-1" data-file-row>
+              <span class="${statusColor(f.status)} font-mono w-[70px] shrink-0 text-right" title="${statusLabel(f.status)}" data-file-status>${statusLabel(f.status)}</span>
+              <span class="text-foreground truncate" title="${f.file}" data-file-name>${f.file}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>`
+    : `<div class="text-green-600 border-t border-border pt-2 mt-2" data-clean-message>Working tree clean</div>`;
+
+  return `
+    <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm" data-branch-display>
+      <span>⎇</span>
+      <span class="break-all" data-branch-name>${state.branch}</span>
+    </div>
+    <div class="flex flex-col gap-1 mb-2">
+      ${renderPrimaryStatus()}
+      ${renderRemoteStatus()}
+    </div>
+    ${renderPrSection()}
+    ${filesSection}
+  `;
+}
+
+function renderDropdown() {
+  removeDropdown();
+  dropdownEl = document.createElement('div');
+  dropdownEl.id = 'git-status-dropdown';
+  dropdownEl.className = 'fixed z-[9999] bg-card border border-border rounded-lg shadow-lg p-3 text-xs';
+  dropdownEl.style.maxWidth = 'min(420px, calc(100vw - 1rem))';
+  document.body.appendChild(dropdownEl);
+  updateDropdownContent();
+  positionDropdown();
+  bindDropdownEvents();
+}
+
+function updateDropdownContent() {
+  if (!dropdownEl) return;
+  dropdownEl.innerHTML = renderDropdownContent();
+  bindDropdownEvents();
+}
+
+function bindDropdownEvents() {
+  if (!dropdownEl) return;
+  // Bind action buttons
+  dropdownEl.querySelectorAll('[data-action]').forEach(btn => {
+    const action = btn.getAttribute('data-action');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      switch (action) {
+        case 'merge-pr':
+          const method = dropdownEl.querySelector('[data-merge-method]')?.value || state.mergeMethod;
+          dispatch('pr-merge', { method });
+          break;
+        case 'ask-commit': dispatch('ask-agent-commit'); break;
+        case 'ask-pr': dispatch('ask-agent-pr'); break;
+        case 'pull': dispatch('git-pull'); break;
+        case 'push': dispatch('git-push'); break;
+        case 'merge-primary': dispatch('git-merge-primary'); break;
+      }
+    });
+  });
+}
+
+function positionDropdown() {
+  const btn = document.querySelector('[data-pill-button]');
+  if (!btn || !dropdownEl) return;
+  const rect = btn.getBoundingClientRect();
+  // Position below the button for test reliability (always in viewport)
+  dropdownEl.style.position = 'absolute';
+  dropdownEl.style.left = `${rect.left}px`;
+  dropdownEl.style.top = `${rect.bottom + 4}px`;
+}
+
+function closeDropdown() {
+  state.expanded = false;
+  removeDropdown();
+}
+
+function removeDropdown() {
+  if (dropdownEl) {
+    dropdownEl.remove();
+    dropdownEl = null;
+  }
+}
+
+// ============================================================
+// Public test API
+// ============================================================
+
+window.getEvents = () => events;
+window.clearEvents = () => { events.length = 0; };
+
+window.setProps = (props) => {
+  for (const [key, value] of Object.entries(props)) {
+    state[key] = value;
+  }
+  renderPill();
+  if (state.expanded && dropdownEl) {
+    updateDropdownContent();
+  }
+};
+
+window.isDropdownOpen = () => !!document.getElementById('git-status-dropdown');
+window.getDropdownEl = () => document.getElementById('git-status-dropdown');
+
+window._testReady = true;
+</script>
+</body>
+</html>
