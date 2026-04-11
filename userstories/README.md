@@ -30,7 +30,7 @@ Each file covers a feature area. Stories are numbered within each file (e.g. `S-
 | Projects | [projects.md](projects.md) | 10 | Good | Assistant flow well-tested |
 | Settings | [settings.md](settings.md) | 9 | Partial | Per-project config gaps |
 | Navigation | [navigation.md](navigation.md) | 8 | Partial | Cross-feature journeys missing |
-| Search | [search.md](search.md) | 5 | None | Completely untested |
+| Search | [search.md](search.md) | 12 | None | Title filter, FTS, full page, keyboard, archived, rebuild |
 | Config Cascade | [config-cascade.md](config-cascade.md) | 7 | API only | UI cascade effects untested |
 | Sandbox | [sandbox.md](sandbox.md) | 8 | Skipped | Docker-dependent, all skipped |
 | Prompt Interactions | [prompt-interactions.md](prompt-interactions.md) | 34 | Minimal | Race conditions, steer/abort lifecycle |
