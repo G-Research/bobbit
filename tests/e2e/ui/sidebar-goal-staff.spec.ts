@@ -57,20 +57,22 @@ test.describe("Sidebar goal actions & staff", () => {
 
 		await openApp(page);
 
-		// Toggle "Show archived" to reveal the archived goal
-		const archivedToggle = page.locator("button").filter({ hasText: /Archived/i }).first();
+		// Toggle "Show archived" using the button's title attribute (text is "See Archived")
+		const archivedToggle = page.locator("button[title='Show archived sessions']").first();
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
 		await archivedToggle.click();
 
-		// Wait for archived goals to load and the goal title to appear
-		await expect(page.getByText("SB22 Reattempt Test").first()).toBeVisible({ timeout: 10_000 });
+		// Wait for archived goals to load asynchronously — title is rendered uppercase via CSS
+		const goalTitle = page.getByText("SB22 Reattempt Test", { exact: false }).first();
+		await expect(goalTitle).toBeVisible({ timeout: 15_000 });
 
-		// Hover over the goal row to reveal action buttons
-		const goalRow = page.getByText("SB22 Reattempt Test").first();
+		// Hover over the goal row's parent container (has class "group") to reveal
+		// the sidebar-actions div which is "hidden group-hover:flex"
+		const goalRow = goalTitle.locator("xpath=ancestor::div[contains(@class,'group')]").first();
 		await goalRow.hover();
 
 		// Find and click the re-attempt button (title="Re-attempt goal")
-		const reattemptBtn = page.locator("button[title='Re-attempt goal']").first();
+		const reattemptBtn = goalRow.locator("button[title='Re-attempt goal']");
 		await expect(reattemptBtn).toBeVisible({ timeout: 5_000 });
 		await reattemptBtn.click();
 
@@ -114,12 +116,12 @@ test.describe("Sidebar goal actions & staff", () => {
 		await expect(page.getByText("SB23 Archive Test")).toHaveCount(0, { timeout: 5_000 });
 
 		// Toggle "Show archived"
-		const archivedToggle = page.locator("button").filter({ hasText: /Archived/i }).first();
+		const archivedToggle = page.locator("button[title='Show archived sessions']").first();
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
 		await archivedToggle.click();
 
-		// Now the archived goal should be visible
-		await expect(page.getByText("SB23 Archive Test").first()).toBeVisible({ timeout: 10_000 });
+		// Now the archived goal should be visible (title rendered uppercase via CSS)
+		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("SB-31: No Staff section visible when no staff configured", async ({ page }) => {
