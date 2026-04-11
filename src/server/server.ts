@@ -1734,7 +1734,32 @@ async function handleApiRoute(
 				json({ generation: currentGen, sessions: [...sessions, ...filteredArchived] });
 			}
 		} else {
-			json({ generation: currentGen, sessions });
+			// Always include archived delegates of live sessions so the sidebar
+			// can render chevrons/nesting without a separate fetch.
+			const liveIdSet = new Set(sessions.map(s => s.id));
+			const archivedDelegatesOfLive: typeof sessions = [];
+			const allArchivedForDelegates: typeof sessions = [];
+			for (const ctx of projectContextManager.all()) {
+				for (const s of ctx.sessionStore.getArchived()) {
+					if (s.delegateOf) {
+						allArchivedForDelegates.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
+					}
+				}
+			}
+			// BFS: live parents → their archived delegates → delegates of those, etc.
+			const seen = new Set<string>();
+			const queue = [...liveIdSet];
+			while (queue.length > 0) {
+				const parentId = queue.shift()!;
+				for (const s of allArchivedForDelegates) {
+					if (s.delegateOf === parentId && !seen.has(s.id)) {
+						seen.add(s.id);
+						archivedDelegatesOfLive.push(s);
+						queue.push(s.id);
+					}
+				}
+			}
+			json({ generation: currentGen, sessions, archivedDelegates: archivedDelegatesOfLive });
 		}
 		return;
 	}

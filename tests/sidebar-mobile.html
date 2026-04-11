@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar Mobile — unit test fixture</title>
+</head>
+<body>
+<script>
+// ============================================================================
+// Pure functions for mobile sidebar behavior (SB-33).
+// ============================================================================
+
+function getMobileSidebarBehavior(isDesktop) {
+  return {
+    buttonsAlwaysVisible: !isDesktop,
+    rowPadding: isDesktop ? "py-0.5" : "py-1",
+    showHamburgerMenu: !isDesktop,
+    autoCloseOnSelect: !isDesktop,
+  };
+}
+
+window.__mobileSidebar = {
+  getMobileSidebarBehavior: getMobileSidebarBehavior
+};
+</script>
+</body>
+</html>
