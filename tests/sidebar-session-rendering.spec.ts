@@ -265,6 +265,99 @@ test.describe("SB-35: hasPersonalityBadges", () => {
 });
 
 // ---------------------------------------------------------------------------
+// SB-15: Role picker dropdown
+// ---------------------------------------------------------------------------
+test.describe("SB-15: Role picker dropdown", () => {
+	test("returns role items from roles array", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() =>
+			(window as any).__sessionRendering.getRolePickerItems([{ name: "coder" }, { name: "reviewer" }], [])
+		);
+		expect(result).toContainEqual({ type: "role", id: "coder" });
+		expect(result).toContainEqual({ type: "role", id: "reviewer" });
+	});
+
+	test("includes personalities before roles", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() =>
+			(window as any).__sessionRendering.getRolePickerItems([{ name: "coder" }], [{ name: "thorough" }])
+		);
+		expect(result[0]).toEqual({ type: "personality", id: "thorough" });
+		expect(result[1]).toEqual({ type: "role", id: "coder" });
+	});
+
+	test("always includes create button at end", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() =>
+			(window as any).__sessionRendering.getRolePickerItems([], [])
+		);
+		expect(result[result.length - 1]).toEqual({ type: "create", id: "create" });
+	});
+
+	test("empty roles returns only create button", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() =>
+			(window as any).__sessionRendering.getRolePickerItems([], [])
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0].type).toBe("create");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// SB-34: Keyboard shortcut actions
+// ---------------------------------------------------------------------------
+test.describe("SB-34: Keyboard shortcut actions", () => {
+	test('Alt+G returns "new-goal"', async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const r = await page.evaluate(() =>
+			(window as any).__sessionRendering.getKeyboardShortcutAction("g", true, false, false, "BODY")
+		);
+		expect(r).toBe("new-goal");
+	});
+
+	test('Ctrl+K returns "focus-search"', async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const r = await page.evaluate(() =>
+			(window as any).__sessionRendering.getKeyboardShortcutAction("k", false, true, false, "BODY")
+		);
+		expect(r).toBe("focus-search");
+	});
+
+	test('Ctrl+[ returns "toggle-sidebar"', async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const r = await page.evaluate(() =>
+			(window as any).__sessionRendering.getKeyboardShortcutAction("[", false, true, false, "BODY")
+		);
+		expect(r).toBe("toggle-sidebar");
+	});
+
+	test("suppressed when textarea is focused", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const r = await page.evaluate(() =>
+			(window as any).__sessionRendering.getKeyboardShortcutAction("g", true, false, false, "TEXTAREA")
+		);
+		expect(r).toBeNull();
+	});
+
+	test("suppressed when input is focused", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const r = await page.evaluate(() =>
+			(window as any).__sessionRendering.getKeyboardShortcutAction("g", true, false, false, "INPUT")
+		);
+		expect(r).toBeNull();
+	});
+
+	test("random key returns null", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const r = await page.evaluate(() =>
+			(window as any).__sessionRendering.getKeyboardShortcutAction("x", false, false, false, "BODY")
+		);
+		expect(r).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
 // SB-36: Sandbox indicator dot color
 // ---------------------------------------------------------------------------
 test.describe("SB-36: getSandboxDotColor", () => {

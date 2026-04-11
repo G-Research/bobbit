@@ -73,6 +73,24 @@ function getSandboxDotColor(status) {
   return (status === "streaming" || status === "busy") ? "green" : "grey";
 }
 
+// --- getRolePickerItems (SB-15) ---
+function getRolePickerItems(roles, personalities) {
+  var items = [];
+  for (var i = 0; i < (personalities || []).length; i++) items.push({ type: "personality", id: personalities[i].name });
+  for (var j = 0; j < roles.length; j++) items.push({ type: "role", id: roles[j].name });
+  items.push({ type: "create", id: "create" });
+  return items;
+}
+
+// --- getKeyboardShortcutAction (SB-34) ---
+function getKeyboardShortcutAction(key, altKey, ctrlKey, metaKey, activeElementTag) {
+  if (activeElementTag === "TEXTAREA" || activeElementTag === "INPUT") return null;
+  if (altKey && key === "g") return "new-goal";
+  if ((ctrlKey || metaKey) && key === "k") return "focus-search";
+  if ((ctrlKey || metaKey) && key === "[") return "toggle-sidebar";
+  return null;
+}
+
 // Expose all helpers to Playwright
 window.__sessionRendering = {
   terseRelativeTime: terseRelativeTime,
@@ -80,7 +98,9 @@ window.__sessionRendering = {
   hasUnseenActivity: hasUnseenActivity,
   getSessionIndicatorType: getSessionIndicatorType,
   hasPersonalityBadges: hasPersonalityBadges,
-  getSandboxDotColor: getSandboxDotColor
+  getSandboxDotColor: getSandboxDotColor,
+  getRolePickerItems: getRolePickerItems,
+  getKeyboardShortcutAction: getKeyboardShortcutAction
 };
 </script>
 </body>

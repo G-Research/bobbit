@@ -1736,7 +1736,7 @@ async function handleApiRoute(
 			.map(s => ({ ...s, colorIndex: colorStore.get(s.id) }));
 		const archivedDelegates = sessionManager.listArchivedSessions()
 			.filter(s => s.delegateOf === parentId)
-			.map(s => ({ ...s, colorIndex: colorStore.get(s.id), status: "archived", archived: true }));
+			.map(s => ({ ...s, colorIndex: colorStore.get(s.id), archived: true }));
 		json([...liveDelegates, ...archivedDelegates]);
 		return;
 	}

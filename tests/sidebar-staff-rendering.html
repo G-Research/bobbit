@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar Staff Rendering — unit test fixture</title>
+</head>
+<body>
+<script>
+// ============================================================================
+// Pure functions for staff sidebar row rendering (SB-31).
+// ============================================================================
+
+function getStaffRowInfo(staffMember, activeSession) {
+  return {
+    name: staffMember.name,
+    hasActiveSession: !!activeSession,
+    isRetired: !!staffMember.retired,
+    showWakeButton: !activeSession && !staffMember.retired,
+    statusIndicator: activeSession
+      ? (activeSession.status === "streaming" || activeSession.status === "busy" ? "active" : "idle")
+      : "none",
+    dimmed: !!staffMember.retired,
+  };
+}
+
+window.__staffRendering = {
+  getStaffRowInfo: getStaffRowInfo
+};
+</script>
+</body>
+</html>
