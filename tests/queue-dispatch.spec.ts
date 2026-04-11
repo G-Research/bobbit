@@ -107,11 +107,33 @@ class DispatchSimulator {
 	}
 
 	/**
-	 * Models steerQueued — marks as steered + reorders but does NOT dispatch.
-	 * Steered messages stay in queue until batchedSteerAbort().
+	 * Models steerQueued — marks as steered + reorders.
+	 * If the agent is streaming, dispatches all steered+undispatched messages
+	 * immediately via steer (PI-10 fix).
 	 */
 	steerQueued(messageId: string): boolean {
-		return this.queue.steer(messageId);
+		const ok = this.queue.steer(messageId);
+		if (!ok) return false;
+
+		// PI-10: if streaming, dispatch steered messages immediately
+		if (this.status === "streaming") {
+			const steered = this.queue.toArray().filter(m => m.isSteered && !m.dispatched);
+			if (steered.length > 0) {
+				const batchText = steered.map(m => m.text).join("\n");
+				const batchMsg: QueuedMessage = {
+					id: `steer-immediate-${Date.now()}`,
+					text: batchText,
+					isSteered: true,
+					createdAt: Date.now(),
+				};
+				this.dispatched.push({ message: batchMsg, method: "steer" });
+				for (const m of steered) {
+					this.queue.markDispatched(m.id);
+				}
+			}
+		}
+
+		return true;
 	}
 
 	/**
@@ -568,7 +590,40 @@ test.describe("Queue Dispatch Integration", () => {
 
 	// ── Batched steer tests ────────────────────────────────────────────
 
-	test("(story 11) batched steer: steer 1 message, abort → steered dispatched as steer, remaining drains as prompt", () => {
+	test("PI-10: steerQueued while streaming should dispatch immediately via steer (not wait for agent_end)", () => {
+		// This test replicates the real UI flow for PI-10:
+		// 1. Agent is streaming (busy)
+		// 2. User queues a message
+		// 3. User clicks Steer button → steerQueued()
+		// 4. The steered message should be dispatched immediately via rpcClient.steer()
+		const sim = new DispatchSimulator();
+
+		// Make agent busy
+		sim.enqueue("Running");
+		expect(sim.status).toBe("streaming");
+
+		// Queue a message while busy
+		const msg = sim.enqueue("Urgent steer");
+		expect(msg).not.toBeNull();
+		expect(sim.queue.length).toBe(1);
+
+		// Promote to steered (this is what the Steer button does)
+		sim.steerQueued(msg!.id);
+
+		// PI-10 says: "The steer is delivered to the agent at the next tool boundary"
+		// This means steerQueued should dispatch immediately when agent is streaming.
+		// The message should have been dispatched as a steer, not left in the queue.
+		expect(sim.dispatched.length).toBe(2); // "Running" + "Urgent steer"
+		expect(sim.dispatched[1].method).toBe("steer");
+		expect(sim.dispatched[1].message.text).toBe("Urgent steer");
+
+		// Message stays in queue (dispatched flag set) for UI display, but
+		// no undispatched messages remain
+		const undispatched = sim.queue.toArray().filter(m => !m.dispatched);
+		expect(undispatched.length).toBe(0);
+	});
+
+	test("(story 11) steer 1 message while streaming → dispatched immediately, abort drains remaining", () => {
 		const sim = new DispatchSimulator();
 
 		// Make agent busy
@@ -580,27 +635,29 @@ test.describe("Queue Dispatch Integration", () => {
 		const msgB = sim.enqueue("MsgB");
 		expect(sim.queue.length).toBe(2);
 
-		// Steer msgB (marks as steered, reorders to front, but does NOT dispatch)
+		// Steer msgB — now dispatched immediately (PI-10 fix)
 		sim.steerQueued(msgB!.id);
-		expect(sim.queue.toArray().map(m => m.text)).toEqual(["MsgB", "MsgA"]);
-		// No new dispatch should have happened
-		expect(sim.dispatched.length).toBe(1); // only "Running"
 
-		// User presses abort → batched steer injection
-		sim.batchedSteerAbort();
-
-		// "MsgB" should be dispatched as steer method
+		// MsgB should have been dispatched as steer immediately
+		expect(sim.dispatched.length).toBe(2); // "Running" + "MsgB"
 		expect(sim.dispatched[1].method).toBe("steer");
 		expect(sim.dispatched[1].message.text).toBe("MsgB");
 
-		// After abort, agent goes idle and drains remaining → "MsgA" as prompt
+		// MsgA remains in queue (non-steered)
+		const remaining = sim.queue.toArray().filter(m => !m.dispatched);
+		expect(remaining.length).toBe(1);
+		expect(remaining[0].text).toBe("MsgA");
+
+		// User presses abort → MsgA drains as prompt
+		sim.batchedSteerAbort();
+
 		expect(sim.dispatched[2].method).toBe("prompt");
 		expect(sim.dispatched[2].message.text).toBe("MsgA");
 
 		expect(sim.queue.isEmpty).toBe(true);
 	});
 
-	test("(story 12) multiple steer: steer C then B, abort → batch dispatch in steer order, then non-steered drain", () => {
+	test("(story 12) multiple steer: steer C then B while streaming → batched dispatch, then abort drains A", () => {
 		const sim = new DispatchSimulator();
 
 		// Make agent busy
@@ -611,21 +668,21 @@ test.describe("Queue Dispatch Integration", () => {
 		const msgB = sim.enqueue("B");
 		const msgC = sim.enqueue("C");
 
-		// Steer C first, then B (steer order: C first since steered first)
+		// Steer C first — dispatched immediately
 		sim.steerQueued(msgC!.id);
-		sim.steerQueued(msgB!.id);
-		expect(sim.queue.toArray().map(m => m.text)).toEqual(["C", "B", "A"]);
+		expect(sim.dispatched[1].method).toBe("steer");
+		expect(sim.dispatched[1].message.text).toBe("C");
 
-		// Abort — batch steer injection
+		// Steer B — dispatched immediately (C already dispatched, only B is new)
+		sim.steerQueued(msgB!.id);
+		expect(sim.dispatched[2].method).toBe("steer");
+		expect(sim.dispatched[2].message.text).toBe("B");
+
+		// Abort — only non-steered A drains
 		sim.batchedSteerAbort();
 
-		// Batch steer: C and B concatenated as a single steer dispatch
-		expect(sim.dispatched[1].method).toBe("steer");
-		expect(sim.dispatched[1].message.text).toBe("C\nB");
-
-		// After abort, drain non-steered: A
-		expect(sim.dispatched[2].method).toBe("prompt");
-		expect(sim.dispatched[2].message.text).toBe("A");
+		expect(sim.dispatched[3].method).toBe("prompt");
+		expect(sim.dispatched[3].message.text).toBe("A");
 
 		sim.agentEnd();
 		expect(sim.queue.isEmpty).toBe(true);
@@ -743,28 +800,33 @@ test.describe("Queue Dispatch Integration", () => {
 		const m2 = sim.enqueue("M2");
 		const m3 = sim.enqueue("M3");
 
-		// User promotes M1 and M2 to steers
+		// User promotes M1 and M2 to steers — these dispatch immediately (PI-10)
 		sim.steerQueued(m1!.id);
 		sim.steerQueued(m2!.id);
 
-		// Simulate _dispatchSteeredMessages() — marks steered msgs as dispatched
-		sim.queue.markDispatched(m1!.id);
-		sim.queue.markDispatched(m2!.id);
+		// M1 and M2 were dispatched as steers (indices 1 and 2)
+		expect(sim.dispatched[1].method).toBe("steer");
+		expect(sim.dispatched[2].method).toBe("steer");
 
 		// User clicks abort. Agent is blocked, 3s grace expires, force-killed.
 		// forceAbortRestart: aborting → resetDispatched → idle → drain
+		// After reset, steered messages get re-dispatched as a batch prompt
 		sim.forceAbortRestart();
 
-		// M1+M2 should be dispatched as a SINGLE batched prompt (not two separate dispatches)
-		expect(sim.dispatched[1].message.text).toBe("M1\nM2");
-		expect(sim.dispatched[1].method).toBe("prompt"); // idle dispatch uses prompt
+		// M1+M2 should be recovered and re-dispatched as a SINGLE batched prompt
+		const recoveredBatch = sim.dispatched.find(
+			(d, i) => i > 2 && d.message.text.includes("M1") && d.message.text.includes("M2"),
+		);
+		expect(recoveredBatch).toBeTruthy();
+		expect(recoveredBatch!.method).toBe("prompt"); // idle dispatch uses prompt
 
 		// M3 drains on next agent_end cycle
 		sim.agentEnd();
-		expect(sim.dispatched[2].message.text).toBe("M3");
+		const m3Dispatch = sim.dispatched.find(d => d.message.text === "M3");
+		expect(m3Dispatch).toBeTruthy();
 
+		sim.agentEnd(); // M3 finishes
 		expect(sim.queue.isEmpty).toBe(true);
-		expect(sim.dispatched.length).toBe(3); // LongRunning, M1+M2 batch, M3
 
 		// Verify aborting status was included
 		expect(sim.statusTransitions).toContain("aborting");

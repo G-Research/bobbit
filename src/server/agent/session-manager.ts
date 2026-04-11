@@ -1033,7 +1033,7 @@ export class SessionManager {
 	 * Promote a queued message to steered and reorder.
 	 * If the agent is streaming, all steered+undispatched messages are
 	 * batched and dispatched immediately via rpcClient.steer() so they
-	 * are injected at the next tool boundary.
+	 * are injected at the next tool boundary (PI-10).
 	 */
 	steerQueued(sessionId: string, messageId: string): boolean {
 		const session = this.sessions.get(sessionId);
@@ -1041,13 +1041,34 @@ export class SessionManager {
 		const ok = session.promptQueue.steer(messageId);
 		if (!ok) return false;
 
-		this.broadcastQueue(session);
+		// If the agent is currently streaming, dispatch all steered+undispatched
+		// messages immediately via rpcClient.steer() so they are injected at
+		// the next tool boundary (PI-10). If idle, they'll drain normally.
+		if (session.status === "streaming") {
+			this._dispatchSteeredMessages(session);
+		}
 
-		// Steered messages are NOT dispatched immediately on promotion.
-		// They reorder in the queue and dispatch via drainQueue after agent_end
-		// (or after abort+restart). Live steer (direct typing while streaming)
-		// uses a separate path: rpcClient.steer() via the WS "steer" command.
+		this.broadcastQueue(session);
 		return true;
+	}
+
+	/**
+	 * Batch all steered+undispatched messages and dispatch via rpcClient.steer().
+	 * Marks each as dispatched so they aren't sent again.
+	 */
+	private _dispatchSteeredMessages(session: SessionInfo): void {
+		const steeredMessages = session.promptQueue.toArray()
+			.filter((m: any) => m.isSteered && !m.dispatched);
+		if (steeredMessages.length === 0) return;
+
+		const batchText = steeredMessages.map((m: any) => m.text).join("\n");
+		for (const m of steeredMessages) {
+			session.promptQueue.markDispatched(m.id);
+		}
+
+		session.rpcClient.steer(batchText).catch((err: any) => {
+			console.error(`[session-manager] Failed to dispatch steered messages for ${session.id}:`, err);
+		});
 	}
 
 	/** Reorder queued messages to match the given ID list. */

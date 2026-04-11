@@ -6,6 +6,9 @@
  *    agent via rpcClient.steer() (used by steer_queued promotion + abort).
  * 2. { type: "prompt" } sent while streaming is correctly queued by the server
  *    (the default path — the UI always queues via prompt during streaming).
+ * 3. PI-10: steer_queued (the real UI flow) delivers mid-turn at the next
+ *    tool boundary — queue a prompt, promote via steer_queued, verify the
+ *    agent receives it BEFORE the current turn ends.
  */
 import { test, expect } from "./in-process-harness.js";
 import {
@@ -65,6 +68,56 @@ test.describe("Steer mid-turn delivery", () => {
 				(m: WsMsg) => m.type === "queue_update" && m.queue && m.queue.length > 0,
 			);
 			expect(queuedMsgs.length).toBe(0);
+		} finally {
+			conn.close();
+		}
+	});
+
+	test("PI-10: steer_queued delivers mid-turn when agent is streaming", async () => {
+		// This replicates the REAL UI flow:
+		// 1. User sends a prompt → agent starts streaming
+		// 2. User types another message → queued as non-steered (type: "prompt")
+		// 3. User clicks Steer button on the pill → sends steer_queued
+		// 4. The steered message should be delivered mid-turn at the next
+		//    tool boundary via rpcClient.steer(), NOT wait for agent_end.
+		sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+
+		try {
+			await conn.waitFor((m) => m.type === "queue_update");
+
+			// Make agent busy with a long-running turn
+			conn.send({ type: "prompt", text: "STAY_BUSY:10000 working on something" });
+			await conn.waitFor(statusPredicate("streaming"));
+
+			// Queue a message while agent is streaming (this is what the UI does)
+			conn.send({ type: "prompt", text: "STEER_QUEUED_TEST_456" });
+			const queued = await conn.waitFor(queueLenPredicate(1));
+			const msgId = queued.queue![0].id;
+
+			// Clear messages to track only steer-related events
+			conn.messages.length = 0;
+
+			// Promote to steered via steer_queued (this is what the Steer button does)
+			conn.send({ type: "steer_queued", messageId: msgId });
+
+			// Wait for the queue_update confirming the message is steered
+			await conn.waitFor(
+				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.isSteered),
+			);
+
+			// The steered message should be delivered to the agent mid-turn.
+			// The mock agent emits [STEER_RECEIVED] when it gets a steer RPC.
+			// This MUST arrive BEFORE the original STAY_BUSY turn completes.
+			const steerAck = await conn.waitFor(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED"),
+				5000,
+			);
+
+			expect(steerAck.data.message.content[0].text).toContain("STEER_QUEUED_TEST_456");
 		} finally {
 			conn.close();
 		}
