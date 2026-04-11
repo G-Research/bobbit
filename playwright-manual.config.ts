@@ -21,5 +21,12 @@ export default defineConfig({
 			name: "manual-integration",
 			testDir: "./tests/manual-integration",
 		},
+		{
+			name: "docker-e2e",
+			testDir: "./tests/e2e",
+			testMatch: [
+				"**/sandbox-recovery-docker*.spec.ts",
+			],
+		},
 	],
 });

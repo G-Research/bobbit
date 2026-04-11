@@ -35,6 +35,8 @@ export default defineConfig({
 				"**/gate-resign-cancel*",
 				"**/gates-api-heavy*",
 				"**/project-bugs*",
+				// Docker-dependent tests — run via test:manual instead
+				"**/sandbox-recovery-docker*",
 			],
 			workers: 4,
 		},
