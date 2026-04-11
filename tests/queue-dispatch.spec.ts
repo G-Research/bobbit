@@ -638,4 +638,101 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.dispatched[0].method).toBe("followUp");
 		expect(sim.dispatched[0].message.text).toBe("DirectFollowUp");
 	});
+
+	// ── BUG REPRODUCING TESTS ──────────────────────────────────────────
+	// These tests demonstrate confirmed bugs and SHOULD FAIL until fixed.
+
+	test("BUG: steered messages lost after dispatch + force-kill — no resetDispatched method (PI-25)", () => {
+		// Bug 1: When steered messages are dispatched via rpcClient.steer() and then
+		// the agent process is force-killed, the messages are lost forever because:
+		// 1. They have dispatched=true (so dequeueUndispatched skips them)
+		// 2. No resetDispatched() method exists to clear the flag after force-kill restart
+		const q = new PromptQueue();
+		const a = q.enqueue("SteerA");
+		const b = q.enqueue("SteerB");
+		const c = q.enqueue("NormalC");
+
+		// Simulate: user steers A and B
+		q.steer(a.id);
+		q.steer(b.id);
+
+		// Simulate: _dispatchSteeredMessages() marks them dispatched (sent to stdin)
+		q.markDispatched(a.id);
+		q.markDispatched(b.id);
+
+		// Simulate: agent process is force-killed. The steer RPCs are lost.
+		// After restart, drainQueue calls dequeueUndispatched():
+		const next = q.dequeueUndispatched();
+		expect(next?.text).toBe("NormalC"); // C is dispatched fine
+
+		// But A and B were silently dropped — they had dispatched=true
+		// The queue is now empty. The steered messages are lost forever.
+		expect(q.isEmpty).toBe(true);
+
+		// THE FIX: PromptQueue needs a resetDispatched() method to clear
+		// the dispatched flag after a force-kill restart.
+		// This assertion FAILS because the method doesn't exist yet:
+		expect(typeof (q as any).resetDispatched).toBe("function");
+	});
+
+	test("BUG: force-kill restart loses steered messages in full simulation (PI-25)", () => {
+		// Full end-to-end simulation of the force-kill steered message loss bug.
+		const sim = new DispatchSimulator();
+
+		// Agent is streaming (processing first prompt)
+		sim.enqueue("LongRunning");
+		expect(sim.status).toBe("streaming");
+
+		// User queues M1, M2, M3 while agent is busy
+		const m1 = sim.enqueue("M1");
+		const m2 = sim.enqueue("M2");
+		const m3 = sim.enqueue("M3");
+
+		// User promotes M1 and M2 to steers
+		sim.steerQueued(m1!.id);
+		sim.steerQueued(m2!.id);
+
+		// Simulate _dispatchSteeredMessages() — marks steered msgs as dispatched
+		// (In real code, this happens in steerQueued → _dispatchSteeredMessages)
+		sim.queue.markDispatched(m1!.id);
+		sim.queue.markDispatched(m2!.id);
+
+		// User clicks abort. Agent is blocked in a tool call, doesn't respond.
+		// 3 seconds pass, process is force-killed.
+		// After restart, drainQueue runs — but M1 and M2 are marked dispatched!
+
+		// Simulate: after force-kill restart, we SHOULD call resetDispatched()
+		// but the method doesn't exist yet. This is the bug.
+		// The fix: sim.queue.resetDispatched() would clear all dispatched flags.
+
+		// Without the fix, drainQueue only gets M3:
+		const firstDrain = sim.queue.dequeueUndispatched();
+		expect(firstDrain?.text).toBe("M3");
+		expect(sim.queue.isEmpty).toBe(true); // M1, M2 are gone!
+
+		// THE FIX ASSERTION: resetDispatched must exist
+		expect(typeof (sim.queue as any).resetDispatched).toBe("function");
+	});
+
+	test("BUG: no aborting status transition during force-abort (PI-21b)", () => {
+		// Bug 2: When user clicks abort, there's no "aborting" status broadcast.
+		// The user sees no feedback for up to 3 seconds while the grace period runs.
+		// The status should transition: streaming → aborting → idle
+		// But currently it goes: streaming → idle (with a 3s gap of silence)
+		const sim = new DispatchSimulator();
+
+		// Start streaming
+		sim.enqueue("Running");
+		expect(sim.status).toBe("streaming");
+		expect(sim.statusTransitions).toEqual(["idle", "streaming"]);
+
+		// User aborts — the DispatchSimulator models the current behavior:
+		// batchedSteerAbort() goes directly to idle (no "aborting" intermediate)
+		sim.batchedSteerAbort();
+
+		// EXPECTED (after fix): transitions should include "aborting"
+		// streaming → aborting → idle
+		// ACTUAL (current bug): streaming → idle (no aborting)
+		expect(sim.statusTransitions).toContain("aborting");
+	});
 });
