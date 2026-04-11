@@ -34,7 +34,7 @@ The automated E2E tests skip all three: Docker is unavailable (72+ `test.skip(!h
 
 ### Prompt Interaction Coverage
 
-All 24 prompt interaction user stories (PI-01 through PI-24) have automated test coverage. The stories are defined in `userstories/prompt-interactions.md` and cover every interactive element in the message editor, status bar, and context bar.
+Prompt interaction user stories (PI-01 through PI-25 plus sub-stories, defined in `userstories/prompt-interactions.md`) have automated test coverage. The stories cover every interactive element in the message editor, status bar, and context bar.
 
 **Unit fixture tests** cover isolated component behavior:
 
@@ -54,6 +54,9 @@ All 24 prompt interaction user stories (PI-01 through PI-24) have automated test
 | `abort-and-focus.spec.ts` | PI-21, PI-24 | Abort streaming (Stop button + Escape), textarea focus management |
 | `personality-selector.spec.ts` | PI-22 | Personality selector chip UI |
 | `personality-tool-renderer.spec.ts` | PI-22 | Personality tool renderers |
+| `queue-dispatch.spec.ts` | PI-25, PI-21b | PromptQueue batching, resetDispatched, dequeueAllSteered, force-kill recovery, aborting status |
+| `draft-persistence.spec.ts` | PI-04b, PI-04c | Draft flush promise return, rAF retry replacing queueMicrotask |
+| `review-annotation-focus.spec.ts` | PI-24b | Focus restoration to message editor after annotation cancel |
 
 **Browser E2E tests** cover flows that need a real server:
 
@@ -61,6 +64,7 @@ All 24 prompt interaction user stories (PI-01 through PI-24) have automated test
 |-----------|---------|---------------|
 | `prompt-stats-e2e.spec.ts` | PI-15, PI-17, PI-18, PI-23 | Model selector persistence, context/cost stats with real usage data |
 | `personality-e2e.spec.ts` | PI-22 | Personality selector with server-side config |
+| `abort-status-e2e.spec.ts` | PI-21b, PI-25 | Aborting status broadcast via WS, steered message queue reorder on abort |
 
 PI-10 (steer) has API-level coverage in `steer-midturn.spec.ts`. PI-05 has E2E coverage in `slash-skill-e2e.spec.ts`.
 

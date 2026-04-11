@@ -54,7 +54,7 @@ Docker-dependent tests skip automatically when Docker is unavailable.
 
 See [docs/testing-strategy.md](docs/testing-strategy.md) for test architecture, harness selection, helper APIs, and mock agent details.
 
-**Prompt interaction tests:** All 24 prompt interaction user stories (PI-01 through PI-24, defined in `userstories/prompt-interactions.md`) have automated test coverage. Unit fixture tests cover isolated component behavior — file attachments, drag-drop, voice input, model/thinking selectors, context bar, cost display, git status widget, background process pills, abort/focus management, and personality selector. Browser E2E tests cover multi-component flows that need a real server — model persistence, context stats, personality selection. See `tests/message-editor-attach.spec.ts` for the attachment pattern or `tests/e2e/ui/prompt-stats-e2e.spec.ts` for the browser E2E pattern.
+**Prompt interaction tests:** Prompt interaction user stories (PI-01 through PI-25 plus sub-stories, defined in `userstories/prompt-interactions.md`) have automated test coverage. Unit fixture tests cover isolated component behavior — file attachments, drag-drop, voice input, model/thinking selectors, context bar, cost display, git status widget, background process pills, abort/focus management, and personality selector. Browser E2E tests cover multi-component flows that need a real server — model persistence, context stats, personality selection. See `tests/message-editor-attach.spec.ts` for the attachment pattern or `tests/e2e/ui/prompt-stats-e2e.spec.ts` for the browser E2E pattern.
 
 **Rules:**
 - All tests run in isolation — never read/write `.bobbit/` directly, use the isolated directory from `e2e-setup.ts`.

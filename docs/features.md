@@ -78,7 +78,7 @@ Server-side queuing of user messages when the agent is busy.
 - Queue auto-drains when the agent finishes a turn (suppressed on error — user must retry first).
 - Client can promote queued messages to steered (`steer_queued`), remove them (`remove_queued`), edit them (remove + populate textarea), or drag-reorder them (`reorder_queue`).
 - Queue pills show drag handle, edit (pencil), steer, and remove buttons. Steered pills show a "Sent" badge instead.
-- Steered messages are batched — they are held until the user presses Stop/Escape, then delivered as a single block on abort.
+- Steered messages are batched — they reorder to the front of the queue and are delivered as a single combined prompt when the agent next becomes idle (on normal turn completion or after abort+restart).
 - `follow_up` flag is preserved through the queue: messages enqueued with `isFollowUp: true` dispatch via `followUp()` RPC on drain.
 - Queue state broadcast to clients via `queue_update` events.
 
