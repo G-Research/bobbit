@@ -13,7 +13,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import { parseCustomDirectories as parseCustomDirsFromConfig } from "../agent/config-directories.js";
+import { resolveMarkdownRefs } from "../agent/system-prompt.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+/** Built-in skills shipped with Bobbit in defaults/skills/ (copied to dist/server/defaults/skills/ at build time). */
+const BUILTIN_SKILLS_DIR = path.join(__dirname, "..", "defaults", "skills");
 
 export interface SlashSkill {
 	/** Slash command name (without leading /) */
@@ -111,7 +117,8 @@ function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 
 		try {
 			const raw = fs.readFileSync(skillFile, "utf-8");
-			const { frontmatter, content } = parseFrontmatter(raw);
+			const { frontmatter, content: rawContent } = parseFrontmatter(raw);
+			const content = resolveMarkdownRefs(rawContent, path.dirname(skillFile));
 
 			const name = frontmatter.name || entry.name;
 			const description = frontmatter.description ||
@@ -159,7 +166,8 @@ function scanCommandsDir(dir: string): SlashSkill[] {
 
 		try {
 			const raw = fs.readFileSync(filePath, "utf-8");
-			const { frontmatter, content } = parseFrontmatter(raw);
+			const { frontmatter, content: rawContent } = parseFrontmatter(raw);
+			const content = resolveMarkdownRefs(rawContent, path.dirname(filePath));
 
 			const name = frontmatter.name || baseName;
 			const description = frontmatter.description ||
@@ -266,10 +274,14 @@ export function discoverSlashSkills(
 		customSkills.push(...scanSkillDir(entry.path, "custom"));
 	}
 
+	// Scan builtin skills shipped with Bobbit (defaults/skills/)
+	const builtinFileSkills = scanSkillDir(BUILTIN_SKILLS_DIR, "built-in" as SlashSkill["source"]);
+
 	// Merge with priority (lowest to highest — later insertions overwrite):
-	// built-in → custom → legacy → bobbit personal → claude personal → bobbit project → claude project
+	// built-in → builtin-file → custom → legacy → bobbit personal → claude personal → bobbit project → claude project
 	const byName = new Map<string, SlashSkill>();
 	for (const skill of BUILTIN_SKILLS) byName.set(skill.name, skill);
+	for (const skill of builtinFileSkills) byName.set(skill.name, skill);
 	for (const skill of customSkills) byName.set(skill.name, skill);
 	for (const skill of legacyCommands) byName.set(skill.name, skill);
 	for (const skill of bobbitPersonalSkills) byName.set(skill.name, skill);
