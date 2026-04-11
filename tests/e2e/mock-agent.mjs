@@ -15,6 +15,7 @@ const rl = createInterface({ input: process.stdin });
 
 /** Track conversation messages for get_messages */
 const conversationMessages = [];
+let currentModel = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384 };
 
 /** Session file path — created on first prompt, returned by get_state */
 let sessionFilePath = null;
@@ -495,7 +496,7 @@ rl.on("line", async (line) => {
 			send({ type: "response", id: msg.id, success: true, data: {
 				status: "idle",
 				sessionFile: sf,
-				model: { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384 },
+				model: currentModel,
 			} });
 			break;
 		}
@@ -504,9 +505,20 @@ rl.on("line", async (line) => {
 			send({ type: "response", id: msg.id, success: true, data: conversationMessages });
 			break;
 
-		case "set_model":
+		case "set_model": {
+			// Track the model so get_state returns it
+			const knownModels = {
+				"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
+			};
+			const known = knownModels[msg.modelId];
+			if (known) {
+				currentModel = known;
+			} else {
+				currentModel = { provider: msg.provider || "mock", id: msg.modelId || "mock-model", contextWindow: 128000, maxTokens: 16384 };
+			}
 			send({ type: "response", id: msg.id, success: true });
 			break;
+		}
 
 		case "compact":
 			send({ type: "response", id: msg.id, success: true });
