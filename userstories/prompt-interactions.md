@@ -648,7 +648,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
     - Agent processes Q2 and responds.
 12. All queue pills are now consumed. Textarea is ready for new input.
 
-**Coverage:** none
+**Coverage:** tests/queue-dispatch.spec.ts
 
 ---
 
@@ -668,7 +668,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Draft should still be present.
    - **Suspected:** draft is missing because the race condition persisted the empty state.
 
-**Coverage:** none
+**Coverage:** tests/draft-persistence.spec.ts
 
 ---
 
@@ -687,7 +687,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Wait 2 seconds. Check textarea.
    - Draft should still be there.
 
-**Coverage:** none
+**Coverage:** tests/draft-persistence.spec.ts
 
 ---
 
@@ -760,7 +760,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Send a new message.
    - Agent responds normally (process was restarted).
 
-**Coverage:** none
+**Coverage:** tests/queue-dispatch.spec.ts
 
 ---
 
@@ -817,4 +817,4 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Without clicking anything, start typing.
    - Characters should appear in the message editor textarea.
 
-**Coverage:** none
+**Coverage:** tests/review-annotation-focus.spec.ts

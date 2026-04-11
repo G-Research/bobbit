@@ -31,7 +31,8 @@ test.describe("Annotation Focus Bug", () => {
 		// Get the full method body (up to the next private/protected method or end of class)
 		const methodSource = source.substring(cancelMethodStart, cancelMethodStart + 800);
 
-		// After fix, it should focus the content area or host element
+		// After fix, it should focus the message editor textarea (not the review content)
+		expect(methodSource).toContain('message-editor');
 		const hasFocusCall = /\.focus\(\)/.test(methodSource);
 		expect(hasFocusCall).toBe(true);
 	});
