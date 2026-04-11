@@ -62,6 +62,15 @@ export class PromptQueue {
 		return this.queue.shift();
 	}
 
+	/** Pop all consecutive steered+undispatched messages from the front. Returns empty array if front is not an undispatched steered message. */
+	dequeueAllSteered(): QueuedMessage[] {
+		const result: QueuedMessage[] = [];
+		while (this.queue.length > 0 && this.queue[0].isSteered && !this.queue[0].dispatched) {
+			result.push(this.queue.shift()!);
+		}
+		return result;
+	}
+
 	/**
 	 * Pop the next undispatched message, removing any already-dispatched
 	 * messages from the front. Used by drainQueue to skip steered messages
