@@ -1043,31 +1043,11 @@ export class SessionManager {
 
 		this.broadcastQueue(session);
 
-		// If agent is streaming, batch-dispatch all steered+undispatched now
-		if (session.status === "streaming") {
-			this._dispatchSteeredMessages(session);
-		}
+		// Steered messages are NOT dispatched immediately on promotion.
+		// They reorder in the queue and dispatch via drainQueue after agent_end
+		// (or after abort+restart). Live steer (direct typing while streaming)
+		// uses a separate path: rpcClient.steer() via the WS "steer" command.
 		return true;
-	}
-
-	/**
-	 * Batch-dispatch all steered+undispatched messages via rpcClient.steer().
-	 * Messages are concatenated and sent as a single steer call, then marked
-	 * dispatched so they aren't sent again on abort or subsequent promotions.
-	 */
-	private _dispatchSteeredMessages(session: SessionInfo): void {
-		const steeredMessages = session.promptQueue.toArray()
-			.filter(m => m.isSteered && !m.dispatched);
-		if (steeredMessages.length === 0) return;
-
-		const batchText = steeredMessages.map(m => m.text).join('\n');
-		session.rpcClient.steer(batchText).catch((err) => {
-			console.error(`[session-manager] Failed to dispatch batched steer for ${session.id}:`, err);
-		});
-		for (const m of steeredMessages) {
-			session.promptQueue.markDispatched(m.id);
-		}
-		this.broadcastQueue(session);
 	}
 
 	/** Reorder queued messages to match the given ID list. */

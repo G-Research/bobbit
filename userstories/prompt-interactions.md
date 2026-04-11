@@ -650,7 +650,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 
 **Coverage:** tests/queue-dispatch.spec.ts
 
-> **Implementation note:** The goal spec's instruction to "remove immediate dispatch from steerQueued()" was not implemented. The issue analysis determined that the existing behavior (immediate batch-dispatch of steered messages during streaming via `_dispatchSteeredMessages()`) is correct by design — it provides real-time steer delivery during active turns. The `dequeueAllSteered()` batching was instead added to `drainQueue()` for the post-abort/restart recovery path.
+> **Implementation note:** Immediate dispatch was removed from `steerQueued()` per spec. Promoted messages now reorder in the queue and dispatch via `drainQueue()` after `agent_end` or abort+restart, batched via `dequeueAllSteered()`. Live steer (direct typing while streaming) uses a separate path (`rpcClient.steer()` via WS "steer" command) and is unaffected.
 
 ---
 
