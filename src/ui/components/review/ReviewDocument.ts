@@ -451,6 +451,11 @@ export class ReviewDocument extends LitElement {
     this._existingComment = "";
     this._editingAnnotationId = null;
     window.getSelection()?.removeAllRanges();
+    // Restore focus to review content (PI-24b)
+    requestAnimationFrame(() => {
+      const el = this.querySelector<HTMLElement>(".review-document-content");
+      if (el) { el.tabIndex = -1; el.focus(); }
+    });
   }
 
   private _removeAnnotation(annotationId: string): void {
