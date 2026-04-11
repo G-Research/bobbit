@@ -14,7 +14,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch |
+| `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch. Response includes `archivedDelegates` array (see below) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
@@ -25,7 +25,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
-| `GET` | `/api/sessions` | Returns `archivedDelegates` array alongside `sessions` — archived delegates of live sessions are included automatically so the sidebar can render chevrons/nesting without a separate fetch |
+
 
 ### Review Annotations
 
@@ -388,6 +388,14 @@ A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspe
 
 Returns 400 if `section` is missing or invalid. Returns 404 if the resolved signal index is out of range.
 
+### Archived delegates in session response
+
+`GET /api/sessions` (without `?since`) returns an `archivedDelegates` array alongside `sessions`. This contains all archived sessions that are delegates (direct or nested) of any live session, found via BFS from live session IDs through `delegateOf` chains. Each entry has the same shape as a session object with `archived: true`.
+
+This avoids a separate fetch for archived delegate data — the sidebar can render chevrons and nested children immediately on first load. The alternative (a dedicated delegates endpoint with lazy-fetch) was rejected because it creates a chicken-and-egg problem: the chevron only renders when children are known, but children are only fetched on chevron click.
+
+**Note:** The `?since=N` polling path does **not** include `archivedDelegates` — it only returns the changed session list. Archived delegates are loaded on the initial full fetch and refreshed on full re-fetches (e.g. after reconnect). This is intentional: delegate relationships rarely change during polling intervals.
+
 ### Generation counters (conditional fetch)
 
 `GET /api/sessions` and `GET /api/goals` support a `?since=N` query parameter for efficient polling. Both stores maintain a monotonically increasing generation counter that increments on every mutation.
@@ -399,8 +407,10 @@ Returns 400 if `section` is missing or invalid. Returns 404 if the resolved sign
 
 **When data has changed** (or `?since` is omitted):
 ```json
-{ "generation": 43, "sessions": [...] }
+{ "generation": 43, "sessions": [...], "archivedDelegates": [...] }
 { "generation": 18, "goals": [...] }
 ```
+
+Note: `archivedDelegates` is only present in the sessions response when `?since` is omitted or when the generation has changed. It is absent in `?since` conditional responses (see above).
 
 The generation resets to 0 on server restart. Clients should initialize their tracked generation to -1 so the first request always fetches the full payload.
