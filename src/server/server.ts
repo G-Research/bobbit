@@ -1711,7 +1711,7 @@ async function handleApiRoute(
 			for (const ctx of projectContextManager.all()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					if (s.delegateOf) {
-						allArchivedForDelegates.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
+						allArchivedForDelegates.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
 					}
 				}
 			}
