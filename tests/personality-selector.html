@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Personality Selector Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  #chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 12px;
+    border: 1px solid;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .chip.selected {
+    background: rgba(99, 102, 241, 0.15);
+    color: rgb(99, 102, 241);
+    border-color: rgba(99, 102, 241, 0.3);
+  }
+  .chip:not(.selected) {
+    background: rgba(128, 128, 128, 0.6);
+    color: rgba(255, 255, 255, 0.7);
+    border-color: rgba(128, 128, 128, 0.4);
+  }
+</style>
+</head>
+<body>
+<div id="chips"></div>
+
+<script>
+/**
+ * Replicates the personality chip selection logic from src/app/dialogs.ts lines 760-790.
+ *
+ * State:
+ * - availablePersonalities: array of {name, label, description}
+ * - initialPersonalities: array of selected personality names (initial state)
+ * - pendingPersonalities: null (matches initial) or array of currently selected names
+ */
+
+let availablePersonalities = [];
+let initialPersonalities = [];
+let pendingPersonalities = null;
+
+function getDisplayPersonalities() {
+  return pendingPersonalities !== null ? pendingPersonalities : initialPersonalities;
+}
+
+function renderChips() {
+  const container = document.getElementById('chips');
+  container.innerHTML = '';
+  availablePersonalities.forEach((personality) => {
+    const display = getDisplayPersonalities();
+    const selected = display.includes(personality.name);
+    const btn = document.createElement('button');
+    btn.className = 'chip' + (selected ? ' selected' : '');
+    btn.textContent = personality.label;
+    btn.title = personality.description;
+    btn.dataset.name = personality.name;
+    btn.addEventListener('click', () => {
+      const current = pendingPersonalities !== null ? [...pendingPersonalities] : [...initialPersonalities];
+      if (selected) {
+        pendingPersonalities = current.filter((t) => t !== personality.name);
+      } else {
+        pendingPersonalities = [...current, personality.name];
+      }
+      // Reset to null if pending matches initial
+      if (
+        pendingPersonalities.length === initialPersonalities.length &&
+        pendingPersonalities.every((t) => initialPersonalities.includes(t))
+      ) {
+        pendingPersonalities = null;
+      }
+      renderChips();
+    });
+    container.appendChild(btn);
+  });
+}
+
+function setPersonalities(available, initial) {
+  availablePersonalities = available;
+  initialPersonalities = initial || [];
+  pendingPersonalities = null;
+  renderChips();
+}
+
+function getSelectedPersonalities() {
+  return getDisplayPersonalities();
+}
+
+function getPendingState() {
+  return pendingPersonalities;
+}
+
+// Default test data
+setPersonalities(
+  [
+    { name: 'concise', label: 'Concise', description: 'Short and direct responses' },
+    { name: 'friendly', label: 'Friendly', description: 'Warm and approachable tone' },
+    { name: 'formal', label: 'Formal', description: 'Professional and structured' },
+  ],
+  ['friendly']
+);
+
+// Public API
+window.getSelectedPersonalities = getSelectedPersonalities;
+window.setPersonalities = setPersonalities;
+window.getPendingState = getPendingState;
+window._testReady = true;
+</script>
+</body>
+</html>
