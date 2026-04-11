@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar Session Rendering — unit test fixture</title>
+</head>
+<body>
+<script>
+// ============================================================================
+// Pure functions extracted from src/app/render-helpers.ts for isolated testing.
+// ============================================================================
+
+// --- terseRelativeTime (SB-06) ---
+function terseRelativeTime(timestamp) {
+  if (!timestamp || !Number.isFinite(timestamp)) return "";
+  const diff = Date.now() - timestamp;
+  if (diff < 60000) return "now";
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return mins + "m";
+  const hours = Math.floor(diff / 3600000);
+  if (hours < 24) return hours + "h";
+  const days = Math.floor(diff / 86400000);
+  return days + "d";
+}
+
+// --- formatSessionAge (SB-06) ---
+function formatSessionAge(timestamp) {
+  if (!timestamp || !Number.isFinite(timestamp)) return "";
+  const diff = Date.now() - timestamp;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + "h ago";
+  const days = Math.floor(hours / 24);
+  return days + "d ago";
+}
+
+// --- hasUnseenActivity (SB-07) ---
+// Simplified from render-helpers.ts — takes explicit params instead of
+// reading module-level state.
+function hasUnseenActivity(session, activeId, goals, visitedMap) {
+  if (session.status === "streaming" || session.status === "busy") return false;
+  if (session.id === activeId) return false;
+
+  var teamGoal = session.teamGoalId || (session.role === "team-lead" ? session.goalId : undefined);
+  if (teamGoal) {
+    var goal = (goals || []).find(function (g) { return g.id === teamGoal; });
+    if (!goal || goal.state !== "complete") return false;
+  }
+
+  var lastVisit = (visitedMap || {})[session.id] || 0;
+  return session.lastActivity > lastVisit;
+}
+
+// --- getSessionIndicatorType (SB-05 / SB-08) ---
+// Derives the indicator type shown next to a session row.
+function getSessionIndicatorType(session) {
+  if (session.status === "streaming" || session.status === "busy") return "pulsing-dot";
+  if (session.isCompacting) return "compacting";
+  if (session.isAborting) return "aborting";
+  if (session.status === "connecting") return "spinner";
+  return "time";
+}
+
+// --- hasPersonalityBadges (SB-35) ---
+function hasPersonalityBadges(session) {
+  return !!(session.personalities && session.personalities.length > 0);
+}
+
+// --- getSandboxDotColor (SB-36) ---
+function getSandboxDotColor(status) {
+  return (status === "streaming" || status === "busy") ? "green" : "grey";
+}
+
+// --- getRolePickerItems (SB-15) ---
+function getRolePickerItems(roles, personalities) {
+  var items = [];
+  for (var i = 0; i < (personalities || []).length; i++) items.push({ type: "personality", id: personalities[i].name });
+  for (var j = 0; j < roles.length; j++) items.push({ type: "role", id: roles[j].name });
+  items.push({ type: "create", id: "create" });
+  return items;
+}
+
+// --- getKeyboardShortcutAction (SB-34) ---
+function getKeyboardShortcutAction(key, altKey, ctrlKey, metaKey, activeElementTag) {
+  if (activeElementTag === "TEXTAREA" || activeElementTag === "INPUT") return null;
+  if (altKey && key === "g") return "new-goal";
+  if ((ctrlKey || metaKey) && key === "k") return "focus-search";
+  if ((ctrlKey || metaKey) && key === "[") return "toggle-sidebar";
+  return null;
+}
+
+// Expose all helpers to Playwright
+window.__sessionRendering = {
+  terseRelativeTime: terseRelativeTime,
+  formatSessionAge: formatSessionAge,
+  hasUnseenActivity: hasUnseenActivity,
+  getSessionIndicatorType: getSessionIndicatorType,
+  hasPersonalityBadges: hasPersonalityBadges,
+  getSandboxDotColor: getSandboxDotColor,
+  getRolePickerItems: getRolePickerItems,
+  getKeyboardShortcutAction: getKeyboardShortcutAction
+};
+</script>
+</body>
+</html>

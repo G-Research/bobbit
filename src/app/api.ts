@@ -146,6 +146,18 @@ export async function refreshSessions(): Promise<void> {
 
 			state.gatewaySessions = newSessions;
 
+			// Merge archived delegates of live sessions into state.archivedSessions
+			const archivedDelegates: GatewaySession[] = sessionsData.archivedDelegates || [];
+			if (archivedDelegates.length > 0) {
+				const existingIds = new Set(state.archivedSessions.map(s => s.id));
+				for (const d of archivedDelegates) {
+					if (!existingIds.has(d.id)) {
+						state.archivedSessions.push(d);
+						existingIds.add(d.id);
+					}
+				}
+			}
+
 			for (const s of state.gatewaySessions) {
 				if (s.colorIndex !== undefined && !sessionColorMap.has(s.id)) {
 					sessionColorMap.set(s.id, s.colorIndex);
