@@ -39,12 +39,10 @@ test.describe("Sidebar navigation", () => {
 	test("SB-01: project section collapses and persists across reload", async ({ page }) => {
 		await openApp(page);
 
-		// Get the first project's info from the API to know its name and ID
-		const projectInfo = await page.evaluate(async () => {
-			const resp = await fetch("/api/projects");
-			const projects = await resp.json();
-			return projects[0] as { id: string; name: string };
-		});
+		// Get the first project's info from the server-side API
+		const resp = await apiFetch("/api/projects");
+		const projects = await resp.json();
+		const projectInfo = projects[0] as { id: string; name: string };
 		expect(projectInfo).toBeTruthy();
 
 		// The project should be expanded by default — "Sessions" sub-header visible
