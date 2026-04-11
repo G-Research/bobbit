@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
+	readE2EToken,
 	nonGitCwd,
 	connectWs,
 	waitForSessionStatus,
@@ -407,5 +408,50 @@ test.describe("sandbox container recovery", () => {
 			method: "PUT",
 			body: JSON.stringify({ sandbox: "none" }),
 		}).catch(() => {});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// BgProcess sandbox guard — Docker-dependent test
+// ---------------------------------------------------------------------------
+
+function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
+	return fetch(`${baseURL}${path}`, {
+		...opts,
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${readE2EToken()}`,
+			...(opts.headers as Record<string, string> || {}),
+		},
+	});
+}
+
+test.describe("BgProcess Sandbox Guard (Docker)", () => {
+	test("sandboxed session with containerId does not return 403", async ({ gateway }) => {
+		test.skip(!isDockerAvailable(), "Docker not available");
+
+		// Create a normal session
+		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: nonGitCwd() }),
+		});
+		expect(res.status).toBe(201);
+		const { id } = await res.json();
+
+		// Manipulate session to be sandboxed WITH a containerId
+		const session = gateway.sessionManager.getSession(id);
+		session.sandboxed = true;
+		session.containerId = "fake-container-123";
+
+		// Attempt to create a bg-process — should NOT be 403
+		// (may fail due to fake container, but the sandbox guard should not block it)
+		const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${id}/bg-processes`, {
+			method: "POST",
+			body: JSON.stringify({ command: "echo test" }),
+		});
+		expect(bgRes.status).not.toBe(403);
+
+		// Cleanup
+		await adminFetch(gateway.baseURL, `/api/sessions/${id}`, { method: "DELETE" });
 	});
 });

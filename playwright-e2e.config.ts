@@ -37,7 +37,6 @@ export default defineConfig({
 				"**/project-bugs*",
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
-				"**/bg-process-sandbox-guard*",
 			],
 			workers: 4,
 		},
