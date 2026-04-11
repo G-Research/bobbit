@@ -240,6 +240,25 @@ export async function refreshSessions(): Promise<void> {
 	}
 }
 
+/** Fetch all delegates (live + archived) for a parent session and merge into state. */
+export async function fetchDelegates(sessionId: string): Promise<void> {
+	try {
+		const resp = await gatewayFetch(`/api/sessions/${sessionId}/delegates`);
+		if (!resp.ok) return;
+		const delegates: GatewaySession[] = await resp.json();
+		// Merge into archivedSessions, deduped by ID
+		const existingIds = new Set(state.archivedSessions.map(s => s.id));
+		const liveIds = new Set(state.gatewaySessions.map(s => s.id));
+		for (const d of delegates) {
+			if (!existingIds.has(d.id) && !liveIds.has(d.id)) {
+				state.archivedSessions.push(d);
+			}
+		}
+	} catch {
+		// Silently fail
+	}
+}
+
 /** Whether archived sessions have been fetched at least once. */
 let _archivedSessionsLoaded = false;
 

@@ -1727,6 +1727,20 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/sessions/:id/delegates — all delegate sessions (live + archived) for a parent
+	const delegatesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/delegates$/);
+	if (delegatesMatch && req.method === "GET") {
+		const parentId = delegatesMatch[1];
+		const liveDelegates = sessionManager.listSessions()
+			.filter(s => s.delegateOf === parentId)
+			.map(s => ({ ...s, colorIndex: colorStore.get(s.id) }));
+		const archivedDelegates = sessionManager.listArchivedSessions()
+			.filter(s => s.delegateOf === parentId)
+			.map(s => ({ ...s, colorIndex: colorStore.get(s.id), status: "archived", archived: true }));
+		json([...liveDelegates, ...archivedDelegates]);
+		return;
+	}
+
 	// GET /api/sessions/:id (exact match — not /api/sessions/:id/output etc.)
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {
