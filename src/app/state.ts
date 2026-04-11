@@ -166,10 +166,6 @@ export const state = {
 
 	// Search state
 	searchQuery: "",
-	searchResults: null as any[] | null,
-	searchLoading: false,
-	searchContentMode: localStorage.getItem("searchContentMode") === "true",
-	searchMatchIds: null as Set<string> | null,
 
 	// Pagination for archived items
 	archivedGoalsCursor: null as number | null,
@@ -464,15 +460,6 @@ export function setProjects(projects: Project[]): void {
 	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
 		state.activeProjectId = projects[0]?.id ?? null;
 	}
-}
-
-// ============================================================================
-// SEARCH CONTENT MODE
-// ============================================================================
-
-export function setSearchContentMode(val: boolean): void {
-	state.searchContentMode = val;
-	localStorage.setItem("searchContentMode", String(val));
 }
 
 // ============================================================================

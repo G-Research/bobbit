@@ -16,7 +16,6 @@ import {
 
 	resetArchivedExpandState,
 	getSidebarData,
-	setSearchContentMode,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
@@ -24,7 +23,7 @@ import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendin
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
-import { searchApi, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
@@ -79,50 +78,13 @@ import { renderSearchPage, initSearchPage, resetSearchPage } from "./search-page
 /** Compact session row for mobile — mirrors sidebar row with always-visible buttons */
 
 // Mobile search handlers (shared logic with sidebar but separate scope)
-async function _handleMobileSearchInput(query: string): Promise<void> {
+function _handleMobileSearchInput(query: string): void {
 	state.searchQuery = query;
-	if (!query.trim()) {
-		state.searchResults = null;
-		state.searchLoading = false;
-		renderApp();
-		return;
-	}
-	// When content mode is off, just set the query for client-side title filtering
-	if (!state.searchContentMode) {
-		state.searchResults = null;
-		state.searchLoading = false;
-		renderApp();
-		return;
-	}
-	// Content mode: use FTS API
-	state.searchLoading = true;
-	renderApp();
-	const data = await searchApi(query);
-	if (state.searchQuery !== query) return;
-	state.searchResults = data.results;
-	state.searchLoading = false;
 	renderApp();
 }
 
 function _handleMobileSearchClear(): void {
 	state.searchQuery = "";
-	state.searchResults = null;
-	state.searchLoading = false;
-	renderApp();
-}
-
-function _handleMobileResultClick(detail: { type: string; id: string; sessionId?: string; goalId?: string }): void {
-	state.searchQuery = "";
-	state.searchResults = null;
-	state.searchLoading = false;
-	if (detail.type === "goal" && detail.id) {
-		import("./routing.js").then(m => m.setHashRoute("goal-dashboard", detail.id, true));
-	} else if (detail.type === "session" && detail.id) {
-		import("./session-manager.js").then(m => m.connectToSession(detail.id, true));
-	} else if (detail.type === "message" && detail.sessionId) {
-		const sid = detail.sessionId;
-		import("./session-manager.js").then(m => m.connectToSession(sid, true));
-	}
 	renderApp();
 }
 
@@ -131,8 +93,8 @@ function renderMobileLanding() {
 	let { ungroupedSessions, liveGoals } = sidebarData;
 	const { archivedGoals } = sidebarData;
 
-	// Client-side title filtering for mobile (title-only mode)
-	if (state.searchQuery && !state.searchContentMode) {
+	// Client-side title filtering for mobile
+	if (state.searchQuery) {
 		const q = state.searchQuery.toLowerCase();
 		liveGoals = liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(q);
@@ -194,26 +156,12 @@ function renderMobileLanding() {
 				${renderSetupBanner(true)}
 				<search-box
 					.query=${state.searchQuery}
-					.loading=${state.searchLoading}
-					.contentMode=${state.searchContentMode}
 					.showControls=${!!state.searchQuery}
 					@search-input=${(e: CustomEvent) => { _handleMobileSearchInput(e.detail.query); }}
 					@search-clear=${() => { _handleMobileSearchClear(); }}
-					@search-mode-change=${(e: CustomEvent) => {
-						setSearchContentMode(e.detail.contentSearch);
-						// Re-trigger search with new mode
-						if (state.searchQuery) _handleMobileSearchInput(state.searchQuery);
-					}}
 					@full-search-click=${(e: CustomEvent) => { setHashRoute("search", e.detail.query); }}
 				></search-box>
-				${state.searchQuery && state.searchContentMode ? html`
-					<search-results
-						.results=${state.searchResults || []}
-						.loading=${state.searchLoading}
-						.query=${state.searchQuery}
-						@result-click=${(e: CustomEvent) => { _handleMobileResultClick(e.detail); }}
-					></search-results>
-				` : state.sessionsLoading
+				${state.sessionsLoading
 					? html`<div class="text-center py-12 text-muted-foreground text-xs">Loading…</div>`
 					: state.sessionsError
 						? html`<div class="text-center py-12">
