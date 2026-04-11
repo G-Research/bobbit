@@ -451,10 +451,11 @@ export class ReviewDocument extends LitElement {
     this._existingComment = "";
     this._editingAnnotationId = null;
     window.getSelection()?.removeAllRanges();
-    // Restore focus to review content (PI-24b)
+    // Return focus to the message editor textarea (PI-24b)
     requestAnimationFrame(() => {
-      const el = this.querySelector<HTMLElement>(".review-document-content");
-      if (el) { el.tabIndex = -1; el.focus(); }
+      const editor = document.querySelector("message-editor");
+      const textarea = editor?.querySelector("textarea");
+      if (textarea) (textarea as HTMLElement).focus();
     });
   }
 
