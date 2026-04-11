@@ -1714,6 +1714,16 @@ async function handleApiRoute(
 				? allArchived.filter((s: any) => s.projectId === filterProjectId)
 				: allArchived;
 
+			// Collect all archived delegates for BFS enrichment
+			const allArchivedForDelegates: typeof sessions = [];
+			for (const ctx of projectContextManager.all()) {
+				for (const s of ctx.sessionStore.getArchived()) {
+					if (s.delegateOf) {
+						allArchivedForDelegates.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
+					}
+				}
+			}
+
 			const limitParam = url.searchParams.get("limit");
 			const afterParam = url.searchParams.get("after");
 			if (limitParam) {
@@ -1728,10 +1738,43 @@ async function handleApiRoute(
 				const hasMore = page.length > limit;
 				const sliced = page.slice(0, limit);
 				const nextCursor = sliced.length > 0 ? (sliced[sliced.length - 1] as any).archivedAt : undefined;
-				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, hasMore, nextCursor });
+
+				// BFS: collect archived delegates reachable from live sessions
+				const liveIdSet = new Set(sessions.map(s => s.id));
+				const archivedDelegatesOfLive: typeof sessions = [];
+				const seen = new Set<string>();
+				const queue = [...liveIdSet];
+				while (queue.length > 0) {
+					const parentId = queue.shift()!;
+					for (const s of allArchivedForDelegates) {
+						if (s.delegateOf === parentId && !seen.has(s.id)) {
+							seen.add(s.id);
+							archivedDelegatesOfLive.push(s);
+							queue.push(s.id);
+						}
+					}
+				}
+
+				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, hasMore, nextCursor, archivedDelegates: archivedDelegatesOfLive });
 			} else {
+				// BFS: collect archived delegates reachable from live sessions
+				const liveIdSet = new Set(sessions.map(s => s.id));
+				const archivedDelegatesOfLive: typeof sessions = [];
+				const seen = new Set<string>();
+				const queue = [...liveIdSet];
+				while (queue.length > 0) {
+					const parentId = queue.shift()!;
+					for (const s of allArchivedForDelegates) {
+						if (s.delegateOf === parentId && !seen.has(s.id)) {
+							seen.add(s.id);
+							archivedDelegatesOfLive.push(s);
+							queue.push(s.id);
+						}
+					}
+				}
+
 				// Backward compatible: return all archived sessions
-				json({ generation: currentGen, sessions: [...sessions, ...filteredArchived] });
+				json({ generation: currentGen, sessions: [...sessions, ...filteredArchived], archivedDelegates: archivedDelegatesOfLive });
 			}
 		} else {
 			// Always include archived delegates of live sessions so the sidebar
