@@ -73,7 +73,7 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add a UI E2E test**: Create `.spec.ts` in `tests/e2e/ui/`, import from `../gateway-harness.js`. Use helpers from `./ui-helpers.js`. See `session-interactions.spec.ts`.
 
-**Add a REST endpoint**: Add handler in `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` for the pattern. See also `GET /api/sessions/:id/delegates` for a filtered sub-resource pattern. See [docs/rest-api.md](docs/rest-api.md).
+**Add a REST endpoint**: Add handler in `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` for the pattern. See [docs/rest-api.md](docs/rest-api.md).
 
 **Add a project**: `POST /api/projects` (programmatic) or "Add Project" sidebar button (smart flow with Path A/B/C detection). Key files: `project-registry.ts`, `project-context.ts`. See [docs/internals.md — Project assistant](docs/internals.md#project-assistant) for the full flow.
 

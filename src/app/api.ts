@@ -146,6 +146,18 @@ export async function refreshSessions(): Promise<void> {
 
 			state.gatewaySessions = newSessions;
 
+			// Merge archived delegates of live sessions into state.archivedSessions
+			const archivedDelegates: GatewaySession[] = sessionsData.archivedDelegates || [];
+			if (archivedDelegates.length > 0) {
+				const existingIds = new Set(state.archivedSessions.map(s => s.id));
+				for (const d of archivedDelegates) {
+					if (!existingIds.has(d.id)) {
+						state.archivedSessions.push(d);
+						existingIds.add(d.id);
+					}
+				}
+			}
+
 			for (const s of state.gatewaySessions) {
 				if (s.colorIndex !== undefined && !sessionColorMap.has(s.id)) {
 					sessionColorMap.set(s.id, s.colorIndex);
@@ -237,25 +249,6 @@ export async function refreshSessions(): Promise<void> {
 	if (isInitial && state.showArchived && !_archivedSessionsLoaded) {
 		fetchArchivedSessions();
 		fetchArchivedGoalsPaginated();
-	}
-}
-
-/** Fetch all delegates (live + archived) for a parent session and merge into state. */
-export async function fetchDelegates(sessionId: string): Promise<void> {
-	try {
-		const resp = await gatewayFetch(`/api/sessions/${sessionId}/delegates`);
-		if (!resp.ok) return;
-		const delegates: GatewaySession[] = await resp.json();
-		// Merge into archivedSessions, deduped by ID
-		const existingIds = new Set(state.archivedSessions.map(s => s.id));
-		const liveIds = new Set(state.gatewaySessions.map(s => s.id));
-		for (const d of delegates) {
-			if (!existingIds.has(d.id) && !liveIds.has(d.id)) {
-				state.archivedSessions.push(d);
-			}
-		}
-	} catch {
-		// Silently fail
 	}
 }
 

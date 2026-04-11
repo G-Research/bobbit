@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar archived delegates — inline merge logic</title>
+</head>
+<body>
+<script>
+/**
+ * Replicates the archived-delegate merge logic from src/app/api.ts refreshSessions().
+ *
+ * Given current archivedSessions and the archivedDelegates array from the server,
+ * returns the new archivedSessions array after dedup merge.
+ */
+function mergeArchivedDelegates(archivedSessions, archivedDelegates) {
+  const existingIds = new Set(archivedSessions.map(s => s.id));
+  const result = [...archivedSessions];
+  for (const d of archivedDelegates) {
+    if (!existingIds.has(d.id)) {
+      result.push(d);
+      existingIds.add(d.id);
+    }
+  }
+  return result;
+}
+
+/**
+ * Simulates the chevron/hasChildren check from renderSessionRow.
+ * Given a session, live sessions, and archived sessions, returns whether
+ * the session should show a chevron (hasChildren).
+ */
+function computeHasChildren(sessionId, liveSessions, archivedSessions, showArchived) {
+  const liveDelegates = liveSessions.filter(s => s.delegateOf === sessionId && (showArchived || s.status !== "terminated"));
+  const archivedDelegates = showArchived ? archivedSessions.filter(s => s.delegateOf === sessionId) : [];
+  return liveDelegates.length > 0 || archivedDelegates.length > 0;
+}
+
+/**
+ * Simulates the BFS logic from the server that finds archived delegates
+ * of live sessions (including nested delegates).
+ */
+function serverBFS(liveSessions, allArchived) {
+  const liveIds = new Set(liveSessions.map(s => s.id));
+  const result = [];
+  const seen = new Set();
+  const queue = [...liveIds];
+  while (queue.length > 0) {
+    const parentId = queue.shift();
+    for (const s of allArchived) {
+      if (s.delegateOf === parentId && !seen.has(s.id)) {
+        seen.add(s.id);
+        result.push(s);
+        queue.push(s.id);
+      }
+    }
+  }
+  return result;
+}
+
+// Expose for Playwright
+window.mergeArchivedDelegates = mergeArchivedDelegates;
+window.computeHasChildren = computeHasChildren;
+window.serverBFS = serverBFS;
+</script>
+</body>
+</html>

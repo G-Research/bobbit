@@ -21,7 +21,7 @@ import { statusBobbit } from "./session-colors.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal, fetchDelegates } from "./api.js";
+import { startTeam, deleteGoal } from "./api.js";
 
 // ============================================================================
 // FORMATTING
@@ -253,7 +253,7 @@ export function renderSessionRow(session: GatewaySession) {
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); if (isArchivedParentExpanded(session.id) && state.showArchived) { fetchDelegates(session.id).then(() => renderApp()); } renderApp(); }}
+				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
 				${connecting
@@ -321,7 +321,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); if (isArchivedParentExpanded(session.id)) { fetchDelegates(session.id).then(() => renderApp()); } renderApp(); }}
+				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse" : "Expand"}"
 			>${expanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center">
