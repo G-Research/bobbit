@@ -1,7 +1,7 @@
 import { LitElement, html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { icon } from "@mariozechner/mini-lit";
-import { Search, X, Loader2 } from "lucide";
+import { Search, X } from "lucide";
 
 /**
  * Sidebar search input with debounced queries, keyboard shortcut (Ctrl+K / Cmd+K),
@@ -15,7 +15,7 @@ import { Search, X, Loader2 } from "lucide";
 export class SearchBox extends LitElement {
 	@property({ type: String }) query = "";
 	@property({ type: Boolean }) collapsed = false;
-	@property({ type: Boolean }) loading = false;
+
 	@property({ type: Boolean }) showControls = false;
 
 	@state() private _focused = false;
@@ -105,9 +105,7 @@ export class SearchBox extends LitElement {
 				<div class="relative pb-1">
 					<div class="relative flex items-center">
 						<span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none ${this._focused ? "text-foreground" : ""}">
-							${this.loading
-								? html`<span class="inline-block animate-spin">${icon(Loader2, "sm")}</span>`
-								: icon(Search, "sm")}
+							${icon(Search, "sm")}
 						</span>
 						<input
 							data-search

@@ -927,11 +927,11 @@ export function renderSidebar() {
 								filteredGoals = liveGoals.map(goal => {
 									const goalMatches = goal.title.toLowerCase().includes(q);
 									const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
-									const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q));
+									const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 									if (!goalMatches && !hasMatchingSession) return null as unknown as Goal;
 									return goal;
 								}).filter(Boolean);
-								filteredUngrouped = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q));
+								filteredUngrouped = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 								filteredStaff = filteredStaff.filter(s => s.name?.toLowerCase().includes(q));
 							}
 							// No longer need to filter out pending project sessions — they have real projectIds now
@@ -984,9 +984,9 @@ export function renderSidebar() {
 									filteredArchivedGoals = archivedGoals.filter(goal => {
 										if (goal.title.toLowerCase().includes(q)) return true;
 										const goalSessions = [...state.gatewaySessions, ...state.archivedSessions].filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
-										return goalSessions.some(s => s.title?.toLowerCase().includes(q));
+										return goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 									});
-									filteredStandaloneArchived = allStandaloneArchived.filter(s => s.title?.toLowerCase().includes(q));
+									filteredStandaloneArchived = allStandaloneArchived.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 								}
 
 								const showArchivedContent = state.showArchived;
