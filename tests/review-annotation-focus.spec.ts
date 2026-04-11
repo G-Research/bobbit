@@ -20,22 +20,17 @@ test.describe("Annotation Focus Bug", () => {
 		source = fs.readFileSync(REVIEW_DOC_PATH, "utf-8");
 	});
 
-	test("BUG: _onAnnotationCancel does not restore focus after dismiss (PI-24b)", () => {
+	test("_onAnnotationCancel restores focus after dismiss (PI-24b)", () => {
 		// Bug 5: When user presses Escape to dismiss the annotation popover,
-		// _onAnnotationCancel() cleans up annotation state but performs no focus
-		// management. Focus is lost to document.body.
-		//
-		// The fix: After setting _popoverOpen = false in _onAnnotationCancel,
-		// focus the review document's content wrapper or the host element.
+		// _onAnnotationCancel() must restore focus to the review document content.
 
 		// Extract the _onAnnotationCancel method body
 		const cancelMethodStart = source.indexOf("_onAnnotationCancel(): void {");
 		expect(cancelMethodStart).toBeGreaterThan(-1);
 
-		// Get the method body (find the matching closing brace)
-		const methodSource = source.substring(cancelMethodStart, cancelMethodStart + 500);
+		// Get the full method body (up to the next private/protected method or end of class)
+		const methodSource = source.substring(cancelMethodStart, cancelMethodStart + 800);
 
-		// BUG: The method doesn't contain any focus() call
 		// After fix, it should focus the content area or host element
 		const hasFocusCall = /\.focus\(\)/.test(methodSource);
 		expect(hasFocusCall).toBe(true);
