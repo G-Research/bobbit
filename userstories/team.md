@@ -127,18 +127,19 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
 **Steps and expectations:**
 1. Type a redirect message in the textarea while the agent is streaming.
    - The textarea is editable during streaming (not disabled).
-   - The Send button shows as a Stop button, but typing switches context to steer mode.
-2. Press Enter to send the steer.
-   - The message is queued as a steer pill below the textarea with amber styling (`bg-amber-500/10 border-amber-500/30`) and a Zap icon.
-   - The steer is delivered to the agent at the next tool boundary (not mid-token).
-3. Observe the agent's behavior after receiving the steer.
+2. Press Enter to send.
+   - The message is queued as a pill below the textarea with muted styling.
+   - The pill shows a **Steer** button, Edit button, Remove button, and drag handle.
+3. Click the **Steer** button on the pill.
+   - The pill switches to amber styling (`bg-amber-500/10 border-amber-500/30`) with a "Sent" indicator.
+   - The steer is dispatched to the agent immediately via `rpcClient.steer()`.
+   - Dispatched steer pills are not draggable, editable, or removable.
+4. At the next tool boundary (not mid-token), the agent receives the steer.
    - The agent's partial response remains visible in chat.
    - The steer message appears as a user turn, visually marked as a steer.
    - The agent adjusts its work based on the steer content.
    - The agent's new response follows the steer in chronological order.
-4. The steer pill updates to show "Sent" (Zap icon + "Sent" text in amber) once dispatched.
-   - Dispatched steer pills are not draggable, editable, or removable.
-5. Send a second steer before the first is acknowledged.
+5. Queue and steer a second message before the first is acknowledged.
    - Both steers are batched and delivered together at the next tool boundary.
    - No steers are dropped or lost.
 6. Steer via the team lead (using `team_steer` tool) instead of navigating to the agent's session.
