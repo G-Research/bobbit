@@ -18,6 +18,8 @@ web_search("React server components") → wait → web_search("React client comp
 
 Apply the same principle to any set of independent tool calls: multiple file reads, multiple bash commands, multiple searches.
 
+**Never use `delegate` to gather information.** Each delegate spawns a full agent process (~15K+ tokens of system prompt overhead) and you still read the results sequentially in your context — paying for the content twice. Use parallel `read`/`grep`/`bash` calls instead: zero overhead, results land directly in your context. Only delegate when the sub-task requires its own multi-step reasoning chain (analysis, code changes, investigation) that justifies the startup cost.
+
 # Inline rendering
 
 Files written via `write` with certain extensions render inline in the chat:
