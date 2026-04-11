@@ -29,7 +29,7 @@ When a user asks to show, visualize, mock up, or demo something visual, prefer w
 
 **Note**: Both `write` and `edit` render inline previews for `.html`/`.htm` files. For `edit`, the preview is fetched asynchronously after the edit completes — it reads the updated file from the server and renders it in an iframe, just like `write` does. Use `edit` for surgical changes to HTML files without needing to rewrite the entire file.
 
-For design mockups, use the `/mockup` skill which provides detailed guidance on high-fidelity previews, live preview panels, and mockup principles. See [docs/design-mockups.md](docs/design-mockups.md) for the full reference.
+For design mockups, use the `/mockup` skill which provides detailed guidance on high-fidelity previews, live preview panels, and mockup principles. See `.bobbit/config/docs/design-mockups.md` for the full reference.
 
 # Gateway API access
 

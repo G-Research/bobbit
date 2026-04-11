@@ -13,6 +13,32 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * config cascade from dist/server/defaults/tools/. Only user-customized groups
  * should exist in .bobbit/config/tools/.
  */
+/**
+ * Sync docs from defaults/docs/ into .bobbit/config/docs/.
+ * Always overwrites — these are shipped reference docs that should stay
+ * current with the installed Bobbit version. User-created docs in this
+ * directory are fine; only files that exist in defaults/docs/ are overwritten.
+ */
+function syncDocsFromDefaults(dotBobbit: string): void {
+  const defaultsDocsDir = path.join(__dirname, "defaults", "docs");
+  if (!fs.existsSync(defaultsDocsDir)) return;
+
+  const destDocsDir = path.join(dotBobbit, "config", "docs");
+  fs.mkdirSync(destDocsDir, { recursive: true });
+
+  try {
+    for (const entry of fs.readdirSync(defaultsDocsDir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      fs.copyFileSync(
+        path.join(defaultsDocsDir, entry.name),
+        path.join(destDocsDir, entry.name),
+      );
+    }
+  } catch (err) {
+    console.warn("[scaffold] Failed to sync docs from defaults:", err);
+  }
+}
+
 export function scaffoldBobbitDir(projectRoot: string): void {
   const dotBobbit = bobbitDir(projectRoot);
 
@@ -41,6 +67,9 @@ export function scaffoldBobbitDir(projectRoot: string): void {
         fs.copyFileSync(sysPromptSrc, sysPromptDest);
       }
     }
+
+    // Sync docs from defaults — always overwrite so shipped docs stay current
+    syncDocsFromDefaults(dotBobbit);
 
     return;
   }
@@ -76,6 +105,9 @@ export function scaffoldBobbitDir(projectRoot: string): void {
     }
     // Tool groups are NOT copied — they resolve via cascade from builtins
   }
+
+  // Copy shipped docs into .bobbit/config/docs/
+  syncDocsFromDefaults(dotBobbit);
 
   // Create .gitignore
   fs.writeFileSync(path.join(dotBobbit, ".gitignore"), "state/\n");

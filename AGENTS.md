@@ -111,7 +111,7 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add QA testing**: Add `qa_start_command` (minimum) to `project.yaml`. Runs as optional `agent-qa` verification step. See [docs/qa-testing.md](docs/qa-testing.md).
 
-**Create a design mockup**: Use the `/mockup` skill or read [docs/design-mockups.md](docs/design-mockups.md) for the full guide on high-fidelity HTML previews, live preview panels, and mockup principles.
+**Create a design mockup**: Use the `/mockup` skill or read [.bobbit/config/docs/design-mockups.md](.bobbit/config/docs/design-mockups.md) for the full guide on high-fidelity HTML previews, live preview panels, and mockup principles.
 
 ## Debugging
 
