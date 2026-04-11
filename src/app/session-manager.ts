@@ -405,6 +405,8 @@ let _draftSessionId: string | null = null;
 let _draftTimer: ReturnType<typeof setTimeout> | null = null;
 let _draftAbort: AbortController | null = null;
 let _draftListenersInstalled = false;
+/** Tracks the in-flight save promise so session switches can await it. */
+let _pendingSave: Promise<void> | null = null;
 /** Monotonic counter — incremented on every send. Saved alongside the draft
  *  so stale saves (from aborted-but-already-sent requests) can be detected
  *  and ignored on load. */
@@ -412,8 +414,9 @@ let _draftGen = 0;
 /** The generation at which the last send occurred. Any draft with gen < this is stale. */
 let _draftSendGen = 0;
 
-/** Immediately persist the given draft value (or delete if empty). */
-function _flushDraft(rawVal?: string): void {
+/** Immediately persist the given draft value (or delete if empty).
+ *  Returns the save promise when content is non-empty so callers can await it. */
+function _flushDraft(rawVal?: string): Promise<void> | void {
 	if (!_draftSessionId) return;
 	if (_draftAbort) _draftAbort.abort();
 	// If no value provided, read from the editor
@@ -423,8 +426,10 @@ function _flushDraft(rawVal?: string): void {
 		_draftAbort = new AbortController();
 		const sid = _draftSessionId;
 		const gen = ++_draftGen;
-		saveDraftToServer(sid, 'prompt', { text: val, gen }, _draftAbort.signal)
-			.finally(() => { if (_draftAbort) _draftAbort = null; });
+		const p = saveDraftToServer(sid, 'prompt', { text: val, gen }, _draftAbort.signal)
+			.finally(() => { if (_draftAbort) _draftAbort = null; _pendingSave = null; });
+		_pendingSave = p;
+		return p;
 	} else {
 		deleteDraftFromServer(_draftSessionId, 'prompt');
 	}
@@ -457,6 +462,12 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 	// Restore existing draft from server
 	(async () => {
 		try {
+			// Wait for any in-flight save from the previous session to land
+			// before loading, so we don't get stale data on rapid switch-back.
+			if (_pendingSave) {
+				await _pendingSave;
+				_pendingSave = null;
+			}
 			const draft = await loadDraftFromServer(sessionId, 'prompt');
 			// Only apply if we're still on the same session
 			if (_draftSessionId !== sessionId) return;
@@ -482,13 +493,17 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 			if (text) {
 				editor.value = text;
 				// Guard against Lit re-renders that may reset the textarea.
-				// Re-apply the draft after a microtask to survive any pending
+				// Re-apply the draft across multiple frames to survive pending
 				// requestUpdate() cycles triggered by connection state changes.
-				queueMicrotask(() => {
-					if (_draftSessionId !== sessionId) return;
+				let retries = 0;
+				const reapply = () => {
+					if (_draftSessionId !== sessionId || retries > 5) return;
 					const el = document.querySelector("message-editor") as any;
 					if (el && el.value !== text) el.value = text;
-				});
+					retries++;
+					requestAnimationFrame(reapply);
+				};
+				requestAnimationFrame(reapply);
 			}
 		} catch { /* ignore */ }
 	})();

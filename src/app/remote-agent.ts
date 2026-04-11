@@ -795,7 +795,11 @@ export class RemoteAgent {
 						this._state.turnStartTime = null;
 					}
 				}
-				if (msg.status !== "streaming") this._isAborting = false;
+				if (msg.status === "aborting") {
+					this._isAborting = true;
+				} else if (msg.status !== "streaming") {
+					this._isAborting = false;
+				}
 				// After a tool permission grant, the server restarts the session.
 				// When it becomes idle, replay the original prompt so the tool call succeeds.
 				if (msg.status === "idle" && this._pendingGrantReplay) {
