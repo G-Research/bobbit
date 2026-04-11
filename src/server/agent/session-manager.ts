@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
-import type { ServerMessage } from "../ws/protocol.js";
+import type { ServerMessage, QueuedMessage } from "../ws/protocol.js";
 import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
@@ -1100,8 +1100,18 @@ export class SessionManager {
 	private drainQueue(session: SessionInfo): void {
 		if (session.promptQueue.isEmpty) return;
 
-		// Skip already-dispatched messages (steered mid-turn), then pop the next
-		const next = session.promptQueue.dequeueUndispatched();
+		// Batch all steered messages at the front into a single prompt
+		const steered = session.promptQueue.dequeueAllSteered();
+		let next: QueuedMessage | undefined;
+
+		if (steered.length > 0) {
+			const batchText = steered.map(m => m.text).join('\n');
+			next = { ...steered[0], text: batchText };
+		} else {
+			// Skip already-dispatched messages (steered mid-turn), then pop the next
+			next = session.promptQueue.dequeueUndispatched();
+		}
+
 		this.broadcastQueue(session);
 		if (!next) return;
 
