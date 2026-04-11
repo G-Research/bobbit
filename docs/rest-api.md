@@ -25,6 +25,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
+| `GET` | `/api/sessions/:id/delegates` | All sessions (live + archived) where `delegateOf` equals the given session ID. Used by the sidebar to lazy-load archived delegates when a parent row is expanded |
 
 ### Review Annotations
 

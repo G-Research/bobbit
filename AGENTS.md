@@ -56,6 +56,8 @@ See [docs/testing-strategy.md](docs/testing-strategy.md) for test architecture, 
 
 **Prompt interaction tests:** Prompt interaction user stories (PI-01 through PI-25 plus sub-stories, defined in `userstories/prompt-interactions.md`) have automated test coverage. Unit fixture tests cover isolated component behavior — file attachments, drag-drop, voice input, model/thinking selectors, context bar, cost display, git status widget, background process pills, abort/focus management, and personality selector. Browser E2E tests cover multi-component flows that need a real server — model persistence, context stats, personality selection. See `tests/message-editor-attach.spec.ts` for the attachment pattern or `tests/e2e/ui/prompt-stats-e2e.spec.ts` for the browser E2E pattern.
 
+**Sidebar tests:** Sidebar user stories (SB-00 through SB-37 plus SB-00b, defined in `userstories/sidebar.md`) have automated test coverage. Unit fixture tests cover rendering logic — session hierarchy, time formatting, unseen activity, goal badges, PR status, setup indicators, empty states, personality badges, sandbox indicators, role picker, staff rendering, mobile behavior, and keyboard shortcuts. Browser E2E tests cover multi-component flows — project collapse, goal team navigation, session switching, session creation/rename/terminate, search filtering, archived toggle, sidebar collapse, and goal actions. See `tests/sidebar-hierarchy.spec.ts` for the hierarchy pattern or `tests/e2e/ui/sidebar-navigation.spec.ts` for the E2E pattern.
+
 **Rules:**
 - All tests run in isolation — never read/write `.bobbit/` directly, use the isolated directory from `e2e-setup.ts`.
 - **Never start background servers from bash** (`node server.js &`) — pipes hang the agent. Use Playwright `webServer` config.
@@ -71,7 +73,7 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add a UI E2E test**: Create `.spec.ts` in `tests/e2e/ui/`, import from `../gateway-harness.js`. Use helpers from `./ui-helpers.js`. See `session-interactions.spec.ts`.
 
-**Add a REST endpoint**: Add handler in `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` for the pattern. See [docs/rest-api.md](docs/rest-api.md).
+**Add a REST endpoint**: Add handler in `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` for the pattern. See also `GET /api/sessions/:id/delegates` for a filtered sub-resource pattern. See [docs/rest-api.md](docs/rest-api.md).
 
 **Add a project**: `POST /api/projects` (programmatic) or "Add Project" sidebar button (smart flow with Path A/B/C detection). Key files: `project-registry.ts`, `project-context.ts`. See [docs/internals.md — Project assistant](docs/internals.md#project-assistant) for the full flow.
 
