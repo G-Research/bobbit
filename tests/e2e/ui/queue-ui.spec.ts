@@ -35,8 +35,8 @@ test.describe("Queue UI E2E", () => {
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// Send a message to make agent busy
-		await sendMessage(page, "STAY_BUSY:10000 working");
+		// Send a message to make agent busy (tool call with 3s delay)
+		await sendMessage(page, "STAY_BUSY:3000 working");
 
 		// Wait for streaming status (the stop button appears)
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
@@ -73,8 +73,8 @@ test.describe("Queue UI E2E", () => {
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// Make agent busy
-		await sendMessage(page, "STAY_BUSY:15000 working");
+		// Make agent busy (tool call with 3s delay)
+		await sendMessage(page, "STAY_BUSY:3000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 
 		// PI-10b steps 1-2: Queue two messages

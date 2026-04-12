@@ -86,8 +86,10 @@ test.describe("Steer mid-turn delivery", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy with a long-running turn
-			conn.send({ type: "prompt", text: "STAY_BUSY:10000 working on something" });
+			// Make agent busy with a tool call. The mock agent emits
+			// tool_execution_start at the beginning and tool_execution_end
+			// after the delay. Steered messages are dispatched at tool_execution_end.
+			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on something" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue a message while agent is streaming (this is what the UI does)
@@ -106,15 +108,14 @@ test.describe("Steer mid-turn delivery", () => {
 				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.isSteered),
 			);
 
-			// The steered message should be delivered to the agent mid-turn.
-			// The mock agent emits [STEER_RECEIVED] when it gets a steer RPC.
-			// This MUST arrive BEFORE the original STAY_BUSY turn completes.
+			// The steered message is dispatched at tool_execution_end (after
+			// the 2s tool call finishes). The mock agent emits [STEER_RECEIVED].
 			const steerAck = await conn.waitFor(
 				(m) =>
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
 					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED"),
-				5000,
+				10_000,
 			);
 
 			expect(steerAck.data.message.content[0].text).toContain("STEER_QUEUED_TEST_456");
@@ -136,8 +137,8 @@ test.describe("Steer mid-turn delivery", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy
-			conn.send({ type: "prompt", text: "STAY_BUSY:10000 working on multi-step task" });
+			// Make agent busy with a tool call
+			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on multi-step task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue two messages while streaming
@@ -152,7 +153,8 @@ test.describe("Steer mid-turn delivery", () => {
 			// Clear messages to track only steer-related events
 			conn.messages.length = 0;
 
-			// Promote both to steered (this is what clicking Steer on each pill does)
+			// Promote both to steered (this is what clicking Steer on each pill does).
+			// Neither dispatches immediately — they accumulate until tool_execution_end.
 			conn.send({ type: "steer_queued", messageId: msg1Id });
 			await conn.waitFor(
 				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg1Id && q.isSteered),
@@ -162,28 +164,20 @@ test.describe("Steer mid-turn delivery", () => {
 				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg2Id && q.isSteered),
 			);
 
-			// Each steer_queued dispatches immediately. The mock agent emits
-			// [STEER_RECEIVED] for each steer RPC. Wait for both to arrive
-			// BEFORE the original STAY_BUSY turn completes.
-			const steerAck1 = await conn.waitFor(
+			// At tool_execution_end, both steers are batched into a single
+			// rpcClient.steer() call. The mock agent emits one [STEER_RECEIVED]
+			// containing both messages.
+			const steerAck = await conn.waitFor(
 				(m) =>
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
-					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED") &&
-					m.data?.message?.content?.[0]?.text?.includes("STEER_BATCH_MSG_1"),
-				5000,
+					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED"),
+				10_000,
 			);
-			expect(steerAck1.data.message.content[0].text).toContain("STEER_BATCH_MSG_1");
 
-			const steerAck2 = await conn.waitFor(
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED") &&
-					m.data?.message?.content?.[0]?.text?.includes("STEER_BATCH_MSG_2"),
-				5000,
-			);
-			expect(steerAck2.data.message.content[0].text).toContain("STEER_BATCH_MSG_2");
+			const receivedText = steerAck.data.message.content[0].text;
+			expect(receivedText).toContain("STEER_BATCH_MSG_1");
+			expect(receivedText).toContain("STEER_BATCH_MSG_2");
 		} finally {
 			conn.close();
 		}

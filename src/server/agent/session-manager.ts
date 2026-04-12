@@ -1041,12 +1041,13 @@ export class SessionManager {
 		const ok = session.promptQueue.steer(messageId);
 		if (!ok) return false;
 
-		// If the agent is currently streaming, dispatch all steered+undispatched
-		// messages immediately via rpcClient.steer() so they are injected at
-		// the next tool boundary (PI-10). If idle, they'll drain normally.
-		if (session.status === "streaming") {
-			this._dispatchSteeredMessages(session);
-		}
+		// Steered messages are NOT dispatched immediately on promotion.
+		// They accumulate in the queue and are dispatched as a batch at the
+		// next tool boundary (PI-10b). This ensures that multiple steers sent
+		// during a long tool call are all delivered together, even if they
+		// arrive seconds apart. The dispatch is triggered by the tool_result
+		// event handler in _handleAgentEvent().
+		// If the agent is idle, they'll drain normally via drainQueue.
 
 		this.broadcastQueue(session);
 		return true;
@@ -1055,6 +1056,7 @@ export class SessionManager {
 	/**
 	 * Batch all steered+undispatched messages and dispatch via rpcClient.steer().
 	 * Marks each as dispatched so they aren't sent again.
+	 * Called from handleAgentLifecycle on tool_execution_end events.
 	 */
 	private _dispatchSteeredMessages(session: SessionInfo): void {
 		const steeredMessages = session.promptQueue.toArray()
@@ -1161,6 +1163,14 @@ export class SessionManager {
 			}
 		}
 
+		// Tool boundary: dispatch accumulated steered messages as a batch
+		// (PI-10b). Steers sent during a long tool call are collected in the
+		// queue and delivered together when the tool finishes, before the
+		// agent starts its next step.
+		if (event.type === "tool_execution_end") {
+			this._dispatchSteeredMessages(session);
+		}
+
 		if (event.type === "message_end" && event.message?.role === "assistant") {
 			session.lastTurnErrored = event.message.stopReason === "error";
 		}
@@ -1188,6 +1198,12 @@ export class SessionManager {
 				);
 				session.oneTimeGrantedTools = [];
 			}
+
+			// Dispatch any remaining steered messages before going idle.
+			// Most steers are dispatched at tool boundaries (tool_execution_end),
+			// but if steers arrive after the last tool call or during a non-tool
+			// turn, they would otherwise be lost. This is the safety net.
+			this._dispatchSteeredMessages(session);
 
 			session.status = "idle";
 			session.streamingStartedAt = undefined;

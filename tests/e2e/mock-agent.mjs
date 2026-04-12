@@ -432,7 +432,22 @@ async function handlePrompt(requestId, text) {
 	} else if (lower.includes("working") || lower.includes("first prompt") || lower.includes("long essay")) {
 		busyMs = 500;
 	}
-	await tick(busyMs);
+
+	// Simulate a tool call during the busy period so tool_execution_end
+	// fires mid-turn. This allows steered messages to be dispatched at the
+	// tool boundary rather than waiting for agent_end.
+	if (busyMs > 100) {
+		const busyToolId = `tool_busy_${Date.now()}`;
+		emit({ type: "tool_execution_start", toolName: "Bash", toolId: busyToolId, input: { command: "sleep" } });
+		await tick(busyMs);
+		if (!currentAbortController || currentAbortController.signal.aborted) {
+			currentAbortController = null;
+			return;
+		}
+		emit({ type: "tool_execution_end", toolCallId: busyToolId, toolName: "Bash", isError: false });
+	} else {
+		await tick(busyMs);
+	}
 
 	// If aborted during delay, don't emit end events (abort handler already did)
 	if (!currentAbortController || currentAbortController.signal.aborted) {

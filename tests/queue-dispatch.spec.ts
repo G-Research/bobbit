@@ -108,32 +108,33 @@ class DispatchSimulator {
 
 	/**
 	 * Models steerQueued — marks as steered + reorders.
-	 * If the agent is streaming, dispatches all steered+undispatched messages
-	 * immediately via steer (PI-10 fix).
+	 * Does NOT dispatch immediately. Steered messages accumulate and are
+	 * dispatched as a batch at the next tool boundary via toolBoundary().
 	 */
 	steerQueued(messageId: string): boolean {
-		const ok = this.queue.steer(messageId);
-		if (!ok) return false;
+		return this.queue.steer(messageId);
+	}
 
-		// PI-10: if streaming, dispatch steered messages immediately
-		if (this.status === "streaming") {
-			const steered = this.queue.toArray().filter(m => m.isSteered && !m.dispatched);
-			if (steered.length > 0) {
-				const batchText = steered.map(m => m.text).join("\n");
-				const batchMsg: QueuedMessage = {
-					id: `steer-immediate-${Date.now()}`,
-					text: batchText,
-					isSteered: true,
-					createdAt: Date.now(),
-				};
-				this.dispatched.push({ message: batchMsg, method: "steer" });
-				for (const m of steered) {
-					this.queue.markDispatched(m.id);
-				}
-			}
+	/**
+	 * Models the tool boundary event (tool_execution_end).
+	 * Dispatches all steered+undispatched messages as a single batch steer.
+	 */
+	toolBoundary(): void {
+		if (this.status !== "streaming") return;
+		const steered = this.queue.toArray().filter(m => m.isSteered && !m.dispatched);
+		if (steered.length === 0) return;
+
+		const batchText = steered.map(m => m.text).join("\n");
+		const batchMsg: QueuedMessage = {
+			id: `steer-batch-${Date.now()}`,
+			text: batchText,
+			isSteered: true,
+			createdAt: Date.now(),
+		};
+		this.dispatched.push({ message: batchMsg, method: "steer" });
+		for (const m of steered) {
+			this.queue.markDispatched(m.id);
 		}
-
-		return true;
 	}
 
 	/**
@@ -590,12 +591,11 @@ test.describe("Queue Dispatch Integration", () => {
 
 	// ── Batched steer tests ────────────────────────────────────────────
 
-	test("PI-10: steerQueued while streaming should dispatch immediately via steer (not wait for agent_end)", () => {
-		// This test replicates the real UI flow for PI-10:
-		// 1. Agent is streaming (busy)
-		// 2. User queues a message
-		// 3. User clicks Steer button → steerQueued()
-		// 4. The steered message should be dispatched immediately via rpcClient.steer()
+	test("PI-10: steerQueued accumulates, toolBoundary dispatches as batch", () => {
+		// PI-10/PI-10b: steered messages are NOT dispatched on promotion.
+		// They accumulate and are dispatched as a batch at the next tool
+		// boundary. This ensures that multiple steers sent during a long
+		// tool call (even seconds apart) all arrive together.
 		const sim = new DispatchSimulator();
 
 		// Make agent busy
@@ -605,25 +605,46 @@ test.describe("Queue Dispatch Integration", () => {
 		// Queue a message while busy
 		const msg = sim.enqueue("Urgent steer");
 		expect(msg).not.toBeNull();
-		expect(sim.queue.length).toBe(1);
 
-		// Promote to steered (this is what the Steer button does)
+		// Promote to steered — should NOT dispatch yet
 		sim.steerQueued(msg!.id);
+		expect(sim.dispatched.length).toBe(1); // only "Running"
 
-		// PI-10 says: "The steer is delivered to the agent at the next tool boundary"
-		// This means steerQueued should dispatch immediately when agent is streaming.
-		// The message should have been dispatched as a steer, not left in the queue.
-		expect(sim.dispatched.length).toBe(2); // "Running" + "Urgent steer"
+		// Tool boundary fires — NOW the steer is dispatched
+		sim.toolBoundary();
+		expect(sim.dispatched.length).toBe(2);
 		expect(sim.dispatched[1].method).toBe("steer");
 		expect(sim.dispatched[1].message.text).toBe("Urgent steer");
-
-		// Message stays in queue (dispatched flag set) for UI display, but
-		// no undispatched messages remain
-		const undispatched = sim.queue.toArray().filter(m => !m.dispatched);
-		expect(undispatched.length).toBe(0);
 	});
 
-	test("(story 11) steer 1 message while streaming → dispatched immediately, abort drains remaining", () => {
+	test("PI-10b: multiple steers during same tool call are batched at tool boundary", () => {
+		// User steers two messages 10s apart during a long tool call.
+		// Both should be delivered as a single batch at the next tool boundary.
+		const sim = new DispatchSimulator();
+
+		// Make agent busy
+		sim.enqueue("Running");
+		expect(sim.status).toBe("streaming");
+
+		// Queue and steer first message
+		const msg1 = sim.enqueue("Steer A");
+		sim.steerQueued(msg1!.id);
+
+		// Queue and steer second message (seconds later, same tool call)
+		const msg2 = sim.enqueue("Steer B");
+		sim.steerQueued(msg2!.id);
+
+		// Neither should have dispatched yet
+		expect(sim.dispatched.length).toBe(1); // only "Running"
+
+		// Tool boundary fires — both steers dispatched as a single batch
+		sim.toolBoundary();
+		expect(sim.dispatched.length).toBe(2);
+		expect(sim.dispatched[1].method).toBe("steer");
+		expect(sim.dispatched[1].message.text).toBe("Steer A\nSteer B");
+	});
+
+	test("(story 11) steer 1 message while streaming → dispatched at tool boundary, abort drains remaining", () => {
 		const sim = new DispatchSimulator();
 
 		// Make agent busy
@@ -635,11 +656,13 @@ test.describe("Queue Dispatch Integration", () => {
 		const msgB = sim.enqueue("MsgB");
 		expect(sim.queue.length).toBe(2);
 
-		// Steer msgB — now dispatched immediately (PI-10 fix)
+		// Steer msgB — NOT dispatched yet
 		sim.steerQueued(msgB!.id);
+		expect(sim.dispatched.length).toBe(1); // only "Running"
 
-		// MsgB should have been dispatched as steer immediately
-		expect(sim.dispatched.length).toBe(2); // "Running" + "MsgB"
+		// Tool boundary → MsgB dispatched as steer
+		sim.toolBoundary();
+		expect(sim.dispatched.length).toBe(2);
 		expect(sim.dispatched[1].method).toBe("steer");
 		expect(sim.dispatched[1].message.text).toBe("MsgB");
 
@@ -657,7 +680,7 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.queue.isEmpty).toBe(true);
 	});
 
-	test("(story 12) multiple steer: steer C then B while streaming → batched dispatch, then abort drains A", () => {
+	test("(story 12) steer C then B while streaming → batched at tool boundary, abort drains A", () => {
 		const sim = new DispatchSimulator();
 
 		// Make agent busy
@@ -668,21 +691,22 @@ test.describe("Queue Dispatch Integration", () => {
 		const msgB = sim.enqueue("B");
 		const msgC = sim.enqueue("C");
 
-		// Steer C first — dispatched immediately
+		// Steer C then B — neither dispatched yet
 		sim.steerQueued(msgC!.id);
-		expect(sim.dispatched[1].method).toBe("steer");
-		expect(sim.dispatched[1].message.text).toBe("C");
-
-		// Steer B — dispatched immediately (C already dispatched, only B is new)
 		sim.steerQueued(msgB!.id);
-		expect(sim.dispatched[2].method).toBe("steer");
-		expect(sim.dispatched[2].message.text).toBe("B");
+		expect(sim.dispatched.length).toBe(1); // only "Running"
+
+		// Tool boundary → C and B dispatched as a single batch
+		sim.toolBoundary();
+		expect(sim.dispatched.length).toBe(2);
+		expect(sim.dispatched[1].method).toBe("steer");
+		expect(sim.dispatched[1].message.text).toBe("C\nB");
 
 		// Abort — only non-steered A drains
 		sim.batchedSteerAbort();
 
-		expect(sim.dispatched[3].method).toBe("prompt");
-		expect(sim.dispatched[3].message.text).toBe("A");
+		expect(sim.dispatched[2].method).toBe("prompt");
+		expect(sim.dispatched[2].message.text).toBe("A");
 
 		sim.agentEnd();
 		expect(sim.queue.isEmpty).toBe(true);
@@ -800,22 +824,18 @@ test.describe("Queue Dispatch Integration", () => {
 		const m2 = sim.enqueue("M2");
 		const m3 = sim.enqueue("M3");
 
-		// User promotes M1 and M2 to steers — these dispatch immediately (PI-10)
+		// User promotes M1 and M2 to steers (not dispatched yet — waiting for tool boundary)
 		sim.steerQueued(m1!.id);
 		sim.steerQueued(m2!.id);
-
-		// M1 and M2 were dispatched as steers (indices 1 and 2)
-		expect(sim.dispatched[1].method).toBe("steer");
-		expect(sim.dispatched[2].method).toBe("steer");
+		expect(sim.dispatched.length).toBe(1); // only "LongRunning"
 
 		// User clicks abort. Agent is blocked, 3s grace expires, force-killed.
 		// forceAbortRestart: aborting → resetDispatched → idle → drain
-		// After reset, steered messages get re-dispatched as a batch prompt
 		sim.forceAbortRestart();
 
-		// M1+M2 should be recovered and re-dispatched as a SINGLE batched prompt
+		// M1+M2 should be recovered and dispatched as a SINGLE batched prompt
 		const recoveredBatch = sim.dispatched.find(
-			(d, i) => i > 2 && d.message.text.includes("M1") && d.message.text.includes("M2"),
+			(d, i) => i > 0 && d.message.text.includes("M1") && d.message.text.includes("M2"),
 		);
 		expect(recoveredBatch).toBeTruthy();
 		expect(recoveredBatch!.method).toBe("prompt"); // idle dispatch uses prompt
