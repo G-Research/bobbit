@@ -19,6 +19,7 @@ const {
 	resolveMarkdownRefs,
 	readAgentsMd,
 	assembleSystemPrompt,
+	getPromptSections,
 	cleanupSessionPrompt,
 	initPromptDirs,
 } = await import("../src/server/agent/system-prompt.ts");
@@ -89,11 +90,37 @@ describe("resolveMarkdownRefs", () => {
 		assert.ok(result.includes("  line2"));
 	});
 
-	it("does not match @references mid-line", () => {
+	it("resolves inline @references mid-line", () => {
+		fs.writeFileSync(path.join(cwdDir, "file.md"), "expanded content", "utf-8");
 		const result = resolveMarkdownRefs("see @file.md for details", cwdDir);
-		// The regex requires the @ref to be at the start of a line (with optional whitespace)
-		// "see @file.md for details" has "see " before @, so it should NOT be treated as a ref
-		assert.equal(result, "see @file.md for details");
+		assert.ok(result.includes("expanded content"), "inline @ref should be expanded");
+		assert.ok(result.includes("see "), "surrounding text preserved");
+		assert.ok(result.includes(" for details"), "surrounding text preserved");
+	});
+
+	it("resolves inline @ref in list items like Claude Code", () => {
+		fs.mkdirSync(path.join(cwdDir, "docs"), { recursive: true });
+		fs.writeFileSync(path.join(cwdDir, "docs/rules.md"), "Rule content", "utf-8");
+		const result = resolveMarkdownRefs("- git workflow @docs/rules.md", cwdDir);
+		assert.ok(result.includes("Rule content"), "inline @ref in list should expand");
+		assert.ok(result.includes("- git workflow"), "list prefix preserved");
+	});
+
+	it("does not expand email addresses as @refs", () => {
+		const result = resolveMarkdownRefs("contact user@example.com for help", cwdDir);
+		assert.equal(result, "contact user@example.com for help");
+	});
+
+	it("respects max depth of 5 hops", () => {
+		// Create a chain of 7 files
+		for (let i = 0; i < 7; i++) {
+			const next = i < 6 ? `@depth${i + 1}.md` : "leaf";
+			fs.writeFileSync(path.join(cwdDir, `depth${i}.md`), `level-${i}\n${next}`, "utf-8");
+		}
+		const result = resolveMarkdownRefs("@depth0.md", cwdDir);
+		assert.ok(result.includes("level-0"));
+		assert.ok(result.includes("level-4"));
+		assert.ok(result.includes("max import depth reached"));
 	});
 
 	it("handles empty included file", () => {
@@ -149,6 +176,23 @@ describe("assembleSystemPrompt", () => {
 		assert.ok(result);
 		const content = fs.readFileSync(result, "utf-8");
 		assert.ok(content.includes("You are a helpful assistant."));
+	});
+
+	it("resolves @refs in global system prompt", () => {
+		const docsDir = path.join(path.dirname(globalPromptPath), "docs");
+		fs.mkdirSync(docsDir, { recursive: true });
+		fs.writeFileSync(path.join(docsDir, "rules.md"), "Rule 1: Be concise.", "utf-8");
+		fs.writeFileSync(globalPromptPath, "You are helpful.\n@docs/rules.md\nEnd.", "utf-8");
+		const result = assembleSystemPrompt("test-session-refs", {
+			cwd: cwdDir,
+			baseSystemPromptPath: globalPromptPath,
+		});
+		assert.ok(result);
+		const content = fs.readFileSync(result, "utf-8");
+		assert.ok(content.includes("You are helpful."));
+		assert.ok(content.includes("Rule 1: Be concise."));
+		assert.ok(content.includes("End."));
+		assert.ok(!content.includes("@docs/rules.md"), "raw @ref should be expanded");
 	});
 
 	it("includes AGENTS.md from cwd", () => {
@@ -299,6 +343,27 @@ describe("assembleSystemPrompt", () => {
 		const content = fs.readFileSync(result, "utf-8");
 		assert.ok(content.includes("# Working Directory"));
 		assert.ok(!content.includes("Goal"));
+	});
+});
+
+describe("getPromptSections", () => {
+	beforeEach(setup);
+	afterEach(cleanup);
+
+	it("resolves @refs in global system prompt sections", () => {
+		const docsDir = path.join(path.dirname(globalPromptPath), "docs");
+		fs.mkdirSync(docsDir, { recursive: true });
+		fs.writeFileSync(path.join(docsDir, "extra.md"), "Expanded content here.", "utf-8");
+		fs.writeFileSync(globalPromptPath, "Base prompt.\n@docs/extra.md", "utf-8");
+		const sections = getPromptSections({
+			cwd: cwdDir,
+			baseSystemPromptPath: globalPromptPath,
+		});
+		const sysSection = sections.find(s => s.label === "System Prompt");
+		assert.ok(sysSection, "should have a System Prompt section");
+		assert.ok(sysSection!.content.includes("Base prompt."));
+		assert.ok(sysSection!.content.includes("Expanded content here."));
+		assert.ok(!sysSection!.content.includes("@docs/extra.md"), "raw @ref should be expanded");
 	});
 });
 
