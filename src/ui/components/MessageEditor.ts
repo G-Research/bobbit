@@ -257,44 +257,55 @@ export class MessageEditor extends LitElement {
 		return leftOffset;
 	}
 
+	/** Live preview order of pill IDs while dragging. Null when not dragging. */
+	private _dragPreviewOrder: string[] | null = null;
+
 	private _handlePillDragStart = (e: DragEvent, msg: QueuedMessage) => {
 		this._draggedPillId = msg.id;
 		if (e.dataTransfer) {
 			e.dataTransfer.effectAllowed = "move";
 			e.dataTransfer.setData("text/plain", msg.id);
 		}
-		// Add visual feedback
-		const target = (e.target as HTMLElement).closest(".queue-pill") as HTMLElement;
-		if (target) target.style.opacity = "0.5";
 	};
 
-	private _handlePillDragOver = (e: DragEvent) => {
+	private _handlePillDragOver = (e: DragEvent, overPillId: string) => {
 		e.preventDefault();
 		if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-	};
+		if (!this._draggedPillId || this._draggedPillId === overPillId) return;
 
-	private _handlePillDrop = (e: DragEvent, dropTargetId: string) => {
-		e.preventDefault();
-		if (!this._draggedPillId || this._draggedPillId === dropTargetId) return;
-
-		// Compute new order
+		// Compute preview order: move dragged pill to the hovered position
 		const ids = this.queuedMessages.map((m) => m.id);
 		const dragIdx = ids.indexOf(this._draggedPillId);
-		const dropIdx = ids.indexOf(dropTargetId);
-		if (dragIdx === -1 || dropIdx === -1) return;
+		const overIdx = ids.indexOf(overPillId);
+		if (dragIdx === -1 || overIdx === -1) return;
 
-		// Remove dragged and insert at drop position
 		ids.splice(dragIdx, 1);
-		ids.splice(dropIdx, 0, this._draggedPillId);
+		ids.splice(overIdx, 0, this._draggedPillId);
 
-		this.onReorder?.(ids);
-		this._draggedPillId = null;
+		// Only re-render if the order actually changed
+		if (!this._dragPreviewOrder || this._dragPreviewOrder.join(",") !== ids.join(",")) {
+			this._dragPreviewOrder = ids;
+			this.requestUpdate();
+		}
 	};
 
-	private _handlePillDragEnd = (e: DragEvent) => {
-		const target = (e.target as HTMLElement).closest(".queue-pill") as HTMLElement;
-		if (target) target.style.opacity = "";
+	private _handlePillDrop = (e: DragEvent, _dropTargetId: string) => {
+		e.preventDefault();
+		if (!this._draggedPillId) return;
+
+		// Use the live preview order as the final order
+		const finalOrder = this._dragPreviewOrder
+			?? this.queuedMessages.map((m) => m.id);
+
+		this.onReorder?.(finalOrder);
 		this._draggedPillId = null;
+		this._dragPreviewOrder = null;
+	};
+
+	private _handlePillDragEnd = (_e: DragEvent) => {
+		this._draggedPillId = null;
+		this._dragPreviewOrder = null;
+		this.requestUpdate();
 	};
 
 	private handleTextareaInput = (e: Event) => {
@@ -784,12 +795,16 @@ export class MessageEditor extends LitElement {
 				<!-- Queued messages -->
 				${this.queuedMessages.length > 0 ? html`
 					<div class="px-3 pt-2 pb-1 flex flex-col gap-1.5">
-						${this.queuedMessages.map((msg) => html`
-							<div class="queue-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${msg.isSteered ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground"
+						${(this._dragPreviewOrder
+							? this._dragPreviewOrder.map(id => this.queuedMessages.find(m => m.id === id)).filter(Boolean) as QueuedMessage[]
+							: this.queuedMessages
+						).map((msg) => html`
+							<div class="queue-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${msg.isSteered ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground${this._draggedPillId === msg.id ? " opacity-50" : ""}" style="${this._draggedPillId === msg.id ? "opacity: 0.5" : ""}"
 								data-pill-id="${msg.id}"
+								data-steered="${msg.isSteered}"
 								draggable="${!msg.isSteered}"
 								@dragstart=${(e: DragEvent) => this._handlePillDragStart(e, msg)}
-								@dragover=${this._handlePillDragOver}
+								@dragover=${(e: DragEvent) => this._handlePillDragOver(e, msg.id)}
 								@drop=${(e: DragEvent) => this._handlePillDrop(e, msg.id)}
 								@dragend=${this._handlePillDragEnd}
 							>
