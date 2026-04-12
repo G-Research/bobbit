@@ -1677,6 +1677,30 @@ async function handleApiRoute(
 		return;
 	}
 
+	// BFS helper: walk delegateOf, teamLeadSessionId, teamGoalId, and goalId chains
+	// from seed IDs through an archived session pool.
+	function bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[] {
+		const result: any[] = [];
+		const seen = new Set<string>();
+		const queue = [...seedIds];
+		while (queue.length > 0) {
+			const parentId = queue.shift()!;
+			for (const s of allArchived) {
+				if (!seen.has(s.id) && (
+					s.delegateOf === parentId ||
+					s.teamLeadSessionId === parentId ||
+					s.teamGoalId === parentId ||
+					s.goalId === parentId
+				)) {
+					seen.add(s.id);
+					result.push(s);
+					queue.push(s.id);
+				}
+			}
+		}
+		return result;
+	}
+
 	// GET /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "GET") {
 		const currentGen = projectContextManager.getSessionGeneration();
@@ -1714,13 +1738,18 @@ async function handleApiRoute(
 				? allArchived.filter((s: any) => s.projectId === filterProjectId)
 				: allArchived;
 
-			// Collect all archived delegates for BFS enrichment
-			const allArchivedForDelegates: typeof sessions = [];
+			// Collect ALL archived sessions for BFS enrichment (not just delegates)
+			const allArchivedForBfs: typeof sessions = [];
 			for (const ctx of projectContextManager.all()) {
 				for (const s of ctx.sessionStore.getArchived()) {
-					if (s.delegateOf) {
-						allArchivedForDelegates.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
-					}
+					allArchivedForBfs.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
+				}
+			}
+			// Build live goal IDs for BFS seeding
+			const liveGoalIds: string[] = [];
+			for (const ctx of projectContextManager.all()) {
+				for (const g of ctx.goalStore.getLive()) {
+					if (!g.archived) liveGoalIds.push(g.id);
 				}
 			}
 
@@ -1739,69 +1768,38 @@ async function handleApiRoute(
 				const sliced = page.slice(0, limit);
 				const nextCursor = sliced.length > 0 ? (sliced[sliced.length - 1] as any).archivedAt : undefined;
 
-				// BFS: collect archived delegates reachable from live sessions
+				// BFS: collect archived children reachable from live sessions and goals
 				const liveIdSet = new Set(sessions.map(s => s.id));
-				const archivedDelegatesOfLive: typeof sessions = [];
-				const seen = new Set<string>();
-				const queue = [...liveIdSet];
-				while (queue.length > 0) {
-					const parentId = queue.shift()!;
-					for (const s of allArchivedForDelegates) {
-						if (s.delegateOf === parentId && !seen.has(s.id)) {
-							seen.add(s.id);
-							archivedDelegatesOfLive.push(s);
-							queue.push(s.id);
-						}
-					}
-				}
+				const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIds], allArchivedForBfs);
 
 				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, hasMore, nextCursor, archivedDelegates: archivedDelegatesOfLive });
 			} else {
-				// BFS: collect archived delegates reachable from live sessions
+				// BFS: collect archived children reachable from live sessions and goals
 				const liveIdSet = new Set(sessions.map(s => s.id));
-				const archivedDelegatesOfLive: typeof sessions = [];
-				const seen = new Set<string>();
-				const queue = [...liveIdSet];
-				while (queue.length > 0) {
-					const parentId = queue.shift()!;
-					for (const s of allArchivedForDelegates) {
-						if (s.delegateOf === parentId && !seen.has(s.id)) {
-							seen.add(s.id);
-							archivedDelegatesOfLive.push(s);
-							queue.push(s.id);
-						}
-					}
-				}
+				const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIds], allArchivedForBfs);
 
 				// Backward compatible: return all archived sessions
 				json({ generation: currentGen, sessions: [...sessions, ...filteredArchived], archivedDelegates: archivedDelegatesOfLive });
 			}
 		} else {
-			// Always include archived delegates of live sessions so the sidebar
+			// Always include archived children of live sessions/goals so the sidebar
 			// can render chevrons/nesting without a separate fetch.
 			const liveIdSet = new Set(sessions.map(s => s.id));
-			const archivedDelegatesOfLive: typeof sessions = [];
-			const allArchivedForDelegates: typeof sessions = [];
+			const allArchivedForBfsNonPaginated: typeof sessions = [];
 			for (const ctx of projectContextManager.all()) {
 				for (const s of ctx.sessionStore.getArchived()) {
-					if (s.delegateOf) {
-						allArchivedForDelegates.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
-					}
+					allArchivedForBfsNonPaginated.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
 				}
 			}
-			// BFS: live parents → their archived delegates → delegates of those, etc.
-			const seen = new Set<string>();
-			const queue = [...liveIdSet];
-			while (queue.length > 0) {
-				const parentId = queue.shift()!;
-				for (const s of allArchivedForDelegates) {
-					if (s.delegateOf === parentId && !seen.has(s.id)) {
-						seen.add(s.id);
-						archivedDelegatesOfLive.push(s);
-						queue.push(s.id);
-					}
+			// Build live goal IDs for BFS seeding
+			const liveGoalIdsNonPaginated: string[] = [];
+			for (const ctx of projectContextManager.all()) {
+				for (const g of ctx.goalStore.getLive()) {
+					if (!g.archived) liveGoalIdsNonPaginated.push(g.id);
 				}
 			}
+			// BFS: live parents/goals → their archived children → children of those, etc.
+			const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIdsNonPaginated], allArchivedForBfsNonPaginated);
 			json({ generation: currentGen, sessions, archivedDelegates: archivedDelegatesOfLive });
 		}
 		return;
@@ -2176,7 +2174,35 @@ async function handleApiRoute(
 			const page = allArchived.slice(0, limit);
 			const hasMore = allArchived.length > limit;
 			const nextCursor = page.length > 0 ? page[page.length - 1].archivedAt : undefined;
-			json({ goals: page, total, hasMore, nextCursor });
+
+			// Collect archived sessions affiliated with goals in this page
+			const goalIdsInPage = new Set(page.map((g: any) => g.id));
+			const affiliatedSessions: any[] = [];
+			const seenSessionIds = new Set<string>();
+			for (const ctx of projectContextManager.all()) {
+				for (const s of ctx.sessionStore.getArchived()) {
+					if (!seenSessionIds.has(s.id) && (goalIdsInPage.has((s as any).teamGoalId) || goalIdsInPage.has((s as any).goalId))) {
+						seenSessionIds.add(s.id);
+						affiliatedSessions.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+					}
+				}
+			}
+			// BFS walk delegate/team chains from affiliated sessions
+			const allArchivedForGoalsBfs: any[] = [];
+			for (const ctx of projectContextManager.all()) {
+				for (const s of ctx.sessionStore.getArchived()) {
+					allArchivedForGoalsBfs.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+				}
+			}
+			const delegateEnriched = bfsEnrichArchived(affiliatedSessions.map(s => s.id), allArchivedForGoalsBfs);
+			for (const s of delegateEnriched) {
+				if (!seenSessionIds.has(s.id)) {
+					seenSessionIds.add(s.id);
+					affiliatedSessions.push(s);
+				}
+			}
+
+			json({ goals: page, total, hasMore, nextCursor, archivedSessions: affiliatedSessions });
 			return;
 		}
 
@@ -4364,6 +4390,9 @@ async function handleApiRoute(
 					title: s.title,
 					accessory: s.accessory,
 					taskId: s.taskId,
+					teamLeadSessionId: s.teamLeadSessionId,
+					teamGoalId: s.teamGoalId,
+					delegateOf: s.delegateOf,
 				}));
 		}
 

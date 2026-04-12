@@ -45,7 +45,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/goals` | List all goals. Supports `?since=N` generation counter for conditional fetch |
+| `GET` | `/api/goals` | List all goals. `?archived=true` returns archived goals with an `archivedSessions` field. Supports `?since=N` generation counter for conditional fetch |
 | `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
@@ -86,7 +86,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/steer` | Steer a team agent mid-turn (`{ sessionId, message }`) |
 | `POST` | `/api/goals/:id/team/abort` | Force-abort a stuck team agent (`{ sessionId }`) |
 | `POST` | `/api/goals/:id/team/prompt` | Send prompt to a team agent, queued if busy (`{ sessionId, message }`) |
-| `GET` | `/api/goals/:id/team/agents` | List agents for a team goal |
+| `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead) |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
 
@@ -388,13 +388,27 @@ A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspe
 
 Returns 400 if `section` is missing or invalid. Returns 404 if the resolved signal index is out of range.
 
-### Archived delegates in session response
+### Archived child enrichment in session response
 
-`GET /api/sessions` (without `?since`) returns an `archivedDelegates` array alongside `sessions`. This contains all archived sessions that are delegates (direct or nested) of any live session, found via BFS from live session IDs through `delegateOf` chains. Each entry has the same shape as a session object with `archived: true`.
+`GET /api/sessions` (without `?since`) returns an `archivedDelegates` array alongside `sessions`. This contains all archived sessions that are children of any live session or live goal, found via BFS from live session IDs and live goal IDs through multiple relationship types:
 
-The `?include=archived` path (both paginated with `&limit=N` and non-paginated) also returns `archivedDelegates`. This ensures that when the user toggles "Show Archived" in the sidebar, archived delegates of live sessions remain visible — they are included via the same BFS enrichment rather than relying solely on the paginated window.
+- **`delegateOf`** — direct and nested delegate chains
+- **`teamGoalId` / `goalId`** — archived sessions affiliated with live goals
+- **`teamLeadSessionId`** — archived team members (coders, reviewers, QA agents) of live team leads
 
-This avoids a separate fetch for archived delegate data — the sidebar can render chevrons and nested children immediately on first load. The alternative (a dedicated delegates endpoint with lazy-fetch) was rejected because it creates a chicken-and-egg problem: the chevron only renders when children are known, but children are only fetched on chevron click.
+The BFS walks all three relationship types, then recursively includes delegates of any newly-discovered sessions. This ensures visibility is inherited: if a parent is visible in the sidebar, all its children are available behind a collapse chevron.
+
+The `?include=archived` path (both paginated with `&limit=N` and non-paginated) also returns `archivedDelegates` via the same enrichment. This ensures that when the user toggles "Show Archived" in the sidebar, archived children of live sessions and goals remain visible rather than relying solely on the paginated window.
+
+This avoids a separate fetch for archived child data — the sidebar can render chevrons and nested children immediately on first load. The alternative (a dedicated children endpoint with lazy-fetch) was rejected because it creates a chicken-and-egg problem: the chevron only renders when children are known, but children are only fetched on chevron click.
+
+### Archived sessions in goals response
+
+`GET /api/goals?archived=true` returns an `archivedSessions` array alongside the paginated goals. This contains all archived sessions affiliated with the returned goals (matched by `teamGoalId` or `goalId`), plus their delegate chains (BFS walk on `delegateOf`).
+
+**Why:** Without this, expanding an archived goal in the sidebar would show no children — the sessions endpoint only enriches children of *live* goals, and archived goal sessions may be beyond the paginated session window. Including them in the goals response guarantees that any archived goal visible in the sidebar has its children immediately available.
+
+The client merges these affiliated sessions into `state.archivedSessions` (additive merge, not replace) to avoid overwriting BFS-enriched delegates from the live poll.
 
 **Note:** The `?since=N` polling path does **not** include `archivedDelegates` — it only returns the changed session list. Archived delegates are loaded on the initial full fetch and refreshed on full re-fetches (e.g. after reconnect). This is intentional: delegate relationships rarely change during polling intervals.
 

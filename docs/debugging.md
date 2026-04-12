@@ -160,12 +160,27 @@ When a sandbox container is killed or removed, sessions auto-recover. Use this c
 - Full search page (`#/search`) is the sole consumer of the FTS API — it manages its own state, independent from sidebar filtering
 - Archived section not auto-opening on search match? Check `_archivedBySearch` flag — it distinguishes search-triggered expansion from manual clicks
 
+## Sidebar child loading
+
+Visibility is inherited — if a sidebar entry is visible (live, search match, or loaded via "See archived" + paging), all its children must be loaded. Three parent→child relationships are covered:
+
+1. **Goal → sessions**: `teamGoalId` or `goalId` match
+2. **Team lead → team members**: `teamLeadSessionId` match (coders, reviewers, QA agents)
+3. **Session → delegates**: `delegateOf` chains (recursive)
+
+Debugging checklist:
+- Expanding a live goal shows no children? Check the server BFS enrichment in `GET /api/sessions` — it should seed from live goal IDs and walk `teamGoalId`/`goalId`, not just `delegateOf`
+- Archived team members missing? The BFS must also walk `teamLeadSessionId` relationships from live session IDs
+- Expanding an archived goal shows nothing? Check `GET /api/goals?archived=true` returns an `archivedSessions` field with affiliated sessions and their delegate chains
+- Children appear briefly then vanish? The client must merge (not replace) archived sessions — check `fetchArchivedSessionsPaginated()` uses additive merge on first page, not `state.archivedSessions = []`
+- Edge case: goal loaded via "Load more goals" has no children? The on-demand fallback in `renderGoalGroup` should fire a one-shot fetch to `GET /api/goals/:id/team/agents?include=archived`. Check the `_goalChildrenFetched` guard Set isn't stale — it's cleared by `clearGoalChildrenFetchedCache()` when toggling archived off
+
 ## Paginated archives
 
 - Cursor based on `archivedAt` timestamp
 - Missing items? Check `archivedAt` is set (older items may lack it)
 - Count mismatch? Verify total from paginated response metadata
-- Archived delegates disappearing on "Show Archived" toggle? The `?include=archived` path returns `archivedDelegates` via BFS enrichment — if they're missing, check that the server is running the delegate BFS on the archived response and the client is merging them into `state.archivedSessions`
+- Archived delegates disappearing on "Show Archived" toggle? The `?include=archived` path returns `archivedDelegates` via BFS enrichment — if they're missing, check that the server is running the child BFS on the archived response and the client is merging them into `state.archivedSessions`
 
 ## Slash skill expansion
 
