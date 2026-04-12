@@ -174,9 +174,10 @@ export interface PromptSection {
 export function assembleSystemPrompt(sessionId: string, parts: PromptParts): string | undefined {
 	const sections: string[] = [];
 
-	// 1. Global system prompt
+	// 1. Global system prompt (resolve @refs relative to its directory)
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
-		const base = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
+		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
+		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
 		if (base) sections.push(base);
 	}
 
@@ -277,9 +278,10 @@ function estimateTokens(text: string): number {
 export function getPromptSections(parts: PromptParts): PromptSection[] {
 	const sections: PromptSection[] = [];
 
-	// 1. Global system prompt
+	// 1. Global system prompt (resolve @refs relative to its directory)
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
-		const base = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
+		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
+		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
 		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base, tokens: estimateTokens(base) });
 	}
 

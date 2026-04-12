@@ -19,6 +19,7 @@ const {
 	resolveMarkdownRefs,
 	readAgentsMd,
 	assembleSystemPrompt,
+	getPromptSections,
 	cleanupSessionPrompt,
 	initPromptDirs,
 } = await import("../src/server/agent/system-prompt.ts");
@@ -149,6 +150,23 @@ describe("assembleSystemPrompt", () => {
 		assert.ok(result);
 		const content = fs.readFileSync(result, "utf-8");
 		assert.ok(content.includes("You are a helpful assistant."));
+	});
+
+	it("resolves @refs in global system prompt", () => {
+		const docsDir = path.join(path.dirname(globalPromptPath), "docs");
+		fs.mkdirSync(docsDir, { recursive: true });
+		fs.writeFileSync(path.join(docsDir, "rules.md"), "Rule 1: Be concise.", "utf-8");
+		fs.writeFileSync(globalPromptPath, "You are helpful.\n@docs/rules.md\nEnd.", "utf-8");
+		const result = assembleSystemPrompt("test-session-refs", {
+			cwd: cwdDir,
+			baseSystemPromptPath: globalPromptPath,
+		});
+		assert.ok(result);
+		const content = fs.readFileSync(result, "utf-8");
+		assert.ok(content.includes("You are helpful."));
+		assert.ok(content.includes("Rule 1: Be concise."));
+		assert.ok(content.includes("End."));
+		assert.ok(!content.includes("@docs/rules.md"), "raw @ref should be expanded");
 	});
 
 	it("includes AGENTS.md from cwd", () => {
@@ -299,6 +317,27 @@ describe("assembleSystemPrompt", () => {
 		const content = fs.readFileSync(result, "utf-8");
 		assert.ok(content.includes("# Working Directory"));
 		assert.ok(!content.includes("Goal"));
+	});
+});
+
+describe("getPromptSections", () => {
+	beforeEach(setup);
+	afterEach(cleanup);
+
+	it("resolves @refs in global system prompt sections", () => {
+		const docsDir = path.join(path.dirname(globalPromptPath), "docs");
+		fs.mkdirSync(docsDir, { recursive: true });
+		fs.writeFileSync(path.join(docsDir, "extra.md"), "Expanded content here.", "utf-8");
+		fs.writeFileSync(globalPromptPath, "Base prompt.\n@docs/extra.md", "utf-8");
+		const sections = getPromptSections({
+			cwd: cwdDir,
+			baseSystemPromptPath: globalPromptPath,
+		});
+		const sysSection = sections.find(s => s.label === "System Prompt");
+		assert.ok(sysSection, "should have a System Prompt section");
+		assert.ok(sysSection!.content.includes("Base prompt."));
+		assert.ok(sysSection!.content.includes("Expanded content here."));
+		assert.ok(!sysSection!.content.includes("@docs/extra.md"), "raw @ref should be expanded");
 	});
 });
 
