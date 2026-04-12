@@ -127,6 +127,7 @@ Key quick checks:
 - **Stuck gate verification**: Cancel via `POST /api/goals/:id/gates/:gateId/cancel-verification` or the dashboard Cancel button.
 - **Gate/task tool bloat**: Agent tools (`gate_list`, `gate_status`, `task_list`) use `?view=summary` by default for slim responses. Use `gate_inspect` to drill into content, verification output, or signal history on demand. See [docs/rest-api.md — Summary views](docs/rest-api.md#summary-views-viewsummary).
 - **Search index**: Delete `<project-root>/.bobbit/state/search.db` and restart to rebuild.
+- **Auto-nudge flooding**: If a team lead receives duplicate nudges after sleep/wake, check `nudgePending` state in TeamManager. The guard prevents re-enqueuing while a nudge is already pending — cleared on `agent_start`.
 
 ## Git conventions
 
@@ -165,7 +166,7 @@ If not set, no setup runs (intentional — Bobbit doesn't assume your package ma
 
 ## Reference docs
 
-- @docs/internals.md — tool policies, search, MCP, sandbox, config directories, disk state, goals, multi-project architecture
-- @docs/debugging.md — scannable debugging checklists for all subsystems
+- [docs/internals.md](docs/internals.md) — tool policies, search, MCP, sandbox, config directories, disk state, goals, multi-project architecture
+- [docs/debugging.md](docs/debugging.md) — scannable debugging checklists for all subsystems
 - [docs/dev-workflow.md](docs/dev-workflow.md) — running modes, restart workflow, safe change process
 - [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) — goal/workflow/gate data model and lifecycle
