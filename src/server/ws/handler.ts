@@ -26,6 +26,7 @@ function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, s
 					id: persisted.modelId,
 					contextWindow: meta.contextWindow,
 					maxTokens: meta.maxTokens,
+					reasoning: meta.reasoning,
 				}
 			}
 		});
@@ -210,7 +211,8 @@ export function handleWebSocketConnection(
 					if (archived) {
 						const archivedData: Record<string, unknown> = { archived: true, archivedAt: archived.archivedAt, title: archived.title };
 						if (archived.modelProvider && archived.modelId) {
-							archivedData.model = { provider: archived.modelProvider, id: archived.modelId };
+							const archivedMeta = inferMeta(archived.modelId);
+							archivedData.model = { provider: archived.modelProvider, id: archived.modelId, reasoning: archivedMeta.reasoning };
 						}
 						send(ws, { type: "state", data: archivedData });
 					}
