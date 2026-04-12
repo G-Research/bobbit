@@ -15,7 +15,7 @@ const rl = createInterface({ input: process.stdin });
 
 /** Track conversation messages for get_messages */
 const conversationMessages = [];
-let currentModel = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384 };
+let currentModel = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384, reasoning: true };
 
 /** Session file path — created on first prompt, returned by get_state */
 let sessionFilePath = null;

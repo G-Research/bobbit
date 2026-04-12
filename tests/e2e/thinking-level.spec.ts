@@ -1,9 +1,9 @@
 /**
- * E2E test proving the thinking level toggle is non-functional.
+ * E2E tests for thinking level support.
  *
- * The server currently has no handler for `set_thinking_level` messages,
- * so sending one produces an UNKNOWN_TYPE error. This test will pass
- * once the server-side plumbing is wired up.
+ * Covers:
+ * - set_thinking_level WS command is handled without error
+ * - Fallback model state includes `reasoning` flag (PI-16 regression)
  */
 import { test, expect } from "./in-process-harness.js";
 import { createSession, connectWs } from "./e2e-setup.js";
@@ -37,6 +37,36 @@ test.describe("Thinking Level", () => {
 				errors.length,
 				"set_thinking_level not recognized by server",
 			).toBe(0);
+		} finally {
+			conn.close();
+		}
+	});
+
+	test("fallback model state includes reasoning flag (PI-16 regression)", async () => {
+		// When a client connects to a session that hasn't responded to get_state
+		// yet (dormant/preparing), the server sends a fallback model state from
+		// persisted data. This must include `reasoning` so the UI can show the
+		// thinking level selector for reasoning-capable models.
+		const sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+
+		try {
+			// Wait for the initial state message with model info.
+			// The fallback path fires for dormant sessions immediately on connect.
+			const stateMsg = await conn.waitFor(
+				(m) => m.type === "state" && m.data?.model?.id,
+				10_000,
+			);
+
+			const model = stateMsg.data.model;
+			expect(model).toBeTruthy();
+			expect(model.id).toBeTruthy();
+			// The reasoning field must be explicitly present (boolean), not undefined.
+			// Without this, the thinking selector disappears from the UI.
+			expect(
+				typeof model.reasoning,
+				`model.reasoning should be a boolean, got ${typeof model.reasoning} for model "${model.id}"`,
+			).toBe("boolean");
 		} finally {
 			conn.close();
 		}

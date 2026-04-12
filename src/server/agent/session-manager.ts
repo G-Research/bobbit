@@ -28,7 +28,7 @@ import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
-import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
+import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -2428,7 +2428,7 @@ export class SessionManager {
 					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}`);
 					broadcast(session.clients, {
 						type: "state",
-						data: { model: { provider, id: modelId } },
+						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
 					});
 					return;
 				} catch (err) {
@@ -2469,7 +2469,7 @@ export class SessionManager {
 
 			broadcast(session.clients, {
 				type: "state",
-				data: { model: { provider: "aigw", id: modelToUse.id } },
+				data: { model: { provider: "aigw", id: modelToUse.id, reasoning: inferMeta(modelToUse.id).reasoning } },
 			});
 		} catch (err) {
 			console.warn(`[session-manager] Failed to auto-select model for ${session.id}:`, err);
