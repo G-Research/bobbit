@@ -90,11 +90,37 @@ describe("resolveMarkdownRefs", () => {
 		assert.ok(result.includes("  line2"));
 	});
 
-	it("does not match @references mid-line", () => {
+	it("resolves inline @references mid-line", () => {
+		fs.writeFileSync(path.join(cwdDir, "file.md"), "expanded content", "utf-8");
 		const result = resolveMarkdownRefs("see @file.md for details", cwdDir);
-		// The regex requires the @ref to be at the start of a line (with optional whitespace)
-		// "see @file.md for details" has "see " before @, so it should NOT be treated as a ref
-		assert.equal(result, "see @file.md for details");
+		assert.ok(result.includes("expanded content"), "inline @ref should be expanded");
+		assert.ok(result.includes("see "), "surrounding text preserved");
+		assert.ok(result.includes(" for details"), "surrounding text preserved");
+	});
+
+	it("resolves inline @ref in list items like Claude Code", () => {
+		fs.mkdirSync(path.join(cwdDir, "docs"), { recursive: true });
+		fs.writeFileSync(path.join(cwdDir, "docs/rules.md"), "Rule content", "utf-8");
+		const result = resolveMarkdownRefs("- git workflow @docs/rules.md", cwdDir);
+		assert.ok(result.includes("Rule content"), "inline @ref in list should expand");
+		assert.ok(result.includes("- git workflow"), "list prefix preserved");
+	});
+
+	it("does not expand email addresses as @refs", () => {
+		const result = resolveMarkdownRefs("contact user@example.com for help", cwdDir);
+		assert.equal(result, "contact user@example.com for help");
+	});
+
+	it("respects max depth of 5 hops", () => {
+		// Create a chain of 7 files
+		for (let i = 0; i < 7; i++) {
+			const next = i < 6 ? `@depth${i + 1}.md` : "leaf";
+			fs.writeFileSync(path.join(cwdDir, `depth${i}.md`), `level-${i}\n${next}`, "utf-8");
+		}
+		const result = resolveMarkdownRefs("@depth0.md", cwdDir);
+		assert.ok(result.includes("level-0"));
+		assert.ok(result.includes("level-4"));
+		assert.ok(result.includes("max import depth reached"));
 	});
 
 	it("handles empty included file", () => {

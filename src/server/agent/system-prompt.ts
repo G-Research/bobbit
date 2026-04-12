@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 
@@ -26,44 +27,83 @@ function getStateDir(): string {
 }
 
 /**
- * Resolve `@FILENAME.md` references in markdown content.
+ * Resolve `@path` references in markdown content, matching Claude Code behavior.
  *
- * Lines matching `@somefile.md` (optionally with leading whitespace) are
- * replaced with the contents of that file, resolved relative to `baseDir`.
- * References are resolved recursively (a referenced file can itself contain
- * `@` references). A `seen` set prevents infinite loops.
+ * `@path/to/file.ext` references are expanded inline wherever they appear on a
+ * line. Both relative and absolute paths are supported; relative paths resolve
+ * from `baseDir`. References are resolved recursively (a referenced file can
+ * itself contain `@` references) up to a maximum depth of 5 hops. A `seen` set
+ * prevents infinite loops. Paths starting with `~` expand to the home directory.
+ *
+ * When a `@ref` is the **only** content on a line (with optional leading
+ * whitespace), the file content replaces the entire line and inherits the
+ * leading indentation. When inline with other text, the file content is
+ * inserted in place of the `@ref` token (no indentation adjustment).
  */
-export function resolveMarkdownRefs(content: string, baseDir: string, seen?: Set<string>): string {
+export function resolveMarkdownRefs(content: string, baseDir: string, seen?: Set<string>, depth = 0): string {
 	if (!seen) seen = new Set();
+	const MAX_DEPTH = 5;
 
-	return content.replace(/^([ \t]*)@(\S+\.md)\s*$/gm, (_match, indent: string, filename: string) => {
-		const filePath = path.resolve(baseDir, filename);
-		const canonical = path.normalize(filePath);
-
-		if (seen!.has(canonical)) {
-			return `${indent}<!-- circular reference: ${filename} -->`;
-		}
-
-		if (!fs.existsSync(filePath)) {
-			return `${indent}<!-- file not found: ${filename} -->`;
-		}
-
-		seen!.add(canonical);
-		try {
-			const refContent = fs.readFileSync(filePath, "utf-8");
-			const resolved = resolveMarkdownRefs(refContent, path.dirname(filePath), seen);
-			// Preserve indentation for each line of the included content
-			if (indent) {
-				return resolved
-					.split("\n")
-					.map((line) => (line.trim() ? indent + line : line))
-					.join("\n");
-			}
-			return resolved;
-		} catch {
-			return `${indent}<!-- error reading: ${filename} -->`;
-		}
+	// First pass: whole-line refs (preserves indentation behavior)
+	content = content.replace(/^([ \t]*)@(\S+)\s*$/gm, (_match, indent: string, refPath: string) => {
+		return resolveOneRef(refPath, indent, baseDir, seen!, depth, MAX_DEPTH, /* wholeLine */ true);
 	});
+
+	// Second pass: inline refs (surrounded by other text)
+	// Negative lookbehind excludes email addresses (word char before @)
+	content = content.replace(/(?<!\w)@((?:~[/\\]|\.{0,2}[/\\])?[\w./_\\-]+\.\w+)/g, (_match, refPath: string) => {
+		return resolveOneRef(refPath, "", baseDir, seen!, depth, MAX_DEPTH, /* wholeLine */ false);
+	});
+
+	return content;
+}
+
+function expandHomePath(p: string): string {
+	if (p.startsWith("~")) {
+		return path.join(os.homedir(), p.slice(1));
+	}
+	return p;
+}
+
+function resolveOneRef(
+	refPath: string,
+	indent: string,
+	baseDir: string,
+	seen: Set<string>,
+	depth: number,
+	maxDepth: number,
+	wholeLine: boolean,
+): string {
+	const filePath = path.resolve(baseDir, expandHomePath(refPath));
+	const canonical = path.normalize(filePath);
+
+	if (seen.has(canonical)) {
+		return wholeLine ? `${indent}<!-- circular reference: ${refPath} -->` : `<!-- circular reference: ${refPath} -->`;
+	}
+
+	if (!fs.existsSync(filePath)) {
+		return wholeLine ? `${indent}<!-- file not found: ${refPath} -->` : `<!-- file not found: ${refPath} -->`;
+	}
+
+	if (depth >= maxDepth) {
+		return wholeLine ? `${indent}<!-- max import depth reached: ${refPath} -->` : `<!-- max import depth reached: ${refPath} -->`;
+	}
+
+	seen.add(canonical);
+	try {
+		const refContent = fs.readFileSync(filePath, "utf-8");
+		const resolved = resolveMarkdownRefs(refContent, path.dirname(filePath), seen, depth + 1);
+
+		if (wholeLine && indent) {
+			return resolved
+				.split("\n")
+				.map((line) => (line.trim() ? indent + line : line))
+				.join("\n");
+		}
+		return resolved;
+	} catch {
+		return wholeLine ? `${indent}<!-- error reading: ${refPath} -->` : `<!-- error reading: ${refPath} -->`;
+	}
 }
 
 /**
