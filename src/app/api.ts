@@ -455,6 +455,18 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 		} else {
 			state.archivedSessions = sessions;
 		}
+
+		// Merge archived delegates from the response (BFS-enriched by server)
+		const archivedDelegates: GatewaySession[] = data.archivedDelegates || [];
+		if (archivedDelegates.length > 0) {
+			const existingIds = new Set(state.archivedSessions.map(s => s.id));
+			for (const d of archivedDelegates) {
+				if (!existingIds.has(d.id)) {
+					state.archivedSessions.push(d);
+					existingIds.add(d.id);
+				}
+			}
+		}
 		state.archivedSessionsTotal = data.total ?? sessions.length;
 		state.archivedSessionsHasMore = data.hasMore ?? false;
 		state.archivedSessionsCursor = data.nextCursor ?? null;
