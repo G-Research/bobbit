@@ -58,6 +58,8 @@ See [docs/testing-strategy.md](docs/testing-strategy.md) for test architecture, 
 
 **Sidebar tests:** Sidebar user stories (SB-00 through SB-37 plus SB-00b, defined in `userstories/sidebar.md`) have automated test coverage. Unit fixture tests cover rendering logic — session hierarchy, time formatting, unseen activity, goal badges, PR status, setup indicators, empty states, personality badges, sandbox indicators, role picker, staff rendering, mobile behavior, and keyboard shortcuts. Browser E2E tests cover multi-component flows — project collapse, goal team navigation, session switching, session creation/rename/terminate, search filtering, archived toggle, sidebar collapse, and goal actions. See `tests/sidebar-hierarchy.spec.ts` for the hierarchy pattern or `tests/e2e/ui/sidebar-navigation.spec.ts` for the E2E pattern.
 
+**Sidebar child auto-loading tests:** Child auto-loading (ensuring visible sidebar entries always have their children loaded) is tested at the API and browser E2E levels. API tests (`tests/e2e/sidebar-child-loading.spec.ts`, `tests/e2e/archived-session-merge.spec.ts`) verify server-side BFS enrichment covers `teamGoalId`, `teamLeadSessionId`, and `delegateOf` chains, and that the archived goals response includes affiliated sessions. Browser E2E tests (`tests/e2e/ui/sidebar-child-loading.spec.ts`) verify that expanding a goal in the sidebar always shows its children — including archived team members and delegates.
+
 **Rules:**
 - All tests run in isolation — never read/write `.bobbit/` directly, use the isolated directory from `e2e-setup.ts`.
 - **Never start background servers from bash** (`node server.js &`) — pipes hang the agent. Use Playwright `webServer` config.
@@ -127,6 +129,7 @@ Key quick checks:
 - **Stuck gate verification**: Cancel via `POST /api/goals/:id/gates/:gateId/cancel-verification` or the dashboard Cancel button.
 - **Gate/task tool bloat**: Agent tools (`gate_list`, `gate_status`, `task_list`) use `?view=summary` by default for slim responses. Use `gate_inspect` to drill into content, verification output, or signal history on demand. See [docs/rest-api.md — Summary views](docs/rest-api.md#summary-views-viewsummary).
 - **Search index**: Delete `<project-root>/.bobbit/state/search.db` and restart to rebuild.
+- **Sidebar child loading**: If expanding a goal shows no children, check: (1) the server BFS enrichment in the sessions endpoint seeds from live goal IDs and live session IDs — not just `delegateOf` chains but also `teamGoalId`, `teamLeadSessionId`, and `goalId` relationships; (2) the archived goals endpoint (`GET /api/goals?archived=true`) returns an `archivedSessions` field with affiliated sessions; (3) the on-demand fallback in `renderGoalGroup` fires for edge cases (guarded by `_goalChildrenFetched` Set to avoid repeated calls). See also the "Paginated archives" section in [docs/debugging.md](docs/debugging.md).
 - **Auto-nudge flooding**: If a team lead receives duplicate nudges after sleep/wake, check `nudgePending` state in TeamManager. The guard prevents re-enqueuing while a nudge is already pending — cleared on `agent_start`.
 
 ## Git conventions
