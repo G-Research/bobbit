@@ -267,47 +267,53 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 
 ---
 
-## PI-10: Steer (interrupt with new message)
+## PI-10: Steer (queue then promote)
 
-**Preconditions:** Active session, agent is currently streaming a response.
+**Preconditions:** Active session, agent is currently streaming a response (e.g. multi-step tool use).
 
 **Steps and expectations:**
-1. While the agent is streaming, type a new message in the textarea.
+1. While the agent is streaming, type a new message in the textarea and press Enter.
    - Textarea is still editable during streaming.
-2. Press Enter (or click Send).
-   - The message is queued as a steer.
-   - A queued pill appears below the textarea with amber styling (`bg-amber-500/10 border-amber-500/30`).
-   - The pill shows a Zap icon and "Steer" button, indicating it will interrupt the current turn.
-3. The steer is delivered to the agent at the next tool boundary.
-   - The agent's current response may be interrupted.
-   - The steer message appears as a user turn in chat, visually marked as a steer.
-   - The agent continues with the new direction.
-4. Both the partial response, the steer, and the new response are visible in chat in chronological order.
-5. Steered pills show a "Sent" indicator (Zap icon + "Sent" text in amber) once dispatched.
+   - The message is queued (not steered yet).
+   - A queued pill appears below the textarea with muted styling (`bg-muted/50 border-border/50`).
+   - The pill shows: drag handle, truncated text, **Steer** button, Edit button, Remove button.
+2. Click the **Steer** button on the pill.
+   - The pill switches to amber styling (`bg-amber-500/10 border-amber-500/30`).
+   - The pill shows a "Sent" indicator (Zap icon + "Sent" text in amber).
    - Dispatched steer pills are not draggable, editable, or removable.
+   - The steer is dispatched to the agent immediately via `rpcClient.steer()`.
+3. At the next tool boundary (between tool calls, not mid-token), the agent receives the steer.
+   - The agent's current multi-step work is interrupted with the new context.
+   - The steer message appears as a user turn in chat.
+   - The agent continues incorporating the steer content.
+4. Both the partial response, the steer, and the new response are visible in chat in chronological order.
 
-**Coverage:** covered (queue-ui.spec.ts E2E, steer-midturn.spec.ts API, message-editor-queue.spec.ts unit)
+**Coverage:** covered (steer-midturn.spec.ts API — steer_queued mid-turn delivery, queue-ui.spec.ts E2E, message-editor-queue.spec.ts unit)
 
 ---
 
-## PI-10b: Batch multiple steers
+## PI-10b: Batch multiple steers from queue
 
-**Preconditions:** Active session, agent is currently streaming a response.
+**Preconditions:** Active session, agent is currently streaming a response (e.g. multi-step tool use).
 
 **Steps and expectations:**
-1. While the agent is streaming, send a steer message (type + Enter).
-   - First steer pill appears with amber styling.
-2. Before the agent acknowledges the first steer, send a second steer.
-   - Second pill appears below the first.
-3. Send a third steer immediately after.
-   - Three pills visible in order.
-4. Steers are batched and delivered to the agent together at the next tool boundary.
-   - Agent receives the combined context of all steers, not just the last one.
+1. While the agent is streaming, type a message and press Enter.
+   - First queued pill appears with muted styling.
+2. Type a second message and press Enter.
+   - Second queued pill appears below the first.
+3. Click **Steer** on pill 1.
+   - Pill 1 switches to amber "Sent" styling.
+   - Pill 1 moves to the front of the queue (steered messages sort before non-steered).
+   - The steer is dispatched to the agent immediately.
+4. Click **Steer** on pill 2.
+   - Pill 2 switches to amber "Sent" styling.
+   - The steer is dispatched to the agent immediately.
+5. At the next tool boundary, the agent receives both steers as a batched message.
+   - Agent receives the combined context of both steers (joined with newlines), not just the last one.
    - No steers are dropped or lost.
-5. Chat shows the correct chronological order: partial agent response, steer 1, steer 2, steer 3, then the agent's new response.
-6. All dispatched steer pills show the "Sent" indicator.
+6. Chat shows the correct chronological order: partial agent response, steer 1, steer 2, then the agent's new response.
 
-**Coverage:** covered (queue-ui.spec.ts E2E, queue-dispatch.spec.ts unit — batch steer delivery)
+**Coverage:** covered (steer-midturn.spec.ts API, queue-ui.spec.ts E2E, queue-dispatch.spec.ts unit — batch steer delivery)
 
 ---
 
@@ -650,7 +656,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 
 **Coverage:** tests/queue-dispatch.spec.ts
 
-> **Implementation note:** Immediate dispatch was removed from `steerQueued()` per spec. Promoted messages now reorder in the queue and dispatch via `drainQueue()` after `agent_end` or abort+restart, batched via `dequeueAllSteered()`. Live steer (direct typing while streaming) uses a separate path (`rpcClient.steer()` via WS "steer" command) and is unaffected.
+> **Implementation note:** `steerQueued()` dispatches steered messages immediately via `rpcClient.steer()` when the agent is streaming (PI-10 fix). All steered+undispatched messages are batched and sent together. If the agent is idle, steered messages reorder in the queue and dispatch via `drainQueue()` after `agent_end` or abort+restart.
 
 ---
 

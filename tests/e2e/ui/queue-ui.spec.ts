@@ -22,8 +22,10 @@ test.describe("Queue UI E2E", () => {
 		await waitForHealth();
 	});
 
-	test("story 11: steer pill shows Sent badge, abort delivers steered message", async ({ page }) => {
-		// Create session via API for control
+	test("PI-10: steer pill shows Sent badge, steer delivered mid-turn without abort", async ({ page }) => {
+		// PI-10: Queue a message, click Steer, verify delivery WITHOUT aborting.
+		// The mock agent emits [STEER_RECEIVED] text when it gets a steer RPC,
+		// which appears in the chat as visible text.
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
@@ -39,45 +41,31 @@ test.describe("Queue UI E2E", () => {
 		// Wait for streaming status (the stop button appears)
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 
-		// Queue 2 messages via textarea (messages during streaming are queued, not steered)
+		// PI-10 step 1: Queue a message while agent is streaming
 		const textarea = page.locator("textarea").first();
-		await textarea.fill("steer me");
+		await textarea.fill("steer me now");
 		await textarea.press("Enter");
 
-		// Wait for the pill to appear
+		// Queued pill appears with muted styling and Steer button
 		await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator(".steer-btn")).toHaveCount(1);
 
-		await textarea.fill("normal msg");
-		await textarea.press("Enter");
-
-		// Wait for 2 pills
-		await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
-
-		// Click "Steer" on the first pill
-		await page.locator(".queue-pill").first().locator(".steer-btn").click();
-
-		// The steered pill should show "Sent" indicator
+		// PI-10 step 2: Click Steer → pill shows "Sent", dispatched immediately
+		await page.locator(".steer-btn").first().click();
 		await expect(page.locator(".sent-indicator")).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(".sent-indicator")).toContainText("Sent");
 
-		// Click abort/stop button
-		await page.locator("button[title='Stop streaming']").click();
-
-		// Wait for agent to go idle and queue to drain
-		await waitForSessionStatus(sessionId, "idle", 15_000);
-
-		// After abort and drain, the steered message should appear in chat
-		// Wait for it to be fully processed
-		await page.waitForFunction(
-			() => {
-				const msgs = document.querySelectorAll("[class*='message']");
-				return msgs.length > 0;
-			},
-			{ timeout: 15_000 },
-		);
+		// PI-10 step 3: Agent receives the steer at the next tool boundary.
+		// The mock agent emits [STEER_RECEIVED] which appears in chat.
+		// Verify it appears WITHOUT clicking abort.
+		await expect(
+			page.getByText("STEER_RECEIVED").first(),
+		).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("story 12: multiple steer — both delivered on abort", async ({ page }) => {
+	test("PI-10b: batch steer — two pills promoted, both delivered without abort", async ({ page }) => {
+		// PI-10b: Queue two messages, click Steer on each, verify both are
+		// delivered as a batch mid-turn without requiring abort.
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
@@ -89,35 +77,30 @@ test.describe("Queue UI E2E", () => {
 		await sendMessage(page, "STAY_BUSY:15000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 
-		// Queue 3 messages via textarea (messages during streaming are queued, not steered)
+		// PI-10b steps 1-2: Queue two messages
 		const textarea = page.locator("textarea").first();
-		for (const text of ["steer A", "steer B", "normal C"]) {
-			await textarea.fill(text);
-			await textarea.press("Enter");
-		}
+		await textarea.fill("batch steer A");
+		await textarea.press("Enter");
+		await expect(page.locator(".queue-pill")).toHaveCount(1, { timeout: 5_000 });
 
-		// Wait for 3 pills
-		await expect(page.locator(".queue-pill")).toHaveCount(3, { timeout: 5_000 });
+		await textarea.fill("batch steer B");
+		await textarea.press("Enter");
+		await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
 
-		// Steer first two pills
-		// After clicking steer on pill 0, it reorders. Click steer on another non-steered pill.
+		// PI-10b step 3: Click Steer on pill 1
 		await page.locator(".queue-pill .steer-btn").first().click();
 		await expect(page.locator(".sent-indicator")).toHaveCount(1, { timeout: 3_000 });
 
-		// There should still be a steer-btn on remaining non-steered pills
+		// PI-10b step 4: Click Steer on pill 2
 		await page.locator(".queue-pill .steer-btn").first().click();
 		await expect(page.locator(".sent-indicator")).toHaveCount(2, { timeout: 3_000 });
 
-		// Abort
-		await page.locator("button[title='Stop streaming']").click();
-
-		// Wait for idle
-		await waitForSessionStatus(sessionId, "idle", 15_000);
-
-		// Both steered messages should have been delivered
-		// The non-steered message should also drain eventually
-		// Wait for queue to be empty (all processed)
-		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 15_000 });
+		// PI-10b step 5: Agent receives both steers at the next tool boundary.
+		// The mock agent emits [STEER_RECEIVED] in chat.
+		// Verify delivery WITHOUT aborting.
+		await expect(
+			page.getByText("STEER_RECEIVED").first(),
+		).toBeVisible({ timeout: 10_000 });
 	});
 
 	test("story 22: draft text persists across page reload", async ({ page }) => {

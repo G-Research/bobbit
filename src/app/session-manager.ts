@@ -461,6 +461,12 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 	_draftSessionId = sessionId;
 	// Restore send gen from sessionStorage (survives HMR/reload)
 	_draftSendGen = parseInt(sessionStorage.getItem(`draft-send-gen-${sessionId}`) || "0", 10);
+	// Start _draftGen above _draftSendGen so new saves are never rejected as
+	// stale. _teardownDraftHandlers resets _draftGen to 0, but _draftSendGen
+	// persists in sessionStorage — without this, new drafts after a session
+	// switch get gen=1 which is <= sendGen, causing them to be silently
+	// discarded on load (PI-04b).
+	_draftGen = _draftSendGen;
 
 	// Restore existing draft from server
 	(async () => {
@@ -484,13 +490,12 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 				text = draft;
 			} else if (draft && typeof draft === 'object' && 'text' in (draft as any)) {
 				const d = draft as { text: string; gen?: number };
-				// If this draft's gen is <= the last send gen, it's stale (from
-				// a save that raced with a send). Ignore it.
-				if (d.gen != null && d.gen <= _draftSendGen) {
-					text = null;
-				} else {
-					text = d.text;
-				}
+				// If the draft text is non-empty, restore it. The tombstone
+				// mechanism (empty text saved on send) is sufficient to prevent
+				// stale resurrection — a send always overwrites the draft with
+				// empty text. Any non-empty text on the server is a real draft
+				// the user typed after their last send.
+				text = d.text || null;
 			}
 
 			if (text) {
@@ -546,6 +551,26 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 				sessionStorage.setItem(`draft-send-gen-${_draftSessionId}`, String(gen));
 				saveDraftToServer(_draftSessionId, 'prompt', { text: "", gen });
 			}
+		});
+
+		// Flush draft on page unload (hard refresh, tab close) via sendBeacon.
+		// Regular fetch is killed by the browser during unload, so we use
+		// sendBeacon which is guaranteed to be sent. This fixes PI-04b draft
+		// loss on Ctrl+R / F5 when the debounce hasn't fired yet.
+		window.addEventListener("beforeunload", () => {
+			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+			if (!_draftSessionId) return;
+			const editor = document.querySelector("message-editor") as any;
+			const val: string = editor?.value ?? "";
+			if (!val.trim()) return;
+			const gen = ++_draftGen;
+			const url = localStorage.getItem("gateway.url") || window.location.origin;
+			const token = localStorage.getItem("gateway.token") || "";
+			const body = JSON.stringify({ type: "prompt", data: { text: val, gen } });
+			const blob = new Blob([body], { type: "application/json" });
+			// sendBeacon doesn't support custom headers, so pass token as query param.
+			// The server already accepts ?token= for auth (used by WebSocket connections).
+			navigator.sendBeacon(`${url}/api/sessions/${_draftSessionId}/draft?token=${encodeURIComponent(token)}`, blob);
 		});
 
 		_draftListenersInstalled = true;
