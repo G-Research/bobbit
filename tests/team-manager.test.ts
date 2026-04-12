@@ -141,6 +141,7 @@ function createMockTaskManager() {
 	const tasks: any[] = [];
 	return {
 		getTasksByGoal: (_goalId: string) => tasks,
+		getTasksForSession: (_sessionId: string) => tasks.filter((t: any) => t.assignedSessionId === _sessionId),
 		createTask: (_goalId: string, task: any) => { tasks.push(task); return task; },
 		getTask: (id: string) => tasks.find((t: any) => t.id === id),
 		updateTask: (_id: string, _updates: any) => true,
@@ -666,6 +667,86 @@ describe("TeamManager", () => {
 			assert.equal(sm._sessions.has("session-0"), true); // team lead alive
 			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
 			assert.equal(goal.state, "complete");
+		});
+	});
+
+	// ---------------------------------------------------------------------------
+	// Tests: idle nudge sleep guard (reproducing bug)
+	// ---------------------------------------------------------------------------
+
+	describe("idle nudge sleep guard", () => {
+		it("should allow multiple nudges when no pending guard exists (reproducing bug)", async (t) => {
+			t.mock.timers.enable({ apis: ["setInterval"] });
+
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+
+			// Add enqueuePrompt to the mock session manager (not present by default)
+			const enqueuePrompt = mock.fn(async (_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+
+			// Capture onEvent callbacks so we can simulate lifecycle events
+			const eventCallbacks: Array<(event: any) => void> = [];
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (
+				cwd: string,
+				args?: string[],
+				goalId?: string,
+				goalAssistant?: boolean,
+				opts?: any,
+			) => {
+				const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+				// Replace onEvent to capture the callback
+				session.rpcClient.onEvent = mock.fn((cb: any) => {
+					eventCallbacks.push(cb);
+					return () => {};
+				});
+				return session;
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			// Get the team lead session and inject a fake active worker
+			const entry = (team as any).teams.get("goal-1")!;
+			const workerSession = {
+				id: "worker-1",
+				status: "streaming",
+				cwd: "/tmp/worker",
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			};
+			sm._sessions.set("worker-1", workerSession);
+			entry.agents.push({
+				sessionId: "worker-1",
+				role: "coder",
+				task: "work on feature",
+				createdAt: Date.now(),
+			});
+
+			// Set the team lead to idle so shouldSkipNudge() passes
+			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
+			tlSession.status = "idle";
+
+			// Simulate agent_end on the team lead — this triggers startIdleNudgeTimer()
+			for (const cb of eventCallbacks) {
+				cb({ type: "agent_end" });
+			}
+
+			// Advance time by 5 hours — the 10-min interval should fire ~30 times
+			t.mock.timers.tick(5 * 60 * 60 * 1000);
+
+			// BUG: without a pending guard, every tick enqueues a nudge
+			const callCount = enqueuePrompt.mock.callCount();
+			assert.ok(
+				callCount > 1,
+				`Expected enqueuePrompt to be called more than once (bug reproduction), got ${callCount}`,
+			);
+			console.log(`[test] enqueuePrompt called ${callCount} times in 5h (expected ~30 without guard)`);
+
+			t.mock.timers.reset();
 		});
 	});
 
