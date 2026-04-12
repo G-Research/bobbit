@@ -137,6 +137,8 @@ export class TeamManager {
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
 	/** Separate timer for nudging when no workers remain (goalId → timer). */
 	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
+	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
+	private nudgePending = new Map<string, boolean>();
 	private verificationHarness?: VerificationHarness;
 	/** Delay before nudging the idle team lead when workers are active (ms). */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
@@ -345,6 +347,7 @@ export class TeamManager {
 			clearInterval(nwTimer);
 			this.noWorkersNudgeTimers.delete(goalId);
 		}
+		this.nudgePending.delete(goalId);
 	}
 
 	/**
@@ -361,6 +364,7 @@ export class TeamManager {
 		const tl = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!tl || tl.status !== "idle") return true;
 		if (this.verificationHarness?.getActiveVerifications(goalId).length) return true;
+		if (this.nudgePending.get(goalId)) return true;
 		return false;
 	}
 
@@ -404,6 +408,7 @@ export class TeamManager {
 				`Check your progress — use task_list and gate_list to review what's done and what remains. ` +
 				`If there's more work to do, spawn agents or do it yourself. ` +
 				`If all work is complete and gates are passed, call team_complete to finish the goal.`;
+			this.nudgePending.set(goalId, true);
 			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
 			console.log(`[team-manager] Sent no-workers idle nudge to team lead for goal ${goalId}`);
 
@@ -439,6 +444,7 @@ export class TeamManager {
 				`If an agent is idle and their work looks complete, mark their task as done and dismiss them. ` +
 				`If idle agents have more to do, prompt them to continue.`;
 
+			this.nudgePending.set(goalId, true);
 			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
 			console.log(`[team-manager] Sent idle nudge to team lead for goal ${goalId}`);
 		}, TeamManager.IDLE_NUDGE_DELAY_MS);
@@ -463,6 +469,7 @@ export class TeamManager {
 			if (event.type === "agent_end") {
 				this.startIdleNudgeTimer(goalId);
 			} else if (event.type === "agent_start") {
+				this.nudgePending.delete(goalId);
 				this.clearIdleNudgeTimer(goalId);
 			}
 		});

@@ -747,6 +747,58 @@ describe("TeamManager", () => {
 
 			t.mock.timers.reset();
 		});
+
+		it("should resume nudging after agent processes the pending nudge", async (t) => {
+			t.mock.timers.enable({ apis: ["setInterval"] });
+
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+
+			const eventCallbacks: Array<(event: any) => void> = [];
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+				session.rpcClient.onEvent = mock.fn((cb: any) => { eventCallbacks.push(cb); return () => {}; });
+				return session;
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			const entry = (team as any).teams.get("goal-1")!;
+			const workerSession = {
+				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			};
+			sm._sessions.set("worker-1", workerSession);
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+
+			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
+			tlSession.status = "idle";
+
+			// Trigger agent_end to start nudge timer
+			for (const cb of eventCallbacks) cb({ type: "agent_end" });
+
+			// Advance 5 hours — should get exactly 1 nudge (pending guard blocks the rest)
+			t.mock.timers.tick(5 * 60 * 60 * 1000);
+			assert.equal(enqueuePrompt.mock.callCount(), 1, "First batch: exactly 1 nudge");
+
+			// Simulate agent processing the nudge: agent_start then agent_end
+			for (const cb of eventCallbacks) cb({ type: "agent_start" });
+			tlSession.status = "idle";
+			for (const cb of eventCallbacks) cb({ type: "agent_end" });
+
+			// Advance another 15 minutes — should get a second nudge
+			t.mock.timers.tick(15 * 60 * 1000);
+			assert.ok(enqueuePrompt.mock.callCount() >= 2, "Second nudge should fire after agent processes first");
+
+			t.mock.timers.reset();
+		});
 	});
 
 	// ---------------------------------------------------------------------------
