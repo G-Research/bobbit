@@ -165,6 +165,7 @@ When a sandbox container is killed or removed, sessions auto-recover. Use this c
 - Cursor based on `archivedAt` timestamp
 - Missing items? Check `archivedAt` is set (older items may lack it)
 - Count mismatch? Verify total from paginated response metadata
+- Archived delegates disappearing on "Show Archived" toggle? The `?include=archived` path returns `archivedDelegates` via BFS enrichment — if they're missing, check that the server is running the delegate BFS on the archived response and the client is merging them into `state.archivedSessions`
 
 ## Slash skill expansion
 
