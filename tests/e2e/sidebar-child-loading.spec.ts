@@ -12,7 +12,7 @@
  * Both tests are expected to FAIL against the current (unfixed) codebase.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, createSession, createGoal, deleteGoal, nonGitCwd } from "./e2e-setup.js";
 
 /** Terminate (archive) a session via DELETE. */
 async function terminateSession(id: string): Promise<void> {
@@ -75,13 +75,8 @@ test("archivedDelegates includes archived team members with teamLeadSessionId", 
 // ---------------------------------------------------------------------------
 
 test("archived goals endpoint returns affiliated archivedSessions", async () => {
-	// 1. Create a goal
-	const goalResp = await apiFetch("/api/goals", {
-		method: "POST",
-		body: JSON.stringify({ title: "Child Loading Test Goal", cwd: nonGitCwd() }),
-	});
-	expect(goalResp.status).toBe(201);
-	const goal = await goalResp.json();
+	// 1. Create a goal (use helper which sets worktree: false for test env)
+	const goal = await createGoal({ title: "Child Loading Test Goal" });
 	const goalId = goal.id;
 
 	// 2. Create a session associated with this goal
@@ -91,8 +86,7 @@ test("archived goals endpoint returns affiliated archivedSessions", async () => 
 	await terminateSession(sessionId);
 
 	// 4. Archive the goal via DELETE
-	const delResp = await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
-	expect(delResp.ok, `Failed to archive goal: ${delResp.status}`).toBe(true);
+	await deleteGoal(goalId);
 
 	// 5. Fetch archived goals
 	const archResp = await apiFetch("/api/goals?archived=true");
