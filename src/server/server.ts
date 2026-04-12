@@ -2187,18 +2187,18 @@ async function handleApiRoute(
 					}
 				}
 			}
-			// BFS walk delegateOf chains from affiliated sessions
-			const delegateQueue = affiliatedSessions.map(s => s.id);
-			while (delegateQueue.length > 0) {
-				const pid = delegateQueue.shift()!;
-				for (const ctx of projectContextManager.all()) {
-					for (const s of ctx.sessionStore.getArchived()) {
-						if (!seenSessionIds.has(s.id) && s.delegateOf === pid) {
-							seenSessionIds.add(s.id);
-							affiliatedSessions.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
-							delegateQueue.push(s.id);
-						}
-					}
+			// BFS walk delegate/team chains from affiliated sessions
+			const allArchivedForGoalsBfs: any[] = [];
+			for (const ctx of projectContextManager.all()) {
+				for (const s of ctx.sessionStore.getArchived()) {
+					allArchivedForGoalsBfs.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+				}
+			}
+			const delegateEnriched = bfsEnrichArchived(affiliatedSessions.map(s => s.id), allArchivedForGoalsBfs);
+			for (const s of delegateEnriched) {
+				if (!seenSessionIds.has(s.id)) {
+					seenSessionIds.add(s.id);
+					affiliatedSessions.push(s);
 				}
 			}
 
@@ -4390,6 +4390,9 @@ async function handleApiRoute(
 					title: s.title,
 					accessory: s.accessory,
 					taskId: s.taskId,
+					teamLeadSessionId: s.teamLeadSessionId,
+					teamGoalId: s.teamGoalId,
+					delegateOf: s.delegateOf,
 				}));
 		}
 

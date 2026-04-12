@@ -14,6 +14,7 @@ import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
+import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -264,6 +265,7 @@ export function archivedSessionsLoaded(): boolean {
 export function clearArchivedSessionsState(): void {
 	_archivedSessionsLoaded = false;
 	state.archivedSessions = [];
+	clearGoalChildrenFetchedCache();
 }
 
 /** Fetch archived sessions from the API (paginated). */

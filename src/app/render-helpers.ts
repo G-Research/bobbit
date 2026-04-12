@@ -30,6 +30,11 @@ import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 /** Guard set to prevent repeated on-demand child fetches per goal. */
 const _goalChildrenFetched = new Set<string>();
 
+/** Clear the on-demand child fetch guard (called when archived state is reset). */
+export function clearGoalChildrenFetchedCache(): void {
+	_goalChildrenFetched.clear();
+}
+
 export function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
