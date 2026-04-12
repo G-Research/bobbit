@@ -675,7 +675,7 @@ describe("TeamManager", () => {
 	// ---------------------------------------------------------------------------
 
 	describe("idle nudge sleep guard", () => {
-		it("should allow multiple nudges when no pending guard exists (reproducing bug)", async (t) => {
+		it("should only enqueue one nudge after sleep wake (pending guard)", async (t) => {
 			t.mock.timers.enable({ apis: ["setInterval"] });
 
 			const goals = new Map<string, MockGoal>();
@@ -684,7 +684,7 @@ describe("TeamManager", () => {
 			const sm = createMockSessionManager(goals);
 
 			// Add enqueuePrompt to the mock session manager (not present by default)
-			const enqueuePrompt = mock.fn(async (_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
 			sm.enqueuePrompt = enqueuePrompt;
 
 			// Capture onEvent callbacks so we can simulate lifecycle events
@@ -735,16 +735,15 @@ describe("TeamManager", () => {
 				cb({ type: "agent_end" });
 			}
 
-			// Advance time by 5 hours — the 10-min interval should fire ~30 times
+			// Advance time by 5 hours — simulates a sleep/wake where all overdue intervals fire
 			t.mock.timers.tick(5 * 60 * 60 * 1000);
 
-			// BUG: without a pending guard, every tick enqueues a nudge
+			// CORRECT behavior: only ONE nudge should be enqueued, not ~30
 			const callCount = enqueuePrompt.mock.callCount();
 			assert.ok(
-				callCount > 1,
-				`Expected enqueuePrompt to be called more than once (bug reproduction), got ${callCount}`,
+				callCount <= 1,
+				`Expected enqueuePrompt to be called at most once (pending guard), but got ${callCount}`,
 			);
-			console.log(`[test] enqueuePrompt called ${callCount} times in 5h (expected ~30 without guard)`);
 
 			t.mock.timers.reset();
 		});
