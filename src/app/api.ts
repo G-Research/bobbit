@@ -269,8 +269,8 @@ export function clearArchivedSessionsState(): void {
 /** Fetch archived sessions from the API (paginated). */
 export async function fetchArchivedSessions(): Promise<void> {
 	_archivedSessionsLoaded = true;
-	// Reset pagination state and load first page
-	state.archivedSessions = [];
+	// Reset pagination state and load first page — but don't clear archivedSessions
+	// to preserve BFS-enriched delegates from the live poll
 	state.archivedSessionsCursor = null;
 	state.archivedSessionsHasMore = false;
 	state.archivedSessionsTotal = 0;
@@ -433,6 +433,19 @@ export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: numb
 		state.archivedGoalsTotal = data.total ?? goals.length;
 		state.archivedGoalsHasMore = data.hasMore ?? false;
 		state.archivedGoalsCursor = data.nextCursor ?? null;
+
+		// Merge affiliated sessions returned with archived goals
+		const affiliatedSessions: GatewaySession[] = data.archivedSessions || [];
+		if (affiliatedSessions.length > 0) {
+			const existingIds = new Set(state.archivedSessions.map(s => s.id));
+			for (const s of affiliatedSessions) {
+				if (!existingIds.has(s.id)) {
+					state.archivedSessions.push(s);
+					existingIds.add(s.id);
+				}
+			}
+		}
+
 		renderApp();
 	} catch {
 		// Silently fail
@@ -453,7 +466,12 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 			const newSessions = sessions.filter(s => !existingIds.has(s.id));
 			state.archivedSessions = [...state.archivedSessions, ...newSessions];
 		} else {
-			state.archivedSessions = sessions;
+			// Merge: preserve BFS-enriched delegates from live poll, update with fresh server data
+			const serverIds = new Set(sessions.map(s => s.id));
+			state.archivedSessions = [
+				...state.archivedSessions.filter(s => !serverIds.has(s.id)),
+				...sessions,
+			];
 		}
 
 		// Merge archived delegates from the response (BFS-enriched by server)

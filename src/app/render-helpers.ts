@@ -21,11 +21,14 @@ import { statusBobbit } from "./session-colors.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal } from "./api.js";
+import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 
 // ============================================================================
 // FORMATTING
 // ============================================================================
+
+/** Guard set to prevent repeated on-demand child fetches per goal. */
+const _goalChildrenFetched = new Set<string>();
 
 export function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -491,6 +494,37 @@ export function renderGoalGroup(goal: Goal) {
 	const hasActiveTeam = isTeamGoal && goalSessions.some((s) => s.role === "team-lead" && s.status !== "terminated");
 	const isLoading = teamLoading.has(goal.id);
 	const isPreparing = goal.setupStatus === "preparing";
+
+	// On-demand fetch for expanded goals with no visible children
+	if (isExpanded && isTeamGoal && goalSessions.length === 0 && !_goalChildrenFetched.has(goal.id)) {
+		const archivedChildren = state.archivedSessions.filter(s => s.teamGoalId === goal.id);
+		if (archivedChildren.length === 0) {
+			_goalChildrenFetched.add(goal.id);
+			gatewayFetch(`/api/goals/${goal.id}/team/agents?include=archived`)
+				.then(r => r.ok ? r.json() : null)
+				.then(data => {
+					if (data?.agents?.length > 0) {
+						const existingIds = new Set(state.archivedSessions.map(s => s.id));
+						for (const agent of data.agents) {
+							if (!existingIds.has(agent.sessionId)) {
+								state.archivedSessions.push({
+									id: agent.sessionId,
+									title: agent.title || agent.role,
+									role: agent.role,
+									status: "archived",
+									teamGoalId: goal.id,
+									teamLeadSessionId: agent.teamLeadSessionId,
+									createdAt: agent.createdAt || Date.now(),
+									archivedAt: agent.archivedAt,
+								} as any);
+							}
+						}
+						renderApp();
+					}
+				})
+				.catch(() => {});
+		}
+	}
 
 	const toggleExpand = () => {
 		if (isExpanded) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id);
