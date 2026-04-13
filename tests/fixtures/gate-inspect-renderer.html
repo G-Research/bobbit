@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GateInspectRenderer Test Fixture</title>
+</head>
+<body>
+<div id="container"></div>
+<script>
+/**
+ * Test fixture for GateInspectRenderer logic.
+ *
+ * Mirrors the rendering decisions in GateInspectRenderer.ts:
+ * - getToolState() resolves to inprogress/complete/error/warning
+ * - Three section branches: content, verification, signals
+ * - Verification step expand/collapse via DOM-direct manipulation
+ * - Signal field names: verdict (not status), timestamp (not signalledAt)
+ * - Signal count pluralization
+ */
+
+function getToolState(result, isStreaming) {
+	if (!result) return isStreaming ? "inprogress" : "complete";
+	if (result.isError) {
+		const text = (result.content || []).filter(c => c.type === "text").map(c => c.text).join("");
+		if (text.includes("Skipped due to queued user message")) return "warning";
+		return "error";
+	}
+	return "complete";
+}
+
+function getResult(result) {
+	const text = (result && result.content || [])
+		.filter(c => c.type === "text")
+		.map(c => c.text)
+		.join("\n") || "";
+	let data = null;
+	try { data = JSON.parse(text); } catch(e) {}
+	return { text, data };
+}
+
+function isSkippedToolResult(result) {
+	if (!result || !result.isError) return false;
+	const text = (result.content || []).filter(c => c.type === "text").map(c => c.text).join("");
+	return text.includes("Skipped due to queued user message");
+}
+
+function deriveStepStatus(step) {
+	if (step.skipped) return "skipped";
+	if (step.passed === true) return "passed";
+	if (step.passed === false) return "failed";
+	return "running";
+}
+
+/**
+ * Mirrors GateInspectRenderer.render() — returns rendering decision metadata.
+ */
+function renderInspect(params, result, isStreaming) {
+	const state = getToolState(result, isStreaming);
+	const gateId = (params && params.gate_id) || "gate";
+
+	// Loading state
+	if (!result) {
+		return { branch: "loading", state, gateId };
+	}
+
+	// Error/skipped state
+	const { data, text } = getResult(result);
+	if (result.isError) {
+		const skipped = isSkippedToolResult(result);
+		return { branch: skipped ? "skipped" : "error", state, gateId, text };
+	}
+
+	const section = (data && data.section) || (params && params.section) || "content";
+	if (section === "content") return renderContent(state, gateId, data);
+	if (section === "verification") return renderVerification(state, gateId, data);
+	if (section === "signals") return renderSignals(state, gateId, data);
+	return renderContent(state, gateId, data);
+}
+
+function renderContent(state, gateId, data) {
+	const signalIndex = (data && data.signalIndex != null) ? data.signalIndex : "?";
+	const signalId = (data && data.signalId) || "";
+	const content = data && data.text;
+	return {
+		branch: "content",
+		state, gateId,
+		signalIndex, signalId,
+		hasContent: !!content,
+		contentText: content || null,
+	};
+}
+
+function renderVerification(state, gateId, data) {
+	const signalIndex = (data && data.signalIndex != null) ? data.signalIndex : "?";
+	const signalId = (data && data.signalId) || "";
+	const steps = (data && data.steps) || [];
+
+	const stepInfos = steps.map(function(step) {
+		const status = deriveStepStatus(step);
+		const isFailed = status === "failed";
+		return {
+			name: step.name,
+			type: step.type,
+			status: status,
+			hasOutput: !!step.output,
+			isFailed: isFailed,
+			startsExpanded: isFailed,
+			durationMs: step.duration_ms,
+		};
+	});
+
+	return {
+		branch: "verification",
+		state, gateId,
+		signalIndex, signalId,
+		stepCount: steps.length,
+		steps: stepInfos,
+	};
+}
+
+function renderSignals(state, gateId, data) {
+	const signals = (data && data.signals) || [];
+	const count = signals.length;
+	const pluralized = count + " signal" + (count !== 1 ? "s" : "");
+	const isCollapsible = count > 5;
+
+	// Mirror the field names used in the renderer
+	const rows = signals.map(function(s) {
+		return {
+			index: s.index,
+			// BUG FIX verification: these must use `verdict` and `timestamp`
+			verdict: s.verdict,
+			timestamp: s.timestamp,
+			hasContent: !!s.hasContent,
+			sessionId: s.sessionId ? s.sessionId.slice(0, 8) : null,
+		};
+	});
+
+	return {
+		branch: "signals",
+		state, gateId,
+		count: count,
+		pluralized: pluralized,
+		isCollapsible: isCollapsible,
+		rows: rows,
+	};
+}
+
+/**
+ * Build a live DOM for verification steps to test expand/collapse behavior.
+ * Mirrors the DOM structure from GateInspectRenderer._renderVerification().
+ */
+function buildVerificationDOM(steps) {
+	const container = document.getElementById("container");
+	container.innerHTML = "";
+	const wrapper = document.createElement("div");
+
+	steps.forEach(function(step) {
+		const status = deriveStepStatus(step);
+		const isFailed = status === "failed";
+		const hasOutput = !!step.output;
+
+		const card = document.createElement("div");
+		card.className = "border border-border rounded text-sm";
+
+		const header = document.createElement("div");
+		header.className = "p-2 flex items-center gap-2" + (hasOutput ? " cursor-pointer" : "");
+
+		const nameSpan = document.createElement("span");
+		nameSpan.textContent = step.name;
+		header.appendChild(nameSpan);
+
+		if (hasOutput) {
+			const chevron = document.createElement("span");
+			chevron.setAttribute("data-step-chevron", "");
+			chevron.textContent = isFailed ? "▴" : "▾";
+			header.appendChild(chevron);
+
+			header.addEventListener("click", function(e) {
+				var parentCard = e.currentTarget.parentElement;
+				var output = parentCard.querySelector("[data-step-output]");
+				var chev = parentCard.querySelector("[data-step-chevron]");
+				if (!output) return;
+				var isHidden = output.classList.contains("hidden");
+				output.classList.toggle("hidden");
+				if (chev) chev.textContent = isHidden ? "▴" : "▾";
+			});
+		}
+
+		card.appendChild(header);
+
+		if (hasOutput) {
+			const output = document.createElement("pre");
+			output.setAttribute("data-step-output", "");
+			output.className = (isFailed ? "" : "hidden") + " text-xs";
+			output.textContent = step.output;
+			card.appendChild(output);
+		}
+
+		wrapper.appendChild(card);
+	});
+
+	container.appendChild(wrapper);
+	return wrapper;
+}
+
+// Expose
+window.renderInspect = renderInspect;
+window.buildVerificationDOM = buildVerificationDOM;
+window._testReady = true;
+</script>
+</body>
+</html>

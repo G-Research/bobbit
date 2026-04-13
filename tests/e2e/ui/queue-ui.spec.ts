@@ -243,6 +243,9 @@ test.describe("Queue UI E2E", () => {
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
+		// Wait for draft restore cycle to settle before asserting
+		await page.waitForTimeout(1_000);
+
 		// Verify textarea is empty — draft was cleared on send
 		await expect(page.locator("textarea").first()).toHaveValue("", { timeout: 10_000 });
 	});
