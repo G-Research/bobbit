@@ -11,7 +11,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette } from "./session-manager.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
@@ -57,9 +57,16 @@ async function waitForGateway(url: string, token: string): Promise<void> {
 // ============================================================================
 
 let handlingHashChange = false;
+let pendingHashChange = false;
 
 async function handleHashChange(): Promise<void> {
-	if (handlingHashChange) return;
+	if (handlingHashChange) {
+		// Another hash change arrived while we're still processing the previous one.
+		// Flag it so we re-process after the current handler finishes. This ensures
+		// rapid switches (A→B→A) don't silently drop the final destination.
+		pendingHashChange = true;
+		return;
+	}
 	handlingHashChange = true;
 
 	try {
@@ -71,6 +78,15 @@ async function handleHashChange(): Promise<void> {
 			state.appView = "disconnected";
 			renderApp();
 			return;
+		}
+
+		// Flush and tear down draft handlers when leaving a session view.
+		// Session-to-session switches handle this via selectSession(), but
+		// navigation to non-session views (settings, roles, dashboard, etc.)
+		// bypasses selectSession entirely, leaving the draft unflushed and
+		// the editor content lost when the DOM is replaced (CT-02, PI-04f).
+		if (route.view !== "session") {
+			flushAndTeardownDraft();
 		}
 
 		if (route.view === "goal" && route.goalId) {
@@ -294,6 +310,13 @@ async function handleHashChange(): Promise<void> {
 		}
 	} finally {
 		handlingHashChange = false;
+		// If another hash change arrived while we were processing, handle it now.
+		// Read the current hash (not the one that was pending) — we always want
+		// the latest state. This prevents rapid A→B→A from getting stuck on B.
+		if (pendingHashChange) {
+			pendingHashChange = false;
+			handleHashChange();
+		}
 	}
 }
 

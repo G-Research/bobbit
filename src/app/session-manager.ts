@@ -444,6 +444,15 @@ export function flushPendingDraft(): void {
 	_flushDraft();
 }
 
+/** Flush any pending draft save and tear down handlers.
+ *  Call when navigating away from a session to a non-session view
+ *  (settings, roles, tools, etc.) so the draft is persisted before
+ *  the editor is removed from the DOM. */
+export function flushAndTeardownDraft(): void {
+	flushPendingDraft();
+	_teardownDraftHandlers();
+}
+
 function _teardownDraftHandlers(): void {
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
 	// Don't abort in-flight flush saves — let them complete.
