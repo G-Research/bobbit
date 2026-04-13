@@ -20,6 +20,7 @@ nul
 .pi/
 # .bobbit/config/ is runtime state (per-project overrides), not tracked in git
 .bobbit/config/
+.bobbit/tmp/
 # .bobbit/state/ is excluded by .bobbit/.gitignore
 .e2e-pi*
 .e2e-bobbit*
