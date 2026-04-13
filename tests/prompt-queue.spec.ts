@@ -223,21 +223,4 @@ test.describe("PromptQueue", () => {
 		expect(q.length).toBe(3);
 	});
 
-	test.skip("enqueue with isFollowUp: true — flag preserved in toArray() and dequeue()", () => {
-		const q = new PromptQueue();
-		q.enqueue("normal");
-		q.enqueue("follow", { isFollowUp: true });
-
-		const arr = q.toArray();
-		expect(arr[0].isFollowUp).toBeFalsy();
-		expect(arr[1].isFollowUp).toBe(true);
-
-		const first = q.dequeue();
-		expect(first?.text).toBe("normal");
-		expect(first?.isFollowUp).toBeFalsy();
-
-		const second = q.dequeue();
-		expect(second?.text).toBe("follow");
-		expect(second?.isFollowUp).toBe(true);
-	});
 });

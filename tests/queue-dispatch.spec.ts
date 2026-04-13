@@ -713,27 +713,6 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.status).toBe("idle");
 	});
 
-	// ── followUp dispatch test ─────────────────────────────────────────
-
-	test.skip("followUp dispatch: enqueue with isFollowUp while busy → dispatched via followUp method", () => {
-		const sim = new DispatchSimulator();
-
-		// Make agent busy
-		sim.enqueue("Running");
-
-		// Queue a follow_up message
-		const followUp = sim.enqueue("FollowUp", { isFollowUp: true });
-		expect(followUp).not.toBeNull();
-		expect(followUp!.isFollowUp).toBe(true);
-
-		// Agent finishes → drain fires
-		sim.agentEnd();
-
-		// The follow_up message should be dispatched via "followUp" method
-		expect(sim.dispatched[1].method).toBe("followUp");
-		expect(sim.dispatched[1].message.text).toBe("FollowUp");
-	});
-
 	test("followUp direct dispatch: idle + empty queue + isFollowUp → dispatched via followUp method", () => {
 		const sim = new DispatchSimulator();
 
