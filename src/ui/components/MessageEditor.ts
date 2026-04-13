@@ -48,6 +48,8 @@ export class MessageEditor extends LitElement {
 		this.requestUpdate("value", oldValue);
 	}
 
+
+
 	@property() sessionId?: string;
 	@property() isStreaming = false;
 	@property() currentModel?: Model<any>;
@@ -702,6 +704,16 @@ export class MessageEditor extends LitElement {
 			if (this.sessionId) {
 				this._loadHistory();
 			}
+		}
+		// Check for a pending draft. When the editor is destroyed and recreated
+		// by a parent re-render, the new instance starts with _value="". This
+		// picks up the draft from a global side-channel set by session-manager.
+		const pending = (globalThis as any).__bobbitPendingDraft as
+			| { text: string; sessionId: string }
+			| undefined;
+		if (pending && this.sessionId === pending.sessionId && this._value !== pending.text) {
+			this._value = pending.text;
+			this.requestUpdate("value", "");
 		}
 		if ((changed.has("cwd") || changed.has("projectId")) && this.cwd) {
 			this._slashSkillsLoaded = false;

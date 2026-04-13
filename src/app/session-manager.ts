@@ -407,12 +407,87 @@ let _draftAbort: AbortController | null = null;
 let _draftListenersInstalled = false;
 /** Tracks the in-flight save promise so session switches can await it. */
 let _pendingSave: Promise<void> | null = null;
+/** Pending draft text to restore — survives DOM element recreation.
+ *  Set when draft is loaded from server; cleared when the editor confirms it. */
+let _pendingDraftText: string | null = null;
+let _pendingDraftSessionId: string | null = null;
 /** Monotonic counter — incremented on every send. Saved alongside the draft
  *  so stale saves (from aborted-but-already-sent requests) can be detected
  *  and ignored on load. */
 let _draftGen = 0;
 /** The generation at which the last send occurred. Any draft with gen < this is stale. */
 let _draftSendGen = 0;
+
+/** Set the global pending draft side-channel and try to apply it.
+ *  MessageEditor.updated() also reads this, so even if the element is
+ *  destroyed and recreated by a parent re-render, the new instance
+ *  picks up the pending draft on its first render cycle. */
+function _applyPendingDraft(): void {
+	if (!_pendingDraftText || !_pendingDraftSessionId) return;
+	if (_draftSessionId !== _pendingDraftSessionId) {
+		_pendingDraftText = null;
+		_pendingDraftSessionId = null;
+		(globalThis as any).__bobbitPendingDraft = undefined;
+		return;
+	}
+	// Set the side-channel so new MessageEditor instances pick it up
+	(globalThis as any).__bobbitPendingDraft = {
+		text: _pendingDraftText,
+		sessionId: _pendingDraftSessionId,
+	};
+	// Also try to apply directly to any existing element
+	const el = document.querySelector("message-editor") as any;
+	if (el && el.value !== _pendingDraftText) {
+		el.value = _pendingDraftText;
+	}
+}
+
+let _draftCheckTimer: ReturnType<typeof setInterval> | null = null;
+let _draftMutationObserver: MutationObserver | null = null;
+
+/** Start watching for the draft to be applied. Uses three mechanisms:
+ *  1. Immediate apply (handles the common case)
+ *  2. MutationObserver on <message-editor> additions (handles element recreation)
+ *  3. Periodic interval as fallback (handles edge cases)
+ *  All three clear themselves after 3 seconds or when the draft is applied. */
+function _startDraftCheck(): void {
+	// Clean up any previous watchers
+	if (_draftCheckTimer) { clearInterval(_draftCheckTimer); _draftCheckTimer = null; }
+	if (_draftMutationObserver) { _draftMutationObserver.disconnect(); _draftMutationObserver = null; }
+
+	const start = Date.now();
+	const cleanup = () => {
+		if (_draftCheckTimer) { clearInterval(_draftCheckTimer); _draftCheckTimer = null; }
+		if (_draftMutationObserver) { _draftMutationObserver.disconnect(); _draftMutationObserver = null; }
+	};
+
+	// MutationObserver: fires when new elements are added to the DOM.
+	// This catches the case where Lit destroys and recreates <message-editor>.
+	_draftMutationObserver = new MutationObserver((mutations) => {
+		if (!_pendingDraftText) { cleanup(); return; }
+		for (const mutation of mutations) {
+			for (const node of mutation.addedNodes) {
+				if (node instanceof HTMLElement &&
+					(node.tagName === "MESSAGE-EDITOR" || node.querySelector?.("message-editor"))) {
+					// New editor appeared — apply draft after Lit finishes rendering
+					requestAnimationFrame(() => _applyPendingDraft());
+				}
+			}
+		}
+	});
+	_draftMutationObserver.observe(document.body, { childList: true, subtree: true });
+
+	// Periodic fallback: re-apply every 100ms for 3 seconds
+	_draftCheckTimer = setInterval(() => {
+		if (!_pendingDraftText || Date.now() - start > 3000) {
+			cleanup();
+			_pendingDraftText = null;
+			_pendingDraftSessionId = null;
+			return;
+		}
+		_applyPendingDraft();
+	}, 100);
+}
 
 /** Immediately persist the given draft value (or delete if empty).
  *  Returns the save promise when content is non-empty so callers can await it. */
@@ -455,11 +530,15 @@ export function flushAndTeardownDraft(): void {
 
 function _teardownDraftHandlers(): void {
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+	if (_draftCheckTimer) { clearInterval(_draftCheckTimer); _draftCheckTimer = null; }
 	// Don't abort in-flight flush saves — let them complete.
 	// _flushDraft() already cancels any previous in-flight save at the top
 	// via `if (_draftAbort) _draftAbort.abort()` before starting a new one.
 	_draftAbort = null;
 	_draftSessionId = null;
+	_pendingDraftText = null;
+	_pendingDraftSessionId = null;
+	(globalThis as any).__bobbitPendingDraft = undefined;
 	_draftGen = 0;
 	_draftSendGen = 0;
 }
@@ -508,21 +587,13 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 			}
 
 			if (text) {
-				editor.value = text;
-				// Guard against Lit re-renders that may reset the textarea.
-				// Re-apply the draft across multiple animation frames to survive
-				// requestUpdate() cycles triggered by connection status changes,
-				// message loading, and other session setup activity. 20 frames
-				// covers ~330ms at 60fps which is enough for the reconnection storm.
-				let retries = 0;
-				const reapply = () => {
-					if (_draftSessionId !== sessionId || retries > 20) return;
-					const el = document.querySelector("message-editor") as any;
-					if (el && el.value !== text) el.value = text;
-					retries++;
-					requestAnimationFrame(reapply);
-				};
-				requestAnimationFrame(reapply);
+				// Store the pending draft so it survives DOM element recreation.
+				// Apply immediately, then start a periodic check that re-applies
+				// for 2 seconds to survive Lit re-renders.
+				_pendingDraftText = text;
+				_pendingDraftSessionId = sessionId;
+				_applyPendingDraft();
+				_startDraftCheck();
 			}
 		} catch { /* ignore */ }
 	})();
@@ -539,6 +610,12 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 			// Verify it's inside a message-editor
 			if (!target.closest("message-editor")) return;
 			if (!_draftSessionId) return;
+
+			// User is typing — clear any pending draft restore since the user
+			// is now in control of the editor content.
+			_pendingDraftText = null;
+			_pendingDraftSessionId = null;
+			(globalThis as any).__bobbitPendingDraft = undefined;
 
 			const val = (target as HTMLTextAreaElement).value;
 			if (_draftTimer) clearTimeout(_draftTimer);
