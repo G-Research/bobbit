@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, setupWorktreeDeps } from "../skills/git.js";
+
+const execFile = promisify(execFileCb);
 
 function sanitiseBranchName(name: string): string {
 	return name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -87,6 +91,7 @@ export class StaffManager {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: id },
 				sandboxed: sessionManager.isSandboxEnabled,
+				sandboxBranch: sessionManager.isSandboxEnabled ? branchName : undefined,
 				projectId,
 			});
 			session.staffId = id;
@@ -213,6 +218,47 @@ export class StaffManager {
 	}
 
 	/**
+	 * Refresh a staff agent's worktree: rebase onto the primary branch and
+	 * re-run the project's worktree setup command (e.g. npm ci).
+	 * Non-fatal — logs warnings on failure so the agent can still operate.
+	 */
+	private async refreshWorktree(staff: PersistedStaff, projectId: string): Promise<void> {
+		if (!staff.worktreePath) return;
+
+		// Skip refresh for sandboxed staff — their worktree lives inside the container
+		const ctx = this.pcm.getOrCreate(projectId);
+		if (ctx?.projectConfigStore.get("sandbox") === "docker") return;
+
+		const wt = staff.worktreePath;
+		try {
+			await execFile("git", ["fetch", "origin"], { cwd: wt, timeout: 60_000 });
+		} catch (err) {
+			console.warn(`[staff-manager] git fetch failed in ${wt} (non-fatal):`, err);
+			return; // Can't rebase without fetch
+		}
+
+		try {
+			const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: wt, timeout: 5_000 });
+			const primary = stdout.trim().replace("refs/remotes/origin/", "");
+			if (!primary || primary.startsWith("-")) {
+				console.warn(`[staff-manager] Could not detect primary branch in ${wt} (got "${primary}"), skipping rebase`);
+			} else {
+				await execFile("git", ["rebase", `origin/${primary}`], { cwd: wt, timeout: 60_000 });
+			}
+		} catch (err) {
+			console.warn(`[staff-manager] git rebase failed in ${wt} (non-fatal):`, err);
+			// Abort any in-progress rebase to leave worktree in a usable state
+			try { await execFile("git", ["rebase", "--abort"], { cwd: wt }); } catch { /* ignore */ }
+		}
+
+		// Run worktree setup command (e.g. npm ci)
+		const setupCmd = ctx?.projectConfigStore.get("worktree_setup_command");
+		if (setupCmd) {
+			await setupWorktreeDeps(staff.cwd, wt, setupCmd);
+		}
+	}
+
+	/**
 	 * Wake a staff agent: enqueue a prompt on its permanent session.
 	 * If the session doesn't exist yet (legacy migration), create one first.
 	 * If the session subprocess is terminated, restore it before enqueuing.
@@ -240,6 +286,7 @@ export class StaffManager {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: staffId },
 				sandboxed: sessionManager.isSandboxEnabled,
+				sandboxBranch: sessionManager.isSandboxEnabled ? staff.branch : undefined,
 			});
 			session.staffId = staffId;
 			sessionManager.setTitle(session.id, staff.name);
@@ -264,6 +311,9 @@ export class StaffManager {
 				return this.wake(staffId, prompt, sessionManager);
 			}
 		}
+
+		// Refresh the worktree before waking (rebase + deps)
+		await this.refreshWorktree(staff, found.projectId);
 
 		// Enqueue the wake prompt on the existing session
 		await sessionManager.enqueuePrompt(staff.currentSessionId, wakePrompt);

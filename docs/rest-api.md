@@ -154,9 +154,13 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/staff` | List all staff agent definitions |
+| `GET` | `/api/staff` | List all staff agent definitions. Each entry includes a `sandboxed` boolean (inherited from project config). |
+| `GET` | `/api/staff/:id` | Get a single staff agent definition (includes `sandboxed` boolean) |
 | `POST` | `/api/staff` | Create a staff agent (`{ name, description, triggers, skillId?, prompt? }`) |
+| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId }`) |
+| `DELETE` | `/api/staff/:id` | Delete a staff agent and terminate its session |
 | `POST` | `/api/staff/:id/wake` | Manually trigger a staff agent's wake cycle |
+| `GET` | `/api/staff/:id/sessions` | **Deprecated (410)**. Use `GET /api/staff/:id` instead. |
 
 ### Project Config
 
