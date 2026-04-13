@@ -109,7 +109,7 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Change message rendering**: `src/ui/components/Messages.ts` for standard roles, `message-renderer-registry.ts` for custom types.
 
-**Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `project-sandbox.ts`, `sandbox-manager.ts`, `docker-args.ts`. One long-lived container per project. See [docs/internals.md — Docker sandbox](docs/internals.md#docker-sandbox).
+**Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `project-sandbox.ts`, `sandbox-manager.ts`, `docker-args.ts`. One long-lived container per project. Staff agents in sandbox mode use container-internal worktrees via `sandboxBranch`. See [docs/internals.md — Docker sandbox](docs/internals.md#docker-sandbox).
 
 **Run maintenance cleanup**: Settings → Maintenance tab. Three sections: orphaned worktrees, orphaned sessions, expired archives. Each has scan → preview → execute. Cleanup is never automatic.
 
@@ -166,6 +166,8 @@ worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
 ```
 
 If not set, no setup runs (intentional — Bobbit doesn't assume your package manager).
+
+Staff agent worktrees are automatically refreshed on each wake cycle — the branch is rebased onto the primary branch and `worktree_setup_command` is re-run. This prevents stale dependencies and outdated code in long-lived staff sessions. The underlying `setupWorktreeDeps()` function is exported from `src/server/skills/git.ts` for reuse. Sandboxed staff skip the host-side refresh (their worktrees live inside the container).
 
 ## Reference docs
 
