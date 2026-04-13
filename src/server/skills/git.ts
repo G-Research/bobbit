@@ -206,7 +206,7 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
  * prerequisite for Bobbit, Git Bash is always available.
  * The SOURCE_REPO env var is set to the original repo path.
  */
-async function setupWorktreeDeps(repoPath: string, worktreePath: string, setupCommand: string): Promise<void> {
+export async function setupWorktreeDeps(repoPath: string, worktreePath: string, setupCommand: string): Promise<void> {
 	if (!setupCommand) return;
 	try {
 		console.log(`[git] Running worktree setup command: ${setupCommand}`);
