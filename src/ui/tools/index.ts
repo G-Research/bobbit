@@ -22,6 +22,7 @@ import { WriteRenderer } from "./renderers/WriteRenderer.js";
 import { TeamSpawnRenderer, TeamListRenderer, TeamDismissRenderer, TeamCompleteRenderer, TeamSteerRenderer, TeamPromptRenderer, TeamAbortRenderer } from "./renderers/TeamToolRenderers.js";
 import { TaskListRenderer, TaskCreateRenderer, TaskUpdateRenderer } from "./renderers/TaskToolRenderers.js";
 import { GateListRenderer, GateSignalRenderer, GateStatusRenderer } from "./renderers/GateToolRenderers.js";
+import { GateInspectRenderer } from "./renderers/GateInspectRenderer.js";
 import "./renderers/GateVerificationLive.js"; // registers <gate-verification-live> custom element
 import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
 import { PersonalitiesListRenderer, PersonalitiesCreateRenderer } from "./renderers/PersonalityToolRenderers.js";
@@ -66,6 +67,7 @@ registerToolRenderer("personalities_create", new PersonalitiesCreateRenderer());
 registerToolRenderer("gate_list", new GateListRenderer());
 registerToolRenderer("gate_signal", new GateSignalRenderer());
 registerToolRenderer("gate_status", new GateStatusRenderer());
+registerToolRenderer("gate_inspect", new GateInspectRenderer());
 registerToolRenderer("preview_open", new PreviewOpenRenderer());
 registerToolRenderer("review_open", new ReviewOpenRenderer());
 registerToolRenderer("review_close", new ReviewCloseRenderer());

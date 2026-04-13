@@ -11,14 +11,14 @@ import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function getResult(result: ToolResultMessage | undefined): { text: string; data: any } {
+export function getResult(result: ToolResultMessage | undefined): { text: string; data: any } {
 	const text = result?.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
 	let data: any = null;
 	try { data = JSON.parse(text); } catch { /* not JSON */ }
 	return { text, data };
 }
 
-function gateBadge(status: string): TemplateResult {
+export function gateBadge(status: string): TemplateResult {
 	const styles: Record<string, string> = {
 		pending: "bg-muted text-muted-foreground",
 		passed: "bg-green-500/20 text-green-600 dark:text-green-400",
