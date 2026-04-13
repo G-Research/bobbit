@@ -977,6 +977,7 @@ export interface StaffAgent {
 	lastWakeAt?: number;
 	currentSessionId?: string;
 	projectId?: string;
+	sandboxed?: boolean;
 }
 
 export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
