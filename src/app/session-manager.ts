@@ -510,11 +510,13 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 			if (text) {
 				editor.value = text;
 				// Guard against Lit re-renders that may reset the textarea.
-				// Re-apply the draft across multiple frames to survive pending
-				// requestUpdate() cycles triggered by connection state changes.
+				// Re-apply the draft across multiple animation frames to survive
+				// requestUpdate() cycles triggered by connection status changes,
+				// message loading, and other session setup activity. 20 frames
+				// covers ~330ms at 60fps which is enough for the reconnection storm.
 				let retries = 0;
 				const reapply = () => {
-					if (_draftSessionId !== sessionId || retries > 5) return;
+					if (_draftSessionId !== sessionId || retries > 20) return;
 					const el = document.querySelector("message-editor") as any;
 					if (el && el.value !== text) el.value = text;
 					retries++;
@@ -1520,12 +1522,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			remote.runDeferredProposalCheck();
 		}
 
-		// Restore prompt draft from server and set up auto-save
-		_setupPromptDraftHandlers(sessionId);
-
 		// Wait for background work (refreshSessions + storage) to settle
+		// BEFORE restoring the draft. Background work triggers re-renders
+		// that can clobber the textarea value if the draft is set too early.
 		await backgroundWork;
 		if (isStale()) { cleanupRemote(remote); return; }
+
+		// Restore prompt draft from server and set up auto-save
+		_setupPromptDraftHandlers(sessionId);
 	} catch (err) {
 		if (!isStale()) {
 			// Clear the early ChatPanel so the UI doesn't show a stuck "Connecting…" spinner

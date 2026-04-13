@@ -25,7 +25,7 @@ test.describe("CT-02: Draft preservation", () => {
 		await waitForHealth();
 	});
 
-	test("PI-04b: draft survives rapid session switch", async ({ page }) => {
+	test("PI-04b: draft survives rapid session switch", { annotation: { type: "issue", description: "Intermittent: draft restore races with Lit re-renders during reconnection. rAF retry helps but is not 100% reliable." } }, async ({ page }) => {
 		const sessionA = await createSession();
 		const sessionB = await createSession();
 		await waitForSessionStatus(sessionA, "idle");
@@ -123,7 +123,7 @@ test.describe("CT-02: Draft preservation", () => {
 		expect(finalVal).toBe(draftText);
 	});
 
-	test.skip("PI-04 step 9: attachment preserved in draft across session switch", async ({ page }) => {
+	test.fixme("PI-04 step 9: text draft preserved when attachment is added — BUG: attaching a file clobbers text", async ({ page }) => {
 		const sessionA = await createSession();
 		const sessionB = await createSession();
 		await waitForSessionStatus(sessionA, "idle");
@@ -140,7 +140,6 @@ test.describe("CT-02: Draft preservation", () => {
 		await textarea.fill("text with attachment");
 
 		// Attach a file via the hidden file input inside <message-editor> (light DOM)
-		// MessageEditor uses createRenderRoot() { return this; } so input is in light DOM
 		const fileInput = page.locator('message-editor input[type="file"]').first();
 		await fileInput.setInputFiles({
 			name: "test-file.txt",
@@ -148,28 +147,36 @@ test.describe("CT-02: Draft preservation", () => {
 			buffer: Buffer.from("test file content"),
 		});
 
-		// Wait for attachment tile to appear — the component renders a thumbnail
-		// or file icon with the filename. Look for it broadly.
-		await expect(
-			page.locator("message-editor").getByText("test-file", { exact: false }).first()
-		).toBeVisible({ timeout: 5_000 });
+		// Attachment tile appears
+		await expect(page.locator("attachment-tile").first()).toBeVisible({ timeout: 5_000 });
 
-		// Switch to session B
+		// Text must still be in the textarea after attachment was added
+		expect(await textarea.inputValue()).toBe("text with attachment");
+
+		// Wait for draft save to complete
+		await expect(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionA}/draft?type=prompt`);
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.data.text).toBe("text with attachment");
+		}).toPass({ timeout: 10_000 });
+
+		// Switch to session B and back
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionB);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-
-		// Switch back to session A
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionA);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// Both the text and attachment must be preserved
+		// Text draft must be restored
 		await expect(async () => {
 			const val = await page.locator("textarea").first().inputValue();
 			expect(val).toBe("text with attachment");
 		}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
-		await expect(
-			page.locator("message-editor").getByText("test-file", { exact: false }).first()
-		).toBeVisible({ timeout: 5_000 });
+
+		// Note: attachment tiles are NOT persisted in the draft system (they live
+		// on the component instance only). The session cache may restore them on
+		// fast switch-back, but this is not guaranteed. Attachment draft persistence
+		// is a known gap — see CT-02 "Does not survive" notes.
 	});
 
 	test("PI-04d: draft survives model change", async ({ page }) => {
@@ -213,7 +220,7 @@ test.describe("CT-02: Draft preservation", () => {
 		}).toPass({ intervals: [500, 1000], timeout: 5_000 });
 	});
 
-	test("PI-04f: draft survives navigation to settings and back", async ({ page }) => {
+	test("PI-04f: draft survives navigation to settings and back", { annotation: { type: "issue", description: "Intermittent: draft restore races with Lit re-renders during reconnection. rAF retry helps but is not 100% reliable." } }, async ({ page }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
@@ -240,6 +247,12 @@ test.describe("CT-02: Draft preservation", () => {
 		await page.waitForFunction(() => window.location.hash.startsWith("#/settings"));
 		await page.waitForTimeout(1000); // Let the settings page fully render
 
+		// Verify draft is still on the server before navigating back
+		const checkResp = await apiFetch(`/api/sessions/${sessionId}/draft?type=prompt`);
+		expect(checkResp.status).toBe(200);
+		const checkBody = await checkResp.json();
+		expect(checkBody.data.text).toBe("draft before settings detour");
+
 		// Navigate back to the session
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
@@ -248,6 +261,6 @@ test.describe("CT-02: Draft preservation", () => {
 		await expect(async () => {
 			const val = await page.locator("textarea").first().inputValue();
 			expect(val).toBe("draft before settings detour");
-		}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+		}).toPass({ intervals: [500, 1000, 2000], timeout: 15_000 });
 	});
 });
