@@ -20,7 +20,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
    - Empty state appears: "No staff agents yet" with a UserCheck icon.
    - No table headers are rendered.
 
-**Coverage:** none
+**Coverage:** none — needs browser E2E for list rendering, state badges, empty state
 
 ---
 
@@ -42,7 +42,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 4. Reject the proposal instead.
    - No staff agent is created. Sidebar Staff section is unchanged.
 
-**Coverage:** none
+**Coverage:** none — needs browser E2E for assistant + propose_staff flow
 
 ---
 
@@ -64,7 +64,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 5. Click the pencil button.
    - The edit view for that staff agent opens (same form as step 1).
 
-**Coverage:** none
+**Coverage:** none — needs browser E2E for edit form, save, sidebar update
 
 ---
 
@@ -84,7 +84,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 4. Repeat steps 1–2 but cancel the confirmation dialog instead.
    - "Stale Bot" remains in the list and sidebar. No API call is made.
 
-**Coverage:** none
+**Coverage:** none — needs browser E2E for delete confirmation flow
 
 ---
 
@@ -111,7 +111,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 7. Expand again.
    - Entries reappear in the same order.
 
-**Coverage:** none
+**Coverage:** unit (sidebar-staff-rendering.spec.ts — status indicators, wake button, retired dimming); needs browser E2E for full sidebar interaction
 
 ---
 
@@ -134,7 +134,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 5. Click the "Monitor Bot" sidebar entry when it already has an active session.
    - Navigates to the existing session (no new session created).
 
-**Coverage:** none
+**Coverage:** API (staff.spec.ts — POST wake, paused staff rejected); needs browser E2E for wake button UI flow
 
 ---
 
@@ -158,7 +158,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
    - While "Cron Bot" is paused, configured triggers do not fire (agent is not woken automatically).
    - After resuming, triggers are re-enabled and fire on schedule.
 
-**Coverage:** none
+**Coverage:** API (staff.spec.ts — paused staff cannot be woken); needs browser E2E for pause/resume toggle UI
 
 ---
 
@@ -180,4 +180,4 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 6. Configure both a cron trigger and a git trigger, then save.
    - The Triggers column shows a combined summary (e.g. "Cron: 0 9 * * 1" and "Git: push").
 
-**Coverage:** none
+**Coverage:** API (staff.spec.ts — trigger ID auto-generation); needs browser E2E for trigger config UI
