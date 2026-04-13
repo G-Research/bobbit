@@ -541,6 +541,17 @@ function renderEditView(): TemplateResult {
 						onInput: (e: Event) => { editCwd = (e.target as HTMLInputElement).value; renderApp(); },
 					})}
 				</div>
+				<!-- Sandbox indicator -->
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Sandbox</label>
+					<div class="flex items-center gap-2">
+						${selectedStaff.sandboxed
+							? html`<span class="px-2 py-0.5 text-xs rounded-full bg-cyan-500/15 text-cyan-700 dark:text-cyan-400">🐳 Docker Sandbox</span>`
+							: html`<span class="px-2 py-0.5 text-xs rounded-full bg-muted text-muted-foreground">No Sandbox</span>`
+						}
+					</div>
+					<p class="text-[10px] text-muted-foreground mt-1">Inherited from project settings</p>
+				</div>
 				<!-- Colour picker -->
 				<div>
 					<div class="text-xs text-muted-foreground mb-2 font-medium">Colour</div>
