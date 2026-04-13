@@ -5846,7 +5846,12 @@ async function handleApiRoute(
 	// GET /api/staff
 	if (url.pathname === "/api/staff" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		json({ staff: staffManager.listStaff(projectId) });
+		const list = staffManager.listStaff(projectId).map(s => {
+			const ctx = projectContextManager.getOrCreate(s.projectId!);
+			const sandboxed = ctx?.projectConfigStore.get("sandbox") === "docker";
+			return { ...s, sandboxed };
+		});
+		json({ staff: list });
 		return;
 	}
 
@@ -5893,7 +5898,9 @@ async function handleApiRoute(
 		if (req.method === "GET") {
 			const staff = staffManager.getStaff(id);
 			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-			json(staff);
+			const ctx = projectContextManager.getOrCreate(staff.projectId!);
+			const sandboxed = ctx?.projectConfigStore.get("sandbox") === "docker";
+			json({ ...staff, sandboxed });
 			return;
 		}
 
