@@ -342,4 +342,68 @@ test.describe("Staff Agents — REST API", () => {
 		});
 		expect(wakeRes.status).toBe(400);
 	});
+
+	test("GET /api/staff/:id includes sandboxed field", async () => {
+		const res = await apiFetch(`/api/staff/${sharedStaff.id}`, {});
+		expect(res.ok).toBe(true);
+		const staff = await res.json();
+		expect(typeof staff.sandboxed).toBe("boolean");
+		// Test environment has no Docker — sandboxed should be false
+		expect(staff.sandboxed).toBe(false);
+	});
+
+	test("GET /api/staff list includes sandboxed field on each item", async () => {
+		const res = await apiFetch(`/api/staff`, {});
+		expect(res.ok).toBe(true);
+		const data = await res.json();
+		expect(Array.isArray(data.staff)).toBe(true);
+		for (const s of data.staff) {
+			expect(typeof s.sandboxed).toBe("boolean");
+		}
+	});
+
+	test("POST /api/staff/:id/wake refreshes worktree from primary branch", async () => {
+		// Get staff details to find worktreePath
+		const getRes = await apiFetch(`/api/staff/${sharedStaff.id}`, {});
+		const staff = await getRes.json();
+		const worktreePath = staff.worktreePath;
+		if (!worktreePath) {
+			console.warn("No worktreePath on shared staff — skipping refresh test");
+			return;
+		}
+
+		const { execFileSync } = await import("node:child_process");
+		const fs = await import("node:fs");
+		const path = await import("node:path");
+
+		// Set up origin pointing to the test repo itself so git fetch/rebase work
+		try {
+			execFileSync("git", ["remote", "add", "origin", gitCwd()], { cwd: gitCwd(), stdio: "pipe" });
+		} catch { /* already exists */ }
+		execFileSync("git", ["fetch", "origin"], { cwd: gitCwd(), stdio: "pipe" });
+
+		// Detect primary branch name and set symbolic ref
+		const primaryBranch = execFileSync("git", ["branch", "--show-current"], { cwd: gitCwd(), encoding: "utf-8" }).trim();
+		execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${primaryBranch}`], { cwd: gitCwd(), stdio: "pipe" });
+
+		// Create a unique marker commit on the test repo's primary branch
+		const marker = `wake-refresh-${Date.now()}`;
+		fs.writeFileSync(path.join(gitCwd(), `${marker}.txt`), marker);
+		execFileSync("git", ["add", `${marker}.txt`], { cwd: gitCwd(), stdio: "pipe" });
+		execFileSync("git", ["commit", "-m", `test: ${marker}`], { cwd: gitCwd(), stdio: "pipe" });
+
+		// Wake the staff agent — triggers refreshWorktree (fetch + rebase onto primary)
+		const wakeRes = await apiFetch(`/api/staff/${sharedStaff.id}/wake`, {
+			method: "POST",
+			body: JSON.stringify({ prompt: "refresh test" }),
+		});
+		expect(wakeRes.status).toBe(201);
+
+		// Wait for the async refreshWorktree to complete
+		await new Promise((r) => setTimeout(r, 5_000));
+
+		// Verify the marker commit is now in the worktree's log
+		const log = execFileSync("git", ["log", "--oneline", "-5"], { cwd: worktreePath, encoding: "utf-8" });
+		expect(log).toContain(marker);
+	});
 });

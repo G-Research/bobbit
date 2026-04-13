@@ -238,9 +238,13 @@ export class StaffManager {
 		}
 
 		try {
-			const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: wt });
+			const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: wt, timeout: 5_000 });
 			const primary = stdout.trim().replace("refs/remotes/origin/", "");
-			await execFile("git", ["rebase", `origin/${primary}`], { cwd: wt, timeout: 60_000 });
+			if (!primary || primary.startsWith("-")) {
+				console.warn(`[staff-manager] Could not detect primary branch in ${wt} (got "${primary}"), skipping rebase`);
+			} else {
+				await execFile("git", ["rebase", `origin/${primary}`], { cwd: wt, timeout: 60_000 });
+			}
 		} catch (err) {
 			console.warn(`[staff-manager] git rebase failed in ${wt} (non-fatal):`, err);
 			// Abort any in-progress rebase to leave worktree in a usable state
@@ -248,7 +252,7 @@ export class StaffManager {
 		}
 
 		// Run worktree setup command (e.g. npm ci)
-		const setupCmd = ctx?.projectConfigStore.get("worktree_setup_command") as string | undefined;
+		const setupCmd = ctx?.projectConfigStore.get("worktree_setup_command");
 		if (setupCmd) {
 			await setupWorktreeDeps(staff.cwd, wt, setupCmd);
 		}
