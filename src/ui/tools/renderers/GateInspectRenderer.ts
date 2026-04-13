@@ -37,9 +37,6 @@ function deriveStepStatus(step: any): string {
 // ── Renderer ─────────────────────────────────────────────────────────
 
 export class GateInspectRenderer implements ToolRenderer {
-	/** Track expanded steps per render via a WeakMap keyed on the result object */
-	private _expandedSets = new WeakMap<object, Set<number>>();
-
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
 		const state = getToolState(result, isStreaming);
 		const gateId = params?.gate_id || "gate";
@@ -99,27 +96,19 @@ export class GateInspectRenderer implements ToolRenderer {
 
 	// ── section="verification" ───────────────────────────────────────
 
-	private _renderVerification(state: any, gateId: string, data: any, result: ToolResultMessage): ToolRenderResult {
+	private _renderVerification(state: any, gateId: string, data: any, _result: ToolResultMessage): ToolRenderResult {
 		const signalIndex = data?.signalIndex ?? "?";
 		const signalId = data?.signalId || "";
 		const steps: any[] = data?.steps || [];
 
-		// Track expanded state — initialize with failed steps expanded
-		let expandedSet = this._expandedSets.get(result);
-		if (!expandedSet) {
-			expandedSet = new Set<number>();
-			steps.forEach((step: any, i: number) => {
-				if (deriveStepStatus(step) === "failed") expandedSet!.add(i);
-			});
-			this._expandedSets.set(result, expandedSet);
-		}
-
-		const toggleStep = (idx: number) => {
-			if (expandedSet!.has(idx)) expandedSet!.delete(idx);
-			else expandedSet!.add(idx);
-			// Force re-render by dispatching on the container
-			const event = new CustomEvent("gate-inspect-toggle", { bubbles: true });
-			document.dispatchEvent(event);
+		const toggleStep = (e: Event) => {
+			const card = (e.currentTarget as HTMLElement).parentElement!;
+			const output = card.querySelector('[data-step-output]') as HTMLElement;
+			const chevron = card.querySelector('[data-step-chevron]') as HTMLElement;
+			if (!output) return;
+			const isHidden = output.classList.contains('hidden');
+			output.classList.toggle('hidden');
+			if (chevron) chevron.textContent = isHidden ? '▴' : '▾';
 		};
 
 		return {
@@ -127,10 +116,10 @@ export class GateInspectRenderer implements ToolRenderer {
 				${renderHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — verification`)}
 				<div class="text-xs text-muted-foreground mt-1">Signal #${signalIndex}${signalId ? html` · ${signalId}` : nothing}</div>
 				<div class="mt-2 space-y-1">
-					${steps.map((step: any, i: number) => {
+					${steps.map((step: any, _i: number) => {
 						const status = deriveStepStatus(step);
 						const hasOutput = !!step.output;
-						const isExpanded = expandedSet!.has(i);
+						const isFailed = status === "failed";
 						const typeBadgeCls = step.type === "command"
 							? "bg-muted text-muted-foreground"
 							: "bg-purple-500/20 text-purple-600 dark:text-purple-400";
@@ -139,18 +128,18 @@ export class GateInspectRenderer implements ToolRenderer {
 							<div class="border border-border rounded text-sm">
 								<div
 									class="p-2 flex items-center gap-2 ${hasOutput ? "cursor-pointer hover:bg-accent/50" : ""}"
-									@click=${hasOutput ? () => toggleStep(i) : null}
+									@click=${hasOutput ? toggleStep : null}
 								>
 									${stepStatusIcon(status)}
 									<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name}</span>
 									<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
 									${step.duration_ms != null ? html`<span class="text-xs text-muted-foreground tabular-nums">${formatDuration(step.duration_ms)}</span>` : nothing}
-									${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
+									${hasOutput ? html`<span data-step-chevron class="text-muted-foreground text-[10px] shrink-0">${isFailed ? "▴" : "▾"}</span>` : nothing}
 								</div>
-								${isExpanded && step.output ? (
+								${hasOutput ? (
 									step.type !== "command"
-										? html`<div class="text-xs text-muted-foreground max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border"><markdown-block .content=${step.output}></markdown-block></div>`
-										: html`<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>`
+										? html`<div data-step-output class="${isFailed ? "" : "hidden"} text-xs text-muted-foreground max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border"><markdown-block .content=${step.output}></markdown-block></div>`
+										: html`<pre data-step-output class="${isFailed ? "" : "hidden"} text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>`
 								) : nothing}
 							</div>
 						`;
@@ -176,8 +165,8 @@ export class GateInspectRenderer implements ToolRenderer {
 				${signals.map((s: any) => html`
 					<div class="flex items-center gap-2 text-xs py-0.5">
 						<span class="text-muted-foreground">#${s.index}</span>
-						${gateBadge(s.status)}
-						<span class="text-muted-foreground">${formatTime(s.signalledAt)}</span>
+						${gateBadge(s.verdict)}
+						<span class="text-muted-foreground">${formatTime(s.timestamp)}</span>
 						${s.hasContent ? html`<span title="Has content">📄</span>` : nothing}
 						${s.sessionId ? html`<span class="font-mono text-muted-foreground">${s.sessionId.slice(0, 8)}</span>` : nothing}
 					</div>
@@ -190,7 +179,7 @@ export class GateInspectRenderer implements ToolRenderer {
 			const chevronRef = createRef<HTMLSpanElement>();
 			return {
 				content: html`<div>
-					${renderCollapsibleHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — ${count} signals`, contentRef, chevronRef, false)}
+					${renderCollapsibleHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — ${count} signal${count !== 1 ? "s" : ""}`, contentRef, chevronRef, false)}
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 						${rows}
 					</div>
