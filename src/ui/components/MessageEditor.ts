@@ -682,6 +682,17 @@ export class MessageEditor extends LitElement {
 		super.connectedCallback();
 		document.addEventListener("keydown", this.handleGlobalKeyDown);
 		document.addEventListener("keyup", this.handleGlobalKeyUp);
+		// Restore draft from sessionStorage if available. This runs synchronously
+		// when the element is created/reattached, BEFORE any Lit render cycle
+		// can reset _value to "". session-manager saves the draft text here
+		// after loading from the server.
+		if (this.sessionId) {
+			const key = `bobbit_draft_${this.sessionId}`;
+			const draft = sessionStorage.getItem(key);
+			if (draft) {
+				this._value = draft;
+			}
+		}
 	}
 
 	override disconnectedCallback() {
@@ -705,16 +716,7 @@ export class MessageEditor extends LitElement {
 				this._loadHistory();
 			}
 		}
-		// Check for a pending draft. When the editor is destroyed and recreated
-		// by a parent re-render, the new instance starts with _value="". This
-		// picks up the draft from a global side-channel set by session-manager.
-		const pending = (globalThis as any).__bobbitPendingDraft as
-			| { text: string; sessionId: string }
-			| undefined;
-		if (pending && this.sessionId === pending.sessionId && this._value !== pending.text) {
-			this._value = pending.text;
-			this.requestUpdate("value", "");
-		}
+
 		if ((changed.has("cwd") || changed.has("projectId")) && this.cwd) {
 			this._slashSkillsLoaded = false;
 			this._loadSlashSkills();

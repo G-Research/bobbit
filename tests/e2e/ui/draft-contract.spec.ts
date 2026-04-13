@@ -21,12 +21,7 @@ import {
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
 test.describe("CT-02: Draft preservation", () => {
-	// Draft restore races with Lit re-renders during session reconnection.
-	// The MutationObserver + interval + updated() hook handles most cases,
-	// but element recreation during parent re-renders can still cause a
-	// one-off failure. Retry makes these reliable while the architectural
-	// fix (reactive draft flow) is pending.
-	test.describe.configure({ retries: 2 });
+
 	test.beforeAll(async () => {
 		await waitForHealth();
 	});
