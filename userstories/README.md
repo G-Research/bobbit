@@ -37,12 +37,28 @@ Each file covers a feature area. Stories are numbered within each file (e.g. `S-
 | Review Pane | [review-pane.md](review-pane.md) | 21 | None | Completely untested |
 | Resilience | [resilience.md](resilience.md) | 6 | Manual only | No automated crash tests |
 
+## Cross-Feature Contracts
+
+[contracts.md](contracts.md) documents 17 cross-feature contracts — guarantees that one feature provides to others. When a change touches a contract boundary, consult the contract to understand what must hold.
+
+## Feature Interaction Matrix
+
+[feature-matrix.md](feature-matrix.md) is a lookup table for agents building new features. Find the section matching your feature type, check the listed contracts, and verify against the checklist.
+
+## Specification Convention
+
+Stories describe **user-visible behavior**, not implementation. Assertions say "the session row is highlighted" not "the `sidebar-session-active` class is applied." CSS classes, API endpoints, and component names belong in tests, not stories. See [docs/ux-review-plan.md](../docs/ux-review-plan.md) for the full convention.
+
 ## How to Use
 
-When implementing a new E2E test, reference the story ID in the test description:
+**Implementing a test:** Reference the story ID in the test description:
 
 ```typescript
 test('S-03: draft isolation across sessions', async ({ page }) => { ... });
 ```
 
-When a bug is found, check if it maps to an existing story. If not, add a new story first, then write the test.
+**Building a new feature:** Consult the [feature matrix](feature-matrix.md) for your feature type. Honor the listed contracts. Verify against the checklist.
+
+**Fixing a bug:** Find the relevant story. If it doesn't cover this variation, add a sub-story first. Write the test, confirm it fails, fix, confirm it passes.
+
+**Changing a contract boundary:** If your change affects a guarantee in [contracts.md](contracts.md), review all consuming stories and update them if needed.
