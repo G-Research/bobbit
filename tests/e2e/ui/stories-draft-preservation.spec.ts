@@ -25,6 +25,12 @@ import {
 	defineContract,
 } from "./spec-framework.js";
 import { CT_02, CT_05, CT_13, CT_15 } from "./spec-contracts.js";
+import {
+	STORY_CT02_A,
+	STORY_CT02_B,
+	STORY_CT02_C,
+	STORY_CT02_D,
+} from "./story-registry.js";
 
 test.describe("CT-02: Draft preservation", () => {
 	let s: SpecContext;
@@ -49,12 +55,7 @@ test.describe("CT-02: Draft preservation", () => {
 	// ---------------------------------------------------------------
 
 	test("CT-02-a: Draft survives rapid session switching", async () => {
-		s.begin(defineStory({
-			id: "CT-02-a",
-			title: "Draft survives rapid session switching",
-			contracts: [CT_02],
-			covers: ["rapid-session-switch"],
-		}));
+		s.begin(STORY_CT02_A);
 
 		// setup
 		await s.navigate_to("session", "A");
@@ -74,12 +75,7 @@ test.describe("CT-02: Draft preservation", () => {
 	});
 
 	test.skip("CT-02-b: Draft with attachment survives settings detour", async () => {
-		s.begin(defineStory({
-			id: "CT-02-b",
-			title: "Draft with attachment survives settings detour",
-			contracts: [CT_02, CT_13],
-			covers: ["settings-detour", "attachment-added"],
-		}));
+		s.begin(STORY_CT02_B);
 
 		// setup
 		await s.navigate_to("session", "A");
@@ -100,12 +96,7 @@ test.describe("CT-02: Draft preservation", () => {
 	});
 
 	test("CT-02-c: Draft survives model change", async () => {
-		s.begin(defineStory({
-			id: "CT-02-c",
-			title: "Draft survives model change",
-			contracts: [CT_02, CT_15],
-			covers: ["model-change"],
-		}));
+		s.begin(STORY_CT02_C);
 
 		// setup
 		await s.navigate_to("session", "A");
@@ -122,12 +113,7 @@ test.describe("CT-02: Draft preservation", () => {
 	});
 
 	test("CT-02-d: Draft survives page reload", async () => {
-		s.begin(defineStory({
-			id: "CT-02-d",
-			title: "Draft survives page reload",
-			contracts: [CT_02, CT_05],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_CT02_D);
 
 		// setup
 		await s.navigate_to("session", "A");

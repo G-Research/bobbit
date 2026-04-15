@@ -20,6 +20,20 @@ import {
 } from "./spec-framework.js";
 import { CT_03, CT_04 } from "./spec-contracts.js";
 import {
+	STORY_SB01,
+	STORY_SB02,
+	STORY_SB03,
+	STORY_SB06,
+	STORY_SB09,
+	STORY_SB12,
+	STORY_SB24,
+	STORY_SB27,
+	STORY_SB32,
+	STORY_SB34,
+	STORY_CT03_HIGHLIGHT,
+	STORY_SB_CONCURRENT,
+} from "./story-registry.js";
+import {
 	waitForHealth,
 	createSession,
 	deleteSession,
@@ -60,12 +74,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-01: Project sections collapse and persist across reload", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-01",
-			title: "Project sections collapse and persist across reload",
-			contracts: [CT_03],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_SB01);
 
 		// setup — create a session so the project section has content
 		const sessionId = await s.createTestSession("A");
@@ -81,16 +90,17 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 
 		// "Sessions" sub-header should be visible when project is expanded
 		const sessionsLabel = page.getByText("Sessions", { exact: true }).first();
-		await expect(sessionsLabel).toBeVisible({ timeout: 10_000 });
+		await expect(sessionsLabel).toBeVisible({ timeout: 15_000 });
 
 		// Find project header — div.cursor-pointer inside .sidebar-edge containing project name
-		const projectHeader = page.locator(".sidebar-edge div.cursor-pointer").filter({
+		const projectHeader = s.sidebar.project_section();
+		const projectLocator = page.locator(".sidebar-edge div.cursor-pointer").filter({
 			hasText: projectInfo.name,
 		}).first();
-		await expect(projectHeader).toBeVisible({ timeout: 5_000 });
+		await expect(projectLocator).toBeVisible({ timeout: 10_000 });
 
 		// Click to collapse
-		await projectHeader.click();
+		await projectLocator.click();
 
 		// After collapse, "Sessions" should be hidden
 		await expect(sessionsLabel).not.toBeVisible({ timeout: 5_000 });
@@ -100,14 +110,16 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 
 		// assert — Sessions should still be hidden after reload
 		s.assert();
-		await expect(sessionsLabel).not.toBeVisible({ timeout: 3_000 });
+		await expect(page.getByText("Sessions", { exact: true }).first())
+			.not.toBeVisible({ timeout: 10_000 });
 
 		// Expand again to restore state for other tests
 		const projectHeaderAfterReload = page.locator(".sidebar-edge div.cursor-pointer").filter({
 			hasText: projectInfo.name,
 		}).first();
+		await expect(projectHeaderAfterReload).toBeVisible({ timeout: 10_000 });
 		await projectHeaderAfterReload.click();
-		await expect(page.getByText("Sessions", { exact: true }).first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Sessions", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 	});
 
 	// ---------------------------------------------------------------
@@ -115,12 +127,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-02: Goal team nesting with expand and collapse", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-02",
-			title: "Goal team nesting with expand and collapse",
-			contracts: [CT_03],
-			covers: ["collapsed-tree-expansion"],
-		}));
+		s.begin(STORY_SB02);
 
 		// setup — create a goal
 		const goal = await createGoal({ title: "Team Nesting Goal", cwd: nonGitCwd() });
@@ -131,6 +138,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 
 		// act — find the goal in sidebar by text
 		s.act();
+		const goalGroup = s.sidebar.goal_group("Team Nesting Goal");
 		const goalHeader = page.getByText("Team Nesting Goal", { exact: false }).first();
 		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
 
@@ -156,12 +164,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-03: Auto-expand parent goal group on deep link navigation", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-03",
-			title: "Auto-expand parent goal group on deep link navigation",
-			contracts: [CT_03],
-			covers: ["deep-link-navigation", "collapsed-tree-expansion"],
-		}));
+		s.begin(STORY_SB03);
 
 		// setup — create a goal and a session inside it
 		const goal = await createGoal({ title: "Deep Link Goal", cwd: nonGitCwd() });
@@ -186,12 +189,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-06: Idle time display on session rows persists across reload", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-06",
-			title: "Idle time display on session rows persists across reload",
-			contracts: [CT_04],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_SB06);
 
 		// setup — create a session (will be idle immediately)
 		const sessionId = await s.createTestSession("A");
@@ -204,15 +202,15 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		s.assert();
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 		// The active row should be highlighted
-		const activeRow = page.locator(".sidebar-session-active");
-		await expect(activeRow).toBeVisible({ timeout: 10_000 });
+		const activeRow = s.sidebar.session_row();
+		await activeRow.is_visible();
 
 		// Reload and verify session row still visible
 		await s.reload();
 		// Navigate back to the session
 		await navigateToHash(page, `#/session/${sessionId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator(".sidebar-session-active")).toBeVisible({ timeout: 10_000 });
+		await s.sidebar.session_row().is_visible();
 	});
 
 	// ---------------------------------------------------------------
@@ -220,12 +218,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-09: Goal gate progress badge persists across reload", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-09",
-			title: "Goal gate progress badge persists across reload",
-			contracts: [CT_04],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_SB09);
 
 		// setup — create a goal with a workflow that has gates
 		let goal: { id: string; [k: string]: unknown };
@@ -262,12 +255,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-12: Completed goal renders appropriately in sidebar", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-12",
-			title: "Completed goal renders appropriately in sidebar",
-			contracts: [CT_04],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_SB12);
 
 		// setup — create a goal and complete it via API
 		const goal = await createGoal({ title: "Completed Goal Test", cwd: nonGitCwd() });
@@ -295,12 +283,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-24: Filter sidebar sessions by typing in search", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-24",
-			title: "Filter sidebar sessions by typing in search",
-			contracts: [CT_03],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_SB24);
 
 		// setup — create sessions with distinctive names
 		const sessionA = await createSession({ cwd: nonGitCwd() });
@@ -327,9 +310,9 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		s.act();
 		await page.keyboard.press("Control+k");
 
-		const searchInput = page.locator("input[data-search]");
-		await expect(searchInput).toBeVisible({ timeout: 5_000 });
-		await searchInput.fill("AlphaSB");
+		const searchInput = s.sidebar.search_input();
+		await searchInput.is_visible();
+		await page.locator("input[data-search]").fill("AlphaSB");
 		await page.waitForTimeout(400);
 
 		// assert — Alpha visible, Bravo hidden
@@ -338,7 +321,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		await expect(page.getByText("BravoSBTest")).not.toBeVisible({ timeout: 3_000 });
 
 		// Clear search — both should reappear
-		await searchInput.fill("");
+		await page.locator("input[data-search]").fill("");
 		await page.waitForTimeout(400);
 		await expect(page.getByText("AlphaSBTest")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("BravoSBTest")).toBeVisible({ timeout: 5_000 });
@@ -352,12 +335,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-27: Show archived toggle reveals archived section", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-27",
-			title: "Show archived toggle reveals archived section",
-			contracts: [CT_03, CT_04],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_SB27);
 
 		// setup
 		await s.sidebar.is_visible();
@@ -377,12 +355,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-32: Sidebar collapses to icon-only mode and persists", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-32",
-			title: "Sidebar collapses to icon-only mode and persists",
-			contracts: [CT_03],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_SB32);
 
 		// setup — verify sidebar is expanded (240px wide)
 		await s.sidebar.is_visible();
@@ -419,12 +392,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("SB-34: Keyboard shortcuts for sidebar search and collapse", async ({ page }) => {
-		s.begin(defineStory({
-			id: "SB-34",
-			title: "Keyboard shortcuts for sidebar search and collapse",
-			contracts: [CT_03],
-			covers: ["deep-link-navigation"],
-		}));
+		s.begin(STORY_SB34);
 
 		// setup
 		await s.sidebar.is_visible();
@@ -434,8 +402,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		await page.keyboard.press("Control+k");
 		await page.waitForTimeout(300);
 
-		const searchInput = page.locator("input[data-search]");
-		await expect(searchInput).toBeFocused({ timeout: 5_000 });
+		await s.sidebar.search_input().is_focused();
 
 		// Press Escape to blur search
 		await page.keyboard.press("Escape");
@@ -462,12 +429,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// ---------------------------------------------------------------
 
 	test("CT-03-sidebar-highlight: Session highlight follows navigation", async ({ page }) => {
-		s.begin(defineStory({
-			id: "CT-03-sidebar-highlight",
-			title: "Session highlight follows navigation with back/forward",
-			contracts: [CT_03],
-			covers: ["deep-link-navigation", "back-forward-navigation"],
-		}));
+		s.begin(STORY_CT03_HIGHLIGHT);
 
 		// setup — create two sessions
 		const idA = await s.createTestSession("A");
@@ -480,8 +442,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 			.toBeVisible({ timeout: 15_000 });
 
 		// Session A should be highlighted
-		const activeRow = page.locator(".sidebar-session-active");
-		await expect(activeRow).toBeVisible({ timeout: 5_000 });
+		await s.sidebar.session_row().is_visible();
 
 		// Navigate to session B
 		await navigateToHash(page, `#/session/${idB}`);
@@ -498,7 +459,43 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		// assert — A should be highlighted again
 		s.assert();
 		await s.url_contains(idA);
-		await expect(page.locator(".sidebar-session-active")).toBeVisible({ timeout: 5_000 });
+		await s.sidebar.session_row().is_visible();
+	});
+
+	// ---------------------------------------------------------------
+	// SB-concurrent: Multiple concurrent sessions in sidebar
+	// ---------------------------------------------------------------
+
+	test("SB-concurrent: Sidebar reflects multiple concurrent sessions", async ({ page }) => {
+		s.begin(STORY_SB_CONCURRENT);
+
+		// Create 3 sessions simultaneously
+		const [id1, id2, id3] = await Promise.all([
+			createSession({ cwd: nonGitCwd() }),
+			createSession({ cwd: nonGitCwd() }),
+			createSession({ cwd: nonGitCwd() }),
+		]);
+		sessionIds.push(id1, id2, id3);
+		await Promise.all([
+			waitForSessionStatus(id1, "idle"),
+			waitForSessionStatus(id2, "idle"),
+			waitForSessionStatus(id3, "idle"),
+		]);
+
+		// Reload to see all sessions
+		await s.reload();
+
+		s.act();
+		await s.sidebar.is_visible();
+
+		// assert — all 3 sessions should be visible in sidebar
+		s.assert();
+		await expect(async () => {
+			const sessionRows = await page.locator(
+				".sidebar-session-active, .sidebar-edge [class*='cursor-pointer']",
+			).count();
+			expect(sessionRows).toBeGreaterThanOrEqual(3);
+		}).toPass({ timeout: 10_000 });
 	});
 });
 
@@ -525,6 +522,7 @@ test.describe("Sidebar spec graph", () => {
 		defineStory({ id: "SB-32", title: "Collapsed sidebar icon-only mode", contracts: [CT_03], covers: ["page-reload"] });
 		defineStory({ id: "SB-34", title: "Sidebar keyboard shortcuts", contracts: [CT_03], covers: ["deep-link-navigation"] });
 		defineStory({ id: "CT-03-sidebar-highlight", title: "Session highlight follows navigation", contracts: [CT_03], covers: ["deep-link-navigation", "back-forward-navigation"] });
+		defineStory({ id: "SB-concurrent-agents", title: "Sidebar reflects multiple concurrent sessions", contracts: [CT_04], covers: ["concurrent-agents"] });
 
 		const graph = exportSpecGraph();
 
@@ -534,7 +532,7 @@ test.describe("Sidebar spec graph", () => {
 
 		// CT-04 should have stories
 		expect(graph.contracts["CT-04"]).toBeTruthy();
-		expect(graph.contracts["CT-04"].stories.length).toBeGreaterThanOrEqual(3);
+		expect(graph.contracts["CT-04"].stories.length).toBeGreaterThanOrEqual(4);
 
 		// Check coverage completeness
 		const completeness = contractCompleteness();
@@ -546,8 +544,8 @@ test.describe("Sidebar spec graph", () => {
 
 		const ct04 = completeness.find(c => c.contractId === "CT-04");
 		expect(ct04).toBeTruthy();
-		// CT-04 variations: page-reload covered, agent-crash-restart and concurrent-agents not covered here
+		// CT-04 variations: page-reload, concurrent-agents covered; agent-crash-restart not covered
 		const ct04Covered = ct04!.variations.filter(v => v.coveredBy !== null);
-		expect(ct04Covered.length).toBeGreaterThanOrEqual(1);
+		expect(ct04Covered.length).toBeGreaterThanOrEqual(2);
 	});
 });

@@ -20,6 +20,17 @@ import {
 	clearStoryRegistry,
 } from "./spec-framework.js";
 import { CT_03, CT_13 } from "./spec-contracts.js";
+import {
+	STORY_N01,
+	STORY_N02,
+	STORY_N03,
+	STORY_N04,
+	STORY_N06,
+	STORY_N07,
+	STORY_N08,
+	STORY_N09,
+	STORY_N10,
+} from "./story-registry.js";
 import { navigateToHash } from "./ui-helpers.js";
 
 test.describe("CT-13: URL routing and navigation", () => {
@@ -47,12 +58,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-01: Sidebar session selection updates URL and highlight", async () => {
-		s.begin(defineStory({
-			id: "N-01",
-			title: "Sidebar session selection updates URL and highlight",
-			contracts: [CT_13, CT_03],
-			covers: ["view-transitions", "page-reload", "deep-link-navigation"],
-		}));
+		s.begin(STORY_N01);
 
 		await s.createTestSession("A");
 		await s.createTestSession("B");
@@ -91,12 +97,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-02: Goal dashboard navigation and back", async () => {
-		s.begin(defineStory({
-			id: "N-02",
-			title: "Goal dashboard navigation and back",
-			contracts: [CT_13],
-			covers: ["back-forward-navigation"],
-		}));
+		s.begin(STORY_N02);
 
 		await s.createTestSession("A");
 		const goal = await createGoal({ title: "Nav test goal" });
@@ -133,12 +134,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-03: Deep links to all view types", async () => {
-		s.begin(defineStory({
-			id: "N-03",
-			title: "Deep links to all view types",
-			contracts: [CT_13],
-			covers: ["bookmarks"],
-		}));
+		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
 		const goal = await createGoal({ title: "Deep link goal" });
@@ -234,12 +230,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-04: Browser back and forward across views", async () => {
-		s.begin(defineStory({
-			id: "N-04",
-			title: "Browser back and forward across views",
-			contracts: [CT_13],
-			covers: ["back-forward-navigation"],
-		}));
+		s.begin(STORY_N04);
 
 		await s.createTestSession("A");
 		await s.open();
@@ -284,12 +275,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-06: Sidebar collapse persistence across reload", async () => {
-		s.begin(defineStory({
-			id: "N-06",
-			title: "Sidebar collapse persistence across reload",
-			contracts: [CT_13],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_N06);
 
 		await s.createTestSession("A");
 		await s.open();
@@ -346,12 +332,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-07: Page title contains Bobbit", async () => {
-		s.begin(defineStory({
-			id: "N-07",
-			title: "Page title contains Bobbit",
-			contracts: [CT_13],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_N07);
 
 		await s.createTestSession("A");
 		await s.open();
@@ -374,12 +355,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-08: Keyboard shortcuts for navigation", async () => {
-		s.begin(defineStory({
-			id: "N-08",
-			title: "Keyboard shortcuts for navigation",
-			contracts: [CT_13],
-			covers: ["view-transitions"],
-		}));
+		s.begin(STORY_N08);
 
 		await s.createTestSession("A");
 		await s.open();
@@ -444,12 +420,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-09: Cross-feature navigation journey", async () => {
-		s.begin(defineStory({
-			id: "N-09",
-			title: "Cross-feature navigation journey",
-			contracts: [CT_13],
-			covers: ["view-transitions", "back-forward-navigation"],
-		}));
+		s.begin(STORY_N09);
 
 		await s.createTestSession("A");
 		const goal = await createGoal({ title: "Journey goal" });
@@ -498,12 +469,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-10: Settings sub-navigation", async () => {
-		s.begin(defineStory({
-			id: "N-10",
-			title: "Settings sub-navigation",
-			contracts: [CT_13],
-			covers: ["view-transitions", "bookmarks"],
-		}));
+		s.begin(STORY_N10);
 
 		await s.createTestSession("A");
 		await s.open();
