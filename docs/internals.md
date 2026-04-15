@@ -809,6 +809,50 @@ The existing session restore path (on gateway restart) also benefits from worktr
 
 ---
 
+## Large content truncation
+
+When an agent writes a large file, the `pi-coding-agent` RPC protocol emits `message_update` events containing the **full accumulated message** on every streaming chunk. For a 40MB file write, this means ~40MB of JSON is serialized, broadcast via WebSocket, parsed by the browser, and held in the EventBuffer — on every token. With multiple agents writing simultaneously, this creates catastrophic memory pressure and freezes the Node.js event loop.
+
+The truncation system intercepts events before they reach the broadcast layer and EventBuffer, replacing large tool input content with a lightweight stub while preserving the full content in the agent's `.jsonl` session file for on-demand access.
+
+### Architecture
+
+```
+Agent process → message_update (full content)
+       │
+       ├─→ handleAgentLifecycle() — receives original (for search indexing)
+       ├─→ trackCostFromEvent()   — receives original (for token accounting)
+       │
+       └─→ truncateLargeToolContent(event)
+              │
+              ├─→ eventBuffer.push()  — truncated (ring buffer stays small)
+              └─→ broadcast()         — truncated (WebSocket payloads stay small)
+```
+
+### Key design decisions
+
+- **32KB threshold** — generous enough that normal code files (<10KB) pass through untouched, but catches generated data files, large test fixtures, and minified bundles. Exported as `LARGE_CONTENT_THRESHOLD` from `truncate-large-content.ts`.
+- **Zero overhead for small content** — no cloning occurs unless truncation is actually needed. The function returns the original event reference unchanged.
+- **Original event never mutated** — `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event. Only the broadcast/buffer path sees the truncated version.
+- **Dual format support** — both `toolCall`/`arguments` (pi-coding-agent RPC format) and `tool_use`/`input` (Anthropic API format) are handled for robustness.
+- **UI lazy loading** — `WriteRenderer` shows a preview (first 512 chars) with a "Load full content" button. Full content is fetched via `GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`. See [docs/rest-api.md — Large content truncation](rest-api.md#large-content-truncation).
+- **Streaming throttle** — `remote-agent.ts` throttles `streamMessage` updates to 2x/sec when content is truncated, reducing Lit re-render pressure in the browser.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `truncate-large-content.ts` | `truncateLargeToolContent()` function and `LARGE_CONTENT_THRESHOLD` constant |
+| `session-setup.ts` | Applies truncation in `subscribeToEvents()` before broadcast/buffer |
+| `session-manager.ts` | Same truncation at all event listener sites |
+| `server.ts` | REST endpoint for lazy-loading full content from `.jsonl` |
+| `fetch-tool-content.ts` (UI) | Client-side REST helper for lazy loading |
+| `WriteRenderer.ts` (UI) | Detects truncation, shows preview + "Load full content" button |
+| `Messages.ts` (UI) | Handles `load-full-content` CustomEvent, fetches and re-renders |
+| `remote-agent.ts` (UI) | Throttles stream updates for truncated content |
+
+---
+
 ## Viewer WebSocket
 
 The `/ws/viewer` endpoint provides a read-only, sessionless WebSocket connection for the goal dashboard to receive live gate verification events.
