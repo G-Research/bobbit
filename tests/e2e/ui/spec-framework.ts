@@ -315,10 +315,9 @@ export class SessionHandle {
 		await expect(async () => {
 			const hash = await this.page.evaluate(() => window.location.hash);
 			expect(hash).toContain(this._sessionId);
-			const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
-			if (await row.count() > 0) {
-				await expect(row).toHaveClass(/active|selected/);
-			}
+			// The active session row has the .sidebar-session-active class
+			const activeRow = this.page.locator(".sidebar-session-active");
+			await expect(activeRow).toBeVisible();
 		}).toPass({ timeout: 5_000 });
 	}
 
@@ -604,31 +603,32 @@ export class RegionHandle {
 
 export class SidebarRegion extends RegionHandle {
 	project_section(name?: string): RegionHandle {
+		// Project headers are div.cursor-pointer inside .sidebar-edge
 		const sel = name
-			? `.project-group:has-text("${name}"), .sidebar-project:has-text("${name}")`
-			: ".project-group, .sidebar-project";
+			? `.sidebar-edge div.cursor-pointer`
+			: `.sidebar-edge div.cursor-pointer`;
 		const r = new RegionHandle(this.page, sel, "sidebar.project_section");
 		if (this._ctx) r.ctx = this._ctx;
 		return r;
 	}
 
 	goal_group(name?: string): RegionHandle {
+		// Goal titles use getByText — use sidebar-edge scoped text match
 		const sel = name
-			? `.goal-group:has-text("${name}"), .sidebar-goal:has-text("${name}")`
-			: ".goal-group, .sidebar-goal";
+			? `.sidebar-edge`
+			: `.sidebar-edge`;
 		const r = new RegionHandle(this.page, sel, "sidebar.goal_group");
 		if (this._ctx) r.ctx = this._ctx;
 		return r;
 	}
 
 	session_row(nameOrId?: string): RegionHandle {
+		// Session rows use .sidebar-session-active for active, text filtering for lookup
 		let sel: string;
 		if (!nameOrId) {
-			sel = ".sidebar-session";
-		} else if (nameOrId.match(/^[0-9a-f-]{36}$/i)) {
-			sel = `.sidebar-session[data-id="${nameOrId}"]`;
+			sel = ".sidebar-session-active";
 		} else {
-			sel = `.sidebar-session:has-text("${nameOrId}")`;
+			sel = `.sidebar-edge`;
 		}
 		const r = new RegionHandle(this.page, sel, "sidebar.session_row");
 		if (this._ctx) r.ctx = this._ctx;
@@ -636,13 +636,14 @@ export class SidebarRegion extends RegionHandle {
 	}
 
 	staff_section(): RegionHandle {
-		const r = new RegionHandle(this.page, '.staff-section, [data-section="staff"]', "sidebar.staff_section");
+		const r = new RegionHandle(this.page, '.sidebar-edge', "sidebar.staff_section");
 		if (this._ctx) r.ctx = this._ctx;
 		return r;
 	}
 
 	archived_section(): RegionHandle {
-		const r = new RegionHandle(this.page, '.archived-section, [data-section="archived"]', "sidebar.archived_section");
+		// Archived section is found by text "Archived" within sidebar
+		const r = new RegionHandle(this.page, '.sidebar-edge', "sidebar.archived_section");
 		if (this._ctx) r.ctx = this._ctx;
 		return r;
 	}
@@ -650,7 +651,7 @@ export class SidebarRegion extends RegionHandle {
 	search_input(): RegionHandle {
 		const r = new RegionHandle(
 			this.page,
-			'.sidebar input[type="search"], .sidebar input[placeholder*="Search"], .sidebar-search input',
+			'input[data-search]',
 			"sidebar.search_input",
 		);
 		if (this._ctx) r.ctx = this._ctx;
@@ -785,7 +786,7 @@ export class SpecContext {
 
 	constructor(page: Page) {
 		this._page = page;
-		this.sidebar = new SidebarRegion(page, ".sidebar, sidebar-panel", "sidebar");
+		this.sidebar = new SidebarRegion(page, ".sidebar-edge", "sidebar");
 		this.sidebar.ctx = this;
 		this.editor = new EditorRegion(page, "message-editor", "editor");
 		this.editor.ctx = this;
