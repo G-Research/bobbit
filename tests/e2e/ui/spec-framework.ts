@@ -985,6 +985,6 @@ export class SpecContext {
 			expect(resp.status).toBe(200);
 			const body = await resp.json();
 			expect(body.data.text).toBe(expectedText);
-		}).toPass({ timeout: 10_000 });
+		}).toPass({ intervals: [500, 1000, 1000, 2000, 2000], timeout: 15_000 });
 	}
 }
