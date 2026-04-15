@@ -11,6 +11,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { renderTool } from "../tools/index.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
+import { fetchToolContent } from "../utils/fetch-tool-content.js";
+import { state as appState } from "../../app/state.js";
 import "./ThinkingBlock.js";
 import "./LiveTimer.js";
 import "./ToolGroup.js";
@@ -391,15 +393,60 @@ export class ToolMessage extends LitElement {
 
 	private _onPreviewReady = () => { this.requestUpdate(); };
 
+	private _onLoadFullContent = (e: Event) => {
+		e.stopPropagation();
+		this._loadFullContent();
+	};
+
+	private async _loadFullContent(): Promise<void> {
+		const sessionId = appState.remoteAgent?.gatewaySessionId;
+		if (!sessionId) return;
+
+		// Find the message index and block index for this tool call
+		const messages = appState.remoteAgent?.state?.messages;
+		if (!messages) return;
+
+		let messageIndex = -1;
+		let blockIndex = -1;
+		for (let mi = 0; mi < messages.length; mi++) {
+			const msg = messages[mi];
+			if (!Array.isArray(msg.content)) continue;
+			for (let bi = 0; bi < msg.content.length; bi++) {
+				const block = msg.content[bi];
+				if (block.type === "toolCall" && block.id === this.toolCall.id) {
+					messageIndex = mi;
+					blockIndex = bi;
+					break;
+				}
+			}
+			if (messageIndex >= 0) break;
+		}
+
+		if (messageIndex < 0 || blockIndex < 0) return;
+
+		try {
+			const fullContent = await fetchToolContent(sessionId, messageIndex, blockIndex);
+			// Replace truncated content with full content in the arguments
+			if (this.toolCall.arguments) {
+				this.toolCall.arguments.content = fullContent;
+			}
+			this.requestUpdate();
+		} catch {
+			// Silently fail — button already shows "Loading..." state
+		}
+	}
+
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
 		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
+		this.addEventListener("load-full-content", this._onLoadFullContent);
 	}
 
 	override disconnectedCallback(): void {
 		super.disconnectedCallback();
 		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
+		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 
 	override render() {
