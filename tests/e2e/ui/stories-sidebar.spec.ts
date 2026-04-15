@@ -107,6 +107,8 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 
 		// Reload — collapsed state should persist via localStorage
 		await s.reload();
+		// Wait for sidebar to fully render with persisted state
+		await page.waitForTimeout(500);
 
 		// assert — Sessions should still be hidden after reload
 		s.assert();
