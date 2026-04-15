@@ -14,6 +14,7 @@ import { test, expect } from "../gateway-harness.js";
 import {
 	SpecContext,
 	defineStory,
+	defineContract,
 	exportSpecGraph,
 	contractCompleteness,
 	clearStoryRegistry,
@@ -508,7 +509,9 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 test.describe("Sidebar spec graph", () => {
 	test.beforeEach(() => {
 		clearStoryRegistry();
-		// Do NOT clear contract registry — contracts from spec-contracts.ts must remain
+		// Re-register contracts — another spec file's clearContractRegistry() may have wiped them
+		defineContract(CT_03);
+		defineContract(CT_04);
 	});
 
 	test("spec graph dump for sidebar stories", () => {

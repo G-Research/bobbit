@@ -15,6 +15,7 @@ import { waitForHealth, createSession, deleteSession, createGoal, deleteGoal, ap
 import {
 	SpecContext,
 	defineStory,
+	defineContract,
 	exportSpecGraph,
 	contractCompleteness,
 	clearStoryRegistry,
@@ -518,10 +519,11 @@ test.describe("CT-13: URL routing and navigation", () => {
 test.describe("Navigation spec graph", () => {
 	test.beforeEach(() => {
 		clearStoryRegistry();
+		// Re-register contract — another spec file's clearContractRegistry() may have wiped it
+		defineContract(CT_13);
 	});
 
 	test("CT-13 coverage from navigation stories", () => {
-		// Re-register CT-13
 		const ct13 = CT_13;
 
 		// Re-define all navigation stories to check coverage
