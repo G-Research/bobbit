@@ -1002,8 +1002,10 @@ export class SpecContext {
 	async reload() {
 		trackIntent(this._activeStory, this._phase, "reload");
 		await this._page.reload();
+		// Wait for sidebar to be present — use .sidebar-edge which is always in DOM
+		// regardless of collapsed/expanded state (Settings button text is hidden when collapsed)
 		await expect(
-			this._page.locator("button").filter({ hasText: "Settings" }).first(),
+			this._page.locator(".sidebar-edge").first(),
 		).toBeVisible({ timeout: 20_000 });
 	}
 

@@ -163,7 +163,10 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.act();
 		await navigateToHash(s.page, "#/settings/system/models");
 		s.assert();
-		await s.settings.is_visible();
+		await s.page.waitForFunction(() =>
+			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
+		await expect(s.page.getByText("Models").first())
+			.toBeVisible({ timeout: 10_000 });
 
 		// Deep link: roles
 		s.act();
