@@ -4861,7 +4861,7 @@ async function handleApiRoute(
 			const content = Array.isArray(msg.content) ? msg.content : [];
 			const block = content[blockIndex];
 			if (!block) { json({ error: "Block not found" }, 404); return; }
-			const toolContent = block.input?.content;
+			const toolContent = block.arguments?.content ?? block.input?.content;
 			if (toolContent === undefined) { json({ error: "No content in block" }, 404); return; }
 			json({ content: toolContent });
 		} catch (err) {

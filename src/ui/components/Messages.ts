@@ -432,7 +432,8 @@ export class ToolMessage extends LitElement {
 			}
 			this.requestUpdate();
 		} catch {
-			// Silently fail — button already shows "Loading..." state
+			// Reset button state so user can retry
+			this.requestUpdate();
 		}
 	}
 

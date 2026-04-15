@@ -20,10 +20,25 @@ export interface TruncatedContent {
 	preview: string;
 }
 
+/** Helper: check if a content block is a tool call (either format) */
+function isToolBlock(block: any): boolean {
+	return block?.type === "toolCall" || block?.type === "tool_use";
+}
+
+/** Helper: get the string content from a tool block (either format) */
+function getToolContent(block: any): string | undefined {
+	const c = block.arguments?.content ?? block.input?.content;
+	return typeof c === "string" ? c : undefined;
+}
+
 /**
  * If the event is a `message_update` or `message_end` containing tool_use
- * blocks with large string content, return a shallow clone with those
- * content values replaced by a truncated descriptor.
+ * or toolCall blocks with large string content, return a shallow clone with
+ * those content values replaced by a truncated descriptor.
+ *
+ * Supports both formats:
+ *  - Anthropic API: `{ type: "tool_use", input: { content: "..." } }`
+ *  - pi-coding-agent RPC: `{ type: "toolCall", arguments: { content: "..." } }`
  *
  * Returns the original event unchanged when no truncation is needed.
  */
@@ -35,16 +50,15 @@ export function truncateLargeToolContent(event: any, threshold: number = LARGE_C
 	const content = event.message?.content;
 	if (!Array.isArray(content)) return event;
 
-	// Scan for any tool_use block that needs truncation
+	// Scan for any tool block that needs truncation
 	let needsTruncation = false;
 	for (const block of content) {
-		if (
-			block?.type === "tool_use" &&
-			typeof block.input?.content === "string" &&
-			block.input.content.length > threshold
-		) {
-			needsTruncation = true;
-			break;
+		if (isToolBlock(block)) {
+			const c = getToolContent(block);
+			if (c !== undefined && c.length > threshold) {
+				needsTruncation = true;
+				break;
+			}
 		}
 	}
 
@@ -52,26 +66,27 @@ export function truncateLargeToolContent(event: any, threshold: number = LARGE_C
 
 	// Build a shallow clone of the event with truncated content blocks
 	const newContent = content.map((block: any) => {
-		if (
-			block?.type === "tool_use" &&
-			typeof block.input?.content === "string" &&
-			block.input.content.length > threshold
-		) {
-			const original = block.input.content as string;
-			const truncatedContent: TruncatedContent = {
-				_truncated: true,
-				_originalLength: original.length,
-				preview: original.slice(0, 512),
-			};
+		if (!isToolBlock(block)) return block;
+		const c = getToolContent(block);
+		if (c === undefined || c.length <= threshold) return block;
+
+		const truncatedContent: TruncatedContent = {
+			_truncated: true,
+			_originalLength: c.length,
+			preview: c.slice(0, 512),
+		};
+
+		// Preserve the original field structure (arguments vs input)
+		if (block.arguments?.content !== undefined) {
 			return {
 				...block,
-				input: {
-					...block.input,
-					content: truncatedContent,
-				},
+				arguments: { ...block.arguments, content: truncatedContent },
 			};
 		}
-		return block;
+		return {
+			...block,
+			input: { ...block.input, content: truncatedContent },
+		};
 	});
 
 	return {

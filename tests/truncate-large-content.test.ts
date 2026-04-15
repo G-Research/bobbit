@@ -150,6 +150,101 @@ describe("truncateLargeToolContent", () => {
 		assert.strictEqual(result.message.content[0].input.content._originalLength, 200);
 	});
 
+	// ── toolCall / arguments format (pi-coding-agent RPC) ──
+
+	it("truncates large toolCall content (arguments format)", () => {
+		const largeContent = "R".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const event = {
+			type: "message_update",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "write", arguments: { path: "big.json", content: largeContent } },
+				],
+			},
+		};
+
+		const result = truncateLargeToolContent(event);
+
+		assert.notStrictEqual(result, event);
+		const truncated = result.message.content[0].arguments.content;
+		assert.strictEqual(truncated._truncated, true);
+		assert.strictEqual(truncated._originalLength, largeContent.length);
+		assert.strictEqual(truncated.preview, largeContent.slice(0, 512));
+		// Path preserved in arguments
+		assert.strictEqual(result.message.content[0].arguments.path, "big.json");
+		// Must NOT create an input field
+		assert.strictEqual(result.message.content[0].input, undefined);
+	});
+
+	it("does NOT mutate the original event (toolCall format)", () => {
+		const largeContent = "S".repeat(LARGE_CONTENT_THRESHOLD + 100);
+		const event = {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "write", arguments: { path: "f.txt", content: largeContent } },
+				],
+			},
+		};
+
+		truncateLargeToolContent(event);
+
+		assert.strictEqual(typeof event.message.content[0].arguments.content, "string");
+		assert.strictEqual(event.message.content[0].arguments.content.length, largeContent.length);
+	});
+
+	it("handles mixed toolCall and tool_use blocks", () => {
+		const large1 = "A".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const large2 = "B".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const event = {
+			type: "message_update",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "write", arguments: { path: "a.txt", content: large1 } },
+					{ type: "tool_use", name: "write", input: { path: "b.txt", content: large2 } },
+				],
+			},
+		};
+
+		const result = truncateLargeToolContent(event);
+
+		// toolCall block truncated in arguments
+		assert.strictEqual(result.message.content[0].arguments.content._truncated, true);
+		assert.strictEqual(result.message.content[0].input, undefined);
+		// tool_use block truncated in input
+		assert.strictEqual(result.message.content[1].input.content._truncated, true);
+		assert.strictEqual(result.message.content[1].arguments, undefined);
+	});
+
+	it("returns same object for small toolCall content", () => {
+		const event = {
+			type: "message_update",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "write", arguments: { path: "foo.ts", content: "small" } },
+				],
+			},
+		};
+		assert.strictEqual(truncateLargeToolContent(event), event);
+	});
+
+	it("handles toolCall with non-string content", () => {
+		const event = {
+			type: "message_update",
+			message: {
+				content: [
+					{ type: "toolCall", name: "bash", arguments: { command: "ls" } },
+					{ type: "toolCall", name: "write", arguments: { path: "f.txt", content: 42 } },
+				],
+			},
+		};
+		assert.strictEqual(truncateLargeToolContent(event), event);
+	});
+
 	it("handles null/undefined input gracefully", () => {
 		assert.strictEqual(truncateLargeToolContent(null), null);
 		assert.strictEqual(truncateLargeToolContent(undefined), undefined);
