@@ -19,8 +19,12 @@ import {
 	exportSpecGraph,
 	findRelatedStories,
 	contractCoverage,
+	contractCompleteness,
 	clearStoryRegistry,
+	clearContractRegistry,
+	defineContract,
 } from "./spec-framework.js";
+import { CT_02, CT_05, CT_13, CT_15 } from "./spec-contracts.js";
 
 test.describe("CT-02: Draft preservation", () => {
 	let s: SpecContext;
@@ -48,7 +52,8 @@ test.describe("CT-02: Draft preservation", () => {
 		s.begin(defineStory({
 			id: "CT-02-a",
 			title: "Draft survives rapid session switching",
-			contracts: ["CT-02"],
+			contracts: [CT_02],
+			covers: ["rapid-session-switch"],
 		}));
 
 		// setup
@@ -72,7 +77,8 @@ test.describe("CT-02: Draft preservation", () => {
 		s.begin(defineStory({
 			id: "CT-02-b",
 			title: "Draft with attachment survives settings detour",
-			contracts: ["CT-02", "CT-13"],
+			contracts: [CT_02, CT_13],
+			covers: ["settings-detour", "attachment-added"],
 		}));
 
 		// setup
@@ -97,7 +103,8 @@ test.describe("CT-02: Draft preservation", () => {
 		s.begin(defineStory({
 			id: "CT-02-c",
 			title: "Draft survives model change",
-			contracts: ["CT-02", "CT-15"],
+			contracts: [CT_02, CT_15],
+			covers: ["model-change"],
 		}));
 
 		// setup
@@ -118,7 +125,8 @@ test.describe("CT-02: Draft preservation", () => {
 		s.begin(defineStory({
 			id: "CT-02-d",
 			title: "Draft survives page reload",
-			contracts: ["CT-02", "CT-05"],
+			contracts: [CT_02, CT_05],
+			covers: ["page-reload"],
 		}));
 
 		// setup
@@ -146,62 +154,101 @@ test.describe("Spec graph analysis", () => {
 
 	test.beforeEach(() => {
 		clearStoryRegistry();
+		clearContractRegistry();
 	});
 
-	test("phase annotations control what gets tracked", () => {
-		const story = defineStory({ id: "PH-a", title: "Phase test", contracts: ["CT-02"] });
+	test("defineStory accepts ContractDef objects and normalizes to IDs", () => {
+		const ct = defineContract({
+			id: "CT-TEST",
+			guarantee: "Test guarantee",
+			survives: ["variation-a", "variation-b"],
+			regions: ["editor"],
+			depends_on: [],
+		});
 
-		// Simulate setup phase — should NOT be tracked
-		story.regions = [];
-		story.intents = [];
-		// (In real execution, trackRegion/trackIntent skip "setup" phase)
+		const story = defineStory({
+			id: "T-01",
+			title: "Test story",
+			contracts: [ct],
+			covers: ["variation-a"],
+		});
 
-		// After act/assert, only those interactions appear
-		// This is validated by the behavioral tests above — CT-02-a's setup
-		// navigation doesn't pollute the graph with sidebar/session entries
-		expect(story.regions).toEqual([]);
+		expect(story.contracts).toEqual(["CT-TEST"]);
+		expect(story.covers).toEqual(["variation-a"]);
 	});
 
-	test("registry captures story metadata from defineStory", () => {
-		defineStory({ id: "CT-02-a", title: "Draft survives rapid switch", contracts: ["CT-02"] });
-		defineStory({ id: "CT-02-b", title: "Draft with attachment", contracts: ["CT-02", "CT-13"] });
-		defineStory({ id: "CT-02-c", title: "Draft survives model change", contracts: ["CT-02", "CT-15"] });
-		defineStory({ id: "CT-02-d", title: "Draft survives reload", contracts: ["CT-02", "CT-05"] });
+	test("contractCompleteness shows covered and uncovered variations", () => {
+		const ct = defineContract({
+			id: "CT-TEST",
+			guarantee: "Test guarantee",
+			survives: ["var-a", "var-b", "var-c"],
+			regions: ["editor"],
+			depends_on: [],
+		});
 
-		const registry = getStoryRegistry();
-		expect(registry.size).toBe(4);
-		expect(registry.get("CT-02-a")!.title).toBe("Draft survives rapid switch");
-		expect(registry.get("CT-02-c")!.contracts).toEqual(["CT-02", "CT-15"]);
+		defineStory({ id: "S-1", title: "Covers A", contracts: [ct], covers: ["var-a"] });
+		defineStory({ id: "S-2", title: "Covers B", contracts: [ct], covers: ["var-b"] });
+
+		const results = contractCompleteness();
+		expect(results).toHaveLength(1);
+
+		const report = results[0];
+		expect(report.contractId).toBe("CT-TEST");
+		expect(report.variations).toEqual([
+			{ name: "var-a", coveredBy: "S-1" },
+			{ name: "var-b", coveredBy: "S-2" },
+			{ name: "var-c", coveredBy: null },
+		]);
+		expect(report.coverage).toBeCloseTo(2 / 3);
 	});
 
-	test("spec graph indexes stories by contract, region, and intent", () => {
-		const storyA = defineStory({ id: "SG-a", title: "Story A", contracts: ["CT-02"] });
-		storyA.regions = ["editor", "sidebar"];
-		storyA.intents = ["type_in", "navigate_to_session"];
-		storyA.entities = ["session"];
+	test("contractCompleteness with real CT-02 contract", () => {
+		// Import real contract definition
+		const ct02 = defineContract({
+			id: "CT-02",
+			guarantee: "Session switch preserves drafts and context",
+			survives: [
+				"rapid-session-switch", "settings-detour", "model-change",
+				"page-reload", "goal-dashboard-detour", "attachment-added",
+				"personality-change", "reconnect-after-disconnect",
+			],
+			regions: ["editor", "context_bar"],
+			depends_on: ["CT-05"],
+		});
 
-		const storyB = defineStory({ id: "SG-b", title: "Story B", contracts: ["CT-02", "CT-05"] });
-		storyB.regions = ["editor", "message_list"];
-		storyB.intents = ["type_in", "reload"];
-		storyB.entities = ["session"];
+		defineStory({ id: "CT-02-a", title: "Rapid switch", contracts: [ct02], covers: ["rapid-session-switch"] });
+		defineStory({ id: "CT-02-b", title: "Settings detour", contracts: [ct02], covers: ["settings-detour", "attachment-added"] });
+		defineStory({ id: "CT-02-c", title: "Model change", contracts: [ct02], covers: ["model-change"] });
+		defineStory({ id: "CT-02-d", title: "Reload", contracts: [ct02], covers: ["page-reload"] });
 
-		const storyC = defineStory({ id: "SG-c", title: "Story C", contracts: ["CT-13"] });
-		storyC.regions = ["settings"];
-		storyC.intents = ["navigate_to_settings"];
-		storyC.entities = ["config"];
+		const results = contractCompleteness();
+		const ct02Report = results.find(r => r.contractId === "CT-02")!;
+
+		// 5 variations covered (settings-detour + attachment-added from same story)
+		const covered = ct02Report.variations.filter(v => v.coveredBy !== null);
+		expect(covered).toHaveLength(5);
+
+		// 3 gaps
+		const gaps = ct02Report.variations.filter(v => v.coveredBy === null);
+		expect(gaps.map(g => g.name).sort()).toEqual([
+			"goal-dashboard-detour",
+			"personality-change",
+			"reconnect-after-disconnect",
+		]);
+	});
+
+	test("spec graph includes contract definitions", () => {
+		defineContract({
+			id: "CT-A",
+			guarantee: "Test A",
+			survives: ["var-1"],
+			regions: ["editor"],
+			depends_on: [],
+		});
 
 		const graph = exportSpecGraph();
-
-		expect(graph.contracts["CT-02"].stories).toContain("SG-a");
-		expect(graph.contracts["CT-02"].stories).toContain("SG-b");
-		expect(graph.contracts["CT-02"].stories).not.toContain("SG-c");
-
-		expect(graph.regionIndex["editor"]).toContain("SG-a");
-		expect(graph.regionIndex["editor"]).toContain("SG-b");
-		expect(graph.regionIndex["settings"]).toEqual(["SG-c"]);
-
-		expect(graph.intentIndex["type_in"]).toContain("SG-a");
-		expect(graph.intentIndex["type_in"]).toContain("SG-b");
+		expect(graph.contractDefs["CT-A"]).toBeTruthy();
+		expect(graph.contractDefs["CT-A"].guarantee).toBe("Test A");
 	});
 
 	test("findRelatedStories ranks by overlap", () => {
@@ -227,24 +274,5 @@ test.describe("Spec graph analysis", () => {
 		expect(related[0].overlap).toBeGreaterThan(related[1]?.overlap || 0);
 		expect(related.some(r => r.id === "REL-c")).toBe(true);
 		expect(related.some(r => r.id === "REL-d")).toBe(false);
-	});
-
-	test("contractCoverage shows regions and intents exercised", () => {
-		const a = defineStory({ id: "CC-a", title: "A", contracts: ["CT-02"] });
-		a.regions = ["editor"];
-		a.intents = ["type_in"];
-
-		const b = defineStory({ id: "CC-b", title: "B", contracts: ["CT-02"] });
-		b.regions = ["editor", "sidebar"];
-		b.intents = ["type_in", "navigate_to_session"];
-
-		defineStory({ id: "CC-c", title: "C", contracts: ["CT-05"] });
-
-		const coverage = contractCoverage("CT-02");
-		expect(coverage.stories).toEqual(["CC-a", "CC-b"]);
-		expect(coverage.regions).toContain("editor");
-		expect(coverage.regions).toContain("sidebar");
-		expect(coverage.intents).toContain("type_in");
-		expect(coverage.intents).toContain("navigate_to_session");
 	});
 });

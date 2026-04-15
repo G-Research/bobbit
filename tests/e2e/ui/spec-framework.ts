@@ -25,6 +25,7 @@ export interface StoryMeta {
 	id: string;
 	title: string;
 	contracts: string[];
+	covers: string[];
 	/** Regions touched during act/assert phases (not setup). */
 	regions: string[];
 	/** Intents exercised during act/assert phases (not setup). */
@@ -35,21 +36,49 @@ export interface StoryMeta {
 	environment?: "mobile" | "desktop";
 }
 
+export interface ContractDef {
+	id: string;
+	guarantee: string;
+	survives: string[];
+	regions: string[];
+	depends_on: string[];
+}
+
+const contractRegistry = new Map<string, ContractDef>();
+
+export function defineContract(def: ContractDef): ContractDef {
+	contractRegistry.set(def.id, def);
+	return def;
+}
+
+export function getContractRegistry(): ReadonlyMap<string, ContractDef> {
+	return contractRegistry;
+}
+
+export function clearContractRegistry() {
+	contractRegistry.clear();
+}
+
 const storyRegistry = new Map<string, StoryMeta>();
 
 /** Define a story's metadata. Call at the top of each test. */
 export function defineStory(meta: {
 	id: string;
 	title: string;
-	contracts: string[];
+	contracts: (string | ContractDef)[];
+	covers?: string[];
 	environment?: "mobile" | "desktop";
 }): StoryMeta {
 	const entry: StoryMeta = {
-		...meta,
+		id: meta.id,
+		title: meta.title,
+		contracts: meta.contracts.map(c => typeof c === 'string' ? c : c.id),
+		covers: meta.covers ?? [],
 		regions: [],
 		intents: [],
 		entities: [],
 		file: "",
+		environment: meta.environment,
 	};
 	storyRegistry.set(meta.id, entry);
 	return entry;
@@ -101,12 +130,14 @@ export function clearStoryRegistry() {
 export function exportSpecGraph(): {
 	stories: Record<string, StoryMeta>;
 	contracts: Record<string, { stories: string[] }>;
+	contractDefs: Record<string, ContractDef>;
 	regionIndex: Record<string, string[]>;
 	intentIndex: Record<string, string[]>;
 	entityIndex: Record<string, string[]>;
 } {
 	const stories: Record<string, StoryMeta> = {};
 	const contracts: Record<string, { stories: string[] }> = {};
+	const contractDefs: Record<string, ContractDef> = {};
 	const regionIndex: Record<string, string[]> = {};
 	const intentIndex: Record<string, string[]> = {};
 	const entityIndex: Record<string, string[]> = {};
@@ -131,7 +162,11 @@ export function exportSpecGraph(): {
 		}
 	}
 
-	return { stories, contracts, regionIndex, intentIndex, entityIndex };
+	for (const [id, def] of contractRegistry) {
+		contractDefs[id] = def;
+	}
+
+	return { stories, contracts, contractDefs, regionIndex, intentIndex, entityIndex };
 }
 
 /**
@@ -197,6 +232,44 @@ export function contractCoverage(contractId: string): {
 		}
 	}
 	return { contractId, stories, regions: [...regions], intents: [...intents] };
+}
+
+export function contractCompleteness(): Array<{
+	contractId: string;
+	guarantee: string;
+	variations: Array<{ name: string; coveredBy: string | null }>;
+	coverage: number;
+}> {
+	const results: Array<{
+		contractId: string;
+		guarantee: string;
+		variations: Array<{ name: string; coveredBy: string | null }>;
+		coverage: number;
+	}> = [];
+
+	for (const [id, contract] of contractRegistry) {
+		const variations = contract.survives.map(variation => {
+			// Find a story that covers this variation
+			let coveredBy: string | null = null;
+			for (const [storyId, story] of storyRegistry) {
+				if (story.contracts.includes(id) && story.covers.includes(variation)) {
+					coveredBy = storyId;
+					break;
+				}
+			}
+			return { name: variation, coveredBy };
+		});
+
+		const covered = variations.filter(v => v.coveredBy !== null).length;
+		results.push({
+			contractId: id,
+			guarantee: contract.guarantee,
+			variations,
+			coverage: contract.survives.length > 0 ? covered / contract.survives.length : 1,
+		});
+	}
+
+	return results;
 }
 
 
