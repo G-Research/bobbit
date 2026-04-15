@@ -106,9 +106,11 @@ test.describe("Session lifecycle stories", () => {
 		// act
 		s.act();
 		await s.navigate_to("session", "A");
+		await s.session("A").in_state("active");
 		await s.type_in(s.editor, "draft for A");
 		await s.wait_for_draft_saved("A", "draft for A");
 		await s.navigate_to("session", "B");
+		await s.session("B").in_state("active");
 		await s.type_in(s.editor, "draft for B");
 		await s.wait_for_draft_saved("B", "draft for B");
 		await s.navigate_to("session", "A");
