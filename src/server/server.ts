@@ -4844,6 +4844,32 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content
+	const toolContentMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/(\d+)\/(\d+)$/);
+	if (toolContentMatch && req.method === "GET") {
+		const [, id, msgIdxStr, blkIdxStr] = toolContentMatch;
+		const messageIndex = parseInt(msgIdxStr, 10);
+		const blockIndex = parseInt(blkIdxStr, 10);
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		try {
+			const msgsResp = await session.rpcClient.getMessages();
+			const messages = msgsResp?.data?.messages || msgsResp?.data;
+			if (!Array.isArray(messages)) { json({ error: "Could not retrieve messages" }, 500); return; }
+			const msg = messages[messageIndex];
+			if (!msg) { json({ error: "Message not found" }, 404); return; }
+			const content = Array.isArray(msg.content) ? msg.content : [];
+			const block = content[blockIndex];
+			if (!block) { json({ error: "Block not found" }, 404); return; }
+			const toolContent = block.input?.content;
+			if (toolContent === undefined) { json({ error: "No content in block" }, 404); return; }
+			json({ content: toolContent });
+		} catch (err) {
+			json({ error: String(err) }, 500);
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id/git-diff — unified diff for session working directory
 	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-diff')) {
 		const id = url.pathname.split('/')[3];

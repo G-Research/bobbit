@@ -28,6 +28,7 @@ import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
+import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
@@ -2050,8 +2051,9 @@ export class SessionManager {
 
 			this.handleAgentLifecycle(session, event);
 
-			eventBuffer.push(event);
-			broadcast(session.clients, { type: "event", data: event });
+			const truncated = truncateLargeToolContent(event);
+			eventBuffer.push(truncated);
+			broadcast(session.clients, { type: "event", data: truncated });
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
@@ -2615,8 +2617,9 @@ export class SessionManager {
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = Date.now();
 			this.handleAgentLifecycle(session, event);
-			eventBuffer.push(event);
-			broadcast(session.clients, { type: "event", data: event });
+			const truncated = truncateLargeToolContent(event);
+			eventBuffer.push(truncated);
+			broadcast(session.clients, { type: "event", data: truncated });
 			this.trackCostFromEvent(session, event);
 		});
 		session.unsubscribe = unsub;
@@ -2948,8 +2951,9 @@ export class SessionManager {
 			session.lastActivity = Date.now();
 			roleStore.update(id, { lastActivity: session.lastActivity });
 			this.handleAgentLifecycle(session, event);
-			session.eventBuffer.push(event);
-			broadcast(session.clients, { type: "event", data: event });
+			const truncated = truncateLargeToolContent(event);
+			session.eventBuffer.push(truncated);
+			broadcast(session.clients, { type: "event", data: truncated });
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -3100,8 +3104,9 @@ export class SessionManager {
 			session.lastActivity = Date.now();
 			persoStore.update(id, { lastActivity: session.lastActivity });
 			this.handleAgentLifecycle(session, event);
-			session.eventBuffer.push(event);
-			broadcast(session.clients, { type: "event", data: event });
+			const truncated = truncateLargeToolContent(event);
+			session.eventBuffer.push(truncated);
+			broadcast(session.clients, { type: "event", data: truncated });
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -3936,8 +3941,9 @@ export class SessionManager {
 
 				this.handleAgentLifecycle(session, event);
 
-				session.eventBuffer.push(event);
-				broadcast(session.clients, { type: "event", data: event });
+				const truncated = truncateLargeToolContent(event);
+				session.eventBuffer.push(truncated);
+				broadcast(session.clients, { type: "event", data: truncated });
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 
