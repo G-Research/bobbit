@@ -253,10 +253,10 @@ function renderMobileLanding() {
 												</div>
 												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 													${data.goals.map((goal, gi) => html`
-														${gi > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+														${gi > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
 													`)}
-													${data.goals.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+													${data.goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
 														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
@@ -295,7 +295,7 @@ function renderMobileLanding() {
 										<div class="flex flex-col gap-0.5">
 											<div class="flex items-center gap-1.5 pl-1 pr-2 py-1.5">
 												<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "sm")}</span>
-												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived${(state.archivedGoalsTotal + state.archivedSessionsTotal) > 0 ? ` (${state.archivedGoalsTotal + state.archivedSessionsTotal})` : ""}</span>
+												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 											</div>
 											${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
