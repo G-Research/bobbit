@@ -109,6 +109,8 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Change message rendering**: `src/ui/components/Messages.ts` for standard roles, `message-renderer-registry.ts` for custom types.
 
+**Large content truncation**: Tool content >32KB is truncated in WebSocket broadcasts and EventBuffer to prevent memory pressure. Key files: `truncate-large-content.ts` (threshold + truncation logic), `session-setup.ts`/`session-manager.ts` (applies truncation before broadcast), `WriteRenderer.ts` (shows preview + lazy-load button). Full content lazy-loaded via `GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`. See [docs/internals.md — Large content truncation](docs/internals.md#large-content-truncation).
+
 **Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `project-sandbox.ts`, `sandbox-manager.ts`, `docker-args.ts`. One long-lived container per project. Staff agents in sandbox mode use container-internal worktrees via `sandboxBranch`. See [docs/internals.md — Docker sandbox](docs/internals.md#docker-sandbox).
 
 **Run maintenance cleanup**: Settings → Maintenance tab. Three sections: orphaned worktrees, orphaned sessions, expired archives. Each has scan → preview → execute. Cleanup is never automatic.
@@ -131,6 +133,7 @@ Key quick checks:
 - **Search index**: Delete `<project-root>/.bobbit/state/search.db` and restart to rebuild.
 - **Sidebar child loading**: If expanding a goal shows no children, check: (1) the server BFS enrichment in the sessions endpoint seeds from live goal IDs and live session IDs — not just `delegateOf` chains but also `teamGoalId`, `teamLeadSessionId`, and `goalId` relationships; (2) the archived goals endpoint (`GET /api/goals?archived=true`) returns an `archivedSessions` field with affiliated sessions; (3) the on-demand fallback in `renderGoalGroup` fires for edge cases (guarded by `_goalChildrenFetched` Set to avoid repeated calls). See also the "Paginated archives" section in [docs/debugging.md](docs/debugging.md).
 - **Auto-nudge flooding**: If a team lead receives duplicate nudges after sleep/wake, check `nudgePending` state in TeamManager. The guard prevents re-enqueuing while a nudge is already pending — cleared on `agent_start`.
+- **Large file writes freezing system**: Content >32KB is truncated in broadcasts via `truncateLargeToolContent()`. If UI shows truncated content but "Load full content" fails, check the `.jsonl` file exists. See [docs/debugging.md — Large file writes](docs/debugging.md#large-file-writes-agent-writes-32kb).
 
 ## Git conventions
 

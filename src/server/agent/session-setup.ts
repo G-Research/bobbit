@@ -38,6 +38,7 @@ import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExten
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
+import { truncateLargeToolContent } from "./truncate-large-content.js";
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
@@ -404,8 +405,9 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
 		ctx.handleAgentLifecycle(session, event);
-		session.eventBuffer.push(event);
-		ctx.broadcast(session.clients, { type: "event", data: event });
+		const truncated = truncateLargeToolContent(event);
+		session.eventBuffer.push(truncated);
+		ctx.broadcast(session.clients, { type: "event", data: truncated });
 		ctx.trackCostFromEvent(session, event);
 	});
 }
