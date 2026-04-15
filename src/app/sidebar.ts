@@ -791,10 +791,10 @@ function renderProjectContent(
 	const ungroupedExp = isUngroupedExpanded(project.id);
 	return html`
 		${goals.map((goal, i) => html`
-			${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 			${renderGoalGroup(goal)}
 		`)}
-		${goals.length > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
+		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 				style="padding-left:${HEADER_CHEVRON_W}px;"
@@ -1013,7 +1013,7 @@ export function renderSidebar() {
 										>
 											<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${showArchivedContent ? "▾" : "▸"}</span>
 											<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
-											<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived${(state.archivedGoalsTotal + state.archivedSessionsTotal) > 0 ? ` (${state.archivedGoalsTotal + state.archivedSessionsTotal})` : ""}</span>
+											<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
 										</button>
 										${showArchivedContent ? html`
 											${filteredArchivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
