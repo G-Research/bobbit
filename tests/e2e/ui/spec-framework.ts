@@ -321,6 +321,64 @@ export class SessionHandle {
 			}
 		}).toPass({ timeout: 5_000 });
 	}
+
+	async has_unseen_dot(): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		await expect(row.locator('.unseen-dot, .activity-dot, [class*="unseen"]').first())
+			.toBeVisible({ timeout: 5_000 });
+	}
+
+	async no_unseen_dot(): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		await expect(row.locator('.unseen-dot, .activity-dot, [class*="unseen"]').first())
+			.not.toBeVisible({ timeout: 5_000 });
+	}
+
+	async is_nested_under(parentName: string): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const parentLocator = this.page.locator(
+			`.sidebar-session:has-text("${parentName}"), .goal-group:has-text("${parentName}")`
+		).first();
+		await expect(parentLocator).toBeVisible({ timeout: 5_000 });
+		const sessionInParent = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		await expect(sessionInParent).toBeVisible({ timeout: 5_000 });
+	}
+
+	async is_before(otherSessionName: string): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const thisId = this._sessionId;
+		const result = await this.page.evaluate(({ thisId, otherName }) => {
+			const rows = Array.from(document.querySelectorAll('.sidebar-session'));
+			const thisIdx = rows.findIndex(r => r.getAttribute('data-id') === thisId);
+			const otherIdx = rows.findIndex(r => r.textContent?.includes(otherName));
+			return { thisIdx, otherIdx };
+		}, { thisId, otherName: otherSessionName });
+		expect(result.thisIdx).toBeGreaterThanOrEqual(0);
+		expect(result.otherIdx).toBeGreaterThanOrEqual(0);
+		expect(result.thisIdx).toBeLessThan(result.otherIdx);
+	}
+
+	async shows_status(status: "streaming" | "idle" | "compacting"): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		if (status === "streaming") {
+			await expect(row.locator('.streaming-dots, .pulsing-dot, [class*="streaming"], [class*="active-dot"]').first())
+				.toBeVisible({ timeout: 5_000 });
+		} else if (status === "idle") {
+			await expect(row.locator('.idle-time, .time-display, time, [class*="idle"]').first())
+				.toBeVisible({ timeout: 5_000 });
+		} else if (status === "compacting") {
+			await expect(row.locator('.compacting, [class*="compact"]').first())
+				.toBeVisible({ timeout: 5_000 });
+		}
+	}
 }
 
 export class GoalHandle {
@@ -540,6 +598,67 @@ export class RegionHandle {
 	}
 }
 
+// ============================================================
+// SIDEBAR REGION — typed sub-regions for sidebar hierarchy
+// ============================================================
+
+export class SidebarRegion extends RegionHandle {
+	project_section(name?: string): RegionHandle {
+		const sel = name
+			? `.project-group:has-text("${name}"), .sidebar-project:has-text("${name}")`
+			: ".project-group, .sidebar-project";
+		const r = new RegionHandle(this.page, sel, "sidebar.project_section");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	goal_group(name?: string): RegionHandle {
+		const sel = name
+			? `.goal-group:has-text("${name}"), .sidebar-goal:has-text("${name}")`
+			: ".goal-group, .sidebar-goal";
+		const r = new RegionHandle(this.page, sel, "sidebar.goal_group");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	session_row(nameOrId?: string): RegionHandle {
+		let sel: string;
+		if (!nameOrId) {
+			sel = ".sidebar-session";
+		} else if (nameOrId.match(/^[0-9a-f-]{36}$/i)) {
+			sel = `.sidebar-session[data-id="${nameOrId}"]`;
+		} else {
+			sel = `.sidebar-session:has-text("${nameOrId}")`;
+		}
+		const r = new RegionHandle(this.page, sel, "sidebar.session_row");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	staff_section(): RegionHandle {
+		const r = new RegionHandle(this.page, '.staff-section, [data-section="staff"]', "sidebar.staff_section");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	archived_section(): RegionHandle {
+		const r = new RegionHandle(this.page, '.archived-section, [data-section="archived"]', "sidebar.archived_section");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	search_input(): RegionHandle {
+		const r = new RegionHandle(
+			this.page,
+			'.sidebar input[type="search"], .sidebar input[placeholder*="Search"], .sidebar-search input',
+			"sidebar.search_input",
+		);
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+}
+
+
 const intentSelectors: Record<string, string> = {
 	send_message: "message-editor .send-button:not(.stop-button), message-editor button[title='Send']",
 	stop_streaming: "message-editor .stop-button, message-editor button[title='Stop']",
@@ -653,7 +772,7 @@ export class SpecContext {
 	private _page: Page;
 
 	// Regions
-	readonly sidebar: RegionHandle;
+	readonly sidebar: SidebarRegion;
 	readonly editor: EditorRegion;
 	readonly context_bar: ContextBarRegion;
 	readonly stats_bar: RegionHandle;
@@ -666,7 +785,8 @@ export class SpecContext {
 
 	constructor(page: Page) {
 		this._page = page;
-		this.sidebar = this._region(".sidebar, sidebar-panel", "sidebar");
+		this.sidebar = new SidebarRegion(page, ".sidebar, sidebar-panel", "sidebar");
+		this.sidebar.ctx = this;
 		this.editor = new EditorRegion(page, "message-editor", "editor");
 		this.editor.ctx = this;
 		this.context_bar = new ContextBarRegion(page, ".context-bar, .stats-bar", "context_bar");
@@ -906,6 +1026,52 @@ export class SpecContext {
 		const handle = this.staffAgents.get(staffName);
 		if (!handle) throw new Error(`Staff '${staffName}' not registered`);
 		await apiFetch(`/api/staff/${(handle as any)._staffId}/wake`, { method: "POST" });
+	}
+
+	// --- Navigation ---
+
+	async navigate_back(): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "navigate_back");
+		await this._page.goBack();
+		await this._page.waitForTimeout(300);
+	}
+
+	async navigate_forward(): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "navigate_forward");
+		await this._page.goForward();
+		await this._page.waitForTimeout(300);
+	}
+
+	async url_contains(fragment: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "url_check");
+		await expect(async () => {
+			const hash = await this._page.evaluate(() => window.location.hash);
+			expect(hash).toContain(fragment);
+		}).toPass({ timeout: 5_000 });
+	}
+
+	async url_equals(hash: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "url_check");
+		await expect(async () => {
+			const actual = await this._page.evaluate(() => window.location.hash);
+			expect(actual).toBe(hash);
+		}).toPass({ timeout: 5_000 });
+	}
+
+	async page_title_is(expected: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "page_title_check");
+		await expect(async () => {
+			const title = await this._page.evaluate(() => document.title);
+			expect(title).toBe(expected);
+		}).toPass({ timeout: 5_000 });
+	}
+
+	async page_title_contains(fragment: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "page_title_check");
+		await expect(async () => {
+			const title = await this._page.evaluate(() => document.title);
+			expect(title).toContain(fragment);
+		}).toPass({ timeout: 5_000 });
 	}
 
 	// --- Temporal ---
