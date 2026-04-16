@@ -6,13 +6,25 @@
  * browser tests fail because the UI assets don't exist.
  */
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export default function globalSetup() {
 	const projectRoot = join(import.meta.dirname, "..", "..");
 	const serverEntry = join(projectRoot, "dist", "server", "cli.js");
 	const uiDir = join(projectRoot, "dist", "ui");
+
+	// Share V8 compile cache across all Playwright workers and any child
+	// processes they spawn (gateway-harness spawns dist/server/cli.js per
+	// worker). Without this, every worker re-parses megabytes of
+	// dist/server/ JS on cold start. Requires Node ≥22.8 (stable).
+	// See: https://nodejs.org/api/module.html#module-compile-cache
+	if (!process.env.NODE_COMPILE_CACHE) {
+		const cacheDir = join(tmpdir(), "bobbit-e2e-v8cache");
+		try { mkdirSync(cacheDir, { recursive: true }); } catch { /* best-effort */ }
+		process.env.NODE_COMPILE_CACHE = cacheDir;
+	}
 
 	// Only build what's missing to keep repeated runs fast
 	const needServer = !existsSync(serverEntry);

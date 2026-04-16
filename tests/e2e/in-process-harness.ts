@@ -72,6 +72,9 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
+		// Skip outbound network probes and per-prompt title-generation calls.
+		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+		process.env.BOBBIT_SKIP_TITLE_GEN = "1";
 
 		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
@@ -96,6 +99,11 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 
 		// Set env so e2e-setup.ts helpers target this worker's server
 		process.env.E2E_PORT = String(port);
+
+		// cli.ts normally writes .bobbit/state/gateway-url so agent subprocesses
+		// can discover the gateway. When running in-process we must do that
+		// ourselves — tests that exercise tool-grant-request rely on it.
+		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`);
 
 		const info: GatewayInfo = {
 			port,

@@ -11,6 +11,9 @@
  * real MCP tools that the role doesn't initially have access to.
  */
 import { test, expect } from "./gateway-harness.js";
+
+// This spec actually exercises MCP — opt the worker gateway into starting MCP servers.
+test.use({ enableMcp: true });
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

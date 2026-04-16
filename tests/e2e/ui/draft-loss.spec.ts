@@ -137,11 +137,12 @@ test.describe("Draft persistence bugs", () => {
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// The draft should be restored — but won't be because no beforeunload
-		// handler exists to flush the pending draft via sendBeacon
+		// The draft should be restored via the beforeunload sendBeacon. That
+		// beacon fires fire-and-forget, so we give it a generous window for the
+		// server to persist it + the UI to rehydrate the textarea on reload.
 		await expect(async () => {
 			const val = await page.locator("textarea").first().inputValue();
 			expect(val).toBe(draftText);
-		}).toPass({ intervals: [500, 1000, 1000, 2000], timeout: 10_000 });
+		}).toPass({ intervals: [250, 500, 1000, 1000, 2000, 2000], timeout: 20_000 });
 	});
 });

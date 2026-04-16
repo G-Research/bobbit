@@ -26,30 +26,24 @@ test.describe("Prompt stats E2E", () => {
 		await sendMessage(page, "Full stats test");
 		await waitForAgentResponse(page);
 
-		const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
-		await expect(statsBar).toBeVisible({ timeout: 10_000 });
+	const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+		await expect(statsBar).toBeVisible({ timeout: 15_000 });
+
+		// The stats fields populate asynchronously from a WS broadcast after the
+		// agent response. Under parallel load the WS round-trip can take >10s,
+		// so use generous timeouts.
 
 		// PI-15: Model name displayed
-		await expect(async () => {
-			const text = await statsBar.textContent();
-			expect(text).toContain("mock-model");
-		}).toPass({ timeout: 10_000 });
+		await expect(statsBar).toContainText("mock-model", { timeout: 15_000 });
 
 		// PI-17: Context usage bar shows percentage
-		await expect(async () => {
-			const contextSpan = page.locator("span[title*='Context:']");
-			await expect(contextSpan).toBeVisible();
-			const title = await contextSpan.getAttribute("title");
-			expect(title).toMatch(/Context:.*tokens/);
-			const text = await contextSpan.textContent();
-			expect(text).toMatch(/\d+%/);
-		}).toPass({ timeout: 15_000 });
+		const contextSpan = page.locator("span[title*='Context:']");
+		await expect(contextSpan).toBeVisible({ timeout: 15_000 });
+		await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
+		await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 5_000 });
 
 		// PI-18: Cost display appears
-		await expect(async () => {
-			const text = await statsBar.textContent();
-			expect(text).toContain("$");
-		}).toPass({ timeout: 10_000 });
+		await expect(statsBar).toContainText("$", { timeout: 15_000 });
 	});
 
 	test("PI-17: context popover shows details on click", async ({ page }) => {
@@ -59,8 +53,12 @@ test.describe("Prompt stats E2E", () => {
 		await sendMessage(page, "Popover test");
 		await waitForAgentResponse(page);
 
+		// Wait for the context stats to actually populate (not just for the element
+		// to exist) — the stats arrive via a WS broadcast after the agent response,
+		// and clicking before then yields a blank popover / no-op.
 		const contextSpan = page.locator("span[title*='Context:']");
 		await expect(contextSpan).toBeVisible({ timeout: 10_000 });
+		await expect(contextSpan).toContainText(/\d+%/, { timeout: 10_000 });
 
 		await contextSpan.click();
 
@@ -100,10 +98,8 @@ test.describe("Prompt stats E2E", () => {
 		await waitForAgentResponse(page);
 
 		const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
-		await expect(async () => {
-			const text = await statsBar.textContent();
-			expect(text).toContain("mock-model");
-		}).toPass({ timeout: 10_000 });
+		await expect(statsBar).toBeVisible({ timeout: 10_000 });
+		await expect(statsBar).toContainText("mock-model", { timeout: 10_000 });
 
 		await page.reload();
 
@@ -113,10 +109,9 @@ test.describe("Prompt stats E2E", () => {
 
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		await expect(async () => {
-			const text = await statsBar.textContent();
-			expect(text).toContain("mock-model");
-		}).toPass({ timeout: 15_000 });
+		// Post-reload, the stats bar re-fetches session metadata over WS.
+		// toContainText auto-retries until content matches or timeout.
+		await expect(statsBar).toContainText("mock-model", { timeout: 15_000 });
 	});
 
 

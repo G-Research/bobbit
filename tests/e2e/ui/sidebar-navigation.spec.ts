@@ -230,9 +230,20 @@ test.describe("Sidebar navigation", () => {
 		// In headless Chromium, CSS :hover on .group may not reliably trigger group-hover.
 		// Find the button within the same goal header row and click via JavaScript.
 		const goalRow = goalHeader.locator("xpath=ancestor::div[contains(@class, 'group')]").first();
+		// Wait until the hidden dashboard button is attached to the DOM before
+		// invoking click. The previous `if (btn) btn.click()` silently swallowed
+		// the case where the button wasn't yet rendered, causing flaky failures
+		// where navigation never happened.
+		await expect.poll(
+			() => goalRow.evaluate((row) =>
+				!!row.querySelector("button[title='Goal dashboard']"),
+			),
+			{ timeout: 10_000 },
+		).toBe(true);
 		await goalRow.evaluate((row) => {
 			const btn = row.querySelector<HTMLButtonElement>("button[title='Goal dashboard']");
-			if (btn) btn.click();
+			if (!btn) throw new Error("Dashboard button not found in goal row");
+			btn.click();
 		});
 
 		// Verify URL navigates to goal dashboard
@@ -242,7 +253,11 @@ test.describe("Sidebar navigation", () => {
 			expect(h).toMatch(/goal/i);
 		}).toPass({ timeout: 10_000 });
 
-		// Verify dashboard content loads (tab bar is always present)
-		await expect(page.locator(".tab").first()).toBeVisible({ timeout: 10_000 });
+		// Verify dashboard content loads. Wait for the dashboard container first
+		// (it briefly shows a loading animation before the tabs render), then for
+		// any tab to become visible.
+		await expect(page.locator(".dashboard-container").first())
+			.toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(".tab").first()).toBeVisible({ timeout: 15_000 });
 	});
 });
