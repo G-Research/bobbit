@@ -156,6 +156,10 @@ function respondToPrompt(text) {
 		const filePath = extractFilePath(text);
 		return { tool: "Edit", input: { path: filePath, oldText: "ORIGINAL_VALUE", newText: "EDITED_VALUE" }, output: "Edited successfully" };
 	}
+	if (lower.includes("ask_user_choices") || lower.includes("ask user choices")) {
+		// Signals the mock agent to hit the blocking /api/internal/user-question endpoint.
+		return { askUserChoices: true };
+	}
 	// Default: just reply with text
 	return null;
 }
@@ -293,6 +297,66 @@ async function handlePrompt(requestId, text) {
 			conversationMessages.push(assistantMsg);
 			emit({ type: "message_end", message: assistantMsg });
 		}
+	} else if (toolAction && toolAction.askUserChoices) {
+		// Call the ask_user_choices tool via its REST endpoint directly, mirroring
+		// how the real extension posts to /api/internal/user-question and blocks
+		// until the UI submits. The mock agent waits for the response, then emits
+		// the toolCall + toolResult events.
+		const toolId = `tool_ask_${Date.now()}`;
+		const sessionId = process.env.BOBBIT_SESSION_ID;
+		const bobbitDir = process.env.BOBBIT_DIR || path.join(process.env.HOME || process.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (process.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {}
+
+		const questions = [
+			{ question: "Favorite color?", options: ["red", "blue", "green"] },
+			{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true },
+		];
+
+		emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
+
+		let resultText = "";
+		let isError = false;
+		try {
+			const resp = await fetch(`${gwUrl}/api/internal/user-question`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+				body: JSON.stringify({ sessionId, toolUseId: toolId, questions }),
+			});
+			const data = await resp.json();
+			if (!resp.ok) {
+				isError = true;
+				resultText = data?.error || `HTTP ${resp.status}`;
+			} else {
+				resultText = JSON.stringify(data);
+			}
+		} catch (err) {
+			isError = true;
+			resultText = err.message;
+		}
+
+		emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: isError ? "error" : "complete", output: resultText });
+		emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
+		};
+		conversationMessages.push(assistantMsg);
+		emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "ask_user_choices",
+			isError,
+			content: [{ type: "text", text: resultText }],
+		};
+		conversationMessages.push(toolResultMsg);
+		emit({ type: "message_end", message: toolResultMsg });
 	} else if (toolAction && toolAction.multiTool) {
 		// Multiple tool calls in a single turn
 		const contentBlocks = [];

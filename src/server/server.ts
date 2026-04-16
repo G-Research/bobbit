@@ -34,6 +34,7 @@ import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, stripTokenFromGitUrl, shouldSkipRemotePush } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
+import { UserQuestionHarness, validateQuestions, validateAnswers } from "./agent/user-question-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
@@ -527,6 +528,9 @@ export function createGateway(config: GatewayConfig) {
 	// Verification harness — assigned after wss is created (closure captures the reference)
 	let verificationHarness: VerificationHarness;
 
+	// User-question harness (ask_user_choices) — in-memory only; not persisted.
+	const userQuestionHarness = new UserQuestionHarness();
+
 	// Sandbox manager — assigned in start() when sandbox=docker
 	let sandboxManager: SandboxManager | null = null;
 
@@ -589,7 +593,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, userQuestionHarness, broadcastToSession);
 
 			return;
 		}
@@ -665,6 +669,21 @@ export function createGateway(config: GatewayConfig) {
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
+	// Broadcast a message to all WebSocket clients subscribed to a specific session.
+	function broadcastToSession(sessionId: string, event: any): void {
+		const session = sessionManager.getSession(sessionId);
+		if (!session) return;
+		const data = JSON.stringify(event);
+		for (const ws of session.clients) {
+			if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+		}
+	}
+
+	// Wire session-termination cleanup for pending user-questions.
+	sessionManager.addTerminationListener((sessionId) => {
+		userQuestionHarness.rejectAllForSession(sessionId);
+	});
+
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
@@ -1103,6 +1122,8 @@ async function handleApiRoute(
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
 	reviewAnnotationStore?: ReviewAnnotationStore,
+	userQuestionHarness?: UserQuestionHarness,
+	broadcastToSession?: (sessionId: string, event: any) => void,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -6150,6 +6171,67 @@ async function handleApiRoute(
 			reportHtml,
 		});
 		json({ ok: true });
+		return;
+	}
+
+	// POST /api/internal/user-question  — called by the ask_user_choices tool extension.
+	// Blocks until the UI submits answers, then resolves with { answers: [...] }.
+	if (url.pathname === "/api/internal/user-question" && req.method === "POST") {
+		if (!userQuestionHarness) { json({ error: "user-question harness not configured" }, 500); return; }
+		const body = await readBody(req);
+		const { sessionId, toolUseId, questions } = body || {};
+		if (typeof sessionId !== "string" || typeof toolUseId !== "string" || !Array.isArray(questions)) {
+			json({ error: "Missing required fields: sessionId, toolUseId, questions" }, 400);
+			return;
+		}
+		const validationErr = validateQuestions(questions);
+		if (validationErr) { json({ error: validationErr }, 400); return; }
+		if (!sessionManager.getSession(sessionId)) {
+			json({ error: "Unknown session" }, 404);
+			return;
+		}
+		try {
+			if (broadcastToSession) {
+				broadcastToSession(sessionId, { type: "user_question_pending", sessionId, toolUseId, questions });
+			}
+			const answers = await userQuestionHarness.register(sessionId, toolUseId, questions);
+			json({ answers });
+		} catch (e: any) {
+			json({ error: e?.message || String(e) }, 500);
+		}
+		return;
+	}
+
+	// POST /api/internal/user-question/submit  — called by the UI widget with answers.
+	if (url.pathname === "/api/internal/user-question/submit" && req.method === "POST") {
+		if (!userQuestionHarness) { json({ error: "user-question harness not configured" }, 500); return; }
+		const body = await readBody(req);
+		const { sessionId, toolUseId, answers } = body || {};
+		if (typeof sessionId !== "string" || typeof toolUseId !== "string" || !Array.isArray(answers)) {
+			json({ error: "Missing required fields: sessionId, toolUseId, answers" }, 400);
+			return;
+		}
+		const answerErr = validateAnswers(answers);
+		if (answerErr) { json({ error: answerErr }, 400); return; }
+		const ok = userQuestionHarness.submit(sessionId, toolUseId, answers);
+		if (!ok) { json({ error: "No pending question for this session/toolUseId" }, 404); return; }
+		if (broadcastToSession) {
+			broadcastToSession(sessionId, { type: "user_question_answered", sessionId, toolUseId, answers });
+		}
+		json({ ok: true });
+		return;
+	}
+
+	// GET /api/internal/user-question/pending?sessionId=...  — rehydrate pending list after reconnect.
+	if (url.pathname === "/api/internal/user-question/pending" && req.method === "GET") {
+		if (!userQuestionHarness) { json({ error: "user-question harness not configured" }, 500); return; }
+		const sessionId = url.searchParams.get("sessionId") || "";
+		const list = userQuestionHarness.listForSession(sessionId).map(p => ({
+			toolUseId: p.toolUseId,
+			questions: p.questions,
+			createdAt: p.createdAt,
+		}));
+		json({ pending: list });
 		return;
 	}
 

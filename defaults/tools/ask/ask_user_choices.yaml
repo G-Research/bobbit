@@ -1,0 +1,43 @@
+name: ask_user_choices
+description: "Ask the user 1–5 multiple-choice questions via an interactive inline widget. Blocks until the user submits; returns { answers: [...] }."
+summary: "Ask the user multiple-choice questions and wait for their answers."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Ask
+docs: |
+  Ask the user 1–5 multiple-choice questions via an inline interactive widget.
+  The tool call blocks until the user submits answers; returns `{ answers: [...] }`.
+detail_docs: |
+  ## Input
+
+  ```json
+  {
+    "questions": [
+      {
+        "question": "Which layout do you prefer?",
+        "options": ["Grid", "List", "Masonry"],
+        "allow_other": true
+      },
+      ...
+    ]
+  }
+  ```
+
+  - **questions**: 1–5 questions
+  - Each question has a **question** string, an **options** array (2–8 items), and an optional
+    **allow_other** boolean that adds an "Other" free-text choice.
+
+  ## Output
+
+  ```json
+  {
+    "answers": [
+      { "question": "...", "selected": "Grid",  "other_text": null },
+      { "question": "...", "selected": "Other", "other_text": "user's typed text" }
+    ]
+  }
+  ```
+
+  The tool blocks until the user submits all answers in the UI. If the session is terminated
+  while the question is pending, the tool returns an error.
