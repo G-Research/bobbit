@@ -16,10 +16,9 @@
  *   cleanup → teardown (not tracked)
  */
 import { test, expect } from "../gateway-harness.js";
-import { waitForHealth, apiFetch, createSession, deleteSession } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
-import { SpecContext, defineStory } from "./spec-framework.js";
-import { CT_16 } from "./spec-contracts.js";
+import { waitForHealth, apiFetch, deleteSession } from "../e2e-setup.js";
+import { SpecContext } from "./spec-framework.js";
+import { STORY_PR01, STORY_PR04, STORY_PR09, STORY_PR10 } from "./story-registry.js";
 
 test.describe("CT-16: Projects organize sessions", () => {
 	let s: SpecContext;
@@ -41,12 +40,7 @@ test.describe("CT-16: Projects organize sessions", () => {
 	// ---------------------------------------------------------------
 
 	test("PR-01: Default project visible in sidebar after reload", async () => {
-		s.begin(defineStory({
-			id: "PR-01",
-			title: "Default project visible in sidebar after reload",
-			contracts: [CT_16],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_PR01);
 
 		// setup — open app, verify project exists via API
 		await s.open();
@@ -73,12 +67,7 @@ test.describe("CT-16: Projects organize sessions", () => {
 	// ---------------------------------------------------------------
 
 	test("PR-04: Project removal API returns proper status", async () => {
-		s.begin(defineStory({
-			id: "PR-04",
-			title: "Project removal API returns proper status",
-			contracts: [CT_16],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_PR04);
 
 		// setup
 		await s.open();
@@ -101,12 +90,7 @@ test.describe("CT-16: Projects organize sessions", () => {
 	// ---------------------------------------------------------------
 
 	test("PR-09: Sessions grouped under project survive reload", async () => {
-		s.begin(defineStory({
-			id: "PR-09",
-			title: "Sessions grouped under project survive reload",
-			contracts: [CT_16],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_PR09);
 
 		// setup — create a session so we have something under the project
 		await s.createTestSession("A");
@@ -131,12 +115,7 @@ test.describe("CT-16: Projects organize sessions", () => {
 	// ---------------------------------------------------------------
 
 	test("PR-10: Session created and deleted within project", async () => {
-		s.begin(defineStory({
-			id: "PR-10",
-			title: "Session created and deleted within project",
-			contracts: [CT_16],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_PR10);
 
 		// setup
 		await s.open();

@@ -18,11 +18,19 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import { test, expect } from "../gateway-harness.js";
-import { waitForHealth, createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
-import { SpecContext, defineStory } from "./spec-framework.js";
-import { CT_05, CT_17 } from "./spec-contracts.js";
+import { test } from "../gateway-harness.js";
+import { waitForHealth } from "../e2e-setup.js";
+import { SpecContext } from "./spec-framework.js";
+import {
+	STORY_RE01,
+	STORY_RE02,
+	STORY_RE03,
+	STORY_RE04,
+	STORY_RE05,
+	STORY_RE06,
+	STORY_RE07,
+	STORY_RE08,
+} from "./story-registry.js";
 
 test.describe("CT-05: Resilience", () => {
 	let s: SpecContext;
@@ -45,12 +53,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test.skip("RE-01: Single session survives server crash", async () => {
-		s.begin(defineStory({
-			id: "RE-01",
-			title: "Single session survives server crash",
-			contracts: [CT_05],
-			covers: ["server-crash-restart"],
-		}));
+		s.begin(STORY_RE01);
 
 		// setup
 		await s.createTestSession("A");
@@ -78,12 +81,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test.skip("RE-02: Goal and dashboard survive server crash", async () => {
-		s.begin(defineStory({
-			id: "RE-02",
-			title: "Goal and dashboard survive server crash",
-			contracts: [CT_05],
-			covers: ["server-crash-restart"],
-		}));
+		s.begin(STORY_RE02);
 
 		// setup — create goal with gates/tasks
 		await s.open();
@@ -105,12 +103,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test.skip("RE-03: Multiple session types survive restart", async () => {
-		s.begin(defineStory({
-			id: "RE-03",
-			title: "Multiple session types survive restart",
-			contracts: [CT_05],
-			covers: ["server-crash-restart"],
-		}));
+		s.begin(STORY_RE03);
 
 		// setup — create 5 different session types
 		await s.createTestSession("plain");
@@ -147,12 +140,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test.skip("RE-04: Worktree preservation across crash", async () => {
-		s.begin(defineStory({
-			id: "RE-04",
-			title: "Worktree preservation across crash",
-			contracts: [CT_05],
-			covers: ["server-crash-restart"],
-		}));
+		s.begin(STORY_RE04);
 
 		// setup — create a worktree session
 		await s.createTestSession("wt");
@@ -178,12 +166,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test.skip("RE-05: Docker sandbox container recovery", async () => {
-		s.begin(defineStory({
-			id: "RE-05",
-			title: "Docker sandbox container recovery",
-			contracts: [CT_05, CT_17],
-			covers: ["server-crash-restart"],
-		}));
+		s.begin(STORY_RE05);
 
 		// setup — session using sandbox container
 		await s.createTestSession("sandbox");
@@ -207,12 +190,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test.skip("RE-06: Crash during session setup", async () => {
-		s.begin(defineStory({
-			id: "RE-06",
-			title: "Crash during session setup",
-			contracts: [CT_05],
-			covers: ["server-crash-restart"],
-		}));
+		s.begin(STORY_RE06);
 
 		// setup — begin session creation
 		await s.open();
@@ -238,12 +216,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test("RE-07: State survives disconnect and reload", async () => {
-		s.begin(defineStory({
-			id: "RE-07",
-			title: "State survives disconnect and reload",
-			contracts: [CT_05],
-			covers: ["network-reconnect"],
-		}));
+		s.begin(STORY_RE07);
 
 		// setup — create session with a message
 		await s.createTestSession("A");
@@ -272,12 +245,7 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test.skip("RE-08: Rapid crash-restart cycle stability", async () => {
-		s.begin(defineStory({
-			id: "RE-08",
-			title: "Rapid crash-restart cycle stability",
-			contracts: [CT_05],
-			covers: ["server-crash-restart"],
-		}));
+		s.begin(STORY_RE08);
 
 		// setup — sessions and goals exist
 		await s.createTestSession("A");

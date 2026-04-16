@@ -11,10 +11,23 @@
  *   cleanup → teardown (not tracked)
  */
 import { test, expect } from "../gateway-harness.js";
-import { waitForHealth, apiFetch, createSession, deleteSession, waitForSessionStatus, gitCwd } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
-import { SpecContext, defineStory } from "./spec-framework.js";
-import { CT_01, CT_02, CT_05, CT_15, CT_16 } from "./spec-contracts.js";
+import { waitForHealth, apiFetch, deleteSession, gitCwd } from "../e2e-setup.js";
+import { waitForAgentResponse } from "./ui-helpers.js";
+import { SpecContext } from "./spec-framework.js";
+import {
+	STORY_S01,
+	STORY_S02,
+	STORY_S03,
+	STORY_S04,
+	STORY_S05,
+	STORY_S06,
+	STORY_S07,
+	STORY_S08,
+	STORY_S09,
+	STORY_S10,
+	STORY_S11,
+	STORY_S12,
+} from "./story-registry.js";
 
 test.describe("Session lifecycle stories", () => {
 	let s: SpecContext;
@@ -36,12 +49,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-01: New session shows empty chat with focused editor", async () => {
-		s.begin(defineStory({
-			id: "S-01",
-			title: "New session shows empty chat with focused editor",
-			contracts: [CT_05, CT_16],
-			covers: ["browser-refresh", "page-reload"],
-		}));
+		s.begin(STORY_S01);
 
 		// setup
 		await s.createTestSession("A");
@@ -63,12 +71,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-02: Sending a message produces an agent response", async () => {
-		s.begin(defineStory({
-			id: "S-02",
-			title: "Sending a message produces an agent response",
-			contracts: [CT_05],
-			covers: ["browser-refresh"],
-		}));
+		s.begin(STORY_S02);
 
 		// setup
 		await s.createTestSession("A");
@@ -91,12 +94,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-03: Draft isolation across sessions", async () => {
-		s.begin(defineStory({
-			id: "S-03",
-			title: "Draft isolation across sessions",
-			contracts: [CT_02, CT_05],
-			covers: ["rapid-session-switch", "page-reload", "browser-refresh"],
-		}));
+		s.begin(STORY_S03);
 
 		// setup
 		await s.createTestSession("A");
@@ -125,12 +123,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-04: Terminated session disappears from sidebar", async () => {
-		s.begin(defineStory({
-			id: "S-04",
-			title: "Terminated session disappears from sidebar",
-			contracts: [CT_16],
-			covers: ["page-reload"],
-		}));
+		s.begin(STORY_S04);
 
 		// setup
 		const sessionId = await s.createTestSession("A");
@@ -154,12 +147,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-05: Messages stay isolated between sessions", async () => {
-		s.begin(defineStory({
-			id: "S-05",
-			title: "Messages stay isolated between sessions",
-			contracts: [CT_05],
-			covers: ["browser-refresh"],
-		}));
+		s.begin(STORY_S05);
 
 		// setup
 		await s.createTestSession("A");
@@ -193,12 +181,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-06: Rapid session switching lands on correct session", async () => {
-		s.begin(defineStory({
-			id: "S-06",
-			title: "Rapid session switching lands on correct session",
-			contracts: [CT_05],
-			covers: ["browser-refresh"],
-		}));
+		s.begin(STORY_S06);
 
 		// setup
 		await s.createTestSession("A");
@@ -238,12 +221,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-07: Session survives page reload", async () => {
-		s.begin(defineStory({
-			id: "S-07",
-			title: "Session survives page reload",
-			contracts: [CT_05],
-			covers: ["browser-refresh"],
-		}));
+		s.begin(STORY_S07);
 
 		// setup
 		await s.createTestSession("A");
@@ -267,17 +245,11 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-08: Session in git repo gets a worktree", async () => {
-		s.begin(defineStory({
-			id: "S-08",
-			title: "Session in git repo gets a worktree",
-			contracts: [CT_05, CT_16],
-			covers: ["browser-refresh", "page-reload"],
-		}));
+		s.begin(STORY_S08);
 
 		// setup
 		const cwd = gitCwd();
 		const sessionId = await s.createTestSession("A", { cwd });
-		await waitForSessionStatus(sessionId, "idle");
 
 		// act
 		s.act();
@@ -296,12 +268,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-09: Renamed session title persists after reload", async () => {
-		s.begin(defineStory({
-			id: "S-09",
-			title: "Renamed session title persists after reload",
-			contracts: [CT_05],
-			covers: ["browser-refresh"],
-		}));
+		s.begin(STORY_S09);
 
 		// setup
 		const sessionId = await s.createTestSession("A");
@@ -339,12 +306,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-10: Session properties persist across reload", async () => {
-		s.begin(defineStory({
-			id: "S-10",
-			title: "Session properties persist across reload",
-			contracts: [CT_05, CT_15],
-			covers: ["browser-refresh"],
-		}));
+		s.begin(STORY_S10);
 
 		// setup
 		const sessionId = await s.createTestSession("A");
@@ -374,12 +336,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-11: Send message and receive agent response", async () => {
-		s.begin(defineStory({
-			id: "S-11",
-			title: "Send message and receive agent response",
-			contracts: [CT_01],
-			covers: ["abort-mid-stream"],
-		}));
+		s.begin(STORY_S11);
 
 		// setup
 		await s.createTestSession("A");
@@ -402,12 +359,7 @@ test.describe("Session lifecycle stories", () => {
 	// ---------------------------------------------------------------
 
 	test("S-12: Sequential messages are handled correctly", async () => {
-		s.begin(defineStory({
-			id: "S-12",
-			title: "Sequential messages are handled correctly",
-			contracts: [CT_01, CT_02],
-			covers: ["rapid-sends-while-streaming"],
-		}));
+		s.begin(STORY_S12);
 
 		// setup
 		await s.createTestSession("A");
