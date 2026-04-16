@@ -133,15 +133,19 @@ export class TeamManager {
 	private localStore: TeamStore | null;
 	/** Local GoalManager — used only in the non-PCM (test) path. */
 	private _localGoalManager: GoalManager | null = null;
-	/** Timers for the idle-nudge mechanism (goalId → timer). */
-	private idleNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
+	/** Timers for the idle-nudge mechanism (goalId → timer). One-shot setTimeouts that reschedule with exponential backoff. */
+	private idleNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	/** Count of consecutive workers-nudges sent for a goal (goalId → count). Reset on agent_start. */
+	private idleNudgeCount = new Map<string, number>();
 	/** Separate timer for nudging when no workers remain (goalId → timer). */
 	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
 	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
 	private nudgePending = new Map<string, boolean>();
 	private verificationHarness?: VerificationHarness;
-	/** Delay before nudging the idle team lead when workers are active (ms). */
+	/** Base delay before nudging the idle team lead when workers are active (ms). Successive nudges back off exponentially up to MAX_IDLE_NUDGE_DELAY_MS. */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
+	/** Maximum delay between workers-nudges (ms). Caps the exponential backoff. */
+	private static readonly MAX_IDLE_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
 	/** Delay before nudging the idle team lead when no workers remain (ms). */
 	private static readonly NO_WORKERS_NUDGE_DELAY_MS = 300_000;
 
@@ -339,9 +343,10 @@ export class TeamManager {
 	private clearIdleNudgeTimer(goalId: string): void {
 		const timer = this.idleNudgeTimers.get(goalId);
 		if (timer) {
-			clearInterval(timer);
+			clearTimeout(timer);
 			this.idleNudgeTimers.delete(goalId);
 		}
+		this.idleNudgeCount.delete(goalId);
 		const nwTimer = this.noWorkersNudgeTimers.get(goalId);
 		if (nwTimer) {
 			clearInterval(nwTimer);
@@ -418,12 +423,35 @@ export class TeamManager {
 		}, TeamManager.NO_WORKERS_NUDGE_DELAY_MS);
 		this.noWorkersNudgeTimers.set(goalId, nwTimer);
 
-		// --- 10-minute workers timer (repeating) ---
-		const timer = setInterval(() => {
+		// --- Workers timer (one-shot, reschedules with exponential backoff) ---
+		// Each successive nudge (without the lead acting) doubles the delay:
+		// 10m, 20m, 40m, 80m, … capped at MAX_IDLE_NUDGE_DELAY_MS (12h).
+		// The counter resets on agent_start via clearIdleNudgeTimer().
+		this.scheduleWorkersNudge(goalId);
+	}
+
+	/**
+	 * Schedule the next workers-nudge for a goal using exponential backoff.
+	 * Delay = IDLE_NUDGE_DELAY_MS * 2^count, capped at MAX_IDLE_NUDGE_DELAY_MS.
+	 */
+	private scheduleWorkersNudge(goalId: string): void {
+		const count = this.idleNudgeCount.get(goalId) ?? 0;
+		const delay = Math.min(
+			TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count),
+			TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
+		);
+
+		const timer = setTimeout(() => {
+			this.idleNudgeTimers.delete(goalId);
+
 			if (this.shouldSkipNudge(goalId)) return;
 
 			const activeWorkers = this.getActiveWorkers(goalId);
-			if (activeWorkers.length === 0) return; // no workers — handled by the other timer
+			if (activeWorkers.length === 0) {
+				// No workers — handled by the other timer. Don't increment backoff.
+				this.scheduleWorkersNudge(goalId);
+				return;
+			}
 
 			const entry = this.teams.get(goalId)!;
 			const lines = activeWorkers.map((agent) => {
@@ -446,8 +474,20 @@ export class TeamManager {
 
 			this.nudgePending.set(goalId, true);
 			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
-			console.log(`[team-manager] Sent idle nudge to team lead for goal ${goalId}`);
-		}, TeamManager.IDLE_NUDGE_DELAY_MS);
+			this.idleNudgeCount.set(goalId, count + 1);
+			const nextDelay = Math.min(
+				TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count + 1),
+				TeamManager.MAX_IDLE_NUDGE_DELAY_MS,
+			);
+			console.log(
+				`[team-manager] Sent idle nudge #${count + 1} to team lead for goal ${goalId}; ` +
+				`next nudge in ${Math.round(nextDelay / 60000)}m`,
+			);
+
+			// Reschedule with the incremented counter
+			this.scheduleWorkersNudge(goalId);
+		}, delay);
+
 		this.idleNudgeTimers.set(goalId, timer);
 	}
 

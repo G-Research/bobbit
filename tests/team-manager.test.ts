@@ -176,9 +176,13 @@ function createTeamManager(sm: any, config = DEFAULT_CONFIG): InstanceType<typeo
 after(() => {
 	for (const tm of _createdManagers) {
 		for (const [, timer] of (tm as any).idleNudgeTimers) {
-			clearInterval(timer);
+			clearTimeout(timer);
 		}
 		(tm as any).idleNudgeTimers.clear();
+		for (const [, timer] of (tm as any).noWorkersNudgeTimers ?? []) {
+			clearInterval(timer);
+		}
+		(tm as any).noWorkersNudgeTimers?.clear?.();
 	}
 	// Clean up temp PI dir
 	try { fs.rmSync(TEST_PI_DIR, { recursive: true }); } catch { /* ignore */ }
