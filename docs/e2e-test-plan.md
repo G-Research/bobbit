@@ -1,129 +1,109 @@
-# E2E Test Suite: The Real Problem & Plan
+# E2E Test Architecture: The Tier 2 Migration
 
-## Machine: 24 cores, 63GB RAM
+## POC results (completed)
 
-## Current state
+Built `tests/contract/fixtures/gateway.ts` — a per-test in-process gateway factory — and converted 3 tests from `gates-api-heavy.spec.ts` / `gate-resign-cancel.spec.ts`.
 
-| Metric | Value |
-|--------|-------|
-| Total tests | 621 (433 API + 188 browser) |
-| Sequential time | 1,247s (846s useful + 401s retry waste) |
-| Wall time (3+3 workers) | ~4 min |
-| CPU usage | ~50% of 24 cores = 12 cores for 1 run |
-| Flaky tests causing retries | 11 tests, 401s wasted |
+### Measured cost per test
+- Fresh gateway setup: **~35ms** (imports cached across tests in process)
+- Gateway shutdown: **~60ms**
+- HTTP startup (when used): **~170ms**
+- Goal creation: **~40ms**
+- Verification command (`echo ok`): **~2000ms** ← the real bottleneck for gate tests
 
-## Why it's slow and heavy
+### Per-test baseline
+| Test type | Tier 3 (today) | Tier 2 (new) | Savings |
+|-----------|----------------|--------------|---------|
+| Pure API (no agent, no verification) | ~500ms | **~200ms** | 60% |
+| Agent session (sends prompt) | ~1500ms | **~400ms** | 73% |
+| Command verification (subprocess) | ~2500ms | **~2300ms** | 8% |
 
-### 1. Browser tests are 3× heavier than needed (643s, 188 tests)
-Each browser worker spawns: Playwright worker + gateway server + Chromium + mock agents.
-**Most browser tests don't need a browser.** They test API-driven state through UI selectors when the same logic is testable via REST/WS.
+### What the POC confirmed
+1. Per-test fresh gateway is viable and doesn't leak resources
+2. `await using` pattern cleans up deterministically
+3. Tests are independent — no shared state between tests
+4. Imports cache across tests in the same process (so first test pays 1s, rest pay 0)
 
-### 2. Flaky tests waste 32% of runtime (401s)
-11 tests retry 1-2 times each. Root causes:
-- WS event collision (stale messages matched by `waitFor`)
-- Shared in-process state between parallel tests
-- Timing-sensitive assertions under CPU contention
+### What the POC revealed as a harder problem
+- **Command verification (real subprocess)** still takes 2s per test on Windows
+- This is a Windows subprocess startup cost, not an architecture issue
+- For the ~9 test files that use command verification, per-test cost stays ~2s
+- For the other ~60 files (pure API + session tests), per-test cost drops to ~200-400ms
 
-### 3. Mock agent spawn overhead (~1s per test)
-Every test that creates a session spawns a Node child process for the mock agent. At 600+ tests, that's ~600 process spawns.
+## Projected suite time
 
-### 4. No resource scaling for concurrent runs
-6 runs × 6 workers = 36 workers. 36 × (gateway + Chromium + agents) = hundreds of processes, 12+ GB RAM, all 24 cores saturated.
+Using the POC measurements:
 
-## Target
+### Assumption: 620 tests total (current)
+- 100 tests involve command verification (~2s each) → **200s**
+- 200 tests involve mock agent sessions (~400ms each) → **80s**
+- 320 tests are pure REST/WS logic (~200ms each) → **64s**
 
-- **Full test suite in <120s** (unit + e2e combined)
-- **6 concurrent runs** fit in 24 cores / 63GB without contention
-- **Per-run budget**: 4 cores max, ~4GB RAM max → 2 workers max
+**Sequential: 344s. With 8 parallel processes: 43s wall.**
 
-### Math
-- 120s target - 22s unit tests = **98s for e2e**
-- 98s wall × 2 workers = **196s sequential budget**
-- Current useful time (minus retries): 846s
-- **Need to cut 650s (77%)**
+vs. today's ~240s wall with 6 Playwright workers.
 
-## The plan
+### Assumption after optimization:
+If we switch the subprocess-based verification steps to use a mock shell (in-process command execution for `echo ok` style commands in `test-fast` workflow), the 200s of command verification drops to ~20s. That gives:
 
-### Phase 1: Eliminate all flaky tests (save 401s of retry waste)
+**Sequential: 164s. With 8 parallel processes: 20s wall.**
 
-The 11 flaky tests all share root cause patterns:
+## The migration plan
 
-**a) WS event collision** — `waitFor` finds stale messages from earlier in the test. Partially fixed with `waitForNext`, needs completing across all affected tests.
+### Step 1 (2-3 days): Build the `tests/contract/` foundation
+- ✅ `createTestGateway()` fixture (done in POC)
+- Add helpers: `createGoal()`, `signalGate()`, `waitForGateStatus()` using fetch
+- Add WS helper for tests that need event assertions
+- Add `agent session` helper that creates a session and sends a prompt
 
-**b) Shared in-process gateway state** — tests running in parallel on the same worker see each other's projects, sessions, and skill caches.
+### Step 2 (3-5 days): Convert pure API tests
+Per-file mechanical migration:
+- Read current Playwright spec
+- Rewrite as `node:test` contract test using fixture
+- Delete the Playwright spec
+- Verify equivalent coverage with `git diff`
 
-**c) Browser timing** — tests assert visibility before rendering completes.
+Target: `tests/e2e/*.spec.ts` files that only use `in-process-harness` (no browser).
 
-**Target: 0 retries → 846s useful time instead of 1,247s.**
+~50 files, ~400 tests.
 
-### Phase 2: Convert ~80 browser tests to in-process (save ~400s)
+### Step 3 (2 days): Convert session+WS tests
+The 34 files that use sessions and WS events. Same pattern, with the mock agent helper.
 
-The 188 browser tests take 643s. Most test API behavior visible through UI but testable via REST/WS:
+### Step 4 (1 day): Keep the UI tests as Tier 3
+The ~30 files under `tests/e2e/ui/` that use a real browser. These stay as Playwright tests with spawned gateway. They test the UI→gateway contract — that's what Tier 3 is for.
 
-| Category | Tests | Can convert? |
-|----------|-------|-------------|
-| Sidebar rendering/state | ~40 | Yes — test via REST API + WS events |
-| Settings persistence | ~15 | Yes — test via REST API |
-| Goal/workflow CRUD UI | ~25 | Yes — test via REST API |
-| Navigation/routing | ~15 | No — needs real hash routing |
-| Streaming/draft contracts (CT-01/02/06) | ~34 | No — needs real browser |
-| User interaction (click, type) | ~30 | No — needs real browser |
-| Tool/proposal UI | ~20 | Partial |
+### Step 5 (1 day): Optimize command verification
+For `test-fast` workflow's `echo ok` steps, add an in-process command runner that skips the subprocess. Real verification tests (gates using actual shell commands) stay as Tier 3.
 
-~80 browser tests → in-process API tests. ~3s saved per conversion = **~240s saved**.
+### Step 6 (1 day): Update `npm run test:unit` and `npm run test:e2e`
+- `test:unit` now includes `tests/contract/` → fast, ~30s total
+- `test:e2e` runs only `tests/e2e/` → the heavy browser tier, ~60s total
+- Combined: **<90s**
 
-### Phase 3: Reduce workers, increase efficiency
+## Risks and mitigations
 
-After phases 1-2:
-- **API project**: ~513 tests (~250s seq), 2 workers → 125s wall
-- **Browser project**: ~108 tests (~300s seq), 1 worker → 300s wall
+### Risk: In-process gateway differs from production gateway
+**Mitigation**: Tier 3 (browser tests) still hit real HTTP/WS. If something only fails over the network, Tier 3 catches it.
 
-Browser is the bottleneck at 1 worker. But with 1 browser worker per run, 6 concurrent runs = 6 Chromiums (manageable).
+### Risk: We lose coverage of HTTP layer edge cases
+**Mitigation**: Keep 5-10 dedicated Tier 3 tests for auth, rate limiting, content negotiation.
 
-### Phase 4: Shared gateway for browser tests
+### Risk: Test isolation breaks if gateway leaks state
+**Mitigation**: Each test uses a fresh temp dir. Module-level state in server.ts is the only concern — we verified the POC runs 3 tests sequentially without contamination.
 
-All browser tests share one gateway started in `globalSetup` instead of each worker spawning its own. Eliminates 5-8s startup per worker, reduces process count.
+### Risk: Per-test gateway setup cost adds up
+**Mitigation**: Measured at 35ms in POC. 400 tests × 35ms = 14s total setup overhead — acceptable.
 
-### Projected result
+## Decision gates
 
-| Phase | Sequential time | Wall (2+1 workers) |
-|-------|----------------|-------------------|
-| Current | 1,247s | ~240s (4 min) |
-| Phase 1 (fix flaky) | 846s | ~170s |
-| Phase 2 (convert browser→API) | ~530s | ~120s |
-| Phase 3 (rebalance workers) | ~530s | ~110s |
-| Phase 4 (shared gateway) | ~500s | ~100s |
+1. ✅ **Is per-test fresh gateway feasible?** Yes, measured 35ms setup + 60ms shutdown.
+2. ✅ **Do tests stay isolated?** Yes, POC ran 3 tests sequentially without contamination.
+3. **Is the subprocess verification cost acceptable?** For ~100 tests at 2s each = 200s, that's still too much for `test:unit` (<30s target). We need Step 5 (in-process command runner for test-fast) to get under the target.
+4. **Can we migrate 400 tests in ~1 week?** The migration is mechanical per-test, estimated 5-10 tests/hour = 40-80 hours = 1-2 weeks of focused work.
 
-### Resource usage per run after all phases
+## Recommended next step
 
-| Resource | Current | After |
-|----------|---------|-------|
-| Workers | 6 (3+3) | 3 (2+1) |
-| Node processes | ~12 | ~5 |
-| Chromium instances | 3 | 1 |
-| Memory | ~4 GB | ~1.5 GB |
-| CPU cores | ~12 | ~4 |
+Finish converting `gates-api-heavy.spec.ts` + `gate-resign-cancel.spec.ts` to Tier 2. Measure real wall time vs today's flaky 5-10min with retries. If it's a clean win, proceed with the full migration.
 
-### 6 concurrent runs after all phases
-
-| Resource | Current (6×) | After (6×) |
-|----------|-------------|-----------|
-| Total processes | ~72 | ~30 |
-| Chromium instances | 18 | 6 |
-| Memory | ~24 GB | ~9 GB |
-| CPU cores needed | 72 (3× over) | 24 (fits exactly) |
-
-## Implementation order
-
-1. **Fix all 11 flaky tests** — biggest ROI, 401s of waste eliminated
-2. **Convert ~80 browser tests to in-process** — incremental, per-file
-3. **Rebalance workers to 2+1** — config change
-4. **Shared browser gateway** — globalSetup change
-
-## What doesn't change
-
-- `npm run test:unit` — 841 tests, 22s
-- `npm run test:e2e` — all tests, <120s target
-- All CT/PI/SB contract tests stay as browser E2E
-- All user story coverage maintained
-- Code coverage maintained or improved
+Alternatively: I can commit this POC, demonstrate the approach, and let you decide the scope (full migration vs. "new tests only go to Tier 2").
