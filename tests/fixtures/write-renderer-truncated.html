@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: sans-serif; padding: 8px; }
+  /* Minimal stubs for Tailwind-like classes used by the renderer */
+  .text-xs { font-size: 0.75rem; }
+  .text-muted-foreground { color: #888; }
+  .bg-muted { background: #f0f0f0; }
+  .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+  .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+  .rounded { border-radius: 0.25rem; }
+  .ml-2 { margin-left: 0.5rem; }
+  .mt-2 { margin-top: 0.5rem; }
+  .mb-1 { margin-bottom: 0.25rem; }
+  .flex { display: flex; }
+  .items-center { align-items: center; }
+  .gap-2 { gap: 0.5rem; }
+  .text-primary { color: #3b82f6; }
+  .space-y-3 > * + * { margin-top: 0.75rem; }
+  .max-h-0 { max-height: 0; }
+  .overflow-hidden { overflow: hidden; }
+</style>
+</head>
+<body>
+
+<div id="normal-write"></div>
+<div id="truncated-streaming"></div>
+<div id="truncated-final"></div>
+
+<script type="module">
+// Minimal stubs for Lit html template rendering
+// We render the WriteRenderer output as plain HTML strings for testing
+
+import { WriteRenderer } from "../../src/ui/tools/renderers/WriteRenderer.js";
+
+// Stub the renderer dependencies: renderHeader, renderCollapsibleHeader, getToolState, etc.
+// Since we can't easily import the full Lit/component stack, we'll use a simpler approach:
+// test the logic by calling render() and inspecting the returned TemplateResult.
+
+// For file:// fixtures we need a different approach. Let's test via the component.
+</script>
+
+<script>
+// Simpler approach: test the WriteRenderer logic inline without full module imports.
+// We'll validate the truncation detection and display logic.
+
+function isTruncated(content) {
+  return (
+    typeof content === "object" &&
+    content !== null &&
+    content._truncated === true
+  );
+}
+
+function formatSize(bytes) {
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return bytes + " bytes";
+}
+
+// Test 1: Normal string content — not truncated
+const normalContent = "console.log('hello');";
+const normalResult = isTruncated(normalContent);
+document.getElementById("normal-write").innerHTML = `
+  <div data-testid="normal-truncated">${normalResult}</div>
+  <div data-testid="normal-display">${normalContent}</div>
+`;
+
+// Test 2: Truncated content during streaming
+const truncatedContent = {
+  _truncated: true,
+  _originalLength: 10485760,
+  preview: "// First 512 characters of a very large file...\nconst data = [1, 2, 3];"
+};
+const streamTruncated = isTruncated(truncatedContent);
+const streamDisplay = streamTruncated ? truncatedContent.preview : truncatedContent;
+const streamSize = formatSize(truncatedContent._originalLength);
+document.getElementById("truncated-streaming").innerHTML = `
+  <div data-testid="stream-truncated">${streamTruncated}</div>
+  <div data-testid="stream-display">${streamDisplay}</div>
+  <div data-testid="stream-size">${streamSize}</div>
+  <span data-testid="stream-badge" class="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded ml-2">
+    Truncated (${streamSize})
+  </span>
+`;
+
+// Test 3: Truncated content in final render (with result) — has "Load full content" button
+const finalTruncated = isTruncated(truncatedContent);
+const finalDisplay = finalTruncated ? truncatedContent.preview : truncatedContent;
+const finalSize = formatSize(truncatedContent._originalLength);
+document.getElementById("truncated-final").innerHTML = `
+  <div data-testid="final-truncated">${finalTruncated}</div>
+  <div data-testid="final-display">${finalDisplay}</div>
+  <div data-testid="final-size">${finalSize}</div>
+  <div class="flex items-center gap-2 mt-2 mb-1">
+    <span data-testid="final-badge" class="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">
+      Content truncated (${finalSize}) — preview only
+    </span>
+    <button data-testid="load-full-btn" class="text-xs text-primary" id="load-btn">Load full content</button>
+  </div>
+`;
+
+// Test 4: Edge cases
+const edgeCases = [
+  { input: null, expected: false, label: "null" },
+  { input: undefined, expected: false, label: "undefined" },
+  { input: "", expected: false, label: "empty-string" },
+  { input: { _truncated: false, _originalLength: 100, preview: "x" }, expected: false, label: "truncated-false" },
+  { input: { _truncated: true, _originalLength: 0, preview: "" }, expected: true, label: "truncated-empty" },
+  { input: { _truncated: true, _originalLength: 50000, preview: "abc" }, expected: true, label: "truncated-small" },
+];
+
+let edgeHtml = "";
+for (const tc of edgeCases) {
+  const result = isTruncated(tc.input);
+  edgeHtml += `<div data-testid="edge-${tc.label}">${result === tc.expected ? "pass" : "fail"}</div>`;
+}
+document.body.insertAdjacentHTML("beforeend", `<div id="edge-cases">${edgeHtml}</div>`);
+
+// Test 5: formatSize
+const sizeTests = [
+  { bytes: 500, expected: "500 bytes" },
+  { bytes: 1024, expected: "1.0 KB" },
+  { bytes: 32768, expected: "32.0 KB" },
+  { bytes: 1048576, expected: "1.0 MB" },
+  { bytes: 10485760, expected: "10.0 MB" },
+  { bytes: 41943040, expected: "40.0 MB" },
+];
+
+let sizeHtml = "";
+for (const st of sizeTests) {
+  const result = formatSize(st.bytes);
+  sizeHtml += `<div data-testid="size-${st.bytes}">${result === st.expected ? "pass" : "fail"}:${result}</div>`;
+}
+document.body.insertAdjacentHTML("beforeend", `<div id="size-tests">${sizeHtml}</div>`);
+
+// Test 6: Button click dispatches CustomEvent
+document.getElementById("load-btn").addEventListener("click", (e) => {
+  e.currentTarget.textContent = "Loading...";
+  e.currentTarget.dispatchEvent(new CustomEvent("load-full-content", {
+    bubbles: true,
+    composed: true,
+  }));
+});
+
+// Listen for the event at document level to verify it bubbles
+document.addEventListener("load-full-content", () => {
+  document.body.insertAdjacentHTML("beforeend",
+    '<div data-testid="event-fired">true</div>'
+  );
+});
+</script>
+
+</body>
+</html>

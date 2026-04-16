@@ -195,6 +195,21 @@ export class SessionStore {
 	setDraft(sessionId: string, type: string, data: unknown): boolean {
 		const session = this.sessions.get(sessionId);
 		if (!session) return false;
+		// Reject stale writes: if both the incoming and existing drafts carry a
+		// `gen` field, only accept the write when the incoming gen is >= existing.
+		// This prevents out-of-order HTTP requests from resurrecting a draft that
+		// was already cleared by a newer tombstone (e.g. send clears with gen=2,
+		// but a delayed save from gen=1 arrives after).
+		if (data && typeof data === "object" && "gen" in (data as Record<string, unknown>)) {
+			const incomingGen = (data as Record<string, unknown>).gen;
+			const existing = session.drafts?.[type];
+			if (existing && typeof existing === "object" && "gen" in (existing as Record<string, unknown>)) {
+				const existingGen = (existing as Record<string, unknown>).gen;
+				if (typeof incomingGen === "number" && typeof existingGen === "number" && incomingGen < existingGen) {
+					return true; // Silently discard stale write — not an error
+				}
+			}
+		}
 		this.generation++;
 		if (!session.drafts) session.drafts = {};
 		session.drafts[type] = data;

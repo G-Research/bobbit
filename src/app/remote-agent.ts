@@ -97,6 +97,8 @@ export class RemoteAgent {
 	private _intentionalDisconnect = false;
 	private _connectionStatus: ConnectionStatus = "disconnected";
 	private _pendingReconnectNotif = false;
+	/** Timestamp of last streamMessage update when content contains truncated blocks. */
+	private _lastTruncatedStreamUpdate = 0;
 	private static readonly MAX_RECONNECT_DELAY = 30_000;
 	private static readonly BASE_RECONNECT_DELAY = 1_000;
 
@@ -1228,6 +1230,22 @@ export class RemoteAgent {
 				// in message-list from now on.
 				this.flushDeferredMessage();
 				if (event.message) {
+					// Throttle stream updates when content has truncated blocks
+					// to reduce Lit re-render pressure (2x/sec instead of every token).
+					const hasTruncated = Array.isArray(event.message.content) &&
+						event.message.content.some((c: any) =>
+							c.type === "toolCall" &&
+							typeof c.arguments?.content === "object" &&
+							c.arguments?.content?._truncated === true,
+						);
+					if (hasTruncated) {
+						const now = Date.now();
+						if (now - this._lastTruncatedStreamUpdate < 500) {
+							break; // Skip this update — throttled
+						}
+						this._lastTruncatedStreamUpdate = now;
+					}
+
 					this._state.streamMessage = event.message;
 					// Check for proposals during streaming so preview syncs live.
 					// Pass streaming=true so blocks are NOT marked as processed —
