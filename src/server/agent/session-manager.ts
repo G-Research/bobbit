@@ -1815,6 +1815,7 @@ export class SessionManager {
 	private async restoreSession(ps: PersistedSession): Promise<void> {
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
+		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
 		// Restore env vars needed by extensions
 		bridgeOptions.env = { BOBBIT_SESSION_ID: ps.id };
@@ -1922,6 +1923,12 @@ export class SessionManager {
 				for (const extPath of mcpExtPaths) {
 					bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
 				}
+			}
+		} else if (!ps.role && this.mcpManager) {
+			// Roleless sessions still need MCP extensions (e.g. playwright tools)
+			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			for (const extPath of mcpExtPaths) {
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
 			}
 		}
 
