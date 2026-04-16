@@ -231,6 +231,14 @@ test.describe("Queue UI E2E", () => {
 		// Wait for agent to respond and go idle
 		await waitForSessionStatus(sessionId, "idle", 15_000);
 
+		// Wait for draft to be cleared server-side before reloading
+		await expect(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionId}/draft?type=prompt`);
+			if (resp.status === 404) return; // draft deleted = cleared
+			const body = await resp.json();
+			expect(body.data?.text ?? "").toBe("");
+		}).toPass({ timeout: 10_000 });
+
 		// Reload the page
 		await page.reload();
 
