@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connectWs, type WsConnection } from "./e2e-setup.js";
 
 /**
  * E2E test for gate re-signal cancellation.
@@ -61,13 +61,6 @@ async function getSignals(goalId: string, gateId: string): Promise<any[]> {
 	return data.signals || [];
 }
 
-/** Get gate status. */
-async function getGateStatus(goalId: string, gateId: string): Promise<any> {
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	expect(res.ok).toBe(true);
-	return res.json();
-}
-
 /**
  * Poll until a condition is met, with timeout.
  */
@@ -109,8 +102,14 @@ test.describe("Gate Re-signal Cancellation", () => {
 		});
 		const goalId = goal.id;
 
+		// Open a WS connection to receive gate events
+		const sessionId = await createSession();
+		let conn: WsConnection | undefined;
+
 		try {
-			// 2. Signal the gate — starts verification with the 8s command
+			conn = await connectWs(sessionId);
+
+			// 2. Signal the gate — starts verification with the 2s command
 			const signal1Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "Signal v1" }),
@@ -119,14 +118,13 @@ test.describe("Gate Re-signal Cancellation", () => {
 			const signal1Data = await signal1Res.json();
 			const signal1Id = signal1Data.signal.id;
 
-			// 3. Wait briefly for verification to start
-			await pollUntil(
-				() => getActiveVerifications(goalId),
-				(v) => v.length > 0 && v.some(a => a.signalId === signal1Id && a.overallStatus === "running"),
+			// 3. Wait for verification to start via WS event
+			await conn.waitFor(
+				(m) => m.type === "gate_verification_started" && m.gateId === "slow-gate" && m.signalId === signal1Id,
 				5000,
 			);
 
-			// 4. Verify the first signal's verification is active
+			// 4. Verify the first signal's verification is active via REST
 			const activeBeforeResignal = await getActiveVerifications(goalId);
 			expect(activeBeforeResignal.length).toBeGreaterThanOrEqual(1);
 			const firstVerification = activeBeforeResignal.find(v => v.signalId === signal1Id);
@@ -143,33 +141,24 @@ test.describe("Gate Re-signal Cancellation", () => {
 			const signal2Id = signal2Data.signal.id;
 			expect(signal2Id).not.toBe(signal1Id);
 
-			// 6. Verify the old signal's verification is no longer active
-			//    (cancelled and removed from activeVerifications)
-			//    The new signal's verification should be active.
-			await pollUntil(
-				() => getActiveVerifications(goalId),
-				(verifs) => {
-					const hasOld = verifs.some(v => v.signalId === signal1Id);
-					const hasNew = verifs.some(v => v.signalId === signal2Id);
-					// Old should be gone, new should be present (or already completed & cleaned up)
-					return !hasOld && (hasNew || verifs.length === 0);
-				},
-				5000,
+			// 6. Wait for old verification to be cancelled via WS event
+			await conn.waitFor(
+				(m) => m.type === "gate_verification_complete" && m.signalId === signal1Id && m.status === "cancelled",
+				10_000,
 			);
 
+			// Confirm old verification is no longer in active list
 			const activeAfterResignal = await getActiveVerifications(goalId);
-			// Old verification must not be active
 			expect(activeAfterResignal.find(v => v.signalId === signal1Id)).toBeFalsy();
 
-			// 7. Wait for the new verification to complete (gate passes or fails)
-			const finalGate = await pollUntil(
-				() => getGateStatus(goalId, "slow-gate"),
-				(gate) => gate.status === "passed" || gate.status === "failed",
-				20000,
+			// 7. Wait for the gate to pass via WS event
+			const wsMsg = await conn.waitFor(
+				(m) => m.type === "gate_status_changed" && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
+				20_000,
 			);
 
 			// 8. Gate status should be determined by the new signal (passed, since command exits 0)
-			expect(finalGate.status).toBe("passed");
+			expect(wsMsg.status).toBe("passed");
 
 			// Verify signal history: both signals recorded, latest is v2
 			const signals = await getSignals(goalId, "slow-gate");
@@ -180,7 +169,9 @@ test.describe("Gate Re-signal Cancellation", () => {
 			expect(latestSignal.id).toBe(signal2Id);
 			expect(latestSignal.verification.status).toBe("passed");
 		} finally {
+			conn?.close();
 			await deleteGoal(goalId).catch(() => {});
+			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 
@@ -192,7 +183,13 @@ test.describe("Gate Re-signal Cancellation", () => {
 		});
 		const goalId = goal.id;
 
+		// Open a WS connection to receive gate events
+		const sessionId = await createSession();
+		let conn: WsConnection | undefined;
+
 		try {
+			conn = await connectWs(sessionId);
+
 			// Signal 1
 			const s1Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
 				method: "POST",
@@ -200,8 +197,11 @@ test.describe("Gate Re-signal Cancellation", () => {
 			});
 			expect(s1Res.status).toBe(201);
 
-			// Wait for verification to start
-			await new Promise(r => setTimeout(r, 200));
+			// Wait for verification to start via WS
+			await conn.waitFor(
+				(m) => m.type === "gate_verification_started" && m.gateId === "slow-gate",
+				5000,
+			);
 
 			// Signal 2 (cancels signal 1)
 			const s2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
@@ -210,7 +210,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 			});
 			expect(s2Res.status).toBe(201);
 
-			// Wait briefly
+			// Wait briefly for signal 2's verification to start
 			await new Promise(r => setTimeout(r, 200));
 
 			// Signal 3 (cancels signal 2)
@@ -232,19 +232,20 @@ test.describe("Gate Re-signal Cancellation", () => {
 				5000,
 			);
 
-			// Wait for the final verification to complete
-			const finalGate = await pollUntil(
-				() => getGateStatus(goalId, "slow-gate"),
-				(gate) => gate.status === "passed" || gate.status === "failed",
-				20000,
+			// Wait for the gate to pass via WS event (replaces REST polling)
+			const wsMsg = await conn.waitFor(
+				(m) => m.type === "gate_status_changed" && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
+				20_000,
 			);
-			expect(finalGate.status).toBe("passed");
+			expect(wsMsg.status).toBe("passed");
 
 			// Verify no stale verifications remain active
 			const activeAfter = await getActiveVerifications(goalId);
 			expect(activeAfter.length).toBe(0);
 		} finally {
+			conn?.close();
 			await deleteGoal(goalId).catch(() => {});
+			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 });
