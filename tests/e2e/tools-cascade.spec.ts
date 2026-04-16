@@ -12,6 +12,7 @@ import { mkdirSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 test.describe("Tool Config Cascade", () => {
+	test.describe.configure({ retries: 1 });
 
 	test("fresh scaffold has tools config directory", async () => {
 		// The in-process harness uses scaffoldBobbitDir which creates

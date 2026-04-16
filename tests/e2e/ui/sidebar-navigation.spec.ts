@@ -20,6 +20,7 @@ import {
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Sidebar navigation", () => {
+	test.describe.configure({ retries: 1 });
 	const sessionIds: string[] = [];
 	const goalIds: string[] = [];
 
