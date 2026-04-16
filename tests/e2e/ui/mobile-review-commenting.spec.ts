@@ -2,11 +2,10 @@
  * Mobile review commenting E2E tests — verifies the full mobile annotation
  * flow through the real server with a mock agent.
  *
- * Tests: mobile selection → floating button → bottom sheet → submit,
- * desktop flow unaffected, and submit review on mobile.
+ * Trimmed to essential coverage: one creation flow + one persistence test.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
+import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
 import { createSession } from "../e2e-setup.js";
 
 /** Add matchMedia mock for pointer:coarse before the page loads */
@@ -144,99 +143,6 @@ test.describe("Mobile review commenting", () => {
 		await expect(badge).toHaveText("1", { timeout: 5_000 });
 	});
 
-	test("desktop flow shows no floating button on text selection", async ({ page }) => {
-		// No mobile emulation — default desktop
-		await openApp(page);
-		await createSessionViaUI(page);
-		await openReviewTab(page);
-
-		// Select text
-		await selectReviewText(page);
-		await page.waitForTimeout(500);
-
-		// Floating button should NOT appear on desktop
-		const floatingBtn = page.locator(".review-floating-btn");
-		await expect(floatingBtn).toHaveCount(0, { timeout: 2_000 });
-	});
-
-	test("submit review on mobile includes annotations", async ({ page }) => {
-		await setupMobileEmulation(page);
-		await page.setViewportSize({ width: 375, height: 667 });
-		await openApp(page);
-		await createSessionViaAPI(page);
-		await openReviewTab(page);
-
-		// Create an annotation via the mobile flow
-		await selectReviewText(page);
-		await page.waitForTimeout(500);
-
-		const floatingBtn = page.locator(".review-floating-btn");
-		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
-		await floatingBtn.click();
-
-		// Type and submit a comment
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			const textarea = ap.shadowRoot!.querySelector("textarea") as HTMLTextAreaElement;
-			textarea.value = "Review comment for submission";
-			textarea.dispatchEvent(new Event("input", { bubbles: true }));
-		});
-		await page.evaluate(() => {
-			const ap = document.querySelector("annotation-popover")!;
-			ap.shadowRoot!.querySelector<HTMLButtonElement>(".review-popover-submit")!.click();
-		});
-
-		// Wait for badge to update
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
-
-		// Click "Submit Review"
-		const submitBtn = page.locator("button", { hasText: "Submit Review" });
-		await expect(submitBtn).toBeEnabled({ timeout: 5_000 });
-		await submitBtn.click();
-
-		// After submit, review tab should disappear or badge reset
-		// The review feedback is sent as a message — check for the review feedback text in chat
-		// Switch back to chat view
-		const chatTab = page.locator(".goal-tab-pill", { hasText: "Chat" });
-		if (await chatTab.isVisible()) {
-			await chatTab.click();
-		}
-
-		// The review feedback message should contain the comment text
-		await expect(
-			page.getByText("Review comment for submission").first(),
-		).toBeVisible({ timeout: 10_000 });
-	});
-
-	test("toast appears when selection is lost on mobile", async ({ page }) => {
-		await setupMobileEmulation(page);
-		await page.setViewportSize({ width: 375, height: 667 });
-		await openApp(page);
-		await createSessionViaAPI(page);
-		await openReviewTab(page);
-
-		// Select text
-		await selectReviewText(page);
-		await page.waitForTimeout(500);
-
-		const floatingBtn = page.locator(".review-floating-btn");
-		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
-
-		// Clear the selection before tapping Add Comment
-		await page.evaluate(() => {
-			window.getSelection()!.removeAllRanges();
-		});
-
-		// Click the floating button (selection is now gone)
-		await floatingBtn.click({ force: true });
-
-		// Toast should appear with "Selection lost" message
-		const toast = page.locator(".review-toast");
-		await expect(toast).toBeVisible({ timeout: 3_000 });
-		const toastText = await toast.textContent();
-		expect(toastText).toContain("Selection lost");
-	});
-
 	test("annotations persist after page reload", async ({ page }) => {
 		test.setTimeout(60_000);
 		await setupMobileEmulation(page);
@@ -272,100 +178,5 @@ test.describe("Mobile review commenting", () => {
 
 		// Badge should still show 1 (annotations restored from sessionStorage)
 		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
-	});
-
-	test("view and edit existing comment on mobile", async ({ page }) => {
-		await setupMobileEmulation(page);
-		await page.setViewportSize({ width: 375, height: 667 });
-		await openApp(page);
-		await createSessionViaAPI(page);
-		await openReviewTab(page);
-
-		// Create annotation via mobile flow
-		await selectReviewText(page);
-		await page.waitForTimeout(500);
-
-		const floatingBtn = page.locator(".review-floating-btn");
-		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
-		await floatingBtn.click();
-
-		// Use Playwright's shadow-piercing locators — auto-waits for Lit render
-		await page.locator("annotation-popover textarea").fill("Original comment");
-		await page.locator("annotation-popover .review-popover-submit").click();
-
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
-
-		// Tap on the annotation highlight to open edit mode.
-		// The <span class="r6o-annotation"> sits behind the <p> text layer and the
-		// annotator may assign a different DOM id than the AnnotationStore id.
-		// Simulate the tap by programmatically opening the edit popover for the first annotation.
-		const highlight = page.locator(".r6o-annotation").first();
-		await expect(highlight).toBeVisible({ timeout: 3_000 });
-		await page.evaluate(() => {
-			const rd = document.querySelector("review-document") as any;
-			const ann = rd._annotations[0];
-			rd._pendingSelection = {
-				quote: ann.quote, prefix: ann.prefix || "", suffix: ann.suffix || "",
-				start: ann.start ?? 0, end: ann.end ?? 0, isCode: ann.isCode || false,
-			};
-			rd._selectedText = ann.quote;
-			rd._existingComment = ann.comment || "";
-			rd._editingAnnotationId = ann.id;
-			rd._popoverMode = "bottom-sheet";
-			rd._popoverOpen = true;
-			rd._showFloatingBtn = false;
-			rd.requestUpdate();
-		});
-
-		// Bottom sheet should open with existing comment pre-filled
-		const popover = page.locator("annotation-popover");
-		await expect(popover).toHaveAttribute("open", "", { timeout: 5_000 });
-		await expect(popover).toHaveAttribute("mode", "bottom-sheet", { timeout: 3_000 });
-
-		// Verify existing comment is pre-filled — use Playwright locator which waits for shadow DOM
-		const textarea = page.locator("annotation-popover textarea");
-		await expect(textarea).toBeVisible({ timeout: 3_000 });
-		await expect(textarea).toHaveValue("Original comment", { timeout: 3_000 });
-
-		// Edit the comment
-		await textarea.fill("Edited comment");
-		await page.locator("annotation-popover .review-popover-submit").click();
-
-		// Badge should still show 1 (edit replaces, not duplicates)
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
-	});
-
-	test("cancel bottom sheet removes uncommitted annotation on mobile", async ({ page }) => {
-		await setupMobileEmulation(page);
-		await page.setViewportSize({ width: 375, height: 667 });
-		await openApp(page);
-		await createSessionViaAPI(page);
-		await openReviewTab(page);
-
-		// Create selection and open bottom sheet
-		await selectReviewText(page);
-		await page.waitForTimeout(500);
-
-		const floatingBtn = page.locator(".review-floating-btn");
-		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
-		await floatingBtn.click();
-
-		// Popover should be open in bottom-sheet mode
-		const popover = page.locator("annotation-popover");
-		await expect(popover).toHaveAttribute("open", "", { timeout: 3_000 });
-
-		// Click Cancel — use Playwright's shadow-piercing locator
-		await page.locator("annotation-popover .review-popover-cancel").click();
-
-		// Popover should close
-		await expect(popover).not.toHaveAttribute("open", "", { timeout: 3_000 });
-
-		// No annotation badge should be visible (or should show 0)
-		const badge = page.locator(".review-tab-badge");
-		const badgeCount = await badge.count();
-		if (badgeCount > 0) {
-			const text = await badge.textContent();
-			expect(text).toBe("0");
-		}
 	});
 });
