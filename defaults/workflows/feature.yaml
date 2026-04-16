@@ -47,8 +47,8 @@ gates:
         run: "{{project.test_unit_command}}"
       - name: "E2E tests"
         type: command
-        timeout: 180
-        run: "{{project.test_e2e_standard_command}}"
+        timeout: 900
+        run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
         role: spec-auditor
@@ -245,10 +245,6 @@ gates:
     name: Ready to Merge
     depends_on: [documentation]
     verify:
-      - name: "Full E2E tests"
-        type: command
-        timeout: 900
-        run: "{{project.test_e2e_command}}"
       - name: "Branch pushed to remote"
         type: command
         run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ."
