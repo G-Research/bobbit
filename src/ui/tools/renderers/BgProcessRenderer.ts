@@ -4,6 +4,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { SquareTerminal } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import "../../components/LiveTimer.js";
 
 interface BgParams {
 	action: string;
@@ -25,6 +26,35 @@ interface BgParams {
  * Looked up by all subsequent actions so the name is always available.
  */
 const processNameCache = new Map<string, string>();
+
+/**
+ * Per-tool-call start-timestamp cache. Keyed by toolCallId when available,
+ * otherwise by the params object identity (while the call is still
+ * streaming and we don't have a result yet). The first render records
+ * the wall-clock time; subsequent renders reuse it so <live-timer>
+ * counts up from when the call started, not from the latest re-render.
+ */
+const callStartById = new Map<string, number>();
+const callStartByParams = new WeakMap<object, number>();
+
+function getCallStart(params: BgParams, result: ToolResultMessage | undefined): number {
+	const id = result?.toolCallId;
+	if (id) {
+		let t = callStartById.get(id);
+		if (t === undefined) {
+			// Promote any per-params entry so we don't double-count.
+			t = callStartByParams.get(params) ?? Date.now();
+			callStartById.set(id, t);
+		}
+		return t;
+	}
+	let t = callStartByParams.get(params);
+	if (t === undefined) {
+		t = Date.now();
+		callStartByParams.set(params, t);
+	}
+	return t;
+}
 
 /** Extract the process name from result text like "Logs for bg-12 (branch cleanup):" */
 function extractAndCacheProcessName(id: string | undefined, result: ToolResultMessage | undefined): void {
@@ -51,6 +81,10 @@ function resolveProcessName(params: BgParams, result: ToolResultMessage | undefi
 			const idMatch = text.match(/ID:\s*(bg-\d+)/);
 			if (idMatch?.[1]) processNameCache.set(idMatch[1], params.name);
 		}
+		// Also populate a default start-time for this create action so the
+		// renderer shows a timer even before the session-manager refresh fires.
+		// Fallback uses result.timestamp if available; otherwise do nothing —
+		// we'd rather show no timer than a misleading one on historical replay.
 		return params.name;
 	}
 
@@ -88,7 +122,7 @@ const S = {
 } as const;
 
 /** Build the rich header as a TemplateResult with structured layout. */
-function buildHeader(params: BgParams, result: ToolResultMessage | undefined): TemplateResult {
+function buildHeader(params: BgParams, result: ToolResultMessage | undefined, timerNode: TemplateResult): TemplateResult {
 	const processName = resolveProcessName(params, result);
 	const id = params.id || "";
 
@@ -127,21 +161,33 @@ function buildHeader(params: BgParams, result: ToolResultMessage | undefined): T
 			if (params.timeout) detail = html`<span style="${S.detail}">up to ${formatDuration(params.timeout)}</span>`;
 			break;
 		case "list":
-			return html`<span style="${S.wrap}">${badge} ${action}</span>`;
+			return html`<span style="${S.wrap}">${badge} ${action}${timerNode}</span>`;
 	}
 
 	const sep = detail ? html`<span style="${S.sep}">—</span>` : html``;
 
-	return html`<span style="${S.wrap}">${badge} ${action}${nameAndId} ${sep} ${detail}</span>`;
+	return html`<span style="${S.wrap}">${badge} ${action}${nameAndId} ${sep} ${detail}${timerNode}</span>`;
+}
+
+/** Render the live elapsed timer span. `running` stops the counter when false. */
+function renderCallTimer(params: BgParams, result: ToolResultMessage | undefined, running: boolean): TemplateResult {
+	const startedAt = getCallStart(params, result);
+	return html` <span style="${S.detail}" title="Elapsed since the tool call started">· <live-timer .startTime=${startedAt} .running=${running}></live-timer></span>`;
 }
 
 export class BgProcessRenderer implements ToolRenderer<BgParams> {
 	render(
 		params: BgParams | undefined,
 		result: ToolResultMessage | undefined,
-		_isStreaming?: boolean,
+		isStreaming?: boolean,
 	): ToolRenderResult {
-		const headerContent = params ? buildHeader(params, result) : html`<span>background process</span>`;
+		// Only `wait` benefits from a live elapsed timer — other actions
+		// (create, logs, grep, …) return effectively immediately.
+		const timerRunning = !result || !!isStreaming;
+		const timerNode = params?.action === "wait"
+			? renderCallTimer(params, result, timerRunning)
+			: html``;
+		const headerContent = params ? buildHeader(params, result, timerNode) : html`<span>background process</span>`;
 		const state = getToolState(result, !result);
 
 		const output = typeof result?.content === "string"

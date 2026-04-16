@@ -76,6 +76,8 @@ export class GateVerificationLive extends LitElement {
 
 	private _boundOnEvent = this._onEvent.bind(this);
 	private _reconcileTimer?: ReturnType<typeof setTimeout>;
+	/** Throttled re-render after streaming output events (high-frequency). */
+	private _outputFlushTimer?: ReturnType<typeof setTimeout>;
 
 	override createRenderRoot() { return this; }
 
@@ -108,6 +110,10 @@ export class GateVerificationLive extends LitElement {
 		if (this._reconcileTimer) {
 			clearTimeout(this._reconcileTimer);
 			this._reconcileTimer = undefined;
+		}
+		if (this._outputFlushTimer) {
+			clearTimeout(this._outputFlushTimer);
+			this._outputFlushTimer = undefined;
 		}
 	}
 
@@ -268,6 +274,14 @@ export class GateVerificationLive extends LitElement {
 				if (this.modalStep && this.modalStep.index === idx) {
 					this.modalStep = { ...this.modalStep, output: next };
 				}
+				// Throttle re-renders: streaming output events can arrive at kHz.
+				// A 200ms flush gives near-real-time updates without overwhelming Lit.
+				if (!this._outputFlushTimer) {
+					this._outputFlushTimer = setTimeout(() => {
+						this._outputFlushTimer = undefined;
+						this.requestUpdate();
+					}, 200);
+				}
 				break;
 			}
 			case "gate_verification_complete": {
@@ -381,7 +395,13 @@ export class GateVerificationLive extends LitElement {
 
 	private _renderStepCard(step: VerificationStep, index: number): TemplateResult {
 		const isExpanded = this.expandedSteps.has(index);
-		const hasOutput = !!step.output;
+		// Streamed output accumulates in _stepOutputs while the step is running;
+		// fall back to step.output once the step completes. Either can populate
+		// the expandable body so users see live output during long-running
+		// command steps (e2e test runs, etc.).
+		const streamedOutput = this._stepOutputs.get(index) || "";
+		const displayOutput = streamedOutput || step.output || "";
+		const hasOutput = displayOutput.length > 0;
 		const dStatus = toDelegateStatus(step.status);
 		const entry = toCardEntry(step, index);
 		const isRunningCommand = step.status === "running" && step.type === "command";
@@ -398,8 +418,10 @@ export class GateVerificationLive extends LitElement {
 					class="p-2 flex items-center gap-2 ${clickable ? "cursor-pointer hover:bg-accent/50" : ""}"
 					@click=${clickable ? () => {
 						if (isRunningCommand) {
+							// Running command: open the full-screen live output modal
 							this._openModal(index, step.name);
 						} else if (hasOutput) {
+							// Completed or streaming non-command step: toggle inline body
 							this._toggleStep(index);
 						}
 					} : null}
@@ -412,10 +434,10 @@ export class GateVerificationLive extends LitElement {
 					${isRunningCommand ? html`<span class="text-muted-foreground text-[10px] shrink-0" title="View live output">▸</span>` : nothing}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
 				</div>
-				${isExpanded && step.output ? (
+				${isExpanded && hasOutput ? (
 				step.type !== "command"
-					? html`<div class="text-xs text-muted-foreground max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border"><markdown-block .content=${step.output}></markdown-block></div>`
-					: html`<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${hasAnsi(step.output) ? unsafeHTML(ansiToHtml(step.output)) : step.output}</pre>`
+					? html`<div class="text-xs text-muted-foreground max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border"><markdown-block .content=${displayOutput}></markdown-block></div>`
+					: html`<pre class="text-xs text-muted-foreground whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-muted/50 rounded-b p-2 border-t border-border">${hasAnsi(displayOutput) ? unsafeHTML(ansiToHtml(displayOutput)) : displayOutput}</pre>`
 			) : nothing}
 			</div>
 		`;

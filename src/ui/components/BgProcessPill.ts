@@ -2,6 +2,7 @@ import { html, LitElement, nothing, render as litRender } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { customElement, property, state } from "lit/decorators.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
+import "./LiveTimer.js";
 
 export interface BgProcessInfo {
 	id: string;
@@ -220,6 +221,9 @@ export class BgProcessPill extends LitElement {
 						${!isRunning && p.exitCode !== null
 							? html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`
 							: nothing}
+						<span class="font-mono text-[11px] text-muted-foreground" title="Elapsed since process started">
+							<live-timer .startTime=${p.startTime} .running=${isRunning}></live-timer>
+						</span>
 						${isRunning
 							? html`<button
 								class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-700 dark:text-red-400 hover:bg-red-500/30 transition-colors"
