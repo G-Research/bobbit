@@ -126,9 +126,16 @@ test.describe("Prompt stats E2E", () => {
 		await sendMessage(page, "Model button test");
 		await waitForAgentResponse(page);
 
-		const modelButton = page.locator("button").filter({ hasText: "mock-model" }).first();
-		await expect(modelButton).toBeVisible({ timeout: 10_000 });
+		const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+		await expect(statsBar).toBeVisible({ timeout: 10_000 });
 
+		// Wait for the model name to appear in the stats bar before locating the button
+		await expect(async () => {
+			const text = await statsBar.textContent();
+			expect(text).toContain("mock-model");
+		}).toPass({ timeout: 10_000 });
+
+		const modelButton = statsBar.locator("button").filter({ hasText: "mock-model" }).first();
 		await modelButton.click();
 
 		const dialog = page.locator("dialog, [role='dialog'], .fixed.inset-0");
