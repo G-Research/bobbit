@@ -89,6 +89,59 @@ export function getLoginShellConfig(): ShellConfig {
 }
 
 /**
+ * Tools that require the full interactive PATH (installed via system package
+ * managers, nvm, asdf, etc.). Commands that reference any of these need
+ * `--login` on Windows Git Bash.
+ *
+ * Commands that use only shell builtins (echo, test, [, :, cat, grep, sed,
+ * awk, basic operators) run in plain shell — 25× faster on Windows.
+ */
+const LOGIN_SHELL_TOOLS = [
+	"npm", "npx", "yarn", "pnpm", "node",
+	"python", "python3", "pip", "pip3", "pytest", "poetry",
+	"go", "cargo", "rustc",
+	"mvn", "gradle", "sbt",
+	"gh", "docker", "kubectl", "helm", "terraform",
+	"make", "cmake",
+	"ruby", "gem", "bundle", "rails",
+	"php", "composer",
+	"dotnet",
+	"tsc", "eslint", "prettier", "vitest", "jest", "playwright",
+];
+
+/**
+ * Choose shell for a verification command. Uses --login (slow, full PATH) only
+ * when the command references a tool that requires PATH resolution. Otherwise
+ * uses plain shell (fast).
+ *
+ * Examples:
+ *   "echo ok"            → plain bash  (150ms)
+ *   "[ -f foo.txt ]"     → plain bash  (150ms)
+ *   "npm run test"       → login bash  (3700ms — needs PATH)
+ *   "gh pr list"         → login bash  (3700ms)
+ */
+export function getVerificationShell(command: string): ShellConfig {
+	if (process.platform !== "win32" || !GIT_BASH) {
+		// Non-Windows or no Git Bash: use whatever getShellConfig returns.
+		// Shell startup on Linux/macOS is fast (sh -c ≈ 5ms).
+		return getShellConfig();
+	}
+
+	// Tokenize command — roughly. This is a heuristic, not a shell parser.
+	// We just look for whole words matching known tools.
+	const words = command.split(/[\s|&;()<>`"'$]+/).filter(Boolean);
+	const needsLogin = words.some(w => {
+		// Strip leading path prefix (./node_modules/.bin/xyz → xyz)
+		const basename = w.includes("/") ? w.substring(w.lastIndexOf("/") + 1) : w;
+		return LOGIN_SHELL_TOOLS.includes(basename);
+	});
+
+	return needsLogin
+		? { shell: GIT_BASH, args: ["--login", "-c"] }
+		: { shell: GIT_BASH, args: ["-c"] };
+}
+
+/**
  * Resolve the `sh` executable path. On Windows returns Git Bash path
  * (or falls back to just "sh" which may be on PATH if Git for Windows is
  * installed). On Linux/macOS returns "sh".

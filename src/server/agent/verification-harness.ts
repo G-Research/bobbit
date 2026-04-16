@@ -9,7 +9,7 @@ import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
-import { GIT_BASH, getShellConfig } from "./shell-util.js";
+import { getVerificationShell } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
 import {
@@ -1903,11 +1903,17 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
-			// Use the shared shell config — prefers Git Bash on Windows (login shell
-			// for full PATH) so bash syntax works, falls back to cmd.exe / /bin/sh.
-			const { shell: shellBin, args: shellArgs } = process.platform === "win32" && GIT_BASH
-				? { shell: GIT_BASH, args: ["--login", "-c"] }
-				: getShellConfig();
+			// Shell selection: default to plain bash (fast), use --login only for
+			// commands that need the full interactive PATH (npm, pytest, gh, etc.).
+			//
+			// On Windows, Git Bash with --login is ~3.7s per spawn (sources /etc/profile,
+			// ~/.bash_profile). Plain bash is ~150ms. 25× difference.
+			//
+			// Heuristic: commands that reference common tool names get --login.
+			// Everything else (echo, test, [], cat, grep, basic shell operators)
+			// runs in plain shell. This preserves backward compat for real workflows
+			// while making test workflows 25× faster.
+			const { shell: shellBin, args: shellArgs } = getVerificationShell(command);
 			// For sandboxed goals, run the command inside the project container
 			const child = containerId
 				? spawn("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", command], {

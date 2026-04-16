@@ -28,7 +28,6 @@ export default defineConfig({
 				"**/mcp-integration*",
 				"**/per-project-config-dirs*",
 				"**/port-auto-increment*",
-				"**/localhost-auth*",
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
@@ -44,7 +43,6 @@ export default defineConfig({
 				"**/mcp-integration*.spec.ts",
 				"**/per-project-config-dirs*.spec.ts",
 				"**/port-auto-increment*.spec.ts",
-				"**/localhost-auth*.spec.ts",
 			],
 			testIgnore: [
 				// Docker-dependent tests — run via test:manual instead

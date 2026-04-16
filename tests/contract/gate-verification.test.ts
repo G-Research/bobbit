@@ -1,10 +1,7 @@
 /**
- * Tier 2 contract tests for the gate verification pipeline.
+ * Tier 2 contract tests for gate verification.
  *
- * Each test gets a fresh in-process gateway. No browser, no spawned processes,
- * no retries — just the actual verification code running in isolation.
- *
- * These tests replace the flaky equivalents in:
+ * Replaces:
  *   tests/e2e/gates-api-heavy.spec.ts
  *   tests/e2e/gate-resign-cancel.spec.ts
  */
@@ -12,111 +9,81 @@ import { test } from "node:test";
 import assert from "node:assert";
 import { createTestGateway } from "./fixtures/gateway.js";
 
-async function apiFetch(gw: any, path: string, opts: { method?: string; body?: any } = {}): Promise<any> {
-	const res = await fetch(`${gw.baseURL}${path}`, {
-		method: opts.method || "GET",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${gw.token}`,
-		},
-		body: opts.body ? JSON.stringify(opts.body) : undefined,
+test("cascade reset — re-signaling upstream resets downstream to pending", async () => {
+	await using gw = await createTestGateway();
+
+	const goal = await gw.createGoal({
+		title: "Cascade Reset Test",
+		workflowId: "test-fast",
 	});
-	const text = await res.text();
-	return { status: res.status, body: text ? JSON.parse(text) : null };
-}
 
-async function waitForGateStatus(
-	gw: any,
-	goalId: string,
-	gateId: string,
-	status: string,
-	timeoutMs = 5000,
-): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(gw, `/api/goals/${goalId}/gates/${gateId}`);
-		if (res.body?.status === status) return;
-		await new Promise(r => setTimeout(r, 20));
-	}
-	const final = await apiFetch(gw, `/api/goals/${goalId}/gates/${gateId}`);
-	throw new Error(`Gate ${gateId} did not reach "${status}" in ${timeoutMs}ms (last status: ${final.body?.status})`);
-}
+	await gw.signalGate(goal.id, "design-doc", { content: "# Design v1" });
+	await gw.waitForGateStatus(goal.id, "design-doc", "passed");
 
-test("cascade reset — re-signaling upstream resets downstream", async () => {
-	const t0 = Date.now();
-	await using gw = await createTestGateway({ startHttp: true });
-	const t1 = Date.now();
+	await gw.signalGate(goal.id, "implementation");
+	await gw.waitForGateStatus(goal.id, "implementation", "passed");
 
-	const goalRes = await apiFetch(gw, "/api/goals", {
-		method: "POST",
-		body: { title: "Cascade Reset Test", cwd: gw.dir, team: false, workflowId: "test-fast" },
-	});
-	assert.equal(goalRes.status, 201, `Goal creation failed: ${JSON.stringify(goalRes.body)}`);
-	const goalId = goalRes.body.id;
-	const t2 = Date.now();
+	// Re-signal upstream with new content — downstream should reset to pending
+	await gw.signalGate(goal.id, "design-doc", { content: "# Design v2" });
+	await gw.waitForGateStatus(goal.id, "design-doc", "passed");
 
-	const s1 = await apiFetch(gw, `/api/goals/${goalId}/gates/design-doc/signal`, {
-		method: "POST",
-		body: { content: "# Design v1" },
-	});
-	assert.equal(s1.status, 201);
-	await waitForGateStatus(gw, goalId, "design-doc", "passed");
-	const t3 = Date.now();
-
-	const s2 = await apiFetch(gw, `/api/goals/${goalId}/gates/implementation/signal`, {
-		method: "POST",
-		body: {},
-	});
-	assert.equal(s2.status, 201);
-	await waitForGateStatus(gw, goalId, "implementation", "passed");
-	const t4 = Date.now();
-
-	const s3 = await apiFetch(gw, `/api/goals/${goalId}/gates/design-doc/signal`, {
-		method: "POST",
-		body: { content: "# Design v2" },
-	});
-	assert.equal(s3.status, 201);
-	await waitForGateStatus(gw, goalId, "design-doc", "passed");
-	const t5 = Date.now();
-
-	const gatesRes = await apiFetch(gw, `/api/goals/${goalId}/gates`);
-	const impl = gatesRes.body.gates.find((g: any) => g.gateId === "implementation");
-	assert.equal(impl?.status, "pending", "implementation gate should reset after upstream re-signal");
-
-	console.log(`\n  gateway=${t1-t0}ms goal=${t2-t1}ms sig1+verify=${t3-t2}ms sig2+verify=${t4-t3}ms sig3+verify=${t5-t4}ms`);
+	const impl = await gw.getGate(goal.id, "implementation");
+	assert.equal(impl.status, "pending", "implementation gate should reset after upstream re-signal");
 });
 
-test("gate with unmet upstream dependency is rejected (409)", async () => {
-	await using gw = await createTestGateway({ startHttp: true });
+test("signaling a gate with unmet upstream dependency returns 409", async () => {
+	await using gw = await createTestGateway();
 
-	const goalRes = await apiFetch(gw, "/api/goals", {
-		method: "POST",
-		body: { title: "Dep Test", cwd: gw.dir, team: false, workflowId: "test-fast" },
+	const goal = await gw.createGoal({
+		title: "Dependency Test",
+		workflowId: "test-fast",
 	});
-	assert.equal(goalRes.status, 201);
-	const goalId = goalRes.body.id;
 
-	// Try to signal implementation without signaling design-doc first → 409
-	const res = await apiFetch(gw, `/api/goals/${goalId}/gates/implementation/signal`, {
-		method: "POST",
-		body: {},
-	});
+	// Signal implementation without passing design-doc first
+	const res = await gw.signalGate(goal.id, "implementation");
 	assert.equal(res.status, 409);
-	assert.match(res.body.error, /design-doc|Upstream gate/i);
+	assert.match(res.body.error, /Upstream gate|design-doc/i);
 });
 
-test("unknown gate returns 404", async () => {
-	await using gw = await createTestGateway({ startHttp: true });
+test("signaling an unknown gate returns 404", async () => {
+	await using gw = await createTestGateway();
 
-	const goalRes = await apiFetch(gw, "/api/goals", {
-		method: "POST",
-		body: { title: "Unknown Gate Test", cwd: gw.dir, team: false, workflowId: "test-fast" },
+	const goal = await gw.createGoal({
+		title: "Unknown Gate Test",
+		workflowId: "test-fast",
 	});
-	const goalId = goalRes.body.id;
 
-	const res = await apiFetch(gw, `/api/goals/${goalId}/gates/nonexistent/signal`, {
-		method: "POST",
-		body: {},
-	});
+	const res = await gw.signalGate(goal.id, "nonexistent-gate");
 	assert.equal(res.status, 404);
+});
+
+test("metadata variable resolution in command step", async () => {
+	await using gw = await createTestGateway();
+
+	const goal = await gw.createGoal({
+		title: "Metadata Resolution Test",
+		workflowId: "bug-fix",
+	});
+
+	// Signal issue-analysis first (upstream)
+	await gw.signalGate(goal.id, "issue-analysis", {
+		content: "# Analysis\n\nSteps: run echo\nRoot cause: src/a.ts:1",
+	});
+	await gw.waitForGateStatus(goal.id, "issue-analysis", "passed");
+
+	// Signal reproducing-test with metadata — expect:failure gate
+	await gw.signalGate(goal.id, "reproducing-test", {
+		metadata: {
+			test_command: "echo metadata-works",
+			error_pattern: "some error",
+		},
+	});
+	// echo metadata-works exits 0 → gate fails (expect:failure semantics)
+	await gw.waitForGateStatus(goal.id, "reproducing-test", "failed");
+
+	// Verify the {{test_command}} resolution reached the step output
+	const gate = await gw.getGate(goal.id, "reproducing-test");
+	const lastSignal = gate.signals[gate.signals.length - 1];
+	const step = lastSignal.verification.steps[0];
+	assert.match(step.output, /metadata-works/);
 });

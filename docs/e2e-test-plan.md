@@ -1,109 +1,93 @@
-# E2E Test Architecture: The Tier 2 Migration
+# E2E Test Plan: Concrete Path to <120s and Low CPU
 
-## POC results (completed)
+## What we've confirmed
 
-Built `tests/contract/fixtures/gateway.ts` — a per-test in-process gateway factory — and converted 3 tests from `gates-api-heavy.spec.ts` / `gate-resign-cancel.spec.ts`.
+### Win 1: Shell cost (committed)
+Git Bash `--login` shell spawn on Windows is **3.7 seconds**. Plain bash is 150ms. For verification commands that only use shell builtins (like `echo ok` in `test-fast` workflow), we now skip `--login`.
 
-### Measured cost per test
-- Fresh gateway setup: **~35ms** (imports cached across tests in process)
-- Gateway shutdown: **~60ms**
-- HTTP startup (when used): **~170ms**
-- Goal creation: **~40ms**
-- Verification command (`echo ok`): **~2000ms** ← the real bottleneck for gate tests
+**Impact**: ~25× faster for command-verification tests that use builtins. Real-world workflows (`npm run test`) still use `--login` because they reference tools that need PATH.
 
-### Per-test baseline
-| Test type | Tier 3 (today) | Tier 2 (new) | Savings |
-|-----------|----------------|--------------|---------|
-| Pure API (no agent, no verification) | ~500ms | **~200ms** | 60% |
-| Agent session (sends prompt) | ~1500ms | **~400ms** | 73% |
-| Command verification (subprocess) | ~2500ms | **~2300ms** | 8% |
+### Win 2: Tier 2 fixture (committed)
+`tests/contract/fixtures/gateway.ts` provides a per-test in-process gateway at ~35ms setup + ~60ms shutdown. Pure API tests run at ~200-400ms. Useful going forward.
 
-### What the POC confirmed
-1. Per-test fresh gateway is viable and doesn't leak resources
-2. `await using` pattern cleans up deterministically
-3. Tests are independent — no shared state between tests
-4. Imports cache across tests in the same process (so first test pays 1s, rest pay 0)
+### Constraint: process-level singletons
+Server code has module-level state (`_projectRoot`, prompt dirs, etc.) that prevents multiple gateways in the same Node process. **Per-test isolation requires one process per test**, which is too expensive (~1s import cost per process × 620 tests).
 
-### What the POC revealed as a harder problem
-- **Command verification (real subprocess)** still takes 2s per test on Windows
-- This is a Windows subprocess startup cost, not an architecture issue
-- For the ~9 test files that use command verification, per-test cost stays ~2s
-- For the other ~60 files (pure API + session tests), per-test cost drops to ~200-400ms
+**Implication**: Per-file gateway (current Playwright model) is the practical ceiling for isolation.
 
-## Projected suite time
+## Where the CPU goes
 
-Using the POC measurements:
+Running `npm run test:e2e` today:
+- **6 Playwright workers** (3 API in-process + 3 Browser spawned)
+- Each browser worker runs: Playwright worker + spawned gateway + Chromium
+- ~30 extra processes at steady state (~15 from browser, ~15 from mock agents)
+- **CPU saturates** because each process has real work: page rendering, WS event handling, stdin/stdout parsing
 
-### Assumption: 620 tests total (current)
-- 100 tests involve command verification (~2s each) → **200s**
-- 200 tests involve mock agent sessions (~400ms each) → **80s**
-- 320 tests are pure REST/WS logic (~200ms each) → **64s**
+At the machine limit, CPU contention creates the timing-flaky tests (verification takes >15s because the gateway doing the verification can't get CPU).
 
-**Sequential: 344s. With 8 parallel processes: 43s wall.**
+## The three levers
 
-vs. today's ~240s wall with 6 Playwright workers.
+### Lever A: Reduce subprocess cost (high-impact, low-risk)
 
-### Assumption after optimization:
-If we switch the subprocess-based verification steps to use a mock shell (in-process command execution for `echo ok` style commands in `test-fast` workflow), the 200s of command verification drops to ~20s. That gives:
+1. **Plain shell for simple commands** — DONE. Cut verification command cost 25×.
+2. **Mock agent as worker thread** — partially explored, would save ~20-50ms × 600 sessions = 12-30s. Low priority vs other levers.
+3. **Skip mock agent for tests that don't need it** — Many tests create a session just to open a WS. If we had a way to open WS without spawning an agent, we'd save 100% of that cost.
 
-**Sequential: 164s. With 8 parallel processes: 20s wall.**
+### Lever B: Reduce worker count (high-impact, requires refactoring)
 
-## The migration plan
+Current 6 workers saturate CPU. If we use **fewer, heavier workers** that serve more tests each, we reduce process-spawn overhead and CPU contention.
 
-### Step 1 (2-3 days): Build the `tests/contract/` foundation
-- ✅ `createTestGateway()` fixture (done in POC)
-- Add helpers: `createGoal()`, `signalGate()`, `waitForGateStatus()` using fetch
-- Add WS helper for tests that need event assertions
-- Add `agent session` helper that creates a session and sends a prompt
+- Playwright workers = 2 instead of 6
+- Each worker handles more tests serially
+- Wall time depends on whether savings from less contention outweigh lost parallelism
 
-### Step 2 (3-5 days): Convert pure API tests
-Per-file mechanical migration:
-- Read current Playwright spec
-- Rewrite as `node:test` contract test using fixture
-- Delete the Playwright spec
-- Verify equivalent coverage with `git diff`
+### Lever C: Reduce test count (low-risk, coverage-tradeoff)
 
-Target: `tests/e2e/*.spec.ts` files that only use `in-process-harness` (no browser).
+Per the Tier 1/2/3 split in the earlier plan:
+- Tier 1 (unit tests via file:// fixtures): **~800 tests, 22s** — already done
+- Tier 2 (in-process gateway, Node test runner): **~400 tests target, ~60s** — infrastructure built
+- Tier 3 (Playwright browser): **~30 tests, ~60s** — user stories only
 
-~50 files, ~400 tests.
+Migrating 400 tests from Playwright to Node test runner is where the real win is.
 
-### Step 3 (2 days): Convert session+WS tests
-The 34 files that use sessions and WS events. Same pattern, with the mock agent helper.
+## Concrete next step
 
-### Step 4 (1 day): Keep the UI tests as Tier 3
-The ~30 files under `tests/e2e/ui/` that use a real browser. These stay as Playwright tests with spawned gateway. They test the UI→gateway contract — that's what Tier 3 is for.
+Pick one: **Lever B** (reduce workers) or **Lever C** (migrate to Tier 2).
 
-### Step 5 (1 day): Optimize command verification
-For `test-fast` workflow's `echo ok` steps, add an in-process command runner that skips the subprocess. Real verification tests (gates using actual shell commands) stay as Tier 3.
+### Lever B: Reduce workers
+**Effort**: 1 hour (config change + verify).
+**Risk**: Wall time might go UP if we lose too much parallelism.
+**Test**: Change `playwright-e2e.config.ts` to `workers: 2` for each project. Run full suite. Measure.
 
-### Step 6 (1 day): Update `npm run test:unit` and `npm run test:e2e`
-- `test:unit` now includes `tests/contract/` → fast, ~30s total
-- `test:e2e` runs only `tests/e2e/` → the heavy browser tier, ~60s total
-- Combined: **<90s**
+### Lever C: Migrate to Tier 2
+**Effort**: 1-2 weeks of mechanical rewriting.
+**Risk**: Low — we have the fixture and a working POC.
+**Test**: Migrate 50 tests at a time, measuring wall time after each batch.
 
-## Risks and mitigations
+**My recommendation**: Do Lever B first (1 hour, might be a big win on its own). If it's not enough, start Lever C.
 
-### Risk: In-process gateway differs from production gateway
-**Mitigation**: Tier 3 (browser tests) still hit real HTTP/WS. If something only fails over the network, Tier 3 catches it.
+## What Lever B might look like
 
-### Risk: We lose coverage of HTTP layer edge cases
-**Mitigation**: Keep 5-10 dedicated Tier 3 tests for auth, rate limiting, content negotiation.
+Instead of 6 workers all spawning heavy browser contexts, run 2 workers that handle all tests:
+- 2 Playwright workers × 1 gateway each × 1 Chromium each = 2 gateways + 2 Chromiums
+- vs today's 3 gateways + 3 Chromiums + 3 API gateways in-process = 9 running gateways
 
-### Risk: Test isolation breaks if gateway leaks state
-**Mitigation**: Each test uses a fresh temp dir. Module-level state in server.ts is the only concern — we verified the POC runs 3 tests sequentially without contamination.
+But with 2 workers serving 620 tests instead of 6, per-worker load doubles. If today each worker finishes in ~4min, with 2 workers it's ~12min.
 
-### Risk: Per-test gateway setup cost adds up
-**Mitigation**: Measured at 35ms in POC. 400 tests × 35ms = 14s total setup overhead — acceptable.
+That doesn't work.
 
-## Decision gates
+**Actual fix**: reduce the WORK, not just the concurrency. The browser suite has 190 tests. If ~80 of them don't actually need a browser (they test API state via UI selectors), move them to the API project. That gives:
 
-1. ✅ **Is per-test fresh gateway feasible?** Yes, measured 35ms setup + 60ms shutdown.
-2. ✅ **Do tests stay isolated?** Yes, POC ran 3 tests sequentially without contamination.
-3. **Is the subprocess verification cost acceptable?** For ~100 tests at 2s each = 200s, that's still too much for `test:unit` (<30s target). We need Step 5 (in-process command runner for test-fast) to get under the target.
-4. **Can we migrate 400 tests in ~1 week?** The migration is mechanical per-test, estimated 5-10 tests/hour = 40-80 hours = 1-2 weeks of focused work.
+- API: 433 + 80 = 513 tests, 3 workers
+- Browser: 110 tests, 3 workers
 
-## Recommended next step
+Each browser worker handles 110/3 = ~37 tests. At ~3s each = 111s per worker. Under 120s target.
 
-Finish converting `gates-api-heavy.spec.ts` + `gate-resign-cancel.spec.ts` to Tier 2. Measure real wall time vs today's flaky 5-10min with retries. If it's a clean win, proceed with the full migration.
+## The decision tree
 
-Alternatively: I can commit this POC, demonstrate the approach, and let you decide the scope (full migration vs. "new tests only go to Tier 2").
+1. Keep Lever A win (committed)
+2. Try reducing workers to 2+4 (1 hour). If <120s, DONE.
+3. If not, migrate the ~80 API-only tests out of the browser project (1-2 days). If <120s, DONE.
+4. If not, proceed with full Tier 2 migration (1-2 weeks).
+
+Start with step 2?
