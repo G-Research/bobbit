@@ -8,7 +8,7 @@ import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "
 
 test.describe("Review Pane", () => {
 
-	test("opens review pane with inline markdown", async ({ page }) => {
+	test("opens review pane with inline markdown @smoke", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "REVIEW_OPEN");

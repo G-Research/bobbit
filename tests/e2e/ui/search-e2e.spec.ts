@@ -13,7 +13,7 @@ test.describe("Search (UI)", () => {
 	 * SR-01: Sidebar filter mode — typing in the sidebar search input
 	 * instantly filters visible items by title (client-side).
 	 */
-	test("SR-01: sidebar filter hides non-matching sessions", async ({ page }) => {
+	test("SR-01: sidebar filter hides non-matching sessions @smoke", async ({ page }) => {
 		// Create two sessions with distinct titles via API
 		const id1 = await createSession();
 		const id2 = await createSession();

@@ -17,6 +17,7 @@ gates:
       - name: Gap analysis
         type: llm-review
         role: spec-auditor
+        phase: 1
         prompt: |-
           Compare the goal specification to the actual implementation on this branch.
 
@@ -33,6 +34,7 @@ gates:
       - name: Code quality review
         type: llm-review
         role: code-reviewer
+        phase: 1
         prompt: |-
           Review the code changes on branch {{branch}} vs {{master}} for quality.
 

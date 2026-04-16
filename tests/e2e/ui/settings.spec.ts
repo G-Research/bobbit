@@ -16,7 +16,7 @@ function uniqueProjectDir(): string {
 }
 
 test.describe("Settings (full-stack UI)", () => {
-	test("open settings and switch tabs", async ({ page }) => {
+	test("open settings and switch tabs @smoke", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
 

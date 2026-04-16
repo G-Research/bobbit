@@ -16,7 +16,7 @@ test.afterEach(async () => {
 });
 
 test.describe("GET /api/roles — default roles", () => {
-	test("returns seeded default roles on fresh start", async () => {
+	test("returns seeded default roles on fresh start @smoke", async () => {
 		// Default roles are seeded during scaffold — poll briefly in case the
 		// in-process gateway is still initializing when the test fires.
 		let names: string[] = [];

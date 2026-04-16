@@ -66,7 +66,7 @@ test.beforeAll(() => {
 });
 
 test.describe("Gates API", () => {
-	test("gate lifecycle — list gates for new goal", async () => {
+	test("gate lifecycle — list gates for new goal @smoke", async () => {
 		const goalId = await createGoalWithWorkflow("general");
 		try {
 			const resp = await apiFetch(`/api/goals/${goalId}/gates`);
@@ -166,7 +166,7 @@ test.describe("Gates API", () => {
 		}
 	});
 
-	test("signal history — multiple signals tracked", async () => {
+	test("signal history — multiple signals tracked @smoke", async () => {
 		const goalId = await createGoalWithWorkflow("general");
 		try {
 			// Signal design-doc twice with different content

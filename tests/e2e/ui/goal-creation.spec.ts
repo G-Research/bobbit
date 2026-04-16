@@ -68,7 +68,7 @@ test.describe("Goal creation (full-stack UI)", () => {
 		if (createdGoal) await deleteGoal(createdGoal.id);
 	});
 
-	test("goal appears after API creation", async ({ page }) => {
+	test("goal appears after API creation @smoke", async ({ page }) => {
 		const goal = await createGoal({ title: "API Created Goal" });
 
 		try {

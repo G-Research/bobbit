@@ -130,7 +130,7 @@ test.beforeAll(async () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 test.describe("Health endpoint", () => {
-	test("GET /api/health returns ok", async () => {
+	test("GET /api/health returns ok @smoke", async () => {
 		const resp = await apiFetch("/api/health");
 		expect(resp.status).toBe(200);
 		const data = await resp.json();
@@ -147,7 +147,7 @@ test.describe("Sessions API", () => {
 	let sessionId: string;
 	test.afterEach(async () => { if (sessionId) { await deleteSession(sessionId); sessionId = ""; } });
 
-	test("POST creates a session", async () => {
+	test("POST creates a session @smoke", async () => {
 		const resp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: nonGitCwd() }),
@@ -159,7 +159,7 @@ test.describe("Sessions API", () => {
 		sessionId = data.id;
 	});
 
-	test("GET lists sessions", async () => {
+	test("GET lists sessions @smoke", async () => {
 		sessionId = await createSession();
 		const resp = await apiFetch("/api/sessions");
 		expect(resp.status).toBe(200);
@@ -232,7 +232,7 @@ test.describe("Goals API", () => {
 	let goalId: string;
 	test.afterEach(async () => { if (goalId) { await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {}); goalId = ""; } });
 
-	test("POST creates a goal", async () => {
+	test("POST creates a goal @smoke", async () => {
 		const resp = await apiFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify({ title: "E2E test goal", cwd: nonGitCwd(), spec: "Test spec" }),

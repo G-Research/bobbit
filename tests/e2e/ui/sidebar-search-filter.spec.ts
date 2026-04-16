@@ -43,7 +43,7 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await deleteGoal(goalCharlie.id).catch(() => {});
 	});
 
-	test("SB-24: filter sidebar by typing partial name", async ({ page }) => {
+	test("SB-24: filter sidebar by typing partial name @smoke", async ({ page }) => {
 		await openApp(page);
 
 		// Wait for sidebar to render our sessions
@@ -73,7 +73,8 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 	test("SB-24: query persists after clicking a filtered session", async ({ page }) => {
 		await openApp(page);
 
-		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 10_000 });
+		const sidebar = page.locator(".sidebar-edge");
+		await expect(sidebar.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 10_000 });
 
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.click();
@@ -81,7 +82,7 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await page.waitForTimeout(400);
 
 		// Click the filtered session row
-		await page.getByText("AlphaUniqueSearch").click();
+		await sidebar.getByText("AlphaUniqueSearch").click();
 
 		// Query should persist in the input
 		await expect(searchInput).toHaveValue("AlphaUnique");
@@ -221,17 +222,15 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 
 		// Press Ctrl+[
 		await page.keyboard.press("Control+[");
-		await page.waitForTimeout(300);
 
 		// Sidebar should be collapsed — search input no longer visible
-		await expect(searchInput).not.toBeVisible({ timeout: 3_000 });
+		await expect(searchInput).not.toBeVisible({ timeout: 5_000 });
 
 		// Press Ctrl+[ again to expand
 		await page.keyboard.press("Control+[");
-		await page.waitForTimeout(300);
 
 		// Sidebar should be expanded again — search input visible
-		await expect(searchInput).toBeVisible({ timeout: 3_000 });
+		await expect(searchInput).toBeVisible({ timeout: 5_000 });
 	});
 
 	test("SB-34: Ctrl+K works even when textarea has focus", async ({ page }) => {

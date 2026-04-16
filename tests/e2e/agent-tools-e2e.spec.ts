@@ -28,7 +28,7 @@ test.describe("Session lifecycle", () => {
 	let sessionId: string;
 	test.afterEach(async () => { if (sessionId) { await deleteSession(sessionId); sessionId = ""; } });
 
-	test("prompt triggers streaming then idle", async () => {
+	test("prompt triggers streaming then idle @smoke", async () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {
@@ -40,7 +40,7 @@ test.describe("Session lifecycle", () => {
 		}
 	});
 
-	test("abort stops a streaming session", async () => {
+	test("abort stops a streaming session @smoke", async () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {
