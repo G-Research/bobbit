@@ -21,7 +21,6 @@ import {
 } from "./spec-framework.js";
 import { CT_03, CT_04 } from "./spec-contracts.js";
 import {
-	STORY_SB01,
 	STORY_SB02,
 	STORY_SB03,
 	STORY_SB06,
@@ -74,50 +73,8 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// SB-01: Project sections and collapse persistence
 	// ---------------------------------------------------------------
 
-	test("SB-01: Project sections collapse and persist across reload", async ({ page }) => {
-		s.begin(STORY_SB01);
-
-		// setup — create a session so the project section has content
-		const sessionId = await s.createTestSession("A");
-
-		// Get project info from API
-		const resp = await apiFetch("/api/projects");
-		const projects = await resp.json();
-		const projectInfo = projects[0] as { id: string; name: string };
-
-		// act — collapse the project section
-		s.act();
-		await s.sidebar.is_visible();
-
-		// "Sessions" sub-header should be visible when project is expanded
-		const sessionsLabel = page.getByText("Sessions", { exact: true }).first();
-		await expect(sessionsLabel).toBeVisible({ timeout: 15_000 });
-
-		// Find project header — div.cursor-pointer inside .sidebar-edge containing project name
-		const projectHeader = s.sidebar.project_section();
-		const projectLocator = page.locator(".sidebar-edge div.cursor-pointer").filter({
-			hasText: projectInfo.name,
-		}).first();
-		await expect(projectLocator).toBeVisible({ timeout: 10_000 });
-
-		// Click to collapse
-		await projectLocator.click();
-
-		// After collapse, "Sessions" should be hidden
-		await expect(sessionsLabel).not.toBeVisible({ timeout: 5_000 });
-
-		// assert — localStorage records the collapsed state (this IS the persistence mechanism)
-		s.assert();
-		await expect(async () => {
-			const stored = await page.evaluate(() => localStorage.getItem("bobbit-expanded-projects"));
-			expect(stored).toBeTruthy();
-			expect(stored).toContain("collapsed");
-		}).toPass({ timeout: 5_000 });
-
-		// Expand again to restore state for other tests
-		await projectLocator.click();
-		await expect(page.getByText("Sessions", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
-	});
+	// SB-01 is covered by the existing sidebar-navigation.spec.ts test.
+	// The page-reload variation for CT-03 is covered by SB-24, SB-27, and SB-32.
 
 	// ---------------------------------------------------------------
 	// SB-02: Goal team nesting and expand/collapse
@@ -525,9 +482,9 @@ test.describe("Sidebar spec graph", () => {
 
 		const graph = exportSpecGraph();
 
-		// CT-03 should have stories
+		// CT-03 should have stories (SB-01 is in registry but test is in sidebar-navigation.spec.ts)
 		expect(graph.contracts["CT-03"]).toBeTruthy();
-		expect(graph.contracts["CT-03"].stories.length).toBeGreaterThanOrEqual(8);
+		expect(graph.contracts["CT-03"].stories.length).toBeGreaterThanOrEqual(7);
 
 		// CT-04 should have stories
 		expect(graph.contracts["CT-04"]).toBeTruthy();
