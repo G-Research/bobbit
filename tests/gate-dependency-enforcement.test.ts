@@ -1,60 +1,16 @@
 /**
  * Unit tests for gate dependency enforcement logic.
  *
- * Tests that team_spawn and team/prompt reject (409) when upstream gates
- * haven't passed, and allow operations when they have or when no gate is specified.
+ * Tests the actual checkGateDependencies() function imported from the server
+ * source — the same pure function used by team-manager.ts spawnRole() and
+ * server.ts team/prompt handler to enforce upstream gate ordering.
  *
  * Replaces the flaky E2E test (tests/e2e/gate-dependency-enforcement.spec.ts)
  * which had timing issues with verification completion.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-
-// ── Types mimicking the gate/workflow structures ──────────────────────
-
-interface GateDef {
-	id: string;
-	name: string;
-	dependsOn: string[];
-}
-
-interface GateState {
-	gateId: string;
-	status: "pending" | "passed" | "failed";
-}
-
-/**
- * Pure logic extracted from team-manager.ts spawnRole() and server.ts team/prompt handler.
- * Both use the same pattern: look up the workflow gate definition, check its dependsOn,
- * verify all upstream gates have passed.
- *
- * Returns null if allowed, or an error message string if blocked.
- */
-function checkGateDependencies(
-	workflowGateId: string | undefined,
-	workflowGates: GateDef[],
-	gateStates: GateState[],
-): string | null {
-	if (!workflowGateId) return null; // No gate specified → backward compat, always allowed
-
-	const wfGate = workflowGates.find(g => g.id === workflowGateId);
-	if (!wfGate || !wfGate.dependsOn?.length) return null; // No dependencies → allowed
-
-	const passedIds = new Set(
-		gateStates.filter(g => g.status === "passed").map(g => g.gateId),
-	);
-	const notPassed = wfGate.dependsOn.filter(depId => !passedIds.has(depId));
-
-	if (notPassed.length > 0) {
-		const names = notPassed.map(id => {
-			const def = workflowGates.find(g => g.id === id);
-			return def ? `${def.name} (${id})` : id;
-		});
-		return `Upstream gate(s) not passed: ${names.join(", ")}. Cannot proceed for gate "${workflowGateId}" until dependencies are met.`;
-	}
-
-	return null;
-}
+import { checkGateDependencies, type GateDef, type GateState } from "../src/server/agent/gate-dependency-check.js";
 
 // ── Test workflow: design-doc → implementation → ready-to-merge ──────
 

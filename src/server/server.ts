@@ -18,6 +18,8 @@ import { oauthComplete, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { discoverSlashSkills, getSkillDirectories } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
+import { checkGateDependencies } from "./agent/gate-dependency-check.js";
+import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
@@ -2011,8 +2013,9 @@ async function handleApiRoute(
 		// Non-assistant, non-goal sessions get a worktree by default unless explicitly opted out.
 		// Goal sessions have their own worktree logic via goalManager.setupWorktreeAndStartTeam().
 		let worktreeOpts: { repoPath: string } | undefined;
-		const wantWorktree = body?.worktree !== undefined ? !!body.worktree : (!assistantType && !goalId);
-		if (wantWorktree && !assistantType) {
+		// shouldCreateWorktree handles the want/assistant/goal logic; git repo check is async so done separately
+		const wantWorktree = shouldCreateWorktree({ worktree: body?.worktree, assistantType, goalId }, true);
+		if (wantWorktree) {
 			try {
 				if (await isGitRepo(cwd)) {
 					const repoPath = await getRepoRoot(cwd);
@@ -4332,19 +4335,11 @@ async function handleApiRoute(
 			const goalGateCtx = projectContextManager.getContextForGoal(goalId);
 			const goalGateStore = goalGateCtx?.gateStore;
 			if (goal?.workflow && goalGateStore) {
-				const wfGate = goal.workflow.gates.find((g: any) => g.id === wfGateId);
-				if (wfGate?.dependsOn?.length) {
-					const gateStates = goalGateStore.getGatesForGoal(goalId);
-					const passedIds = new Set(gateStates.filter((g: any) => g.status === "passed").map((g: any) => g.gateId));
-					const notPassed = wfGate.dependsOn.filter((depId: string) => !passedIds.has(depId));
-					if (notPassed.length > 0) {
-						const names = notPassed.map((id: string) => {
-							const def = goal.workflow!.gates.find((g: any) => g.id === id);
-							return def ? `${def.name} (${id})` : id;
-						});
-						json({ error: `Upstream gate(s) not passed: ${names.join(", ")}. Cannot prompt for gate "${wfGateId}" until dependencies are met.` }, 409);
-						return;
-					}
+				const gateStates = goalGateStore.getGatesForGoal(goalId);
+				const depError = checkGateDependencies(wfGateId, goal.workflow.gates, gateStates);
+				if (depError) {
+					json({ error: depError }, 409);
+					return;
 				}
 			}
 		}
