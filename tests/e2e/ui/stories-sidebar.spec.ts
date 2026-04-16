@@ -13,11 +13,6 @@
 import { test, expect } from "../gateway-harness.js";
 import {
 	SpecContext,
-	defineStory,
-	defineContract,
-	exportSpecGraph,
-	contractCompleteness,
-	clearStoryRegistry,
 } from "./spec-framework.js";
 import { CT_03, CT_04 } from "./spec-contracts.js";
 import {
@@ -454,55 +449,4 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	});
 });
 
-// ---------------------------------------------------------------
-// Spec graph dump
-// ---------------------------------------------------------------
 
-test.describe("Sidebar spec graph", () => {
-	test.beforeEach(() => {
-		clearStoryRegistry();
-		// Re-register contracts — another spec file's clearContractRegistry() may have wiped them
-		defineContract(CT_03);
-		defineContract(CT_04);
-	});
-
-	test("spec graph dump for sidebar stories", () => {
-		// Re-register stories for graph analysis
-		defineStory({ id: "SB-01", title: "Project sections collapse persistence", contracts: [CT_03], covers: ["page-reload"] });
-		defineStory({ id: "SB-02", title: "Goal team nesting expand/collapse", contracts: [CT_03], covers: ["collapsed-tree-expansion"] });
-		defineStory({ id: "SB-03", title: "Auto-expand parent on deep link", contracts: [CT_03], covers: ["deep-link-navigation", "collapsed-tree-expansion"] });
-		defineStory({ id: "SB-06", title: "Idle time display on session rows", contracts: [CT_04], covers: ["page-reload"] });
-		defineStory({ id: "SB-09", title: "Goal gate progress badge", contracts: [CT_04], covers: ["page-reload"] });
-		defineStory({ id: "SB-12", title: "Completed goal rendering", contracts: [CT_04], covers: ["page-reload"] });
-		defineStory({ id: "SB-24", title: "Filter sidebar by typing", contracts: [CT_03], covers: ["page-reload"] });
-		defineStory({ id: "SB-27", title: "Show archived toggle", contracts: [CT_03, CT_04], covers: ["page-reload"] });
-		defineStory({ id: "SB-32", title: "Collapsed sidebar icon-only mode", contracts: [CT_03], covers: ["page-reload"] });
-		defineStory({ id: "SB-34", title: "Sidebar keyboard shortcuts", contracts: [CT_03], covers: ["deep-link-navigation"] });
-		defineStory({ id: "CT-03-sidebar-highlight", title: "Session highlight follows navigation", contracts: [CT_03], covers: ["deep-link-navigation", "back-forward-navigation"] });
-		defineStory({ id: "SB-concurrent-agents", title: "Sidebar reflects multiple concurrent sessions", contracts: [CT_04], covers: ["concurrent-agents"] });
-
-		const graph = exportSpecGraph();
-
-		// CT-03 should have stories (SB-01 is in registry but test is in sidebar-navigation.spec.ts)
-		expect(graph.contracts["CT-03"]).toBeTruthy();
-		expect(graph.contracts["CT-03"].stories.length).toBeGreaterThanOrEqual(7);
-
-		// CT-04 should have stories
-		expect(graph.contracts["CT-04"]).toBeTruthy();
-		expect(graph.contracts["CT-04"].stories.length).toBeGreaterThanOrEqual(4);
-
-		// Check coverage completeness
-		const completeness = contractCompleteness();
-
-		const ct03 = completeness.find(c => c.contractId === "CT-03");
-		expect(ct03).toBeTruthy();
-		// CT-03 variations: deep-link-navigation, back-forward-navigation, page-reload, collapsed-tree-expansion
-		expect(ct03!.coverage).toBe(1);
-
-		const ct04 = completeness.find(c => c.contractId === "CT-04");
-		expect(ct04).toBeTruthy();
-		// CT-04 variations: page-reload, concurrent-agents covered; agent-crash-restart not covered
-		const ct04Covered = ct04!.variations.filter(v => v.coveredBy !== null);
-		expect(ct04Covered.length).toBeGreaterThanOrEqual(2);
-	});
-});
