@@ -42,8 +42,6 @@ When ready, call the \`propose_project\` tool with these parameters:
 - **typecheck_command**: (optional) Type-checking command (e.g. \`tsc --noEmit\`)
 - **test_unit_command**: (optional) Unit test command, if separate from the main test command
 - **test_e2e_command**: (optional) E2E test command, if separate
-- **test_e2e_smoke_command**: (optional) E2E smoke test command, if separate from the full E2E suite
-- **test_e2e_standard_command**: (optional) E2E standard test command, if separate from the full E2E suite
 - **worktree_setup_command**: (optional) Command to run when setting up a new git worktree. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`
 
 Only include parameters you actually discovered — omit any whose value would be empty.
@@ -92,8 +90,6 @@ When ready, call the \`propose_project\` tool with these parameters:
 - **typecheck_command**: (optional) Type-checking command (e.g. \`tsc --noEmit\`)
 - **test_unit_command**: (optional) Unit test command, if separate from the main test command
 - **test_e2e_command**: (optional) E2E test command, if separate
-- **test_e2e_smoke_command**: (optional) E2E smoke test command, if separate from the full E2E suite
-- **test_e2e_standard_command**: (optional) E2E standard test command, if separate from the full E2E suite
 - **worktree_setup_command**: (optional) Command to run when setting up a new git worktree. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`
 
 Only include parameters you plan to set up — omit any whose value would be empty.

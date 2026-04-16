@@ -1067,7 +1067,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (proposal.framework) state.setupFormStack.framework = proposal.framework;
 				if (proposal.testing) state.setupFormStack.testing = proposal.testing;
 			} else if (proposal.action === "commands") {
-				const cmdFields = ["build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "test_e2e_smoke_command", "test_e2e_standard_command"];
+				const cmdFields = ["build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command"];
 				for (const f of cmdFields) {
 					if ((proposal as any)[f] && !state.setupFormCommandsEdited[f]) {
 						state.setupFormCommands[f] = (proposal as any)[f];
@@ -1197,7 +1197,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.assistantHasProposal = false;
 		state.setupPreviewAction = "";
 		state.setupFormStack = { language: "", framework: "", testing: "" };
-		state.setupFormCommands = { build_command: "", test_command: "", typecheck_command: "", test_unit_command: "", test_e2e_command: "", test_e2e_smoke_command: "", test_e2e_standard_command: "" };
+		state.setupFormCommands = { build_command: "", test_command: "", typecheck_command: "", test_unit_command: "", test_e2e_command: "" };
 		state.setupFormModels = { session_model: "", review_model: "", naming_model: "" };
 		state.setupFormSystemPrompt = "";
 		state.setupFormSystemPromptEdited = false;
@@ -1690,7 +1690,7 @@ export async function acceptProjectProposal(): Promise<void> {
 	// Write config fields
 	const configFields: Record<string, string> = {};
 	const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
-		'test_unit_command', 'test_e2e_command', 'test_e2e_smoke_command', 'test_e2e_standard_command', 'worktree_setup_command'];
+		'test_unit_command', 'test_e2e_command', 'worktree_setup_command'];
 	for (const key of CONFIG_KEYS) {
 		if (fields[key]) configFields[key] = fields[key];
 	}
