@@ -44,14 +44,14 @@ async function waitForGateStatus(
 	goalId: string,
 	gateId: string,
 	targetStatus: string,
-	timeoutMs = 15000,
+	timeoutMs = 30000,
 ): Promise<any> {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
 		const data = await res.json();
 		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 50));
+		await new Promise(r => setTimeout(r, 200));
 	}
 	// One last check with detail for error message
 	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);

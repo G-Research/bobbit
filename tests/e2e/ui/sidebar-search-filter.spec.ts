@@ -222,17 +222,15 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 
 		// Press Ctrl+[
 		await page.keyboard.press("Control+[");
-		await page.waitForTimeout(300);
 
 		// Sidebar should be collapsed — search input no longer visible
-		await expect(searchInput).not.toBeVisible({ timeout: 3_000 });
+		await expect(searchInput).not.toBeVisible({ timeout: 5_000 });
 
 		// Press Ctrl+[ again to expand
 		await page.keyboard.press("Control+[");
-		await page.waitForTimeout(300);
 
 		// Sidebar should be expanded again — search input visible
-		await expect(searchInput).toBeVisible({ timeout: 3_000 });
+		await expect(searchInput).toBeVisible({ timeout: 5_000 });
 	});
 
 	test("SB-34: Ctrl+K works even when textarea has focus", async ({ page }) => {

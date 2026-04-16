@@ -14,6 +14,7 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
 	timeout: 30_000,
 	retries: 2,
+	fullyParallel: true,
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	projects: [
@@ -31,7 +32,7 @@ export default defineConfig({
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			workers: 4,
+			workers: 3,
 		},
 		{
 			name: "browser",
@@ -45,8 +46,11 @@ export default defineConfig({
 				"**/port-auto-increment*.spec.ts",
 				"**/localhost-auth*.spec.ts",
 			],
-			testIgnore: [],
-			workers: 2,
+			testIgnore: [
+				// Docker-dependent tests — run via test:manual instead
+				"**/sandbox-recovery-docker*",
+			],
+			workers: 3,
 		},
 	],
 });
