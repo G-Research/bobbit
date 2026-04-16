@@ -225,10 +225,12 @@ test.describe("Session lifecycle stories", () => {
 		await s.navigate_to("session", "B");
 		await s.navigate_to("session", "C");
 
-		// assert — final session is C with correct content
+		// assert — final session is C with correct content (retry until UI settles)
 		s.assert();
-		await s.session("C").in_state("active");
-		await s.message_list.is_visible("msg-c");
+		await expect(async () => {
+			await s.session("C").in_state("active");
+			await s.message_list.is_visible("msg-c");
+		}).toPass({ timeout: 5_000 });
 	});
 
 	// ---------------------------------------------------------------
