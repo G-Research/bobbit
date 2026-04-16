@@ -89,56 +89,24 @@ export function getLoginShellConfig(): ShellConfig {
 }
 
 /**
- * Tools that require the full interactive PATH (installed via system package
- * managers, nvm, asdf, etc.). Commands that reference any of these need
- * `--login` on Windows Git Bash.
+ * Choose shell for a verification command.
  *
- * Commands that use only shell builtins (echo, test, [, :, cat, grep, sed,
- * awk, basic operators) run in plain shell — 25× faster on Windows.
- */
-const LOGIN_SHELL_TOOLS = [
-	"npm", "npx", "yarn", "pnpm", "node",
-	"python", "python3", "pip", "pip3", "pytest", "poetry",
-	"go", "cargo", "rustc",
-	"mvn", "gradle", "sbt",
-	"gh", "docker", "kubectl", "helm", "terraform",
-	"make", "cmake",
-	"ruby", "gem", "bundle", "rails",
-	"php", "composer",
-	"dotnet",
-	"tsc", "eslint", "prettier", "vitest", "jest", "playwright",
-];
-
-/**
- * Choose shell for a verification command. Uses --login (slow, full PATH) only
- * when the command references a tool that requires PATH resolution. Otherwise
- * uses plain shell (fast).
+ * Always returns plain bash — 25× faster than `--login` on Windows Git Bash
+ * (~150ms vs ~3700ms per spawn). Most commands (echo, node, npm, git, gh,
+ * docker, python, etc.) work fine in plain bash because their executables
+ * are on the system PATH that Node.js inherits.
  *
- * Examples:
- *   "echo ok"            → plain bash  (150ms)
- *   "[ -f foo.txt ]"     → plain bash  (150ms)
- *   "npm run test"       → login bash  (3700ms — needs PATH)
- *   "gh pr list"         → login bash  (3700ms)
+ * `--login` is only needed for tools installed via version managers like
+ * nvm, asdf, rbenv that modify PATH in `~/.bash_profile`. Projects using
+ * those should configure an explicit shell wrapper in their commands, e.g.:
+ *     "bash --login -c 'nvm use 20 && npm test'"
+ *
+ * Trade-off: verification commands that rely on .bash_profile-set PATH will
+ * fail, but those were rare and now surface as clear "command not found"
+ * errors instead of silently wasting ~3.5s per command step.
  */
-export function getVerificationShell(command: string): ShellConfig {
-	if (process.platform !== "win32" || !GIT_BASH) {
-		// Non-Windows or no Git Bash: use whatever getShellConfig returns.
-		// Shell startup on Linux/macOS is fast (sh -c ≈ 5ms).
-		return getShellConfig();
-	}
-
-	// Tokenize command — roughly. This is a heuristic, not a shell parser.
-	// We just look for whole words matching known tools.
-	const words = command.split(/[\s|&;()<>`"'$]+/).filter(Boolean);
-	const needsLogin = words.some(w => {
-		// Strip leading path prefix (./node_modules/.bin/xyz → xyz)
-		const basename = w.includes("/") ? w.substring(w.lastIndexOf("/") + 1) : w;
-		return LOGIN_SHELL_TOOLS.includes(basename);
-	});
-
-	return needsLogin
-		? { shell: GIT_BASH, args: ["--login", "-c"] }
-		: { shell: GIT_BASH, args: ["-c"] };
+export function getVerificationShell(_command: string): ShellConfig {
+	return getShellConfig();
 }
 
 /**
