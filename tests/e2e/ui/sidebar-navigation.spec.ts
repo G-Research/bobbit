@@ -190,12 +190,11 @@ test.describe("Sidebar navigation", () => {
 		// Wait for session C to load — textarea visible means session is connected
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// Wait for final state to settle
-		await page.waitForTimeout(2000);
-
-		// Verify URL contains session C
-		const hash = await page.evaluate(() => window.location.hash);
-		expect(hash).toContain(idC);
+		// Poll until URL contains session C (the last one) — may take time to settle
+		await expect(async () => {
+			const hash = await page.evaluate(() => window.location.hash);
+			expect(hash).toContain(idC);
+		}).toPass({ timeout: 10_000 });
 
 		// Only one session should be active in sidebar
 		const activeRows = page.locator(".sidebar-session-active");
