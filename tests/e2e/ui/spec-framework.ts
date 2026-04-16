@@ -661,8 +661,8 @@ export class SidebarRegion extends RegionHandle {
 
 
 const intentSelectors: Record<string, string> = {
-	send_message: "message-editor .send-button:not(.stop-button), message-editor button[title='Send']",
-	stop_streaming: "message-editor .stop-button, message-editor button[title='Stop']",
+	send_message: "message-editor button[title='Send message']",
+	stop_streaming: "button[title='Stop streaming']",
 	attach_file: "message-editor input[type='file']",
 };
 
@@ -962,7 +962,21 @@ export class SpecContext {
 	async stop_streaming() {
 		trackIntent(this._activeStory, this._phase, "stop_streaming");
 		trackRegion(this._activeStory, this._phase, "editor");
-		await this._page.locator("message-editor .stop-button, message-editor button[title='Stop']").first().click();
+		await this._page.locator("button[title='Stop streaming']").first().click();
+	}
+
+	async wait_for_streaming(): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "wait_for_streaming");
+		await expect(this._page.locator("button[title='Stop streaming']").first())
+			.toBeVisible({ timeout: 10_000 });
+	}
+
+	async wait_for_idle(): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "wait_for_idle");
+		await expect(this._page.locator("button[title='Stop streaming']").first())
+			.not.toBeVisible({ timeout: 15_000 });
+		await expect(this._page.locator("message-editor button[title='Send message']").first())
+			.toBeVisible({ timeout: 5_000 });
 	}
 
 	async attach_file(name: string, _type: "file" | "image") {

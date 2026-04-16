@@ -4,7 +4,7 @@
  * No Playwright dependencies — safe to import from standalone tools.
  */
 import { defineStory } from "./spec-framework.js";
-import { CT_02, CT_03, CT_04, CT_05, CT_13, CT_15 } from "./spec-contracts.js";
+import { CT_01, CT_02, CT_03, CT_04, CT_05, CT_06, CT_13, CT_15 } from "./spec-contracts.js";
 
 // ── Draft Preservation stories (CT-02) ──
 
@@ -34,6 +34,87 @@ export const STORY_CT02_D = defineStory({
 	title: "Draft survives page reload",
 	contracts: [CT_02, CT_05],
 	covers: ["page-reload"],
+});
+
+export const STORY_CT02_E = defineStory({
+	id: "CT-02-e",
+	title: "Draft survives goal dashboard detour",
+	contracts: [CT_02],
+	covers: ["goal-dashboard-detour"],
+});
+
+export const STORY_CT02_F = defineStory({
+	id: "CT-02-f",
+	title: "Draft survives personality change",
+	contracts: [CT_02],
+	covers: ["personality-change"],
+});
+
+export const STORY_CT02_G = defineStory({
+	id: "CT-02-g",
+	title: "Draft survives reconnect after disconnect",
+	contracts: [CT_02, CT_05],
+	covers: ["reconnect-after-disconnect"],
+});
+
+// ── Streaming Lifecycle stories (CT-01) ──
+
+export const STORY_CT01_A = defineStory({
+	id: "CT-01-a",
+	title: "Send message and observe streaming lifecycle",
+	contracts: [CT_01, CT_06],
+	covers: [],
+});
+
+export const STORY_CT01_B = defineStory({
+	id: "CT-01-b",
+	title: "Abort mid-stream preserves partial response",
+	contracts: [CT_01, CT_06],
+	covers: ["abort-mid-stream"],
+});
+
+export const STORY_CT01_C = defineStory({
+	id: "CT-01-c",
+	title: "Re-send after abort",
+	contracts: [CT_01],
+	covers: ["re-send-after-abort"],
+});
+
+export const STORY_CT01_D = defineStory({
+	id: "CT-01-d",
+	title: "Rapid sends while streaming queue messages",
+	contracts: [CT_01],
+	covers: ["rapid-sends-while-streaming"],
+});
+
+export const STORY_CT01_E = defineStory({
+	id: "CT-01-e",
+	title: "Session switch during stream",
+	contracts: [CT_01, CT_02],
+	covers: ["session-switch-during-stream"],
+});
+
+export const STORY_CT01_F = defineStory({
+	id: "CT-01-f",
+	title: "Page reload during stream",
+	contracts: [CT_01, CT_05],
+	covers: ["page-reload"],
+});
+
+// ── Focus Follows Intent stories (CT-06) ──
+
+export const STORY_CT06_A = defineStory({
+	id: "CT-06-a",
+	title: "Focus follows rapid session switch",
+	contracts: [CT_06],
+	covers: ["rapid-session-switch"],
+});
+
+export const STORY_CT06_B = defineStory({
+	id: "CT-06-b",
+	title: "Focus returns after dialog close",
+	contracts: [CT_06],
+	covers: ["dialog-close"],
 });
 
 // ── Sidebar stories (CT-03, CT-04) ──
