@@ -694,7 +694,8 @@ export class AgentInterface extends LitElement {
 					{ value: "high", label: i18n("High"), icon: icon(Brain, "sm") },
 				] as SelectOption[],
 				onChange: (value: string) => {
-					session.state.thinkingLevel = value as any;
+					if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(value);
+					else session.state.thinkingLevel = value as any;
 				},
 				width: "80px",
 				size: "sm",
@@ -708,7 +709,10 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					ModelSelector.open(state.model, (m) => { session.state.model = m; });
+					ModelSelector.open(state.model, (m) => {
+						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
+						else session.state.model = m;
+					});
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
@@ -967,12 +971,16 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								ModelSelector.open(state.model, (model) => { session.state.model = model; });
+								ModelSelector.open(state.model, (model) => {
+								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
+								else session.state.model = model;
+							});
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector
 									? (level: "off" | "minimal" | "low" | "medium" | "high") => {
-											session.state.thinkingLevel = level;
+											if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(level);
+											else session.state.thinkingLevel = level;
 										}
 									: undefined
 							}

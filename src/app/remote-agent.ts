@@ -97,7 +97,7 @@ export class RemoteAgent {
 	private _intentionalDisconnect = false;
 	private _connectionStatus: ConnectionStatus = "disconnected";
 	private _pendingReconnectNotif = false;
-	/** Timestamp of last streamMessage update when content contains truncated blocks. */
+	/** Timestamp of last streamingMessage update when content contains truncated blocks. */
 	private _lastTruncatedStreamUpdate = 0;
 	private static readonly MAX_RECONNECT_DELAY = 30_000;
 	private static readonly BASE_RECONNECT_DELAY = 1_000;
@@ -155,7 +155,7 @@ export class RemoteAgent {
 			isPreparing: false,
 			archivedAt: null as number | null,
 			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } | null,
-			streamMessage: null as any,
+			streamingMessage: null as any,
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
 			turnStartTime: null as number | null,
@@ -540,7 +540,7 @@ export class RemoteAgent {
 
 	reset(): void {
 		this._state.messages = [];
-		this._state.streamMessage = null;
+		this._state.streamingMessage = null;
 		this._state.isStreaming = false;
 		this._state.pendingToolCalls = new Set();
 		this._state.error = undefined;
@@ -759,7 +759,7 @@ export class RemoteAgent {
 						this._pendingReconnectNotif = false;
 						this._appendNotification("Reconnected to server", "system");
 					}
-					// Note: we intentionally do NOT try to reconstruct streamMessage
+					// Note: we intentionally do NOT try to reconstruct streamingMessage
 					// for late-joining clients. The message-list will show all messages
 					// including pending tool calls. The streaming container will pick up
 					// new events as they arrive.
@@ -912,7 +912,7 @@ export class RemoteAgent {
 				const perm = msg as any;
 				// The server has aborted the agent turn. Clean up:
 				// 1. Clear any in-progress streaming message
-				this._state.streamMessage = undefined;
+				this._state.streamingMessage = undefined;
 				// 2. Remove messages added after the last user message (tool error + agent response from the aborted turn)
 				const lastUserIdx = this._state.messages.findLastIndex(
 					(m: any) => m.role === "user" || m.role === "user-with-attachments"
@@ -962,7 +962,7 @@ export class RemoteAgent {
 
 	/**
 	 * Move any deferred assistant message into the stable messages array
-	 * and clear streamMessage. Called at points where the streaming container
+	 * and clear streamingMessage. Called at points where the streaming container
 	 * is simultaneously updated (message_update replaces its content,
 	 * message_end of non-assistant clears it, agent_end clears it) so the
 	 * tool call never appears in both message-list and streaming-container.
@@ -1186,7 +1186,7 @@ export class RemoteAgent {
 	private flushDeferredMessage() {
 		if (this._deferredAssistantMessage) {
 			this._state.messages = [...this._state.messages, this._deferredAssistantMessage];
-			this._state.streamMessage = null;
+			this._state.streamingMessage = null;
 			this._deferredAssistantMessage = null;
 		}
 	}
@@ -1205,7 +1205,7 @@ export class RemoteAgent {
 				this.flushDeferredMessage();
 				this._state.isStreaming = false;
 				this._isAborting = false;
-				this._state.streamMessage = null;
+				this._state.streamingMessage = null;
 				this._state.pendingToolCalls = new Set();
 
 				// Notify: beep + favicon badge
@@ -1246,7 +1246,7 @@ export class RemoteAgent {
 						this._lastTruncatedStreamUpdate = now;
 					}
 
-					this._state.streamMessage = event.message;
+					this._state.streamingMessage = event.message;
 					// Check for proposals during streaming so preview syncs live.
 					// Pass streaming=true so blocks are NOT marked as processed —
 					// the final fire on message_end marks them.
@@ -1275,12 +1275,12 @@ export class RemoteAgent {
 							// when the next message_update arrives (which replaces
 							// the streaming container content simultaneously).
 							this._deferredAssistantMessage = event.message;
-							// Keep streamMessage set so the AgentInterface
+							// Keep streamingMessage set so the AgentInterface
 							// message_end handler does NOT clear the streaming
 							// container.
 						} else {
 							// No tool calls — safe to add immediately.
-							this._state.streamMessage = null;
+							this._state.streamingMessage = null;
 							this._state.messages = [...this._state.messages, event.message];
 						}
 					} else {
@@ -1288,7 +1288,7 @@ export class RemoteAgent {
 						// Flush any deferred assistant message first so it
 						// appears before this message in the correct order.
 						this.flushDeferredMessage();
-						this._state.streamMessage = null;
+						this._state.streamingMessage = null;
 
 						let msg = event.message;
 						// Enrich echoed user messages with stashed attachments
