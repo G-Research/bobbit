@@ -20,6 +20,7 @@ const DEFAULTS: Record<string, string> = {
 	typecheck_command: "npm run check",
 	test_unit_command: "npm run test:unit",
 	test_e2e_command: "npm run test:e2e",
+	test_e2e_smoke_command: "npm run test:e2e:smoke",
 	worktree_setup_command: "",  // Empty = no setup runs on new worktrees
 	default_thinking_level: "",  // Empty = use agent's built-in default ("medium")
 	sandbox: "none",                    // "none" | "docker"
