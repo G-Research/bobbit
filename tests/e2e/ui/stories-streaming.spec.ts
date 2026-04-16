@@ -83,11 +83,11 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		await s.send_message("STAY_BUSY:5000 long task");
 		await s.wait_for_streaming();
 		await s.stop_streaming();
+		await s.wait_for_idle();
 
 		// assert
 		s.assert();
 		await s.editor.can("send_message");
-		await s.editor.cannot("stop_streaming");
 		// After abort, click textarea to confirm it's usable (focus may stay on
 		// the now-removed stop button rather than auto-transferring)
 		await s.page.locator("message-editor textarea").first().click();

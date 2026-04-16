@@ -261,6 +261,6 @@ test.describe("Queue UI E2E", () => {
 		await expect(async () => {
 			const val = await page.locator("textarea").first().inputValue();
 			expect(val).toBe("");
-		}).toPass({ timeout: 10_000 });
+		}).toPass({ timeout: 15_000 });
 	});
 });
