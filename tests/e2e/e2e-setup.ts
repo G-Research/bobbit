@@ -281,6 +281,43 @@ export function messageEndPredicate(role: string): (m: WsMsg) => boolean {
 }
 
 // ---------------------------------------------------------------------------
+// WebSocket gate helpers — faster than REST polling for gate status changes
+// ---------------------------------------------------------------------------
+
+/**
+ * Wait for a gate to reach a target status via WebSocket events.
+ * Much faster than polling REST — resolves within milliseconds of the status change.
+ * Requires a WS connection to a session associated with the goal (or a goalless session
+ * that receives fallback broadcasts).
+ */
+export async function waitForGateStatusWs(
+	conn: WsConnection,
+	gateId: string,
+	targetStatus: string,
+	timeoutMs = 15_000,
+): Promise<WsMsg> {
+	return conn.waitFor(
+		(m) => m.type === "gate_status_changed" && m.gateId === gateId && m.status === targetStatus,
+		timeoutMs,
+	);
+}
+
+/**
+ * Wait for gate verification to complete (passed or failed) via WebSocket.
+ * Returns the completion event with status.
+ */
+export async function waitForGateVerificationWs(
+	conn: WsConnection,
+	gateId: string,
+	timeoutMs = 15_000,
+): Promise<WsMsg> {
+	return conn.waitFor(
+		(m) => m.type === "gate_status_changed" && m.gateId === gateId && (m.status === "passed" || m.status === "failed"),
+		timeoutMs,
+	);
+}
+
+// ---------------------------------------------------------------------------
 // Polling helpers (Category 1: infrastructure readiness)
 // ---------------------------------------------------------------------------
 
