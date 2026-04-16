@@ -16,6 +16,7 @@ import {
 	partitionOptionalSteps,
 	buildStepCache,
 	canSkipAllSteps,
+	computeAllPassed,
 	TRANSIENT_ERROR_PATTERNS,
 	QA_NON_TRANSIENT_PATTERNS,
 } from "../dist/server/agent/verification-logic.js";
@@ -500,5 +501,61 @@ describe("canSkipAllSteps", () => {
 		const cache = new Map([["test", { name: "test", passed: true }]]);
 		const steps = [step("test"), step("lint"), step("build")];
 		assert.equal(canSkipAllSteps(cache as any, steps), false);
+	});
+});
+
+// ===================================================================
+// computeAllPassed
+// ===================================================================
+
+function signalStep(name: string, opts: Record<string, unknown> = {}): any {
+	return { name, type: "command", passed: true, output: "", duration_ms: 0, ...opts };
+}
+
+describe("computeAllPassed", () => {
+	it("returns true when all steps passed", () => {
+		assert.equal(computeAllPassed([
+			signalStep("test", { passed: true }),
+			signalStep("lint", { passed: true }),
+		]), true);
+	});
+
+	it("returns false when a step failed", () => {
+		assert.equal(computeAllPassed([
+			signalStep("test", { passed: true }),
+			signalStep("lint", { passed: false }),
+		]), false);
+	});
+
+	it("returns true when skipped steps have passed: false (phase-skipped)", () => {
+		assert.equal(computeAllPassed([
+			signalStep("test", { passed: true }),
+			signalStep("review", { passed: false, skipped: true }),
+		]), true);
+	});
+
+	it("returns true when skipped steps have passed: true (optional-skipped)", () => {
+		assert.equal(computeAllPassed([
+			signalStep("test", { passed: true }),
+			signalStep("qa", { passed: true, skipped: true }),
+		]), true);
+	});
+
+	it("returns false when a non-skipped step failed even if skipped steps exist", () => {
+		assert.equal(computeAllPassed([
+			signalStep("test", { passed: false }),
+			signalStep("review", { passed: false, skipped: true }),
+		]), false);
+	});
+
+	it("returns true for empty results (vacuously)", () => {
+		assert.equal(computeAllPassed([]), true);
+	});
+
+	it("returns true when all steps are skipped", () => {
+		assert.equal(computeAllPassed([
+			signalStep("qa", { passed: false, skipped: true }),
+			signalStep("review", { passed: false, skipped: true }),
+		]), true);
 	});
 });

@@ -21,6 +21,7 @@ import {
 	getSortedPhases,
 	partitionOptionalSteps,
 	buildStepCache,
+	computeAllPassed,
 	canSkipAllSteps,
 } from "./verification-logic.js";
 
@@ -270,10 +271,11 @@ export class VerificationHarness {
 		for (const step of v.steps) {
 			if (step.status !== "running") {
 				// Already completed before restart — keep result
+				// Skipped steps (optional or phase-skipped) count as passed for overall verdict
 				resolvedSteps.push({
 					name: step.name,
 					type: step.type,
-					passed: step.status === "passed",
+					passed: step.status === "passed" || step.status === "skipped",
 					output: step.output || "",
 					duration_ms: step.durationMs || 0,
 				});
@@ -793,7 +795,7 @@ export class VerificationHarness {
 					const cached = cachedSteps.get(s.name)!;
 					return { ...cached, output: `[cached from prior signal] ${cached.output}` };
 				});
-				const allPassed = results.every(r => r.passed);
+				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
@@ -1131,7 +1133,7 @@ export class VerificationHarness {
 				expect: steps[i].expect,
 			});
 
-			const allPassed = results.every(r => r.passed);
+			const allPassed = computeAllPassed(results);
 			const status = allPassed ? "passed" : "failed";
 
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });

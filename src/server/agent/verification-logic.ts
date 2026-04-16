@@ -255,3 +255,20 @@ export function canSkipAllSteps(
 ): boolean {
 	return cache.size >= activeSteps.length && activeSteps.every(s => cache.has(s.name));
 }
+
+// ---------------------------------------------------------------------------
+// Overall pass/fail computation
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine whether all verification steps passed.
+ *
+ * Steps that were skipped (e.g. because an earlier phase failed, or because
+ * they are disabled optional steps) are excluded from the pass/fail decision.
+ * The actually-failed step in the earlier phase is what causes the gate to
+ * fail — the downstream skipped steps should not pile on as additional
+ * failures.
+ */
+export function computeAllPassed(results: GateSignalStep[]): boolean {
+	return results.every(r => r.skipped || r.passed);
+}
