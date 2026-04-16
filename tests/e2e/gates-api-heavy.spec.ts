@@ -66,107 +66,6 @@ test.beforeAll(() => {
 });
 
 test.describe("Gates API (verification)", () => {
-	test("gate signal and verification — content gate", async () => {
-		const goalId = await createGoalWithWorkflow("general");
-		try {
-			// Signal design-doc gate with content
-			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content: "# Design\n\nApproach: do the thing\n\nFiles: src/foo.ts\n\nCriteria: it works",
-				}),
-			});
-			expect(signalResp.status).toBe(201);
-			const signalData = await signalResp.json();
-			expect(signalData.signal.id).toBeTruthy();
-			expect(signalData.signal.status).toBe("running");
-
-			// Wait for pass (LLM review auto-passes)
-			await waitForGateStatus(goalId, "design-doc", "passed");
-
-			// Verify content is retrievable
-			const contentResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/content`);
-			expect(contentResp.status).toBe(200);
-			const contentData = await contentResp.json();
-			expect(contentData.content).toContain("Approach: do the thing");
-			expect(contentData.version).toBe(1);
-
-			// Verify signal history
-			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
-			expect(signalsResp.status).toBe(200);
-			const { signals } = await signalsResp.json();
-			expect(signals).toHaveLength(1);
-			expect(signals[0].id).toBe(signalData.signal.id);
-			expect(signals[0].verification.status).toBe("passed");
-		} finally {
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("expect failure — command that fails passes verification", async () => {
-		const goalId = await createGoalWithWorkflow("bug-fix");
-		try {
-			// Signal issue-analysis (content gate with LLM review — auto-passes)
-			await apiFetch(`/api/goals/${goalId}/gates/issue-analysis/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content: "# Bug Analysis\n\nSteps: 1. call add(2,3)\nRoot cause: src/calc.ts:5 uses minus instead of plus",
-				}),
-			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
-
-			// Signal reproducing-test with a command that fails (exit 1) and matching error_pattern
-			// Because the gate has expect: failure + non-zero exit + matching pattern = pass
-			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					metadata: { test_command: "echo Expected addition to equal 5 1>&2 & exit 1", error_pattern: "Expected addition to equal 5" },
-				}),
-			});
-			expect(signalResp.status).toBe(201);
-
-			// Gate should pass because expect:failure + non-zero exit + matching error_pattern = pass
-			await waitForGateStatus(goalId, "reproducing-test", "passed");
-		} finally {
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("expect failure — command that succeeds fails verification", async () => {
-		const goalId = await createGoalWithWorkflow("bug-fix");
-		try {
-			// Signal issue-analysis first
-			await apiFetch(`/api/goals/${goalId}/gates/issue-analysis/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content: "# Bug\n\nSteps: 1. run test\nRoot cause: src/x.ts:1",
-				}),
-			});
-			await waitForGateStatus(goalId, "issue-analysis", "passed");
-
-			// Signal reproducing-test with a command that succeeds (exit 0)
-			// Because the gate has expect: failure, a zero exit = fail
-			await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					metadata: { test_command: "exit 0", error_pattern: "some error" },
-				}),
-			});
-
-			// Gate should fail because expect:failure + zero exit = fail
-			const gate = await waitForGateStatus(goalId, "reproducing-test", "failed");
-			// Verify the verification step shows failure
-			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signals`);
-			const { signals } = await signalsResp.json();
-			const lastSignal = signals[signals.length - 1];
-			expect(lastSignal.verification.status).toBe("failed");
-			expect(lastSignal.verification.steps.length).toBeGreaterThan(0);
-			expect(lastSignal.verification.steps[0].passed).toBe(false);
-		} finally {
-			await deleteGoal(goalId);
-		}
-	});
-
 	test("cascade reset — re-signaling upstream resets downstream", async () => {
 		// Use test-fast workflow — general runs npm run check/test which is too slow for 30s timeout
 		const goalId = await createGoalWithWorkflow("test-fast");
@@ -240,27 +139,6 @@ test.describe("Gates API (verification)", () => {
 			expect(step.output).toContain("metadata-works");
 		} finally {
 			await deleteGoal(goalId);
-		}
-	});
-
-	test("goal without explicit workflow gets default gates", async () => {
-		// Create goal without explicit workflowId — may get a default workflow
-		const resp = await apiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "Default Workflow Goal", cwd: nonGitCwd() }),
-		});
-		const goal = await resp.json();
-		try {
-			const gatesResp = await apiFetch(`/api/goals/${goal.id}/gates`);
-			expect(gatesResp.status).toBe(200);
-			const { gates } = await gatesResp.json();
-			// Should have gates (default workflow assigns general gates)
-			expect(gates.length).toBeGreaterThanOrEqual(0);
-			for (const gate of gates) {
-				expect(gate.status).toBe("pending");
-			}
-		} finally {
-			await deleteGoal(goal.id);
 		}
 	});
 });

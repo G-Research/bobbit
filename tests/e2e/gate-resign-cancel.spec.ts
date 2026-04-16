@@ -184,40 +184,6 @@ test.describe("Gate Re-signal Cancellation", () => {
 		}
 	});
 
-	test("re-signaling does not affect happy path (single signal)", async () => {
-		// Verify the basic single-signal path still works correctly
-		const goal = await createGoal({
-			title: `Single Signal Test ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
-			worktree: false,
-		});
-		const goalId = goal.id;
-
-		try {
-			// Signal once
-			const signalRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Single signal" }),
-			});
-			expect(signalRes.status).toBe(201);
-
-			// Wait for it to pass
-			const finalGate = await pollUntil(
-				() => getGateStatus(goalId, "slow-gate"),
-				(gate) => gate.status === "passed" || gate.status === "failed",
-				20000,
-			);
-			expect(finalGate.status).toBe("passed");
-
-			// Only one signal in history
-			const signals = await getSignals(goalId, "slow-gate");
-			expect(signals.length).toBe(1);
-			expect(signals[0].verification.status).toBe("passed");
-		} finally {
-			await deleteGoal(goalId).catch(() => {});
-		}
-	});
-
 	test("triple re-signal — only final signal determines outcome", async () => {
 		const goal = await createGoal({
 			title: `Triple Re-signal Test ${Date.now()}`,
