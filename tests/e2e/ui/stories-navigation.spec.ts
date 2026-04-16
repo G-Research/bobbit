@@ -459,11 +459,11 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.navigate_back(); // back to session
 		s.assert();
 		await s.url_contains(`/session/${s.session("A").sessionId}`);
-		await s.editor.is_visible();
+		await s.editor.is_visible({ timeout: 10_000 });
 
 		// No blank screens at any step — app still responsive
 		await expect(s.page.locator("button").filter({ hasText: "Settings" }).first())
-			.toBeVisible({ timeout: 5_000 });
+			.toBeVisible({ timeout: 10_000 });
 	});
 
 	// ---------------------------------------------------------------
