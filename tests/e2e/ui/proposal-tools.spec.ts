@@ -37,7 +37,7 @@ async function deleteGoalByTitle(title: string) {
 }
 
 test.describe("Proposal tool blocks", () => {
-	test("propose_goal tool block renders in message history", async ({ page }) => {
+	test("propose_goal tool block renders in message history @smoke", async ({ page }) => {
 		await triggerGoalProposal(page);
 
 		// The message area should contain a tool card for propose_goal

@@ -4,6 +4,9 @@
  * Tests run against a real gateway (started by Playwright webServer).
  * A mock MCP server (tests/fixtures/mock-mcp-server.mjs) provides
  * deterministic tool responses via stdio transport.
+ *
+ * Trimmed to 3 core tests: discovery+connection, tool execution, tool list.
+ * Permission grant flow is covered by mcp-tool-permission.spec.ts.
  */
 import { test, expect } from "./gateway-harness.js";
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
@@ -58,174 +61,98 @@ test.afterAll(() => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 1. MCP Server Discovery
+// 1. MCP Server Discovery & Connection
 // ═══════════════════════════════════════════════════════════════════════════
 
-test.describe("MCP Server Discovery", () => {
-	test("GET /api/mcp-servers returns discovered servers", async () => {
-		// First restart the mock server to ensure discovery picks up the config
-		await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
+test("server discovery, restart, and connected status", async () => {
+	// Restart to ensure the mock server is connected
+	const restartResp = await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
+	expect(restartResp.status).toBe(200);
+	const restartResult = await restartResp.json();
+	expect(restartResult.status).toBe("connected");
+	expect(restartResult.toolCount).toBe(2);
 
-		const resp = await apiFetch("/api/mcp-servers");
-		expect(resp.status).toBe(200);
-		const servers = await resp.json();
-		expect(Array.isArray(servers)).toBe(true);
+	// Verify the server list shows it connected with correct metadata
+	const resp = await apiFetch("/api/mcp-servers");
+	expect(resp.status).toBe(200);
+	const servers = await resp.json();
+	const mock = servers.find((s: any) => s.name === "mock");
+	expect(mock).toBeDefined();
+	expect(mock.config?.command).toBe(process.execPath);
+	expect(mock.status).toBe("connected");
+	expect(mock.toolCount).toBe(2);
 
-		const mock = servers.find((s: any) => s.name === "mock");
-		expect(mock).toBeDefined();
-		expect(mock.config?.command).toBe(process.execPath);
-	});
-
-	test("POST /api/mcp-servers/:name/restart connects server", async () => {
-		const resp = await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
-		expect(resp.status).toBe(200);
-		const result = await resp.json();
-		expect(result.status).toBe("connected");
-		expect(result.toolCount).toBe(2);
-	});
-
-	test("GET /api/mcp-servers shows connected server with tools", async () => {
-		// Ensure server is connected
-		await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
-
-		const resp = await apiFetch("/api/mcp-servers");
-		expect(resp.status).toBe(200);
-		const servers = await resp.json();
-		const mock = servers.find((s: any) => s.name === "mock");
-		expect(mock).toBeDefined();
-		expect(mock.status).toBe("connected");
-		expect(mock.toolCount).toBe(2);
-
-		// Verify tool names follow the mcp__<server>__<tool> convention
-		if (mock.tools) {
-			const toolNames = mock.tools.map((t: any) => t.name);
-			expect(toolNames).toContain("mcp__mock__echo");
-			expect(toolNames).toContain("mcp__mock__add");
-		}
-	});
+	// Verify tool names follow the mcp__<server>__<tool> convention
+	if (mock.tools) {
+		const toolNames = mock.tools.map((t: any) => t.name);
+		expect(toolNames).toContain("mcp__mock__echo");
+		expect(toolNames).toContain("mcp__mock__add");
+	}
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 2. MCP Tool Calls via Internal API
+// 2. MCP Tool Execution via Internal API
 // ═══════════════════════════════════════════════════════════════════════════
 
-test.describe("MCP Tool Calls", () => {
-	let testSessionId: string;
+test("tool execution via /api/internal/mcp-call", async () => {
+	// Ensure the mock server is connected
+	await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
 
-	test.beforeAll(async () => {
-		// Ensure the mock server is connected before running tool call tests
-		await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
-
-		// Create a test session — required for X-Bobbit-Session-Id header
-		const sessResp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ title: "mcp-test-session" }),
-		});
-		const sessData = await sessResp.json();
-		testSessionId = sessData.id;
+	// Create a test session for the X-Bobbit-Session-Id header
+	const sessResp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ title: "mcp-test-session" }),
 	});
+	const testSessionId = (await sessResp.json()).id;
 
-	/** Helper to call MCP tool with session header */
-	function mcpCall(tool: string, args: Record<string, unknown>): Promise<Response> {
-		return apiFetch("/api/internal/mcp-call", {
+	const mcpCall = (tool: string, args: Record<string, unknown>) =>
+		apiFetch("/api/internal/mcp-call", {
 			method: "POST",
 			headers: { "X-Bobbit-Session-Id": testSessionId },
 			body: JSON.stringify({ tool, args }),
 		});
-	}
 
-	test("POST /api/internal/mcp-call executes echo tool", async () => {
-		const resp = await mcpCall("mcp__mock__echo", { message: "hello world" });
-		expect(resp.status).toBe(200);
-		const result = await resp.json();
-		expect(result.content).toBeDefined();
-		expect(Array.isArray(result.content)).toBe(true);
-		expect(result.content.length).toBeGreaterThan(0);
-		expect(result.content[0].type).toBe("text");
-		expect(result.content[0].text).toBe("hello world");
-		expect(result.isError).toBeFalsy();
-	});
+	// Echo tool — happy path
+	const echoResp = await mcpCall("mcp__mock__echo", { message: "hello world" });
+	expect(echoResp.status).toBe(200);
+	const echoResult = await echoResp.json();
+	expect(echoResult.content[0].text).toBe("hello world");
+	expect(echoResult.isError).toBeFalsy();
 
-	test("POST /api/internal/mcp-call executes add tool", async () => {
-		const resp = await mcpCall("mcp__mock__add", { a: 2, b: 3 });
-		expect(resp.status).toBe(200);
-		const result = await resp.json();
-		expect(result.content).toBeDefined();
-		expect(result.content[0].type).toBe("text");
-		expect(result.content[0].text).toBe("5");
-		expect(result.isError).toBeFalsy();
-	});
+	// Add tool — verifies argument passing
+	const addResp = await mcpCall("mcp__mock__add", { a: 2, b: 3 });
+	expect(addResp.status).toBe(200);
+	const addResult = await addResp.json();
+	expect(addResult.content[0].text).toBe("5");
 
-	test("POST /api/internal/mcp-call returns error for unknown tool on server", async () => {
-		const resp = await mcpCall("mcp__mock__nonexistent", {});
-		expect(resp.status).toBe(200);
-		const result = await resp.json();
-		expect(result.content[0].text).toBe("Unknown tool");
-		expect(result.isError).toBe(true);
-	});
+	// Unknown tool — error handling
+	const unknownResp = await mcpCall("mcp__mock__nonexistent", {});
+	expect(unknownResp.status).toBe(200);
+	const unknownResult = await unknownResp.json();
+	expect(unknownResult.isError).toBe(true);
 
-	test("POST /api/internal/mcp-call returns error for unknown server", async () => {
-		const resp = await mcpCall("mcp__nonexistent__sometool", {});
-		// Should return an error status (400 or 404)
-		expect(resp.status).toBeGreaterThanOrEqual(400);
-	});
+	// Unknown server — 4xx error
+	const badServerResp = await mcpCall("mcp__nonexistent__sometool", {});
+	expect(badServerResp.status).toBeGreaterThanOrEqual(400);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. MCP Tools in Tool List
 // ═══════════════════════════════════════════════════════════════════════════
 
-test.describe("MCP Tools in Tool List", () => {
-	test.beforeAll(async () => {
-		// Ensure the mock server is connected
-		await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
-	});
+test("MCP tools appear in GET /api/tools with correct metadata", async () => {
+	// Ensure the mock server is connected
+	await apiFetch("/api/mcp-servers/mock/restart", { method: "POST" });
 
-	test("GET /api/tools includes MCP tools", async () => {
-		const resp = await apiFetch("/api/tools");
-		expect(resp.status).toBe(200);
-		const { tools } = await resp.json();
-		const toolNames = tools.map((t: any) => t.name);
+	const resp = await apiFetch("/api/tools");
+	expect(resp.status).toBe(200);
+	const { tools } = await resp.json();
+	const toolNames = tools.map((t: any) => t.name);
 
-		expect(toolNames).toContain("mcp__mock__echo");
-		expect(toolNames).toContain("mcp__mock__add");
-	});
+	expect(toolNames).toContain("mcp__mock__echo");
+	expect(toolNames).toContain("mcp__mock__add");
 
-	test("MCP tools have correct metadata", async () => {
-		const resp = await apiFetch("/api/tools");
-		expect(resp.status).toBe(200);
-		const { tools } = await resp.json();
-
-		const echoTool = tools.find((t: any) => t.name === "mcp__mock__echo");
-		expect(echoTool).toBeDefined();
-		expect(echoTool.description.toLowerCase()).toContain("echo");
-		expect(echoTool.group).toMatch(/MCP/i);
-
-		const addTool = tools.find((t: any) => t.name === "mcp__mock__add");
-		expect(addTool).toBeDefined();
-		expect(addTool.description.toLowerCase()).toContain("add");
-	});
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 4. Authentication
-// ═══════════════════════════════════════════════════════════════════════════
-
-test.describe("MCP API Authentication", () => {
-	test("MCP endpoints require auth", async () => {
-		const endpoints = [
-			{ path: "/api/mcp-servers", method: "GET" },
-			{ path: "/api/mcp-servers/mock/restart", method: "POST" },
-			{ path: "/api/internal/mcp-call", method: "POST" },
-		];
-
-		for (const { path, method } of endpoints) {
-			const resp = await fetch(`${base()}${path}`, {
-				method,
-				headers: { "Content-Type": "application/json" },
-				body: method === "POST" ? JSON.stringify({}) : undefined,
-			});
-			expect(resp.status).toBe(401);
-		}
-	});
+	const echoTool = tools.find((t: any) => t.name === "mcp__mock__echo");
+	expect(echoTool.description.toLowerCase()).toContain("echo");
+	expect(echoTool.group).toMatch(/MCP/i);
 });

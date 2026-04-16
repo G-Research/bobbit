@@ -41,7 +41,7 @@ test.describe("task_changed WS notifications", () => {
 	test.describe.configure({ mode: 'serial' });
 	let taskId: string;
 
-	test("task_create via WS broadcasts task_changed event", async () => {
+	test("task_create via WS broadcasts task_changed event @smoke", async () => {
 		// Send a task_create command over WebSocket
 		wsConn.send({
 			type: "task_create",

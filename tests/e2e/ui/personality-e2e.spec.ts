@@ -13,7 +13,7 @@ test.describe("Personality selector E2E", () => {
 		await waitForHealth();
 	});
 
-	test("PI-22: personality chips visible and toggleable in session settings", async ({ page }) => {
+	test("PI-22: personality chips visible and toggleable in session settings @smoke", async ({ page }) => {
 		// First verify personalities exist on server
 		const res = await apiFetch("/api/personalities");
 		const data = await res.json();

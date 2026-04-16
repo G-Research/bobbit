@@ -1,17 +1,16 @@
 /**
  * E2E test to verify user messages are echoed back via message_end events.
  *
- * This test reproduces the "missing user message" bug by:
- * 1. Connecting to a session via WebSocket
- * 2. Sending a prompt
- * 3. Verifying a message_end event with role=user arrives
- * 4. Testing reconnection scenarios to see if messages survive
+ * Optimized: independent tests run in parallel, reconnect scenarios
+ * are combined where they share the same pattern.
  */
 import { test, expect } from "./in-process-harness.js";
 import { createSession, connectWs, messageEndPredicate } from "./e2e-setup.js";
 
 test.describe("User message echo", () => {
-	test("prompt sends back a message_end event with role=user", async () => {
+	test.describe.configure({ mode: "parallel" });
+
+	test("prompt sends back a message_end with role=user and appears in get_messages @smoke", async () => {
 		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
@@ -26,22 +25,9 @@ test.describe("User message echo", () => {
 				? content.find((c: any) => c.type === "text")?.text
 				: content;
 			expect(textContent).toContain("Hello, this is a test message");
-		} finally {
-			conn.close();
-		}
-	});
 
-	test("user message appears in get_messages response after prompt", async () => {
-		const sessionId = await createSession();
-		const conn = await connectWs(sessionId);
-
-		try {
-			conn.send({ type: "prompt", text: "Test message for get_messages" });
-
-			await conn.waitFor(messageEndPredicate("user"));
-
+			// Also verify get_messages (previously a separate test)
 			conn.send({ type: "get_messages" });
-
 			const messagesResponse = await conn.waitFor((m) => m.type === "messages");
 
 			const msgs = Array.isArray(messagesResponse.data)
@@ -51,7 +37,7 @@ test.describe("User message echo", () => {
 
 			const userMsg = msgs.find((m: any) =>
 				m.role === "user" && Array.isArray(m.content) &&
-				m.content.some((c: any) => c.type === "text" && c.text?.includes("Test message for get_messages"))
+				m.content.some((c: any) => c.type === "text" && c.text?.includes("Hello, this is a test message"))
 			);
 			expect(userMsg).toBeTruthy();
 		} finally {

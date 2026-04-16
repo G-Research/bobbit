@@ -74,7 +74,7 @@ async function getDefaultProject(): Promise<{ id: string; name: string }> {
 }
 
 test.describe("Project isolation — no default fallback", () => {
-	test("session created in project B has correct projectId and is filtered correctly", async () => {
+	test("session created in project B has correct projectId and is filtered correctly @smoke", async () => {
 		const defaultProject = await getDefaultProject();
 		const projectB = await registerProject(`isolation-B-${Date.now()}`);
 

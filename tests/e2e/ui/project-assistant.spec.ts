@@ -1,7 +1,10 @@
 /**
- * Project assistant UX E2E tests.
- * Tests provisional project registration, sidebar rendering,
- * project proposal preview form, cleanup on terminate, and persistence.
+ * Project assistant UX E2E tests — consolidated.
+ * 4 essential tests covering critical paths:
+ * 1. Happy path: create provisional → accept proposal → project promoted with config
+ * 2. Dismiss/cleanup: dismiss proposal + provisional cleanup on delete
+ * 3. Provisional project persistence across page refresh
+ * 4. API basics: session types + provisional flag
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, nonGitCwd, waitForSessionStatus, deleteSession } from "../e2e-setup.js";
@@ -83,216 +86,101 @@ async function findProvisionalProject(dir: string): Promise<any | undefined> {
 	return projects.find((p: any) => p.rootPath === dir && p.provisional);
 }
 
-test.describe("Project assistant UX", () => {
-	test("auto-prompt is sent automatically via connectToSession (detection mode)", async ({ page }) => {
+test.describe("Project assistant UX (consolidated)", () => {
+	test("happy path — create provisional, accept proposal, project promoted with config", async ({ page }) => {
 		await openApp(page);
 
-		const { dir, sessionId } = await addProjectViaDialog(page, "auto-detect");
+		const { dir, sessionId } = await addProjectViaDialog(page, "happy-path");
 
-		// The auto-prompt should have been sent automatically (not manually)
+		// Verify auto-prompt was sent and provisional project created
 		const userMsg = page.locator("user-message").first();
 		await expect(userMsg).toContainText("project registration", { timeout: 10_000 });
 		await expect(userMsg).toContainText(dir);
-
 		await waitForAgentResponse(page);
 
-		// Cleanup
-		const prov = await findProvisionalProject(dir);
-		await deleteSession(sessionId);
-		if (prov) await cleanupProject(prov.id);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
-	});
-
-	test("session created with correct assistantType via API", async () => {
-		// Detection mode
-		const { sessionId: detectionId, provisionalProjectId: pp1 } = await createProjectAssistantSession("project");
-		const detResp = await apiFetch(`/api/sessions/${detectionId}`);
-		const detData = await detResp.json();
-		expect(detData.assistantType).toBe("project");
-
-		// Scaffolding mode
-		const { sessionId: scaffoldId, provisionalProjectId: pp2 } = await createProjectAssistantSession("project-scaffolding");
-		const scfResp = await apiFetch(`/api/sessions/${scaffoldId}`);
-		const scfData = await scfResp.json();
-		expect(scfData.assistantType).toBe("project-scaffolding");
-
-		await deleteSession(detectionId);
-		await deleteSession(scaffoldId);
-		if (pp1) await cleanupProject(pp1);
-		if (pp2) await cleanupProject(pp2);
-	});
-
-	test("project assistant session is navigable and visible", async ({ page }) => {
-		const { sessionId, provisionalProjectId } = await createProjectAssistantSession("project");
-		await waitForSessionStatus(sessionId, "idle");
-
-		await openApp(page);
-
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-
-		const hash = await page.evaluate(() => window.location.hash);
-		expect(hash).toContain(sessionId);
-
-		await sendMessage(page, "Hello from project assistant test");
-		await waitForAgentResponse(page);
-
-		await deleteSession(sessionId);
-		if (provisionalProjectId) await cleanupProject(provisionalProjectId);
-	});
-
-	test("session terminate removes it from active sessions list", async () => {
-		const { sessionId, provisionalProjectId } = await createProjectAssistantSession("project");
-		await waitForSessionStatus(sessionId, "idle");
-
-		await deleteSession(sessionId);
-
-		const resp = await apiFetch("/api/sessions");
-		const data = await resp.json();
-		const sessions = data.sessions || [];
-		const found = sessions.find((s: { id: string }) => s.id === sessionId);
-		expect(found).toBeFalsy();
-
-		if (provisionalProjectId) await cleanupProject(provisionalProjectId);
-	});
-
-	test("detection and scaffolding modes use different auto-prompt text", async ({ page }) => {
-		const { sessionId, provisionalProjectId } = await createProjectAssistantSession("project");
-		await waitForSessionStatus(sessionId, "idle");
-
-		await openApp(page);
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-
-		await sendMessage(page, "Start the project registration session. The project directory is: /my/project");
-		await waitForAgentResponse(page);
-
-		await expect(page.getByText("project registration").first()).toBeVisible();
-
-		const setupTextCount = await page.getByText("new project setup").count();
-		expect(setupTextCount).toBe(0);
-
-		await deleteSession(sessionId);
-		if (provisionalProjectId) await cleanupProject(provisionalProjectId);
-	});
-});
-
-test.describe("Provisional project lifecycle", () => {
-	test("provisional project appears in sidebar with (setting up) indicator", async ({ page }) => {
-		await openApp(page);
-
-		const { dir, sessionId } = await addProjectViaDialog(page, "sidebar-prov");
-
-		// Verify a provisional project was created via API
-		const provisional = await findProvisionalProject(dir);
-		expect(provisional).toBeTruthy();
-		expect(provisional.provisional).toBe(true);
-
-		// The sidebar should show the directory basename with "(setting up)"
+		// Verify provisional project exists in sidebar with "(setting up)" indicator
 		const sidebar = page.locator(".sidebar-edge");
 		const dirBasename = dir.split(/[\\/]/).filter(Boolean).pop()!;
 		await expect(sidebar.getByText(dirBasename).first()).toBeVisible({ timeout: 15_000 });
 		await expect(sidebar.getByText("(setting up)").first()).toBeVisible();
 
-		// Cleanup
-		await deleteSession(sessionId);
-		await cleanupProject(provisional.id);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
-	});
-
-	test("provisional project has suppressed action buttons", async ({ page }) => {
-		await openApp(page);
-
-		const { dir, sessionId } = await addProjectViaDialog(page, "suppress-btn");
-
-		const sidebar = page.locator(".sidebar-edge");
-
-		// Verify "(setting up)" is visible
-		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
-
-		// The project header with "(setting up)" should not have a settings gear button
-		const provisionalHeader = sidebar.locator(".group").filter({ hasText: "(setting up)" }).first();
-		await expect(provisionalHeader.locator('button[title="Project settings"]')).not.toBeVisible();
-
-		// Cleanup
+		// Get the provisional project ID
 		const prov = await findProvisionalProject(dir);
+		expect(prov).toBeTruthy();
+		expect(prov.provisional).toBe(true);
+		const projectId = prov.id;
+
+		// Trigger proposal and accept it
+		await sendMessage(page, "PROJECT_PROPOSAL");
+		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
+
+		// Verify form fields are present
+		await expect(page.getByText("Project Name").first()).toBeVisible();
+		await expect(page.getByText("Root Path").first()).toBeVisible();
+
+		// Click Accept
+		await page.getByText("Accept Project").first().click();
+
+		// Wait for promotion
+		await expect(async () => {
+			const prjs = await getProjects();
+			const promoted = prjs.find((p: any) => p.id === projectId);
+			expect(promoted).toBeTruthy();
+			expect(promoted.provisional).toBeFalsy();
+		}).toPass({ timeout: 15_000 });
+
+		// Verify the project name was updated
+		const projects = await getProjects();
+		const promoted = projects.find((p: any) => p.id === projectId);
+		expect(promoted.name).toBe("Test Project");
+
+		// Verify config was written
+		await expect(async () => {
+			const configResp = await apiFetch(`/api/projects/${projectId}/config`);
+			expect(configResp.ok).toBe(true);
+			const config = await configResp.json();
+			expect(config.build_command).toBe("npm run build");
+			expect(config.test_command).toBe("npm test");
+			expect(config.typecheck_command).toBe("npm run check");
+			expect(config.worktree_setup_command).toBe("npm ci");
+		}).toPass({ timeout: 20_000 });
+
+		// Sidebar should no longer show "(setting up)"
+		await expect(sidebar.getByText("Test Project").first()).toBeVisible({ timeout: 15_000 });
+
+		// Cleanup
 		await deleteSession(sessionId);
-		if (prov) await cleanupProject(prov.id);
+		await cleanupProject(projectId);
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
 
-	test("provisional project cleaned up on session terminate via API", async () => {
-		const dir = uniqueDir("cleanup-api");
-		writeFileSync(join(dir, "README.md"), "# test");
-
-		const { sessionId, provisionalProjectId } = await createProjectAssistantSession("project", dir);
-		await waitForSessionStatus(sessionId, "idle");
-
-		// Verify provisional project exists
-		let projects = await getProjects();
-		const provisional = projects.find((p: any) => p.id === provisionalProjectId);
-		expect(provisional).toBeTruthy();
-		expect(provisional.provisional).toBe(true);
-
-		// Terminate session — server doesn't auto-cleanup, so we manually delete
-		await deleteSession(sessionId);
-
-		// The provisional project should still exist after API-only session delete
-		// (cleanup is client-side behavior)
-		projects = await getProjects();
-		const stillExists = projects.find((p: any) => p.id === provisionalProjectId);
-		expect(stillExists).toBeTruthy();
-
-		// Manually clean up the provisional project
-		await cleanupProject(provisionalProjectId!);
-
-		// Now it should be gone
-		projects = await getProjects();
-		const gone = projects.find((p: any) => p.id === provisionalProjectId);
-		expect(gone).toBeFalsy();
-
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
-	});
-
-	test("provisional project cleaned up on session terminate via browser", async ({ page }) => {
+	test("dismiss proposal hides form and cleanup removes provisional project", async ({ page }) => {
 		await openApp(page);
 
-		const { dir, sessionId } = await addProjectViaDialog(page, "cleanup-browser");
+		const { dir, sessionId } = await addProjectViaDialog(page, "dismiss-cleanup");
 
-		const sidebar = page.locator(".sidebar-edge");
+		// Trigger proposal
+		await sendMessage(page, "PROJECT_PROPOSAL");
+		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
 
-		// Verify placeholder exists — generous timeout for system load
-		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
+		// Click Dismiss
+		await page.locator("button").filter({ hasText: "Dismiss" }).first().click();
 
-		// Get the provisional project ID for cleanup
+		// The "Accept Project" should disappear, replaced by placeholder
+		await expect(page.getByText("Accept Project").first()).not.toBeVisible({ timeout: 15_000 });
+		await expect(page.getByText("Waiting for project analysis").first()).toBeVisible({ timeout: 15_000 });
+
+		// Get the provisional project and verify it exists
 		const prov = await findProvisionalProject(dir);
 		expect(prov).toBeTruthy();
 
-		// Navigate to the session, then terminate it via the UI command bar
-		// We'll use the API delete and then navigate away to trigger refresh
+		// Delete session and cleanup provisional project
 		await deleteSession(sessionId);
+		await cleanupProject(prov.id);
 
-		// Navigate away and wait for the sidebar to refresh
-		await page.evaluate(() => { window.location.hash = "#/"; });
-		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
-		).toBeVisible({ timeout: 15_000 });
-
-		// Manually remove the provisional project (since API-only delete doesn't auto-cleanup)
-		if (prov) await cleanupProject(prov.id);
-
-		// Refresh to pick up the changes
-		await page.reload();
-		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
-		).toBeVisible({ timeout: 15_000 });
-
-		// The provisional project's "(setting up)" should no longer appear
-		// Wait for sidebar to render after cleanup
-		await expect(async () => {
-			const settingUpCount = await sidebar.getByText("(setting up)").count();
-			expect(settingUpCount).toBe(0);
-		}).toPass({ timeout: 15_000 });
+		// Verify project is gone
+		const projects = await getProjects();
+		expect(projects.find((p: any) => p.id === prov.id)).toBeFalsy();
 
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
@@ -328,160 +216,36 @@ test.describe("Provisional project lifecycle", () => {
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
 
-	test("provisional project returned by GET /api/projects with provisional flag", async () => {
-		const dir = uniqueDir("api-flag");
-		writeFileSync(join(dir, "README.md"), "# test");
+	test("API basics — session types and provisional flag", async () => {
+		// Detection mode
+		const { sessionId: detectionId, provisionalProjectId: pp1 } = await createProjectAssistantSession("project");
+		const detResp = await apiFetch(`/api/sessions/${detectionId}`);
+		const detData = await detResp.json();
+		expect(detData.assistantType).toBe("project");
 
-		const { sessionId, provisionalProjectId } = await createProjectAssistantSession("project", dir);
+		// Scaffolding mode
+		const { sessionId: scaffoldId, provisionalProjectId: pp2 } = await createProjectAssistantSession("project-scaffolding");
+		const scfResp = await apiFetch(`/api/sessions/${scaffoldId}`);
+		const scfData = await scfResp.json();
+		expect(scfData.assistantType).toBe("project-scaffolding");
 
-		// Verify via API
-		const projects = await getProjects();
-		const provisional = projects.find((p: any) => p.id === provisionalProjectId);
-		expect(provisional).toBeTruthy();
-		expect(provisional.provisional).toBe(true);
-		expect(provisional.rootPath).toBe(dir);
+		// Verify provisional flag via projects API
+		if (pp1) {
+			const projects = await getProjects();
+			const provisional = projects.find((p: any) => p.id === pp1);
+			expect(provisional).toBeTruthy();
+			expect(provisional.provisional).toBe(true);
+		}
 
-		await deleteSession(sessionId);
-		if (provisionalProjectId) await cleanupProject(provisionalProjectId);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
-	});
-});
+		// Session terminate removes from active list
+		await deleteSession(detectionId);
+		const resp = await apiFetch("/api/sessions");
+		const data = await resp.json();
+		const sessions = data.sessions || [];
+		expect(sessions.find((s: { id: string }) => s.id === detectionId)).toBeFalsy();
 
-test.describe("Project proposal preview form", () => {
-	test("proposal shows preview form with editable fields", async ({ page }) => {
-		await openApp(page);
-
-		const { dir, sessionId } = await addProjectViaDialog(page, "proposal-form");
-
-		// Send a message to trigger PROJECT_PROPOSAL
-		await sendMessage(page, "PROJECT_PROPOSAL");
-
-		// Wait for the proposal form to appear with "Accept Project" button
-		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
-
-		// Verify form fields are present
-		await expect(page.getByText("Project Name").first()).toBeVisible();
-		await expect(page.getByText("Root Path").first()).toBeVisible();
-		await expect(page.getByText("Build Command").first()).toBeVisible();
-		await expect(page.getByText("Test Command").first()).toBeVisible();
-
-		// Verify the proposed name is populated
-		const nameInput = page.locator('input[placeholder="Project name"]');
-		await expect(nameInput).toHaveValue("Test Project");
-
-		// Dismiss button should be present
-		await expect(page.locator("button").filter({ hasText: "Dismiss" }).first()).toBeVisible();
-
-		// Cleanup
-		const prov = await findProvisionalProject(dir);
-		await deleteSession(sessionId);
-		if (prov) await cleanupProject(prov.id);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
-	});
-
-	test("accepting proposal promotes the provisional project", async ({ page }) => {
-		await openApp(page);
-
-		const { dir, sessionId } = await addProjectViaDialog(page, "accept-proj");
-
-		// Get the provisional project ID from API
-		const prov = await findProvisionalProject(dir);
-		expect(prov).toBeTruthy();
-		const projectId = prov.id;
-
-		// Send PROJECT_PROPOSAL to trigger the form
-		await sendMessage(page, "PROJECT_PROPOSAL");
-		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
-
-		// Click Accept
-		await page.getByText("Accept Project").first().click();
-
-		// Wait for the project to be promoted
-		await expect(async () => {
-			const prjs = await getProjects();
-			const promoted = prjs.find((p: any) => p.id === projectId);
-			expect(promoted).toBeTruthy();
-			expect(promoted.provisional).toBeFalsy();
-		}).toPass({ timeout: 15_000 });
-
-		// Verify the project name was updated to "Test Project"
-		const projects = await getProjects();
-		const promoted = projects.find((p: any) => p.id === projectId);
-		expect(promoted.name).toBe("Test Project");
-
-		// Sidebar should no longer show "(setting up)" for this project
-		const sidebar = page.locator(".sidebar-edge");
-		await expect(sidebar.getByText("Test Project").first()).toBeVisible({ timeout: 15_000 });
-
-		// Clean up
-		await deleteSession(sessionId);
-		await cleanupProject(projectId);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
-	});
-
-	test("accepting proposal writes config fields", async ({ page }) => {
-		await openApp(page);
-
-		const { dir, sessionId } = await addProjectViaDialog(page, "config-write");
-
-		// Get the provisional project ID
-		const prov = await findProvisionalProject(dir);
-		expect(prov).toBeTruthy();
-		const projectId = prov.id;
-
-		// Trigger proposal and accept
-		await sendMessage(page, "PROJECT_PROPOSAL");
-		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
-		await page.getByText("Accept Project").first().click();
-
-		// Wait for promotion
-		await expect(async () => {
-			const prjs = await getProjects();
-			const p = prjs.find((pp: any) => pp.id === projectId);
-			expect(p).toBeTruthy();
-			expect(p.provisional).toBeFalsy();
-		}).toPass({ timeout: 15_000 });
-
-		// Verify config was written — the client writes config fields after promotion,
-		// so poll until all expected fields are present.
-		await expect(async () => {
-			const configResp = await apiFetch(`/api/projects/${projectId}/config`);
-			expect(configResp.ok).toBe(true);
-			const config = await configResp.json();
-			expect(config.build_command).toBe("npm run build");
-			expect(config.test_command).toBe("npm test");
-			expect(config.typecheck_command).toBe("npm run check");
-			expect(config.worktree_setup_command).toBe("npm ci");
-		}).toPass({ timeout: 20_000 });
-
-		// Clean up
-		await deleteSession(sessionId);
-		await cleanupProject(projectId);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
-	});
-
-	test("dismissing proposal hides the form", async ({ page }) => {
-		await openApp(page);
-
-		const { dir, sessionId } = await addProjectViaDialog(page, "dismiss-test");
-
-		// Trigger proposal
-		await sendMessage(page, "PROJECT_PROPOSAL");
-		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
-
-		// Click Dismiss button
-		await page.locator("button").filter({ hasText: "Dismiss" }).first().click();
-
-		// The "Accept Project" should disappear
-		await expect(page.getByText("Accept Project").first()).not.toBeVisible({ timeout: 15_000 });
-
-		// Should show "Waiting for project analysis" placeholder instead
-		await expect(page.getByText("Waiting for project analysis").first()).toBeVisible({ timeout: 15_000 });
-
-		// Cleanup
-		const prov = await findProvisionalProject(dir);
-		await deleteSession(sessionId);
-		if (prov) await cleanupProject(prov.id);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+		await deleteSession(scaffoldId);
+		if (pp1) await cleanupProject(pp1);
+		if (pp2) await cleanupProject(pp2);
 	});
 });

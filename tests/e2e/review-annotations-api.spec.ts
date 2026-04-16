@@ -41,7 +41,7 @@ test.afterAll(async () => {
 });
 
 test.describe("Review Annotations API", () => {
-	test("RP-08 API: GET returns empty initially, POST adds annotation, GET returns it", async () => {
+	test("RP-08 API: GET returns empty initially, POST adds annotation, GET returns it @smoke", async () => {
 		// GET — should be empty
 		const getResp1 = await apiFetch(`/api/sessions/${sessionId}/review/annotations`);
 		expect(getResp1.status).toBe(200);

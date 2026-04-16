@@ -34,7 +34,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// CT-01-a: Send message and observe streaming lifecycle
 	// ---------------------------------------------------------------
 
-	test("CT-01-a: Send message and observe streaming lifecycle", async () => {
+	test("CT-01-a: Send message and observe streaming lifecycle @smoke", async () => {
 		s.begin(defineStory({
 			id: "CT-01-a",
 			title: "Send message and observe streaming lifecycle",
@@ -65,7 +65,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// CT-01-b: Abort mid-stream preserves partial response
 	// ---------------------------------------------------------------
 
-	test("CT-01-b: Abort mid-stream preserves partial response", async () => {
+	test("CT-01-b: Abort mid-stream preserves partial response @smoke", async () => {
 		s.begin(defineStory({
 			id: "CT-01-b",
 			title: "Abort mid-stream preserves partial response",

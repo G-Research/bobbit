@@ -1538,6 +1538,7 @@ const SETUP_CMD_LABELS: Record<string, string> = {
 	typecheck_command: "Type Check",
 	test_unit_command: "Test (Unit)",
 	test_e2e_command: "Test (E2E)",
+
 };
 
 async function saveSetupForm(): Promise<void> {
@@ -1796,6 +1797,7 @@ function projectProposalPanel() {
 		{ key: "typecheck_command", label: "Type Check Command" },
 		{ key: "test_unit_command", label: "Unit Test Command" },
 		{ key: "test_e2e_command", label: "E2E Test Command" },
+
 		{ key: "worktree_setup_command", label: "Worktree Setup Command" },
 	];
 

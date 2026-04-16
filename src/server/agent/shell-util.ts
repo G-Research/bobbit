@@ -89,6 +89,27 @@ export function getLoginShellConfig(): ShellConfig {
 }
 
 /**
+ * Choose shell for a verification command.
+ *
+ * Always returns plain bash — 25× faster than `--login` on Windows Git Bash
+ * (~150ms vs ~3700ms per spawn). Most commands (echo, node, npm, git, gh,
+ * docker, python, etc.) work fine in plain bash because their executables
+ * are on the system PATH that Node.js inherits.
+ *
+ * `--login` is only needed for tools installed via version managers like
+ * nvm, asdf, rbenv that modify PATH in `~/.bash_profile`. Projects using
+ * those should configure an explicit shell wrapper in their commands, e.g.:
+ *     "bash --login -c 'nvm use 20 && npm test'"
+ *
+ * Trade-off: verification commands that rely on .bash_profile-set PATH will
+ * fail, but those were rare and now surface as clear "command not found"
+ * errors instead of silently wasting ~3.5s per command step.
+ */
+export function getVerificationShell(_command: string): ShellConfig {
+	return getShellConfig();
+}
+
+/**
  * Resolve the `sh` executable path. On Windows returns Git Bash path
  * (or falls back to just "sh" which may be on PATH if Git for Windows is
  * installed). On Linux/macOS returns "sh".

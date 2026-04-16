@@ -21,7 +21,7 @@ test.describe.configure({ mode: "serial" });
 // ── GET /api/personalities ──
 
 test.describe("GET /api/personalities — seed personalities", () => {
-	test("returns all 10 seed personalities", async () => {
+	test("returns all 10 seed personalities @smoke", async () => {
 		const resp = await apiFetch("/api/personalities");
 		expect(resp.status).toBe(200);
 		const data = await resp.json();

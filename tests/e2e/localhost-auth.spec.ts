@@ -11,7 +11,7 @@
  * skipped entirely. The --auth flag is the only toggle, and we verify it works.
  */
 
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "./in-process-harness.js";
 import { base, readE2EToken } from "./e2e-setup.js";
 
 test.describe("Localhost auth flag", () => {

@@ -17,6 +17,7 @@ import type { GateStore } from "./gate-store.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import { checkGateDependencies } from "./gate-dependency-check.js";
 
 const execFile = promisify(execFileCb);
 
@@ -800,20 +801,10 @@ export class TeamManager {
 		const resolvedWorkflowGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
 		const spawnGateStore = this.resolveGateStore(goalId);
 		if (resolvedWorkflowGateId && goal.workflow && spawnGateStore) {
-			const wfGate = goal.workflow.gates.find(g => g.id === resolvedWorkflowGateId);
-			if (wfGate?.dependsOn?.length) {
-				const gateStates = spawnGateStore.getGatesForGoal(goalId);
-				const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
-				const notPassed = wfGate.dependsOn.filter(depId => !passedIds.has(depId));
-				if (notPassed.length > 0) {
-					const names = notPassed.map(id => {
-						const def = goal.workflow!.gates.find(g => g.id === id);
-						return def ? `${def.name} (${id})` : id;
-					});
-					throw new GateDependencyError(
-						`Upstream gate(s) not passed: ${names.join(", ")}. Cannot spawn agent for gate "${resolvedWorkflowGateId}" until dependencies are met.`
-					);
-				}
+			const gateStates = spawnGateStore.getGatesForGoal(goalId);
+			const depError = checkGateDependencies(resolvedWorkflowGateId, goal.workflow.gates, gateStates);
+			if (depError) {
+				throw new GateDependencyError(depError);
 			}
 		}
 
