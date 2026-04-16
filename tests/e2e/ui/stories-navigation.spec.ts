@@ -112,7 +112,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// assert — goal dashboard visible, URL correct
 		s.assert();
 		await s.url_contains(`/goal/${goal.id}`);
-		await expect(s.page.locator(".tab, .goal-dashboard, goal-dashboard").first())
+		await expect(s.page.locator(".dashboard-container").first())
 			.toBeVisible({ timeout: 10_000 });
 
 		// act — press back to return to session
@@ -148,7 +148,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
 		s.assert();
-		await expect(s.page.locator(".tab, .goal-dashboard, goal-dashboard").first())
+		await expect(s.page.locator(".dashboard-container").first())
 			.toBeVisible({ timeout: 10_000 });
 
 		// Deep link: settings
@@ -433,7 +433,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
 		s.assert();
-		await expect(s.page.locator(".tab, .goal-dashboard, goal-dashboard").first())
+		await expect(s.page.locator(".dashboard-container").first())
 			.toBeVisible({ timeout: 10_000 });
 
 		// act — goal → settings
