@@ -45,10 +45,10 @@ gates:
       - name: "Unit tests"
         type: command
         run: "{{project.test_unit_command}}"
-      - name: "E2E smoke tests"
+      - name: "E2E tests"
         type: command
-        timeout: 120
-        run: "{{project.test_e2e_smoke_command}}"
+        timeout: 180
+        run: "{{project.test_e2e_standard_command}}"
       - name: "Gap analysis"
         type: llm-review
         role: spec-auditor
