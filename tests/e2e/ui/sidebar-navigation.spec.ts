@@ -34,48 +34,8 @@ test.describe("Sidebar navigation", () => {
 		}
 	});
 
-	// ---------------------------------------------------------------
-	// SB-01: Project collapse/expand persists across reload
-	// ---------------------------------------------------------------
 	// SB-01 collapse persistence: covered by stories-sidebar.spec.ts via localStorage verification.
-	// This reload-based variant is unreliable under server load.
-	test.skip("SB-01: project section collapses and persists across reload", async ({ page }) => {
-		await openApp(page);
-
-		// Get the first project's info from the server-side API
-		const resp = await apiFetch("/api/projects");
-		const projects = await resp.json();
-		const projectInfo = projects[0] as { id: string; name: string };
-		expect(projectInfo).toBeTruthy();
-
-		// The project should be expanded by default — "Sessions" sub-header visible
-		const sessionsLabel = page.getByText("Sessions", { exact: true }).first();
-		await expect(sessionsLabel).toBeVisible({ timeout: 10_000 });
-
-		// Find the project header row — it's a div with cursor-pointer containing
-		// the chevron (▾ when expanded) and the project name
-		const projectHeader = page.locator(".sidebar-edge div.cursor-pointer").filter({
-			hasText: projectInfo.name,
-		}).first();
-		await expect(projectHeader).toBeVisible({ timeout: 5_000 });
-
-		// Click to collapse
-		await projectHeader.click();
-
-		// After collapse, "Sessions" sub-section should be hidden
-		await expect(sessionsLabel).not.toBeVisible({ timeout: 5_000 });
-
-		// Verify localStorage records the collapsed state (this IS the persistence mechanism)
-		await expect(async () => {
-			const stored = await page.evaluate(() => localStorage.getItem("bobbit-expanded-projects"));
-			expect(stored).toBeTruthy();
-			expect(stored!).toContain("collapsed");
-		}).toPass({ timeout: 5_000 });
-
-		// Expand again to restore state
-		await projectHeader.click();
-		await expect(page.getByText("Sessions", { exact: true }).first()).toBeVisible({ timeout: 5_000 });
-	});
+	// Removed: reload-based variant was redundant and unreliable under server load.
 
 	// ---------------------------------------------------------------
 	// SB-01: Click session to navigate and highlight

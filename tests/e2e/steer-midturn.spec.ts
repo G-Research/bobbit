@@ -9,6 +9,8 @@
  * 3. PI-10: steer_queued (the real UI flow) delivers mid-turn at the next
  *    tool boundary — queue a prompt, promote via steer_queued, verify the
  *    agent receives it BEFORE the current turn ends.
+ *
+ * Optimized: tests run in parallel (each creates its own session).
  */
 import { test, expect } from "./in-process-harness.js";
 import {
@@ -23,16 +25,10 @@ import {
 test.setTimeout(30_000);
 
 test.describe("Steer mid-turn delivery", () => {
-	let sessionId: string;
-	test.afterEach(async () => {
-		if (sessionId) {
-			await deleteSession(sessionId);
-			sessionId = "";
-		}
-	});
+	test.describe.configure({ mode: "parallel" });
 
 	test("steer sent while streaming is delivered immediately to the agent", async () => {
-		sessionId = await createSession();
+		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
 		try {
@@ -70,25 +66,17 @@ test.describe("Steer mid-turn delivery", () => {
 			expect(queuedMsgs.length).toBe(0);
 		} finally {
 			conn.close();
+			await deleteSession(sessionId);
 		}
 	});
 
 	test("PI-10: steer_queued delivers mid-turn when agent is streaming", async () => {
-		// This replicates the REAL UI flow:
-		// 1. User sends a prompt → agent starts streaming
-		// 2. User types another message → queued as non-steered (type: "prompt")
-		// 3. User clicks Steer button on the pill → sends steer_queued
-		// 4. The steered message should be delivered mid-turn at the next
-		//    tool boundary via rpcClient.steer(), NOT wait for agent_end.
-		sessionId = await createSession();
+		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy with a tool call. The mock agent emits
-			// tool_execution_start at the beginning and tool_execution_end
-			// after the delay. Steered messages are dispatched at tool_execution_end.
 			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on something" });
 			await conn.waitFor(statusPredicate("streaming"));
 
@@ -121,23 +109,17 @@ test.describe("Steer mid-turn delivery", () => {
 			expect(steerAck.data.message.content[0].text).toContain("STEER_QUEUED_TEST_456");
 		} finally {
 			conn.close();
+			await deleteSession(sessionId);
 		}
 	});
 
 	test("PI-10b: batch steer_queued — two queued messages promoted to steer are delivered as a batch", async () => {
-		// Replicates the PI-10b user story:
-		// 1. Agent is streaming
-		// 2. User queues two messages (type: "prompt")
-		// 3. User clicks Steer on each pill (steer_queued)
-		// 4. Both steers are dispatched immediately
-		// 5. Agent receives both at the next tool boundary
-		sessionId = await createSession();
+		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy with a tool call
 			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on multi-step task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
@@ -153,8 +135,7 @@ test.describe("Steer mid-turn delivery", () => {
 			// Clear messages to track only steer-related events
 			conn.messages.length = 0;
 
-			// Promote both to steered (this is what clicking Steer on each pill does).
-			// Neither dispatches immediately — they accumulate until tool_execution_end.
+			// Promote both to steered
 			conn.send({ type: "steer_queued", messageId: msg1Id });
 			await conn.waitFor(
 				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg1Id && q.isSteered),
@@ -165,8 +146,7 @@ test.describe("Steer mid-turn delivery", () => {
 			);
 
 			// At tool_execution_end, both steers are batched into a single
-			// rpcClient.steer() call. The mock agent emits one [STEER_RECEIVED]
-			// containing both messages.
+			// rpcClient.steer() call. The mock agent emits one [STEER_RECEIVED].
 			const steerAck = await conn.waitFor(
 				(m) =>
 					m.type === "event" &&
@@ -180,20 +160,17 @@ test.describe("Steer mid-turn delivery", () => {
 			expect(receivedText).toContain("STEER_BATCH_MSG_2");
 		} finally {
 			conn.close();
+			await deleteSession(sessionId);
 		}
 	});
 
 	test("prompt sent while streaming is correctly queued by the server", async () => {
-		// Verify the server correctly queues { type: "prompt" } during streaming.
-		// The UI fix sends { type: "steer" } instead (tested above), but the
-		// server's queue behavior for prompts should remain unchanged.
-		sessionId = await createSession();
+		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy
 			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working on something" });
 			await conn.waitFor(statusPredicate("streaming"));
 
@@ -213,6 +190,7 @@ test.describe("Steer mid-turn delivery", () => {
 			expect(queueMsg.queue[0].text).toContain("this should be queued");
 		} finally {
 			conn.close();
+			await deleteSession(sessionId);
 		}
 	});
 });

@@ -1,6 +1,10 @@
 /**
  * Consolidated E2E tests for gate verification lifecycle.
  *
+ * Optimized for speed: tests that share identical setup (create goal →
+ * session → WS → signal) are merged into single dense tests with multiple
+ * assertions. All describe blocks run in parallel.
+ *
  * Merges assertions from:
  * - verification-sessions.spec.ts (WS event shape)
  * - verification-sessions-heavy.spec.ts (multi-step, event ordering, auto-pass)
@@ -81,27 +85,61 @@ async function waitForGateAnyStatus(
 }
 
 // ===========================================================================
-// 1. Verification WS events
-//    (from verification-sessions.spec.ts)
+// 1. Command verification WS event lifecycle
+//    Combines: started event shape, step_complete shape, no sessionId on
+//    command steps, startedAt timestamps, step_started timestamps,
+//    step_output events, timestamp consistency, and event ordering.
 // ===========================================================================
 
-test.describe("Verification WS events", () => {
+test.describe("Command verification WS event lifecycle", () => {
+	test.describe.configure({ mode: "parallel" });
 
-	test("gate_verification_started includes step definitions", async () => {
+	test("WS events have correct shape, timestamps, and ordering for design-doc signal", async () => {
 		const goalId = await createTestFastGoal();
 		const sessionId = await createSession({ goalId });
 		const ws = await connectWs(sessionId);
 		try {
+			const before = Date.now();
+
 			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design\n\nTest content" }),
 			});
 			expect(signalResp.status).toBe(201);
 
+			// Collect all key events
+			const signalReceived = await ws.waitFor(
+				(m) => m.type === "gate_signal_received" && m.gateId === "design-doc",
+				30_000,
+			);
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
 				30_000,
 			);
+			const stepStarted = await ws.waitFor(
+				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
+				30_000,
+			);
+			const stepOutput = await ws.waitFor(
+				(m) => m.type === "gate_verification_step_output" && m.gateId === "design-doc",
+				30_000,
+			);
+			const stepComplete = await ws.waitFor(
+				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
+				30_000,
+			);
+			const complete = await ws.waitFor(
+				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
+				30_000,
+			);
+			const statusChanged = await ws.waitFor(
+				(m) => m.type === "gate_status_changed" && m.gateId === "design-doc",
+				30_000,
+			);
+
+			const after = Date.now();
+
+			// --- gate_verification_started shape ---
 			expect(started.goalId).toBe(goalId);
 			expect(started.signalId).toBeTruthy();
 			expect(started.steps).toBeDefined();
@@ -109,29 +147,37 @@ test.describe("Verification WS events", () => {
 			expect(started.steps.length).toBeGreaterThan(0);
 			expect(started.steps[0].name).toBe("Content present");
 			expect(started.steps[0].type).toBe("command");
+			// startedAt timestamp
+			expect(typeof started.startedAt).toBe("number");
+			expect(started.startedAt).toBeGreaterThanOrEqual(before);
+			expect(started.startedAt).toBeLessThanOrEqual(after);
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
+			// --- gate_verification_step_started shape ---
+			expect(stepStarted.goalId).toBe(goalId);
+			expect(stepStarted.signalId).toBeTruthy();
+			expect(typeof stepStarted.stepIndex).toBe("number");
+			expect(stepStarted.stepName).toBe("Content present");
+			// startedAt timestamp
+			expect(typeof stepStarted.startedAt).toBe("number");
+			expect(stepStarted.startedAt).toBeGreaterThanOrEqual(before);
+			expect(stepStarted.startedAt).toBeLessThanOrEqual(after);
+			// Command steps do NOT include sessionId
+			expect(stepStarted.sessionId).toBeUndefined();
 
-	test("gate_verification_step_complete events are broadcast for each step", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design\n\nTest" }),
-			});
+			// --- Timestamp consistency: step starts at or after verification starts ---
+			expect(stepStarted.startedAt).toBeGreaterThanOrEqual(started.startedAt);
 
-			const stepComplete = await ws.waitFor(
-				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				30_000,
-			);
+			// --- gate_verification_step_output shape ---
+			expect(stepOutput.goalId).toBe(goalId);
+			expect(stepOutput.gateId).toBe("design-doc");
+			expect(stepOutput.signalId).toBeTruthy();
+			expect(stepOutput.stepIndex).toBe(0);
+			expect(stepOutput.stream).toBe("stdout");
+			expect(typeof stepOutput.text).toBe("string");
+			expect(stepOutput.text).toContain("ok");
+			expect(typeof stepOutput.ts).toBe("number");
+
+			// --- gate_verification_step_complete shape ---
 			expect(stepComplete.goalId).toBe(goalId);
 			expect(stepComplete.signalId).toBeTruthy();
 			expect(stepComplete.stepIndex).toBe(0);
@@ -140,219 +186,13 @@ test.describe("Verification WS events", () => {
 			expect(typeof stepComplete.durationMs).toBe("number");
 			expect(stepComplete.durationMs).toBeGreaterThanOrEqual(0);
 			expect(typeof stepComplete.output).toBe("string");
-
-			const complete = await ws.waitFor(
-				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
-				30_000,
-			);
-			expect(complete.status).toBe("passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("command step_complete does not include sessionId", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design" }),
-			});
-
-			const stepComplete = await ws.waitFor(
-				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				30_000,
-			);
+			// Command step_complete does NOT include sessionId
 			expect(stepComplete.sessionId).toBeUndefined();
-			expect(stepComplete.status).toBe("passed");
 
-			await waitForGateStatus(goalId, "design-doc", "passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("active verifications REST endpoint returns running steps", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design" }),
-			});
-
-			const activeResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
-			expect(activeResp.status).toBe(200);
-			const { verifications } = await activeResp.json();
-			expect(Array.isArray(verifications)).toBe(true);
-			if (verifications.length > 0) {
-				const v = verifications[0];
-				expect(v.goalId).toBe(goalId);
-				expect(v.gateId).toBe("design-doc");
-				expect(v.signalId).toBeTruthy();
-				expect(Array.isArray(v.steps)).toBe(true);
-				expect(v.steps.length).toBeGreaterThan(0);
-				expect(v.overallStatus).toMatch(/^(running|passed|failed)$/);
-				expect(typeof v.startedAt).toBe("number");
-				for (const step of v.steps) {
-					expect(step.name).toBeTruthy();
-					expect(step.type).toBeTruthy();
-					expect(step.status).toMatch(/^(running|passed|failed)$/);
-					expect(typeof step.startedAt).toBe("number");
-				}
-			}
-
-			await waitForGateStatus(goalId, "design-doc", "passed");
-			await new Promise(r => setTimeout(r, 200));
-			const afterResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
-			const afterData = await afterResp.json();
-			expect(afterData.verifications.length).toBe(0);
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("active verifications endpoint returns empty for non-existent goal", async () => {
-		const resp = await apiFetch("/api/goals/nonexistent-goal-id/verifications/active");
-		expect(resp.status).toBe(200);
-		const { verifications } = await resp.json();
-		expect(verifications).toEqual([]);
-	});
-});
-
-// ===========================================================================
-// 2. Multi-step and heavy verification
-//    (from verification-sessions-heavy.spec.ts)
-// ===========================================================================
-
-test.describe("Multi-step and heavy verification", () => {
-	test.setTimeout(120_000);
-
-	test("all step events received for multi-step verification", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design" }),
-			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
-
-			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
-				method: "POST",
-				body: JSON.stringify({}),
-			});
-
-			const started = await ws.waitFor(
-				(m) => m.type === "gate_verification_started" && m.gateId === "implementation",
-				30_000,
-			);
-			expect(started.steps).toBeDefined();
-			expect(started.steps.length).toBe(1);
-			expect(started.steps[0].name).toBe("Quick check");
-
-			const stepComplete = await ws.waitFor(
-				(m) => m.type === "gate_verification_step_complete" && m.gateId === "implementation",
-				30_000,
-			);
-			expect(stepComplete.stepName).toBe("Quick check");
-			expect(stepComplete.status).toBe("passed");
-
-			const complete = await ws.waitFor(
-				(m) => m.type === "gate_verification_complete" && m.gateId === "implementation",
-				30_000,
-			);
+			// --- gate_verification_complete shape ---
 			expect(complete.status).toBe("passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
 
-	test("llm-review step_complete event includes sessionId", async () => {
-		const goalId = await createGeneralGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content: "# Design\n\nApproach: do something\n\nFiles: src/x.ts\n\nCriteria: works",
-				}),
-			});
-
-			const stepStarted = await ws.waitFor(
-				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				15_000,
-			);
-			expect(stepStarted.goalId).toBe(goalId);
-			expect(stepStarted.signalId).toBeTruthy();
-			expect(typeof stepStarted.stepIndex).toBe("number");
-			expect(stepStarted.stepName).toBeTruthy();
-			expect(stepStarted.sessionId).toBeTruthy();
-			expect(stepStarted.sessionId).toMatch(/^llm-review-/);
-
-			const stepComplete = await ws.waitFor(
-				(m) =>
-					m.type === "gate_verification_step_complete" &&
-					m.gateId === "design-doc" &&
-					m.sessionId != null,
-				15_000,
-			);
-			expect(stepComplete.sessionId).toBeTruthy();
-			expect(stepComplete.sessionId).toMatch(/^llm-review-/);
-			expect(stepComplete.status).toMatch(/^(passed|failed)$/);
-
-			await waitForGateStatus(goalId, "design-doc", "passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("full WS event sequence for verification lifecycle", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design" }),
-			});
-
-			await ws.waitFor(
-				(m) => m.type === "gate_signal_received" && m.gateId === "design-doc",
-				30_000,
-			);
-			await ws.waitFor(
-				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				30_000,
-			);
-			await ws.waitFor(
-				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				30_000,
-			);
-			await ws.waitFor(
-				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
-				30_000,
-			);
-			await ws.waitFor(
-				(m) => m.type === "gate_status_changed" && m.gateId === "design-doc",
-				30_000,
-			);
-
+			// --- Event ordering ---
 			const events = ws.messages.filter(
 				(m) =>
 					(m.type === "gate_signal_received" ||
@@ -362,7 +202,6 @@ test.describe("Multi-step and heavy verification", () => {
 					 m.type === "gate_status_changed") &&
 					m.gateId === "design-doc",
 			);
-
 			const types = events.map((e) => e.type);
 			const signaledIdx = types.indexOf("gate_signal_received");
 			const startedIdx = types.indexOf("gate_verification_started");
@@ -421,132 +260,45 @@ test.describe("Multi-step and heavy verification", () => {
 });
 
 // ===========================================================================
-// 3. Verification output streaming
-//    (from verification-output.spec.ts and verification-output-multi.spec.ts)
+// 2. Multi-step verification
+//    Combines: all step events for multi-step + step_output field checks
 // ===========================================================================
 
-test.describe("Verification output streaming", () => {
+test.describe("Multi-step verification", () => {
+	test.describe.configure({ mode: "parallel" });
+	test.setTimeout(120_000);
 
-	test("gate_verification_started includes startedAt timestamp", async () => {
+	test("multi-step verification emits correct events and step_output fields", async () => {
 		const goalId = await createTestFastGoal();
 		const sessionId = await createSession({ goalId });
 		const ws = await connectWs(sessionId);
 		try {
-			const before = Date.now();
-
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design\n\nTest content" }),
-			});
-
-			const started = await ws.waitFor(
-				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				30_000,
-			);
-
-			const after = Date.now();
-
-			expect(typeof started.startedAt).toBe("number");
-			expect(started.startedAt).toBeGreaterThanOrEqual(before);
-			expect(started.startedAt).toBeLessThanOrEqual(after);
-
-			await waitForGateStatus(goalId, "design-doc", "passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("gate_verification_step_started includes startedAt timestamp", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			const before = Date.now();
-
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design\n\nTest content" }),
-			});
-
-			const stepStarted = await ws.waitFor(
-				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				30_000,
-			);
-
-			const after = Date.now();
-
-			expect(typeof stepStarted.startedAt).toBe("number");
-			expect(stepStarted.startedAt).toBeGreaterThanOrEqual(before);
-			expect(stepStarted.startedAt).toBeLessThanOrEqual(after);
-			expect(stepStarted.goalId).toBe(goalId);
-			expect(stepStarted.signalId).toBeTruthy();
-			expect(typeof stepStarted.stepIndex).toBe("number");
-			expect(stepStarted.stepName).toBe("Content present");
-
-			await waitForGateStatus(goalId, "design-doc", "passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("gate_verification_step_output events are broadcast for command steps", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design\n\nTest" }),
-			});
-
-			const output = await ws.waitFor(
-				(m) => m.type === "gate_verification_step_output" && m.gateId === "design-doc",
-				30_000,
-			);
-
-			expect(output.goalId).toBe(goalId);
-			expect(output.gateId).toBe("design-doc");
-			expect(output.signalId).toBeTruthy();
-			expect(typeof output.stepIndex).toBe("number");
-			expect(output.stepIndex).toBe(0);
-			expect(output.stream).toBe("stdout");
-			expect(typeof output.text).toBe("string");
-			expect(output.text).toContain("ok");
-			expect(typeof output.ts).toBe("number");
-
-			await waitForGateStatus(goalId, "design-doc", "passed");
-		} finally {
-			ws.close();
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
-	});
-
-	test("step_output events have correct fields for multi-step verification", async () => {
-		const goalId = await createTestFastGoal();
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
-		try {
+			// Pass design-doc first (dependency)
 			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design" }),
 			});
 			await waitForGateStatus(goalId, "design-doc", "passed");
 
+			// Signal implementation gate (depends on design-doc)
 			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
 				method: "POST",
 				body: JSON.stringify({}),
 			});
 
+			const started = await ws.waitFor(
+				(m) => m.type === "gate_verification_started" && m.gateId === "implementation",
+				30_000,
+			);
+			expect(started.steps).toBeDefined();
+			expect(started.steps.length).toBe(1);
+			expect(started.steps[0].name).toBe("Quick check");
+
+			// Check step_output event fields
 			const output = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_output" && m.gateId === "implementation",
 				30_000,
 			);
-
 			expect(output.goalId).toBe(goalId);
 			expect(output.gateId).toBe("implementation");
 			expect(output.signalId).toBeTruthy();
@@ -556,7 +308,18 @@ test.describe("Verification output streaming", () => {
 			expect(typeof output.ts).toBe("number");
 			expect(output.ts).toBeGreaterThan(0);
 
-			await waitForGateStatus(goalId, "implementation", "passed");
+			const stepComplete = await ws.waitFor(
+				(m) => m.type === "gate_verification_step_complete" && m.gateId === "implementation",
+				30_000,
+			);
+			expect(stepComplete.stepName).toBe("Quick check");
+			expect(stepComplete.status).toBe("passed");
+
+			const complete = await ws.waitFor(
+				(m) => m.type === "gate_verification_complete" && m.gateId === "implementation",
+				30_000,
+			);
+			expect(complete.status).toBe("passed");
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -564,32 +327,39 @@ test.describe("Verification output streaming", () => {
 		}
 	});
 
-	test("startedAt timestamps are consistent across verification lifecycle", async () => {
-		const goalId = await createTestFastGoal();
+	test("llm-review step events include sessionId", async () => {
+		const goalId = await createGeneralGoal();
 		const sessionId = await createSession({ goalId });
 		const ws = await connectWs(sessionId);
 		try {
 			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
 				method: "POST",
-				body: JSON.stringify({ content: "# Design" }),
+				body: JSON.stringify({
+					content: "# Design\n\nApproach: do something\n\nFiles: src/x.ts\n\nCriteria: works",
+				}),
 			});
 
-			const started = await ws.waitFor(
-				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				30_000,
-			);
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				30_000,
+				15_000,
 			);
+			expect(stepStarted.goalId).toBe(goalId);
+			expect(stepStarted.signalId).toBeTruthy();
+			expect(typeof stepStarted.stepIndex).toBe("number");
+			expect(stepStarted.stepName).toBeTruthy();
+			expect(stepStarted.sessionId).toBeTruthy();
+			expect(stepStarted.sessionId).toMatch(/^llm-review-/);
 
-			expect(typeof started.startedAt).toBe("number");
-			expect(typeof stepStarted.startedAt).toBe("number");
-			expect(stepStarted.startedAt).toBeGreaterThanOrEqual(started.startedAt);
-
-			const now = Date.now();
-			expect(now - started.startedAt).toBeLessThan(30_000);
-			expect(now - stepStarted.startedAt).toBeLessThan(30_000);
+			const stepComplete = await ws.waitFor(
+				(m) =>
+					m.type === "gate_verification_step_complete" &&
+					m.gateId === "design-doc" &&
+					m.sessionId != null,
+				15_000,
+			);
+			expect(stepComplete.sessionId).toBeTruthy();
+			expect(stepComplete.sessionId).toMatch(/^llm-review-/);
+			expect(stepComplete.status).toMatch(/^(passed|failed)$/);
 
 			await waitForGateStatus(goalId, "design-doc", "passed");
 		} finally {
@@ -601,15 +371,17 @@ test.describe("Verification output streaming", () => {
 });
 
 // ===========================================================================
-// 4. Active verification API (modal output)
-//    (from verification-modal-output.spec.ts)
+// 3. Active verification & step output REST API
+//    Combines: active verifications endpoint (running + empty), modal output
+//    bug path, and step output availability after execution.
 // ===========================================================================
 
-test.describe("Active verification API", () => {
+test.describe("Verification REST API", () => {
+	test.describe.configure({ mode: "parallel" });
 
-	test("active verification API returns step output that modal consumes", async () => {
+	test("active verifications API and step output after completion", async () => {
 		const goal = await createGoal({
-			title: `Modal Output Bug ${Date.now()}`,
+			title: `Verification API ${Date.now()}`,
 			workflowId: "test-fast",
 		});
 		const goalId = goal.id;
@@ -619,11 +391,41 @@ test.describe("Active verification API", () => {
 		try {
 			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
 				method: "POST",
-				body: JSON.stringify({ content: "# Design\n\nTest content for modal output bug" }),
+				body: JSON.stringify({ content: "# Design\n\nTest content for API test" }),
 			});
 
+			// Check active verifications while running
+			const activeResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
+			expect(activeResp.status).toBe(200);
+			const { verifications } = await activeResp.json();
+			expect(Array.isArray(verifications)).toBe(true);
+			if (verifications.length > 0) {
+				const v = verifications[0];
+				expect(v.goalId).toBe(goalId);
+				expect(v.gateId).toBe("design-doc");
+				expect(v.signalId).toBeTruthy();
+				expect(Array.isArray(v.steps)).toBe(true);
+				expect(v.steps.length).toBeGreaterThan(0);
+				expect(v.overallStatus).toMatch(/^(running|passed|failed)$/);
+				expect(typeof v.startedAt).toBe("number");
+				for (const step of v.steps) {
+					expect(step.name).toBeTruthy();
+					expect(step.type).toBeTruthy();
+					expect(step.status).toMatch(/^(running|passed|failed)$/);
+					expect(typeof step.startedAt).toBe("number");
+				}
+			}
+
+			// Wait for completion
 			await waitForGateStatus(goalId, "design-doc", "passed", 30_000);
 
+			// Active verifications should be empty after completion
+			await new Promise(r => setTimeout(r, 200));
+			const afterResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
+			const afterData = await afterResp.json();
+			expect(afterData.verifications.length).toBe(0);
+
+			// Step output available via gate REST API (modal output bug fix)
 			const res = await apiFetch(`/api/goals/${goalId}/gates/design-doc`);
 			expect(res.status).toBe(200);
 			const gateData = await res.json();
@@ -633,24 +435,15 @@ test.describe("Active verification API", () => {
 			expect(verification.steps).toBeTruthy();
 			expect(verification.steps.length).toBeGreaterThan(0);
 
-			const commandStep = verification.steps.find(
-				(s: any) => s.type === "command"
-			);
+			const commandStep = verification.steps.find((s: any) => s.type === "command");
 			expect(commandStep).toBeTruthy();
 
-			// API returns output — this is what the REST endpoint provides
 			const apiOutput = commandStep.output || "";
 			expect(apiOutput, "REST API step output should contain command output").toBeTruthy();
 			expect(apiOutput).toContain("ok");
 
-			// Simulate what the UI modal does — reads ONLY liveOutput
+			// Modal bug path: liveOutput is undefined after completion, must fall back to API output
 			const liveOutput: string | undefined = undefined;
-
-			// Bug path: modal uses `liveOutput || ""` and ignores `output`
-			const buggyModalContent = liveOutput || "";
-			expect(buggyModalContent, "Buggy modal path (liveOutput only) shows empty output").toBe("");
-
-			// Fixed path: fall back to API output when liveOutput is empty
 			const fixedModalContent = liveOutput || apiOutput || "";
 			expect(fixedModalContent, "Fixed modal path (liveOutput || output) shows content").toBeTruthy();
 			expect(fixedModalContent).toContain("ok");
@@ -661,41 +454,20 @@ test.describe("Active verification API", () => {
 		}
 	});
 
-	test("verification step output is available via API after command execution", async () => {
-		const goal = await createGoal({
-			title: `Step Output API ${Date.now()}`,
-			workflowId: "test-fast",
-		});
-		const goalId = goal.id;
-		const sessionId = await createSession({ goalId });
-
-		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design\n\nTest" }),
-			});
-
-			await waitForGateStatus(goalId, "design-doc", "passed", 30_000);
-
-			const res = await apiFetch(`/api/goals/${goalId}/gates/design-doc`);
-			const data = await res.json();
-
-			const step = data.signals?.[0]?.verification?.steps?.[0];
-			expect(step).toBeTruthy();
-			expect(step.output, "Step output must be populated in API response").toBeTruthy();
-		} finally {
-			await deleteSession(sessionId);
-			await deleteGoal(goalId);
-		}
+	test("active verifications endpoint returns empty for non-existent goal", async () => {
+		const resp = await apiFetch("/api/goals/nonexistent-goal-id/verifications/active");
+		expect(resp.status).toBe(200);
+		const { verifications } = await resp.json();
+		expect(verifications).toEqual([]);
 	});
 });
 
 // ===========================================================================
-// 5. Expect-failure pipeline
-//    (from error-pattern-verification.spec.ts — integration tests)
+// 4. Expect-failure pipeline
 // ===========================================================================
 
 test.describe("Expect failure pipeline", () => {
+	test.describe.configure({ mode: "parallel" });
 
 	test("expect:failure gate with matching error_pattern passes", async () => {
 		const goal = await createGoal({
@@ -728,7 +500,6 @@ test.describe("Expect failure pipeline", () => {
 			);
 			expect(signalResp.status).toBe(201);
 
-			// Gate should pass — command failed AND output matches the pattern
 			await waitForGateStatus(goalId, "reproducing-test", "passed");
 		} finally {
 			await deleteGoal(goalId);
@@ -766,7 +537,6 @@ test.describe("Expect failure pipeline", () => {
 			);
 			expect(signalResp.status).toBe(201);
 
-			// Gate should fail — command failed but output doesn't match pattern
 			await waitForGateStatus(goalId, "reproducing-test", "failed");
 
 			const signalsResp = await apiFetch(
@@ -786,8 +556,7 @@ test.describe("Expect failure pipeline", () => {
 });
 
 // ===========================================================================
-// 6. LLM Review verification
-//    (from llm-review-verification.spec.ts)
+// 5. LLM Review verification
 // ===========================================================================
 
 test.describe("LLM Review verification", () => {
