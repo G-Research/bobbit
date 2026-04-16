@@ -21,12 +21,13 @@ function modelRecencyRank(id: string): number {
 	const s = id.toLowerCase();
 
 	// ── Anthropic Claude ──
+	if (s.includes("claude-opus-4-7") || s.includes("claude-opus-4.7")) return 102;
 	if (s.includes("claude-opus-4-6") || s.includes("claude-opus-4.6")) return 100;
 	if (s.includes("claude-sonnet-4-6") || s.includes("claude-sonnet-4.6")) return 99;
 	if (s.includes("claude-opus-4-5") || s.includes("claude-opus-4.5")) return 98;
 	if (s.includes("claude-sonnet-4-5") || s.includes("claude-sonnet-4.5")) return 97;
 	if (s.includes("claude-opus-4-1") || s.includes("claude-opus-4.1")) return 96;
-	if (s.includes("claude-opus-4") && !s.includes("4-1") && !s.includes("4.1") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 95;
+	if (s.includes("claude-opus-4") && !s.includes("4-1") && !s.includes("4.1") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6") && !s.includes("4-7") && !s.includes("4.7")) return 95;
 	if (s.includes("claude-sonnet-4") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 94;
 	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
 	if (s.includes("claude-3-7-sonnet") || s.includes("claude-3.7-sonnet")) return 80;
