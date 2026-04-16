@@ -17,6 +17,24 @@ export default defineConfig({
 	fullyParallel: true,
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
+	// Default artifact / launch settings. Chromium's GPU process, prerenderer,
+	// background timers, and BFCache consume ~1 core per worker when idle.
+	// Disabling them has no effect on test semantics for headless runs.
+	use: {
+		video: "off",
+		trace: "off",
+		screenshot: "off",
+		launchOptions: {
+			args: [
+				"--disable-gpu",
+				"--disable-dev-shm-usage",
+				"--disable-background-timer-throttling",
+				"--disable-renderer-backgrounding",
+				"--disable-backgrounding-occluded-windows",
+				"--disable-features=TranslateUI,BackForwardCache,CalculateNativeWinOcclusion",
+			],
+		},
+	},
 	projects: [
 		{
 			name: "api",

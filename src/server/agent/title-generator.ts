@@ -301,6 +301,9 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
  * Returns null if generation fails.
  */
 export async function generateSessionTitle(messages: any[], options?: TitleGenOptions): Promise<string | null> {
+	// Skip title generation entirely when tests/CI opt out — avoids real
+	// outbound calls to api.anthropic.com for every prompted test.
+	if (process.env.BOBBIT_SKIP_TITLE_GEN) return null;
 	const preview = extractConversationPreview(messages);
 	if (!preview.trim()) {
 		console.error("[title-gen] No conversation content to summarise");
@@ -468,6 +471,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<strin
  * Returns null if generation fails.
  */
 export async function generateGoalSummaryTitle(goalTitle: string, options?: TitleGenOptions): Promise<string | null> {
+	if (process.env.BOBBIT_SKIP_TITLE_GEN) return null;
 	if (!goalTitle.trim()) {
 		console.error("[title-gen] No goal title to summarise");
 		return null;

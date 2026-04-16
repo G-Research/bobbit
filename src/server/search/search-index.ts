@@ -211,9 +211,12 @@ export class SearchIndex {
 		const staffEntries = effectiveStaffStore ? effectiveStaffStore.getAll() : [];
 		let messageCount = 0;
 
-		console.log(
-			`[search] Rebuilding index: ${goals.length} goals, ${sessions.length} sessions, ${staffEntries.length} staff...`,
-		);
+		const isEmpty = goals.length === 0 && sessions.length === 0 && staffEntries.length === 0;
+		if (!isEmpty) {
+			console.log(
+				`[search] Rebuilding index: ${goals.length} goals, ${sessions.length} sessions, ${staffEntries.length} staff...`,
+			);
+		}
 
 		const rebuild = this.db.transaction(() => {
 			// Clear everything
@@ -279,9 +282,11 @@ export class SearchIndex {
 
 		rebuild();
 		this._needsRebuild = false;
-		console.log(
-			`[search] Index rebuilt: ${goals.length} goals, ${sessions.length} sessions, ${messageCount} messages, ${staffEntries.length} staff`,
-		);
+		if (!isEmpty) {
+			console.log(
+				`[search] Index rebuilt: ${goals.length} goals, ${sessions.length} sessions, ${messageCount} messages, ${staffEntries.length} staff`,
+			);
+		}
 	}
 
 	// ── Search ─────────────────────────────────────────────────────

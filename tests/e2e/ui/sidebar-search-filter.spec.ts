@@ -74,18 +74,27 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await openApp(page);
 
 		const sidebar = page.locator(".sidebar-edge");
-		await expect(sidebar.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 10_000 });
+		// Match multiple elements (the span + its wrapper div both contain the text).
+		// Use .first() consistently so later click + assertions don't hit strict mode.
+		const alphaRow = sidebar.getByText("AlphaUniqueSearch").first();
+		await expect(alphaRow).toBeVisible({ timeout: 10_000 });
 
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.click();
 		await searchInput.fill("AlphaUnique");
-		await page.waitForTimeout(400);
+		// Wait for the debounced state update + sidebar re-render to settle
+		// (SearchBox debounces 200ms before propagating to state.searchQuery).
+		await expect(searchInput).toHaveValue("AlphaUnique");
+		await expect(alphaRow).toBeVisible();
+		await expect(sidebar.getByText("BravoUniqueSearch").first()).not.toBeVisible();
 
 		// Click the filtered session row
-		await sidebar.getByText("AlphaUniqueSearch").click();
+		await alphaRow.click();
 
-		// Query should persist in the input
-		await expect(searchInput).toHaveValue("AlphaUnique");
+		// Query should persist in the input. Use longer timeout + auto-retry
+		// because the click triggers navigation + renderApp cycles that can
+		// transiently reset the input before settling.
+		await expect(searchInput).toHaveValue("AlphaUnique", { timeout: 5_000 });
 	});
 
 	test("SB-24: goal visible when child session matches", async ({ page }) => {
@@ -219,6 +228,11 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		// Verify the search input is visible (proves sidebar is expanded)
 		const searchInput = page.locator("input[data-search]");
 		await expect(searchInput).toBeVisible({ timeout: 3_000 });
+
+		// Click the body to ensure the document has focus before dispatching
+		// keyboard shortcuts. Without this, a freshly-loaded page can drop the
+		// first key event on Windows headless Chromium.
+		await page.locator("body").click();
 
 		// Press Ctrl+[
 		await page.keyboard.press("Control+[");

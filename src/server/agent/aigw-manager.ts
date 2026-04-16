@@ -385,6 +385,11 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 		return true;
 	}
 
+	// Skip network probing + local-gateway auto-discovery when tests/CI opt out.
+	// Tests that exercise the /api/aigw/* endpoints configure the gateway
+	// explicitly and don't rely on the startup probe.
+	if (process.env.BOBBIT_SKIP_AIGW_DISCOVERY) return false;
+
 	// Check internet
 	const hasInternet = await checkInternetAvailable();
 	if (hasInternet) {

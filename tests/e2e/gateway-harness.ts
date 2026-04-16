@@ -1,19 +1,28 @@
 /**
- * Worker-scoped gateway fixture for E2E tests.
+ * Worker-scoped gateway fixture for browser E2E tests.
  *
- * Each Playwright worker spawns its own isolated gateway instance with:
- *   - A unique port (derived from worker index)
+ * Runs the gateway IN-PROCESS (same strategy as in-process-harness.ts) and
+ * additionally serves the built UI from dist/ui so Playwright's browser can
+ * load the app. Eliminates a persistent per-worker Node child process that
+ * the previous spawned-gateway implementation required.
+ *
+ * Each Playwright worker gets its own isolated gateway with:
+ *   - A unique OS-assigned port (port 0)
  *   - A unique BOBBIT_DIR (ephemeral, cleaned up after)
+ *   - An isolated BOBBIT_AGENT_DIR with fake oauth creds so the UI skips
+ *     the OAuth prompt
  *   - The mock agent (no API key needed)
  *
- * The fixture sets process.env.E2E_PORT and process.env.BOBBIT_DIR before
- * any test files in that worker import e2e-setup.ts, so the helpers in
- * e2e-setup automatically target the right server.
+ * By default MCP subprocesses are skipped (BOBBIT_SKIP_MCP=1). Specs that
+ * actually exercise MCP opt back in with `test.use({ enableMcp: true })`.
+ *
+ * IMPORTANT: This fixture MUST remain worker-scoped (not test-scoped).
+ * Node's module cache means server singletons persist for the worker's
+ * lifetime; making this test-scoped would cause silent cross-test
+ * contamination.
  */
 import { test as base } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createServer } from "node:net";
-import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,155 +30,123 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
-const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
+const STATIC_DIR = resolve(PROJECT_ROOT, "dist", "ui");
 
 // Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
 // (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
-// local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
+// local overlay FS instead. On the host, use os.tmpdir() to guarantee the CWD
 // is outside the git repo — otherwise isGitRepo() returns true for the project
 // rootPath and sessions auto-create worktrees (slow, conflicts with git state).
 const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : join(tmpdir(), "bobbit-e2e");
-
-/** Always serve the UI — the overhead is negligible (static files) and
- *  fullstack browser tests need it. API-only tests simply don't use it. */
 
 export interface GatewayInfo {
 	port: number;
 	baseURL: string;
 	wsBase: string;
 	bobbitDir: string;
+	sessionManager?: any;
 }
 
-/**
- * Spawn a gateway and wait for it to be ready.
- * Returns the child process and connection info.
- */
-async function startGateway(workerIndex: number): Promise<{ proc: ChildProcess; info: GatewayInfo }> {
-	// Find a free port by binding to port 0 and reading the assigned port
-	const port = await new Promise<number>((res, rej) => {
-		const srv = createServer();
-		srv.listen(0, "127.0.0.1", () => {
-			const p = (srv.address() as any).port;
-			srv.close(() => res(p));
+export const test = base.extend<{}, { enableMcp: boolean; gateway: GatewayInfo }>({
+	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
+	// at the top of a spec file. Playwright groups tests with matching option
+	// values onto the same worker, so each spec file effectively gets its own gateway.
+	enableMcp: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp }, use, workerInfo) => {
+		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
+		const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-browser-${workerInfo.workerIndex}`);
+
+		// Clean slate
+		rmSync(bobbitDir, { recursive: true, force: true });
+		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)
+		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
+		// Mark setup as complete so the setup wizard doesn't appear in tests
+		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
+
+		// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
+		// The client checks /api/oauth/status which reads ~/.bobbit/agent/auth.json;
+		// by setting BOBBIT_AGENT_DIR we redirect that to our isolated dir.
+		const agentDir = join(bobbitDir, "agent");
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
+			anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
+		}));
+
+		// Set env BEFORE importing server modules. Playwright workers are
+		// separate Node processes, so module singletons are per-worker — no
+		// cross-contamination.
+		process.env.BOBBIT_DIR = bobbitDir;
+		process.env.BOBBIT_AGENT_DIR = agentDir;
+		process.env.BOBBIT_SKIP_NPM_CI = "1";
+		process.env.BOBBIT_TEST_NO_PUSH = "1";
+		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
+		process.env.BOBBIT_NO_OPEN = "1";
+		// Skip outbound network probes and per-prompt title-generation calls.
+		// Tests that exercise these paths override explicitly.
+		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+		process.env.BOBBIT_SKIP_TITLE_GEN = "1";
+		// Prevent inherited host/sandbox gateway credentials from leaking into
+		// spawned agent subprocesses. We set these to the *local* gateway values
+		// after it starts, below.
+		delete process.env.BOBBIT_GATEWAY_URL;
+		delete process.env.BOBBIT_TOKEN;
+		// Skip MCP by default — spawning MCP subprocesses per gateway is expensive.
+		// mcp-integration / mcp-tool-permission specs opt back in via test.use().
+		if (enableMcp) {
+			delete process.env.BOBBIT_SKIP_MCP;
+		} else {
+			process.env.BOBBIT_SKIP_MCP = "1";
+		}
+
+		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
+		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
+		const { createGateway } = await import("../../dist/server/server.js");
+
+		setProjectRoot(bobbitDir);
+		scaffoldBobbitDir(bobbitDir);
+		const token = loadOrCreateToken();
+
+		const gw = createGateway({
+			host: "127.0.0.1",
+			port: 0,             // OS-assigned port
+			portExplicit: true,  // Skip auto-increment loop
+			authToken: token,
+			defaultCwd: bobbitDir,
+			forceAuth: true,
+			agentCliPath: MOCK_AGENT,
+			// Browser tests need the UI served from the same origin.
+			staticDir: STATIC_DIR,
 		});
-		srv.on("error", rej);
-	});
-	mkdirSync(E2E_TEMP_ROOT, { recursive: true });
-	const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-worker-${port}`);
 
-	// Clean slate
-	rmSync(bobbitDir, { recursive: true, force: true });
-	mkdirSync(join(bobbitDir, "state"), { recursive: true });
-	// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)
-	writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
-	// Mark setup as complete so the setup wizard doesn't appear in tests
-	writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
-
-	// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
-	// The client checks /api/oauth/status which reads ~/.bobbit/agent/auth.json;
-	// by setting BOBBIT_AGENT_DIR we redirect that to our isolated dir.
-	const agentDir = join(bobbitDir, "agent");
-	mkdirSync(agentDir, { recursive: true });
-	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-		anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
-	}));
-
-	const args = [
-		SERVER_CLI,
-		"--host", "127.0.0.1",
-		"--port", String(port),
-		"--no-tls",
-		"--auth",
-		"--agent-cli", MOCK_AGENT,
-		// Use BOBBIT_DIR as the CWD so ensureDefaultProject() registers the
-		// isolated directory — not the real project root.  Without this, every
-		// E2E gateway writes goals/sessions to the main project's state files.
-		"--cwd", bobbitDir,
-	];
-	// UI is always served — fullstack tests need it, API tests ignore it.
-
-	const proc = spawn(process.execPath, args, {
-		cwd: PROJECT_ROOT,
-		stdio: ["ignore", "pipe", "pipe"],
-		env: {
-			...process.env,
-			BOBBIT_DIR: bobbitDir,
-			BOBBIT_AGENT_DIR: agentDir,
-			BOBBIT_LLM_REVIEW_SKIP: "1",
-			BOBBIT_SKIP_NPM_CI: "1",
-			BOBBIT_TEST_NO_PUSH: "1",
-			// Don't skip MCP — the mcp-integration tests need it
-			BOBBIT_NO_OPEN: "1",
-			// Clear host/sandbox gateway credentials to prevent agent subprocesses
-			// from posting to the wrong gateway (e.g. the production host).
-			BOBBIT_GATEWAY_URL: "",
-			BOBBIT_TOKEN: "",
-		},
-	});
-
-	// Collect stderr for diagnostics on failure
-	let stderr = "";
-	proc.stderr?.on("data", (d) => { stderr += d.toString(); });
-	proc.stdout?.on("data", () => {}); // drain stdout to prevent backpressure
-
-	const info: GatewayInfo = {
-		port,
-		baseURL: `http://127.0.0.1:${port}`,
-		wsBase: `ws://127.0.0.1:${port}`,
-		bobbitDir,
-	};
-
-	// Wait for health endpoint to respond
-	const deadline = Date.now() + 30_000;
-	while (Date.now() < deadline) {
-		// Check process hasn't crashed
-		if (proc.exitCode !== null) {
-			throw new Error(`Gateway exited early (code ${proc.exitCode}):\n${stderr}`);
-		}
-		try {
-			// Token file must exist before we can auth
-			const tokenPath = join(bobbitDir, "state", "token");
-			if (existsSync(tokenPath)) {
-				const token = readFileSync(tokenPath, "utf-8").trim();
-				const resp = await fetch(`${info.baseURL}/api/health`, {
-					headers: { Authorization: `Bearer ${token}` },
-				});
-				if (resp.ok) return { proc, info };
-			}
-		} catch {
-			// Not ready yet
-		}
-		await new Promise(r => setTimeout(r, 100));
-	}
-	proc.kill();
-	throw new Error(`Gateway on port ${port} did not become healthy in 30s:\n${stderr}`);
-}
-
-/**
- * Extended test fixture that provides a per-worker gateway.
- *
- * Usage in test files:
- *   import { test } from "./gateway-harness.js";
- *   // e2e-setup helpers automatically target this worker's gateway
- */
-export const test = base.extend<{}, { gateway: GatewayInfo }>({
-	gateway: [async ({}, use, workerInfo) => {
-		const { proc, info } = await startGateway(workerInfo.workerIndex);
+		const port = await gw.start();
 
 		// Set env so e2e-setup.ts helpers target this worker's server
-		process.env.E2E_PORT = String(info.port);
-		process.env.BOBBIT_DIR = info.bobbitDir;
+		process.env.E2E_PORT = String(port);
+
+		// cli.ts normally writes .bobbit/state/gateway-url so agent subprocesses
+		// (mock-agent, tool-grant-request flow) can discover the gateway.
+		// When running in-process we must do that ourselves.
+		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`);
+
+		const info: GatewayInfo = {
+			port,
+			baseURL: `http://127.0.0.1:${port}`,
+			wsBase: `ws://127.0.0.1:${port}`,
+			bobbitDir,
+			sessionManager: gw.sessionManager,
+		};
 
 		await use(info);
 
-		// Teardown: kill gateway, clean up state dir
-		proc.kill();
-		// Wait briefly for process to exit
-		await new Promise(r => setTimeout(r, 500));
+		// Teardown — use existing shutdown() for proper cleanup
+		await gw.shutdown();
 		try {
-			rmSync(info.bobbitDir, { recursive: true, force: true });
+			rmSync(bobbitDir, { recursive: true, force: true });
 		} catch {
-			// Best-effort
+			// Best-effort cleanup
 		}
 	}, { scope: "worker", auto: true, timeout: 60_000 }],
 });
