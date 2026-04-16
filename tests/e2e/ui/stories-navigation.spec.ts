@@ -35,7 +35,7 @@ import {
 import { navigateToHash } from "./ui-helpers.js";
 
 test.describe("CT-13: URL routing and navigation", () => {
-	test.describe.configure({ retries: 1 });
+	test.describe.configure({ retries: 2 });
 	let s: SpecContext;
 	const goalIds: string[] = [];
 

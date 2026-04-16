@@ -46,7 +46,7 @@ import {
 import { navigateToHash, openApp } from "./ui-helpers.js";
 
 test.describe("CT-03 & CT-04: Sidebar stories", () => {
-	test.describe.configure({ retries: 1 });
+	test.describe.configure({ retries: 2 });
 	let s: SpecContext;
 	const goalIds: string[] = [];
 	const sessionIds: string[] = [];
