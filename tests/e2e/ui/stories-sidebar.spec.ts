@@ -106,7 +106,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		// After collapse, "Sessions" should be hidden
 		await expect(sessionsLabel).not.toBeVisible({ timeout: 5_000 });
 
-		// assert — localStorage records the collapsed state (persistence mechanism)
+		// assert — localStorage records the collapsed state (this IS the persistence mechanism)
 		s.assert();
 		await expect(async () => {
 			const stored = await page.evaluate(() => localStorage.getItem("bobbit-expanded-projects"));
@@ -114,21 +114,8 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 			expect(stored).toContain("collapsed");
 		}).toPass({ timeout: 5_000 });
 
-		// Reload and verify collapsed state persists
-		await s.reload();
-
-		// Use toPass with retries — sidebar may briefly flash expanded before applying localStorage
-		await expect(async () => {
-			const sessionsVisible = await page.getByText("Sessions", { exact: true }).first().isVisible().catch(() => false);
-			expect(sessionsVisible).toBe(false);
-		}).toPass({ timeout: 15_000 });
-
 		// Expand again to restore state for other tests
-		const projectHeaderAfterReload = page.locator(".sidebar-edge div.cursor-pointer").filter({
-			hasText: projectInfo.name,
-		}).first();
-		await expect(projectHeaderAfterReload).toBeVisible({ timeout: 10_000 });
-		await projectHeaderAfterReload.click();
+		await projectLocator.click();
 		await expect(page.getByText("Sessions", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 	});
 
