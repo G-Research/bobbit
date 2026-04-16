@@ -203,9 +203,13 @@ export interface WsConnection {
 	messages: WsMsg[];
 	/** Wait for a message matching predicate. Checks already-received messages first. */
 	waitFor: (pred: (m: WsMsg) => boolean, timeoutMs?: number) => Promise<WsMsg>;
-	/** Wait for a NEW message matching predicate (ignores already-received messages). */
-	waitForNext: (pred: (m: WsMsg) => boolean, timeoutMs?: number) => Promise<WsMsg>;
-	/** Current message count — use as cursor for waitForNext-like patterns. */
+	/**
+	 * Wait for a message matching predicate at or after `fromIndex`.
+	 * Pattern: `const idx = ws.messageCount(); await doAction(); await ws.waitForFrom(idx, pred);`
+	 * This is race-safe: if the event fires before the waiter registers, it's still matched.
+	 */
+	waitForFrom: (fromIndex: number, pred: (m: WsMsg) => boolean, timeoutMs?: number) => Promise<WsMsg>;
+	/** Current message count — use as cursor for waitForFrom. */
 	messageCount: () => number;
 	send: (msg: Record<string, unknown>) => void;
 	close: () => void;
@@ -245,10 +249,15 @@ export function connectWs(sessionId: string): Promise<WsConnection> {
 							waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
 						});
 					},
-					waitForNext(pred, timeoutMs = 15_000) {
-						// Only match messages arriving AFTER this call — ignore history.
+					waitForFrom(fromIndex, pred, timeoutMs = 15_000) {
+						// Match messages at or after fromIndex. Use messageCount() to
+						// capture the index BEFORE triggering an async action, then
+						// waitForFrom(idx, ...) to wait for the resulting event.
+						// Safe against race where event arrives before waiter registers.
+						const existing = messages.slice(fromIndex).find(pred);
+						if (existing) return Promise.resolve(existing);
 						return new Promise((res, rej) => {
-							const t = setTimeout(() => rej(new Error(`WS waitForNext timed out (${timeoutMs}ms)`)), timeoutMs);
+							const t = setTimeout(() => rej(new Error(`WS waitForFrom timed out (${timeoutMs}ms)`)), timeoutMs);
 							waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
 						});
 					},
@@ -297,34 +306,35 @@ export function messageEndPredicate(role: string): (m: WsMsg) => boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Wait for a gate to reach a target status via WebSocket events.
- * Much faster than polling REST — resolves within milliseconds of the status change.
- * Requires a WS connection to a session associated with the goal (or a goalless session
- * that receives fallback broadcasts).
+ * Signal a gate via REST and wait for it to reach the target status via WebSocket.
+ *
+ * Race-safe: captures the WS message cursor BEFORE the signal, so re-signals
+ * correctly wait for the NEW event instead of matching a stale one in the buffer.
+ *
+ * Usage:
+ *   await signalAndWaitForGate(ws, goalId, "design-doc", { content: "..." }, "passed");
  */
-export async function waitForGateStatusWs(
+export async function signalAndWaitForGate(
 	conn: WsConnection,
+	goalId: string,
 	gateId: string,
-	targetStatus: string,
+	body: Record<string, unknown>,
+	targetStatus: string | string[],
 	timeoutMs = 15_000,
 ): Promise<WsMsg> {
-	return conn.waitFor(
-		(m) => m.type === "gate_status_changed" && m.gateId === gateId && m.status === targetStatus,
-		timeoutMs,
-	);
-}
-
-/**
- * Wait for gate verification to complete (passed or failed) via WebSocket.
- * Returns the completion event with status.
- */
-export async function waitForGateVerificationWs(
-	conn: WsConnection,
-	gateId: string,
-	timeoutMs = 15_000,
-): Promise<WsMsg> {
-	return conn.waitFor(
-		(m) => m.type === "gate_status_changed" && m.gateId === gateId && (m.status === "passed" || m.status === "failed"),
+	const statuses = Array.isArray(targetStatus) ? targetStatus : [targetStatus];
+	const cursor = conn.messageCount();
+	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	if (!res.ok) {
+		const text = await res.text();
+		throw new Error(`signal ${gateId} failed: ${res.status} ${text}`);
+	}
+	return conn.waitForFrom(
+		cursor,
+		(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === gateId && statuses.includes(m.status),
 		timeoutMs,
 	);
 }
