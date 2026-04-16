@@ -54,9 +54,14 @@ export interface GatewayInfo {
 export const test = base.extend<{}, { gateway: GatewayInfo }>({
 	gateway: [async ({}, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
-		const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-inproc-${workerInfo.workerIndex}`);
+		// Include pid + a per-worker counter so retries don't collide with a
+		// previous worker's teardown that still holds file handles on Windows.
+		const bobbitDir = join(
+			E2E_TEMP_ROOT,
+			`.e2e-inproc-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
+		);
 
-		// Clean slate
+		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
 		// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)
