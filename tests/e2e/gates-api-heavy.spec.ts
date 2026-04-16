@@ -34,14 +34,14 @@ test.describe("Gates API (verification)", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design v1\n\nApproach: X\nFiles: a.ts\nCriteria: Y" }),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
 
 			// Signal implementation (test-fast just runs "echo ok")
 			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
 				method: "POST",
 				body: JSON.stringify({}),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "implementation" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "implementation" && m.status === "passed", 15_000);
 
 			// Verify both are passed
 			const gatesResp1 = await apiFetch(`/api/goals/${goalId}/gates`);
@@ -49,12 +49,13 @@ test.describe("Gates API (verification)", () => {
 			expect(gates1.find((g: any) => g.gateId === "design-doc").status).toBe("passed");
 			expect(gates1.find((g: any) => g.gateId === "implementation").status).toBe("passed");
 
-			// Re-signal design-doc with new content
+			// Re-signal design-doc with new content — use waitForNext to ignore the
+			// already-received "passed" event from the first signal above.
 			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design v2\n\nApproach: Y\nFiles: b.ts\nCriteria: Z" }),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitForNext(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
 
 			// Implementation and ready-to-merge should be reset to pending
 			const gatesResp2 = await apiFetch(`/api/goals/${goalId}/gates`);
@@ -79,7 +80,7 @@ test.describe("Gates API (verification)", () => {
 					content: "# Analysis\n\nSteps: run echo\nRoot cause: src/a.ts:1",
 				}),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
 
 			// Signal reproducing-test with metadata
 			await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signal`, {
@@ -90,7 +91,7 @@ test.describe("Gates API (verification)", () => {
 			});
 			// This gate has expect:failure but "echo metadata-works" exits 0, so it fails
 			// That's fine — we want to check the verification output contains the resolved command
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "reproducing-test" && m.status === "failed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "failed", 15_000);
 
 			// Check the signal's verification step output — the {{test_command}} should have resolved
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signals`);

@@ -93,7 +93,7 @@ test.describe("Command verification WS event lifecycle", () => {
 				30_000,
 			);
 			const statusChanged = await ws.waitFor(
-				(m) => m.type === "gate_status_changed" && m.gateId === "design-doc",
+				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc",
 				30_000,
 			);
 
@@ -238,7 +238,7 @@ test.describe("Multi-step verification", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design" }),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
 
 			// Signal implementation gate (depends on design-doc)
 			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
@@ -321,7 +321,7 @@ test.describe("Multi-step verification", () => {
 			expect(stepComplete.sessionId).toMatch(/^llm-review-/);
 			expect(stepComplete.status).toMatch(/^(passed|failed)$/);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -377,7 +377,7 @@ test.describe("Verification REST API", () => {
 			}
 
 			// Wait for completion
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
 
 			// Active verifications should be empty after completion
 			await new Promise(r => setTimeout(r, 200));
@@ -446,7 +446,7 @@ test.describe("Expect failure pipeline", () => {
 						"# Bug Analysis\n\nSteps: 1. run failing test\nRoot cause: src/calc.ts returns wrong value",
 				}),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
 
 			const signalResp = await apiFetch(
 				`/api/goals/${goalId}/gates/reproducing-test/signal`,
@@ -462,7 +462,7 @@ test.describe("Expect failure pipeline", () => {
 			);
 			expect(signalResp.status).toBe(201);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "reproducing-test" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "passed", 15_000);
 		} finally {
 			ws.close();
 			await deleteGoal(goalId);
@@ -486,7 +486,7 @@ test.describe("Expect failure pipeline", () => {
 						"# Bug Analysis\n\nSteps: 1. run test\nRoot cause: src/foo.ts:10 off-by-one",
 				}),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
 
 			const signalResp = await apiFetch(
 				`/api/goals/${goalId}/gates/reproducing-test/signal`,
@@ -502,7 +502,7 @@ test.describe("Expect failure pipeline", () => {
 			);
 			expect(signalResp.status).toBe(201);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "reproducing-test" && m.status === "failed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "failed", 15_000);
 
 			const signalsResp = await apiFetch(
 				`/api/goals/${goalId}/gates/reproducing-test/signals`,
@@ -542,7 +542,7 @@ test.describe("LLM Review verification", () => {
 			const signalData = await signalResp.json();
 			expect(signalData.signal.status).toBe("running");
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), 15_000);
 
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
 			expect(signalsResp.status).toBe(200);

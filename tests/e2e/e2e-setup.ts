@@ -203,6 +203,10 @@ export interface WsConnection {
 	messages: WsMsg[];
 	/** Wait for a message matching predicate. Checks already-received messages first. */
 	waitFor: (pred: (m: WsMsg) => boolean, timeoutMs?: number) => Promise<WsMsg>;
+	/** Wait for a NEW message matching predicate (ignores already-received messages). */
+	waitForNext: (pred: (m: WsMsg) => boolean, timeoutMs?: number) => Promise<WsMsg>;
+	/** Current message count — use as cursor for waitForNext-like patterns. */
+	messageCount: () => number;
 	send: (msg: Record<string, unknown>) => void;
 	close: () => void;
 }
@@ -241,6 +245,14 @@ export function connectWs(sessionId: string): Promise<WsConnection> {
 							waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
 						});
 					},
+					waitForNext(pred, timeoutMs = 15_000) {
+						// Only match messages arriving AFTER this call — ignore history.
+						return new Promise((res, rej) => {
+							const t = setTimeout(() => rej(new Error(`WS waitForNext timed out (${timeoutMs}ms)`)), timeoutMs);
+							waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
+						});
+					},
+					messageCount: () => messages.length,
 					send: (m) => ws.send(JSON.stringify(m)),
 					close: () => ws.close(),
 				});

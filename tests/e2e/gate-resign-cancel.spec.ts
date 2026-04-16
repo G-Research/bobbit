@@ -153,7 +153,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 
 			// 7. Wait for the gate to pass via WS event
 			const wsMsg = await conn.waitFor(
-				(m) => m.type === "gate_status_changed" && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
+				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
 				20_000,
 			);
 
@@ -234,7 +234,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 
 			// Wait for the gate to pass via WS event (replaces REST polling)
 			const wsMsg = await conn.waitFor(
-				(m) => m.type === "gate_status_changed" && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
+				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
 				20_000,
 			);
 			expect(wsMsg.status).toBe("passed");
