@@ -14,7 +14,7 @@ import { join } from "node:path";
 test.describe("Tool Config Cascade", () => {
 	test.describe.configure({ retries: 2, mode: "serial" });
 
-	test("fresh scaffold has tools config directory", async () => {
+	test("fresh scaffold has tools config directory @smoke", async () => {
 		// The in-process harness uses scaffoldBobbitDir which creates
 		// .bobbit/config/tools/ directory.
 		const toolsConfigDir = join(bobbitDir(), "config", "tools");

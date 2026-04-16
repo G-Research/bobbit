@@ -42,7 +42,7 @@ test.describe("Config page scope navigation", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	test("roles page shows scope row with System and project tabs", async ({ page }) => {
+	test("roles page shows scope row with System and project tabs @smoke", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/roles");
 

@@ -41,7 +41,7 @@ test.describe("GET /api/models with AI Gateway", () => {
 		await apiFetch("/api/aigw/configure", { method: "DELETE" });
 	});
 
-	test("includes gateway models when aigw is configured", async () => {
+	test("includes gateway models when aigw is configured @smoke", async () => {
 		// Configure the mock gateway
 		const configRes = await apiFetch("/api/aigw/configure", {
 			method: "POST",

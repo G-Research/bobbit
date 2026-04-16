@@ -40,7 +40,7 @@ test.describe("Sidebar navigation", () => {
 	// ---------------------------------------------------------------
 	// SB-01: Click session to navigate and highlight
 	// ---------------------------------------------------------------
-	test("SB-01: clicking session row connects and highlights it", async ({ page }) => {
+	test("SB-01: clicking session row connects and highlights it @smoke", async ({ page }) => {
 		const id1 = await createSession();
 		const id2 = await createSession();
 		sessionIds.push(id1, id2);
@@ -78,7 +78,7 @@ test.describe("Sidebar navigation", () => {
 	// ---------------------------------------------------------------
 	// SB-02: Goal team navigation — expand goal, see team lead + children
 	// ---------------------------------------------------------------
-	test("SB-02: goal group shows team lead with expandable children", async ({ page }) => {
+	test("SB-02: goal group shows team lead with expandable children @smoke", async ({ page }) => {
 		const goal = await createGoal({
 			title: "Nav Team Test",
 			worktree: false,

@@ -37,7 +37,7 @@ async function pollUntil(
 }
 
 test.describe("Session lifecycle (full-stack UI)", () => {
-	test("create session, send message, see response, terminate", async ({ page }) => {
+	test("create session, send message, see response, terminate @smoke", async ({ page }) => {
 		await openApp(page);
 
 		// Create a new session

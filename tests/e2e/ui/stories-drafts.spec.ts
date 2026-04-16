@@ -46,7 +46,7 @@ test.describe("CT-02: Draft preservation", () => {
 	// Stories
 	// ---------------------------------------------------------------
 
-	test("CT-02-a: Draft survives rapid session switching", async () => {
+	test("CT-02-a: Draft survives rapid session switching @smoke", async () => {
 		s.begin(defineStory({
 			id: "CT-02-a",
 			title: "Draft survives rapid session switching",
@@ -96,7 +96,7 @@ test.describe("CT-02: Draft preservation", () => {
 		await s.editor.contains_text("important thought");
 	});
 
-	test("CT-02-d: Draft survives page reload", async () => {
+	test("CT-02-d: Draft survives page reload @smoke", async () => {
 		s.begin(defineStory({
 			id: "CT-02-d",
 			title: "Draft survives page reload",

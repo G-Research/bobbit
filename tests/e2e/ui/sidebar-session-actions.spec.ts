@@ -196,7 +196,7 @@ test.describe("Sidebar session actions", () => {
 	});
 
 	// SB-20: Terminate session
-	test("terminate button removes session from sidebar", async ({ page }) => {
+	test("terminate button removes session from sidebar @smoke", async ({ page }) => {
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);
 		await waitForSessionStatus(sessionId, "idle");

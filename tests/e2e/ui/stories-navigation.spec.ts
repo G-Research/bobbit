@@ -53,7 +53,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// N-01: Sidebar session selection and highlight
 	// ---------------------------------------------------------------
 
-	test("N-01: Sidebar session selection updates URL and highlight", async () => {
+	test("N-01: Sidebar session selection updates URL and highlight @smoke", async () => {
 		s.begin(STORY_N01);
 
 		await s.createTestSession("A");
@@ -129,7 +129,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// N-03: Deep links to all view types
 	// ---------------------------------------------------------------
 
-	test("N-03: Deep links to all view types", async () => {
+	test("N-03: Deep links to all view types @smoke", async () => {
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");

@@ -47,7 +47,7 @@ async function deleteProject(id: string) {
 
 test.describe("Config Cascade API", () => {
 
-	test("GET /api/roles returns items with origin field", async () => {
+	test("GET /api/roles returns items with origin field @smoke", async () => {
 		const res = await apiFetch("/api/roles");
 		expect(res.ok).toBe(true);
 		const data = await res.json();

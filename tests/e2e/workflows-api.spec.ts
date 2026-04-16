@@ -37,7 +37,7 @@ test.beforeAll(async () => {
 });
 
 test.describe("Workflow CRUD API", () => {
-	test("GET /api/workflows returns seeded bug-fix workflow", async () => {
+	test("GET /api/workflows returns seeded bug-fix workflow @smoke", async () => {
 		// Poll briefly — seeded workflows may not be ready immediately after gateway init
 		let bugFix: any;
 		for (let attempt = 0; attempt < 5; attempt++) {

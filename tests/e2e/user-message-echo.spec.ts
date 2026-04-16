@@ -10,7 +10,7 @@ import { createSession, connectWs, messageEndPredicate } from "./e2e-setup.js";
 test.describe("User message echo", () => {
 	test.describe.configure({ mode: "parallel" });
 
-	test("prompt sends back a message_end with role=user and appears in get_messages", async () => {
+	test("prompt sends back a message_end with role=user and appears in get_messages @smoke", async () => {
 		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 

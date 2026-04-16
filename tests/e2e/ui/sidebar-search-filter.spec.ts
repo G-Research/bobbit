@@ -43,7 +43,7 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await deleteGoal(goalCharlie.id).catch(() => {});
 	});
 
-	test("SB-24: filter sidebar by typing partial name", async ({ page }) => {
+	test("SB-24: filter sidebar by typing partial name @smoke", async ({ page }) => {
 		await openApp(page);
 
 		// Wait for sidebar to render our sessions

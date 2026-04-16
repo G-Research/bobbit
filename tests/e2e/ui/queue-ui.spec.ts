@@ -23,7 +23,7 @@ test.describe("Queue UI E2E", () => {
 		await waitForHealth();
 	});
 
-	test("PI-10: steer pill shows Sent badge, steer delivered mid-turn without abort", async ({ page }) => {
+	test("PI-10: steer pill shows Sent badge, steer delivered mid-turn without abort @smoke", async ({ page }) => {
 		// PI-10: Queue a message, click Steer, verify delivery WITHOUT aborting.
 		// The mock agent emits [STEER_RECEIVED] text when it gets a steer RPC,
 		// which appears in the chat as visible text.

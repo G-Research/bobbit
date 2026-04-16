@@ -19,7 +19,7 @@ test.describe("Prompt stats E2E", () => {
 		await waitForHealth();
 	});
 
-	test("PI-15/17/18/23: model name, context bar, and cost all visible after interaction", async ({ page }) => {
+	test("PI-15/17/18/23: model name, context bar, and cost all visible after interaction @smoke", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 

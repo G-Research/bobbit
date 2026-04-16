@@ -94,7 +94,7 @@ async function waitForGateAnyStatus(
 test.describe("Command verification WS event lifecycle", () => {
 	test.describe.configure({ mode: "parallel" });
 
-	test("WS events have correct shape, timestamps, and ordering for design-doc signal", async () => {
+	test("WS events have correct shape, timestamps, and ordering for design-doc signal @smoke", async () => {
 		const goalId = await createTestFastGoal();
 		const sessionId = await createSession({ goalId });
 		const ws = await connectWs(sessionId);
@@ -220,7 +220,7 @@ test.describe("Command verification WS event lifecycle", () => {
 		}
 	});
 
-	test("auto-pass gate (no verify steps) skips step events", async () => {
+	test("auto-pass gate (no verify steps) skips step events @smoke", async () => {
 		const goal = await createGoal({ title: `Auto-pass E2E ${Date.now()}` });
 		const goalId = goal.id;
 		const sessionId = await createSession({ goalId });

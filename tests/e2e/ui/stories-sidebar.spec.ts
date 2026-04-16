@@ -76,7 +76,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// SB-02: Goal team nesting and expand/collapse
 	// ---------------------------------------------------------------
 
-	test("SB-02: Goal team nesting with expand and collapse", async ({ page }) => {
+	test("SB-02: Goal team nesting with expand and collapse @smoke", async ({ page }) => {
 		s.begin(STORY_SB02);
 
 		// setup — create a goal
@@ -232,7 +232,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// SB-24: Filter sidebar by typing
 	// ---------------------------------------------------------------
 
-	test("SB-24: Filter sidebar sessions by typing in search", async ({ page }) => {
+	test("SB-24: Filter sidebar sessions by typing in search @smoke", async ({ page }) => {
 		s.begin(STORY_SB24);
 
 		// setup — create sessions with distinctive names
