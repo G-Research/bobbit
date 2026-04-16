@@ -55,9 +55,14 @@ export const test = base.extend<{}, { enableMcp: boolean; gateway: GatewayInfo }
 
 	gateway: [async ({ enableMcp }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
-		const bobbitDir = join(E2E_TEMP_ROOT, `.e2e-browser-${workerInfo.workerIndex}`);
+		// Include pid + timestamp so retries don't collide with a previous
+		// worker's teardown that may still hold file handles on Windows.
+		const bobbitDir = join(
+			E2E_TEMP_ROOT,
+			`.e2e-browser-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
+		);
 
-		// Clean slate
+		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
 		// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)

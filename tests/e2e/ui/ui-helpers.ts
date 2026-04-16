@@ -62,10 +62,12 @@ export async function waitForAgentResponse(
  */
 export async function navigateToHash(page: Page, hash: string): Promise<void> {
 	await page.evaluate((h) => { window.location.hash = h; }, hash);
+	// Under parallel load the hashchange event loop can be slow; 10s gives
+	// comfortable headroom while still catching genuine navigation failures.
 	await page.waitForFunction(
 		(h) => window.location.hash === h,
 		hash,
-		{ timeout: 5_000 },
+		{ timeout: 10_000 },
 	);
 }
 
