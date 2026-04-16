@@ -12,6 +12,14 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **content-visibility CSS**: `message-list > .flex > *` uses `content-visibility: auto` to skip layout/paint for off-screen messages in long conversations.
 - State-transition events (`message_start`, `message_end`, `agent_start`, `agent_end`, `turn_start`, `turn_end`) still call `requestUpdate()` — only `message_update` (the hot path) is excluded.
 
+## Large file writes (agent writes >32KB)
+
+- **System unresponsive during large writes?** The truncation system in `truncateLargeToolContent()` should be stripping content >32KB from WebSocket broadcasts and EventBuffer. Check that `subscribeToEvents()` in `session-setup.ts` applies truncation before `broadcast()` and `eventBuffer.push()`.
+- **Full content not loading in UI?** The "Load full content" button in `WriteRenderer` fetches via `GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`. Check: (1) the endpoint is registered in `server.ts`, (2) the session's `.jsonl` file exists and contains the full message, (3) `messageIndex` and `blockIndex` resolve to the correct content block.
+- **Truncation happening for small files?** Threshold is `LARGE_CONTENT_THRESHOLD` (32KB) in `truncate-large-content.ts`. Only string content in `toolCall`/`arguments` or `tool_use`/`input` blocks is checked.
+- **Search indexing memory spike?** `extractTextFromMessage()` should also handle truncated content gracefully — it receives the original event via `handleAgentLifecycle()`, not the truncated one. If indexing large content causes issues, the search extraction path may need its own truncation.
+- See [docs/internals.md — Large content truncation](internals.md#large-content-truncation) for the full architecture.
+
 ## Duplicate messages
 
 - Check `flushDeferredMessage()` and `_deferredAssistantMessage` in `remote-agent.ts`

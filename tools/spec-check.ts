@@ -15,6 +15,7 @@
 
 // Import registries — these populate on import via defineContract/defineStory calls
 import "../tests/e2e/ui/spec-contracts.js";
+import "../tests/e2e/ui/story-registry.js";
 
 import {
 	getContractRegistry,

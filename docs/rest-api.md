@@ -25,6 +25,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
+| `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 
 
 ### Review Annotations
@@ -434,3 +435,26 @@ The client merges these affiliated sessions into `state.archivedSessions` (addit
 Note: `archivedDelegates` is only present in the sessions response when `?since` is omitted or when the generation has changed. It is absent in `?since` conditional responses (see above).
 
 The generation resets to 0 on server restart. Clients should initialize their tracked generation to -1 so the first request always fetches the full payload.
+
+### Large content truncation
+
+When an agent writes a large file (>32KB of tool input content), the server truncates the content in WebSocket broadcasts and the EventBuffer to prevent memory pressure from multi-megabyte payloads being serialized/deserialized on every streaming token. The full content is preserved in the agent's `.jsonl` session file and available on demand.
+
+**`GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`** — Returns the full, untruncated tool input content for a specific content block.
+
+- `messageIndex` — zero-based index into the session's message history
+- `blockIndex` — zero-based index into the message's content blocks
+
+Returns `200` with `{ content: string }` on success. Returns `404` if the session, message, or block is not found, or if the block has no extractable content.
+
+**How truncation works:**
+
+The `truncateLargeToolContent()` function in `truncate-large-content.ts` scans `message_update` and `message_end` events for tool call blocks with string content exceeding the threshold (default 32KB, exported as `LARGE_CONTENT_THRESHOLD`). When found, the content field is replaced with:
+
+```json
+{ "_truncated": true, "_originalLength": 1048576, "preview": "first 512 characters..." }
+```
+
+The original event is never mutated — a shallow clone is created only when truncation is needed. Events that don't exceed the threshold pass through with zero overhead (no cloning).
+
+**UI behavior:** `WriteRenderer` detects truncated content and shows a preview with a size badge. A "Load full content" button fetches the full content via this endpoint. During streaming, only the preview is shown — syntax highlighting is never applied to multi-MB content.
