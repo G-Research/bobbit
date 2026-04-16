@@ -73,7 +73,8 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 	test("SB-24: query persists after clicking a filtered session", async ({ page }) => {
 		await openApp(page);
 
-		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 10_000 });
+		const sidebar = page.locator(".sidebar-edge");
+		await expect(sidebar.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 10_000 });
 
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.click();
@@ -81,7 +82,7 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await page.waitForTimeout(400);
 
 		// Click the filtered session row
-		await page.getByText("AlphaUniqueSearch").click();
+		await sidebar.getByText("AlphaUniqueSearch").click();
 
 		// Query should persist in the input
 		await expect(searchInput).toHaveValue("AlphaUnique");
