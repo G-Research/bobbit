@@ -10,7 +10,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkGateDependencies, type GateDef, type GateState } from "../src/server/agent/gate-dependency-check.js";
+import { checkGateDependencies, type GateDef } from "../src/server/agent/gate-dependency-check.js";
 
 // ── Test workflow: design-doc → implementation → ready-to-merge ──────
 
@@ -23,7 +23,7 @@ const testWorkflowGates: GateDef[] = [
 describe("Gate Dependency Enforcement", () => {
 	describe("team/spawn gate checks", () => {
 		it("rejects when upstream gate is pending", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "pending" },
 				{ gateId: "implementation", status: "pending" },
 				{ gateId: "ready-to-merge", status: "pending" },
@@ -36,7 +36,7 @@ describe("Gate Dependency Enforcement", () => {
 		});
 
 		it("allows when upstream gate has passed", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "passed" },
 				{ gateId: "implementation", status: "pending" },
 				{ gateId: "ready-to-merge", status: "pending" },
@@ -49,7 +49,7 @@ describe("Gate Dependency Enforcement", () => {
 		it("rejects when any upstream in chain is pending", () => {
 			// ready-to-merge depends on implementation, which depends on design-doc
 			// Even if design-doc passed, implementation must also pass
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "passed" },
 				{ gateId: "implementation", status: "pending" },
 				{ gateId: "ready-to-merge", status: "pending" },
@@ -61,7 +61,7 @@ describe("Gate Dependency Enforcement", () => {
 		});
 
 		it("allows when all upstream gates have passed", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "passed" },
 				{ gateId: "implementation", status: "passed" },
 				{ gateId: "ready-to-merge", status: "pending" },
@@ -74,7 +74,7 @@ describe("Gate Dependency Enforcement", () => {
 
 	describe("backward compatibility (no workflowGateId)", () => {
 		it("allows spawn without workflowGateId", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "pending" },
 			];
 
@@ -83,7 +83,7 @@ describe("Gate Dependency Enforcement", () => {
 		});
 
 		it("allows prompt without workflowGateId", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "pending" },
 				{ gateId: "implementation", status: "pending" },
 			];
@@ -95,7 +95,7 @@ describe("Gate Dependency Enforcement", () => {
 
 	describe("edge cases", () => {
 		it("allows gate with no dependencies", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "pending" },
 			];
 
@@ -105,14 +105,14 @@ describe("Gate Dependency Enforcement", () => {
 		});
 
 		it("allows gate not found in workflow (unknown gate)", () => {
-			const gateStates: GateState[] = [];
+			const gateStates: Array<{ gateId: string; status: string }> = [];
 
 			const error = checkGateDependencies("nonexistent-gate", testWorkflowGates, gateStates);
 			assert.equal(error, null, "Should allow unknown gate (not in workflow definition)");
 		});
 
 		it("rejects when upstream gate has failed status", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "failed" },
 			];
 
@@ -122,7 +122,7 @@ describe("Gate Dependency Enforcement", () => {
 		});
 
 		it("error message includes human-readable gate names", () => {
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "pending" },
 			];
 
@@ -139,7 +139,7 @@ describe("Gate Dependency Enforcement", () => {
 				{ id: "b", name: "Gate B", dependsOn: [] },
 				{ id: "c", name: "Gate C", dependsOn: ["a", "b"] },
 			];
-			const gateStates: GateState[] = [
+			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "a", status: "pending" },
 				{ gateId: "b", status: "pending" },
 				{ gateId: "c", status: "pending" },

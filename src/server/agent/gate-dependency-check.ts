@@ -9,13 +9,6 @@ export interface GateDef {
 	id: string;
 	name: string;
 	dependsOn: string[];
-	[key: string]: unknown; // allow extra fields from workflow gate definitions
-}
-
-export interface GateState {
-	gateId: string;
-	status: "pending" | "passed" | "failed";
-	[key: string]: unknown;
 }
 
 /**
@@ -31,7 +24,7 @@ export interface GateState {
 export function checkGateDependencies(
 	workflowGateId: string | undefined,
 	workflowGates: GateDef[],
-	gateStates: GateState[],
+	gateStates: Array<{ gateId: string; status: string }>,
 ): string | null {
 	if (!workflowGateId) return null;
 

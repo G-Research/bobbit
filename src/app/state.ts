@@ -291,6 +291,8 @@ export const state = {
 		typecheck_command: "",
 		test_unit_command: "",
 		test_e2e_command: "",
+		test_e2e_smoke_command: "",
+		test_e2e_standard_command: "",
 	} as Record<string, string>,
 	setupFormModels: { session_model: "", review_model: "", naming_model: "" },
 	setupFormSystemPrompt: "",

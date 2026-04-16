@@ -61,11 +61,12 @@ describe("Semaphore", () => {
 		assert.deepEqual(order, [1, 2, 3]);
 	});
 
-	it("increments available on release when no waiters", () => {
+	it("throws on over-release when no waiters", () => {
 		const sem = new Semaphore(2);
-		// Release without prior acquire — available goes above initial
-		sem.release();
-		assert.equal(sem.available, 3);
+		// Release without prior acquire — should throw instead of exceeding capacity
+		assert.throws(() => sem.release(), {
+			message: /Semaphore over-release/,
+		});
 	});
 
 	it("handles acquire-release cycles correctly", async () => {

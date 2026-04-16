@@ -5,10 +5,12 @@
  */
 export class Semaphore {
 	private _value: number;
+	private readonly _capacity: number;
 	private _waiters: Array<() => void> = [];
 
 	constructor(initial: number) {
 		this._value = initial;
+		this._capacity = initial;
 	}
 
 	get available(): number { return this._value; }
@@ -29,6 +31,9 @@ export class Semaphore {
 		if (next) {
 			next();
 		} else {
+			if (this._value >= this._capacity) {
+				throw new Error(`Semaphore over-release: value would exceed capacity (${this._capacity})`);
+			}
 			this._value++;
 		}
 	}
