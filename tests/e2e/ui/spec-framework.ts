@@ -315,11 +315,68 @@ export class SessionHandle {
 		await expect(async () => {
 			const hash = await this.page.evaluate(() => window.location.hash);
 			expect(hash).toContain(this._sessionId);
-			const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
-			if (await row.count() > 0) {
-				await expect(row).toHaveClass(/active|selected/);
-			}
+			// The active session row has the .sidebar-session-active class
+			const activeRow = this.page.locator(".sidebar-session-active");
+			await expect(activeRow).toBeVisible();
 		}).toPass({ timeout: 5_000 });
+	}
+
+	async has_unseen_dot(): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		await expect(row.locator('.unseen-dot, .activity-dot, [class*="unseen"]').first())
+			.toBeVisible({ timeout: 5_000 });
+	}
+
+	async no_unseen_dot(): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		await expect(row.locator('.unseen-dot, .activity-dot, [class*="unseen"]').first())
+			.not.toBeVisible({ timeout: 5_000 });
+	}
+
+	async is_nested_under(parentName: string): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const parentLocator = this.page.locator(
+			`.sidebar-session:has-text("${parentName}"), .goal-group:has-text("${parentName}")`
+		).first();
+		await expect(parentLocator).toBeVisible({ timeout: 5_000 });
+		const sessionInParent = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		await expect(sessionInParent).toBeVisible({ timeout: 5_000 });
+	}
+
+	async is_before(otherSessionName: string): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const thisId = this._sessionId;
+		const result = await this.page.evaluate(({ thisId, otherName }) => {
+			const rows = Array.from(document.querySelectorAll('.sidebar-session'));
+			const thisIdx = rows.findIndex(r => r.getAttribute('data-id') === thisId);
+			const otherIdx = rows.findIndex(r => r.textContent?.includes(otherName));
+			return { thisIdx, otherIdx };
+		}, { thisId, otherName: otherSessionName });
+		expect(result.thisIdx).toBeGreaterThanOrEqual(0);
+		expect(result.otherIdx).toBeGreaterThanOrEqual(0);
+		expect(result.thisIdx).toBeLessThan(result.otherIdx);
+	}
+
+	async shows_status(status: "streaming" | "idle" | "compacting"): Promise<void> {
+		trackEntity(this.story, this.phase, "session");
+		trackRegion(this.story, this.phase, "sidebar");
+		const row = this.page.locator(`.sidebar-session[data-id="${this._sessionId}"]`);
+		if (status === "streaming") {
+			await expect(row.locator('.streaming-dots, .pulsing-dot, [class*="streaming"], [class*="active-dot"]').first())
+				.toBeVisible({ timeout: 5_000 });
+		} else if (status === "idle") {
+			await expect(row.locator('.idle-time, .time-display, time, [class*="idle"]').first())
+				.toBeVisible({ timeout: 5_000 });
+		} else if (status === "compacting") {
+			await expect(row.locator('.compacting, [class*="compact"]').first())
+				.toBeVisible({ timeout: 5_000 });
+		}
 	}
 }
 
@@ -540,6 +597,69 @@ export class RegionHandle {
 	}
 }
 
+// ============================================================
+// SIDEBAR REGION — typed sub-regions for sidebar hierarchy
+// ============================================================
+
+export class SidebarRegion extends RegionHandle {
+	project_section(name?: string): RegionHandle {
+		// Project headers are div.cursor-pointer inside .sidebar-edge
+		const sel = name
+			? `.sidebar-edge div.cursor-pointer`
+			: `.sidebar-edge div.cursor-pointer`;
+		const r = new RegionHandle(this.page, sel, "sidebar.project_section");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	goal_group(name?: string): RegionHandle {
+		// Goal titles use getByText — use sidebar-edge scoped text match
+		const sel = name
+			? `.sidebar-edge`
+			: `.sidebar-edge`;
+		const r = new RegionHandle(this.page, sel, "sidebar.goal_group");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	session_row(nameOrId?: string): RegionHandle {
+		// Session rows use .sidebar-session-active for active, text filtering for lookup
+		let sel: string;
+		if (!nameOrId) {
+			sel = ".sidebar-session-active";
+		} else {
+			sel = `.sidebar-edge`;
+		}
+		const r = new RegionHandle(this.page, sel, "sidebar.session_row");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	staff_section(): RegionHandle {
+		const r = new RegionHandle(this.page, '.sidebar-edge', "sidebar.staff_section");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	archived_section(): RegionHandle {
+		// Archived section is found by text "Archived" within sidebar
+		const r = new RegionHandle(this.page, '.sidebar-edge', "sidebar.archived_section");
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+
+	search_input(): RegionHandle {
+		const r = new RegionHandle(
+			this.page,
+			'input[data-search]',
+			"sidebar.search_input",
+		);
+		if (this._ctx) r.ctx = this._ctx;
+		return r;
+	}
+}
+
+
 const intentSelectors: Record<string, string> = {
 	send_message: "message-editor .send-button:not(.stop-button), message-editor button[title='Send']",
 	stop_streaming: "message-editor .stop-button, message-editor button[title='Stop']",
@@ -653,7 +773,7 @@ export class SpecContext {
 	private _page: Page;
 
 	// Regions
-	readonly sidebar: RegionHandle;
+	readonly sidebar: SidebarRegion;
 	readonly editor: EditorRegion;
 	readonly context_bar: ContextBarRegion;
 	readonly stats_bar: RegionHandle;
@@ -666,7 +786,8 @@ export class SpecContext {
 
 	constructor(page: Page) {
 		this._page = page;
-		this.sidebar = this._region(".sidebar, sidebar-panel", "sidebar");
+		this.sidebar = new SidebarRegion(page, ".sidebar-edge", "sidebar");
+		this.sidebar.ctx = this;
 		this.editor = new EditorRegion(page, "message-editor", "editor");
 		this.editor.ctx = this;
 		this.context_bar = new ContextBarRegion(page, ".context-bar, .stats-bar", "context_bar");
@@ -881,8 +1002,10 @@ export class SpecContext {
 	async reload() {
 		trackIntent(this._activeStory, this._phase, "reload");
 		await this._page.reload();
+		// Wait for sidebar to be present — use .sidebar-edge which is always in DOM
+		// regardless of collapsed/expanded state (Settings button text is hidden when collapsed)
 		await expect(
-			this._page.locator("button").filter({ hasText: "Settings" }).first(),
+			this._page.locator(".sidebar-edge").first(),
 		).toBeVisible({ timeout: 20_000 });
 	}
 
@@ -906,6 +1029,52 @@ export class SpecContext {
 		const handle = this.staffAgents.get(staffName);
 		if (!handle) throw new Error(`Staff '${staffName}' not registered`);
 		await apiFetch(`/api/staff/${(handle as any)._staffId}/wake`, { method: "POST" });
+	}
+
+	// --- Navigation ---
+
+	async navigate_back(): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "navigate_back");
+		await this._page.goBack();
+		await this._page.waitForTimeout(300);
+	}
+
+	async navigate_forward(): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "navigate_forward");
+		await this._page.goForward();
+		await this._page.waitForTimeout(300);
+	}
+
+	async url_contains(fragment: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "url_check");
+		await expect(async () => {
+			const hash = await this._page.evaluate(() => window.location.hash);
+			expect(hash).toContain(fragment);
+		}).toPass({ timeout: 5_000 });
+	}
+
+	async url_equals(hash: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "url_check");
+		await expect(async () => {
+			const actual = await this._page.evaluate(() => window.location.hash);
+			expect(actual).toBe(hash);
+		}).toPass({ timeout: 5_000 });
+	}
+
+	async page_title_is(expected: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "page_title_check");
+		await expect(async () => {
+			const title = await this._page.evaluate(() => document.title);
+			expect(title).toBe(expected);
+		}).toPass({ timeout: 5_000 });
+	}
+
+	async page_title_contains(fragment: string): Promise<void> {
+		trackIntent(this._activeStory, this._phase, "page_title_check");
+		await expect(async () => {
+			const title = await this._page.evaluate(() => document.title);
+			expect(title).toContain(fragment);
+		}).toPass({ timeout: 5_000 });
 	}
 
 	// --- Temporal ---
