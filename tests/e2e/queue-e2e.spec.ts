@@ -35,7 +35,7 @@ test.describe("Queue E2E", () => {
 		}
 	});
 
-	test("prompt when idle dispatches directly (queue stays empty)", async () => {
+	test("prompt when idle dispatches directly (queue stays empty) @smoke", async () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
@@ -59,7 +59,7 @@ test.describe("Queue E2E", () => {
 		}
 	});
 
-	test("prompt when busy gets queued, queue_update broadcast", async () => {
+	test("prompt when busy gets queued, queue_update broadcast @smoke", async () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 

@@ -14,8 +14,27 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
 	timeout: 30_000,
 	retries: 2,
+	fullyParallel: true,
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
+	// Default artifact / launch settings. Chromium's GPU process, prerenderer,
+	// background timers, and BFCache consume ~1 core per worker when idle.
+	// Disabling them has no effect on test semantics for headless runs.
+	use: {
+		video: "off",
+		trace: "off",
+		screenshot: "off",
+		launchOptions: {
+			args: [
+				"--disable-gpu",
+				"--disable-dev-shm-usage",
+				"--disable-background-timer-throttling",
+				"--disable-renderer-backgrounding",
+				"--disable-backgrounding-occluded-windows",
+				"--disable-features=TranslateUI,BackForwardCache,CalculateNativeWinOcclusion",
+			],
+		},
+	},
 	projects: [
 		{
 			name: "api",
@@ -27,18 +46,10 @@ export default defineConfig({
 				"**/mcp-integration*",
 				"**/per-project-config-dirs*",
 				"**/port-auto-increment*",
-				"**/localhost-auth*",
-				// Pre-existing failures/flaky on master — skip to unblock CI
-				"**/gate-dependency-enforcement*",
-				"**/session-worktree*",
-				"**/slash-skill-e2e*",
-				"**/gate-resign-cancel*",
-				"**/gates-api-heavy*",
-				"**/project-bugs*",
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			workers: 4,
+			workers: 3,
 		},
 		{
 			name: "browser",
@@ -50,20 +61,12 @@ export default defineConfig({
 				"**/mcp-integration*.spec.ts",
 				"**/per-project-config-dirs*.spec.ts",
 				"**/port-auto-increment*.spec.ts",
-				"**/localhost-auth*.spec.ts",
 			],
 			testIgnore: [
-				// Pre-existing failures/flaky on master — skip to unblock CI
-				"**/gate-verification-ux*",
-				"**/mobile-review-commenting*",
-				"**/team-lifecycle-ui*",
-				"**/navigation.spec*",
-				"**/mcp-integration*",
-				"**/cancel-verification*",
-				"**/session-worktree*",
-				"**/project-assistant*",
+				// Docker-dependent tests — run via test:manual instead
+				"**/sandbox-recovery-docker*",
 			],
-			workers: 2,
+			workers: 3,
 		},
 	],
 });

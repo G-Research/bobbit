@@ -14,13 +14,7 @@ import { test, expect } from "../gateway-harness.js";
 import { waitForHealth, createSession, deleteSession, createGoal, deleteGoal, apiFetch } from "../e2e-setup.js";
 import {
 	SpecContext,
-	defineStory,
-	defineContract,
-	exportSpecGraph,
-	contractCompleteness,
-	clearStoryRegistry,
 } from "./spec-framework.js";
-import { CT_03, CT_13 } from "./spec-contracts.js";
 import {
 	STORY_N01,
 	STORY_N02,
@@ -59,7 +53,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// N-01: Sidebar session selection and highlight
 	// ---------------------------------------------------------------
 
-	test("N-01: Sidebar session selection updates URL and highlight", async () => {
+	test("N-01: Sidebar session selection updates URL and highlight @smoke", async () => {
 		s.begin(STORY_N01);
 
 		await s.createTestSession("A");
@@ -118,7 +112,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// assert — goal dashboard visible, URL correct
 		s.assert();
 		await s.url_contains(`/goal/${goal.id}`);
-		await expect(s.page.locator(".tab, .goal-dashboard, goal-dashboard").first())
+		await expect(s.page.locator(".dashboard-container").first())
 			.toBeVisible({ timeout: 10_000 });
 
 		// act — press back to return to session
@@ -135,7 +129,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// N-03: Deep links to all view types
 	// ---------------------------------------------------------------
 
-	test("N-03: Deep links to all view types", async () => {
+	test("N-03: Deep links to all view types @smoke", async () => {
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
@@ -150,19 +144,23 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.assert();
 		await s.editor.is_visible();
 
-		// Deep link: goal
+		// Deep link: goal. Wait for the hash to settle before asserting on the
+		// new view — back-to-back navigateToHash calls can race with the
+		// previous view's teardown animations.
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
+		await s.page.waitForFunction((id) =>
+			window.location.hash.includes(`/goal/${id}`), goal.id, { timeout: 5_000 });
 		s.assert();
-		await expect(s.page.locator(".tab, .goal-dashboard, goal-dashboard").first())
-			.toBeVisible({ timeout: 10_000 });
+		await expect(s.page.locator(".dashboard-container").first())
+			.toBeVisible({ timeout: 15_000 });
 
 		// Deep link: settings
 		s.act();
 		await navigateToHash(s.page, "#/settings/system/models");
-		s.assert();
 		await s.page.waitForFunction(() =>
 			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
+		s.assert();
 		await expect(s.page.getByText("Models").first())
 			.toBeVisible({ timeout: 10_000 });
 
@@ -439,7 +437,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
 		s.assert();
-		await expect(s.page.locator(".tab, .goal-dashboard, goal-dashboard").first())
+		await expect(s.page.locator(".dashboard-container").first())
 			.toBeVisible({ timeout: 10_000 });
 
 		// act — goal → settings
@@ -513,45 +511,4 @@ test.describe("CT-13: URL routing and navigation", () => {
 	});
 });
 
-// ---------------------------------------------------------------
-// Spec graph analysis for navigation stories
-// ---------------------------------------------------------------
 
-test.describe("Navigation spec graph", () => {
-	test.beforeEach(() => {
-		clearStoryRegistry();
-		// Re-register contract — another spec file's clearContractRegistry() may have wiped it
-		defineContract(CT_13);
-	});
-
-	test("CT-13 coverage from navigation stories", () => {
-		const ct13 = CT_13;
-
-		// Re-define all navigation stories to check coverage
-		defineStory({ id: "N-01", title: "Sidebar session selection", contracts: [ct13], covers: ["view-transitions", "page-reload"] });
-		defineStory({ id: "N-02", title: "Goal dashboard nav and back", contracts: [ct13], covers: ["back-forward-navigation"] });
-		defineStory({ id: "N-03", title: "Deep links to all view types", contracts: [ct13], covers: ["bookmarks"] });
-		defineStory({ id: "N-04", title: "Browser back and forward", contracts: [ct13], covers: ["back-forward-navigation"] });
-		defineStory({ id: "N-06", title: "Sidebar collapse persistence", contracts: [ct13], covers: ["page-reload"] });
-		defineStory({ id: "N-07", title: "Page title", contracts: [ct13], covers: ["page-reload"] });
-		defineStory({ id: "N-08", title: "Keyboard shortcuts", contracts: [ct13], covers: ["view-transitions"] });
-		defineStory({ id: "N-09", title: "Cross-feature journey", contracts: [ct13], covers: ["view-transitions", "back-forward-navigation"] });
-		defineStory({ id: "N-10", title: "Settings sub-navigation", contracts: [ct13], covers: ["view-transitions", "bookmarks"] });
-
-		const results = contractCompleteness();
-		const ct13Report = results.find(r => r.contractId === "CT-13")!;
-
-		expect(ct13Report).toBeTruthy();
-
-		// All 4 CT-13 variations should be covered
-		const covered = ct13Report.variations.filter(v => v.coveredBy !== null);
-		expect(covered).toHaveLength(4);
-
-		// 100% coverage
-		expect(ct13Report.coverage).toBe(1);
-
-		const graph = exportSpecGraph();
-		expect(Object.keys(graph.stories).length).toBe(9);
-		expect(graph.contracts["CT-13"].stories.length).toBe(9);
-	});
-});

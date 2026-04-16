@@ -32,7 +32,7 @@ function getModelsJsonPath(): string {
 }
 
 test.describe("Context window overrides in models.json", () => {
-	test("server writes contextWindow overrides for Claude Sonnet/Opus models", async () => {
+	test("server writes contextWindow overrides for Claude Sonnet/Opus models @smoke", async () => {
 		// The E2E gateway has already started by this point (Playwright webServer).
 		// Read models.json that the server should have written overrides to.
 		const modelsPath = getModelsJsonPath();

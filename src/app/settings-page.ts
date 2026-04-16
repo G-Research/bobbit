@@ -1481,6 +1481,7 @@ const PROJECT_KEY_LABELS: Record<string, string> = {
 	typecheck_command: "Type Check",
 	test_unit_command: "Test (Unit)",
 	test_e2e_command: "Test (E2E)",
+
 	worktree_setup_command: "Worktree Setup",
 	skill_directories: "Skill Dirs",
 	qa_start_command: "QA Start",

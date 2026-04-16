@@ -1,89 +1,13 @@
 /**
- * E2E tests for the unified GET /api/models endpoint.
+ * E2E tests for AI Gateway model discovery via GET /api/models.
  *
- * Validates that the model registry returns a well-formed, complete model list
- * from built-in providers (and optionally AI Gateway when configured).
+ * Built-in provider structure tests are in tests/models-api.test.ts (unit).
+ * These tests require a running gateway to test aigw configure/discover flow.
  */
 
 import { test, expect } from "./in-process-harness.js";
 import http from "node:http";
 import { apiFetch } from "./e2e-setup.js";
-
-test.describe("GET /api/models", () => {
-	test("returns a well-formed JSON array with at least one model", async () => {
-		const res = await apiFetch("/api/models");
-		expect(res.status).toBe(200);
-		const models = await res.json();
-		expect(Array.isArray(models)).toBe(true);
-		expect(models.length).toBeGreaterThan(0);
-	});
-
-	test("every model has the correct structure", async () => {
-		const res = await apiFetch("/api/models");
-		const models = await res.json();
-
-		for (const m of models) {
-			expect(typeof m.id).toBe("string");
-			expect(typeof m.name).toBe("string");
-			expect(typeof m.provider).toBe("string");
-			expect(typeof m.contextWindow).toBe("number");
-			expect(typeof m.maxTokens).toBe("number");
-			expect(typeof m.reasoning).toBe("boolean");
-			expect(Array.isArray(m.input)).toBe(true);
-			expect(typeof m.authenticated).toBe("boolean");
-			// cost object
-			expect(typeof m.cost).toBe("object");
-			expect(typeof m.cost.input).toBe("number");
-			expect(typeof m.cost.output).toBe("number");
-		}
-	});
-
-	test("Claude Sonnet/Opus models report 1M context window", async () => {
-		const res = await apiFetch("/api/models");
-		const models = await res.json();
-
-		const claudeModels = models.filter(
-			(m: any) => m.id.toLowerCase().includes("claude-sonnet") || m.id.toLowerCase().includes("claude-opus"),
-		);
-		// There should be at least one Claude Sonnet or Opus model from built-in providers
-		expect(claudeModels.length).toBeGreaterThan(0);
-
-		for (const m of claudeModels) {
-			expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
-		}
-	});
-
-	test("built-in providers include known providers", async () => {
-		const res = await apiFetch("/api/models");
-		const models = await res.json();
-
-		const providers = new Set(models.map((m: any) => m.provider));
-		// At minimum, the pi-ai registry should include anthropic
-		const hasKnown = providers.has("anthropic") || providers.has("amazon-bedrock");
-		expect(hasKnown).toBe(true);
-	});
-
-	test("authenticated field is boolean on every model", async () => {
-		const res = await apiFetch("/api/models");
-		const models = await res.json();
-
-		for (const m of models) {
-			expect(typeof m.authenticated).toBe("boolean");
-		}
-	});
-
-	test("Claude Haiku models have smaller context than Opus/Sonnet", async () => {
-		const res = await apiFetch("/api/models");
-		const models = await res.json();
-
-		const haiku = models.filter((m: any) => m.id.toLowerCase().includes("claude-haiku"));
-		if (haiku.length > 0) {
-			for (const m of haiku) {
-				expect(m.contextWindow).toBeLessThanOrEqual(200_000);
-			}
-		}
-	});
-});
 
 test.describe("GET /api/models with AI Gateway", () => {
 	const MOCK_MODELS = {
@@ -117,7 +41,7 @@ test.describe("GET /api/models with AI Gateway", () => {
 		await apiFetch("/api/aigw/configure", { method: "DELETE" });
 	});
 
-	test("includes gateway models when aigw is configured", async () => {
+	test("includes gateway models when aigw is configured @smoke", async () => {
 		// Configure the mock gateway
 		const configRes = await apiFetch("/api/aigw/configure", {
 			method: "POST",

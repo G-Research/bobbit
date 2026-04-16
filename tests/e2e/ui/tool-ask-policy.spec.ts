@@ -37,7 +37,7 @@ test.describe("Tool ask policy (UI)", () => {
 		await apiFetch(`/api/roles/${ASK_ROLE}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	test("permission card appears and grant button works", async ({ page }) => {
+	test("permission card appears and grant button works @smoke", async ({ page }) => {
 		await openApp(page);
 
 		// Create session via UI so it's properly wired with the app's RemoteAgent

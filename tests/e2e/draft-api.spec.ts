@@ -22,7 +22,7 @@ test.afterAll(async () => {
 });
 
 test.describe("PUT /api/sessions/:id/draft", () => {
-	test("saves a prompt draft", async () => {
+	test("saves a prompt draft @smoke", async () => {
 		const resp = await apiFetch(`/api/sessions/${sessionId}/draft`, {
 			method: "PUT",
 			body: JSON.stringify({ type: "prompt", data: "hello world" }),
@@ -41,7 +41,7 @@ test.describe("PUT /api/sessions/:id/draft", () => {
 });
 
 test.describe("GET /api/sessions/:id/draft", () => {
-	test("retrieves a previously saved prompt draft", async () => {
+	test("retrieves a previously saved prompt draft @smoke", async () => {
 		// Save first
 		await apiFetch(`/api/sessions/${sessionId}/draft`, {
 			method: "PUT",
