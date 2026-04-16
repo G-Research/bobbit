@@ -10,11 +10,11 @@ import {
 	connectWs,
 	waitForHealth,
 	nonGitCwd,
-	statusPredicate,
+	apiFetch,
 	agentEndPredicate,
 	type WsMsg,
 } from "./e2e-setup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 // Create a dedicated cwd with a slash skill for these tests
@@ -37,76 +37,73 @@ EXPANDED_SKILL_CONTENT_E2E_MARKER
 	);
 });
 
+/** Predicate for user message_end events. */
+const userMessageEnd = (m: WsMsg) =>
+	m.type === "event" &&
+	m.data?.type === "message_end" &&
+	m.data?.message?.role === "user";
+
+/** Extract plain text from a message_end event's content blocks. */
+function extractText(msg: WsMsg): string {
+	return (msg.data.message.content ?? [])
+		.map((c: any) => c.text || "")
+		.join("");
+}
+
 test.describe("Slash skill E2E", () => {
-	test("story 32: prefix slash skill expands to skill content", async () => {
+	test.describe.configure({ mode: "serial" });
+	test("story 32: prefix slash skill expands to skill content @smoke", async () => {
 		const sessionId = await createSession({ cwd: skillCwd });
 		const conn = await connectWs(sessionId);
 
 		try {
-			await conn.waitFor((m) => m.type === "queue_update");
-
-			// Send a prefix slash command: /e2e-test-skill some args
+			await conn.waitFor((m) => m.type === "queue_update", 5_000);
 			conn.send({ type: "prompt", text: "/e2e-test-skill some args" });
 
-			// Wait for the agent to receive the prompt and respond
-			// The mock agent echoes back the user message — check it contains expanded content
-			const userMsgEnd = await conn.waitFor(
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user",
-			);
+			const userMsgEnd = await conn.waitFor(userMessageEnd, 10_000);
+			const userText = extractText(userMsgEnd);
 
-			// The user message text should contain the expanded skill content, not the raw "/e2e-test-skill"
-			const userText = userMsgEnd.data.message.content
-				?.map((c: any) => c.text || "")
-				.join("");
 			expect(userText).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
-			// The raw slash command should be replaced
 			expect(userText).not.toContain("/e2e-test-skill");
-			// Args should be present (either via $ARGUMENTS substitution or appended)
 			expect(userText).toContain("some args");
 
-			await conn.waitFor(agentEndPredicate());
+			await conn.waitFor(agentEndPredicate(), 10_000);
 		} finally {
 			conn.close();
 		}
 	});
 
 	test("story 33: intra-prompt slash skill expands inline", async () => {
+		// Verify the skill file actually exists before sending the prompt.
+		// The beforeAll should have created it, but a stale skillCwd or
+		// missing file would cause silent non-expansion.
+		const skillFile = join(skillCwd, ".claude", "skills", "e2e-test-skill", "SKILL.md");
+		expect(existsSync(skillFile), `Skill file must exist at ${skillFile}`).toBe(true);
+
+		// Verify the session's cwd matches where the skill was created.
 		const sessionId = await createSession({ cwd: skillCwd });
+		const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
+		const session = await sessionResp.json();
+		expect(session.cwd).toBe(skillCwd);
+
 		const conn = await connectWs(sessionId);
 
 		try {
-			await conn.waitFor((m) => m.type === "queue_update");
-
-			// Send a prompt with an inline slash skill reference
+			await conn.waitFor((m) => m.type === "queue_update", 5_000);
 			conn.send({
 				type: "prompt",
 				text: "Analyse using /e2e-test-skill the code",
 			});
 
-			// Wait for the user message echo
-			const userMsgEnd = await conn.waitFor(
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user",
-			);
+			const userMsgEnd = await conn.waitFor(userMessageEnd, 10_000);
+			const userText = extractText(userMsgEnd);
 
-			const userText = userMsgEnd.data.message.content
-				?.map((c: any) => c.text || "")
-				.join("");
-
-			// The inline /e2e-test-skill should be expanded
 			expect(userText).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
-			// Surrounding text should be preserved
 			expect(userText).toContain("Analyse using");
 			expect(userText).toContain("the code");
-			// The raw skill name should be replaced
 			expect(userText).not.toContain("/e2e-test-skill");
 
-			await conn.waitFor(agentEndPredicate());
+			await conn.waitFor(agentEndPredicate(), 10_000);
 		} finally {
 			conn.close();
 		}
