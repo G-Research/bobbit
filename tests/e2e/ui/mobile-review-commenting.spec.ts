@@ -90,7 +90,7 @@ test.describe("Mobile review commenting", () => {
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaAPI(page);
 		await openReviewTab(page);
 
 		// Select text in the review document
@@ -163,7 +163,7 @@ test.describe("Mobile review commenting", () => {
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaAPI(page);
 		await openReviewTab(page);
 
 		// Create an annotation via the mobile flow
@@ -212,7 +212,7 @@ test.describe("Mobile review commenting", () => {
 		await setupMobileEmulation(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaAPI(page);
 		await openReviewTab(page);
 
 		// Select text
