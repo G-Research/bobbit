@@ -352,13 +352,13 @@ export class AgentInterface extends LitElement {
 					break;
 				case "message_end":
 					// When a message finishes, sync the streaming container
-					// with the current streamMessage state.  If the agent
-					// cleared streamMessage (e.g. message without tool calls),
+					// with the current streamingMessage state.  If the agent
+					// cleared streamingMessage (e.g. message without tool calls),
 					// we clear the container so the finalized message only
-					// appears in message-list.  If streamMessage is still set
+					// appears in message-list.  If streamingMessage is still set
 					// (deferred tool-call message), the container keeps it.
 					if (this._streamingContainer) {
-						const sm = this.session?.state.streamMessage;
+						const sm = this.session?.state.streamingMessage;
 						if (!sm) {
 							this._streamingContainer.setMessage(null, true);
 						}
@@ -547,7 +547,7 @@ export class AgentInterface extends LitElement {
 					.tools=${state.tools}
 					.pendingToolCalls=${this.session ? this.session.state.pendingToolCalls : new Set<string>()}
 					.isStreaming=${state.isStreaming}
-					.hasStreamMessage=${!!state.streamMessage}
+					.hasStreamMessage=${!!state.streamingMessage}
 					.toolPartialResults=${(state as any).toolPartialResults}
 					.onCostClick=${this.onCostClick}
 					.onDismissError=${(id: string) => {
@@ -694,7 +694,8 @@ export class AgentInterface extends LitElement {
 					{ value: "high", label: i18n("High"), icon: icon(Brain, "sm") },
 				] as SelectOption[],
 				onChange: (value: string) => {
-					session.setThinkingLevel(value as any);
+					if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(value);
+					else session.state.thinkingLevel = value as any;
 				},
 				width: "80px",
 				size: "sm",
@@ -708,7 +709,10 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					ModelSelector.open(state.model, (m) => session.setModel(m));
+					ModelSelector.open(state.model, (m) => {
+						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
+						else session.state.model = m;
+					});
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
@@ -967,12 +971,16 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								ModelSelector.open(state.model, (model) => session.setModel(model));
+								ModelSelector.open(state.model, (model) => {
+								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
+								else session.state.model = model;
+							});
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector
 									? (level: "off" | "minimal" | "low" | "medium" | "high") => {
-											session.setThinkingLevel(level);
+											if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(level);
+											else session.state.thinkingLevel = level;
 										}
 									: undefined
 							}

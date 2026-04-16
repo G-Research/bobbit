@@ -27,6 +27,10 @@ RUN npm install -g @mariozechner/pi-coding-agent@${PI_AGENT_VERSION} --no-audit 
     && ln -sf $(npm root -g) /node_modules
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 
+# TypeScript compiler — needed for `npm run check` in worktrees.
+# Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
+RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
+
 # Run as non-root user. node:20-slim includes a 'node' user (uid=1000).
 # This ensures files created in /workspace via bind mount are owned by uid=1000
 # on the host, matching typical developer user IDs.
@@ -55,9 +59,6 @@ RUN mkdir -p /home/node/.node_modules_cache
 # container startup. The entrypoint handles mismatches at runtime as a fallback.
 ARG PLAYWRIGHT_VERSION=1.58.2
 RUN npx -y playwright@${PLAYWRIGHT_VERSION} install chromium
-
-# TypeScript compiler — needed for `npm run check` in worktrees
-RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
 
 WORKDIR /workspace
 

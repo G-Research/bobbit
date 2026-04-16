@@ -421,6 +421,7 @@ function httpGetJson(url: string, apiKey?: string, timeoutMs = 10_000): Promise<
 export function modelRecencyRank(id: string): number {
 	const s = id.toLowerCase();
 	// Anthropic Claude
+	if (s.includes("claude-opus-4-7") || s.includes("claude-opus-4.7")) return 102;
 	if (s.includes("claude-opus-4-6") || s.includes("claude-opus-4.6")) return 100;
 	if (s.includes("claude-sonnet-4-6") || s.includes("claude-sonnet-4.6")) return 99;
 	if (s.includes("claude-opus-4-5") || s.includes("claude-opus-4.5")) return 98;

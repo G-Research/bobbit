@@ -70,7 +70,6 @@ export class RpcBridge {
 	async start(): Promise<void> {
 		const cliPath = this.options.cliPath || findAgentCli();
 		const args = ["--mode", "rpc"];
-		if (this.options.cwd) args.push("--cwd", this.options.cwd);
 		if (this.options.systemPromptPath) args.push("--system-prompt", this.options.systemPromptPath);
 		if (this.options.args) args.push(...this.options.args);
 
@@ -439,12 +438,8 @@ export class RpcBridge {
 		for (let i = 0; i < agentArgs.length; i++) {
 			const arg = agentArgs[i];
 			if (arg === "--cwd") {
-				// Remap to container-internal path. Note: the current pi agent
-				// ignores --cwd (it uses process.cwd() instead), so the actual
-				// working directory is set via `docker exec -w` in spawnDockerExec().
-				// We still pass --cwd for forward-compatibility with future CLIs.
-				const containerCwd = this.options.cwd || "/workspace";
-				remappedArgs.push("--cwd", containerCwd);
+				// Skip --cwd and its value — the working directory is set via
+				// `docker exec -w` in spawnDockerExec() (or spawn cwd for direct).
 				i++; // skip the next arg (the host cwd path)
 			} else if (arg === "--system-prompt") {
 				// session-prompts/ dir is mounted at /tmp/session-prompts/

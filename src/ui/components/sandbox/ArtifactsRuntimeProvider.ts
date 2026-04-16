@@ -13,7 +13,7 @@ interface ArtifactsPanelLike {
 }
 
 interface AgentLike {
-	appendMessage(message: any): void;
+	state: { messages: any[] };
 }
 
 /**
@@ -171,7 +171,7 @@ export class ArtifactsRuntimeProvider implements SandboxRuntimeProvider {
 							filename,
 							content,
 						});
-						this.agent?.appendMessage({
+						this.agent?.state.messages.push({
 							role: "artifact",
 							action,
 							filename,
@@ -192,7 +192,7 @@ export class ArtifactsRuntimeProvider implements SandboxRuntimeProvider {
 							command: "delete",
 							filename,
 						});
-						this.agent?.appendMessage({
+						this.agent?.state.messages.push({
 							role: "artifact",
 							action: "delete",
 							filename,
