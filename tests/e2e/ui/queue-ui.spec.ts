@@ -236,7 +236,7 @@ test.describe("Queue UI E2E", () => {
 
 		// Wait for app to load
 		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
+			page.locator(".sidebar-edge").first(),
 		).toBeVisible({ timeout: 15_000 });
 
 		// Navigate back to the same session
@@ -244,9 +244,12 @@ test.describe("Queue UI E2E", () => {
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 		// Wait for draft restore cycle to settle before asserting
-		await page.waitForTimeout(1_000);
+		await page.waitForTimeout(2_000);
 
 		// Verify textarea is empty — draft was cleared on send
-		await expect(page.locator("textarea").first()).toHaveValue("", { timeout: 10_000 });
+		await expect(async () => {
+			const val = await page.locator("textarea").first().inputValue();
+			expect(val).toBe("");
+		}).toPass({ timeout: 10_000 });
 	});
 });

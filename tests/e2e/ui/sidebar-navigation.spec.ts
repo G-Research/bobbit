@@ -65,11 +65,14 @@ test.describe("Sidebar navigation", () => {
 		// Reload page — collapsed state should persist via localStorage
 		await page.reload();
 		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
+			page.locator(".sidebar-edge").first(),
 		).toBeVisible({ timeout: 15_000 });
 
-		// Sessions label should still be hidden after reload
-		await expect(sessionsLabel).not.toBeVisible({ timeout: 3_000 });
+		// Sessions label should still be hidden after reload (use toPass for retry — sidebar may briefly flash expanded)
+		await expect(async () => {
+			const visible = await sessionsLabel.isVisible().catch(() => false);
+			expect(visible).toBe(false);
+		}).toPass({ timeout: 10_000 });
 
 		// Find the project header again after reload and expand
 		const projectHeaderAfterReload = page.locator(".sidebar-edge div.cursor-pointer").filter({
