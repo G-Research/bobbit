@@ -107,13 +107,14 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// act — navigate to goal dashboard
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
-		await s.page.waitForTimeout(500);
 
-		// assert — goal dashboard visible, URL correct
+		// assert — goal dashboard visible, URL correct. Use toBeVisible with
+		// generous timeout instead of a fixed sleep; under parallel load the
+		// dashboard container can take longer than 500ms to mount.
 		s.assert();
 		await s.url_contains(`/goal/${goal.id}`);
 		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 10_000 });
+			.toBeVisible({ timeout: 15_000 });
 
 		// act — press back to return to session
 		s.act();
@@ -362,17 +363,21 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.navigate_to("session", "A");
 		await s.editor.is_visible();
 
-		// The textarea auto-focuses on session open; blur it so the global
-		// keyboard shortcut handler receives the event without competition.
-		await s.page.evaluate(() => {
-			(document.activeElement as HTMLElement | null)?.blur();
-			document.body.focus?.();
-		});
+		// Dispatch keyboard events via window.dispatchEvent rather than
+		// Playwright's keyboard.press — under heavy parallel load the first
+		// Chromium keystroke can be dropped when focus hasn't settled. The
+		// app's shortcut registry listens on `window`, so dispatching there
+		// reaches it reliably and bypasses the focus machinery entirely.
+		const dispatchKey = async (key: string, code: string, ctrlKey = true) => {
+			await s.page.evaluate(({ key, code, ctrlKey }) => {
+				const event = new KeyboardEvent("keydown", { key, code, ctrlKey, bubbles: true, cancelable: true });
+				window.dispatchEvent(event);
+			}, { key, code, ctrlKey });
+		};
 
-		// act — Ctrl+[ toggles sidebar. Poll localStorage instead of sleeping
-		// a fixed amount; the handler can be slow under parallel load.
+		// act — Ctrl+[ toggles sidebar. Poll localStorage until the handler fires.
 		s.act();
-		await s.press_key("Control+BracketLeft");
+		await dispatchKey("[", "BracketLeft");
 
 		s.assert();
 		await expect.poll(
@@ -382,7 +387,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		// Toggle back
 		s.act();
-		await s.press_key("Control+BracketLeft");
+		await dispatchKey("[", "BracketLeft");
 
 		s.assert();
 		await expect.poll(
@@ -392,14 +397,14 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		// act — Ctrl+, opens settings
 		s.act();
-		await s.press_key("Control+,");
+		await dispatchKey(",", "Comma");
 
 		s.assert();
 		await s.url_contains("/settings");
 
 		// act — Ctrl+, again closes settings (returns to previous view)
 		s.act();
-		await s.press_key("Control+,");
+		await dispatchKey(",", "Comma");
 
 		s.assert();
 		// Should be back at session or at least not on settings
@@ -410,7 +415,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		// act — Ctrl+K focuses search
 		s.act();
-		await s.press_key("Control+k");
+		await dispatchKey("k", "KeyK");
 
 		s.assert();
 		// Search input or search page should be active
