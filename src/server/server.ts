@@ -6218,8 +6218,12 @@ async function handleApiRoute(
 		}
 		const answerErr = validateAnswers(answers);
 		if (answerErr) { json({ error: answerErr }, 400); return; }
-		const ok = userQuestionHarness.submit(sessionId, toolUseId, answers);
-		if (!ok) { json({ error: "No pending question for this session/toolUseId" }, 404); return; }
+		const result = userQuestionHarness.submit(sessionId, toolUseId, answers);
+		if (!result.ok) {
+			const status = result.code === "not_found" ? 404 : 400;
+			json({ error: result.error }, status);
+			return;
+		}
 		if (broadcastToSession) {
 			broadcastToSession(sessionId, { type: "user_question_answered", sessionId, toolUseId, answers });
 		}

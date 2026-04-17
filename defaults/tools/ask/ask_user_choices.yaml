@@ -25,16 +25,32 @@ detail_docs: |
   ```
 
   - **questions**: 1–5 questions
-  - Each question has a **question** string, an **options** array (2–8 items), and an optional
-    **allow_other** boolean that adds an "Other" free-text choice.
+  - Each question has a **question** string, an **options** array (2–8 items), and these
+    optional fields:
+    - **allow_other** (boolean) — adds an "Other" free-text choice.
+    - **multi** (boolean) — allow multiple selections; `selected` is returned as an array.
+    - **min** / **max** (integers) — min/max selections when `multi` is true (defaults: 1 and options.length).
 
   ## Output
+
+  Single-select (default):
 
   ```json
   {
     "answers": [
       { "question": "...", "selected": "Grid",  "other_text": null },
       { "question": "...", "selected": "Other", "other_text": "user's typed text" }
+    ]
+  }
+  ```
+
+  Multi-select (`multi: true`) — `selected` is always an array; may contain "Other":
+
+  ```json
+  {
+    "answers": [
+      { "question": "...", "selected": ["Grid", "List"],        "other_text": null },
+      { "question": "...", "selected": ["List", "Other"],       "other_text": "user's typed text" }
     ]
   }
   ```

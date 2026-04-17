@@ -2,10 +2,13 @@
  * Interactive widget rendered inline in the chat for the `ask_user_choices` tool.
  *
  * - Tabs across the top (one per question).
- * - Options render as radio-style cards.
- * - Selecting a non-"Other" option auto-advances to the next tab.
- * - "Other" (when enabled per question) reveals a text input; does NOT auto-advance.
- * - Submit is disabled until all questions have a valid selection.
+ * - Options render as radio/checkbox cards. The native input is visually hidden
+ *   (sr-only) and card styling (border-primary + a ✓ badge) signals selection.
+ * - Single-select: selecting a non-"Other" option auto-advances to the next tab.
+ * - Multi-select (`multi: true`): checkboxes; no auto-advance.
+ * - "Other" (when enabled) reveals a text input; does NOT auto-advance.
+ * - Submit is disabled until every question has a valid selection (respecting
+ *   min/max for multi-select).
  * - Once submitted (or `answers` prop is populated), the widget is read-only.
  */
 import { LitElement, html, nothing, type TemplateResult } from "lit";
@@ -29,16 +32,21 @@ export interface AskQuestion {
 	question: string;
 	options: string[];
 	allow_other?: boolean;
+	multi?: boolean;
+	min?: number;
+	max?: number;
 }
 
 export interface AskAnswer {
 	question: string;
-	selected: string;
+	/** string for single-select; string[] for multi-select. */
+	selected: string | string[];
 	other_text: string | null;
 }
 
 interface DraftEntry {
-	selected: string | null;
+	/** null (none), a single option (single-select), or an array (multi-select). */
+	selected: string | string[] | null;
 	other_text: string;
 }
 
@@ -82,7 +90,10 @@ export class AskUserChoicesWidget extends LitElement {
 	private _ensureDraft(): void {
 		if (!Array.isArray(this.questions)) return;
 		if (this._draft.length !== this.questions.length) {
-			this._draft = this.questions.map(() => ({ selected: null, other_text: "" }));
+			this._draft = this.questions.map((q) => ({
+				selected: q.multi ? [] : null,
+				other_text: "",
+			}));
 			this._activeTab = Math.min(this._activeTab, Math.max(0, this.questions.length - 1));
 		}
 	}
@@ -102,6 +113,19 @@ export class AskUserChoicesWidget extends LitElement {
 
 	private _selectOption(qIdx: number, option: string): void {
 		if (this._isReadOnly()) return;
+		const q = this.questions[qIdx];
+		if (q?.multi) {
+			this._draft = this._draft.map((d, i) => {
+				if (i !== qIdx) return d;
+				const cur = Array.isArray(d.selected) ? d.selected : [];
+				const next = cur.includes(option)
+					? cur.filter(x => x !== option)
+					: [...cur, option];
+				return { ...d, selected: next };
+			});
+			// No auto-advance for multi-select.
+			return;
+		}
 		this._draft = this._draft.map((d, i) => i === qIdx ? { ...d, selected: option } : d);
 		// Auto-advance unless "Other" was selected or this is the last question.
 		if (option !== OTHER_SENTINEL && qIdx < this.questions.length - 1) {
@@ -116,8 +140,18 @@ export class AskUserChoicesWidget extends LitElement {
 
 	private _canSubmit(): boolean {
 		if (this._draft.length !== this.questions.length) return false;
-		return this._draft.every((d) => {
-			if (!d.selected) return false;
+		return this._draft.every((d, i) => {
+			const q = this.questions[i];
+			if (q.multi) {
+				const arr = Array.isArray(d.selected) ? d.selected : [];
+				const maxOptionCount = q.options.length + (q.allow_other ? 1 : 0);
+				const min = q.min ?? 1;
+				const max = q.max ?? maxOptionCount;
+				if (arr.length < min || arr.length > max) return false;
+				if (arr.includes(OTHER_SENTINEL) && !d.other_text.trim()) return false;
+				return true;
+			}
+			if (!d.selected || Array.isArray(d.selected)) return false;
 			if (d.selected === OTHER_SENTINEL && !d.other_text.trim()) return false;
 			return true;
 		});
@@ -133,10 +167,19 @@ export class AskUserChoicesWidget extends LitElement {
 		this._submitError = "";
 		const answers: AskAnswer[] = this.questions.map((q, i) => {
 			const d = this._draft[i];
+			if (q.multi) {
+				const arr = (Array.isArray(d.selected) ? d.selected : []).map(v => v === OTHER_SENTINEL ? "Other" : v);
+				const hasOther = arr.includes("Other");
+				return {
+					question: q.question,
+					selected: arr,
+					other_text: hasOther ? d.other_text.trim() : null,
+				};
+			}
 			const isOther = d.selected === OTHER_SENTINEL;
 			return {
 				question: q.question,
-				selected: isOther ? "Other" : (d.selected || ""),
+				selected: isOther ? "Other" : (typeof d.selected === "string" ? d.selected : ""),
 				other_text: isOther ? d.other_text.trim() : null,
 			};
 		});
@@ -193,13 +236,19 @@ export class AskUserChoicesWidget extends LitElement {
 			</div>`;
 	}
 
+	private _tabAnswered(idx: number, readOnly: boolean): boolean {
+		if (readOnly) return Array.isArray(this.answers) && this.answers[idx] != null;
+		const d = this._draft[idx];
+		if (!d) return false;
+		if (Array.isArray(d.selected)) return d.selected.length > 0;
+		return !!d.selected;
+	}
+
 	private _renderTab(idx: number): TemplateResult {
 		const q = this.questions[idx];
 		const isActive = idx === this._activeTab;
 		const readOnly = this._isReadOnly();
-		const answered = readOnly
-			? Array.isArray(this.answers) && this.answers[idx] != null
-			: !!this._draft[idx]?.selected;
+		const answered = this._tabAnswered(idx, readOnly);
 		const label = (q?.question || `Q${idx + 1}`).slice(0, 40);
 		const cls = [
 			"ask-tab px-2 py-1 text-xs rounded-t cursor-pointer border border-b-0",
@@ -219,16 +268,35 @@ export class AskUserChoicesWidget extends LitElement {
 			</button>`;
 	}
 
+	private _isOptionChecked(qIdx: number, value: string, readOnly: boolean): boolean {
+		const q = this.questions[qIdx];
+		if (readOnly && Array.isArray(this.answers)) {
+			const a = this.answers[qIdx];
+			if (!a) return false;
+			if (Array.isArray(a.selected)) {
+				// Multi-select answer: "Other" round-trips as "Other" (not sentinel).
+				if (value === OTHER_SENTINEL) return a.selected.includes("Other");
+				return a.selected.includes(value);
+			}
+			const stored = a.selected === "Other" ? OTHER_SENTINEL : a.selected;
+			return stored === value;
+		}
+		const d = this._draft[qIdx];
+		if (!d) return false;
+		if (q?.multi) {
+			return Array.isArray(d.selected) && d.selected.includes(value);
+		}
+		return d.selected === value;
+	}
+
 	private _renderActivePanel(readOnly: boolean): TemplateResult | typeof nothing {
 		const idx = this._activeTab;
 		const q = this.questions[idx];
 		if (!q) return nothing;
 		const answer = readOnly && Array.isArray(this.answers) ? this.answers[idx] : null;
 		const draft = this._draft[idx] || { selected: null, other_text: "" };
-		const selected = readOnly && answer
-			? (answer.selected === "Other" ? OTHER_SENTINEL : answer.selected)
-			: draft.selected;
-		const otherText = readOnly && answer && answer.selected === "Other"
+		const otherChecked = this._isOptionChecked(idx, OTHER_SENTINEL, readOnly);
+		const otherText = readOnly && answer && otherChecked
 			? (answer.other_text || "")
 			: draft.other_text;
 
@@ -236,46 +304,76 @@ export class AskUserChoicesWidget extends LitElement {
 			<div role="tabpanel" data-panel-index=${idx} class="ask-panel">
 				<div class="ask-question text-sm font-medium mb-2">${q.question}</div>
 				<div class="ask-options flex flex-col gap-1.5">
-					${q.options.map(opt => this._renderOption(idx, opt, selected === opt, readOnly))}
-					${q.allow_other ? this._renderOtherOption(idx, selected === OTHER_SENTINEL, otherText, readOnly) : nothing}
+					${q.options.map(opt => this._renderOption(idx, opt, this._isOptionChecked(idx, opt, readOnly), readOnly))}
+					${q.allow_other ? this._renderOtherOption(idx, otherChecked, otherText, readOnly) : nothing}
 				</div>
 			</div>`;
 	}
 
 	private _renderOption(qIdx: number, option: string, checked: boolean, readOnly: boolean): TemplateResult {
+		const q = this.questions[qIdx];
+		const multi = !!q?.multi;
 		const cls = [
 			"ask-option flex items-center gap-2 p-2 text-sm rounded border",
 			checked ? "border-primary bg-primary/10" : "border-border",
 			readOnly ? "cursor-default opacity-90" : "cursor-pointer hover:bg-muted",
 		].join(" ");
-		return html`
-			<label class=${cls}>
-				<input
+		const inputAttrs = multi
+			? html`<input
+					type="checkbox"
+					class="sr-only"
+					value=${option}
+					.checked=${checked}
+					?disabled=${readOnly}
+					@change=${() => this._selectOption(qIdx, option)}>`
+			: html`<input
 					type="radio"
+					class="sr-only"
 					name=${`ask-q-${qIdx}-${this.toolUseId}`}
 					value=${option}
 					.checked=${checked}
 					?disabled=${readOnly}
-					@change=${() => this._selectOption(qIdx, option)}>
+					@change=${() => this._selectOption(qIdx, option)}>`;
+		return html`
+			<label class=${cls}>
+				${inputAttrs}
+				<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 rounded-full border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
+					${checked ? html`<span class="ask-check-glyph text-[10px] leading-none">✓</span>` : nothing}
+				</span>
 				<span class="ask-option-text">${option}</span>
 			</label>`;
 	}
 
 	private _renderOtherOption(qIdx: number, checked: boolean, otherText: string, readOnly: boolean): TemplateResult {
+		const q = this.questions[qIdx];
+		const multi = !!q?.multi;
 		const cls = [
 			"ask-option ask-option-other flex items-center gap-2 p-2 text-sm rounded border",
 			checked ? "border-primary bg-primary/10" : "border-border",
 			readOnly ? "cursor-default opacity-90" : "cursor-pointer hover:bg-muted",
 		].join(" ");
-		return html`
-			<label class=${cls}>
-				<input
+		const inputEl = multi
+			? html`<input
+					type="checkbox"
+					class="sr-only"
+					value=${OTHER_SENTINEL}
+					.checked=${checked}
+					?disabled=${readOnly}
+					@change=${() => this._selectOption(qIdx, OTHER_SENTINEL)}>`
+			: html`<input
 					type="radio"
+					class="sr-only"
 					name=${`ask-q-${qIdx}-${this.toolUseId}`}
 					value=${OTHER_SENTINEL}
 					.checked=${checked}
 					?disabled=${readOnly}
-					@change=${() => this._selectOption(qIdx, OTHER_SENTINEL)}>
+					@change=${() => this._selectOption(qIdx, OTHER_SENTINEL)}>`;
+		return html`
+			<label class=${cls}>
+				${inputEl}
+				<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 rounded-full border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
+					${checked ? html`<span class="ask-check-glyph text-[10px] leading-none">✓</span>` : nothing}
+				</span>
 				<span class="ask-option-text">Other</span>
 				${checked ? html`
 					<input

@@ -118,6 +118,80 @@ test.describe("ask_user_choices REST round-trip", () => {
 		}
 	});
 
+	test("multi-select: answers round-trip with selected as array", async () => {
+		const sessionId = await createSession();
+		try {
+			const toolUseId = `tool-ask-multi-${Date.now()}`;
+			const questions = [
+				{ question: "Which?", options: ["a", "b", "c"], multi: true },
+			];
+			const blockingP = postInternal("/api/internal/user-question", { sessionId, toolUseId, questions });
+			// Wait for pending.
+			for (let i = 0; i < 50; i++) {
+				const r = await apiFetch(`/api/internal/user-question/pending?sessionId=${sessionId}`);
+				if ((await r.json()).pending.length > 0) break;
+				await new Promise(r => setTimeout(r, 50));
+			}
+			const answers = [{ question: "Which?", selected: ["a", "b"], other_text: null }];
+			const submitResp = await postInternal("/api/internal/user-question/submit", { sessionId, toolUseId, answers });
+			expect(submitResp.status).toBe(200);
+			const blockingResp = await blockingP;
+			expect(blockingResp.status).toBe(200);
+			expect(await blockingResp.json()).toEqual({ answers });
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("single-select question submitted with an array → 400", async () => {
+		const sessionId = await createSession();
+		try {
+			const toolUseId = `tool-ask-bad-single-${Date.now()}`;
+			const questions = [{ question: "Q?", options: ["a", "b"] }];
+			const blockingP = postInternal("/api/internal/user-question", { sessionId, toolUseId, questions });
+			for (let i = 0; i < 50; i++) {
+				const r = await apiFetch(`/api/internal/user-question/pending?sessionId=${sessionId}`);
+				if ((await r.json()).pending.length > 0) break;
+				await new Promise(r => setTimeout(r, 50));
+			}
+			const bad = [{ question: "Q?", selected: ["a"], other_text: null }];
+			const resp = await postInternal("/api/internal/user-question/submit", { sessionId, toolUseId, answers: bad });
+			expect(resp.status).toBe(400);
+			// Clean up: submit a valid answer so the blocking request resolves.
+			await postInternal("/api/internal/user-question/submit", {
+				sessionId, toolUseId,
+				answers: [{ question: "Q?", selected: "a", other_text: null }],
+			});
+			await blockingP;
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("multi-select question submitted with a string → 400", async () => {
+		const sessionId = await createSession();
+		try {
+			const toolUseId = `tool-ask-bad-multi-${Date.now()}`;
+			const questions = [{ question: "Q?", options: ["a", "b"], multi: true }];
+			const blockingP = postInternal("/api/internal/user-question", { sessionId, toolUseId, questions });
+			for (let i = 0; i < 50; i++) {
+				const r = await apiFetch(`/api/internal/user-question/pending?sessionId=${sessionId}`);
+				if ((await r.json()).pending.length > 0) break;
+				await new Promise(r => setTimeout(r, 50));
+			}
+			const bad = [{ question: "Q?", selected: "a", other_text: null }];
+			const resp = await postInternal("/api/internal/user-question/submit", { sessionId, toolUseId, answers: bad });
+			expect(resp.status).toBe(400);
+			await postInternal("/api/internal/user-question/submit", {
+				sessionId, toolUseId,
+				answers: [{ question: "Q?", selected: ["a"], other_text: null }],
+			});
+			await blockingP;
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("unknown session → 404", async () => {
 		const r = await postInternal("/api/internal/user-question", {
 			sessionId: "no-such-session", toolUseId: "t", questions: [{ question: "Q", options: ["a", "b"] }],
@@ -199,6 +273,52 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 				// Pending list is now empty.
 				const r2 = await apiFetch(`/api/internal/user-question/pending?sessionId=${sessionId}`);
 				expect((await r2.json()).pending).toEqual([]);
+			} finally {
+				conn.close();
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("mock agent multi-select: tool_result.answers[0].selected is an array", async () => {
+		const sessionId = await createSession();
+		try {
+			const conn = await connectWs(sessionId);
+			try {
+				conn.send({ type: "prompt", text: "please use ask_user_choices_multi" });
+				await conn.waitFor(toolStartPredicate("ask_user_choices"), 10_000);
+
+				let toolUseId = "";
+				for (let i = 0; i < 100; i++) {
+					const r = await apiFetch(`/api/internal/user-question/pending?sessionId=${sessionId}`);
+					const list = (await r.json()).pending;
+					if (list.length > 0) { toolUseId = list[0].toolUseId; break; }
+					await new Promise(r => setTimeout(r, 50));
+				}
+				expect(toolUseId).not.toBe("");
+
+				const answers = [
+					{ question: "Which colors?", selected: ["red", "blue"], other_text: null },
+					{ question: "Team size?", selected: "small", other_text: null },
+				];
+				const submitResp = await fetch(`${base()}/api/internal/user-question/submit`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: `Bearer ${readE2EToken()}` },
+					body: JSON.stringify({ sessionId, toolUseId, answers }),
+				});
+				expect(submitResp.status).toBe(200);
+
+				const toolResultMsg = await conn.waitFor(
+					(m) => messageEndPredicate("toolResult")(m)
+						&& m.data?.message?.toolName === "ask_user_choices",
+					10_000,
+				);
+				const content = toolResultMsg.data?.message?.content?.[0]?.text || "";
+				const parsed = JSON.parse(content);
+				expect(Array.isArray(parsed.answers[0].selected)).toBe(true);
+				expect(parsed.answers[0].selected).toEqual(["red", "blue"]);
+				expect(parsed.answers[1].selected).toBe("small");
 			} finally {
 				conn.close();
 			}
