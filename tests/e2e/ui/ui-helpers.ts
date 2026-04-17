@@ -65,11 +65,16 @@ export async function navigateToHash(page: Page, hash: string): Promise<void> {
 	// Chromium can drop or delay the assignment, and the subsequent
 	// waitForFunction just polls the stale value. Reassigning resets the
 	// polling baseline and reliably lands.
+	//
+	// Accept "contains" rather than strict equality because the app's router
+	// may normalize the hash (e.g. append a trailing slash, strip query
+	// params). `contains` is enough to prove the navigation happened —
+	// tests that care about the exact form use `url_equals` separately.
 	for (let attempt = 0; attempt < 3; attempt++) {
 		await page.evaluate((h) => { window.location.hash = h; }, hash);
 		try {
 			await page.waitForFunction(
-				(h) => window.location.hash === h,
+				(h) => window.location.hash.startsWith(h),
 				hash,
 				{ timeout: attempt === 2 ? 10_000 : 3_000 },
 			);

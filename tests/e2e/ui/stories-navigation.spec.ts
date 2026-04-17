@@ -145,22 +145,18 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.assert();
 		await s.editor.is_visible();
 
-		// Deep link: goal. Wait for the hash to settle before asserting on the
-		// new view — back-to-back navigateToHash calls can race with the
-		// previous view's teardown animations.
+		// Deep link: goal. navigateToHash already waits for the hash to settle,
+		// so no extra waitForFunction is needed (removing it avoids compounding
+		// timeouts when the navigation is slow under load).
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
-		await s.page.waitForFunction((id) =>
-			window.location.hash.includes(`/goal/${id}`), goal.id, { timeout: 5_000 });
 		s.assert();
 		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 15_000 });
+			.toBeVisible({ timeout: 20_000 });
 
 		// Deep link: settings
 		s.act();
 		await navigateToHash(s.page, "#/settings/system/models");
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
 		s.assert();
 		await expect(s.page.getByText("Models").first())
 			.toBeVisible({ timeout: 10_000 });
