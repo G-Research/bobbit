@@ -30,7 +30,8 @@ import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
 import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRenderer.js";
 import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
 import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
-import type { ToolRenderResult } from "./types.js";
+import { AskUserChoicesRenderer } from "./renderers/AskUserChoicesRenderer.js";
+import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
 registerToolRenderer("bash", new BashRenderer());
@@ -72,6 +73,7 @@ registerToolRenderer("preview_open", new PreviewOpenRenderer());
 registerToolRenderer("review_open", new ReviewOpenRenderer());
 registerToolRenderer("review_close", new ReviewCloseRenderer());
 registerToolRenderer("verification_result", new VerificationResultRenderer());
+registerToolRenderer("ask_user_choices", new AskUserChoicesRenderer());
 
 // Proposal tools — one renderer per proposal type
 const PROPOSAL_TOOL_NAMES = [
@@ -103,6 +105,7 @@ export function renderTool(
 	params: any | undefined,
 	result: ToolResultMessage | undefined,
 	isStreaming?: boolean,
+	ctx?: ToolRenderContext,
 ): ToolRenderResult {
 	// If showJsonMode is enabled, always use the default renderer
 	if (showJsonMode) {
@@ -111,7 +114,7 @@ export function renderTool(
 
 	const renderer = getToolRenderer(toolName);
 	if (renderer) {
-		return renderer.render(params, result, isStreaming);
+		return renderer.render(params, result, isStreaming, ctx);
 	}
 	return defaultRenderer.withToolName(toolName).render(params, result, isStreaming);
 }

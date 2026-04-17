@@ -155,6 +155,10 @@ export class MockAgentCore {
 			const filePath = MockAgentCore.extractFilePath(text);
 			return { tool: "Edit", input: { path: filePath, oldText: "ORIGINAL_VALUE", newText: "EDITED_VALUE" }, output: "Edited successfully" };
 		}
+		if (lower.includes("ask_user_choices") || lower.includes("ask user choices")) {
+			// Signals the mock agent to hit the blocking /api/internal/user-question endpoint.
+			return { askUserChoices: true };
+		}
 		return null;
 	}
 
@@ -197,6 +201,8 @@ export class MockAgentCore {
 
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
+		} else if (toolAction && toolAction.askUserChoices) {
+			await this._handleAskUserChoices();
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
 		} else if (toolAction && toolAction.mockError) {
@@ -260,6 +266,80 @@ export class MockAgentCore {
 
 		this.emit({ type: "agent_end" });
 		this.emit({ type: "session_status", status: "idle" });
+	}
+
+	async _handleAskUserChoices() {
+		// Call the ask_user_choices tool via its REST endpoint directly, mirroring
+		// how the real extension posts to /api/internal/user-question and blocks
+		// until the UI submits. The mock agent waits for the response, then emits
+		// the toolCall + toolResult events.
+		const toolId = `tool_ask_${Date.now()}`;
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR || path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (this.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {}
+
+		const questions = [
+			{ question: "Favorite color?", options: ["red", "blue", "green"] },
+			{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true },
+		];
+
+		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
+
+		// Emit the assistant toolCall message FIRST so the UI renders the widget
+		// while the tool blocks server-side waiting for the user's answer.
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
+		};
+		this.conversationMessages.push(assistantMsg);
+		// Prime the streaming container via message_update so the widget renders
+		// immediately (message_end alone defers until the next stream event,
+		// which never comes because the tool blocks).
+		// Emit TWICE: the StreamingMessageContainer's _immediateUpdate flag may
+		// still be set from the prior user-echo clear, dropping the first RAF.
+		// A second message_update scheduled on the next frame lands cleanly.
+		this.emit({ type: "message_update", message: assistantMsg });
+		await this.tick(50);
+		this.emit({ type: "message_update", message: assistantMsg });
+		await this.tick(50);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		let resultText = "";
+		let isError = false;
+		try {
+			const resp = await fetch(`${gwUrl}/api/internal/user-question`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+				body: JSON.stringify({ sessionId, toolUseId: toolId, questions }),
+			});
+			const data = await resp.json();
+			if (!resp.ok) {
+				isError = true;
+				resultText = data?.error || `HTTP ${resp.status}`;
+			} else {
+				resultText = JSON.stringify(data);
+			}
+		} catch (err) {
+			isError = true;
+			resultText = err.message;
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: isError ? "error" : "complete", output: resultText });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "ask_user_choices",
+			isError,
+			content: [{ type: "text", text: resultText }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
 	async _handleToolDenied(deniedTool) {

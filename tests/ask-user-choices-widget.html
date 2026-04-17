@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ask_user_choices widget fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  .ask-widget { border: 1px solid #444; border-radius: 6px; padding: 12px; max-width: 600px; background: #20203a; }
+  [role="tablist"] { display: flex; gap: 4px; border-bottom: 1px solid #444; margin-bottom: 12px; flex-wrap: wrap; }
+  .ask-tab { padding: 4px 8px; font-size: 12px; border: 1px solid transparent; border-radius: 4px 4px 0 0; background: transparent; color: #aaa; cursor: pointer; }
+  .ask-tab[aria-selected="true"] { background: #1a1a2e; border-color: #444; border-bottom-color: transparent; color: #fff; font-weight: 500; }
+  .ask-tab-check { color: #22c55e; margin-left: 4px; }
+  .ask-question { font-size: 14px; font-weight: 500; margin-bottom: 8px; }
+  .ask-options { display: flex; flex-direction: column; gap: 6px; }
+  .ask-option { display: flex; align-items: center; gap: 8px; padding: 8px; font-size: 14px; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
+  .ask-option.checked { border-color: #3b82f6; background: rgba(59,130,246,0.1); }
+  .ask-option[data-disabled="true"] { cursor: default; opacity: 0.9; }
+  .ask-other-input { margin-left: 8px; flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid #444; border-radius: 4px; background: #1a1a2e; color: #eee; }
+  .ask-submit { padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 4px; background: #3b82f6; color: white; border: 0; cursor: pointer; }
+  .ask-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+  .ask-submit-row { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .ask-submit-error { color: #f87171; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div id="mount"></div>
+
+<script>
+/**
+ * Plain-JS replica of AskUserChoicesWidget logic.
+ * Mirrors the source at src/ui/components/AskUserChoicesWidget.ts so the
+ * test fixture can validate behaviour without bundling Lit.
+ *
+ * Kept in sync manually; if the source changes, update this file too.
+ */
+
+const OTHER_SENTINEL = "__OTHER__";
+
+class AskWidget {
+  constructor(mount, opts) {
+    this.mount = mount;
+    this.questions = opts.questions;
+    this.answers = opts.answers || null;
+    this.sessionId = opts.sessionId || "";
+    this.toolUseId = opts.toolUseId || "t1";
+    this.errored = !!opts.errored;
+    this.errorText = opts.errorText || "";
+    this.submitUrl = opts.submitUrl || "/api/internal/user-question/submit";
+    this.submitFetch = opts.submitFetch || window.fetch.bind(window);
+    this.activeTab = 0;
+    this.draft = this.questions.map(() => ({ selected: null, other_text: "" }));
+    this.submitting = false;
+    this.submitError = "";
+    this.render();
+  }
+
+  isReadOnly() { return Array.isArray(this.answers) || this.errored; }
+
+  canSubmit() {
+    if (this.draft.length !== this.questions.length) return false;
+    return this.draft.every(d => {
+      if (!d.selected) return false;
+      if (d.selected === OTHER_SENTINEL && !d.other_text.trim()) return false;
+      return true;
+    });
+  }
+
+  selectTab(idx) {
+    if (idx < 0 || idx >= this.questions.length) return;
+    this.activeTab = idx;
+    this.render();
+  }
+
+  selectOption(qIdx, option) {
+    if (this.isReadOnly()) return;
+    this.draft[qIdx] = { ...this.draft[qIdx], selected: option };
+    if (option !== OTHER_SENTINEL && qIdx < this.questions.length - 1) {
+      this.activeTab = qIdx + 1;
+    }
+    // Defer re-render so the triggering event completes first — avoids
+    // detaching the DOM element mid-action for Playwright.
+    setTimeout(() => this.render(), 0);
+  }
+
+  setOtherText(qIdx, text) {
+    if (this.isReadOnly()) return;
+    this.draft[qIdx] = { ...this.draft[qIdx], other_text: text };
+    this.render();
+  }
+
+  async submit() {
+    if (!this.canSubmit() || this.submitting) return;
+    this.submitting = true;
+    this.submitError = "";
+    this.render();
+    const answers = this.questions.map((q, i) => {
+      const d = this.draft[i];
+      const isOther = d.selected === OTHER_SENTINEL;
+      return {
+        question: q.question,
+        selected: isOther ? "Other" : d.selected,
+        other_text: isOther ? d.other_text.trim() : null,
+      };
+    });
+    try {
+      const resp = await this.submitFetch(this.submitUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: this.sessionId, toolUseId: this.toolUseId, answers }),
+      });
+      if (!resp.ok) {
+        let msg = `HTTP ${resp.status}`;
+        try { const e = await resp.json(); if (e && e.error) msg = e.error; } catch {}
+        throw new Error(msg);
+      }
+      this.answers = answers;
+    } catch (e) {
+      this.submitError = e && e.message ? e.message : String(e);
+    } finally {
+      this.submitting = false;
+      this.render();
+    }
+  }
+
+  render() {
+    const root = document.createElement("div");
+    root.className = "ask-widget";
+
+    if (this.errored) {
+      root.innerHTML = `<div class="ask-error">${this.errorText || "ask_user_choices failed."}</div>`;
+      this.mount.replaceChildren(root);
+      return;
+    }
+
+    const readOnly = this.isReadOnly();
+
+    // Tabs
+    const tablist = document.createElement("div");
+    tablist.setAttribute("role", "tablist");
+    this.questions.forEach((q, i) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", String(i === this.activeTab));
+      btn.setAttribute("data-tab-index", String(i));
+      btn.className = "ask-tab";
+      const answered = readOnly
+        ? Array.isArray(this.answers) && this.answers[i] != null
+        : !!this.draft[i].selected;
+      btn.innerHTML = `<span>${i + 1}.</span> <span>${escapeHtml(q.question.slice(0, 40))}</span>${answered ? '<span class="ask-tab-check">✓</span>' : ""}`;
+      btn.addEventListener("click", () => this.selectTab(i));
+      tablist.appendChild(btn);
+    });
+    root.appendChild(tablist);
+
+    // Active panel
+    const q = this.questions[this.activeTab];
+    const answer = readOnly && Array.isArray(this.answers) ? this.answers[this.activeTab] : null;
+    const draft = this.draft[this.activeTab];
+    const selected = readOnly && answer
+      ? (answer.selected === "Other" ? OTHER_SENTINEL : answer.selected)
+      : draft.selected;
+    const otherText = readOnly && answer && answer.selected === "Other"
+      ? (answer.other_text || "")
+      : draft.other_text;
+
+    const panel = document.createElement("div");
+    panel.setAttribute("role", "tabpanel");
+    panel.setAttribute("data-panel-index", String(this.activeTab));
+    panel.innerHTML = `<div class="ask-question">${escapeHtml(q.question)}</div>`;
+
+    const optsDiv = document.createElement("div");
+    optsDiv.className = "ask-options";
+    const renderOpt = (value, label, isOther) => {
+      const checked = selected === value;
+      const lbl = document.createElement("label");
+      lbl.className = "ask-option" + (checked ? " checked" : "") + (isOther ? " ask-option-other" : "");
+      if (readOnly) lbl.setAttribute("data-disabled", "true");
+      lbl.innerHTML = `
+        <input type="radio" name="q-${this.activeTab}" value="${escapeHtml(value)}" ${checked ? "checked" : ""} ${readOnly ? "disabled" : ""}>
+        <span class="ask-option-text">${escapeHtml(label)}</span>
+        ${isOther && checked ? `<input type="text" class="ask-other-input" value="${escapeHtml(otherText)}" ${readOnly ? "disabled" : ""}>` : ""}
+      `;
+      const radio = lbl.querySelector("input[type=radio]");
+      radio.addEventListener("change", () => this.selectOption(this.activeTab, value));
+      const txt = lbl.querySelector("input[type=text]");
+      if (txt) {
+        txt.addEventListener("input", (e) => this.setOtherText(this.activeTab, e.target.value));
+      }
+      return lbl;
+    };
+    for (const opt of q.options) optsDiv.appendChild(renderOpt(opt, opt, false));
+    if (q.allow_other) optsDiv.appendChild(renderOpt(OTHER_SENTINEL, "Other", true));
+    panel.appendChild(optsDiv);
+    root.appendChild(panel);
+
+    // Submit row
+    if (!readOnly) {
+      const row = document.createElement("div");
+      row.className = "ask-submit-row";
+      if (this.submitError) {
+        const err = document.createElement("span");
+        err.className = "ask-submit-error";
+        err.textContent = this.submitError;
+        row.appendChild(err);
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ask-submit";
+      btn.textContent = this.submitting ? "Submitting…" : "Submit";
+      btn.disabled = !this.canSubmit() || this.submitting;
+      btn.addEventListener("click", () => this.submit());
+      row.appendChild(btn);
+      root.appendChild(row);
+    }
+
+    this.mount.replaceChildren(root);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+window.AskWidget = AskWidget;
+window.OTHER_SENTINEL = OTHER_SENTINEL;
+window.mountWidget = function(opts) {
+  const mount = document.getElementById("mount");
+  mount.innerHTML = "";
+  return new AskWidget(mount, opts);
+};
+
+window._testReady = true;
+</script>
+</body>
+</html>

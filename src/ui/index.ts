@@ -8,6 +8,7 @@ export { AgentInterface } from "./components/AgentInterface.js";
 export { bobbitLoadingAnimation } from "./components/BobbitLoadingAnimation.js";
 export { BgProcessPill, type BgProcessInfo } from "./components/BgProcessPill.js";
 export { AttachmentTile } from "./components/AttachmentTile.js";
+export { AskUserChoicesWidget } from "./components/AskUserChoicesWidget.js";
 export { ConsoleBlock } from "./components/ConsoleBlock.js";
 export { DiffBlock, isGitDiff } from "./components/DiffBlock.js";
 export { ErrorMessage } from "./components/ErrorMessage.js";

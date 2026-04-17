@@ -472,11 +472,13 @@ export class ToolMessage extends LitElement {
 				details: this.partialResult.details,
 			} as ToolResultMessageType<any>;
 		}
+		const sessionIdCtx = appState.remoteAgent?.gatewaySessionId;
 		const renderResult = renderTool(
 			toolName,
 			this.toolCall.arguments,
 			result,
 			!this.aborted && (this.isStreaming || this.pending),
+			{ toolUseId: this.toolCall.id, sessionId: sessionIdCtx },
 		);
 
 		// Handle custom rendering (no card wrapper)

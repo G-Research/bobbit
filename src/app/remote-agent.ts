@@ -908,6 +908,24 @@ export class RemoteAgent {
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
 
+			case "user_question_pending":
+			case "user_question_answered": {
+				// Forward to the ask_user_choices widget via a DOM event.
+				// Widgets listen on window and cross-match sessionId + toolUseId.
+				const q = msg as any;
+				const detail = {
+					sessionId: q.sessionId,
+					toolUseId: q.toolUseId,
+					questions: q.questions,
+					answers: q.answers,
+				};
+				const eventName = msg.type === "user_question_pending"
+					? "user-question-pending"
+					: "user-question-answered";
+				window.dispatchEvent(new CustomEvent(eventName, { detail }));
+				break;
+			}
+
 			case "tool_permission_needed": {
 				const perm = msg as any;
 				// The server has aborted the agent turn. Clean up:

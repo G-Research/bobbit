@@ -125,6 +125,10 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 
 		const port = await gw.start();
 
+		// Write gateway-url so agent subprocesses (including the mock agent) can
+		// read it for callbacks to internal endpoints.
+		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`, "utf-8");
+
 		// Set env so e2e-setup.ts helpers target this worker's server
 		process.env.E2E_PORT = String(port);
 
