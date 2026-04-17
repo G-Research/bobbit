@@ -2939,6 +2939,7 @@ export class SessionManager {
 		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
@@ -3089,6 +3090,7 @@ export class SessionManager {
 		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
@@ -3922,6 +3924,7 @@ export class SessionManager {
 			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
+			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 			bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 
 			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
