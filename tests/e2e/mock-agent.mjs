@@ -27,6 +27,10 @@ agent.setEventEmitter((event) => send(event));
 
 const rl = createInterface({ input: process.stdin });
 
+// Serialize handlePrompt calls so concurrent prompts don't interleave
+// (matches the real agent's sequential stream behaviour).
+let promptChain = Promise.resolve();
+
 rl.on("line", async (line) => {
 	const trimmed = line.trim();
 	if (!trimmed) return;
@@ -37,10 +41,13 @@ rl.on("line", async (line) => {
 	// Prompt/follow_up need ack before async work starts
 	if (msg.type === "prompt" || msg.type === "follow_up") {
 		send({ type: "response", id: msg.id, success: true });
-		// handlePrompt runs in background; events flow via the emitter above
-		agent.handlePrompt(msg.message || "").catch(err => {
-			console.error("[mock-agent] Prompt error:", err);
-		});
+		const text = msg.message || "";
+		promptChain = promptChain
+			.catch(() => {})
+			.then(() => agent.handlePrompt(text))
+			.catch(err => {
+				console.error("[mock-agent] Prompt error:", err);
+			});
 		return;
 	}
 

@@ -55,8 +55,12 @@ test.describe("Step description tooltips", () => {
 		// Verify the icon text is ⓘ
 		await expect(tooltipIcon).toHaveText("ⓘ");
 
-		// Verify the title attribute contains expected description text from the feature workflow YAML
-		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i);
+		// The tooltip's `title` attribute swaps between the real description
+		// (from feature.yaml) and a fallback "Configure qa_start_command…"
+		// message while the UI asynchronously loads the project's QA config.
+		// Poll until the real description arrives — auto-retrying
+		// toHaveAttribute handles this cleanly.
+		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i, { timeout: 10_000 });
 	});
 
 	test("tooltip title matches the full workflow YAML description", async ({ page }) => {
@@ -66,10 +70,10 @@ test.describe("Step description tooltips", () => {
 		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
 		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
 
-		// Check for multiple substrings from the expected description using
-		// auto-retrying assertions — the tooltip renders before the full
-		// description is wired up so a one-shot getAttribute can race.
-		await expect(tooltipIcon).toHaveAttribute("title", /QA agent/, { timeout: 5_000 });
+		// The tooltip's `title` swaps between the real description and a
+		// fallback "Configure qa_start_command…" while the UI loads the
+		// project's QA config. Wait for the real description (auto-retrying).
+		await expect(tooltipIcon).toHaveAttribute("title", /QA agent/, { timeout: 10_000 });
 		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/);
 		await expect(tooltipIcon).toHaveAttribute("title", /browser/);
 		await expect(tooltipIcon).toHaveAttribute("title", /end-to-end/);

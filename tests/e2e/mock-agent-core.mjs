@@ -35,6 +35,12 @@ export class MockAgentCore {
 		this.currentModel = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384, reasoning: true };
 		this.sessionFilePath = null;
 		this.currentAbortController = null;
+		// Serializes concurrent handlePrompt calls so a second prompt queued
+		// while the first is still in flight runs after the first completes.
+		// Mirrors the real agent's sequential stream behaviour, which the
+		// team-manager relies on when sending a delegate's initial
+		// "Execute the task" prompt followed immediately by the actual task.
+		this._promptChain = Promise.resolve();
 	}
 
 	/** Override the event emitter (used by child-process mode). */
@@ -174,14 +180,18 @@ export class MockAgentCore {
 		this.conversationMessages.push(userMsg);
 		this.emit({ type: "message_end", message: userMsg });
 
-		// Brief delay before starting — mirrors real agent startup
-		await this.tick(50);
+		// Tiny delay before starting — just enough to mimic a real async
+		// boundary without adding significant test wall time. The original
+		// 50ms was meant to mirror the real agent's startup latency but
+		// tests don't care about that specific number; a microtask boundary
+		// is sufficient.
+		await this.tick(5);
 
 		// Emit agent lifecycle events
 		this.emit({ type: "agent_start" });
 		this.emit({ type: "session_status", status: "streaming" });
 
-		await this.tick(20);
+		await this.tick(5);
 
 		const toolAction = MockAgentCore.respondToPrompt(text);
 
@@ -399,12 +409,17 @@ export class MockAgentCore {
 		switch (msg.type) {
 			case "prompt":
 			case "follow_up": {
-				// Respond to ack, then handle prompt async (events flow via emit)
-				// The caller should treat the response as synchronous ack; the
-				// actual work continues in the background.
-				this.handlePrompt(msg.message || "").catch(err => {
-					console.error("[mock-agent-core] Prompt error:", err);
-				});
+				// Respond to ack, then handle prompt async. Serialize onto the
+				// per-instance promise chain so concurrent prompts queue up
+				// rather than interleave (which would double-assign
+				// currentAbortController and scramble event ordering).
+				const text = msg.message || "";
+				this._promptChain = this._promptChain
+					.catch(() => {})
+					.then(() => this.handlePrompt(text))
+					.catch(err => {
+						console.error("[mock-agent-core] Prompt error:", err);
+					});
 				return { success: true };
 			}
 
@@ -414,10 +429,7 @@ export class MockAgentCore {
 					content: [{ type: "text", text: `[STEER_RECEIVED] ${msg.message || msg.text || ""}` }],
 				};
 				this.conversationMessages.push(steerMsg);
-				// Emit after the response resolves to mirror child-process ordering.
-				queueMicrotask(() => {
-					this.emit({ type: "message_end", message: steerMsg });
-				});
+				this.emit({ type: "message_end", message: steerMsg });
 				return { success: true };
 			}
 
@@ -426,15 +438,14 @@ export class MockAgentCore {
 					this.currentAbortController.abort();
 					this.currentAbortController = null;
 				}
-				// Schedule agent_end / session_status events *after* the response
-				// returns so consumers that await abort() then listen for agent_end
-				// don't miss it due to synchronous ordering. This mirrors the
-				// child-process mock where events are flushed after the JSONL
-				// response is written to stdout.
-				queueMicrotask(() => {
-					this.emit({ type: "agent_end" });
-					this.emit({ type: "session_status", status: "idle" });
-				});
+				// Emit abort events synchronously — the caller's `await abort()`
+				// resolves on the return value below, after which their listener
+				// setup (if any) has already been registered via prior calls.
+				// In-process listeners are effectively ordered, so emitting here
+				// delivers events to all currently-subscribed handlers without
+				// racing a subsequent prompt's new abortController.
+				this.emit({ type: "agent_end" });
+				this.emit({ type: "session_status", status: "idle" });
 				return { success: true };
 			}
 
