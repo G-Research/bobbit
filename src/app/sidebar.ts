@@ -1021,15 +1021,17 @@ export function renderSidebar() {
 								filteredStandaloneArchived = allStandaloneArchived.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 							}
 							for (const g of filteredArchivedGoals) {
-								if (!g.projectId) { console.warn("[sidebar] archived goal missing projectId", g.id); continue; }
-								const bucket = projectMap.get(g.projectId);
-								if (!bucket) { console.warn("[sidebar] archived goal references unknown project", g.id, g.projectId); continue; }
+								const pid = g.projectId || defaultId;
+								if (!g.projectId) console.warn("[sidebar] archived goal missing projectId, using default", g.id);
+								const bucket = projectMap.get(pid) || (defaultId ? projectMap.get(defaultId) : undefined);
+								if (!bucket) { console.warn("[sidebar] archived goal has no matching project bucket", g.id, g.projectId); continue; }
 								bucket.archivedGoals.push(g);
 							}
 							for (const s of filteredStandaloneArchived) {
-								if (!s.projectId) { console.warn("[sidebar] archived session missing projectId", s.id); continue; }
-								const bucket = projectMap.get(s.projectId);
-								if (!bucket) { console.warn("[sidebar] archived session references unknown project", s.id, s.projectId); continue; }
+								const pid = s.projectId || defaultId;
+								if (!s.projectId) console.warn("[sidebar] archived session missing projectId, using default", s.id);
+								const bucket = projectMap.get(pid) || (defaultId ? projectMap.get(defaultId) : undefined);
+								if (!bucket) { console.warn("[sidebar] archived session has no matching project bucket", s.id, s.projectId); continue; }
 								bucket.standaloneArchivedSessions.push(s);
 							}
 
