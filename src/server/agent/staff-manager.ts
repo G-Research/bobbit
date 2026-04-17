@@ -39,7 +39,7 @@ export class StaffManager {
 		systemPrompt: string,
 		cwd: string,
 		sessionManager: SessionManager,
-		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string },
+		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string; sandboxed?: boolean },
 	): Promise<PersistedStaff> {
 		const now = Date.now();
 		const id = randomUUID();
@@ -87,11 +87,14 @@ export class StaffManager {
 			if (staff.memory) {
 				fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
 			}
+			// Per-staff sandbox preference: opts.sandboxed overrides the
+			// project-level default. Undefined means "inherit project setting".
+			const effectiveSandboxed = opts?.sandboxed ?? sessionManager.isSandboxEnabled;
 			const session = await sessionManager.createSession(worktreeResult.worktreePath, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: id },
-				sandboxed: sessionManager.isSandboxEnabled,
-				sandboxBranch: sessionManager.isSandboxEnabled ? branchName : undefined,
+				sandboxed: effectiveSandboxed,
+				sandboxBranch: effectiveSandboxed ? branchName : undefined,
 				projectId,
 			});
 			session.staffId = id;

@@ -1002,7 +1002,7 @@ export async function fetchStaffAgent(id: string): Promise<StaffAgent | null> {
 	}
 }
 
-export async function createStaffAgent(data: { name: string; description: string; systemPrompt: string; cwd: string; triggers?: any[]; projectId?: string }): Promise<StaffAgent | null> {
+export async function createStaffAgent(data: { name: string; description: string; systemPrompt: string; cwd: string; triggers?: any[]; projectId?: string; sandboxed?: boolean }): Promise<StaffAgent | null> {
 	try {
 		const res = await gatewayFetch("/api/staff", {
 			method: "POST",

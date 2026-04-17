@@ -5931,7 +5931,7 @@ async function handleApiRoute(
 				body.systemPrompt,
 				cwd,
 				sessionManager,
-				{ triggers: body.triggers, roleId: body.roleId, projectId },
+				{ triggers: body.triggers, roleId: body.roleId, projectId, sandboxed: body.sandboxed },
 			);
 			json(staff, 201);
 		} catch (err: any) {

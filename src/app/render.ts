@@ -366,6 +366,7 @@ let _workflowsLoaded = false;
 let _selectedWorkflowId = "general";
 let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
+let _staffSandboxed = false;
 let _assistantEnabledOptionalSteps: string[] = [];
 
 /** Set the selected workflow ID from outside the render module (e.g. from a goal proposal). */
@@ -1274,6 +1275,8 @@ function staffPreviewPanel() {
 			triggers = JSON.parse(state.staffPreviewTriggers);
 		} catch { /* keep empty */ }
 
+		const sandboxed = _staffSandboxed;
+		_staffSandboxed = false;
 		const result = await createStaffAgent({
 			name: trimmedName,
 			description: state.staffPreviewDescription,
@@ -1281,6 +1284,7 @@ function staffPreviewPanel() {
 			cwd: state.staffPreviewCwd,
 			triggers,
 			projectId: state.activeProjectId || undefined,
+			sandboxed,
 		});
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
@@ -1335,16 +1339,20 @@ function staffPreviewPanel() {
 						},
 					})}
 				</div>
+				${state.sandboxStatus?.configured ? html`
 				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Sandbox</label>
-					<div class="flex items-center gap-2">
-						${state.sandboxStatus?.configured
-							? html`<span class="px-2 py-0.5 text-xs rounded-full bg-cyan-500/15 text-cyan-700 dark:text-cyan-400">🐳 Docker Sandbox</span>`
-							: html`<span class="px-2 py-0.5 text-xs rounded-full bg-muted text-muted-foreground">No Sandbox</span>`
-						}
-					</div>
-					<p class="text-[10px] text-muted-foreground mt-1">Inherited from project settings</p>
+					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
+						<input type="checkbox" class="toggle-switch" .checked=${_staffSandboxed}
+							?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+							@change=${(e: Event) => { _staffSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
+						<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
+						<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+							: "Runs this staff agent in an isolated Docker container with restricted filesystem and network access"}
+							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+					</label>
 				</div>
+				` : ""}
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
 						<label class="text-xs text-muted-foreground font-medium">Triggers</label>
