@@ -87,7 +87,9 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add a tool renderer**: Create in `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. See `ProposalRenderer.ts` for multi-tool pattern.
 
-**Add a tool**: Builtin tools live in `defaults/tools/<group>/` (tracked in git, shipped to all users). Project-specific tool overrides go in `.bobbit/config/tools/<group>/` (runtime only, gitignored). MCP tools are auto-discovered from `.mcp.json`. See [docs/internals.md — MCP servers](docs/internals.md#mcp-servers).
+**Add a tool**: Builtin tools live in `defaults/tools/<group>/` (tracked in git, shipped to all users). Project-specific tool overrides go in `.bobbit/config/tools/<group>/` (runtime only, gitignored). MCP tools are auto-discovered from `.mcp.json`. See [docs/internals.md — MCP servers](docs/internals.md#mcp-servers). Example groups: `proposals/` (non-blocking `propose_*` tools), `ask/` (blocking — `ask_user_choices` pauses the turn until the user answers an inline widget), `tasks/` (blocking — `verification_result` waits for a reviewer verdict).
+
+**Add a blocking tool (agent awaits user/UI input)**: The tool extension POSTs to an internal REST endpoint and blocks; the server parks a Promise in a harness keyed by `(sessionId, toolUseId)`; a later REST call (from a UI widget or another agent) resolves it, and the HTTP response carries the result back to the agent. Canonical examples: `defaults/tools/ask/` + `src/server/agent/user-question-harness.ts` (`ask_user_choices`), and `defaults/tools/tasks/` + `src/server/agent/verification-harness.ts` (`verification_result`). Session termination rejects all pending entries via `sessionManager.addTerminationListener`. See [docs/blocking-tools.md](docs/blocking-tools.md) for the full walkthrough.
 
 **Add a slash skill**: Create `SKILL.md` in `.claude/skills/<name>/`. YAML frontmatter: `description`, optional `argument_hint`, `allowed_tools`, `context`, `agent`. Scoped per-project via `config_directories`. See [docs/internals.md — Config scan directories](docs/internals.md#config-scan-directories).
 
@@ -179,3 +181,4 @@ Staff agent worktrees are automatically refreshed on each wake cycle — the bra
 - [docs/debugging.md](docs/debugging.md) — scannable debugging checklists for all subsystems
 - [docs/dev-workflow.md](docs/dev-workflow.md) — running modes, restart workflow, safe change process
 - [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) — goal/workflow/gate data model and lifecycle
+- [docs/blocking-tools.md](docs/blocking-tools.md) — blocking-tool pattern (`ask_user_choices`, `verification_result`): harness + REST + UI widget round-trip
