@@ -29,18 +29,19 @@ test.describe("Prompt stats E2E", () => {
 	const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
 		await expect(statsBar).toBeVisible({ timeout: 15_000 });
 
-		// The stats fields populate asynchronously from a WS broadcast after the
-		// agent response. Under parallel load the WS round-trip can take >10s,
-		// so use generous timeouts.
+		// The stats fields populate asynchronously from a "state" WS broadcast
+		// that follows agent_end. Under parallel load the WS round-trip + Lit
+		// re-render can take noticeably longer than the agent's "OK" response,
+		// so use generous timeouts on every field.
 
 		// PI-15: Model name displayed
-		await expect(statsBar).toContainText("mock-model", { timeout: 15_000 });
+		await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
 
 		// PI-17: Context usage bar shows percentage
 		const contextSpan = page.locator("span[title*='Context:']");
 		await expect(contextSpan).toBeVisible({ timeout: 15_000 });
 		await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
-		await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 5_000 });
+		await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });
 
 		// PI-18: Cost display appears
 		await expect(statsBar).toContainText("$", { timeout: 15_000 });
@@ -57,19 +58,20 @@ test.describe("Prompt stats E2E", () => {
 		// to exist) — the stats arrive via a WS broadcast after the agent response,
 		// and clicking before then yields a blank popover / no-op.
 		const contextSpan = page.locator("span[title*='Context:']");
-		await expect(contextSpan).toBeVisible({ timeout: 10_000 });
-		await expect(contextSpan).toContainText(/\d+%/, { timeout: 10_000 });
+		await expect(contextSpan).toBeVisible({ timeout: 15_000 });
+		await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
 
 		await contextSpan.click();
 
 		const popover = page.locator(".context-popover");
 		await expect(popover).toBeVisible({ timeout: 5_000 });
 
-		const popoverText = await popover.textContent();
-		expect(popoverText).toContain("mock-model");
-		expect(popoverText).toContain("Context Usage");
-		expect(popoverText).toContain("Messages");
-		expect(popoverText).toContain("Turns");
+		// Popover content populates from state; use auto-retrying assertions
+		// rather than a one-shot textContent snapshot.
+		await expect(popover).toContainText("mock-model", { timeout: 10_000 });
+		await expect(popover).toContainText("Context Usage", { timeout: 5_000 });
+		await expect(popover).toContainText("Messages", { timeout: 5_000 });
+		await expect(popover).toContainText("Turns", { timeout: 5_000 });
 	});
 
 	test("PI-18: cost popover shows session cost on click", async ({ page }) => {

@@ -4,7 +4,8 @@
  * Handles both legacy `.e2e-bobbit-*` dirs and per-worker `.e2e-worker-*` dirs.
  */
 import { execFileSync } from "node:child_process";
-import { rmSync, readdirSync } from "node:fs";
+import { existsSync, rmSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export default function globalTeardown() {
@@ -14,7 +15,7 @@ export default function globalTeardown() {
 		try { rmSync(bobbitDir, { recursive: true, force: true }); } catch {}
 	}
 
-	// Per-worker dirs created by gateway-harness.ts
+	// Per-worker dirs created by gateway-harness.ts (legacy path: project root)
 	const projectRoot = join(import.meta.dirname, "..", "..");
 	try {
 		for (const entry of readdirSync(projectRoot)) {
@@ -23,6 +24,18 @@ export default function globalTeardown() {
 			}
 		}
 	} catch {}
+
+	// Current worker dirs live under $TMP/bobbit-e2e/.e2e-{inproc,browser}-*
+	const tmpRoot = join(tmpdir(), "bobbit-e2e");
+	if (existsSync(tmpRoot)) {
+		try {
+			for (const entry of readdirSync(tmpRoot)) {
+				if (entry.startsWith(".e2e-inproc-") || entry.startsWith(".e2e-browser-")) {
+					try { rmSync(join(tmpRoot, entry), { recursive: true, force: true }); } catch {}
+				}
+			}
+		} catch {}
+	}
 
 	// Clean up Docker containers created by E2E sandbox tests.
 	// These are labeled `bobbit-project=<uuid>` and bound to temp dirs.

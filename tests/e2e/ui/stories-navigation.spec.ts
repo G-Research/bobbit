@@ -362,6 +362,13 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.navigate_to("session", "A");
 		await s.editor.is_visible();
 
+		// The textarea auto-focuses on session open; blur it so the global
+		// keyboard shortcut handler receives the event without competition.
+		await s.page.evaluate(() => {
+			(document.activeElement as HTMLElement | null)?.blur();
+			document.body.focus?.();
+		});
+
 		// act — Ctrl+[ toggles sidebar
 		s.act();
 		await s.press_key("Control+BracketLeft");
