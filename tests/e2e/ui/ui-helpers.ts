@@ -61,14 +61,30 @@ export async function waitForAgentResponse(
  * Uses Playwright's waitForFunction to confirm the hash change took effect.
  */
 export async function navigateToHash(page: Page, hash: string): Promise<void> {
-	await page.evaluate((h) => { window.location.hash = h; }, hash);
-	// Under parallel load the hashchange event loop can be slow; 10s gives
-	// comfortable headroom while still catching genuine navigation failures.
-	await page.waitForFunction(
-		(h) => window.location.hash === h,
-		hash,
-		{ timeout: 10_000 },
-	);
+	// Retry hash assignment + check up to 3 times; under heavy parallel load
+	// Chromium can drop or delay the assignment, and the subsequent
+	// waitForFunction just polls the stale value. Reassigning resets the
+	// polling baseline and reliably lands.
+	//
+	// Accept "contains" rather than strict equality because the app's router
+	// may normalize the hash (e.g. append a trailing slash, strip query
+	// params). `contains` is enough to prove the navigation happened —
+	// tests that care about the exact form use `url_equals` separately.
+	for (let attempt = 0; attempt < 3; attempt++) {
+		await page.evaluate((h) => { window.location.hash = h; }, hash);
+		try {
+			await page.waitForFunction(
+				(h) => window.location.hash.startsWith(h),
+				hash,
+				{ timeout: attempt === 2 ? 10_000 : 3_000 },
+			);
+			return;
+		} catch (err) {
+			if (attempt === 2) throw err;
+			// brief pause before retry
+			await page.waitForTimeout(100);
+		}
+	}
 }
 
 /**

@@ -15,6 +15,11 @@ export default defineConfig({
 	timeout: 30_000,
 	retries: 2,
 	fullyParallel: true,
+	// Top-level cap. Playwright treats this as the max parallelism across
+	// all projects. Per-project `workers` fields below further constrain
+	// individual projects — the browser project needs fewer workers than
+	// the API project because each Chromium instance is CPU-heavy.
+	workers: 11,
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	// Default artifact / launch settings. Chromium's GPU process, prerenderer,
@@ -49,7 +54,7 @@ export default defineConfig({
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			workers: 3,
+			workers: 5,
 		},
 		{
 			name: "browser",
@@ -66,7 +71,7 @@ export default defineConfig({
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			workers: 3,
+			workers: 6,
 		},
 	],
 });

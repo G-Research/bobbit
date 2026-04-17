@@ -1036,7 +1036,7 @@ export class SpecContext {
 	async wait_for_streaming(): Promise<void> {
 		trackIntent(this._activeStory, this._phase, "wait_for_streaming");
 		await expect(this._page.locator("button[title='Stop streaming']").first())
-			.toBeVisible({ timeout: 10_000 });
+			.toBeVisible({ timeout: 15_000 });
 	}
 
 	async wait_for_idle(): Promise<void> {

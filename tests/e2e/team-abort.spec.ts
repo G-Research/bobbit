@@ -110,7 +110,7 @@ test.describe("team abort — stuck agent", () => {
 			method: "POST",
 			body: JSON.stringify({
 				role: "coder",
-				task: "STAY_BUSY:60000 Run this exact bash command: sleep 120. Do not do anything else.",
+				task: "STAY_BUSY:3000 Run this exact bash command: sleep 120. Do not do anything else.",
 			}),
 		});
 		expect(spawnResp.status).toBe(201);

@@ -144,8 +144,22 @@ test.describe("team steer — agent must be streaming", () => {
 		if (spawnResp.status === 201) {
 			const { sessionId: agentId } = await spawnResp.json();
 
-			// Wait for agent to reach a known state (idle after processing initial task)
+			// The spawn flow sends TWO prompts back-to-back (delegate's initial
+			// "Execute the task" + the team-manager's enriched task). We need
+			// the session to be stably idle — i.e. past both prompts — before
+			// steering. Waiting for idle once, then verifying it stays idle
+			// for a short debounce window, avoids catching the brief idle gap
+			// between prompts.
 			await waitForSessionStatus(agentId, "idle");
+			for (let i = 0; i < 5; i++) {
+				await new Promise(r => setTimeout(r, 100));
+				const resp = await apiFetch(`/api/sessions/${agentId}`);
+				const data = await resp.json();
+				if (data.status !== "idle") {
+					await waitForSessionStatus(agentId, "idle");
+					i = -1; // restart debounce
+				}
+			}
 
 			const steerResp = await apiFetch(`/api/goals/${goalId}/team/steer`, {
 				method: "POST",

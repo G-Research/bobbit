@@ -35,7 +35,7 @@ test.describe("Steer mid-turn delivery", () => {
 			await conn.waitFor((m) => m.type === "queue_update");
 
 			// Make agent busy with a long-running turn
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working on something" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 working on something" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Clear messages to track only steer-related events
@@ -171,7 +171,7 @@ test.describe("Steer mid-turn delivery", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working on something" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 working on something" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Clear messages

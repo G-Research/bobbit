@@ -640,6 +640,11 @@ async function initApp() {
 
 	await loadSavedBindings();
 	startListening();
+	// Marker for E2E tests: indicates the keydown listener is attached so
+	// tests can dispatch synthetic keyboard events without racing startup.
+	if (typeof document !== "undefined") {
+		document.body.dataset.shortcutsReady = "1";
+	}
 
 	// Sync preferences when the page becomes visible (covers cross-device
 	// changes when the user switches back to this tab/app).

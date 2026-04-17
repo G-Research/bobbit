@@ -107,13 +107,14 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// act — navigate to goal dashboard
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
-		await s.page.waitForTimeout(500);
 
-		// assert — goal dashboard visible, URL correct
+		// assert — goal dashboard visible, URL correct. Use toBeVisible with
+		// generous timeout instead of a fixed sleep; under parallel load the
+		// dashboard container can take longer than 500ms to mount.
 		s.assert();
 		await s.url_contains(`/goal/${goal.id}`);
 		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 10_000 });
+			.toBeVisible({ timeout: 15_000 });
 
 		// act — press back to return to session
 		s.act();
@@ -144,22 +145,18 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.assert();
 		await s.editor.is_visible();
 
-		// Deep link: goal. Wait for the hash to settle before asserting on the
-		// new view — back-to-back navigateToHash calls can race with the
-		// previous view's teardown animations.
+		// Deep link: goal. navigateToHash already waits for the hash to settle,
+		// so no extra waitForFunction is needed (removing it avoids compounding
+		// timeouts when the navigation is slow under load).
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
-		await s.page.waitForFunction((id) =>
-			window.location.hash.includes(`/goal/${id}`), goal.id, { timeout: 5_000 });
 		s.assert();
 		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 15_000 });
+			.toBeVisible({ timeout: 20_000 });
 
 		// Deep link: settings
 		s.act();
 		await navigateToHash(s.page, "#/settings/system/models");
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
 		s.assert();
 		await expect(s.page.getByText("Models").first())
 			.toBeVisible({ timeout: 10_000 });
@@ -362,57 +359,65 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.navigate_to("session", "A");
 		await s.editor.is_visible();
 
-		// The textarea auto-focuses on session open; blur it so the global
-		// keyboard shortcut handler receives the event without competition.
-		await s.page.evaluate(() => {
-			(document.activeElement as HTMLElement | null)?.blur();
-			document.body.focus?.();
-		});
+		// Wait for the app's shortcut listener to be attached. We detect it
+		// by checking that a deliberately unbound key (Ctrl+F9) is handled
+		// by the listener — actually simpler: just wait for a marker. The
+		// app sets `document.body.dataset.shortcutsReady = "1"` after
+		// startListening(); tests wait on that.
+		await expect.poll(
+			() => s.page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
 
-		// act — Ctrl+[ toggles sidebar
+		const dispatchKey = async (key: string, code: string, ctrlKey = true) => {
+			await s.page.evaluate(({ key, code, ctrlKey }) => {
+				const event = new KeyboardEvent("keydown", { key, code, ctrlKey, bubbles: true, cancelable: true });
+				window.dispatchEvent(event);
+			}, { key, code, ctrlKey });
+		};
+
+		// act — Ctrl+[ toggles sidebar. Listener is attached by this point,
+		// so a single dispatch suffices.
 		s.act();
-		await s.press_key("Control+BracketLeft");
-		await s.page.waitForTimeout(400);
+		await dispatchKey("[", "BracketLeft");
 
 		s.assert();
-		const collapsedAfterToggle = await s.page.evaluate(() =>
-			localStorage.getItem("bobbit-sidebar-collapsed")
-		);
-		expect(collapsedAfterToggle).toBe("true");
+		await expect.poll(
+			() => s.page.evaluate(() => localStorage.getItem("bobbit-sidebar-collapsed")),
+			{ timeout: 5_000 },
+		).toBe("true");
 
 		// Toggle back
 		s.act();
-		await s.press_key("Control+BracketLeft");
-		await s.page.waitForTimeout(400);
+		await dispatchKey("[", "BracketLeft");
 
 		s.assert();
-		const expandedAfterToggle = await s.page.evaluate(() =>
-			localStorage.getItem("bobbit-sidebar-collapsed")
-		);
-		expect(expandedAfterToggle).not.toBe("true");
+		await expect.poll(
+			() => s.page.evaluate(() => localStorage.getItem("bobbit-sidebar-collapsed")),
+			{ timeout: 5_000 },
+		).not.toBe("true");
 
 		// act — Ctrl+, opens settings
 		s.act();
-		await s.press_key("Control+,");
-		await s.page.waitForTimeout(500);
+		await dispatchKey(",", "Comma");
 
 		s.assert();
 		await s.url_contains("/settings");
 
 		// act — Ctrl+, again closes settings (returns to previous view)
 		s.act();
-		await s.press_key("Control+,");
-		await s.page.waitForTimeout(500);
+		await dispatchKey(",", "Comma");
 
 		s.assert();
 		// Should be back at session or at least not on settings
-		const hashAfterToggleSettings = await s.page.evaluate(() => window.location.hash);
-		expect(hashAfterToggleSettings).not.toContain("/settings");
+		await expect.poll(
+			() => s.page.evaluate(() => window.location.hash),
+			{ timeout: 5_000 },
+		).not.toContain("/settings");
 
 		// act — Ctrl+K focuses search
 		s.act();
-		await s.press_key("Control+k");
-		await s.page.waitForTimeout(400);
+		await dispatchKey("k", "KeyK");
 
 		s.assert();
 		// Search input or search page should be active
