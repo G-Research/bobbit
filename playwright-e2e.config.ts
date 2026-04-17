@@ -19,7 +19,7 @@ export default defineConfig({
 	// all projects. Per-project `workers` fields below further constrain
 	// individual projects — the browser project needs fewer workers than
 	// the API project because each Chromium instance is CPU-heavy.
-	workers: 10,
+	workers: 11,
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	// Default artifact / launch settings. Chromium's GPU process, prerenderer,
@@ -71,7 +71,7 @@ export default defineConfig({
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			workers: 5,
+			workers: 6,
 		},
 	],
 });

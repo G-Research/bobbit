@@ -363,11 +363,16 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.navigate_to("session", "A");
 		await s.editor.is_visible();
 
-		// Dispatch keyboard events via window.dispatchEvent rather than
-		// Playwright's keyboard.press — under heavy parallel load the first
-		// Chromium keystroke can be dropped when focus hasn't settled. The
-		// app's shortcut registry listens on `window`, so dispatching there
-		// reaches it reliably and bypasses the focus machinery entirely.
+		// Wait for the app's shortcut listener to be attached. We detect it
+		// by checking that a deliberately unbound key (Ctrl+F9) is handled
+		// by the listener — actually simpler: just wait for a marker. The
+		// app sets `document.body.dataset.shortcutsReady = "1"` after
+		// startListening(); tests wait on that.
+		await expect.poll(
+			() => s.page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+
 		const dispatchKey = async (key: string, code: string, ctrlKey = true) => {
 			await s.page.evaluate(({ key, code, ctrlKey }) => {
 				const event = new KeyboardEvent("keydown", { key, code, ctrlKey, bubbles: true, cancelable: true });
@@ -375,7 +380,8 @@ test.describe("CT-13: URL routing and navigation", () => {
 			}, { key, code, ctrlKey });
 		};
 
-		// act — Ctrl+[ toggles sidebar. Poll localStorage until the handler fires.
+		// act — Ctrl+[ toggles sidebar. Listener is attached by this point,
+		// so a single dispatch suffices.
 		s.act();
 		await dispatchKey("[", "BracketLeft");
 
