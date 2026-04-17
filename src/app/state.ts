@@ -352,6 +352,23 @@ export function setStaffSectionExpanded(projectId: string, value: boolean): void
 	localStorage.setItem(COLLAPSED_STAFF_KEY, JSON.stringify([...collapsedStaffProjects]));
 }
 
+// Per-project archived section expand state. Default = collapsed (absence means collapsed).
+// Presence of projectId in the set = that project's Archived subsection is expanded.
+const EXPANDED_ARCHIVED_KEY = "bobbit-archived-expanded-projects";
+export let expandedArchivedProjects: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(EXPANDED_ARCHIVED_KEY) || "[]"),
+);
+
+export function isArchivedSectionExpanded(projectId: string): boolean {
+	return expandedArchivedProjects.has(projectId);
+}
+
+export function setArchivedSectionExpanded(projectId: string, value: boolean): void {
+	if (value) expandedArchivedProjects.add(projectId);
+	else expandedArchivedProjects.delete(projectId);
+	localStorage.setItem(EXPANDED_ARCHIVED_KEY, JSON.stringify([...expandedArchivedProjects]));
+}
+
 const COLLAPSED_TEAM_LEADS_KEY = "bobbit-collapsed-team-leads";
 export let collapsedTeamLeadSessions: Set<string> = new Set(
 	JSON.parse(localStorage.getItem(COLLAPSED_TEAM_LEADS_KEY) || "[]"),
@@ -542,7 +559,7 @@ let _sidebarCacheKey: string = "";
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.archived ? "A" : "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
