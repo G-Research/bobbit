@@ -853,16 +853,21 @@ export function createGateway(config: GatewayConfig) {
 			sessionManager.startPurgeSchedule();
 
 			// Initialize worktree pools for all git-repo projects
-			// (pre-creates worktrees in the background so new sessions start instantly)
-			for (const ctx of projectContextManager.all()) {
-				try {
-					const repoPath = ctx.project.rootPath;
-					if (await isGitRepo(repoPath)) {
-						const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
-						const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-						sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize);
-					}
-				} catch { /* best-effort */ }
+			// (pre-creates worktrees in the background so new sessions start instantly).
+			// E2E / CI can skip this entirely via BOBBIT_SKIP_WORKTREE_POOL=1 — the
+			// pool fills worktrees aggressively at boot and replenishes on every
+			// claim, which costs real CPU on tests that don't need git at all.
+			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
+				for (const ctx of projectContextManager.all()) {
+					try {
+						const repoPath = ctx.project.rootPath;
+						if (await isGitRepo(repoPath)) {
+							const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
+							const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
+							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize);
+						}
+					} catch { /* best-effort */ }
+				}
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -1506,14 +1511,17 @@ async function handleApiRoute(
 					newCtx.goalStore.bumpGeneration();
 				};
 			}
-			// Initialize worktree pool if the new project is a git repo
-			try {
-				if (await isGitRepo(body.rootPath)) {
-					const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
-					const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-					sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize);
-				}
-			} catch { /* best-effort */ }
+			// Initialize worktree pool if the new project is a git repo.
+			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
+			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
+				try {
+					if (await isGitRepo(body.rootPath)) {
+						const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
+						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
+						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize);
+					}
+				} catch { /* best-effort */ }
+			}
 			json(project, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);

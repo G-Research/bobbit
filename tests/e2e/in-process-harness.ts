@@ -51,8 +51,13 @@ export interface GatewayInfo {
  *   import { test, expect } from "./in-process-harness.js";
  *   // e2e-setup helpers automatically target this worker's gateway
  */
-export const test = base.extend<{}, { gateway: GatewayInfo }>({
-	gateway: [async ({}, use, workerInfo) => {
+export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: GatewayInfo }>({
+	// Worker-scoped option. Default false (pool pre-fill skipped for CPU).
+	// Opt in with `test.use({ enableWorktreePool: true })` in specs that
+	// actually exercise the pool endpoints.
+	enableWorktreePool: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableWorktreePool }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + a per-worker counter so retries don't collide with a
 		// previous worker's teardown that still holds file handles on Windows.
@@ -80,11 +85,29 @@ export const test = base.extend<{}, { gateway: GatewayInfo }>({
 		// Skip outbound network probes and per-prompt title-generation calls.
 		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
 		process.env.BOBBIT_SKIP_TITLE_GEN = "1";
+		// Skip worktree pool pre-fill by default — git worktree + setup commands
+		// are expensive and most tests don't exercise the pool path. Specs that
+		// exercise the pool opt in with `test.use({ enableWorktreePool: true })`.
+		if (enableWorktreePool) {
+			delete process.env.BOBBIT_SKIP_WORKTREE_POOL;
+		} else {
+			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
+		}
 
 		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 		const { createGateway } = await import("../../dist/server/server.js");
+		// Register the in-process mock bridge factory before any sessions are
+		// created. The factory intercepts RpcBridge constructions whose cliPath
+		// points at our mock-agent.mjs and returns a drop-in class that skips
+		// the Node subprocess + JSONL serialization entirely.
+		const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
+		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+		registerRpcBridgeFactory((opts: any) => {
+			if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
+			return null;
+		});
 
 		setProjectRoot(bobbitDir);
 		scaffoldBobbitDir(bobbitDir);

@@ -114,6 +114,19 @@ test.describe("Draft persistence bugs", () => {
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
+		// The sendBeacon flush is wired up lazily the first time the editor
+		// mounts. Small jitter here gives the beforeunload listener a chance
+		// to attach — without it, the hard reload below can outrun the
+		// listener registration on slow/parallel runs.
+		await page.waitForFunction(() => {
+			// The listener is installed inside session-manager.ts alongside the
+			// _draftListenersInstalled flag; we can't see that flag directly,
+			// but we can confirm the editor component is fully hydrated.
+			const ta = document.querySelector("textarea");
+			const me = document.querySelector("message-editor") as any;
+			return !!ta && !!me;
+		}, { timeout: 5_000 });
+
 		// Type draft text and reload IMMEDIATELY — before the 100ms debounce fires.
 		// Use page.evaluate to type + reload in the same JS tick to avoid any
 		// Playwright inter-command delay that might let the debounce fire.

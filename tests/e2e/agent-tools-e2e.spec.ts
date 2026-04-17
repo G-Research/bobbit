@@ -45,7 +45,7 @@ test.describe("Session lifecycle", () => {
 		const conn = await connectWs(sessionId);
 		try {
 			// Use STAY_BUSY to keep agent streaming until we abort
-			conn.send({ type: "prompt", text: "STAY_BUSY:10000 long essay" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:2000 long essay" });
 			await conn.waitFor(statusPredicate("streaming"));
 			conn.send({ type: "abort" });
 			await conn.waitFor(statusPredicate("idle"));

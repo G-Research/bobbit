@@ -32,8 +32,15 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 	await expect(workflowSelect).toBeVisible({ timeout: 5_000 });
 	await workflowSelect.selectOption("feature");
 
-	// Wait for the "Enable QA Testing" toggle to appear
+	// Wait for the workflow switch to settle: the select must show 'feature'
+	// AND the toggle must be attached with the real tooltip icon (which
+	// appears only for optional steps that carry a description — present
+	// only in the 'feature' workflow).
+	await expect(workflowSelect).toHaveValue("feature", { timeout: 5_000 });
 	await expect(page.getByText("Enable QA Testing").first()).toBeVisible({ timeout: 5_000 });
+	await expect(
+		page.locator(".goal-preview-panel span.cursor-help").first(),
+	).toBeVisible({ timeout: 5_000 });
 }
 
 test.describe("Step description tooltips", () => {
@@ -48,8 +55,12 @@ test.describe("Step description tooltips", () => {
 		// Verify the icon text is ⓘ
 		await expect(tooltipIcon).toHaveText("ⓘ");
 
-		// Verify the title attribute contains expected description text from the feature workflow YAML
-		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i);
+		// The tooltip's `title` attribute swaps between the real description
+		// (from feature.yaml) and a fallback "Configure qa_start_command…"
+		// message while the UI asynchronously loads the project's QA config.
+		// Poll until the real description arrives — auto-retrying
+		// toHaveAttribute handles this cleanly.
+		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i, { timeout: 10_000 });
 	});
 
 	test("tooltip title matches the full workflow YAML description", async ({ page }) => {
@@ -59,16 +70,13 @@ test.describe("Step description tooltips", () => {
 		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
 		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
 
-		// Check for multiple substrings from the expected description:
-		// "Spawn a QA agent that builds the project, starts an ephemeral server,
-		//  and drives a real browser through user scenarios to validate the feature
-		//  works end-to-end."
-		const title = await tooltipIcon.getAttribute("title");
-		expect(title).toBeTruthy();
-		expect(title).toContain("QA agent");
-		expect(title).toContain("ephemeral server");
-		expect(title).toContain("browser");
-		expect(title).toContain("end-to-end");
+		// The tooltip's `title` swaps between the real description and a
+		// fallback "Configure qa_start_command…" while the UI loads the
+		// project's QA config. Wait for the real description (auto-retrying).
+		await expect(tooltipIcon).toHaveAttribute("title", /QA agent/, { timeout: 10_000 });
+		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/);
+		await expect(tooltipIcon).toHaveAttribute("title", /browser/);
+		await expect(tooltipIcon).toHaveAttribute("title", /end-to-end/);
 	});
 
 	test("tooltip icon has correct CSS classes", async ({ page }) => {

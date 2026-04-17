@@ -172,15 +172,15 @@ test.describe("Workflow editor phases", () => {
 		// Type a label
 		await labelInput.fill("Enable QA Testing");
 
-		// Save the workflow
+		// Start listening for the save response *before* clicking so a fast
+		// reply (common under parallel load) can't slip past the listener.
+		const savePromise = page.waitForResponse(
+			resp => resp.url().includes("/api/workflows") && resp.request().method() === "PUT" && resp.ok(),
+			{ timeout: 15_000 },
+		);
 		const saveBtn = page.locator("button").filter({ hasText: "Save" }).first();
 		await saveBtn.click();
-
-		// Wait for save to complete (button re-enables or URL stays the same)
-		await page.waitForResponse(
-			resp => resp.url().includes("/api/workflows") && resp.ok(),
-			{ timeout: 10_000 },
-		);
+		await savePromise;
 
 		// Navigate away and back to verify persistence
 		await navigateToHash(page, "#/workflows");
@@ -319,24 +319,25 @@ test.describe("Workflow editor phases", () => {
 		await openApp(page);
 		await navigateToEditAndExpandGate(page);
 
-		// Save the workflow — compaction should renumber phases to 0, 1
+		// Start listening for the save response *before* clicking the save
+		// button so the listener can't miss a fast response under parallel load.
+		const savePromise = page.waitForResponse(
+			resp => resp.url().includes("/api/workflows") && resp.request().method() === "PUT" && resp.ok(),
+			{ timeout: 15_000 },
+		);
 		const saveBtn = page.locator("button").filter({ hasText: "Save" }).first();
 		await saveBtn.click();
+		await savePromise;
 
-		// Wait for save
-		await page.waitForResponse(
-			resp => resp.url().includes("/api/workflows") && resp.ok(),
-			{ timeout: 10_000 },
-		);
-
-		// Verify via API that phases were compacted
-		const resp = await apiFetch(`/api/workflows/${WF_ID}`);
-		expect(resp.status).toBe(200);
-		const data = await resp.json();
-		const steps = data.gates[0].verify;
-		expect(steps).toHaveLength(2);
-		expect(steps[0].phase ?? 0).toBe(0);
-		expect(steps[1].phase ?? 0).toBe(1); // was 2, now compacted to 1
+		// Verify via API that phases were compacted. Poll because the store
+		// commit is async on the server side and can lag the HTTP response.
+		await expect.poll(async () => {
+			const resp = await apiFetch(`/api/workflows/${WF_ID}`);
+			if (resp.status !== 200) return null;
+			const data = await resp.json();
+			const steps = data.gates[0].verify;
+			return steps.map((s: any) => s.phase ?? 0);
+		}, { timeout: 5_000 }).toEqual([0, 1]);
 	});
 
 	test("empty phase can be removed", async ({ page }) => {
