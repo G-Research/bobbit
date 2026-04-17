@@ -2459,24 +2459,31 @@ export function doRenderApp(): void {
 			const backBtn = !desktop ? Button({
 				variant: "ghost",
 				size: "sm",
-				children: html`<span class="inline-flex items-center gap-1.5">${icon(ArrowLeft, "sm")} <span class="text-xs">All Sessions</span></span>`,
+				// Arrow-only back button (native mobile convention) — frees up
+				// horizontal space for the session title between the back button
+				// and the edit/delete action buttons on the right.
+				children: html`${icon(ArrowLeft, "sm")}`,
 				onClick: backToSessions,
 				title: "Back to session list",
-				className: "h-10 pl-3 pr-3",
+				className: "h-10 w-10 p-0",
 			}) : "";
 
 			if (!desktop) {
 				const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 				const goalId = activeSession?.goalId || activeSession?.teamGoalId;
 				const goalTitle = goalId ? state.goals.find(g => g.id === goalId)?.title : undefined;
+				// Left-aligned title layout (flex row, not absolute-centered) so
+				// the title claims every pixel between the back button and the
+				// right-hand action buttons. On very narrow screens we drop one
+				// step down in font size as a last-resort fallback.
 				return html`
-					<div class="flex items-center w-full pr-0.5 relative" style="min-height:40px;">
+					<div class="flex items-center w-full pr-0.5 gap-1" style="min-height:40px;">
 						<div class="shrink-0">${backBtn}</div>
-						<div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-							<span class="text-sm font-medium text-foreground px-14 inline-flex items-center gap-1 max-w-full" title=${headerTitle}><span class="truncate">${headerTitle}</span>${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}</span>
-							${goalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate px-14 uppercase tracking-wider">${goalTitle}</span>` : ""}
+						<div class="flex-1 min-w-0 flex flex-col justify-center">
+							<span class="mobile-header-title font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}</span>
+							${goalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider">${goalTitle}</span>` : ""}
 						</div>
-						<div class="ml-auto shrink-0">${editDeleteBtns}</div>
+						<div class="shrink-0">${editDeleteBtns}</div>
 					</div>
 				`;
 			}

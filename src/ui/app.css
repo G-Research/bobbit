@@ -937,6 +937,17 @@ html {
 	animation: ask-heartbeat 1.8s ease-in-out infinite;
 }
 
+/* Mobile session-header title sizing: default to text-sm (14px), step down
+   on narrow viewports where the title would otherwise collide with the
+   flanking back/edit buttons. */
+.mobile-header-title { font-size: 0.875rem; line-height: 1.25rem; }
+@media (max-width: 380px) {
+	.mobile-header-title { font-size: 0.8125rem; line-height: 1.125rem; }
+}
+@media (max-width: 340px) {
+	.mobile-header-title { font-size: 0.75rem; line-height: 1rem; }
+}
+
 /* Let code blocks and tool output use full available width
    but constrain to viewport to prevent horizontal scrollbar on mobile */
 .max-w-5xl code-block,
