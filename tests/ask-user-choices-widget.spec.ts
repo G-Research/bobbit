@@ -234,14 +234,14 @@ test.describe("ask_user_choices widget", () => {
 				return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 			},
 		}));
-		await page.locator('input[type=checkbox][value="a"]').click({ force: true });
-		await page.locator('input[type=checkbox][value="c"]').click({ force: true });
+		await page.locator('label:has(input[value="a"])').click();
+		await page.locator('label:has(input[value="c"])').click();
 		// Both cards appear checked.
 		await expect(page.locator('.ask-option').nth(0)).toHaveClass(/checked/);
 		await expect(page.locator('.ask-option').nth(2)).toHaveClass(/checked/);
 		await expect(page.locator('.ask-option').nth(1)).not.toHaveClass(/checked/);
 		// Uncheck a.
-		await page.locator('input[type=checkbox][value="a"]').click({ force: true });
+		await page.locator('label:has(input[value="a"])').click();
 		await expect(page.locator('.ask-option').nth(0)).not.toHaveClass(/checked/);
 		await expect(page.locator('.ask-option').nth(2)).toHaveClass(/checked/);
 		// Submit only c.
@@ -258,7 +258,7 @@ test.describe("ask_user_choices widget", () => {
 				{ question: "Q2", options: ["c", "d"] },
 			],
 		}));
-		await page.locator('input[type=checkbox][value="a"]').click({ force: true });
+		await page.locator('label:has(input[value="a"])').click();
 		// Active tab must still be 0.
 		const active = await page.locator('[role="tab"][aria-selected="true"]').getAttribute("data-tab-index");
 		expect(active).toBe("0");
@@ -269,9 +269,9 @@ test.describe("ask_user_choices widget", () => {
 			questions: [{ question: "Pick", options: ["a", "b"], multi: true }],
 		}));
 		await expect(page.locator(".ask-submit")).toBeDisabled();
-		await page.locator('input[type=checkbox][value="a"]').click({ force: true });
+		await page.locator('label:has(input[value="a"])').click();
 		await expect(page.locator(".ask-submit")).toBeEnabled();
-		await page.locator('input[type=checkbox][value="a"]').click({ force: true });
+		await page.locator('label:has(input[value="a"])').click();
 		await expect(page.locator(".ask-submit")).toBeDisabled();
 	});
 
@@ -279,9 +279,9 @@ test.describe("ask_user_choices widget", () => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [{ question: "Pick ≥2", options: ["a", "b", "c"], multi: true, min: 2 }],
 		}));
-		await page.locator('input[type=checkbox][value="a"]').click({ force: true });
+		await page.locator('label:has(input[value="a"])').click();
 		await expect(page.locator(".ask-submit")).toBeDisabled();
-		await page.locator('input[type=checkbox][value="b"]').click({ force: true });
+		await page.locator('label:has(input[value="b"])').click();
 		await expect(page.locator(".ask-submit")).toBeEnabled();
 	});
 
@@ -293,8 +293,8 @@ test.describe("ask_user_choices widget", () => {
 				return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 			},
 		}));
-		await page.locator('input[type=checkbox][value="a"]').click({ force: true });
-		await page.locator('input[type=checkbox][value="__OTHER__"]').click({ force: true });
+		await page.locator('label:has(input[value="a"])').click();
+		await page.locator('label:has(input[value="__OTHER__"])').click();
 		// Submit disabled while other_text empty.
 		await expect(page.locator(".ask-submit")).toBeDisabled();
 		await page.locator('.ask-other-input').fill('  my custom  ');
