@@ -2420,6 +2420,20 @@ export class SessionManager {
 		} catch (err) {
 			console.error(`[session-manager] Setup error for session ${session.id}:`, err);
 		}
+
+		// Broadcast the agent's current state (model + thinking level) to
+		// connected clients. The initial WS connect path skips getState for
+		// fresh sessions (eventBuffer empty), so this is the first chance
+		// clients get to learn the real model — especially important when
+		// no explicit default.sessionModel or aigw auto-selection ran.
+		try {
+			const st = await session.rpcClient.getState();
+			if (st.success) {
+				broadcast(session.clients, { type: "state", data: st.data });
+			}
+		} catch (err) {
+			console.warn(`[session-manager] Post-setup state broadcast failed for ${session.id}:`, err);
+		}
 	}
 
 	/**
