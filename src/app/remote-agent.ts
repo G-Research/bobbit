@@ -97,6 +97,23 @@ export class RemoteAgent {
 	private _intentionalDisconnect = false;
 	private _connectionStatus: ConnectionStatus = "disconnected";
 	private _pendingReconnectNotif = false;
+	private _visibilityHandlerBound = false;
+	private _onVisibilityChange = (): void => {
+		if (document.visibilityState !== "visible") return;
+		if (this._intentionalDisconnect) return;
+		// If the socket isn't OPEN, kick an immediate reconnect instead of
+		// waiting for the (possibly long) backoff timer that may have been
+		// queued while the tab was suspended.
+		if (this.ws?.readyState !== WebSocket.OPEN) {
+			if (this._reconnectTimer) {
+				clearTimeout(this._reconnectTimer);
+				this._reconnectTimer = null;
+			}
+			this._reconnectAttempt = 0;
+			this._setConnectionStatus("reconnecting");
+			this._connectWs(false).catch(() => { /* onclose will schedule retry */ });
+		}
+	};
 	/** Timestamp of last streamingMessage update when content contains truncated blocks. */
 	private _lastTruncatedStreamUpdate = 0;
 	private static readonly MAX_RECONNECT_DELAY = 30_000;
@@ -226,6 +243,16 @@ export class RemoteAgent {
 		this._sessionId = sessionId;
 		this._intentionalDisconnect = false;
 		this._reconnectAttempt = 0;
+
+		// On mobile, the OS suspends the tab when backgrounded. When the user
+		// returns, the WebSocket is often already dead but the reconnect timer
+		// was paused — we'd otherwise wait out the full backoff before even
+		// trying. Force an immediate reconnect attempt on visibility so resume
+		// is as close to instant as the network allows.
+		if (!this._visibilityHandlerBound) {
+			document.addEventListener("visibilitychange", this._onVisibilityChange);
+			this._visibilityHandlerBound = true;
+		}
 
 		// Restore processed proposal IDs from sessionStorage
 		try {
@@ -378,6 +405,10 @@ export class RemoteAgent {
 		if (this._reconnectTimer) {
 			clearTimeout(this._reconnectTimer);
 			this._reconnectTimer = null;
+		}
+		if (this._visibilityHandlerBound) {
+			document.removeEventListener("visibilitychange", this._onVisibilityChange);
+			this._visibilityHandlerBound = false;
 		}
 		this.ws?.close();
 		this.ws = null;
