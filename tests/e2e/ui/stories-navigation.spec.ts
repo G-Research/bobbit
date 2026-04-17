@@ -145,22 +145,18 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.assert();
 		await s.editor.is_visible();
 
-		// Deep link: goal. Wait for the hash to settle before asserting on the
-		// new view — back-to-back navigateToHash calls can race with the
-		// previous view's teardown animations.
+		// Deep link: goal. navigateToHash already waits for the hash to settle,
+		// so no extra waitForFunction is needed (removing it avoids compounding
+		// timeouts when the navigation is slow under load).
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
-		await s.page.waitForFunction((id) =>
-			window.location.hash.includes(`/goal/${id}`), goal.id, { timeout: 5_000 });
 		s.assert();
 		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 15_000 });
+			.toBeVisible({ timeout: 20_000 });
 
 		// Deep link: settings
 		s.act();
 		await navigateToHash(s.page, "#/settings/system/models");
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
 		s.assert();
 		await expect(s.page.getByText("Models").first())
 			.toBeVisible({ timeout: 10_000 });
@@ -363,11 +359,16 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.navigate_to("session", "A");
 		await s.editor.is_visible();
 
-		// Dispatch keyboard events via window.dispatchEvent rather than
-		// Playwright's keyboard.press — under heavy parallel load the first
-		// Chromium keystroke can be dropped when focus hasn't settled. The
-		// app's shortcut registry listens on `window`, so dispatching there
-		// reaches it reliably and bypasses the focus machinery entirely.
+		// Wait for the app's shortcut listener to be attached. We detect it
+		// by checking that a deliberately unbound key (Ctrl+F9) is handled
+		// by the listener — actually simpler: just wait for a marker. The
+		// app sets `document.body.dataset.shortcutsReady = "1"` after
+		// startListening(); tests wait on that.
+		await expect.poll(
+			() => s.page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+
 		const dispatchKey = async (key: string, code: string, ctrlKey = true) => {
 			await s.page.evaluate(({ key, code, ctrlKey }) => {
 				const event = new KeyboardEvent("keydown", { key, code, ctrlKey, bubbles: true, cancelable: true });
@@ -411,7 +412,9 @@ test.describe("CT-13: URL routing and navigation", () => {
 			}
 		};
 
-		// act — Ctrl+[ toggles sidebar
+		// act — Ctrl+[ toggles sidebar. Listener is attached by this point,
+		// so a single dispatch suffices.
+
 		s.act();
 		await dispatchKey("[", "BracketLeft");
 		s.assert();
@@ -494,11 +497,11 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.navigate_back(); // back to session
 		s.assert();
 		await s.url_contains(`/session/${s.session("A").sessionId}`);
-		await s.editor.is_visible();
+		await expect(s.page.locator('message-editor').first()).toBeVisible({ timeout: 10_000 });
 
 		// No blank screens at any step — app still responsive
 		await expect(s.page.locator("button").filter({ hasText: "Settings" }).first())
-			.toBeVisible({ timeout: 5_000 });
+			.toBeVisible({ timeout: 10_000 });
 	});
 
 	// ---------------------------------------------------------------

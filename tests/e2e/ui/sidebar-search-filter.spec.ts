@@ -229,6 +229,12 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		const searchInput = page.locator("input[data-search]");
 		await expect(searchInput).toBeVisible({ timeout: 3_000 });
 
+		// Wait for the app's keydown listener to attach before dispatching.
+		await expect.poll(
+			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+
 		// Dispatch Ctrl+[ via window.dispatchEvent rather than Playwright's
 		// keyboard.press — under heavy parallel load the first Chromium
 		// keystroke can be dropped when focus hasn't settled. The app's

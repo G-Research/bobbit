@@ -6,6 +6,24 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
+import { apiFetch } from "../e2e-setup.js";
+
+/**
+ * Configure qa_start_command on the default project so the goal form's
+ * "Enable QA Testing" tooltip shows the real workflow description
+ * ("...ephemeral server...") rather than the
+ * "Configure qa_start_command in project settings..." fallback.
+ */
+test.beforeAll(async () => {
+	const projectsResp = await apiFetch("/api/projects");
+	const projects = await projectsResp.json();
+	if (projects.length === 0) return;
+	const projectId = projects[0].id;
+	await apiFetch(`/api/projects/${projectId}/config`, {
+		method: "PUT",
+		body: JSON.stringify({ qa_start_command: "echo ready" }),
+	});
+});
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, switch to feature workflow. */
 async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").Page) {

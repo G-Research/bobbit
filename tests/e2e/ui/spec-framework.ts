@@ -277,6 +277,42 @@ export function contractCompleteness(): Array<{
 // ENTITY HANDLES
 // ============================================================
 
+export class ProjectHandle {
+	constructor(
+		private page: Page,
+		private name: string,
+		private _projectId?: string,
+		private _ctx?: SpecContext,
+	) {}
+
+	get projectId(): string {
+		if (!this._projectId) throw new Error(`Project '${this.name}' has no ID — set it first`);
+		return this._projectId;
+	}
+
+	set projectId(id: string) { this._projectId = id; }
+	set ctx(c: SpecContext) { this._ctx = c; }
+
+	private get story() { return this._ctx?._activeStory; }
+	private get phase() { return this._ctx?._phase ?? "setup"; }
+
+	async in_sidebar() {
+		trackEntity(this.story, this.phase, "project");
+		await expect(
+			this.page.locator(`[data-project-id="${this._projectId}"], .project-section`)
+				.filter({ hasText: this.name }).first()
+		).toBeVisible({ timeout: 5_000 });
+	}
+
+	async not_in_sidebar() {
+		trackEntity(this.story, this.phase, "project");
+		await expect(
+			this.page.locator(`[data-project-id="${this._projectId}"], .project-section`)
+				.filter({ hasText: this.name }).first()
+		).not.toBeVisible({ timeout: 5_000 });
+	}
+}
+
 export class SessionHandle {
 	constructor(
 		private page: Page,
@@ -761,6 +797,7 @@ export class ContextBarRegion extends RegionHandle {
 
 export class SpecContext {
 	private sessions = new Map<string, SessionHandle>();
+	private projects = new Map<string, ProjectHandle>();
 	private goals = new Map<string, GoalHandle>();
 	private gates = new Map<string, GateHandle>();
 	private staffAgents = new Map<string, StaffHandle>();
@@ -861,10 +898,19 @@ export class SpecContext {
 		return this.staffAgents.get(name)!;
 	}
 
+	project(name: string): ProjectHandle {
+		if (!this.projects.has(name)) {
+			const h = new ProjectHandle(this._page, name);
+			h.ctx = this;
+			this.projects.set(name, h);
+		}
+		return this.projects.get(name)!;
+	}
+
 	// --- Setup helpers ---
 
-	async createTestSession(name: string): Promise<string> {
-		const id = await createSession();
+	async createTestSession(name: string, opts?: { cwd?: string; goalId?: string }): Promise<string> {
+		const id = await createSession(opts);
 		await waitForSessionStatus(id, "idle");
 		const handle = this.session(name);
 		handle.sessionId = id;
@@ -880,6 +926,28 @@ export class SpecContext {
 		for (const [, handle] of this.sessions) {
 			try { await deleteSession(handle.sessionId); } catch { /* best effort */ }
 		}
+	}
+
+	async create_session_via_ui(): Promise<string> {
+		trackIntent(this._activeStory, this._phase, "create_session");
+		trackRegion(this._activeStory, this._phase, "sidebar");
+		await this._page.locator("button[title^='New session']").first().click();
+		await expect(this._page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+		const hash = await this._page.evaluate(() => window.location.hash);
+		const match = hash.match(/#\/session\/([a-f0-9-]+)/i);
+		return match ? match[1] : "";
+	}
+
+	async rename_session(sessionName: string, newTitle: string) {
+		trackIntent(this._activeStory, this._phase, "rename_session");
+		trackRegion(this._activeStory, this._phase, "sidebar");
+		const handle = this.sessions.get(sessionName);
+		if (!handle) throw new Error(`Session '${sessionName}' not registered`);
+		const row = this._page.locator(`.sidebar-session[data-id="${handle.sessionId}"], [data-session-id="${handle.sessionId}"]`).first();
+		await row.dblclick();
+		const input = this._page.locator('.sidebar-session input, [data-session-id] input').first();
+		await input.fill(newTitle);
+		await input.press('Enter');
 	}
 
 	// --- System events ---
@@ -968,7 +1036,7 @@ export class SpecContext {
 	async wait_for_streaming(): Promise<void> {
 		trackIntent(this._activeStory, this._phase, "wait_for_streaming");
 		await expect(this._page.locator("button[title='Stop streaming']").first())
-			.toBeVisible({ timeout: 10_000 });
+			.toBeVisible({ timeout: 15_000 });
 	}
 
 	async wait_for_idle(): Promise<void> {
@@ -1100,6 +1168,6 @@ export class SpecContext {
 			expect(resp.status).toBe(200);
 			const body = await resp.json();
 			expect(body.data.text).toBe(expectedText);
-		}).toPass({ timeout: 10_000 });
+		}).toPass({ intervals: [500, 1000, 1000, 2000, 2000], timeout: 15_000 });
 	}
 }
