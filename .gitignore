@@ -40,3 +40,4 @@ sessions_tmp.json
 .e2e-resilience-*/
 .bobbit-manual-integration-*/
 tests/fixtures/markdown-throttle-bundle.js
+tests/fixtures/markdown-throttle-bundle.css

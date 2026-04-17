@@ -12,14 +12,20 @@ import { apiFetch, readE2EToken, nonGitCwd } from "./e2e-setup.js";
 import { resolve } from "node:path";
 import type { Page } from "@playwright/test";
 
-/** Register a project via the REST API and return its id + rootPath. */
+/** Register a project via the REST API and return its id + rootPath.
+ *
+ * Uses `upsert: true` so Playwright test retries (which re-run beforeAll on
+ * the same worker) don't collide with the project already registered at the
+ * memoized nonGitCwd() path from the first attempt — the server would
+ * otherwise return 400 "already registered" and fail the retry too.
+ */
 async function registerProject(name: string): Promise<{ id: string; rootPath: string }> {
 	const rootPath = nonGitCwd(); // temp dir outside any git repo
 	const resp = await apiFetch("/api/projects", {
 		method: "POST",
-		body: JSON.stringify({ name, rootPath }),
+		body: JSON.stringify({ name, rootPath, upsert: true }),
 	});
-	expect(resp.status).toBe(201);
+	expect([200, 201]).toContain(resp.status);
 	const project = await resp.json();
 	expect(project.id).toBeTruthy();
 	return { id: project.id, rootPath };
