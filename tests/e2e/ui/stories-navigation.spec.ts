@@ -369,32 +369,30 @@ test.describe("CT-13: URL routing and navigation", () => {
 			document.body.focus?.();
 		});
 
-		// act — Ctrl+[ toggles sidebar
+		// act — Ctrl+[ toggles sidebar. Poll localStorage instead of sleeping
+		// a fixed amount; the handler can be slow under parallel load.
 		s.act();
 		await s.press_key("Control+BracketLeft");
-		await s.page.waitForTimeout(400);
 
 		s.assert();
-		const collapsedAfterToggle = await s.page.evaluate(() =>
-			localStorage.getItem("bobbit-sidebar-collapsed")
-		);
-		expect(collapsedAfterToggle).toBe("true");
+		await expect.poll(
+			() => s.page.evaluate(() => localStorage.getItem("bobbit-sidebar-collapsed")),
+			{ timeout: 5_000 },
+		).toBe("true");
 
 		// Toggle back
 		s.act();
 		await s.press_key("Control+BracketLeft");
-		await s.page.waitForTimeout(400);
 
 		s.assert();
-		const expandedAfterToggle = await s.page.evaluate(() =>
-			localStorage.getItem("bobbit-sidebar-collapsed")
-		);
-		expect(expandedAfterToggle).not.toBe("true");
+		await expect.poll(
+			() => s.page.evaluate(() => localStorage.getItem("bobbit-sidebar-collapsed")),
+			{ timeout: 5_000 },
+		).not.toBe("true");
 
 		// act — Ctrl+, opens settings
 		s.act();
 		await s.press_key("Control+,");
-		await s.page.waitForTimeout(500);
 
 		s.assert();
 		await s.url_contains("/settings");
@@ -402,17 +400,17 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// act — Ctrl+, again closes settings (returns to previous view)
 		s.act();
 		await s.press_key("Control+,");
-		await s.page.waitForTimeout(500);
 
 		s.assert();
 		// Should be back at session or at least not on settings
-		const hashAfterToggleSettings = await s.page.evaluate(() => window.location.hash);
-		expect(hashAfterToggleSettings).not.toContain("/settings");
+		await expect.poll(
+			() => s.page.evaluate(() => window.location.hash),
+			{ timeout: 5_000 },
+		).not.toContain("/settings");
 
 		// act — Ctrl+K focuses search
 		s.act();
 		await s.press_key("Control+k");
-		await s.page.waitForTimeout(400);
 
 		s.assert();
 		// Search input or search page should be active

@@ -55,7 +55,43 @@ export type RpcEventListener = (event: any) => void;
 /**
  * Lightweight bridge to a pi-coding-agent running in RPC mode.
  * Communicates via JSONL (one JSON object per line) over stdin/stdout.
+ *
+ * Test harnesses can register an alternative factory via
+ * `RpcBridge.registerFactory(fn)` to route specific options (e.g. the E2E
+ * in-process mock) to a custom implementation that matches the public
+ * interface (`IRpcBridge`). The production code is unchanged: it still
+ * calls `new RpcBridge(opts)` and the factory intercepts transparently.
  */
+export interface IRpcBridge {
+	start(): Promise<void>;
+	stop(): Promise<void>;
+	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<any>;
+	steer(text: string): Promise<any>;
+	abort(): Promise<any>;
+	getState(): Promise<any>;
+	getMessages(): Promise<any>;
+	setModel(provider: string, modelId: string): Promise<any>;
+	setThinkingLevel(level: string): Promise<any>;
+	compact(timeoutMs?: number): Promise<any>;
+	waitForReady(overallTimeoutMs?: number): Promise<void>;
+	sendCommand(command: Record<string, any>, timeoutMs?: number): Promise<any>;
+	onEvent(listener: RpcEventListener): () => void;
+	readonly running: boolean;
+}
+
+export type RpcBridgeFactory = (options: RpcBridgeOptions) => IRpcBridge | null;
+
+let _factory: RpcBridgeFactory | null = null;
+
+/**
+ * Register an alternative bridge factory. Called by test harnesses to
+ * route mock sessions to an in-process implementation. Return `null` from
+ * the factory to fall through to the default child-process RpcBridge.
+ */
+export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void {
+	_factory = factory;
+}
+
 export class RpcBridge {
 	private process: ChildProcess | null = null;
 	private requestId = 0;
@@ -65,7 +101,21 @@ export class RpcBridge {
 	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
 	private stderrTail: string[] = [];
 
-	constructor(private options: RpcBridgeOptions = {}) {}
+	constructor(private options: RpcBridgeOptions = {}) {
+		// If a test-registered factory claims this options object, return that
+		// instance instead of the default child-process bridge. This lets the
+		// E2E harness swap in an in-process mock without modifying any callers.
+		if (_factory) {
+			const alt = _factory(options);
+			if (alt) {
+				// Dynamically forward everything to the alternative. Since
+				// `RpcBridge` is a class (not an interface), we return `alt` from
+				// the constructor to replace `this`. TypeScript's structural
+				// compatibility is enforced at the factory level.
+				return alt as unknown as RpcBridge;
+			}
+		}
+	}
 
 	async start(): Promise<void> {
 		const cliPath = this.options.cliPath || findAgentCli();

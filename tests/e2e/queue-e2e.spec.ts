@@ -67,7 +67,7 @@ test.describe("Queue E2E", () => {
 			await conn.waitFor((m) => m.type === "queue_update");
 
 			// Make agent busy with explicit stay-busy duration
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 first prompt" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 first prompt" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Now agent is busy — send another prompt
@@ -88,7 +88,7 @@ test.describe("Queue E2E", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 working" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			conn.send({ type: "prompt", text: "msg A" });
@@ -120,7 +120,7 @@ test.describe("Queue E2E", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 working" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			conn.send({ type: "prompt", text: "to remove" });
@@ -144,7 +144,7 @@ test.describe("Queue E2E", () => {
 			await conn1.waitFor((m) => m.type === "queue_update");
 			await conn2.waitFor((m) => m.type === "queue_update");
 
-			conn1.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			conn1.send({ type: "prompt", text: "STAY_BUSY:1500 working" });
 			await conn1.waitFor(statusPredicate("streaming"));
 
 			conn1.send({ type: "prompt", text: "from client 1" });
@@ -191,7 +191,7 @@ test.describe("Queue E2E", () => {
 			await conn2.waitFor((m) => m.type === "queue_update");
 
 			// Make agent busy
-			conn1.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			conn1.send({ type: "prompt", text: "STAY_BUSY:1500 working" });
 			await conn1.waitFor(statusPredicate("streaming"));
 
 			// Queue 3 messages
@@ -251,7 +251,7 @@ test.describe("Queue E2E", () => {
 			await conn.waitFor((m) => m.type === "queue_update");
 
 			// Start streaming
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 working" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Clear messages to track what comes after abort

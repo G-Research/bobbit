@@ -47,13 +47,16 @@ export interface GatewayInfo {
 	sessionManager?: any;
 }
 
-export const test = base.extend<{}, { enableMcp: boolean; gateway: GatewayInfo }>({
+export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: boolean; gateway: GatewayInfo }>({
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
 	enableMcp: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp }, use, workerInfo) => {
+	// Worker-scoped option. Default false — opt in via `test.use({ enableWorktreePool: true })`.
+	enableWorktreePool: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
@@ -104,11 +107,24 @@ export const test = base.extend<{}, { enableMcp: boolean; gateway: GatewayInfo }
 		} else {
 			process.env.BOBBIT_SKIP_MCP = "1";
 		}
+		if (enableWorktreePool) {
+			delete process.env.BOBBIT_SKIP_WORKTREE_POOL;
+		} else {
+			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
+		}
 
 		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 		const { createGateway } = await import("../../dist/server/server.js");
+		// Register the in-process mock bridge factory before any sessions are
+		// created. See in-process-harness.ts for rationale — same story here.
+		const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
+		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+		registerRpcBridgeFactory((opts: any) => {
+			if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
+			return null;
+		});
 
 		setProjectRoot(bobbitDir);
 		scaffoldBobbitDir(bobbitDir);

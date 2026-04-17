@@ -102,9 +102,15 @@ test.describe("Goal creation (full-stack UI)", () => {
 		const checkbox = page.locator(".goal-preview-panel input[type='checkbox'].toggle-switch").first();
 		await expect(checkbox).toBeChecked();
 
-		// Create the goal
+		// Listen for the goal creation POST *before* clicking, so a fast
+		// response can't slip past under parallel load.
+		const createPromise = page.waitForResponse(
+			resp => resp.url().includes("/api/goals") && resp.request().method() === "POST" && resp.ok(),
+			{ timeout: 15_000 },
+		);
 		const createGoalBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
 		await createGoalBtn.click();
+		await createPromise;
 
 		// Wait for navigation to goal dashboard
 		await expect(page).toHaveURL(/#\/goal(-dashboard)?\//, { timeout: 15_000 });

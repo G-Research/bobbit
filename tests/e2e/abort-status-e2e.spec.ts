@@ -35,7 +35,7 @@ test.describe("Abort status E2E", () => {
 
 			// Make the agent busy with a long-running turn so abort has time
 			// to trigger the aborting → idle transition
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 long running task" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 long running task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Clear message buffer to track only abort-related status changes
@@ -71,7 +71,7 @@ test.describe("Abort status E2E", () => {
 			await conn.waitFor((m) => m.type === "queue_update");
 
 			// Make agent busy
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 working on first task" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 working on first task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue 3 messages while agent is busy
@@ -135,7 +135,7 @@ test.describe("Abort status E2E", () => {
 			await conn.waitFor((m) => m.type === "queue_update");
 
 			// Make agent busy
-			conn.send({ type: "prompt", text: "STAY_BUSY:5000 initial task" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:1500 initial task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue messages: S1 (will be steered), N1 (normal), S2 (will be steered)

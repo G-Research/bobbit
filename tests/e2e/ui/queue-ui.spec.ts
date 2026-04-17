@@ -169,7 +169,7 @@ test.describe("Queue UI E2E", () => {
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 			// Make agent busy
-			conn.send({ type: "prompt", text: "STAY_BUSY:15000 working" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:3000 working" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue 2 messages

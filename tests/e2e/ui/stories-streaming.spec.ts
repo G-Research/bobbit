@@ -80,7 +80,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 
 		// act
 		s.act();
-		await s.send_message("STAY_BUSY:5000 long task");
+		await s.send_message("STAY_BUSY:1500 long task");
 		await s.wait_for_streaming();
 		await s.stop_streaming();
 		await s.wait_for_idle();
@@ -113,7 +113,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 
 		// act
 		s.act();
-		await s.send_message("STAY_BUSY:5000 first");
+		await s.send_message("STAY_BUSY:1500 first");
 		await s.wait_for_streaming();
 		await s.stop_streaming();
 		await s.wait_for_idle();
@@ -178,7 +178,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		// act
 		s.act();
 		await s.navigate_to("session", "A");
-		await s.send_message("STAY_BUSY:5000 working");
+		await s.send_message("STAY_BUSY:1500 working");
 		await s.wait_for_streaming();
 		await s.navigate_to("session", "B");
 		await s.navigate_to("session", "A");
@@ -207,7 +207,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 
 		// act
 		s.act();
-		await s.send_message("STAY_BUSY:5000 working");
+		await s.send_message("STAY_BUSY:1500 working");
 		await s.wait_for_streaming();
 		await s.reload();
 		await s.navigate_to("session", "A");
