@@ -4152,8 +4152,8 @@ async function handleApiRoute(
 			const result = await batchGitStatus(cwd, cid);
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
 			json(result);
-		} catch (err) {
-			json({ error: String(err) }, 500);
+		} catch (err: any) {
+			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
 		}
 		return;
 	}
@@ -4843,6 +4843,8 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 
+		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+
 		// Optional: run git fetch first when ?fetch=true is passed
 		if (url.searchParams.get('fetch') === 'true') {
 			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
@@ -4863,8 +4865,8 @@ async function handleApiRoute(
 					execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
 				}
 			}
-		} catch (err) {
-			json({ error: String(err) }, 500);
+		} catch (err: any) {
+			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
 		}
 		return;
 	}
