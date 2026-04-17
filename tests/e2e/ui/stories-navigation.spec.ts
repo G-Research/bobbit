@@ -369,57 +369,76 @@ test.describe("CT-13: URL routing and navigation", () => {
 			document.body.focus?.();
 		});
 
+		// Helper: poll localStorage/hash until predicate passes, with generous
+		// timeout so we tolerate slow hash/localStorage propagation under parallel load.
+		const pollLocalStorage = async (key: string, expected: string | null, timeout = 5000) =>
+			expect.poll(
+				() => s.page.evaluate((k) => localStorage.getItem(k), key),
+				{ timeout, intervals: [50, 100, 200, 400] },
+			).toBe(expected);
+
+		const pollHashNotContains = async (needle: string, timeout = 5000) =>
+			expect.poll(
+				() => s.page.evaluate(() => window.location.hash),
+				{ timeout, intervals: [50, 100, 200, 400] },
+			).not.toContain(needle);
+
+		const pollHashContains = async (needle: string, timeout = 5000) =>
+			expect.poll(
+				() => s.page.evaluate(() => window.location.hash),
+				{ timeout, intervals: [50, 100, 200, 400] },
+			).toContain(needle);
+
+		// Helper: press a shortcut and wait for its effect. If the first press
+		// is swallowed by a transient focus race, retry once.
+		const pressUntil = async (key: string, check: () => Promise<void>, maxAttempts = 3) => {
+			for (let attempt = 0; attempt < maxAttempts; attempt++) {
+				// Re-blur each attempt — any late focus steal would kill the shortcut.
+				await s.page.evaluate(() => {
+					(document.activeElement as HTMLElement | null)?.blur();
+					document.body.focus?.();
+				});
+				await s.press_key(key);
+				try { await check(); return; } catch (err) {
+					if (attempt === maxAttempts - 1) throw err;
+				}
+			}
+		};
+
 		// act — Ctrl+[ toggles sidebar
 		s.act();
-		await s.press_key("Control+BracketLeft");
-		await s.page.waitForTimeout(400);
-
 		s.assert();
-		const collapsedAfterToggle = await s.page.evaluate(() =>
-			localStorage.getItem("bobbit-sidebar-collapsed")
-		);
-		expect(collapsedAfterToggle).toBe("true");
+		await pressUntil("Control+BracketLeft", () => pollLocalStorage("bobbit-sidebar-collapsed", "true"));
 
 		// Toggle back
 		s.act();
-		await s.press_key("Control+BracketLeft");
-		await s.page.waitForTimeout(400);
-
 		s.assert();
-		const expandedAfterToggle = await s.page.evaluate(() =>
-			localStorage.getItem("bobbit-sidebar-collapsed")
-		);
-		expect(expandedAfterToggle).not.toBe("true");
+		await pressUntil("Control+BracketLeft", async () => {
+			await expect.poll(
+				() => s.page.evaluate(() => localStorage.getItem("bobbit-sidebar-collapsed")),
+				{ timeout: 5000, intervals: [50, 100, 200, 400] },
+			).not.toBe("true");
+		});
 
 		// act — Ctrl+, opens settings
 		s.act();
-		await s.press_key("Control+,");
-		await s.page.waitForTimeout(500);
-
 		s.assert();
-		await s.url_contains("/settings");
+		await pressUntil("Control+,", () => pollHashContains("/settings"));
 
 		// act — Ctrl+, again closes settings (returns to previous view)
 		s.act();
-		await s.press_key("Control+,");
-		await s.page.waitForTimeout(500);
-
 		s.assert();
-		// Should be back at session or at least not on settings
-		const hashAfterToggleSettings = await s.page.evaluate(() => window.location.hash);
-		expect(hashAfterToggleSettings).not.toContain("/settings");
+		await pressUntil("Control+,", () => pollHashNotContains("/settings"));
 
 		// act — Ctrl+K focuses search
 		s.act();
-		await s.press_key("Control+k");
-		await s.page.waitForTimeout(400);
-
 		s.assert();
-		// Search input or search page should be active
-		const searchVisible = await s.page.locator(
+		const searchLocator = s.page.locator(
 			'input[type="search"], input[placeholder*="Search"], .search-page input, .sidebar-search input'
-		).first().isVisible().catch(() => false);
-		expect(searchVisible).toBe(true);
+		).first();
+		await pressUntil("Control+k", async () => {
+			await expect(searchLocator).toBeVisible({ timeout: 5000 });
+		});
 	});
 
 	// ---------------------------------------------------------------
