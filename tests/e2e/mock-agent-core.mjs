@@ -155,6 +155,9 @@ export class MockAgentCore {
 			const filePath = MockAgentCore.extractFilePath(text);
 			return { tool: "Edit", input: { path: filePath, oldText: "ORIGINAL_VALUE", newText: "EDITED_VALUE" }, output: "Edited successfully" };
 		}
+		if (lower.includes("ask_user_choices_multi")) {
+			return { askUserChoices: "multi" };
+		}
 		if (lower.includes("ask_user_choices") || lower.includes("ask user choices")) {
 			// Signals the mock agent to hit the blocking /api/internal/user-question endpoint.
 			return { askUserChoices: true };
@@ -202,7 +205,7 @@ export class MockAgentCore {
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
 		} else if (toolAction && toolAction.askUserChoices) {
-			await this._handleAskUserChoices();
+			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
 		} else if (toolAction && toolAction.mockError) {
@@ -268,7 +271,7 @@ export class MockAgentCore {
 		this.emit({ type: "session_status", status: "idle" });
 	}
 
-	async _handleAskUserChoices() {
+	async _handleAskUserChoices(multi = false) {
 		// Call the ask_user_choices tool via its REST endpoint directly, mirroring
 		// how the real extension posts to /api/internal/user-question and blocks
 		// until the UI submits. The mock agent waits for the response, then emits
@@ -282,10 +285,15 @@ export class MockAgentCore {
 			token = (this.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
 		} catch {}
 
-		const questions = [
-			{ question: "Favorite color?", options: ["red", "blue", "green"] },
-			{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true },
-		];
+		const questions = multi
+			? [
+				{ question: "Which colors?", options: ["red", "blue", "green"], multi: true },
+				{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true },
+			]
+			: [
+				{ question: "Favorite color?", options: ["red", "blue", "green"] },
+				{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true },
+			];
 
 		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
 
