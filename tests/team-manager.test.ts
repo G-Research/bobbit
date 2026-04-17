@@ -753,7 +753,7 @@ describe("TeamManager", () => {
 		});
 
 		it("should resume nudging after agent processes the pending nudge", async (t) => {
-			t.mock.timers.enable({ apis: ["setInterval"] });
+			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
 
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();
