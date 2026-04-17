@@ -104,6 +104,9 @@ Control what agents can do (tool access, system prompts) and how they communicat
 ### Skills
 Reusable templates for isolated sub-agents: code review, security review, test reports. Invoke them from any session for structured, repeatable outputs.
 
+### Interactive Agent Prompts
+Agents can ask you structured multiple-choice questions mid-task via the builtin `ask_user_choices` tool. An inline widget renders in the chat with up to 5 questions and an optional free-text "Other"; the agent pauses until you submit. See [docs/blocking-tools.md](docs/blocking-tools.md) for the blocking-tool pattern.
+
 ### MCP Server Integration
 Use any [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server with Bobbit. Drop a `.mcp.json` in your project root (same format as Claude Code) and Bobbit auto-discovers, connects, and exposes all MCP tools — appearing in the Tools UI, system prompts, and role-based access control.
 

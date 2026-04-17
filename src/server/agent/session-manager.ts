@@ -196,6 +196,7 @@ export class SessionManager {
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
+	private _terminationListeners: Array<(sessionId: string) => void> = [];
 	/** @internal Non-PCM test path only. */
 	private _testGoalManager: GoalManager | null = null;
 	/** @internal Non-PCM test path only. */
@@ -211,6 +212,11 @@ export class SessionManager {
 
 	setVerificationHarness(harness: import("./verification-harness.js").VerificationHarness): void {
 		this._verificationHarness = harness;
+	}
+
+	/** Subscribe to session termination events. Listeners are invoked synchronously. */
+	addTerminationListener(fn: (sessionId: string) => void): void {
+		this._terminationListeners.push(fn);
 	}
 
 	setSandboxManager(manager: SandboxManager | null): void {
@@ -3355,6 +3361,14 @@ export class SessionManager {
 		// (title, goal association, timestamps) is valuable and the search
 		// index may reference this session.  Purge will clean it up later.
 		terminateStore.archive(id);
+
+		// Notify termination listeners (e.g. user-question harness cleanup).
+		for (const listener of this._terminationListeners) {
+			try { listener(id); } catch (err) {
+				console.error(`[session ${id}] termination listener failed:`, err);
+			}
+		}
+
 		// Don't remove color or session prompt — they're needed for archived view
 		return true;
 	}
