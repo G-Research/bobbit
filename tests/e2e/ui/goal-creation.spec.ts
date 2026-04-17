@@ -46,6 +46,23 @@ async function deleteGoal(goalId: string) {
 	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
 }
 
+/**
+ * Configure qa_start_command on the default project so the goal form's
+ * "Enable QA Testing" toggle is enabled. Without it, the toggle is rendered
+ * with pointer-events-none + disabled (see render.ts `qaDisabled` guard) —
+ * silently swallowing clicks in the assistant-panel test that linked a project.
+ */
+test.beforeAll(async () => {
+	const projectsResp = await apiFetch("/api/projects");
+	const projects = await projectsResp.json();
+	if (!Array.isArray(projects) || projects.length === 0) return;
+	const projectId = projects[0].id;
+	await apiFetch(`/api/projects/${projectId}/config`, {
+		method: "PUT",
+		body: JSON.stringify({ qa_start_command: "echo ready" }),
+	}).catch(() => {});
+});
+
 test.describe("Goal creation (full-stack UI)", () => {
 	test("create goal via assistant flow", async ({ page }) => {
 		await openGoalAssistantProposal(page);
@@ -91,15 +108,15 @@ test.describe("Goal creation (full-stack UI)", () => {
 		await expect(workflowSelect).toBeVisible({ timeout: 5_000 });
 		await workflowSelect.selectOption("feature");
 
-		// Now "Enable QA Testing" checkbox should appear
-		const qaCheckbox = page.getByText("Enable QA Testing").first();
-		await expect(qaCheckbox).toBeVisible({ timeout: 5_000 });
-
-		// Click the checkbox label to check it
-		await qaCheckbox.click();
-
-		// Verify the checkbox is now checked
-		const checkbox = page.locator(".goal-preview-panel input[type='checkbox'].toggle-switch").first();
+		// Now "Enable QA Testing" label should appear. Scope the checkbox lookup
+		// to the <label> wrapping that text — the panel has several .toggle-switch
+		// checkboxes (sandbox, auto-start team, optional steps) and .first() would
+		// otherwise pick the sandbox toggle.
+		const qaLabel = page.locator(".goal-preview-panel label", { hasText: "Enable QA Testing" }).first();
+		await expect(qaLabel).toBeVisible({ timeout: 5_000 });
+		const checkbox = qaLabel.locator("input[type='checkbox'].toggle-switch");
+		await expect(checkbox).toBeEnabled({ timeout: 10_000 });
+		await checkbox.click();
 		await expect(checkbox).toBeChecked();
 
 		// Listen for the goal creation POST *before* clicking, so a fast
