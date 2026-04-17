@@ -371,6 +371,9 @@ export class TeamManager {
 		if (!tl || tl.status !== "idle") return true;
 		if (this.verificationHarness?.getActiveVerifications(goalId).length) return true;
 		if (this.nudgePending.get(goalId)) return true;
+		// Don't nudge a team lead whose goal has already finished (complete/shelved/archived).
+		const goal = this.resolveGoal(goalId);
+		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved") return true;
 		return false;
 	}
 
