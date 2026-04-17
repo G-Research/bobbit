@@ -36,13 +36,13 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 			.toHaveAttribute("aria-selected", "true");
 
 		// Pick "blue" on Q1 — should auto-advance to Q2.
-		await widget.locator('input[type="radio"][value="blue"]').check();
+		await widget.locator('label:has(input[value="blue"])').click();
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
 
 		// Q2 has allow_other. Pick "Other" — should NOT auto-advance off the last tab anyway,
 		// and should reveal the free-text input.
-		await widget.locator('input[type="radio"][value="__OTHER__"]').check();
+		await widget.locator('label:has(input[value="__OTHER__"])').click();
 		await expect(widget.locator(".ask-other-input")).toBeVisible({ timeout: 5_000 });
 
 		// Submit is still disabled until text is typed.
@@ -73,10 +73,10 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(widget).toBeVisible({ timeout: 20_000 });
 
 		// Answer Q1 (auto-advance), then answer Q2 non-Other, then submit.
-		await widget.locator('input[type="radio"][value="red"]').check();
+		await widget.locator('label:has(input[value="red"])').click();
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
-		await widget.locator('input[type="radio"][value="medium"]').check();
+		await widget.locator('label:has(input[value="medium"])').click();
 		await widget.locator(".ask-submit").click();
 		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
 
@@ -126,10 +126,10 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		const toolUseId: string = pendingJson.pending[0].toolUseId;
 
 		// Submit from the first tab.
-		await widget.locator('input[type="radio"][value="blue"]').check();
+		await widget.locator('label:has(input[value="blue"])').click();
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
-		await widget.locator('input[type="radio"][value="large"]').check();
+		await widget.locator('label:has(input[value="large"])').click();
 		await widget.locator(".ask-submit").click();
 		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
 
