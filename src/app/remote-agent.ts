@@ -98,6 +98,9 @@ export class RemoteAgent {
 	private _connectionStatus: ConnectionStatus = "disconnected";
 	private _pendingReconnectNotif = false;
 	private _visibilityHandlerBound = false;
+	/** Throttle visibility-driven resyncs: Android can fire visibilitychange
+	 *  several times during screen unlock; we only want one resync per wake. */
+	private _lastVisibilityResync = 0;
 	private _onVisibilityChange = (): void => {
 		if (document.visibilityState !== "visible") return;
 		if (this._intentionalDisconnect) return;
@@ -115,10 +118,18 @@ export class RemoteAgent {
 		} else {
 			// Socket reports OPEN but the connection may actually be dead
 			// (mobile OS can freeze the TCP socket without notifying the JS
-			// layer). Resync messages immediately so we don't show stale
-			// content, and send a cheap ping via get_state — if the socket
-			// is secretly dead, the send will eventually trigger onclose and
-			// the normal reconnect path takes over.
+			// layer). Resync messages once — throttled to at most every 2s
+			// so rapid visibilitychange storms during screen unlock don't
+			// pile up concurrent get_messages requests (which can race with
+			// streaming echoes and produce duplicate user messages).
+			const now = Date.now();
+			if (now - this._lastVisibilityResync < 2000) return;
+			this._lastVisibilityResync = now;
+			// Skip resync while a turn is streaming — the server is actively
+			// pushing events and a wholesale message replacement can interleave
+			// with live message_end deltas. Reconnects after real disconnects
+			// still resync (that path doesn't go through here).
+			if (this._state.isStreaming) return;
 			this.requestMessages();
 			this.send({ type: "get_state" });
 		}
