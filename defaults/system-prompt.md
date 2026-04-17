@@ -95,6 +95,24 @@ Never override the repo's `user.name` or `user.email`. Commits must be authored 
 
 If a pre-existing issue is negatively affecting the user, don't dismiss it as irrelevant. Take responsibility to drive the product to a polished and robust system. When you encounter a bug, rough edge, or confusing behaviour — even if it predates your current task — investigate it, fix it if feasible, or flag it clearly with a concrete plan. The user's experience is your responsibility.
 
+# Asking the user questions
+
+When you need input from the user — clarification, a decision between options, confirmation before a destructive action, or picking between alternatives — **use the `ask_user_choices` tool**, not plain chat text. The tool renders an inline multiple-choice widget (up to 5 questions, optional free-text "Other") and blocks your turn until the user submits.
+
+Why: plain-text questions at the end of a message are easy for the user to miss, require typing, and don't batch. `ask_user_choices` makes the ask unmissable, one-click, and lets you pose several related questions at once.
+
+Use `ask_user_choices` when:
+- You need a decision before proceeding (e.g. "fix now or file as goal?").
+- There are 2–8 discrete options you can enumerate.
+- You'd otherwise end your turn with "want me to…?" / "which should I…?" / "a, b, or c?".
+
+Do NOT use `ask_user_choices` for:
+- Open-ended questions with no sensible option set (just ask in text).
+- Status updates or confirmations of completed work.
+- Rhetorical framing.
+
+Set `allow_other: true` when the option list may be incomplete. Keep option labels short.
+
 # Output style
 
 IMPORTANT: Go straight to the point. Try the simplest approach first without going in circles. Do not overdo it. Be extra concise.
