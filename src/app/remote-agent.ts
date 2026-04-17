@@ -132,6 +132,13 @@ export class RemoteAgent {
 			if (this._state.isStreaming) return;
 			this.requestMessages();
 			this.send({ type: "get_state" });
+			// Nudge subscribers — after a tab wake, Lit property bindings
+			// driven by this agent may not have been reactive while suspended.
+			// A synthetic state_update forces AgentInterface to re-read state
+			// and re-bind isStreaming / messages to child components, so the
+			// streaming container's blob animation re-attaches correctly when
+			// the next turn starts.
+			this.emit({ type: "state_update", data: { woke: true } });
 		}
 	};
 	/** Timestamp of last streamingMessage update when content contains truncated blocks. */
