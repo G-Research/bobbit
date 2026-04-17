@@ -803,6 +803,84 @@ describe("TeamManager", () => {
 
 			t.mock.timers.reset();
 		});
+
+		it("should not nudge a team lead whose goal is already complete", async (t) => {
+			t.mock.timers.enable({ apis: ["setInterval"] });
+
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+
+			const eventCallbacks: Array<(event: any) => void> = [];
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+				session.rpcClient.onEvent = mock.fn((cb: any) => { eventCallbacks.push(cb); return () => {}; });
+				return session;
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			const entry = (team as any).teams.get("goal-1")!;
+			const workerSession = {
+				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			};
+			sm._sessions.set("worker-1", workerSession);
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+
+			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
+			tlSession.status = "idle";
+
+			// Mark the goal complete — workflow finished.
+			goal.state = "complete";
+
+			for (const cb of eventCallbacks) cb({ type: "agent_end" });
+			t.mock.timers.tick(5 * 60 * 60 * 1000);
+
+			assert.equal(enqueuePrompt.mock.callCount(), 0, "Completed goal team lead must not be nudged");
+
+			t.mock.timers.reset();
+		});
+
+		it("should not nudge a team lead whose goal is archived", async (t) => {
+			t.mock.timers.enable({ apis: ["setInterval"] });
+
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+
+			const eventCallbacks: Array<(event: any) => void> = [];
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+				session.rpcClient.onEvent = mock.fn((cb: any) => { eventCallbacks.push(cb); return () => {}; });
+				return session;
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			const entry = (team as any).teams.get("goal-1")!;
+			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
+			tlSession.status = "idle";
+			(goal as any).archived = true;
+
+			for (const cb of eventCallbacks) cb({ type: "agent_end" });
+			t.mock.timers.tick(5 * 60 * 60 * 1000);
+
+			assert.equal(enqueuePrompt.mock.callCount(), 0, "Archived goal team lead must not be nudged");
+
+			t.mock.timers.reset();
+		});
 	});
 
 	// ---------------------------------------------------------------------------
