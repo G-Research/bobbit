@@ -84,6 +84,17 @@ export default function (pi: ExtensionAPI) {
 					allow_other: Type.Optional(Type.Boolean({
 						description: "If true, render an 'Other' option with a free-text input",
 					})),
+					multi: Type.Optional(Type.Boolean({
+						description: "If true, user may select multiple options; selected is returned as a string[].",
+					})),
+					min: Type.Optional(Type.Integer({
+						minimum: 1,
+						description: "Minimum selections when multi:true (default 1).",
+					})),
+					max: Type.Optional(Type.Integer({
+						minimum: 1,
+						description: "Maximum selections when multi:true (default = options.length).",
+					})),
 				}),
 				{ minItems: 1, maxItems: 5, description: "1–5 multiple-choice questions" },
 			),

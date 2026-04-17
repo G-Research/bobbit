@@ -25,7 +25,8 @@ function extractAnswers(result: ToolResultMessage | undefined): AskAnswer[] | nu
 			const valid = data.answers.every((a: any) =>
 				a && typeof a === "object" &&
 				typeof a.question === "string" &&
-				typeof a.selected === "string" &&
+				(typeof a.selected === "string"
+					|| (Array.isArray(a.selected) && a.selected.every((s: any) => typeof s === "string"))) &&
 				(a.other_text === null || typeof a.other_text === "string"));
 			return valid ? data.answers as AskAnswer[] : null;
 		}
