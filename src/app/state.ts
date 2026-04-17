@@ -483,7 +483,14 @@ export function isDesktop(): boolean {
 }
 
 export function hasActiveSession(): boolean {
-	return state.remoteAgent !== null && state.remoteAgent.connected;
+	if (state.remoteAgent === null) return false;
+	if (state.remoteAgent.connected) return true;
+	// Treat an in-flight reconnect as "still active" so the chat panel stays
+	// mounted when the browser/OS briefly suspends the tab (common on mobile
+	// when the user switches apps for >10s). Without this, the view collapses
+	// to the mobile landing/sidebar the moment the WebSocket closes and only
+	// snaps back once the reconnect completes — a jarring flash.
+	return state.remoteAgent.connectionStatus === "reconnecting";
 }
 
 export function activeSessionId(): string | undefined {

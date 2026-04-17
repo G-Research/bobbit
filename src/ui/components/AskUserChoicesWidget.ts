@@ -13,6 +13,7 @@
  */
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { repeat } from "lit/directives/repeat.js";
 
 /**
  * Resolve the gateway auth token. Tries both storage keys used by the app
@@ -128,8 +129,16 @@ export class AskUserChoicesWidget extends LitElement {
 		}
 		this._draft = this._draft.map((d, i) => i === qIdx ? { ...d, selected: option } : d);
 		// Auto-advance unless "Other" was selected or this is the last question.
+		// Defer one tick so the current touch/click gesture settles on the Q1
+		// label before Q2 mounts — otherwise mobile browsers can deliver the
+		// synthetic click to the freshly-rendered Q2 option at the same
+		// coordinates ("ghost click") and either pre-select or swallow the
+		// user's intended first real tap on Q2.
 		if (option !== OTHER_SENTINEL && qIdx < this.questions.length - 1) {
-			this._activeTab = qIdx + 1;
+			const nextIdx = qIdx + 1;
+			setTimeout(() => {
+				if (this._activeTab === qIdx) this._activeTab = nextIdx;
+			}, 250);
 		}
 	}
 
@@ -300,12 +309,27 @@ export class AskUserChoicesWidget extends LitElement {
 			? (answer.other_text || "")
 			: draft.other_text;
 
+		// Key options by `${idx}::${opt}` so Lit rebuilds option DOM when the
+		// active tab changes. Without keying, the <label>/<input> nodes are
+		// reused across panels, which on mobile leaves stale radio state (the
+		// browser treats the "same" radio as already-interacted-with and the
+		// next tap may not fire a `change` event).
 		return html`
 			<div role="tabpanel" data-panel-index=${idx} class="ask-panel">
 				<div class="ask-question text-sm font-medium mb-2">${q.question}</div>
 				<div class="ask-options flex flex-col gap-1.5">
-					${q.options.map(opt => this._renderOption(idx, opt, this._isOptionChecked(idx, opt, readOnly), readOnly))}
-					${q.allow_other ? this._renderOtherOption(idx, otherChecked, otherText, readOnly) : nothing}
+					${repeat(
+						q.options,
+						(opt) => `${idx}::${opt}`,
+						(opt) => this._renderOption(idx, opt, this._isOptionChecked(idx, opt, readOnly), readOnly),
+					)}
+					${q.allow_other
+						? repeat(
+							[OTHER_SENTINEL],
+							() => `${idx}::__other__`,
+							() => this._renderOtherOption(idx, otherChecked, otherText, readOnly),
+						)
+						: nothing}
 				</div>
 			</div>`;
 	}

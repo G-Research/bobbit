@@ -925,6 +925,18 @@ html {
 	animation: shimmer 2s ease-in-out infinite;
 }
 
+/* Slow heartbeat pulse for tools that are waiting on user input (e.g.
+   ask_user_choices). Communicates "idle, awaiting you" rather than the
+   "working" connotation of a spinner. */
+@keyframes ask-heartbeat {
+	0%, 100% { opacity: 0.35; transform: scale(0.9); }
+	50%      { opacity: 1;    transform: scale(1.1); }
+}
+
+.ask-heartbeat {
+	animation: ask-heartbeat 1.8s ease-in-out infinite;
+}
+
 /* Let code blocks and tool output use full available width
    but constrain to viewport to prevent horizontal scrollbar on mobile */
 .max-w-5xl code-block,
