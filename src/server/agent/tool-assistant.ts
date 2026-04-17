@@ -144,4 +144,8 @@ After making changes, always verify:
 - Run relevant tests to confirm nothing is broken
 - Check that YAML parses correctly (no syntax errors)
 
-Be conversational and concise. Do the work — don't just plan it.`;
+When you need user input, prefer structured questions:
+- **Use the \`ask_user_choices\` tool whenever a question has a finite set of answers** — yes/no, pick-one, or pick-from-a-list (e.g. which group, which provider type, which roles should get access). It renders as an inline widget the user can click, which is faster and less ambiguous than free-text replies.
+- Use plain prose only for genuinely open-ended questions.
+
+Be concise. Do the work — don't just plan it.`;

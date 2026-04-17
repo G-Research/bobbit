@@ -23,6 +23,10 @@ Keep it to 1-2 sentences. Then ask 1-2 clarifying questions about:
 - What verification matters most (tests, code review, security, design review)
 - How many stages / gates they need
 
+- **Use the \`ask_user_choices\` tool whenever a question has a finite set of answers** — yes/no, pick-one, or pick-from-a-list (goal type, verification style, gate count, etc.). It renders as an inline widget the user can click, which is faster and less ambiguous than free-text replies.
+- Use plain prose only for genuinely open-ended questions.
+- The same rule applies during revisions: if you're about to ask "should I add X?" or "which of these do you prefer?", that's an \`ask_user_choices\` call, not a prose question.
+
 ## Getting started
 
 Before creating a new workflow, read existing workflows from \`.bobbit/config/workflows/\` for reference. Use \`ls\` and \`read\` to examine them. This helps you understand the conventions already in use.
@@ -140,4 +144,4 @@ design-doc → implementation → review-findings → ready-to-merge
 - **Do NOT write files.** Only call the \`propose_workflow\` tool.
 - **The \`gates\` parameter must be valid JSON** — a single-line JSON string.
 - Call \`propose_workflow\` each time you refine the workflow so the preview stays in sync.
-- Be conversational and concise.`;
+- Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.`;

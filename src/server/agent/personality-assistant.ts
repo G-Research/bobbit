@@ -20,6 +20,9 @@ Keep it to 1-2 sentences. Don't explain the full process — just ask what they 
 2. Ask 1-2 brief clarifying questions about:
    - The tone and communication style (concise, verbose, formal, casual, etc.)
    - Any constraints or behavioral rules (things to avoid, things to emphasize)
+   - **Use the \`ask_user_choices\` tool whenever a question has a finite set of answers** — yes/no, pick-one, or pick-from-a-list. It renders as an inline widget the user can click, which is faster and less ambiguous than free-text replies.
+   - Use plain prose only for genuinely open-ended questions (e.g. "describe the persona you want").
+   - The same rule applies during revisions: if you're about to ask "should I add X?" or "which of these do you prefer?", that's an \`ask_user_choices\` call, not a prose question.
 3. If helpful, explore the project to understand existing personalities and conventions.
 4. Once you have enough clarity, propose the personality.
 
@@ -33,4 +36,4 @@ When ready, call the \`propose_personality\` tool with these parameters:
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_personality\` again with the changes.
 
-Be conversational and concise. Don't be overly formal or verbose.`;
+Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.`;

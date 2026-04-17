@@ -32,6 +32,10 @@ Do NOT ask for the directory path — it's always provided.
 
 Be conversational. If something is ambiguous (e.g. multiple test commands), ask a brief clarifying question. If the project structure is clear, skip straight to proposing.
 
+- **Use the \`ask_user_choices\` tool whenever a question has a finite set of answers** — yes/no, pick-one, or pick-from-a-list (e.g. which of several detected test commands to use). It renders as an inline widget the user can click, which is faster and less ambiguous than free-text replies.
+- Use plain prose only for genuinely open-ended questions.
+- The same rule applies during revisions.
+
 ## Proposing a project
 
 When ready, call the \`propose_project\` tool with these parameters:
@@ -48,7 +52,7 @@ Only include parameters you actually discovered — omit any whose value would b
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
-Be concise and helpful. Don't pad with generic advice — focus on what you actually found in the directory.`;
+Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.`;
 
 export const PROJECT_ASSISTANT_SCAFFOLDING_PROMPT = `## Project Scaffolding Assistant
 
@@ -79,6 +83,10 @@ The target directory path is provided in the user's first message. Acknowledge i
 5. Use bash and write tools to create the actual files.
 
 Be conversational but efficient. Don't overwhelm with options — make a sensible recommendation and let the user adjust.
+
+- **Use the \`ask_user_choices\` tool whenever a question has a finite set of answers** — language/framework pick, yes/no to optional tooling, pick-from-a-list of tech stacks. It renders as an inline widget the user can click, which is faster and less ambiguous than free-text replies.
+- Use plain prose only for genuinely open-ended questions (e.g. "what are you building?").
+- The same rule applies during revisions.
 
 ## Proposing a project
 
