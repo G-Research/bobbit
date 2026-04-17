@@ -318,6 +318,25 @@ async function handlePrompt(requestId, text) {
 
 		emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
 
+		// Emit the assistant toolCall message FIRST so the UI renders the widget
+		// while the tool blocks server-side waiting for the user's answer.
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
+		};
+		conversationMessages.push(assistantMsg);
+		// Prime the streaming container via message_update so the widget renders
+		// immediately (message_end alone defers until the next stream event,
+		// which never comes because the tool blocks).
+		// Emit TWICE: the StreamingMessageContainer's _immediateUpdate flag may
+		// still be set from the prior user-echo clear, dropping the first RAF.
+		// A second message_update scheduled on the next frame lands cleanly.
+		emit({ type: "message_update", message: assistantMsg });
+		await tick(50);
+		emit({ type: "message_update", message: assistantMsg });
+		await tick(50);
+		emit({ type: "message_end", message: assistantMsg });
+
 		let resultText = "";
 		let isError = false;
 		try {
@@ -340,13 +359,6 @@ async function handlePrompt(requestId, text) {
 
 		emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: isError ? "error" : "complete", output: resultText });
 		emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError });
-
-		const assistantMsg = {
-			role: "assistant",
-			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
-		};
-		conversationMessages.push(assistantMsg);
-		emit({ type: "message_end", message: assistantMsg });
 
 		const toolResultMsg = {
 			role: "toolResult",

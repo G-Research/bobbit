@@ -10,7 +10,17 @@
  */
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { getAuthToken } from "../utils/auth-token.js";
+
+/**
+ * Resolve the gateway auth token. Tries both storage keys used by the app
+ * ("gateway.token" set by main.ts on connect, and "auth-token" used by the
+ * legacy auth-token util).
+ */
+function resolveAuthToken(): string {
+	return localStorage.getItem("gateway.token")
+		?? localStorage.getItem("auth-token")
+		?? "";
+}
 
 /** Sentinel value for the "Other" option — distinct from any real option text. */
 export const OTHER_SENTINEL = "__OTHER__";
@@ -131,7 +141,7 @@ export class AskUserChoicesWidget extends LitElement {
 			};
 		});
 		try {
-			const token = await getAuthToken();
+			const token = resolveAuthToken();
 			const headers: Record<string, string> = { "Content-Type": "application/json" };
 			if (token) headers["Authorization"] = `Bearer ${token}`;
 			const resp = await fetch("/api/internal/user-question/submit", {
