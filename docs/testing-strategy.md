@@ -68,6 +68,28 @@ Prompt interaction user stories (PI-01 through PI-25 plus sub-stories, defined i
 
 PI-10 (steer) has API-level coverage in `steer-midturn.spec.ts`. PI-05 has E2E coverage in `slash-skill-e2e.spec.ts`.
 
+### Session & Resilience Coverage
+
+Session lifecycle, reload, and reconnect stories (`userstories/sessions.md`, `userstories/resilience.md`, and the session-related subset of `userstories/projects.md`) have spec-framework coverage for contracts **CT-05** (reload/reconnect restore state) and **CT-16** (projects organize sessions).
+
+| Test file | Stories | What it tests |
+|-----------|---------|---------------|
+| `stories-sessions.spec.ts` | S-01–S-12 | Session create/switch/rename/delete, draft isolation, rapid switching, worktree-backed sessions, persistence, messaging |
+| `stories-resilience.spec.ts` | RE-01–RE-08 | WebSocket disconnect/reconnect (RE-07, runs in standard E2E); server crash/restart, worktree preservation, Docker recovery, rapid restart cycles (RE-01–RE-06, RE-08 — `test.skip()` with "INFRASTRUCTURE: Requires npm run test:manual" annotations) |
+| `stories-projects.spec.ts` | PR-01, PR-04, PR-09, PR-10 | Projects organize sessions; project switching |
+
+**Why crash/restart stories are skipped in standard E2E.** Real process termination, disk-state recovery, and Docker container lifecycle require the manual-integration harness (`npm run test:manual`), which spawns a real gateway subprocess it can hard-kill and restart on a fresh port. The standard browser E2E harness runs an in-process or long-lived spawned gateway and cannot faithfully simulate a crash—only the manual harness exercises the actual persistence and restore code paths. The stories are still written against the spec-framework API and documented inline so they remain discoverable; they just execute under a different runner.
+
+All three files register their stories in `tests/e2e/ui/story-registry.ts`, the central registry that `tools/spec-check.ts` walks to report per-contract variation coverage. Current coverage: **CT-05 at 75%** (3/4 variations) and **CT-16 at 100%** (2/2 variations).
+
+**Framework extensions** added to `tests/e2e/ui/spec-framework.ts` to support these stories:
+
+- `ProjectHandle` — entity handle for asserting against projects.
+- `SpecContext.createTestSession(name, opts)` — accepts `opts.cwd` to put the session in a real git worktree (needed for worktree assertions) and `opts.goalId` for goal-scoped sessions.
+- `SpecContext.create_session_via_ui()` and `rename_session(name, newTitle)` — sidebar-driven session creation and the double-click-to-rename flow, for UI-first stories.
+- `SpecContext.event.disconnect()` — force-closes the WebSocket so RE-07 can observe reconnect behavior without killing the server.
+- `SpecContext.event.server_crash()` / `server_restart()` — stubs that throw a clear "requires manual harness" error when called under the standard E2E runner, so skipped crash/restart stories fail loudly if someone enables them in the wrong context.
+
 ## Root Causes of Escaped Bugs
 
 ### 1. UI Code Is Largely Untested in Isolation
