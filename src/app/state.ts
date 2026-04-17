@@ -352,21 +352,23 @@ export function setStaffSectionExpanded(projectId: string, value: boolean): void
 	localStorage.setItem(COLLAPSED_STAFF_KEY, JSON.stringify([...collapsedStaffProjects]));
 }
 
-// Per-project archived section expand state. Default = collapsed (absence means collapsed).
-// Presence of projectId in the set = that project's Archived subsection is expanded.
-const EXPANDED_ARCHIVED_KEY = "bobbit-archived-expanded-projects";
-export let expandedArchivedProjects: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(EXPANDED_ARCHIVED_KEY) || "[]"),
+// Per-project archived section expand state. Default = expanded (so toggling
+// See Archived on immediately reveals archived items without an extra click).
+// The set stores COLLAPSED project IDs; absence = expanded. This mirrors
+// collapsedUngroupedProjects / collapsedStaffProjects.
+const COLLAPSED_ARCHIVED_KEY = "bobbit-archived-collapsed-projects";
+export let collapsedArchivedProjects: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(COLLAPSED_ARCHIVED_KEY) || "[]"),
 );
 
 export function isArchivedSectionExpanded(projectId: string): boolean {
-	return expandedArchivedProjects.has(projectId);
+	return !collapsedArchivedProjects.has(projectId);
 }
 
 export function setArchivedSectionExpanded(projectId: string, value: boolean): void {
-	if (value) expandedArchivedProjects.add(projectId);
-	else expandedArchivedProjects.delete(projectId);
-	localStorage.setItem(EXPANDED_ARCHIVED_KEY, JSON.stringify([...expandedArchivedProjects]));
+	if (value) collapsedArchivedProjects.delete(projectId);
+	else collapsedArchivedProjects.add(projectId);
+	localStorage.setItem(COLLAPSED_ARCHIVED_KEY, JSON.stringify([...collapsedArchivedProjects]));
 }
 
 const COLLAPSED_TEAM_LEADS_KEY = "bobbit-collapsed-team-leads";

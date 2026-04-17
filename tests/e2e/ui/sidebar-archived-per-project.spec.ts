@@ -77,14 +77,8 @@ test.describe("Per-project Archived subsections", () => {
 		const archivedHeaders = page.locator("span.uppercase").filter({ hasText: /^Archived$/ });
 		await expect(archivedHeaders).toHaveCount(2, { timeout: 10_000 });
 
-		// Expand both per-project Archived subsections — locate the header buttons
-		// (the <button> that contains the "Archived" uppercase label).
-		const archivedButtons = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
-		await expect(archivedButtons).toHaveCount(2, { timeout: 5_000 });
-		await archivedButtons.nth(0).click();
-		await archivedButtons.nth(1).click();
-
-		// Each archived goal title must appear once, under its project.
+		// Per-project Archived subsections default to expanded — each archived goal
+		// title should appear immediately under its project without needing an extra click.
 		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 10_000 });
 		await expect(page.getByText(goalBTitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
 
@@ -108,7 +102,7 @@ test.describe("Per-project Archived subsections", () => {
 		expect(goalAIndex).toBeLessThan(projectBIndex);
 	});
 
-	test("per-project expand state persists across reload", async ({ page }) => {
+	test("per-project collapse state persists across reload", async ({ page }) => {
 		await openApp(page);
 
 		// Turn See Archived on if not already
@@ -117,38 +111,41 @@ test.describe("Per-project Archived subsections", () => {
 		const isOn = await seeArchived.evaluate((el) => el.className.includes("text-primary"));
 		if (!isOn) await seeArchived.click();
 
-		// Wait for per-project Archived headers
+		// Wait for per-project Archived headers (default expanded)
 		const archivedButtons = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
 		await expect(archivedButtons).toHaveCount(2, { timeout: 10_000 });
 
-		// Expand project A's (the first one in DOM) archived subsection
-		await archivedButtons.nth(0).click();
-
-		// Goal A should now be visible
+		// Both archived goals should be visible initially (default expanded)
 		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText(goalBTitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
 
-		// localStorage should record project A as expanded
-		const stored = await page.evaluate(() => localStorage.getItem("bobbit-archived-expanded-projects"));
+		// Collapse project B's archived subsection (the second one in DOM)
+		await archivedButtons.nth(1).click();
+
+		// Goal B should disappear (project B collapsed); Goal A still visible
+		await expect(page.getByText(goalBTitle, { exact: false })).toHaveCount(0, { timeout: 3_000 });
+		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 3_000 });
+
+		// localStorage should record project B as collapsed
+		const stored = await page.evaluate(() => localStorage.getItem("bobbit-archived-collapsed-projects"));
 		expect(stored).toBeTruthy();
 		const ids = JSON.parse(stored!);
-		expect(ids).toContain(projectA.id);
+		expect(ids).toContain(projectB.id);
 
-		// Reload — expand state should persist
+		// Reload — collapse state should persist
 		await page.reload();
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
 
-		// Goal A should still be visible (project A archived subsection still expanded)
+		// Goal A visible, Goal B still collapsed
 		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 10_000 });
-
-		// Goal B should not be visible (project B archived still collapsed)
 		await expect(page.getByText(goalBTitle, { exact: false })).toHaveCount(0, { timeout: 3_000 });
 	});
 
 	test("search surfaces archived items in the correct project subsection", async ({ page }) => {
 		await openApp(page);
 
-		// Ensure clean state: clear the expanded archived projects pref
-		await page.evaluate(() => localStorage.removeItem("bobbit-archived-expanded-projects"));
+		// Ensure clean state: clear the per-project archived collapse pref
+		await page.evaluate(() => localStorage.removeItem("bobbit-archived-collapsed-projects"));
 		// Make sure See Archived is off so the search-auto-open behaviour kicks in
 		await page.evaluate(() => localStorage.setItem("bobbit-show-archived", "false"));
 		await page.reload();
@@ -161,11 +158,11 @@ test.describe("Per-project Archived subsections", () => {
 		// Debounce
 		await page.waitForTimeout(400);
 
-		// Auto-open should have flipped showArchived on; still need to expand project A's subsection
+		// Auto-open flips showArchived on; per-project subsections default expanded
+		// so the matching item appears without extra clicks.
 		const archivedButtons = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
 		// Only project A's archived subsection has matches → only one header visible.
 		await expect(archivedButtons).toHaveCount(1, { timeout: 10_000 });
-		await archivedButtons.nth(0).click();
 
 		// Goal A matches, goal B does not
 		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });

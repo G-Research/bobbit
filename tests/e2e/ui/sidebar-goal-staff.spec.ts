@@ -62,12 +62,6 @@ test.describe("Sidebar goal actions & staff", () => {
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
 		await archivedToggle.click();
 
-		// Per-project Archived subsections are collapsed by default — expand them all.
-		const archivedSubHeaders = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
-		await expect(archivedSubHeaders.first()).toBeVisible({ timeout: 10_000 });
-		const subCount = await archivedSubHeaders.count();
-		for (let i = 0; i < subCount; i++) await archivedSubHeaders.nth(i).click();
-
 		// Wait for archived goals to load asynchronously — title is rendered uppercase via CSS
 		const goalTitle = page.getByText("SB22 Reattempt Test", { exact: false }).first();
 		await expect(goalTitle).toBeVisible({ timeout: 15_000 });
@@ -125,12 +119,6 @@ test.describe("Sidebar goal actions & staff", () => {
 		const archivedToggle = page.locator("button[title='Show archived sessions']").first();
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
 		await archivedToggle.click();
-
-		// Per-project Archived subsections are collapsed by default — expand them all.
-		const archivedSubHeaders = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
-		await expect(archivedSubHeaders.first()).toBeVisible({ timeout: 10_000 });
-		const subCount = await archivedSubHeaders.count();
-		for (let i = 0; i < subCount; i++) await archivedSubHeaders.nth(i).click();
 
 		// Now the archived goal should be visible (title rendered uppercase via CSS)
 		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });

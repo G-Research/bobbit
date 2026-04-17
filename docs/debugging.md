@@ -189,6 +189,7 @@ Debugging checklist:
 - Missing items? Check `archivedAt` is set (older items may lack it)
 - Count mismatch? Verify total from paginated response metadata
 - Archived delegates disappearing on "Show Archived" toggle? The `?include=archived` path returns `archivedDelegates` via BFS enrichment — if they're missing, check that the server is running the child BFS on the archived response and the client is merging them into `state.archivedSessions`
+- Per-project Archived subsections not persisting their collapsed state? Each project's Archived subsection defaults to expanded; collapsed project IDs are persisted in `localStorage["bobbit-archived-collapsed-projects"]` (mirrors `bobbit-collapsed-ungrouped` / `bobbit-collapsed-staff`). The global `bobbit-show-archived` toggle controls all per-project subsections at once
 
 ## Slash skill expansion
 
