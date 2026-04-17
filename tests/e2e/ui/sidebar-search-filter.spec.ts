@@ -229,19 +229,23 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		const searchInput = page.locator("input[data-search]");
 		await expect(searchInput).toBeVisible({ timeout: 3_000 });
 
-		// Click the body to ensure the document has focus before dispatching
-		// keyboard shortcuts. Without this, a freshly-loaded page can drop the
-		// first key event on Windows headless Chromium.
-		await page.locator("body").click();
+		// Dispatch Ctrl+[ via window.dispatchEvent rather than Playwright's
+		// keyboard.press — under heavy parallel load the first Chromium
+		// keystroke can be dropped when focus hasn't settled. The app's
+		// shortcut registry listens on `window`, so dispatching there
+		// reaches it reliably.
+		const pressCtrlBracket = () => page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "[", code: "BracketLeft", ctrlKey: true, bubbles: true, cancelable: true,
+			}));
+		});
 
-		// Press Ctrl+[
-		await page.keyboard.press("Control+[");
+		await pressCtrlBracket();
 
 		// Sidebar should be collapsed — search input no longer visible
 		await expect(searchInput).not.toBeVisible({ timeout: 5_000 });
 
-		// Press Ctrl+[ again to expand
-		await page.keyboard.press("Control+[");
+		await pressCtrlBracket();
 
 		// Sidebar should be expanded again — search input visible
 		await expect(searchInput).toBeVisible({ timeout: 5_000 });

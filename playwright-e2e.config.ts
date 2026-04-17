@@ -54,7 +54,7 @@ export default defineConfig({
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			workers: 6,
+			workers: 5,
 		},
 		{
 			name: "browser",
@@ -71,7 +71,7 @@ export default defineConfig({
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			workers: 4,
+			workers: 5,
 		},
 	],
 });
