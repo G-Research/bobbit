@@ -101,10 +101,10 @@ export class RemoteAgent {
 	private _onVisibilityChange = (): void => {
 		if (document.visibilityState !== "visible") return;
 		if (this._intentionalDisconnect) return;
-		// If the socket isn't OPEN, kick an immediate reconnect instead of
-		// waiting for the (possibly long) backoff timer that may have been
-		// queued while the tab was suspended.
 		if (this.ws?.readyState !== WebSocket.OPEN) {
+			// Socket isn't OPEN — kick an immediate reconnect instead of
+			// waiting for the (possibly long) backoff timer that may have been
+			// queued while the tab was suspended.
 			if (this._reconnectTimer) {
 				clearTimeout(this._reconnectTimer);
 				this._reconnectTimer = null;
@@ -112,6 +112,15 @@ export class RemoteAgent {
 			this._reconnectAttempt = 0;
 			this._setConnectionStatus("reconnecting");
 			this._connectWs(false).catch(() => { /* onclose will schedule retry */ });
+		} else {
+			// Socket reports OPEN but the connection may actually be dead
+			// (mobile OS can freeze the TCP socket without notifying the JS
+			// layer). Resync messages immediately so we don't show stale
+			// content, and send a cheap ping via get_state — if the socket
+			// is secretly dead, the send will eventually trigger onclose and
+			// the normal reconnect path takes over.
+			this.requestMessages();
+			this.send({ type: "get_state" });
 		}
 	};
 	/** Timestamp of last streamingMessage update when content contains truncated blocks. */
