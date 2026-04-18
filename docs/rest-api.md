@@ -265,6 +265,60 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `GET` | `/api/preview` | Get preview HTML for a session (`?sessionId=`) |
 | `POST` | `/api/preview` | Set preview HTML for a session (`?sessionId=`, `{ html }`) |
 
+### Search
+
+Hybrid semantic + lexical search over goals, sessions, messages, and staff. Backed by a per-project LanceDB dataset. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/semantic-search.md](design/semantic-search.md).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/search` | Hybrid query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`. Omit `projectId` to search across all projects. |
+| `POST` | `/api/search/rebuild` | Kick off a full rebuild in the background (`{ projectId }`) |
+| `GET` | `/api/search/stats` | Stats for the project's search index (`?projectId=`) |
+| `POST` | `/api/search/compact` | Trigger Lance dataset compaction (`{ projectId }`) |
+| `GET` | `/api/maintenance/orphaned-index-rows` | List index rows whose parent entity no longer exists (`?projectId=`) |
+| `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned index rows (`{ projectId }`) |
+
+**Disabled-service responses:** All Search endpoints return **503** with `{ error: "search-unavailable", reason, state }` when the service is disabled. `reason` is one of:
+
+- `"disabled-no-native"` — LanceDB native binary failed to load for the current platform (not recoverable without reinstall).
+- `"disabled-no-model"` — embedding model download/load failed (recoverable — Settings → Maintenance → Retry Download).
+
+`state` mirrors `SearchService.getState()` (e.g. `"disabled"`, `"rebuilding"`, `"ready"`).
+
+**`POST /api/search/rebuild`** — body `{ projectId }`. Returns **202 Accepted** on success; progress is streamed via the `index:progress` / `index:complete` / `index:error` WebSocket events (see [websocket-protocol.md](websocket-protocol.md)). **400** if `projectId` is missing.
+
+**`GET /api/search/stats?projectId=<id>`** — returns:
+
+```json
+{
+  "lastRebuildAt": 1775812345000,
+  "rowCountsBySource": { "goals": 12, "sessions": 48, "messages": 9321, "staff": 3 },
+  "datasetBytes": 184321024,
+  "embedderId": "nomic-embed-text-v1.5",
+  "embedderDim": 768,
+  "state": "ready"
+}
+```
+
+Returns **400** if `projectId` is missing, **404** if the project is not registered.
+
+**`POST /api/search/compact`** — body `{ projectId }`. Runs Lance dataset compaction synchronously (fast for typical sizes). Returns `{ ok: true }`.
+
+**`GET /api/maintenance/orphaned-index-rows?projectId=<id>`** — scans the dataset for rows whose parent entity (goal, session, message, staff) no longer exists in the source-of-truth stores. Returns:
+
+```json
+{
+  "count": 17,
+  "sample": [
+    { "id": "message:abc123:42:chunk:0", "source_id": "messages", "parent_id": "message:abc123:42" }
+  ]
+}
+```
+
+`sample` is capped (~10 entries) for preview in the Maintenance UI.
+
+**`POST /api/maintenance/cleanup-index-rows`** — body `{ projectId }`. Deletes all orphaned rows found by the scan above. Returns `{ deleted: <count> }`.
+
 ### Summary views (`?view=summary`)
 
 Three endpoints support a `?view=summary` query parameter that returns slim responses optimized for agent tool calls. Without this parameter, the full response is returned (used by the UI dashboard).

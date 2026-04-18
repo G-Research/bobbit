@@ -460,7 +460,7 @@ Unified semantic + lexical search over goals, sessions, messages, and staff. One
 - **LanceDB** (Rust, Apache-2.0, embedded via `@lancedb/lancedb`) — one dataset per project at `<project-root>/.bobbit/state/search.lance/`.
 - Single `content` table with both a vector index (IVF_PQ on a 768-dim `embedding` column, created lazily past 10K rows) and a Tantivy full-text index on `title` + `text`.
 - Single-row `search_meta` table tracks `embedder_id`, `dim`, `schema_version`, `content_policy_version`. Any mismatch on startup triggers a full rebuild.
-- Shared model cache at `~/.bobbit/models/` — reused across projects.
+- Shared model cache at `~/.bobbit/models/` — reused across projects. Override the path with the `BOBBIT_MODEL_CACHE_DIR` env var for offline / air-gapped installs where the model files are pre-staged in a non-default location.
 
 ### Embedding model
 
