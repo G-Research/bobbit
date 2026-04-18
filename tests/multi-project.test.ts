@@ -2,7 +2,9 @@
  * Unit tests for multi-project foundation classes:
  * - ProjectRegistry — CRUD, persistence, ensureDefaultProject
  * - ConfigResolver — resolveEntities, resolveScalarConfig, resolveConfig
- * - SearchIndex — project_id filtering
+ *
+ * Search project_id filtering moved to tests/search/hybrid-query.spec.ts
+ * (the new LanceDB-backed stack).
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -18,7 +20,6 @@ fs.mkdirSync(path.join(tmpRoot, "config"), { recursive: true });
 
 const { ProjectRegistry } = await import("../src/server/agent/project-registry.ts");
 const { resolveEntities, resolveScalarConfig, resolveConfig } = await import("../src/server/agent/config-resolver.ts");
-const { SearchIndex } = await import("../src/server/search/search-index.ts");
 
 after(() => {
 	try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ok */ }
@@ -369,159 +370,3 @@ describe("ConfigResolver", () => {
 	});
 });
 
-// ── SearchIndex projectId filtering ─────────────────────────────────
-
-describe("SearchIndex projectId filtering", () => {
-	let searchIndex: InstanceType<typeof SearchIndex>;
-	let dbPath: string;
-
-	before(() => {
-		dbPath = path.join(tmpRoot, "search-test-" + Date.now() + ".db");
-		searchIndex = new SearchIndex(dbPath);
-		searchIndex.open();
-
-		// Index goals in two different projects
-		searchIndex.indexGoal({
-			id: "goal-1",
-			title: "Fix authentication bug",
-			spec: "Users cannot log in with SSO",
-			state: "in-progress",
-			archived: false,
-			createdAt: 1000,
-			projectId: "proj-a",
-		} as any);
-
-		searchIndex.indexGoal({
-			id: "goal-2",
-			title: "Add authentication provider",
-			spec: "Add OAuth2 support",
-			state: "todo",
-			archived: false,
-			createdAt: 2000,
-			projectId: "proj-b",
-		} as any);
-
-		// Index sessions in two different projects
-		searchIndex.indexSession({
-			id: "sess-1",
-			title: "Debug authentication flow",
-			role: "coder",
-			archived: false,
-			createdAt: 3000,
-			projectId: "proj-a",
-		} as any, "Fix authentication bug");
-
-		searchIndex.indexSession({
-			id: "sess-2",
-			title: "Implement authentication module",
-			role: "coder",
-			archived: false,
-			createdAt: 4000,
-			projectId: "proj-b",
-		} as any, "Add authentication provider");
-
-		// Index messages in two different projects
-		searchIndex.indexMessage(
-			"sess-1",
-			"Debug authentication flow",
-			"The authentication token is expired and needs refresh",
-			["bash"],
-			5000,
-		);
-
-		searchIndex.indexMessage(
-			"sess-2",
-			"Implement authentication module",
-			"Authentication provider integration is complete",
-			["write"],
-			6000,
-		);
-	});
-
-	after(() => {
-		searchIndex.close();
-		try { fs.unlinkSync(dbPath); } catch { /* ok */ }
-		// Clean up WAL/SHM files
-		try { fs.unlinkSync(dbPath + "-wal"); } catch { /* ok */ }
-		try { fs.unlinkSync(dbPath + "-shm"); } catch { /* ok */ }
-	});
-
-	it("search without projectId returns results from all projects", () => {
-		const results = searchIndex.search("authentication");
-		assert.ok(results.total > 0, "should find results");
-		// Should have results from both projects
-		const goalIds = results.results.filter(r => r.type === "goal").map(r => r.id);
-		assert.ok(goalIds.includes("goal-1"), "should include goal from proj-a");
-		assert.ok(goalIds.includes("goal-2"), "should include goal from proj-b");
-	});
-
-	it("search returns goals matching the query", () => {
-		const results = searchIndex.search("authentication", { type: "goals" });
-		assert.ok(results.total >= 2, "should find at least 2 goals");
-	});
-
-	it("search returns sessions matching the query", () => {
-		const results = searchIndex.search("authentication", { type: "sessions" });
-		assert.ok(results.total >= 2, "should find at least 2 sessions");
-	});
-
-	it("search returns messages matching the query", () => {
-		const results = searchIndex.search("authentication", { type: "messages" });
-		assert.ok(results.total >= 2, "should find at least 2 messages");
-	});
-
-	it("search with empty query returns no results", () => {
-		const results = searchIndex.search("");
-		assert.strictEqual(results.total, 0);
-	});
-
-	it("search for non-matching term returns no results", () => {
-		const results = searchIndex.search("zyxwvutsrqp");
-		assert.strictEqual(results.total, 0);
-	});
-
-	it("indexGoal and removeGoal work correctly", () => {
-		searchIndex.indexGoal({
-			id: "goal-temp",
-			title: "Temporary xylophone goal",
-			spec: "Testing removal",
-			state: "todo",
-			archived: false,
-			createdAt: 9000,
-		} as any);
-
-		let results = searchIndex.search("xylophone", { type: "goals" });
-		assert.ok(results.total >= 1, "should find the temporary goal");
-
-		searchIndex.removeGoal("goal-temp");
-		results = searchIndex.search("xylophone", { type: "goals" });
-		assert.strictEqual(results.total, 0, "should not find removed goal");
-	});
-
-	it("indexSession and removeSession work correctly", () => {
-		searchIndex.indexSession({
-			id: "sess-temp",
-			title: "Temporary xylophone session",
-			role: "tester",
-			archived: false,
-			createdAt: 9000,
-		} as any);
-
-		let results = searchIndex.search("xylophone", { type: "sessions" });
-		assert.ok(results.total >= 1);
-
-		searchIndex.removeSession("sess-temp");
-		results = searchIndex.search("xylophone", { type: "sessions" });
-		assert.strictEqual(results.total, 0);
-	});
-
-	it("removeMessagesForSession clears messages for a session", () => {
-		searchIndex.indexMessage("sess-rm", "Remove test", "platypus unique word here", ["bash"], 10000);
-		let results = searchIndex.search("platypus", { type: "messages" });
-		assert.ok(results.total >= 1);
-
-		searchIndex.removeMessagesForSession("sess-rm");
-		results = searchIndex.search("platypus", { type: "messages" });
-		assert.strictEqual(results.total, 0);
-	});
-});

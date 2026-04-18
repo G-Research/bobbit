@@ -9,8 +9,7 @@ import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
-import { SearchIndex } from "../search/search-index.js";
-import { extractTextFromMessage } from "../search/message-extractor.js";
+import { SearchService } from "../search/search-service.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
@@ -179,7 +178,7 @@ export class SessionManager {
 	/** @internal Test-only cost tracker (used when no PCM is available). */
 	private _testCostTracker: CostTracker | null = null;
 	/** @internal Test-only search index (used when no PCM is available). */
-	private _testSearchIndex: SearchIndex | null = null;
+	private _testSearchIndex: SearchService | null = null;
 	private colorStore?: ColorStore;
 	private personalityManager?: PersonalityManager;
 	private roleManager?: RoleManager;
@@ -377,7 +376,7 @@ export class SessionManager {
 			const stateDir = bobbitStateDir();
 			this._testStore = new SessionStore(stateDir);
 			this._testCostTracker = new CostTracker(stateDir);
-			this._testSearchIndex = new SearchIndex(path.join(stateDir, "search.db"));
+			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
 			this._testGoalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
@@ -438,8 +437,8 @@ export class SessionManager {
 		return null;
 	}
 
-	/** Resolve SearchIndex for a project. Requires projectId when PCM is active. */
-	getSearchIndexForProject(projectId?: string): SearchIndex {
+	/** Resolve SearchService for a project. Requires projectId when PCM is active. */
+	getSearchIndexForProject(projectId?: string): SearchService {
 		if (this.projectContextManager) {
 			if (!projectId) throw new Error("Cannot resolve search index: projectId is required");
 			const ctx = this.projectContextManager.getOrCreate(projectId);
@@ -495,8 +494,8 @@ export class SessionManager {
 		throw new Error("Cannot resolve cost tracker: session has no projectId");
 	}
 
-	/** Resolve the correct SearchIndex for a session based on its project. */
-	private resolveSearchIndex(session: { projectId?: string }): SearchIndex {
+	/** Resolve the correct SearchService for a session based on its project. */
+	private resolveSearchIndex(session: { projectId?: string }): SearchService {
 		if (session.projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(session.projectId);
 			if (ctx) return ctx.searchIndex;
@@ -1249,20 +1248,19 @@ export class SessionManager {
 			});
 		}
 
-		// Index completed assistant messages for search
-		if (event.type === "message_end" && event.message?.role === "assistant") {
+		// Index completed messages for search (user + assistant). The
+		// content policy inside SearchService runs extractForIndexing and
+		// emits one row per text / tool_use / tool_result block.
+		if (event.type === "message_end" && event.message) {
 			try {
-				const { text, toolNames } = extractTextFromMessage(event.message);
-				if (text.trim()) {
-					this.resolveSearchIndex(session).indexMessage(
-						session.id,
-						session.title,
-						text,
-						toolNames,
-						Date.now(),
-						session.projectId || "",
-					);
-				}
+				this.resolveSearchIndex(session).indexMessage({
+					sessionId: session.id,
+					sessionTitle: session.title,
+					message: event.message,
+					timestamp: Date.now(),
+					projectId: session.projectId || undefined,
+					goalId: session.goalId,
+				});
 			} catch {
 				// Non-critical — don't break message flow
 			}
@@ -1634,18 +1632,14 @@ export class SessionManager {
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
 	async restoreSessions(): Promise<void> {
-		// Initialize search index (skip when ProjectContextManager is active —
-		// ProjectContext.open() already opens the index and wires callbacks)
+		// Initialize search service (skip when ProjectContextManager is active —
+		// ProjectContext.open() already opens the service and wires callbacks)
 		if (!this.projectContextManager && this._testSearchIndex && this._testStore && this._testGoalManager) {
 			try {
-				this._testSearchIndex.open();
-				if (this._testSearchIndex.needsRebuild()) {
-					const goalStore = this._testGoalManager.getGoalStore();
-					this._testSearchIndex.rebuildFromStores(goalStore, this._testStore);
-				}
-				// Wire index update callbacks
 				const goalStore = this._testGoalManager.getGoalStore();
 				const testSearchIndex = this._testSearchIndex;
+				testSearchIndex.open({ goalStore, sessionStore: this._testStore });
+				// Wire index update callbacks
 				goalStore.onIndexUpdate = (goal) => {
 					try { testSearchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
 				};
@@ -4072,7 +4066,7 @@ export class SessionManager {
 			if (this.projectContextManager) {
 				// ProjectContextManager.closeAll() handles search index closing
 			} else if (this._testSearchIndex) {
-				this._testSearchIndex.close();
+				await this._testSearchIndex.close();
 			}
 		} catch (err) {
 			console.error("[search] Failed to close search index:", err);
