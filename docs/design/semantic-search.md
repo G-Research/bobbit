@@ -447,27 +447,31 @@ Same `<b>` contract as today — `search-page.ts` keeps its existing sanitiser.
 
 ## 8. Indexing triggers — full call-site map
 
-Every existing call site maps 1:1 to the new surface. `SearchService` exposes the same method names during the initial migration to keep the diff small; a follow-up rename is free.
+Every existing call site maps 1:1 to the new surface.
 
-| File : line | Current call | New call |
+> ⚠ **Line numbers in this table were accurate at implementation time only.** Files have since evolved — use `grep` to find the current locations (e.g. `rg 'resolveSearchIndex' src/server/`).
+>
+> **Rename deferred:** The plan suggested renaming `getSearchIndexForProject` → `getSearchServiceForProject` and `resolveSearchIndex` → `resolveSearchService`. **This rename was NOT applied.** The methods retain their original names for migration simplicity; `SearchService` is what they return. Don't be surprised by the mismatch between the class name and the accessor names.
+
+| File | Current call | New call |
 |---|---|---|
-| `project-context.ts:72` | `new SearchIndex(...)` | `new SearchService({ stateDir, projectId, embedder })` |
-| `project-context.ts:88` | `searchIndex.staffStore = ...` | constructor takes `staffStore` |
-| `project-context.ts:89` | `.open()` | `.open()` (async now — loads dataset, checks meta, schedules rebuild if needed) |
-| `project-context.ts:91` | `.rebuildFromStores(...)` | `.rebuildFromSources([GoalSource, SessionSource, MessageSource, StaffSource])` — runs in background, emits progress |
-| `project-context.ts:95` | `.indexGoal(goal, projectId)` | `.indexGoal(goal)` (projectId bound at construction) |
-| `project-context.ts:99` | `.indexSession(session, goalTitle, projectId)` | `.indexSession(session, goalTitle)` |
-| `project-context.ts:106` | `.close()` | `.close()` |
-| `session-manager.ts:380` | `new SearchIndex(...)` (test harness) | `new SearchService({ stateDir, projectId: "test", embedder: TEST_EMBEDDER })` |
-| `session-manager.ts:442, 499` | `getSearchIndexForProject` / `resolveSearchIndex` | rename → `getSearchServiceForProject` / `resolveSearchService` |
-| `session-manager.ts:573` | injects `searchIndex` into `SessionContext` | inject `searchService` |
-| `session-manager.ts:1257` | `resolveSearchIndex(session).indexMessage(...)` | `.indexMessage({ sessionId, sessionTitle, message, timestamp })` — note: takes the **raw message object** now; `content-policy.extractForIndexing` runs inside the service |
-| `session-manager.ts:1641-1655` | test-harness full rebuild loop | `.open()` handles needsRebuild internally; ad-hoc indexGoal/indexSession loop can stay |
-| `session-manager.ts:3579-3582` | `.removeMessagesForSession / .removeSession` | same names |
-| `session-manager.ts:4074` | `.close()` | `.close()` |
-| `staff-manager.ts:82, 166` | `.indexStaff(staff, projectId)` | `.indexStaff(staff)` |
-| `staff-manager.ts:115, 197` | `.removeStaff(id)` | same |
-| `state-migration.ts:287` | `renameForBackup(search.db)` | add: also delete `search.lance/` on version mismatch (very rare); keep the rename-for-backup for legacy `search.db` |
+| `project-context.ts` (constructor) | `new SearchIndex(...)` | `new SearchService({ stateDir, projectId, embedder })` |
+| `project-context.ts` (wiring) | `searchIndex.staffStore = ...` | constructor takes `staffStore` |
+| `project-context.ts` (`open`) | `.open()` | `.open()` (async now — loads dataset, checks meta, schedules rebuild if needed) |
+| `project-context.ts` (rebuild entry) | `.rebuildFromStores(...)` | `.rebuildFromSources([GoalSource, SessionSource, MessageSource, StaffSource])` — runs in background, emits progress |
+| `project-context.ts` (goal hook) | `.indexGoal(goal, projectId)` | `.indexGoal(goal)` (projectId bound at construction) |
+| `project-context.ts` (session hook) | `.indexSession(session, goalTitle, projectId)` | `.indexSession(session, goalTitle)` |
+| `project-context.ts` (`close`) | `.close()` | `.close()` |
+| `session-manager.ts` (test harness) | `new SearchIndex(...)` | `new SearchService({ stateDir, projectId: "test", embedder: TEST_EMBEDDER })` |
+| `session-manager.ts` (resolver helpers) | `getSearchIndexForProject` / `resolveSearchIndex` | **unchanged names**; return `SearchService` instead of `SearchIndex` |
+| `session-manager.ts` (context injection) | injects `searchIndex` into `SessionContext` | inject `searchService` |
+| `session-manager.ts` (`message_end` handler) | `resolveSearchIndex(session).indexMessage(...)` | `.indexMessage({ sessionId, sessionTitle, message, timestamp })` — takes the **raw message object** now; `content-policy.extractForIndexing` runs inside the service |
+| `session-manager.ts` (test-harness rebuild loop) | full rebuild loop | `.open()` handles needsRebuild internally; ad-hoc indexGoal/indexSession loop can stay |
+| `session-manager.ts` (purge paths) | `.removeMessagesForSession` / `.removeSession` | same names |
+| `session-manager.ts` (shutdown) | `.close()` | `.close()` |
+| `staff-manager.ts` (create/update) | `.indexStaff(staff, projectId)` | `.indexStaff(staff)` |
+| `staff-manager.ts` (delete) | `.removeStaff(id)` | same |
+| `state-migration.ts` (legacy db handler) | `renameForBackup(search.db)` | add: also delete `search.lance/` on version mismatch (very rare); keep the rename-for-backup for legacy `search.db` |
 
 ### Incremental upsert flow
 

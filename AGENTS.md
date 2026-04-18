@@ -119,7 +119,7 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Modify sandbox behavior**: Set `sandbox: "docker"` in `project.yaml`. Key files: `project-sandbox.ts`, `sandbox-manager.ts`, `docker-args.ts`. One long-lived container per project. Staff agents in sandbox mode use container-internal worktrees via `sandboxBranch`. See [docs/internals.md — Docker sandbox](docs/internals.md#docker-sandbox).
 
-**Run maintenance cleanup**: Settings → Maintenance tab. Three sections: orphaned worktrees, orphaned sessions, expired archives. Each has scan → preview → execute. Cleanup is never automatic.
+**Run maintenance cleanup**: Settings → Maintenance tab. Scan sections (orphaned worktrees, orphaned sessions, expired archives, orphaned search-index rows) each follow the scan → preview → execute pattern. The tab also hosts the **Search Index** panel — stats (per-source row counts, dataset size, embedder id/dim, last rebuild timestamp), live rebuild progress, and **Rebuild Index** / **Compact Dataset** / **Retry Download** actions. Cleanup is never automatic. See [docs/internals.md — Semantic search](docs/internals.md#semantic-search) for the search-index surface.
 
 **Configure per-project settings**: Settings → project tab → sub-tabs. Config inherits from System, overridable per field. REST: `GET/PUT /api/projects/:id/config`. See [docs/internals.md — Per-project config](docs/internals.md#per-project-config).
 

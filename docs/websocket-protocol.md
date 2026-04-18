@@ -64,3 +64,10 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
 | `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |
 | `pr_status_changed` | `goalId?`, `sessionId?`, `status` | PR status changed for a goal or session |
+| `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
+| `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
+| `index:error` | `projectId`, `message`, `recoverable` | Search index error. `recoverable: true` for model/download failures; `false` for native-binary failures. |
+
+### Search index events
+
+The `index:*` events drive the search status dot and the Settings → Maintenance → Search Index panel. They are never surfaced as foreground toasts or banners — users who want detail open the Maintenance panel. See [docs/internals.md — Semantic search](internals.md#semantic-search) for the full re-indexing model.
