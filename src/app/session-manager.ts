@@ -856,30 +856,32 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					state.chatPanel.agentInterface.requestUpdate();
 				}
 			}
-			// Refresh git status when agent becomes idle (turn finished)
-			if (status === "idle") {
+			// Refresh git status when agent becomes idle (turn finished).
+			// Only for the ACTIVE session — cached/background agents firing
+			// this for every turn would flood the server with git-status calls
+			// (especially painful on mobile after tab wake when N cached agents
+			// all reconnect and broadcast idle state).
+			if (status === "idle" && activeSessionId() === sessionId) {
 				refreshGitStatusForSession(sessionId);
-				// Keep the active session marked as visited so it doesn't show unseen.
-				// Only for the active session — cached sessions going idle should
-				// show the unseen indicator when the user switches back.
-				if (activeSessionId() === sessionId) {
-					markSessionVisited(sessionId);
-				}
+				markSessionVisited(sessionId);
 			}
 			renderApp();
 		};
 
 		remote.onConnectionStatusChange = (status: ConnectionStatus) => {
+			const isActive = activeSessionId() === sessionId;
 			// Only update global connection status if this is the active session
-			if (activeSessionId() === sessionId) {
+			if (isActive) {
 				state.connectionStatus = status;
 			}
-			// Re-fetch git status and bg processes after reconnect (e.g. server restart)
-			if (status === "connected") {
+			// Re-fetch git status and bg processes after reconnect (e.g. server
+			// restart). Skip for cached/background agents — they’ll be refreshed
+			// lazily when the user switches back to them.
+			if (status === "connected" && isActive) {
 				refreshGitStatusForSession(sessionId);
 				refreshBgProcessesForSession(sessionId);
 			}
-			if (activeSessionId() === sessionId) renderApp();
+			if (isActive) renderApp();
 		};
 
 		remote.onCompactionChange = (isCompacting: boolean) => {
