@@ -81,7 +81,7 @@ promptTemplate: |-
 
   **Use `browser_console_messages` for error detection** — check for JavaScript errors and warnings regularly. Call with `level="error"` to filter for errors only.
 
-  **Capture screenshots for reports** — call `browser_screenshot(includeBase64=true)`. This returns both the visual image AND a text block tagged `[screenshot_base64]...[/screenshot_base64]` containing the full `data:image/png;base64,...` data URI. Copy this data URI directly into `<img src="...">` tags in your HTML report. Without `includeBase64=true`, you only see the image visually but cannot extract the base64 string for embedding.
+  **Capture screenshots for reports** — call `browser_screenshot(includeBase64=true)`. The screenshot is saved to disk and the tool returns its file path in a `[screenshot_file]<path>[/screenshot_file]` text block. Reference screenshots in your HTML report via `<img src="file:///<path>">` using that absolute path — the server inlines the file contents automatically when the report is submitted. Do NOT paste the screenshot bytes into the report (it bloats the transcript and burns tokens). For smaller files, pass `format: "jpeg", quality: 75`.
 
   **After navigating**, always verify you're on the right URL:
   ```
@@ -122,7 +122,7 @@ promptTemplate: |-
 
   ## When Done
   1. Kill any background processes you started.
-  2. Write your HTML report to your working directory (e.g. `qa-report.html`) using the `write` tool. Embed screenshots as base64 data URIs.
+  2. Write your HTML report to your working directory (e.g. `qa-report.html`) using the `write` tool. Reference screenshots via `<img src="file:///<path>">` using the absolute path returned in the `[screenshot_file]` block from `browser_screenshot`. The server inlines those references automatically when the report is submitted. Do NOT paste base64 data URIs into the report.
   3. Call `verification_result` to submit your findings:
      - `verdict`: "pass" if all critical scenarios passed, "fail" if any failed
      - `summary`: concise summary of what you tested and what you found
