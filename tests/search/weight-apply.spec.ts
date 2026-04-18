@@ -104,6 +104,29 @@ test("weight 2.0 outranks weight 1.0 at identical relevance", async () => {
 	await store.close();
 });
 
+test("user-role (weight 2.0) outranks assistant-role (weight 1.0) at identical text", async () => {
+	// Integration-flavoured variant of the weight test: two rows with
+	// IDENTICAL text but different role/weight (user=2.0 vs
+	// assistant=1.0). At equal base relevance the user row must rank
+	// higher — proves the role-aware content policy flows through to
+	// search ranking end-to-end.
+	const dir = path.join(tmpDir(), "search.lance");
+	const embedder = conceptEmbedder();
+	const store = await LanceStore.open({ dataDir: dir, embedDim: EMBED_DIM });
+	const [emb] = await embedder.embed(["search_document: alpha alpha alpha"], "document");
+	const base = row("__placeholder", 1.0, emb);
+	await store.upsert([
+		{ ...base, id: "asst", role: "assistant", weight: 1.0, content_hash: "h-asst" },
+		{ ...base, id: "user", role: "user", weight: 2.0, content_hash: "h-user" },
+	]);
+	const hq = new HybridQuery({ lance: store, embedder });
+	const res = await hq.search({ q: "alpha", limit: 10 });
+	expect(res.results.length).toBe(2);
+	expect(res.results[0].id).toBe("user");
+	expect(res.results[1].id).toBe("asst");
+	await store.close();
+});
+
 test("weight ordering persists across three distinct weights", async () => {
 	const dir = path.join(tmpDir(), "search.lance");
 	const embedder = conceptEmbedder();

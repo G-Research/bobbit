@@ -19,6 +19,7 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { PersistedGoal, GoalStore } from "../agent/goal-store.js";
 import type { PersistedSession, SessionStore } from "../agent/session-store.js";
@@ -84,6 +85,21 @@ export class SearchService {
 	private readonly _messageSource = new MessageIndexSource();
 	private readonly _staffSource = new StaffIndexSource();
 
+	/**
+	 * Shared model cache directory across all projects AND all Bobbit
+	 * installs on this machine. Nomic's ~140MB ONNX files get downloaded
+	 * once and reused everywhere. Respects $BOBBIT_MODEL_CACHE_DIR for
+	 * tests / advanced users.
+	 */
+	static sharedModelCacheDir(): string {
+		const override = process.env.BOBBIT_MODEL_CACHE_DIR;
+		if (override && override.length > 0) return override;
+		return path.join(os.homedir(), ".bobbit", "models");
+	}
+
+	/** Interval handle for the daily dataset-compaction timer. */
+	private _compactTimer: ReturnType<typeof setInterval> | null = null;
+
 	constructor(opts: SearchServiceOptions) {
 		this.stateDir = opts.stateDir;
 		this.projectId = opts.projectId;
@@ -92,7 +108,7 @@ export class SearchService {
 			?? (process.env.BOBBIT_FAKE_EMBEDDER === "1"
 				? createFakeEmbedder()
 				: new NomicEmbedder({
-						modelCacheDir: path.join(opts.stateDir, "models"),
+						modelCacheDir: SearchService.sharedModelCacheDir(),
 					}));
 		this.progressBus = opts.progressBus ?? sharedProgressBus;
 		this.staffStore = opts.staffStore;
@@ -159,6 +175,26 @@ export class SearchService {
 		await this._store.compact();
 	}
 
+	/** Interval in ms between scheduled dataset compactions. 24 hours. */
+	private static readonly COMPACT_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+	/**
+	 * Kick off a background `setInterval` that compacts the dataset every
+	 * 24 hours. `.unref()`'d so the timer never keeps the event loop alive.
+	 * Exposed for tests via `getCompactIntervalMs()`.
+	 */
+	private _startScheduledCompaction(): void {
+		if (this._compactTimer) return;
+		this._compactTimer = setInterval(() => {
+			void this.compact().catch((err) => {
+				console.error("[search] Scheduled compact failed:", err);
+			});
+		}, SearchService.COMPACT_INTERVAL_MS);
+		if (typeof this._compactTimer.unref === "function") {
+			this._compactTimer.unref();
+		}
+	}
+
 	/**
 	 * Kick off async initialization. Returns synchronously — callers that
 	 * want to wait can `await service.whenReady()`.
@@ -193,6 +229,10 @@ export class SearchService {
 	/** Close — idempotent, safe to call from shutdown paths. */
 	async close(): Promise<void> {
 		this._state = "closed";
+		if (this._compactTimer) {
+			clearInterval(this._compactTimer);
+			this._compactTimer = null;
+		}
 		if (this._store) {
 			try {
 				await this._store.close();
@@ -661,6 +701,9 @@ export class SearchService {
 		}
 
 		this._state = "ready";
+		// Schedule daily compaction once the service is up. Timer is
+		// .unref()'d so it never keeps the process alive on shutdown.
+		this._startScheduledCompaction();
 	}
 }
 
