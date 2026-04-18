@@ -37,6 +37,10 @@ import { buildCurrentMeta } from "./meta.js";
 const EMBED_BATCH_SIZE = 32;
 const UPSERT_BATCH_SIZE = 128;
 const ROWS_BEFORE_INDEX = 10_000;
+/** Opportunistic rebuild trigger: rows since last index > rowCount * this ratio. */
+const OPPORTUNISTIC_INDEX_RATIO = 0.1;
+/** Minimum time between opportunistic index rebuilds. */
+const OPPORTUNISTIC_INDEX_COOLDOWN_MS = 60 * 60 * 1000;
 const MAX_TOKENS = 2000;
 const CHUNK_OVERLAP = 200;
 const PROGRESS_DEBOUNCE_MS = 500;
@@ -75,6 +79,10 @@ export class Indexer {
 	private readonly chunkOverlap: number;
 
 	private _backlog = 0;
+	/** Opportunistic-ANN-rebuild bookkeeping (design §13). */
+	private _rowsSinceLastIndex = 0;
+	private _lastIndexBuildAt = 0;
+	private _indexRebuildPending = false;
 	private _lastProgressEmit = 0;
 	private _progressTimer: NodeJS.Timeout | null = null;
 	private _pendingPhase: "rebuild" | "incremental" = "incremental";
@@ -156,6 +164,17 @@ export class Indexer {
 
 			// Final flush for any pending debounced progress event.
 			this._flushProgress();
+
+			// Opportunistic ANN-index rebuild (design §13). If the dataset
+			// has grown by more than 10% since the last build and we're past
+			// the 10K-row threshold, schedule a rebuild — rate-limited to once
+			// per hour. Runs in the background; failures are logged only.
+			if (expanded.length > 0) {
+				this._rowsSinceLastIndex += expanded.length;
+				void this._maybeRebuildIndexes().catch((err) => {
+					console.error("[search] Opportunistic index rebuild failed:", err);
+				});
+			}
 		} catch (err) {
 			// Reset backlog for these entries — they're not queued any more.
 			this._backlog = Math.max(0, this._backlog - entries.length);
@@ -254,6 +273,8 @@ export class Indexer {
 			const finalCount = await this.lance.count();
 			if (finalCount > ROWS_BEFORE_INDEX) {
 				await this.lance.createIndexes();
+				this._lastIndexBuildAt = Date.now();
+				this._rowsSinceLastIndex = 0;
 			}
 
 			// Stamp the meta row with the active runtime fingerprint.
@@ -284,6 +305,39 @@ export class Indexer {
 	}
 
 	// ── Internals ────────────────────────────────────────────────────
+
+	/**
+	 * Opportunistic ANN-index rebuild. Gated by:
+	 *   1. Current row count > 10K.
+	 *   2. Rows added since last build > 10% of total.
+	 *   3. At least 60 minutes since the last build.
+	 * Safe to call concurrently — a pending rebuild short-circuits.
+	 * Exposed for tests.
+	 */
+	async _maybeRebuildIndexes(nowMs: number = Date.now()): Promise<boolean> {
+		if (this._indexRebuildPending) return false;
+		if (this._lastIndexBuildAt > 0 && nowMs - this._lastIndexBuildAt < OPPORTUNISTIC_INDEX_COOLDOWN_MS) {
+			return false;
+		}
+		let rowCount: number;
+		try {
+			rowCount = await this.lance.count();
+		} catch {
+			return false;
+		}
+		if (rowCount <= ROWS_BEFORE_INDEX) return false;
+		if (this._rowsSinceLastIndex <= rowCount * OPPORTUNISTIC_INDEX_RATIO) return false;
+
+		this._indexRebuildPending = true;
+		try {
+			await this.lance.createIndexes();
+			this._lastIndexBuildAt = nowMs;
+			this._rowsSinceLastIndex = 0;
+			return true;
+		} finally {
+			this._indexRebuildPending = false;
+		}
+	}
 
 	private async _filterUnchanged(entries: Indexable[]): Promise<Indexable[]> {
 		if (entries.length === 0) return entries;
