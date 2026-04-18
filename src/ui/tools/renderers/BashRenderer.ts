@@ -10,6 +10,7 @@ import { renderInlineImages } from "./image-utils.js";
 
 interface BashParams {
 	command: string;
+	description?: string;
 }
 
 /**
@@ -43,7 +44,9 @@ export class BashRenderer implements ToolRenderer<BashParams, undefined> {
 		const state = getToolState(result, isStreaming);
 
 		const headerText = params?.command
-			? html`<span class="font-mono">${summarizeCommand(params.command)}</span>`
+			? (params.description
+				? html`<span class="bash-description italic text-muted-foreground">${params.description}</span>`
+				: html`<span class="font-mono">${summarizeCommand(params.command)}</span>`)
 			: i18n("Running command...");
 
 		// With result: collapsible command + output
