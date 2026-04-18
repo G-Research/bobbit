@@ -25,6 +25,45 @@ function isToolBlock(block: any): boolean {
 	return block?.type === "toolCall" || block?.type === "tool_use";
 }
 
+/**
+ * Truncate large tool content inside a list of persisted messages (as
+ * returned by the agent's `get_messages` RPC). Used when sending history
+ * to clients on session open / reconnect / tab wake — previously, the full
+ * untruncated history was serialized into a single WebSocket frame, which
+ * caused very slow (and sometimes failing) history loads for sessions with
+ * large file writes/reads.
+ *
+ * Returns the original array when nothing needs truncation.
+ */
+export function truncateLargeToolContentInMessages(messages: any, threshold: number = LARGE_CONTENT_THRESHOLD): any {
+	if (!Array.isArray(messages)) return messages;
+	let changed = false;
+	const out = messages.map((msg: any) => {
+		const content = msg?.content;
+		if (!Array.isArray(content)) return msg;
+		let msgChanged = false;
+		const newContent = content.map((block: any) => {
+			if (!isToolBlock(block)) return block;
+			const c = getToolContent(block);
+			if (c === undefined || c.length <= threshold) return block;
+			msgChanged = true;
+			const truncatedContent: TruncatedContent = {
+				_truncated: true,
+				_originalLength: c.length,
+				preview: c.slice(0, 512),
+			};
+			if (block.arguments?.content !== undefined) {
+				return { ...block, arguments: { ...block.arguments, content: truncatedContent } };
+			}
+			return { ...block, input: { ...block.input, content: truncatedContent } };
+		});
+		if (!msgChanged) return msg;
+		changed = true;
+		return { ...msg, content: newContent };
+	});
+	return changed ? out : messages;
+}
+
 /** Helper: get the string content from a tool block (either format) */
 function getToolContent(block: any): string | undefined {
 	const c = block.arguments?.content ?? block.input?.content;

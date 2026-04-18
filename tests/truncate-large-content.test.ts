@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { truncateLargeToolContent, LARGE_CONTENT_THRESHOLD } from "../src/server/agent/truncate-large-content.js";
+import {
+	truncateLargeToolContent,
+	truncateLargeToolContentInMessages,
+	LARGE_CONTENT_THRESHOLD,
+} from "../src/server/agent/truncate-large-content.js";
 
 describe("truncateLargeToolContent", () => {
 	it("returns the same object for non-message events", () => {
@@ -297,5 +301,64 @@ describe("truncateLargeToolContent", () => {
 
 	it("exports the threshold constant", () => {
 		assert.strictEqual(LARGE_CONTENT_THRESHOLD, 32 * 1024);
+	});
+});
+
+describe("truncateLargeToolContentInMessages", () => {
+	it("returns the same array reference when nothing needs truncating", () => {
+		const messages = [
+			{ role: "user", content: "hi" },
+			{ role: "assistant", content: [{ type: "text", text: "hello" }] },
+			{ role: "assistant", content: [{ type: "tool_use", name: "write", input: { content: "small" } }] },
+		];
+		const result = truncateLargeToolContentInMessages(messages);
+		assert.strictEqual(result, messages);
+	});
+
+	it("truncates large tool_use content in history and preserves other messages by reference", () => {
+		const large = "y".repeat(LARGE_CONTENT_THRESHOLD + 10);
+		const smallMsg = { role: "assistant", content: [{ type: "text", text: "ok" }] };
+		const bigMsg = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Writing..." },
+				{ type: "tool_use", name: "write", input: { path: "big.txt", content: large } },
+			],
+		};
+		const messages = [smallMsg, bigMsg];
+		const result = truncateLargeToolContentInMessages(messages) as any[];
+		assert.notStrictEqual(result, messages, "array is cloned when something changed");
+		assert.strictEqual(result[0], smallMsg, "unchanged messages kept by reference");
+		assert.notStrictEqual(result[1], bigMsg, "changed messages are shallow-cloned");
+		const block = result[1].content[1];
+		assert.deepEqual(block.input.content, {
+			_truncated: true,
+			_originalLength: large.length,
+			preview: large.slice(0, 512),
+		});
+		assert.strictEqual(bigMsg.content[1].input.content, large, "original not mutated");
+	});
+
+	it("supports toolCall/arguments format", () => {
+		const large = "z".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const messages = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "write", arguments: { path: "x", content: large } },
+				],
+			},
+		];
+		const result = truncateLargeToolContentInMessages(messages) as any[];
+		const block = result[0].content[0];
+		assert.strictEqual(block.arguments.content._truncated, true);
+		assert.strictEqual(block.arguments.content._originalLength, large.length);
+	});
+
+	it("ignores non-array input", () => {
+		assert.strictEqual(truncateLargeToolContentInMessages(undefined as any), undefined);
+		assert.strictEqual(truncateLargeToolContentInMessages(null as any), null);
+		const obj = { messages: [] };
+		assert.strictEqual(truncateLargeToolContentInMessages(obj as any), obj);
 	});
 });

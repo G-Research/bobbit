@@ -28,7 +28,7 @@ import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
-import { truncateLargeToolContent } from "./truncate-large-content.js";
+import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
@@ -2399,7 +2399,15 @@ export class SessionManager {
 		try {
 			const msgs = await session.rpcClient.getMessages();
 			if (msgs.success) {
-				broadcast(session.clients, { type: "messages", data: msgs.data });
+				const raw: any = msgs.data;
+				let data: any = raw;
+				if (Array.isArray(raw)) {
+					data = truncateLargeToolContentInMessages(raw);
+				} else if (raw && Array.isArray(raw.messages)) {
+					const truncated = truncateLargeToolContentInMessages(raw.messages);
+					data = truncated === raw.messages ? raw : { ...raw, messages: truncated };
+				}
+				broadcast(session.clients, { type: "messages", data });
 			}
 			const st = await session.rpcClient.getState();
 			if (st.success) {
@@ -3424,7 +3432,7 @@ export class SessionManager {
 					// Skip malformed lines
 				}
 			}
-			return messages;
+			return truncateLargeToolContentInMessages(messages) as unknown[];
 		} catch {
 			return [];
 		}

@@ -11,6 +11,7 @@ import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
 import { inferMeta } from "../agent/aigw-manager.js";
+import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 // patchModelContextWindow removed — model-registry returns correct context windows via inferMeta()
 
 /** Send persisted model info as fallback when getState() is unavailable. */
@@ -413,7 +414,16 @@ export function handleWebSocketConnection(
 				case "get_messages": {
 					const msgsResp = await session.rpcClient.getMessages();
 					if (msgsResp.success) {
-						send(ws, { type: "messages", data: msgsResp.data as unknown[] });
+						const raw = msgsResp.data as any;
+						// msgsResp.data may be an array or { messages: [...] }
+						let data: any = raw;
+						if (Array.isArray(raw)) {
+							data = truncateLargeToolContentInMessages(raw);
+						} else if (raw && Array.isArray(raw.messages)) {
+							const truncated = truncateLargeToolContentInMessages(raw.messages);
+							data = truncated === raw.messages ? raw : { ...raw, messages: truncated };
+						}
+						send(ws, { type: "messages", data });
 					}
 					break;
 				}
@@ -486,7 +496,18 @@ export function handleWebSocketConnection(
 						const restored = sessionManager.getSession(sessionId);
 						if (restored) {
 							restored.rpcClient.getMessages?.()
-								.then((msgs: any) => { if (msgs) send(ws, { type: "messages", data: msgs }); })
+								.then((msgs: any) => {
+									if (!msgs) return;
+									const raw = msgs.data ?? msgs;
+									let data: any = raw;
+									if (Array.isArray(raw)) {
+										data = truncateLargeToolContentInMessages(raw);
+									} else if (raw && Array.isArray(raw.messages)) {
+										const truncated = truncateLargeToolContentInMessages(raw.messages);
+										data = truncated === raw.messages ? raw : { ...raw, messages: truncated };
+									}
+									send(ws, { type: "messages", data });
+								})
 								.catch(() => {});
 						}
 					}).catch((err: any) => {
