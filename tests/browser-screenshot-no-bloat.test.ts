@@ -170,6 +170,76 @@ describe("browser_screenshot does not duplicate base64 payload as text", () => {
 		);
 	});
 
+	it("spills screenshot to disk and returns [screenshot_file] path when includeBase64=true", async () => {
+		await navigateTo(
+			"data:text/html,<html><body style='margin:0;background:#228833;width:100vw;height:100vh'></body></html>",
+		);
+
+		const result: any = await runScreenshot({ includeBase64: true });
+		const content = result?.content ?? [];
+
+		const fileBlocks = content.filter(
+			(b: any) => b && b.type === "text" && typeof b.text === "string" && b.text.startsWith("[screenshot_file]"),
+		);
+		assert.equal(fileBlocks.length, 1, "expected exactly one [screenshot_file] text block");
+		const match = /^\[screenshot_file\](.+?)\[\/screenshot_file\]$/.exec(fileBlocks[0].text);
+		assert.ok(match, "expected well-formed [screenshot_file]<path>[/screenshot_file]");
+		const filePath = match![1];
+		assert.ok(fs.existsSync(filePath), `spilled file should exist on disk: ${filePath}`);
+		assert.ok(filePath.includes("/.bobbit-qa/screenshots/"), `path should be under .bobbit-qa/screenshots/: ${filePath}`);
+		assert.ok(filePath.endsWith(".png"), `default format should write .png: ${filePath}`);
+
+		// Bytes on disk should equal the base64 payload in the image block.
+		const diskBytes = fs.readFileSync(filePath);
+		const images = imageBlocks(content);
+		assert.equal(images.length, 1);
+		const imgBytes = Buffer.from(images[0].data as string, "base64");
+		assert.ok(diskBytes.equals(imgBytes), "disk bytes must match image content block base64");
+	});
+
+	it("writes .jpg with image/jpeg mimeType when format='jpeg'", async () => {
+		await navigateTo(
+			"data:text/html,<html><body style='margin:0;background:#cc8833;width:100vw;height:100vh'></body></html>",
+		);
+
+		const result: any = await runScreenshot({ includeBase64: true, format: "jpeg", quality: 75 });
+		const content = result?.content ?? [];
+
+		const images = imageBlocks(content);
+		assert.equal(images.length, 1);
+		assert.equal(images[0].mimeType, "image/jpeg", "image block mimeType should be image/jpeg");
+
+		const fileBlock = content.find(
+			(b: any) => b && b.type === "text" && typeof b.text === "string" && b.text.startsWith("[screenshot_file]"),
+		);
+		assert.ok(fileBlock, "expected [screenshot_file] block");
+		const match = /^\[screenshot_file\](.+?)\[\/screenshot_file\]$/.exec(fileBlock.text);
+		assert.ok(match, "well-formed [screenshot_file] block");
+		assert.ok(match![1].endsWith(".jpg"), `jpeg format should write .jpg extension: ${match![1]}`);
+		assert.ok(fs.existsSync(match![1]), "jpeg file should exist on disk");
+	});
+
+	it("creates no file and returns no [screenshot_file] block when includeBase64 is omitted or false", async () => {
+		await navigateTo(
+			"data:text/html,<html><body style='margin:0;background:#113355;width:100vw;height:100vh'></body></html>",
+		);
+
+		const dir = path.join(tmpCwd, ".bobbit-qa", "screenshots");
+		const filesBefore = fs.existsSync(dir) ? fs.readdirSync(dir).length : 0;
+
+		for (const params of [{}, { includeBase64: false }]) {
+			const result: any = await runScreenshot(params);
+			const content = result?.content ?? [];
+			const hasFileBlock = content.some(
+				(b: any) => b && b.type === "text" && typeof b.text === "string" && b.text.includes("[screenshot_file]"),
+			);
+			assert.equal(hasFileBlock, false, "no [screenshot_file] block without includeBase64");
+		}
+
+		const filesAfter = fs.existsSync(dir) ? fs.readdirSync(dir).length : 0;
+		assert.equal(filesAfter, filesBefore, "no new files should be created when includeBase64 is not set");
+	});
+
 	it("keeps combined text content under 2 KB at 1920x1080 with includeBase64=true", async () => {
 		const resize = captured.tools.get("browser_resize");
 		assert.ok(resize, "browser_resize tool missing");
