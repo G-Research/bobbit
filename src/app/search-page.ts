@@ -10,6 +10,7 @@ import { searchApi } from "./api.js";
 import { renderApp } from "./state.js";
 import { setHashRoute, getRouteFromHash } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
+import "./components/search-status-dot.js";
 
 // ============================================================================
 // MODULE-LEVEL STATE
@@ -353,6 +354,7 @@ export function renderSearchPage(): TemplateResult {
 							autofocus
 						/>
 					</div>
+					<search-status-dot></search-status-dot>
 				</div>
 
 				<!-- Type filter toggles -->
