@@ -95,10 +95,16 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
 		await seeArchivedBtn.click();
 
-		// 7. Wait for the archived section to appear
-		await expect(
-			page.locator("span.uppercase").filter({ hasText: "Archived" }).first(),
-		).toBeVisible({ timeout: 10_000 });
+		// 7. Wait for the toggle to take effect. After #328 (per-project Archived
+		// subsections), no span.uppercase "Archived" header renders in this
+		// scenario — the project has no standalone archived goals or sessions,
+		// only a delegate of a LIVE parent, so the per-project Archived
+		// subsection stays empty. Instead poll for the button's active state
+		// (text-primary class).
+		await expect.poll(
+			async () => seeArchivedBtn.evaluate((el) => el.className.includes("text-primary")),
+			{ timeout: 10_000 },
+		).toBe(true);
 
 		// Wait for sidebar to fully render with archived data
 		await page.waitForTimeout(2000);
@@ -146,9 +152,10 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 
 		// Toggle back on
 		await seeArchivedBtn.click();
-		await expect(
-			page.locator("span.uppercase").filter({ hasText: "Archived" }).first(),
-		).toBeVisible({ timeout: 10_000 });
+		await expect.poll(
+			async () => seeArchivedBtn.evaluate((el) => el.className.includes("text-primary")),
+			{ timeout: 10_000 },
+		).toBe(true);
 		await page.waitForTimeout(2000);
 
 		// Re-expand parent if needed
