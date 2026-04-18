@@ -157,6 +157,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			command: Type.String({ description: "The bash command to execute" }),
 			timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 300)" })),
+			description: Type.Optional(Type.String({ description: "Short human-readable label (3–6 words) for the command. Strongly recommended for multi-line commands, heredocs, and non-obvious one-liners. Example: 'sum agent-qa costs from session-costs.json'." })),
 		}),
 		async execute(_toolCallId, { command, timeout }, abortSignal, onUpdate) {
 			return new Promise((resolve) => {
