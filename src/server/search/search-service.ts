@@ -27,7 +27,7 @@ import type { Embedder, IndexSource, IndexSourceContext, SearchResults } from ".
 import { LanceStore } from "./lance-store.js";
 import { Indexer } from "./indexer.js";
 import { HybridQuery } from "./hybrid-query.js";
-import { NomicEmbedder } from "./embedder.js";
+import { NomicEmbedder, createFakeEmbedder } from "./embedder.js";
 import { GoalIndexSource } from "./sources/goal-source.js";
 import { SessionIndexSource } from "./sources/session-source.js";
 import { MessageIndexSource } from "./sources/message-source.js";
@@ -88,15 +88,75 @@ export class SearchService {
 		this.stateDir = opts.stateDir;
 		this.projectId = opts.projectId;
 		this.dataDir = path.join(opts.stateDir, "search.lance");
-		this.embedder = opts.embedder ?? new NomicEmbedder({
-			modelCacheDir: path.join(opts.stateDir, "models"),
-		});
+		this.embedder = opts.embedder
+			?? (process.env.BOBBIT_FAKE_EMBEDDER === "1"
+				? createFakeEmbedder()
+				: new NomicEmbedder({
+						modelCacheDir: path.join(opts.stateDir, "models"),
+					}));
 		this.progressBus = opts.progressBus ?? sharedProgressBus;
 		this.staffStore = opts.staffStore;
 	}
 
 	getState(): SearchServiceState {
 		return this._state;
+	}
+
+	/** Internal access for admin/maintenance REST endpoints. */
+	getLanceStore(): LanceStore | null {
+		return this._store;
+	}
+
+	/** Embedder identity for stats endpoint. */
+	getEmbedderInfo(): { id: string; dim: number } {
+		return { id: this.embedder.id, dim: this.embedder.dim };
+	}
+
+	/**
+	 * Per-source row counts + last rebuild timestamp for the stats endpoint.
+	 * Returns `null` for fields that are unavailable in the current state.
+	 */
+	async getStats(): Promise<{
+		state: SearchServiceState;
+		embedderId: string;
+		embedderDim: number;
+		lastRebuildAt: number | null;
+		rowCountsBySource: { goals: number; sessions: number; messages: number; staff: number };
+		datasetBytes: number;
+	}> {
+		const info = this.getEmbedderInfo();
+		const empty = { goals: 0, sessions: 0, messages: 0, staff: 0 };
+		const base = {
+			state: this._state,
+			embedderId: info.id,
+			embedderDim: info.dim,
+			lastRebuildAt: null as number | null,
+			rowCountsBySource: empty,
+			datasetBytes: dirSizeBytes(this.dataDir),
+		};
+		if (!this._store) return base;
+		try {
+			const meta = await this._store.readMeta();
+			const rowCountsBySource = {
+				goals: await this._store.count("source_id = 'goals'"),
+				sessions: await this._store.count("source_id = 'sessions'"),
+				messages: await this._store.count("source_id = 'messages'"),
+				staff: await this._store.count("source_id = 'staff'"),
+			};
+			return {
+				...base,
+				lastRebuildAt: meta?.createdAt ?? null,
+				rowCountsBySource,
+			};
+		} catch {
+			return base;
+		}
+	}
+
+	/** Compact the Lance dataset (passthrough). No-op when not ready. */
+	async compact(): Promise<void> {
+		if (!this._store) return;
+		await this._store.compact();
 	}
 
 	/**
@@ -609,6 +669,37 @@ export class SearchService {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+function dirSizeBytes(dir: string): number {
+	try {
+		if (!fs.existsSync(dir)) return 0;
+		let total = 0;
+		const stack: string[] = [dir];
+		while (stack.length) {
+			const p = stack.pop()!;
+			let stat: fs.Stats;
+			try {
+				stat = fs.lstatSync(p);
+			} catch {
+				continue;
+			}
+			if (stat.isDirectory()) {
+				let entries: string[] = [];
+				try {
+					entries = fs.readdirSync(p);
+				} catch {
+					continue;
+				}
+				for (const e of entries) stack.push(path.join(p, e));
+			} else if (stat.isFile()) {
+				total += stat.size;
+			}
+		}
+		return total;
+	} catch {
+		return 0;
+	}
+}
 
 function emptyStaffStore(): StaffStore {
 	// Minimal shim for the staff-less rebuild path. Only `getAll()` is
