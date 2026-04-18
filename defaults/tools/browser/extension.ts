@@ -12,8 +12,14 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+/** Root dir under cwd where screenshots are spilled when includeBase64=true. */
+const QA_SCREENSHOT_ROOT = ".bobbit-qa/screenshots";
+/** All cwds we have ever written screenshots into — cleaned up on shutdown. */
+const qaScreenshotDirs = new Set<string>();
 
 // Lazy-loaded playwright — may not be installed (e.g. Docker sandbox containers).
 let playwrightMod: typeof import("playwright") | null = null;
@@ -49,7 +55,7 @@ async function ensurePage(): Promise<import("playwright").Page> {
 		browser = await playwrightMod.chromium.launch({ headless: true });
 	}
 	const context = await browser.newContext({
-		viewport: { width: 1280, height: 720 },
+		viewport: { width: 960, height: 540 },
 	});
 	page = await context.newPage();
 	attachConsoleListener(page);
@@ -64,6 +70,13 @@ async function cleanup() {
 	page = null;
 	consoleMessages.length = 0;
 	currentListenerPage = null;
+	// Remove any QA screenshot spill dirs created during this session. This runs
+	// on session_shutdown, which covers the QA agent termination path — there is
+	// no separate extension-level cleanup hook on session end beyond this event.
+	for (const dir of qaScreenshotDirs) {
+		try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+	}
+	qaScreenshotDirs.clear();
 }
 
 /** Race a promise against an AbortSignal. Throws if aborted. */
@@ -122,19 +135,28 @@ export default function (pi: ExtensionAPI) {
 			"Returns the image so you can see it. Optionally saves to a file.",
 		parameters: Type.Object({
 			selector: Type.Optional(Type.String({ description: "CSS selector to screenshot a specific element. Omit for full page." })),
-			savePath: Type.Optional(Type.String({ description: "File path to save the screenshot to (png). Optional." })),
+			savePath: Type.Optional(Type.String({ description: "File path to save the screenshot to (png/jpg). Optional." })),
 			fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page. Default false." })),
-			includeBase64: Type.Optional(Type.Boolean({ description: "Include raw base64 string as text in the response. Use when you need to embed screenshots in HTML reports. Default false." })),
+			includeBase64: Type.Optional(Type.Boolean({ description: "Spill the screenshot to <cwd>/.bobbit-qa/screenshots/<uuid>.png and return a [screenshot_file]<path>[/screenshot_file] text block. Reference via <img src=\"file:///<path>\"> in HTML reports. Default false." })),
+			format: Type.Optional(Type.Union([Type.Literal("png"), Type.Literal("jpeg")], { description: "Image format. Default 'png'. 'jpeg' is ~5x smaller at quality 75." })),
+			quality: Type.Optional(Type.Number({ description: "JPEG quality (1-100). Only applies to format='jpeg'. Default 80." })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const p = await withAbort(ensurePage(), signal);
 
+			const format: "png" | "jpeg" = params.format === "jpeg" ? "jpeg" : "png";
+			const quality = typeof params.quality === "number" ? params.quality : 80;
+			const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
+			const ext = format === "jpeg" ? "jpg" : "png";
+
+			const shotOpts: any = format === "jpeg" ? { type: "jpeg", quality } : { type: "png" };
+
 			let buffer: Buffer;
 			if (params.selector) {
 				const el = p.locator(params.selector).first();
-				buffer = await withAbort(el.screenshot({ type: "png" }), signal) as Buffer;
+				buffer = await withAbort(el.screenshot(shotOpts), signal) as Buffer;
 			} else {
-				buffer = await withAbort(p.screenshot({ type: "png", fullPage: params.fullPage ?? false }), signal) as Buffer;
+				buffer = await withAbort(p.screenshot({ ...shotOpts, fullPage: params.fullPage ?? false }), signal) as Buffer;
 			}
 
 			let savedTo: string | undefined;
@@ -152,16 +174,34 @@ export default function (pi: ExtensionAPI) {
 			const content: Array<{type: string, mimeType?: string, data?: string, text?: string}> = [
 				{
 					type: "image" as const,
-					mimeType: "image/png" as const,
+					mimeType,
 					data: base64,
 				},
 				{ type: "text", text: `Screenshot of ${url} (${title})${savedTo ? ` — saved to ${savedTo}` : ""}` },
 			];
 
-			// When includeBase64 is set, append the raw base64 string as text so the agent
-			// can programmatically embed it in HTML reports as a data URI.
+			// When includeBase64 is set, spill the PNG/JPEG to disk under
+			// <cwd>/.bobbit-qa/screenshots/<uuid>.<ext> and return only a tiny
+			// [screenshot_file]<abs path>[/screenshot_file] text block. This avoids
+			// duplicating the screenshot bytes in the transcript (which otherwise
+			// get re-cached every turn and cost millions of tokens).
 			if (params.includeBase64) {
-				content.push({ type: "text", text: `[screenshot_base64]\ndata:image/png;base64,${base64}\n[/screenshot_base64]` });
+				const dir = path.resolve(ctx.cwd, QA_SCREENSHOT_ROOT);
+				fs.mkdirSync(dir, { recursive: true });
+				qaScreenshotDirs.add(dir);
+				const filename = `${crypto.randomUUID()}.${ext}`;
+				const abs = path.join(dir, filename);
+				fs.writeFileSync(abs, buffer);
+				// Normalise to forward slashes so file:// URIs work on Windows.
+				const uriPath = abs.replace(/\\/g, "/");
+				content.push({ type: "text", text: `[screenshot_file]${uriPath}[/screenshot_file]` });
+			}
+
+			// Emit a short size warning if the raw base64 is large — helps agents
+			// notice when they should switch to jpeg or a smaller viewport.
+			if (base64.length > 20000) {
+				const kb = Math.round(buffer.length / 1024);
+				content.push({ type: "text", text: `[screenshot_size_warning] ${kb}kb image — consider jpeg format or smaller viewport` });
 			}
 
 			return {

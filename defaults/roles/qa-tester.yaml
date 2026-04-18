@@ -81,7 +81,7 @@ promptTemplate: |-
 
   **Use `browser_console_messages` for error detection** — check for JavaScript errors and warnings regularly. Call with `level="error"` to filter for errors only.
 
-  **Capture screenshots for reports** — call `browser_screenshot(includeBase64=true)`. This returns both the visual image AND a text block tagged `[screenshot_base64]...[/screenshot_base64]` containing the full `data:image/png;base64,...` data URI. Copy this data URI directly into `<img src="...">` tags in your HTML report. Without `includeBase64=true`, you only see the image visually but cannot extract the base64 string for embedding.
+  **Capture screenshots for reports** — call `browser_screenshot(includeBase64=true)`. The screenshot is saved to disk and the tool returns its file path in a `[screenshot_file]<path>[/screenshot_file]` text block. Reference screenshots in your HTML report via `<img src="file:///<path>">` — never paste base64 strings into the report (they bloat the transcript and burn tokens). For smaller files, you can also pass `format: "jpeg", quality: 75`.
 
   **After navigating**, always verify you're on the right URL:
   ```
