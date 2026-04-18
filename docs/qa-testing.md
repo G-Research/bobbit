@@ -91,7 +91,7 @@ The protocol has 9 steps:
 
 6. **Drive browser scenarios** — Navigate to `qa_browser_entry` (with `$PORT` and `$TOKEN` substituted). For each scenario from the task prompt, take before/after screenshots and record a PASS/FAIL verdict. Respect `qa_max_scenarios` and `qa_max_duration_minutes`.
 
-7. **Produce HTML report** — Write a self-contained HTML report with base64-embedded screenshots (see Report Format below).
+7. **Produce HTML report** — Write an HTML report that references screenshots via `<img src="file:///<path>">` using the paths returned in `[screenshot_file]` blocks from `browser_screenshot(includeBase64: true)`. The server inlines those references to base64 data URIs when the report is submitted via `report_html_file` (see Screenshots in QA reports below).
 
 8. **Submit results** — Call the `verification_result` tool with `verdict` ("pass" or "fail"), `summary` (concise findings), and `report_html` (self-contained HTML report). The verification harness receives results through this tool and handles gate signaling automatically.
 
@@ -118,6 +118,59 @@ The validation report is a self-contained HTML file. Screenshots are embedded as
 ### Why self-contained HTML?
 
 The report is the gate artifact — it's stored as gate content and must be readable without a running server. Base64-embedded screenshots ensure the evidence is preserved with the report, not lost when the temp directory is cleaned up.
+
+## Screenshots in QA reports
+
+QA reports embed screenshots as evidence. To keep the agent's own transcript small (base64 image payloads balloon cache-read token costs on every subsequent turn), screenshots taken with `includeBase64: true` are **spilled to disk** rather than returned inline as text. The server then inlines them to base64 data URIs only when the final report is submitted — so the report stays self-contained while the agent's turns stay cheap.
+
+### How to take a screenshot for the report
+
+Call `browser_screenshot` with `includeBase64: true`:
+
+```
+browser_screenshot({ includeBase64: true })
+```
+
+The tool returns two content blocks:
+
+- An `image` block — the visual the agent's vision pipeline uses to reason about the page.
+- A text block of the form `[screenshot_file]<absolute-path>[/screenshot_file]`. The file lives under `<session-cwd>/.bobbit-qa/screenshots/<uuid>.(png|jpg)`.
+
+Reference the file in the HTML report via a `file://` URL:
+
+```html
+<img src="file:///absolute/path/to/.bobbit-qa/screenshots/abc123.png" alt="Step 1 before">
+```
+
+On Windows, use forward slashes in the path (e.g. `file:///C:/Users/.../abc123.png`).
+
+### Server-side inlining
+
+When the agent submits the report via `verification_result`'s `report_html_file` parameter, the server reads the file, finds every `<img src="file://...">` reference, and rewrites it to an inline `data:image/...;base64,...` URI. This makes the final report self-contained for viewing in the blob-URL report viewer and for long-term gate-artifact storage.
+
+Constraints:
+
+- Only `file://` srcs resolving under the session's cwd (including the `.bobbit-qa/` subtree) are inlined. Paths outside the session tree are left unchanged.
+- Cumulative cap: **20 MB** of inlined image data per report. References beyond the cap are left as `file://` URLs.
+- Missing files, non-image MIME types, and unresolvable paths are left as-is — they do not fail the submission.
+- The `report_html` inline-string parameter is not rewritten; use `report_html_file` to get automatic inlining.
+
+### Cleanup
+
+The `.bobbit-qa/` directory is gitignored and scoped per session. It is deleted when the session shuts down. Do not commit spilled screenshots.
+
+### Reducing screenshot cost further
+
+- The default browser viewport is 960×540 (lowered from 1280×720) to shrink encoded size. Use `browser_resize` if a scenario needs a larger or mobile viewport.
+- `browser_screenshot` accepts optional `format: "png" | "jpeg"` (default `png`) and `quality` (for JPEG, e.g. 75). JPEG at quality 75 is roughly 5× smaller than PNG and is usually fine for QA evidence:
+
+  ```
+  browser_screenshot({ includeBase64: true, format: "jpeg", quality: 75 })
+  ```
+
+### Why not paste base64 directly into the report?
+
+Earlier versions of the tool returned the full `data:image/png;base64,...` URI as a text block so the agent could copy-paste it into the report. That payload then stayed in the agent transcript and was re-cached on every subsequent turn, costing tens of thousands of tokens per screenshot. The file-spill + server-inline flow replaces that path — agents should never embed base64 image data as literal text in their HTML or in their chat output.
 
 ## Budget enforcement
 

@@ -1560,7 +1560,7 @@ export class VerificationHarness {
 			step.prompt || "",
 			"",
 			"## Screenshots",
-			"When taking screenshots for the report, use `browser_screenshot(includeBase64=true)`. This returns the image AND a text block tagged `[screenshot_base64]...[/screenshot_base64]` containing the full data URI. Copy these data URIs into `<img src=\"...\">` tags in your HTML report. Without `includeBase64=true`, you see the image visually but cannot extract the base64 string for embedding.",
+			"When taking screenshots for the report, call `browser_screenshot(includeBase64=true)`. The screenshot is saved to disk and the tool returns its absolute path in a `[screenshot_file]<path>[/screenshot_file]` text block. Reference screenshots in your HTML report via `<img src=\"file:///<path>\">` — never paste base64 strings into the report (they bloat the transcript and burn tokens). For smaller files you can also pass `format: \"jpeg\", quality: 75`.",
 			"",
 			"## Submitting Results",
 			"After completing all scenarios, call `verification_result` to submit your results:",

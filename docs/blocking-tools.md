@@ -5,7 +5,7 @@ Some builtin tools need to pause the agent turn and wait for something the user 
 The canonical examples today are:
 
 - `ask_user_choices` — agent asks the user 1–5 multiple-choice questions (single- or multi-select, with optional free-text "Other") via an inline widget; the widget POSTs answers.
-- `verification_result` — a reviewer/QA agent submits a verdict; the signal that originally triggered verification resolves with the result.
+- `verification_result` — a reviewer/QA agent submits a verdict; the signal that originally triggered verification resolves with the result. When a QA agent submits a report via `report_html_file`, the server automatically rewrites `<img src="file://...">` references under the session cwd (including the `.bobbit-qa/` subtree) to inline base64 data URIs, with a 20 MB cumulative cap. See [docs/qa-testing.md — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports).
 
 This page uses `ask_user_choices` as the walkthrough. `verification_result` follows the same shape, just with a different UI surface and a different resolver target (a gate signal rather than a chat widget).
 
