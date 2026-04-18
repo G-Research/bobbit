@@ -42,6 +42,68 @@ detail_docs: >-
   | `timeout` | number | No | Maximum execution time in seconds. If the command
   exceeds this, it is killed. No default — commands run until completion. |
 
+  | `description` | string | No | Short human-readable label (3–6 words)
+  describing what the command does. Purely UI metadata — the command runs
+  identically whether it's set or not. **When the command spans multiple lines
+  or uses a heredoc, always pass `description`**, otherwise the UI collapses
+  the call to a useless first-line fragment. Also recommended for non-obvious
+  one-liners. |
+
+
+  ## Usage Rule: `description` for multi-line commands
+
+
+  The UI shows a collapsed header for every bash call, built from the first
+  line of `command` truncated to 80 chars. Multi-line heredocs and `python -c
+  "..."` blocks collapse to garbage like `> python -c "` — giving no clue
+  what the command does. **Always pass `description` when the command has a
+  newline or a heredoc.** It's optional for simple one-liners.
+
+
+  ### Before / after
+
+
+  **Before** (collapsed header renders as `> python -c "`):
+
+
+  ```
+
+  bash(command="python -c \"
+  import json, sys
+
+  data = json.load(open('session-costs.json'))
+
+  total = sum(s['cost'] for s in data if s['agent'] == 'agent-qa')
+
+  print(f'agent-qa total: ${total:.2f}')
+
+  \"")
+
+  ```
+
+
+  **After** (collapsed header renders as `sum agent-qa costs from
+  session-costs.json`):
+
+
+  ```
+
+  bash(
+    command="python -c \"
+  import json, sys
+
+  data = json.load(open('session-costs.json'))
+
+  total = sum(s['cost'] for s in data if s['agent'] == 'agent-qa')
+
+  print(f'agent-qa total: ${total:.2f}')
+
+  \"",
+    description="sum agent-qa costs from session-costs.json"
+  )
+
+  ```
+
 
   ## When to Use
 

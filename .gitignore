@@ -42,3 +42,5 @@ sessions_tmp.json
 .bobbit-manual-integration-*/
 tests/fixtures/markdown-throttle-bundle.js
 tests/fixtures/markdown-throttle-bundle.css
+tests/fixtures/bash-renderer-bundle.js
+tests/fixtures/bash-renderer-bundle.css
