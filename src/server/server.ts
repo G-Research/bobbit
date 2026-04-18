@@ -37,6 +37,7 @@ import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, stripTokenFromGitUrl, shouldSkipRemotePush } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { UserQuestionHarness, validateQuestions, validateAnswers } from "./agent/user-question-harness.js";
+import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
@@ -6168,6 +6169,20 @@ async function handleApiRoute(
 			} catch (e: any) {
 				json({ error: `Failed to read report file: ${e.message}` }, 400);
 				return;
+			}
+		}
+		// Inline any <img src="file://..."> references so the report renders from
+		// the browser's blob origin (cross-origin file:// loads are blocked).
+		if (reportHtml) {
+			const session = sessionManager.getSession(body.sessionId);
+			if (session?.cwd) {
+				try {
+					reportHtml = inlineFileImages(reportHtml, session.cwd, {
+						logger: (msg) => console.warn(msg),
+					});
+				} catch (err: any) {
+					console.warn(`[verification] inlineFileImages failed: ${err?.message || err}`);
+				}
 			}
 		}
 		resolver({
