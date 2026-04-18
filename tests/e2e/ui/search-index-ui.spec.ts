@@ -126,7 +126,9 @@ test.describe("Search Index maintenance panel", () => {
 	});
 
 	test("Orphan Index Rows scan/cleanup buttons work", async ({ page }) => {
-		// Override the scan mock to return 2 rows.
+		await mockSearchApis(page);
+		// Override the scan mock to return 2 rows.  Registered AFTER mockSearchApis
+		// so that Playwright's LIFO handler order gives this one priority.
 		await page.route("**/api/maintenance/orphaned-index-rows*", async (route) => {
 			await route.fulfill({
 				status: 200,
@@ -140,7 +142,6 @@ test.describe("Search Index maintenance panel", () => {
 				}),
 			});
 		});
-		await mockSearchApis(page);
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
 

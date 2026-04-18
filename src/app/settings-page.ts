@@ -2768,7 +2768,7 @@ function renderMaintenanceTab() {
 						?disabled=${maintenanceLoading === "orphanRows" || !orphanIndexRows || orphanIndexRows.count === 0}
 						@click=${cleanupOrphanRows}
 						data-action="cleanup-orphan-index-rows"
-					>${maintenanceLoading === "orphanRows" && orphanIndexRows !== null ? "Cleaning..." : `Clean Up${orphanIndexRows && orphanIndexRows.count > 0 ? ` (${orphanIndexRows.count})` : ""}`}</button>
+					>${maintenanceLoading === "orphanRows" && orphanIndexRows !== null ? "Cleaning..." : `Remove Orphan Rows${orphanIndexRows && orphanIndexRows.count > 0 ? ` (${orphanIndexRows.count})` : ""}`}</button>
 				</div>
 			</div>
 		</div>
