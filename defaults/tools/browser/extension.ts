@@ -18,8 +18,6 @@ import * as path from "node:path";
 
 /** Root dir under cwd where screenshots are spilled when includeBase64=true. */
 const QA_SCREENSHOT_ROOT = ".bobbit-qa/screenshots";
-/** All cwds we have ever written screenshots into — cleaned up on shutdown. */
-const qaScreenshotDirs = new Set<string>();
 
 // Lazy-loaded playwright — may not be installed (e.g. Docker sandbox containers).
 let playwrightMod: typeof import("playwright") | null = null;
@@ -62,7 +60,7 @@ async function ensurePage(): Promise<import("playwright").Page> {
 	return page;
 }
 
-async function cleanup() {
+async function cleanupBrowser() {
 	if (browser?.isConnected()) {
 		await browser.close().catch(() => {});
 	}
@@ -70,13 +68,6 @@ async function cleanup() {
 	page = null;
 	consoleMessages.length = 0;
 	currentListenerPage = null;
-	// Remove any QA screenshot spill dirs created during this session. This runs
-	// on session_shutdown, which covers the QA agent termination path — there is
-	// no separate extension-level cleanup hook on session end beyond this event.
-	for (const dir of qaScreenshotDirs) {
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-	}
-	qaScreenshotDirs.clear();
 }
 
 /** Race a promise against an AbortSignal. Throws if aborted. */
@@ -102,9 +93,20 @@ export default function (pi: ExtensionAPI) {
 		// MCP playwright extension provides equivalent functionality when configured.
 		return;
 	}
-	// Clean up browser on session shutdown
+
+	// Per-install (per-session) state. Screenshot spill dirs are tracked here so
+	// cleanup only ever deletes dirs created by *this* session's tool calls,
+	// never another session's. Kept as a Set (not a single value) because the
+	// same session could in principle invoke tools from multiple cwds.
+	const qaScreenshotDirs = new Set<string>();
+
+	// Clean up browser + this session's screenshot spill dirs on shutdown.
 	pi.on("session_shutdown", async () => {
-		await cleanup();
+		await cleanupBrowser();
+		for (const dir of qaScreenshotDirs) {
+			try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+		qaScreenshotDirs.clear();
 	});
 
 	// ── browser_navigate ─────────────────────────────────────────────
