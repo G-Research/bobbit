@@ -7,6 +7,7 @@ dist/
 .DS_Store
 .playwright-mcp
 qa-*.png
+.bobbit-qa/
 Thumbs.db
 *.log
 bobbit2/
