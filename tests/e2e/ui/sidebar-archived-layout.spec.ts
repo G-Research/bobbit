@@ -110,23 +110,30 @@ test.describe("SB-28: Archived team structure", () => {
 		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
 		await seeArchivedBtn.click();
 
-		// Wait for archived section to load
-		await expect(
-			page.locator("span.uppercase").filter({ hasText: "Archived" }).first(),
-		).toBeVisible({ timeout: 10_000 });
+		// Wait for the See-Archived toggle to activate. The goal here is LIVE
+		// (not archived) — only its team sessions were archived via teardown.
+		// Those sessions have teamGoalId set so they're excluded from the
+		// per-project Archived subsection and instead render nested inside
+		// the live goal group (see renderGoalGroup's state.showArchived branch).
+		// There's therefore no separate "Archived" subsection header to wait
+		// for — just poll the toggle's active state.
+		await expect.poll(
+			async () => seeArchivedBtn.evaluate((el) => el.className.includes("text-primary")),
+			{ timeout: 10_000 },
+		).toBe(true);
 
-		// The goal should appear in the archived section.
-		// Look for the goal title text (case-insensitive since it's uppercased in sidebar)
+		// The live goal row should appear in the sidebar.
 		const goalText = page.getByText("Archived Team Test", { exact: false });
 		await expect(goalText.first()).toBeVisible({ timeout: 10_000 });
 
 		// Expand the goal by clicking it
 		await goalText.first().click();
 
-		// After expanding, archived sessions under the goal should be visible
-		// They should be in a container with greyscale/reduced-opacity styling
-		// Wait for any session row to appear under the goal
-		const archivedSessions = page.locator(".opacity-60");
+		// After expanding, archived team-lead + member rows should be visible
+		// under the goal. renderArchivedSessionRow applies an inline
+		// `filter:grayscale(1); opacity:0.75` style rather than a Tailwind
+		// .opacity-60 class — match on the inline style attribute instead.
+		const archivedSessions = page.locator("[style*='grayscale(1)']");
 		await expect(archivedSessions.first()).toBeVisible({ timeout: 10_000 });
 	});
 });
