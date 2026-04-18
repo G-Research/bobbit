@@ -72,10 +72,13 @@ test.describe("Per-project Archived subsections", () => {
 		await expect(seeArchived).toBeVisible({ timeout: 10_000 });
 		await seeArchived.click();
 
-		// There should be TWO Archived subsection headers (one per project), not one global.
-		// Header label has class "uppercase" and text "Archived".
+		// Each project gets its own nested Archived subsection header (no single
+		// global block). Prior revisions asserted toHaveCount(2), but in a shared
+		// worker the default project or sibling specs may also have archived
+		// items, producing a 3rd subsection. Instead assert >= 2 (both of ours
+		// present) plus absence of a global archived block below all projects.
 		const archivedHeaders = page.locator("span.uppercase").filter({ hasText: /^Archived$/ });
-		await expect(archivedHeaders).toHaveCount(2, { timeout: 10_000 });
+		await expect.poll(async () => archivedHeaders.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
 
 		// Per-project Archived subsections default to expanded — each archived goal
 		// title should appear immediately under its project without needing an extra click.
@@ -111,16 +114,41 @@ test.describe("Per-project Archived subsections", () => {
 		const isOn = await seeArchived.evaluate((el) => el.className.includes("text-primary"));
 		if (!isOn) await seeArchived.click();
 
-		// Wait for per-project Archived headers (default expanded)
+		// Wait for per-project Archived headers (default expanded). Sibling
+		// specs sharing this worker may have added archived items to the default
+		// project, producing an extra subsection, so assert >= 2 rather than ==.
 		const archivedButtons = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
-		await expect(archivedButtons).toHaveCount(2, { timeout: 10_000 });
+		await expect.poll(async () => archivedButtons.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
 
 		// Both archived goals should be visible initially (default expanded)
 		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText(goalBTitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
 
-		// Collapse project B's archived subsection (the second one in DOM)
-		await archivedButtons.nth(1).click();
+		// Collapse the Archived subsection that contains goal B. Find it by
+		// DOM proximity rather than by nth-index, so an extra Archived
+		// subsection from the default project (which sibling specs on the
+		// same worker may have populated) doesn't shift the index and make
+		// us click the wrong project's toggle.
+		await page.evaluate((title) => {
+			// Find the deepest element whose own text content matches the title.
+			const all = Array.from(document.querySelectorAll(".sidebar-edge *")) as HTMLElement[];
+			const titleEl = all.find((el) => {
+				if (!el.textContent?.includes(title)) return false;
+				return !Array.from(el.children).some((c) => c.textContent?.includes(title));
+			});
+			if (!titleEl) throw new Error(`goalB title not found: ${title}`);
+			// Scan all Archived header buttons; pick the last one that precedes
+			// titleEl in document order.
+			const buttons = Array.from(document.querySelectorAll("button")) as HTMLButtonElement[];
+			const archivedBefore = buttons.filter((btn) => {
+				const span = btn.querySelector("span.uppercase");
+				if (span?.textContent?.trim() !== "Archived") return false;
+				const pos = btn.compareDocumentPosition(titleEl);
+				return !!(pos & Node.DOCUMENT_POSITION_FOLLOWING);
+			});
+			if (archivedBefore.length === 0) throw new Error("no Archived header preceding goalB");
+			archivedBefore[archivedBefore.length - 1].click();
+		}, goalBTitle);
 
 		// Goal B should disappear (project B collapsed); Goal A still visible
 		await expect(page.getByText(goalBTitle, { exact: false })).toHaveCount(0, { timeout: 3_000 });
@@ -159,13 +187,19 @@ test.describe("Per-project Archived subsections", () => {
 		await page.waitForTimeout(400);
 
 		// Auto-open flips showArchived on; per-project subsections default expanded
-		// so the matching item appears without extra clicks.
+		// so the matching item appears without extra clicks. Only projects whose
+		// archived goals match the search should render an Archived subsection
+		// — project A matches, project B does not. The default project may also
+		// contain archived items from sibling specs, but none of them match a
+		// unique timestamped search string, so it will also be hidden.
+		//
+		// The search auto-open triggers an async fetch of archived goals; under
+		// parallel load that fetch can take noticeably longer than the default
+		// 5s Playwright assertion timeout, so poll for goalA visible first and
+		// then assert the subsection count.
+		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 		const archivedButtons = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
-		// Only project A's archived subsection has matches → only one header visible.
 		await expect(archivedButtons).toHaveCount(1, { timeout: 10_000 });
-
-		// Goal A matches, goal B does not
-		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText(goalBTitle, { exact: false })).toHaveCount(0, { timeout: 3_000 });
 
 		// Clear search
@@ -175,13 +209,25 @@ test.describe("Per-project Archived subsections", () => {
 
 	test("toggling See Archived off hides all per-project Archived subsections", async ({ page }) => {
 		await openApp(page);
+		// Reset sidebar state so prior tests in this file (especially a failed
+		// search test that leaves showArchived auto-flipped on) don't bleed in.
+		await page.evaluate(() => {
+			localStorage.removeItem("bobbit-show-archived");
+			localStorage.removeItem("bobbit-archived-collapsed-projects");
+		});
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
 
 		const seeArchived = page.locator("button").filter({ hasText: "See Archived" }).first();
 		const isOn = await seeArchived.evaluate((el) => el.className.includes("text-primary"));
 		if (!isOn) {
 			await seeArchived.click();
-			// verify subsections appear
-			await expect(page.locator("span.uppercase").filter({ hasText: /^Archived$/ })).toHaveCount(2, { timeout: 10_000 });
+			// verify subsections appear (>= 2 — sibling specs may add a 3rd on
+			// the default project when sharing a worker).
+			await expect.poll(
+				async () => page.locator("span.uppercase").filter({ hasText: /^Archived$/ }).count(),
+				{ timeout: 10_000 },
+			).toBeGreaterThanOrEqual(2);
 		}
 
 		// Turn off
