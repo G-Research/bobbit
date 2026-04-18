@@ -1700,7 +1700,7 @@ async function handleApiRoute(
 		try {
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const projectNames = new Map(projectRegistry.list().map(p => [p.id, p.name]));
-			const results = projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
+			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
 			json(results);
 		} catch (err) {
 			json({ error: `Search failed: ${err}` }, 500);
