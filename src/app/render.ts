@@ -32,7 +32,7 @@ import "../ui/components/review/ReviewPane.js";
 import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT, getProjectAccentColor } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -91,7 +91,7 @@ function _handleMobileSearchClear(): void {
 function renderMobileLanding() {
 	const sidebarData = getSidebarData();
 	let { ungroupedSessions, liveGoals } = sidebarData;
-	const { archivedGoals } = sidebarData;
+	let { archivedGoals } = sidebarData;
 
 	// Client-side title filtering for mobile
 	if (state.searchQuery) {
@@ -99,10 +99,11 @@ function renderMobileLanding() {
 		liveGoals = liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(q);
 			const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
-			const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q));
+			const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 			return goalMatches || hasMatchingSession;
 		});
-		ungroupedSessions = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q));
+		ungroupedSessions = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+		archivedGoals = filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
 	}
 
 	return html`
@@ -201,7 +202,11 @@ function renderMobileLanding() {
 							: html`
 								${(() => {
 									// Group goals, sessions, and staff by project
-									const staffList = (state.staffList || []).filter(s => s.state !== "retired");
+									let staffList = (state.staffList || []).filter(s => s.state !== "retired");
+									if (state.searchQuery) {
+										const q = state.searchQuery.toLowerCase();
+										staffList = staffList.filter(s => s.name?.toLowerCase().includes(q));
+									}
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
 										const defaultId = state.projects[0]?.id || "";
@@ -289,7 +294,8 @@ function renderMobileLanding() {
 										})}`;
 								})()}
 								${(() => {
-									const standaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+									const allStandaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+									const standaloneArchived = filterArchivedSessionsByQuery(allStandaloneArchived, state.searchQuery);
 									return state.showArchived ? html`
 										<div class="border-t border-border/30 my-1 mx-2"></div>
 										<div class="flex flex-col gap-0.5">

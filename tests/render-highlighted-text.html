@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>render-highlighted-text — unit test fixture</title></head>
+<body>
+<script>
+// Pure helpers mirrored from src/app/render-helpers.ts. If these duplicate
+// definitions drift from the source, the highlight enhancement will behave
+// differently at runtime — keep them in sync.
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function splitByQuery(text, query) {
+  if (!text) return text ? [{ text: text, matched: false }] : [];
+  if (!query) return [{ text: text, matched: false }];
+  const q = String(query);
+  if (!q) return [{ text: text, matched: false }];
+  const re = new RegExp(escapeRegex(q), "gi");
+  const out = [];
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > lastIndex) out.push({ text: text.slice(lastIndex, m.index), matched: false });
+    out.push({ text: m[0], matched: true });
+    lastIndex = m.index + m[0].length;
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  if (out.length === 0) return [{ text: text, matched: false }];
+  if (lastIndex < text.length) out.push({ text: text.slice(lastIndex), matched: false });
+  return out;
+}
+
+function filterArchivedGoalsByQuery(archivedGoals, liveSessions, archivedSessions, query) {
+  if (!query) return archivedGoals;
+  const q = String(query).toLowerCase();
+  if (!q) return archivedGoals;
+  const combined = [...liveSessions, ...archivedSessions];
+  return archivedGoals.filter(goal => {
+    if (goal.title.toLowerCase().includes(q)) return true;
+    const affiliated = combined.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+    return affiliated.some(s => (s.title && s.title.toLowerCase().includes(q)) || (s.role && s.role.toLowerCase().includes(q)));
+  });
+}
+
+function filterArchivedSessionsByQuery(archivedSessions, query) {
+  if (!query) return archivedSessions;
+  const q = String(query).toLowerCase();
+  if (!q) return archivedSessions;
+  return archivedSessions.filter(s => (s.title && s.title.toLowerCase().includes(q)) || (s.role && s.role.toLowerCase().includes(q)));
+}
+
+window.__highlight = { escapeRegex, splitByQuery, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery };
+</script>
+</body>
+</html>

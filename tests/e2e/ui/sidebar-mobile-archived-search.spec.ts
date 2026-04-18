@@ -119,4 +119,29 @@ test.describe("Mobile sidebar archived search filtering", () => {
 			);
 		}
 	});
+
+	test("matching substring is wrapped in a <strong class='font-semibold'> span", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => {
+			localStorage.removeItem("bobbit-archived-collapsed-projects");
+			localStorage.setItem("bobbit-show-archived", "true");
+		});
+		await page.setViewportSize({ width: 375, height: 667 });
+		await page.reload();
+
+		await expect(page.locator("input[data-search]")).toBeVisible({ timeout: 20_000 });
+		await expect(page.getByText(matchingTitle, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+
+		const searchInput = page.locator("input[data-search]");
+		await searchInput.click();
+		await searchInput.fill("story");
+		await page.waitForTimeout(500);
+
+		// At least one <strong class="font-semibold"> should exist wrapping the
+		// matched "story" substring inside the matching goal title.
+		const strongs = page.locator("strong.font-semibold");
+		await expect.poll(async () => strongs.count(), { timeout: 5_000 }).toBeGreaterThan(0);
+		const strongTexts = await strongs.allTextContents();
+		expect(strongTexts.some(t => t.toLowerCase().includes("story"))).toBe(true);
+	});
 });

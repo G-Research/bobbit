@@ -39,6 +39,88 @@ export function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+// ============================================================================
+// SEARCH HIGHLIGHTING
+// ============================================================================
+
+/** Escape regex special characters so `query` is matched literally. */
+export function escapeRegex(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Split `text` into alternating matched/unmatched segments for case-insensitive
+ * occurrences of `query`. Pure function — no DOM — used by
+ * `renderHighlightedText` and tested directly in unit tests.
+ */
+export function splitByQuery(text: string, query: string | null | undefined): Array<{ text: string; matched: boolean }> {
+	if (!text) return text ? [{ text, matched: false }] : [];
+	if (!query) return [{ text, matched: false }];
+	const q = String(query);
+	if (!q) return [{ text, matched: false }];
+	const re = new RegExp(escapeRegex(q), "gi");
+	const out: Array<{ text: string; matched: boolean }> = [];
+	let lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(text)) !== null) {
+		if (m.index > lastIndex) out.push({ text: text.slice(lastIndex, m.index), matched: false });
+		out.push({ text: m[0], matched: true });
+		lastIndex = m.index + m[0].length;
+		if (m[0].length === 0) re.lastIndex++; // avoid infinite loops on zero-width matches
+	}
+	if (out.length === 0) return [{ text, matched: false }];
+	if (lastIndex < text.length) out.push({ text: text.slice(lastIndex), matched: false });
+	return out;
+}
+
+/**
+ * Render `text` with every case-insensitive occurrence of `query` wrapped in
+ * a `<strong class="font-semibold">` span. When `query` is empty/falsy the
+ * original text is returned unchanged (no spans, no layout shift).
+ * Preserves the original casing of the matched substrings.
+ */
+export function renderHighlightedText(text: string, query: string | null | undefined): TemplateResult | string {
+	if (!text) return text || "";
+	if (!query) return text;
+	const segments = splitByQuery(text, query);
+	if (segments.length <= 1 && !segments.some(s => s.matched)) return text;
+	return html`${segments.map(s => s.matched ? html`<strong class="font-semibold">${s.text}</strong>` : s.text)}`;
+}
+
+// ============================================================================
+// SEARCH FILTER PREDICATES
+// ============================================================================
+
+/** Filter archived goals by title match OR affiliated (non-delegate) session title/role match.
+ *  Shared between desktop and mobile sidebar renderers. */
+export function filterArchivedGoalsByQuery(
+	archivedGoals: Goal[],
+	liveSessions: GatewaySession[],
+	archivedSessions: GatewaySession[],
+	query: string | null | undefined,
+): Goal[] {
+	if (!query) return archivedGoals;
+	const q = String(query).toLowerCase();
+	if (!q) return archivedGoals;
+	const combined = [...liveSessions, ...archivedSessions];
+	return archivedGoals.filter(goal => {
+		if (goal.title.toLowerCase().includes(q)) return true;
+		const affiliated = combined.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+		return affiliated.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+	});
+}
+
+/** Filter standalone archived sessions by title or role (case-insensitive). */
+export function filterArchivedSessionsByQuery(
+	archivedSessions: GatewaySession[],
+	query: string | null | undefined,
+): GatewaySession[] {
+	if (!query) return archivedSessions;
+	const q = String(query).toLowerCase();
+	if (!q) return archivedSessions;
+	return archivedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
+}
+
 /** Get the appropriate project accent color for the current theme mode. */
 export function getProjectAccentColor(project: Project): string {
 	const isDark = document.documentElement.classList.contains("dark");
@@ -163,12 +245,13 @@ export function stopTimeRefresh(): void {
 
 /** Render session title with a subtle rolling shadow when active. */
 let _waveIndex = 0;
-export function renderSessionTitle(title: string, isActive?: boolean) {
+export function renderSessionTitle(title: string, isActive?: boolean, query?: string | null) {
 	// Emoji glyphs (e.g. ⚡) have built-in leading whitespace — pull a negative margin to compensate
 	const emojiLead = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(title) ? "margin-left:-2px" : "";
-	if (!isActive) { return emojiLead ? html`<span style="${emojiLead}">${title}</span>` : title; }
+	const content = query ? renderHighlightedText(title, query) : title;
+	if (!isActive) { return emojiLead ? html`<span style="${emojiLead}">${content}</span>` : content; }
 	const delay = -((_waveIndex++ % 7) * 0.6);
-	return html`<span class="title-wave" style="animation-delay:${delay}s;${emojiLead}">${title}</span>`;
+	return html`<span class="title-wave" style="animation-delay:${delay}s;${emojiLead}">${content}</span>`;
 }
 
 /** Render a pulsing dot with conic sweep to indicate active session. */
@@ -269,7 +352,7 @@ export function renderSessionRow(session: GatewaySession) {
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
 			<div class="flex-1 min-w-0 flex flex-col justify-center">
-				<div class="${mobile ? "flex items-center gap-1 min-w-0" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
+				<div class="${mobile ? "flex items-center gap-1 min-w-0" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 				${session.personalities && session.personalities.length > 0 ? html`
 					<div class="flex flex-wrap gap-0.5 mt-0.5">
 						${session.personalities.map((t) => html`<span
@@ -335,7 +418,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			<div class="shrink-0 flex items-center justify-center">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory)}
 			</div>
-			<div class="flex-1 min-w-0 font-normal truncate ${mobile ? "text-base" : "text-xs"}">${displayTitle}</div>
+			<div class="flex-1 min-w-0 font-normal truncate ${mobile ? "text-base" : "text-xs"}">${renderHighlightedText(displayTitle, state.searchQuery)}</div>
 			${session.archivedAt ? html`<span class="shrink-0 ${mobile ? "text-xs" : "text-[10px]"} text-muted-foreground">${terseRelativeTime(session.archivedAt)}</span>` : ""}
 		</div>
 	`;
@@ -405,7 +488,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory)}
 			</div>
-			<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
+			<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1 text-base" : "truncate text-xs"} font-normal"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
 			${mobile
 				? buttons
 				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
@@ -618,7 +701,7 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
-				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${goal.title}</span>
+				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${renderHighlightedText(goal.title, state.searchQuery)}</span>
 				${renderGoalBadge(goal.id)}
 				${mobile
 					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`
