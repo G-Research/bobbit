@@ -35,7 +35,7 @@ import { StaffIndexSource } from "./sources/staff-source.js";
 import { contentHashOf } from "./sources/hash.js";
 import { progressBus as sharedProgressBus, type ProgressBus } from "./progress-bus.js";
 import { needsRebuild as metaNeedsRebuild, buildCurrentMeta } from "./meta.js";
-import { CONTENT_POLICY_VERSION } from "./content-policy.js";
+import { CONTENT_POLICY_VERSION, extractForIndexing } from "./content-policy.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -380,34 +380,30 @@ export class SearchService {
 
 		// Preferred signature.
 		const { sessionId, sessionTitle: st, message, timestamp: ts, projectId: pid, msgIdx, goalId } = arg1;
-		// Lazy import so the service doesn't need a direct dep on content-policy
-		// at the top level (already imported via the message source).
-		import("./content-policy.js")
-			.then(({ extractForIndexing }) => {
-				const hit = extractForIndexing(message);
-				if (hit.entries.length === 0) return;
-				const resolvedProjectId = pid ?? this.projectId;
-				const idx = typeof msgIdx === "number" ? msgIdx : ts;
-				const indexables = hit.entries.map((entry) => ({
-					id: `message:${sessionId}:${idx}:${entry.blockKey}`,
-					sourceId: "messages" as const,
-					text: entry.text,
-					metadata: {
-						sessionId,
-						msgIdx: idx,
-						blockKey: entry.blockKey,
-						...(goalId ? { goalId } : {}),
-					},
-					contentHash: contentHashOf(entry.text, entry.weight, entry.role, ts),
-					timestamp: ts,
-					projectId: resolvedProjectId,
-					archived: false,
-					weight: entry.weight,
-					role: entry.role,
-					display: { title: st },
-				}));
-				return indexer.upsertEntries(indexables);
-			})
+		const hit = extractForIndexing(message);
+		if (hit.entries.length === 0) return;
+		const resolvedProjectId = pid ?? this.projectId;
+		const idx = typeof msgIdx === "number" ? msgIdx : ts;
+		const indexables = hit.entries.map((entry) => ({
+			id: `message:${sessionId}:${idx}:${entry.blockKey}`,
+			sourceId: "messages" as const,
+			text: entry.text,
+			metadata: {
+				sessionId,
+				msgIdx: idx,
+				blockKey: entry.blockKey,
+				...(goalId ? { goalId } : {}),
+			},
+			contentHash: contentHashOf(entry.text, entry.weight, entry.role, ts),
+			timestamp: ts,
+			projectId: resolvedProjectId,
+			archived: false,
+			weight: entry.weight,
+			role: entry.role,
+			display: { title: st },
+		}));
+		indexer
+			.upsertEntries(indexables)
 			.catch((err) => console.error("[search] indexMessage failed:", err));
 	}
 

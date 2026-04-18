@@ -26,7 +26,6 @@ import type {
 	IndexSource,
 	IndexSourceContext,
 } from "./types.js";
-import { SCHEMA_VERSION } from "./types.js";
 import type { LanceStore, ContentRow } from "./lance-store.js";
 import type { ProgressBus } from "./progress-bus.js";
 import { chunkText } from "./chunker.js";
@@ -265,10 +264,6 @@ export class Indexer {
 					contentPolicyVersion: CONTENT_POLICY_VERSION,
 				}),
 			);
-			// Suppress unused-import warning: SCHEMA_VERSION is owned by
-			// `buildCurrentMeta` but re-exported here for callers who want
-			// to cross-check the stamp.
-			void SCHEMA_VERSION;
 
 			this.progressBus.emit("index:complete", {
 				projectId: this.projectId,
@@ -294,20 +289,31 @@ export class Indexer {
 		if (entries.length === 0) return entries;
 		const ids = entries.map((e) => e.id);
 		const list = ids.map((id) => `'${escapeSql(id)}'`).join(",");
-		let existing: Array<{ id: string; content_hash: string }> = [];
+		// Long entries get chunked — only chunk rows with `parent_id = <id>`
+		// exist in the store, so we must match either direct ids OR parent_id
+		// to avoid re-embedding unchanged long entries on every upsert.
+		let existing: Array<{ id: string; parent_id: string | null; content_hash: string }> = [];
 		try {
 			existing = (await this.lance
 				.query()
-				.where(`id IN (${list})`)
-				.select(["id", "content_hash"])
-				.limit(ids.length)
-				.toArray()) as Array<{ id: string; content_hash: string }>;
+				.where(`id IN (${list}) OR parent_id IN (${list})`)
+				.select(["id", "parent_id", "content_hash"])
+				// Allow up to `ids.length * (reasonable chunks per entry)` rows;
+				// we just need any one chunk per parent to confirm the hash.
+				.limit(Math.max(ids.length * 64, ids.length))
+				.toArray()) as Array<{ id: string; parent_id: string | null; content_hash: string }>;
 		} catch {
 			existing = [];
 		}
-		const hashById = new Map<string, string>();
-		for (const r of existing) hashById.set(r.id, r.content_hash);
-		return entries.filter((e) => hashById.get(e.id) !== e.contentHash);
+		// Collapse by the logical entry key: parent_id if set (chunk rows),
+		// else the row's own id. All chunks of a given parent share the
+		// parent's contentHash, so any one row suffices.
+		const hashByEntryId = new Map<string, string>();
+		for (const r of existing) {
+			const key = r.parent_id ?? r.id;
+			if (!hashByEntryId.has(key)) hashByEntryId.set(key, r.content_hash);
+		}
+		return entries.filter((e) => hashByEntryId.get(e.id) !== e.contentHash);
 	}
 
 	/**

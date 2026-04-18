@@ -333,3 +333,50 @@ test("progress events fire on backlog changes", async () => {
 
 	await store.close();
 });
+
+test("re-upsert of long text (requiring chunking) is skipped when contentHash unchanged", async () => {
+	// Regression: _filterUnchanged used to look up by id only, but long
+	// entries are stored as chunk rows (id = `<id>:chunk:N`, parent_id = <id>).
+	// Without checking parent_id, the lookup missed and every re-upsert
+	// re-embedded all chunks. This test guards against that.
+	const { store } = await openStore();
+	const bus = new ProgressBus();
+	const embedder = createFakeEmbedder();
+	const indexer = new Indexer({
+		lance: store,
+		embedder,
+		progressBus: bus,
+		projectId: "p1",
+		progressDebounceMs: 0,
+		maxTokens: 50,
+		chunkOverlap: 5,
+	});
+
+	// Build long text that will split into several chunks at 50 tokens.
+	const words: string[] = [];
+	for (let i = 0; i < 300; i++) words.push(`word${i}`);
+	const longText = words.join(" ");
+
+	const entry = makeIndexable("long", { text: longText, contentHash: "hash-v1" });
+
+	// First upsert: embeds the chunks.
+	await indexer.upsertEntries([entry]);
+	const rowsAfterFirst = await store.count();
+	expect(rowsAfterFirst).toBeGreaterThan(1); // chunked
+	const callsAfterFirst = embedder.calls.length;
+	expect(callsAfterFirst).toBeGreaterThan(0);
+
+	// Second upsert of the same entry (unchanged contentHash): the
+	// indexer MUST match by parent_id on the existing chunk rows and
+	// skip re-embedding entirely.
+	await indexer.upsertEntries([entry]);
+	expect(await store.count()).toBe(rowsAfterFirst);
+	expect(embedder.calls.length).toBe(callsAfterFirst);
+
+	// Sanity: if contentHash changes, re-embedding does happen.
+	const entryUpdated = makeIndexable("long", { text: longText, contentHash: "hash-v2" });
+	await indexer.upsertEntries([entryUpdated]);
+	expect(embedder.calls.length).toBeGreaterThan(callsAfterFirst);
+
+	await store.close();
+});

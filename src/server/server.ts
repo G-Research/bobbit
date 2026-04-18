@@ -700,6 +700,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 			const timer = setTimeout(() => flushProgress(ev.projectId), 500);
+			timer.unref();
 			progressDebounce.set(ev.projectId, { timer, latest: event });
 		});
 		searchProgressBus.on("index:complete", (ev) => {

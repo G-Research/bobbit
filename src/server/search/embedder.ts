@@ -279,8 +279,6 @@ export function createFakeEmbedder(
 		const v = new Float32Array(dim);
 		// xoshiro128** — deterministic, fast.
 		for (let i = 0; i < dim; i++) {
-			const t = (b << 9) | 0;
-			const r = Math.imul(b * 5, 0x80000000) | 0;
 			// Simpler alt PRNG: Mulberry32 would also work. Use a small
 			// LCG chain for readability.
 			a = (Math.imul(a, 1664525) + 1013904223) | 0;
@@ -289,9 +287,6 @@ export function createFakeEmbedder(
 			d = (d ^ ((a >>> 13) | (b << 19))) | 0;
 			const raw = ((a ^ b ^ c ^ d) >>> 0) / 0xffffffff;
 			v[i] = raw * 2 - 1;
-			// Silence unused-locals for the unused xoshiro rotate pieces.
-			void t;
-			void r;
 		}
 		// L2-normalize.
 		let s = 0;
