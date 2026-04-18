@@ -104,6 +104,13 @@ export class RemoteAgent {
 	private _onVisibilityChange = (): void => {
 		if (document.visibilityState !== "visible") return;
 		if (this._intentionalDisconnect) return;
+		// Only the active session's agent performs a visibility-driven resync.
+		// Cached (background) session agents stay connected but do not fetch
+		// history on tab wake — otherwise a single wake on mobile fires up to
+		// SESSION_CACHE_MAX concurrent get_messages requests, each of which
+		// can return tens of KB of history. That’s a major source of mobile
+		// sluggishness after returning from background.
+		if (state.selectedSessionId !== this._sessionId) return;
 		if (this.ws?.readyState !== WebSocket.OPEN) {
 			// Socket isn't OPEN — kick an immediate reconnect instead of
 			// waiting for the (possibly long) backoff timer that may have been
