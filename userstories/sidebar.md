@@ -544,6 +544,10 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
 
 **Coverage:** `tests/search-box.spec.ts` (Ctrl+K, escape, clear, controls visibility). See also SR-01 in search.md.
 
+**Matched-term highlighting:** When the query is non-empty, every matching substring in a visible goal title, session title, session role, or staff name is wrapped in a `<strong class="font-semibold">` span so the user can see *why* a row matched. Matching is case-insensitive, preserves original casing, bolds every occurrence, escapes regex special chars in the query, and leaves plain text untouched when the query is empty. Shared helper `renderHighlightedText` in `src/app/render-helpers.ts` is used by both `renderSidebar` and `renderMobileLanding`.
+
+**Mobile parity:** Mobile landing applies the same filter predicate to archived goals and standalone archived sessions via `filterArchivedGoalsByQuery` / `filterArchivedSessionsByQuery` (also in `render-helpers.ts`), so typing on a mobile viewport with "See Archived" on hides archived rows whose title and whose affiliated session titles/roles do not match.
+
 ---
 
 ## SB-25: Search auto-opens archived section
