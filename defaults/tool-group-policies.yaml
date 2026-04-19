@@ -1,1 +1,8 @@
 Ask: allow
+# Block the @playwright/mcp browser group by default: it launches visible
+# Chromium windows on the host on first use, which is disruptive and can
+# steal focus. Agents should use the native `browser_*` tools (defaults/tools/browser)
+# which are guaranteed headless. Projects that legitimately want a headed
+# browser can override this in `.bobbit/config/tool-group-policies.yaml`
+# (`mcp__playwright: allow`) and/or drop `--headless` in their own `.mcp.json`.
+mcp__playwright: never
