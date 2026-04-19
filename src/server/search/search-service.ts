@@ -38,6 +38,26 @@ import { progressBus as sharedProgressBus, type ProgressBus } from "./progress-b
 import { needsRebuild as metaNeedsRebuild, buildCurrentMeta } from "./meta.js";
 import { CONTENT_POLICY_VERSION, extractForIndexing } from "./content-policy.js";
 
+// ── Module-level rebuild queue ───────────────────────────────────────
+
+/**
+ * Rebuilds are serialized across all `SearchService` instances. On startup
+ * with N projects, meta-mismatch triggers a rebuild per project; running
+ * them in parallel loads N embedder pipelines + scans N sets of sessions
+ * at once, which pegs CPU and balloons RAM. Queuing means one project at
+ * a time — progress events still flow so the UI stays informative.
+ *
+ * Incremental index updates (indexGoal, indexSession, indexMessage,
+ * removeX) bypass the queue and run immediately — they're cheap.
+ */
+let _rebuildQueue: Promise<unknown> = Promise.resolve();
+
+function enqueueRebuild<T>(task: () => Promise<T>): Promise<T> {
+	const next = _rebuildQueue.then(task, task);
+	_rebuildQueue = next.catch(() => undefined);
+	return next;
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export type SearchServiceState =
@@ -589,7 +609,8 @@ export class SearchService {
 			this._messageSource,
 			this._staffSource,
 		];
-		await this._indexer.rebuildFromSources(srcs, ctx);
+		const indexer = this._indexer;
+		await enqueueRebuild(() => indexer.rebuildFromSources(srcs, ctx));
 	}
 
 	// ── Internals ────────────────────────────────────────────────────
@@ -630,7 +651,13 @@ export class SearchService {
 						fs.unlinkSync(legacy);
 						console.log(`[search] Removed legacy ${path.basename(legacy)}`);
 					} catch (err) {
-						console.warn(`[search] Could not remove legacy ${legacy}:`, err);
+						// EBUSY on Windows = another process still holds the file open
+						// (common when a previous harness is still shutting down). Silently
+						// skip — we'll retry on the next open().
+						const code = (err as NodeJS.ErrnoException)?.code;
+						if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOENT") {
+							console.warn(`[search] Could not remove legacy ${legacy}:`, err);
+						}
 					}
 				}
 			}
@@ -681,17 +708,26 @@ export class SearchService {
 					(context?.staffStore || this.staffStore)
 				) {
 					const staff = (context.staffStore ?? this.staffStore) as StaffStore;
-					this.rebuildFromSources(
-						context.goalStore,
-						context.sessionStore,
-						staff,
-					)
-						.then(() => {
-							// No-op — progress events already emitted.
-						})
-						.catch((err) => {
-							console.error("[search] Background rebuild failed:", err);
-						});
+					// Defer the rebuild so initial REST traffic (/api/projects,
+					// /api/sessions, /api/goals) lands before the embedder
+					// starts hammering the event loop. Rebuild still runs in
+					// the background, serialized with other projects via the
+					// module-level queue.
+					const delayMs = Number(process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS ?? 5000);
+					const timer = setTimeout(() => {
+						this.rebuildFromSources(
+							context.goalStore!,
+							context.sessionStore!,
+							staff,
+						)
+							.then(() => {
+								// No-op — progress events already emitted.
+							})
+							.catch((err) => {
+								console.error("[search] Background rebuild failed:", err);
+							});
+					}, delayMs);
+					if (typeof timer.unref === "function") timer.unref();
 				}
 				// If no stores provided, caller is responsible for invoking
 				// rebuildFromStores explicitly once wiring is up.
