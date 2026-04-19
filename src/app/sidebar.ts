@@ -15,8 +15,6 @@ import {
 	setUngroupedExpanded,
 	isStaffExpanded,
 	setStaffSectionExpanded,
-	isArchivedSectionExpanded,
-	setArchivedSectionExpanded,
 	saveExpandedGoals,
 	toggleTeamLeadExpanded,
 	isTeamLeadExpanded,
@@ -29,7 +27,7 @@ import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
@@ -783,42 +781,13 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 	`;
 }
 
-/** Render the collapsible per-project Archived subsection. */
+/** Render the collapsible per-project Archived subsection (desktop variant). */
 function renderProjectArchivedSection(
 	project: Project,
 	archivedGoals: Goal[],
 	standaloneArchivedSessions: GatewaySession[],
 ) {
-	if (!state.showArchived) return "";
-	if (archivedGoals.length === 0 && standaloneArchivedSessions.length === 0) return "";
-	const expanded = isArchivedSectionExpanded(project.id);
-	return html`
-		<div class="border-t border-border/30 my-1 mx-2"></div>
-		<div class="flex flex-col gap-0.5">
-			<button
-				class="relative flex items-center gap-1 pr-1 py-0.5 w-full text-left hover:bg-secondary/30 rounded-md transition-colors"
-				style="padding-left:${HEADER_CHEVRON_W}px;"
-				@click=${() => { setArchivedSectionExpanded(project.id, !expanded); renderApp(); }}
-			>
-				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${expanded ? "▾" : "▸"}</span>
-				<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "xs")}</span>
-				<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
-			</button>
-			${expanded ? html`
-				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
-					${archivedGoals.map(goal => renderGoalGroup(goal))}
-				</div>
-				${archivedGoals.length > 0 && standaloneArchivedSessions.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${standaloneArchivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${standaloneArchivedSessions.map(s => html`
-						${renderArchivedSessionRow(s)}
-						${renderArchivedDelegates(s.id)}
-					`)}
-				</div>` : ""}
-			` : ""}
-		</div>
-	`;
+	return renderSharedProjectArchivedSection(project, archivedGoals, standaloneArchivedSessions, "desktop");
 }
 
 /** Render goals and sessions for a single project (used in multi-project mode). */

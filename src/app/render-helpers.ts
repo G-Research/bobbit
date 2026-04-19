@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, svg, type TemplateResult } from "lit";
-import { Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -12,6 +12,8 @@ import {
 	isTeamLeadExpanded,
 	toggleArchivedParentExpanded,
 	isArchivedParentExpanded,
+	isArchivedSectionExpanded,
+	setArchivedSectionExpanded,
 	type GatewaySession,
 	type Goal,
 	type GoalState,
@@ -304,6 +306,100 @@ export const INDENT = 5;
 export const CHEVRON_W = 14;
 /** Wider chevron slot for level-0 section headers (extra right breathing room). */
 export const HEADER_CHEVRON_W = 20;
+
+// ============================================================================
+// ARCHIVED BUCKETING (shared between desktop sidebar and mobile landing)
+// ============================================================================
+
+export interface ArchivedBucket {
+	archivedGoals: Goal[];
+	standaloneArchivedSessions: GatewaySession[];
+}
+
+/**
+ * Bucket filtered archived goals + standalone archived sessions by project id.
+ * Items without a projectId fall back to the first project as a default bucket,
+ * matching existing desktop behaviour. Returns a Map keyed by project id.
+ */
+export function bucketArchivedByProject(
+	archivedGoals: Goal[],
+	standaloneArchivedSessions: GatewaySession[],
+	projects: Project[],
+): Map<string, ArchivedBucket> {
+	const map = new Map<string, ArchivedBucket>();
+	for (const p of projects) map.set(p.id, { archivedGoals: [], standaloneArchivedSessions: [] });
+	const defaultId = projects[0]?.id || "";
+	for (const g of archivedGoals) {
+		const pid = g.projectId || defaultId;
+		const bucket = map.get(pid) || (defaultId ? map.get(defaultId) : undefined);
+		if (!bucket) continue;
+		bucket.archivedGoals.push(g);
+	}
+	for (const s of standaloneArchivedSessions) {
+		const pid = s.projectId || defaultId;
+		const bucket = map.get(pid) || (defaultId ? map.get(defaultId) : undefined);
+		if (!bucket) continue;
+		bucket.standaloneArchivedSessions.push(s);
+	}
+	return map;
+}
+
+/**
+ * Render the collapsible per-project Archived subsection.
+ *
+ * Shared between desktop (`renderSidebar` in sidebar.ts) and mobile
+ * (`renderMobileLanding` in render.ts). Collapse state is persisted via
+ * `isArchivedSectionExpanded` / `setArchivedSectionExpanded` under the
+ * shared localStorage key `bobbit-archived-collapsed-projects`.
+ *
+ * Returns "" when showArchived is off OR the project has no archived items.
+ *
+ * `variant: "desktop"` matches the original tight desktop styling.
+ * `variant: "mobile"` uses larger touch targets and typography.
+ */
+export function renderProjectArchivedSection(
+	project: Project,
+	archivedGoals: Goal[],
+	standaloneArchivedSessions: GatewaySession[],
+	variant: "desktop" | "mobile" = "desktop",
+): TemplateResult | string {
+	if (!state.showArchived) return "";
+	if (archivedGoals.length === 0 && standaloneArchivedSessions.length === 0) return "";
+	const expanded = isArchivedSectionExpanded(project.id);
+	const isMobile = variant === "mobile";
+	const headerSize = isMobile ? "sm" : "xs";
+	const headerPy = isMobile ? "py-1.5" : "py-0.5";
+	const labelClass = isMobile
+		? "flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60"
+		: "flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium opacity-60";
+	return html`
+		<div class="border-t border-border/30 my-1 mx-2"></div>
+		<div class="flex flex-col gap-0.5">
+			<button
+				class="relative flex items-center gap-1 pr-1 ${headerPy} w-full text-left ${isMobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} rounded-md transition-colors"
+				style="padding-left:${HEADER_CHEVRON_W}px;"
+				@click=${() => { setArchivedSectionExpanded(project.id, !expanded); renderApp(); }}
+			>
+				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none opacity-60" style="width:${HEADER_CHEVRON_W}px;">${expanded ? "▾" : "▸"}</span>
+				<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, headerSize)}</span>
+				<span class="${labelClass}">Archived</span>
+			</button>
+			${expanded ? html`
+				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${archivedGoals.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
+					${archivedGoals.map(goal => isMobile ? html`<div class="opacity-60">${renderGoalGroup(goal)}</div>` : renderGoalGroup(goal))}
+				</div>` : ""}
+				${archivedGoals.length > 0 && standaloneArchivedSessions.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
+				${standaloneArchivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+					${standaloneArchivedSessions.map(s => html`
+						${renderArchivedSessionRow(s)}
+						${renderArchivedDelegates(s.id)}
+					`)}
+				</div>` : ""}
+			` : ""}
+		</div>
+	`;
+}
 
 export function renderSessionRow(session: GatewaySession) {
 	const mobile = !isDesktop();
