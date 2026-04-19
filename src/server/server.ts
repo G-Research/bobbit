@@ -48,6 +48,7 @@ import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImag
 import { SandboxManager } from "./agent/sandbox-manager.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
+import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
@@ -661,6 +662,57 @@ export function createGateway(config: GatewayConfig) {
 			}
 		}
 	}
+	/**
+	 * Broadcast to all authenticated WebSocket clients whose active session
+	 * belongs to the given project. Clients with no session association (e.g.
+	 * the user viewing the dashboard) also receive the event so the UI can
+	 * surface index status in project-agnostic chrome.
+	 */
+	function broadcastToProject(projectId: string, event: any): void {
+		const data = JSON.stringify(event);
+		for (const ws of wss.clients) {
+			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+			const sid = (ws as any).sessionId as string | undefined;
+			if (sid) {
+				const session = sessionManager.getSession(sid);
+				if (!session) continue;
+				if (session.projectId && session.projectId !== projectId) continue;
+			}
+			ws.send(data);
+		}
+	}
+
+	// Bridge search index progress bus → WS. Progress events are debounced
+	// to 500ms per-project (design §9). Complete + error events pass through.
+	{
+		const progressDebounce = new Map<string, { timer: NodeJS.Timeout; latest: any }>();
+		const flushProgress = (projectId: string) => {
+			const entry = progressDebounce.get(projectId);
+			if (!entry) return;
+			progressDebounce.delete(projectId);
+			clearTimeout(entry.timer);
+			broadcastToProject(projectId, entry.latest);
+		};
+		searchProgressBus.on("index:progress", (ev) => {
+			const event = { type: "index:progress" as const, ...ev };
+			const existing = progressDebounce.get(ev.projectId);
+			if (existing) {
+				existing.latest = event;
+				return;
+			}
+			const timer = setTimeout(() => flushProgress(ev.projectId), 500);
+			timer.unref();
+			progressDebounce.set(ev.projectId, { timer, latest: event });
+		});
+		searchProgressBus.on("index:complete", (ev) => {
+			flushProgress(ev.projectId);
+			broadcastToProject(ev.projectId, { type: "index:complete" as const, ...ev });
+		});
+		searchProgressBus.on("index:error", (ev) => {
+			broadcastToProject(ev.projectId, { type: "index:error" as const, ...ev });
+		});
+	}
+
 	teamManager.setBroadcastToGoal(broadcastToGoal);
 	sessionManager.setOnPrCreationDetected((session) => {
 		const goalId = session.goalId || session.teamGoalId;
@@ -1701,7 +1753,7 @@ async function handleApiRoute(
 		try {
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const projectNames = new Map(projectRegistry.list().map(p => [p.id, p.name]));
-			const results = projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
+			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
 			json(results);
 		} catch (err) {
 			json({ error: `Search failed: ${err}` }, 500);
@@ -6353,6 +6405,176 @@ async function handleApiRoute(
 		await sessionManager.purgeExpiredArchives();
 		const stats = await sessionManager.getExpiredArchiveStats();
 		json({ purged: true, remaining: stats });
+		return;
+	}
+
+	// ─── Search admin endpoints (design §9, §11) ─────────────────────
+
+	function resolveSearchProject(pid: string | undefined | null) {
+		if (!pid) return null;
+		const ctx = projectContextManager.getOrCreate(pid);
+		return ctx;
+	}
+
+	function searchUnavailableResponse(state: string) {
+		const reasonMap: Record<string, string> = {
+			"disabled-no-native": "native-binary",
+			"disabled-no-model": "embedding-model",
+			"closed": "closed",
+			"initializing": "initializing",
+		};
+		const reason = reasonMap[state] ?? state;
+		return { error: "search-unavailable", reason, state };
+	}
+
+	// POST /api/search/rebuild
+	if (url.pathname === "/api/search/rebuild" && req.method === "POST") {
+		const body = await readBody(req);
+		const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
+		if (!projectId || typeof projectId !== "string") {
+			json({ error: "Missing projectId" }, 400);
+			return;
+		}
+		const ctx = resolveSearchProject(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		await ctx.searchIndex.whenReady();
+		const state = ctx.searchIndex.getState();
+		if (state !== "ready") {
+			json(searchUnavailableResponse(state), 503);
+			return;
+		}
+		// Kick off in background — client observes progress over WS.
+		ctx.searchIndex
+			.rebuildFromStores(ctx.goalStore, ctx.sessionStore, undefined, ctx.staffStore)
+			.catch((err) => console.error("[search] rebuild failed:", err));
+		json({ ok: true }, 202);
+		return;
+	}
+
+	// GET /api/search/stats?projectId=...
+	if (url.pathname === "/api/search/stats" && req.method === "GET") {
+		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
+		const ctx = resolveSearchProject(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		await ctx.searchIndex.whenReady();
+		const stats = await ctx.searchIndex.getStats();
+		json(stats);
+		return;
+	}
+
+	// POST /api/search/compact
+	if (url.pathname === "/api/search/compact" && req.method === "POST") {
+		const body = await readBody(req);
+		const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
+		if (!projectId || typeof projectId !== "string") {
+			json({ error: "Missing projectId" }, 400);
+			return;
+		}
+		const ctx = resolveSearchProject(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		await ctx.searchIndex.whenReady();
+		const state = ctx.searchIndex.getState();
+		if (state !== "ready") {
+			json(searchUnavailableResponse(state), 503);
+			return;
+		}
+		try {
+			await ctx.searchIndex.compact();
+			json({ ok: true });
+		} catch (err) {
+			json({ error: `Compact failed: ${(err as Error).message}` }, 500);
+		}
+		return;
+	}
+
+	// GET /api/maintenance/orphaned-index-rows?projectId=...
+	if (url.pathname === "/api/maintenance/orphaned-index-rows" && req.method === "GET") {
+		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
+		const ctx = resolveSearchProject(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		await ctx.searchIndex.whenReady();
+		const store = ctx.searchIndex.getLanceStore();
+		if (!store) {
+			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
+			return;
+		}
+		try {
+			const rows = (await store.query().select(["id", "source_id", "parent_id", "goal_id", "session_id"]).limit(100000).toArray()) as Array<Record<string, unknown>>;
+			const orphans: Array<{ id: string; source_id: string; parent_id: string | null }> = [];
+			for (const row of rows) {
+				const sourceId = String(row.source_id ?? "");
+				const id = String(row.id ?? "");
+				let isOrphan = false;
+				if (sourceId === "goals") {
+					const goalId = id.replace(/^goal:/, "");
+					isOrphan = !ctx.goalStore.get(goalId);
+				} else if (sourceId === "sessions") {
+					const sessionId = id.replace(/^session:/, "");
+					isOrphan = !ctx.sessionStore.get(sessionId);
+				} else if (sourceId === "messages") {
+					const sessionId = String(row.session_id ?? "");
+					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
+				} else if (sourceId === "staff") {
+					const staffId = id.replace(/^staff:/, "");
+					isOrphan = !ctx.staffStore.get(staffId);
+				}
+				if (isOrphan) {
+					orphans.push({
+						id,
+						source_id: sourceId,
+						parent_id: row.parent_id != null ? String(row.parent_id) : null,
+					});
+				}
+			}
+			json({ count: orphans.length, sample: orphans.slice(0, 100) });
+		} catch (err) {
+			json({ error: `Orphan scan failed: ${(err as Error).message}` }, 500);
+		}
+		return;
+	}
+
+	// POST /api/maintenance/cleanup-index-rows
+	if (url.pathname === "/api/maintenance/cleanup-index-rows" && req.method === "POST") {
+		const body = await readBody(req);
+		const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
+		if (!projectId || typeof projectId !== "string") {
+			json({ error: "Missing projectId" }, 400);
+			return;
+		}
+		const ctx = resolveSearchProject(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		await ctx.searchIndex.whenReady();
+		const store = ctx.searchIndex.getLanceStore();
+		if (!store) {
+			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
+			return;
+		}
+		try {
+			const rows = (await store.query().select(["id", "source_id", "session_id"]).limit(100000).toArray()) as Array<Record<string, unknown>>;
+			const toDelete: string[] = [];
+			for (const row of rows) {
+				const sourceId = String(row.source_id ?? "");
+				const id = String(row.id ?? "");
+				let isOrphan = false;
+				if (sourceId === "goals") {
+					isOrphan = !ctx.goalStore.get(id.replace(/^goal:/, ""));
+				} else if (sourceId === "sessions") {
+					isOrphan = !ctx.sessionStore.get(id.replace(/^session:/, ""));
+				} else if (sourceId === "messages") {
+					const sessionId = String(row.session_id ?? "");
+					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
+				} else if (sourceId === "staff") {
+					isOrphan = !ctx.staffStore.get(id.replace(/^staff:/, ""));
+				}
+				if (isOrphan) toDelete.push(id);
+			}
+			if (toDelete.length) await store.deleteByIds(toDelete);
+			json({ deleted: toDelete.length });
+		} catch (err) {
+			json({ error: `Cleanup failed: ${(err as Error).message}` }, 500);
+		}
 		return;
 	}
 

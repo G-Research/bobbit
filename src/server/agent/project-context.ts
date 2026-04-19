@@ -13,7 +13,7 @@ import { ToolManager } from "./tool-manager.js";
 import { ProjectConfigStore } from "./project-config-store.js";
 import { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { ColorStore } from "./color-store.js";
-import { SearchIndex } from "../search/search-index.js";
+import { SearchService } from "../search/search-service.js";
 import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
@@ -42,7 +42,7 @@ export class ProjectContext {
   readonly teamStore: TeamStore;
   readonly staffStore: StaffStore;
   readonly colorStore: ColorStore;
-  readonly searchIndex: SearchIndex;
+  readonly searchIndex: SearchService;
   readonly costTracker: CostTracker;
   readonly goalManager: GoalManager;
   readonly secretsStore: SecretsStore;
@@ -69,7 +69,7 @@ export class ProjectContext {
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
     this.colorStore = new ColorStore(this.stateDir);
-    this.searchIndex = new SearchIndex(path.join(this.stateDir, "search.db"));
+    this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore });
     this.costTracker = new CostTracker(this.stateDir);
     this.goalManager = new GoalManager(this.goalStore);
     this.secretsStore = new SecretsStore(this.stateDir);
@@ -83,13 +83,15 @@ export class ProjectContext {
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
   }
 
-  /** Open resources that require initialization (e.g. SQLite). */
+  /** Open resources that require initialization (LanceDB + embedder). */
   open(): void {
-    this.searchIndex.staffStore = this.staffStore;
-    this.searchIndex.open();
-    if (this.searchIndex.needsRebuild()) {
-      this.searchIndex.rebuildFromStores(this.goalStore, this.sessionStore, undefined, this.staffStore);
-    }
+    // Kick off async initialization — non-blocking, state transitions
+    // through "initializing" → "ready" (or a disabled state).
+    this.searchIndex.open({
+      goalStore: this.goalStore,
+      sessionStore: this.sessionStore,
+      staffStore: this.staffStore,
+    });
     // Wire search index updates on goal/session mutations
     this.goalStore.onIndexUpdate = (goal) => {
       this.searchIndex.indexGoal(goal, this.project.id);
@@ -103,6 +105,7 @@ export class ProjectContext {
   /** Close resources for clean shutdown. */
   close(): void {
     this.sessionStore.flush();
-    this.searchIndex.close();
+    // Fire and forget — close() is sync on the public API for callers.
+    void this.searchIndex.close();
   }
 }

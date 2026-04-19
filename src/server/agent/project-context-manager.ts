@@ -2,7 +2,7 @@ import { ProjectContext } from "./project-context.js";
 import { ProjectRegistry } from "./project-registry.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
-import type { SearchResults, SearchResult } from "../search/search-index.js";
+import type { SearchResults, SearchResult } from "../search/types.js";
 
 /**
  * Central registry of ProjectContext instances.
@@ -149,7 +149,7 @@ export class ProjectContextManager {
   }
 
   /** Aggregate search across all (or filtered) project indexes. */
-  searchAll(
+  async searchAll(
     query: string,
     opts: {
       type?: string;
@@ -158,7 +158,7 @@ export class ProjectContextManager {
       projectId?: string;
       projectNames?: Map<string, string>;
     } = {},
-  ): SearchResults {
+  ): Promise<SearchResults> {
     const allResults: SearchResult[] = [];
     let totalCount = 0;
     const limit = opts.limit ?? 50;
@@ -170,7 +170,7 @@ export class ProjectContextManager {
 
       if (!ctx.searchIndex) continue;
 
-      const { results, total } = ctx.searchIndex.search(query, {
+      const out = ctx.searchIndex.search(query, {
         type: opts.type as any,
         // Fetch enough results for cross-project merging
         limit: limit + offset,
@@ -178,6 +178,7 @@ export class ProjectContextManager {
         projectId: undefined, // Already filtered above
         projectNames: opts.projectNames,
       });
+      const { results, total } = out instanceof Promise ? await out : out;
 
       allResults.push(...results);
       totalCount += total;

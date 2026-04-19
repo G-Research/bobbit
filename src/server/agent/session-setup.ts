@@ -21,7 +21,7 @@ import { PromptQueue } from "./prompt-queue.js";
 import type { SessionStore } from "./session-store.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
-import type { SearchIndex } from "../search/search-index.js";
+import type { SearchService } from "../search/search-service.js";
 import type { CostTracker } from "./cost-tracker.js";
 import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
@@ -134,7 +134,7 @@ export interface PipelineContext {
 	configCascade: ConfigCascade | null;
 	costTracker: CostTracker;
 	store: SessionStore;
-	searchIndex: SearchIndex;
+	searchIndex: SearchService;
 	sessions: Map<string, SessionInfo>;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 

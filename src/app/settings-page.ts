@@ -20,7 +20,9 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp, setProjects, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
-import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects } from "./api.js";
+import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, searchCompact, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { dispatchIndexEvent } from "./components/search-status-dot.js";
+import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 
@@ -2335,12 +2337,138 @@ function renderAppearanceTab(projectId: string) {
 let maintenanceWorktrees: Array<{ path: string; branch: string }> | null = null;
 let maintenanceSessions: Array<{ id: string; title: string; createdAt: number }> | null = null;
 let maintenanceArchives: { count: number; totalSizeBytes: number } | null = null;
-let maintenanceLoading: "worktrees" | "sessions" | "archives" | null = null;
+let maintenanceLoading: "worktrees" | "sessions" | "archives" | "search" | "orphanRows" | null = null;
+
+// Search Index panel state
+let searchIndexStats: SearchStats | null = null;
+let searchIndexStatsLoaded = false;
+let searchIndexProgress: { completed: number; total: number } | null = null;
+let searchIndexError: string | null = null;
+let searchIndexWsSubscribed = false;
+let orphanIndexRows: OrphanedIndexRows | null = null;
 
 function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatTimestamp(ts: number | null): string {
+	if (!ts) return "never";
+	try { return new Date(ts).toLocaleString(); } catch { return "unknown"; }
+}
+
+function currentProjectIdForSearch(): string | undefined {
+	// Panel is in system-scope Maintenance tab, but search data is per-project.
+	// Fall back to the active project selected in the sidebar.
+	return state.activeProjectId ?? undefined;
+}
+
+async function loadSearchStats(): Promise<void> {
+	maintenanceLoading = "search";
+	renderApp();
+	try {
+		searchIndexStats = await searchStats(currentProjectIdForSearch());
+		searchIndexStatsLoaded = true;
+	} catch {
+		searchIndexStats = null;
+	}
+	maintenanceLoading = null;
+	renderApp();
+}
+
+/** Subscribe to index:* events to drive the live progress bar + error state. */
+function ensureSearchIndexWsSubscribed(): void {
+	if (searchIndexWsSubscribed) return;
+	searchIndexWsSubscribed = true;
+	window.addEventListener("bobbit-index-event", (e: Event) => {
+		const evt = (e as CustomEvent).detail;
+		if (!evt) return;
+		if (evt.type === "index:progress") {
+			searchIndexProgress = { completed: evt.completed, total: evt.total };
+			searchIndexError = null;
+			renderApp();
+		} else if (evt.type === "index:complete") {
+			searchIndexProgress = null;
+			searchIndexError = null;
+			// Refresh stats so row counts / lastRebuildAt catch up.
+			void loadSearchStats();
+		} else if (evt.type === "index:error") {
+			searchIndexError = evt.message || "Search index error";
+			searchIndexProgress = null;
+			renderApp();
+		}
+	});
+}
+
+async function rebuildSearchIndex(): Promise<void> {
+	if (!window.confirm("Rebuild the search index? This re-embeds every goal, session, message, and staff record for the active project. It runs in the background.")) return;
+	maintenanceLoading = "search";
+	renderApp();
+	try {
+		const projectId = currentProjectIdForSearch();
+		const res = await searchRebuild(projectId);
+		if (res.ok) {
+			// Optimistic yellow dot — the WS event stream will take over.
+			searchIndexProgress = { completed: 0, total: 0 };
+			searchIndexError = null;
+			dispatchIndexEvent({
+				type: "index:progress",
+				projectId: projectId ?? "",
+				phase: "rebuild",
+				total: 0,
+				completed: 0,
+				backlog: 0,
+			});
+		} else if (res.status === 503) {
+			searchIndexError = res.error || "Search unavailable";
+			dispatchIndexEvent({
+				type: "index:error",
+				projectId: projectId ?? "",
+				message: res.error || "Search unavailable",
+				recoverable: false,
+			});
+		} else {
+			searchIndexError = res.error || `Rebuild failed (HTTP ${res.status})`;
+		}
+	} catch (err) {
+		searchIndexError = (err as Error).message;
+	}
+	maintenanceLoading = null;
+	renderApp();
+}
+
+async function compactSearchIndex(): Promise<void> {
+	maintenanceLoading = "search";
+	renderApp();
+	try {
+		await searchCompact(currentProjectIdForSearch());
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	await loadSearchStats();
+}
+
+async function scanOrphanIndexRows(): Promise<void> {
+	maintenanceLoading = "orphanRows";
+	renderApp();
+	try {
+		orphanIndexRows = await orphanedIndexRows(currentProjectIdForSearch());
+	} catch {
+		orphanIndexRows = { count: 0, sample: [] };
+	}
+	maintenanceLoading = null;
+	renderApp();
+}
+
+async function cleanupOrphanRows(): Promise<void> {
+	maintenanceLoading = "orphanRows";
+	renderApp();
+	try {
+		await cleanupOrphanedIndexRows(currentProjectIdForSearch());
+	} catch { /* ignore */ }
+	maintenanceLoading = null;
+	await scanOrphanIndexRows();
 }
 
 async function scanWorktrees(): Promise<void> {
@@ -2430,11 +2558,91 @@ function renderMaintenanceTab() {
 	const scanBtnClass = "px-3 py-1.5 text-sm rounded-md border border-input bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50";
 	const actionBtnClass = "px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50";
 
+	ensureSearchIndexWsSubscribed();
+	if (!searchIndexStatsLoaded && maintenanceLoading !== "search") {
+		void loadSearchStats();
+	}
+
+	const progressPct = (() => {
+		if (!searchIndexProgress) return null;
+		const { completed, total } = searchIndexProgress;
+		if (total <= 0) return 0; // indeterminate
+		return Math.min(100, Math.round((completed / total) * 100));
+	})();
+
 	return html`
 		<div class="flex flex-col gap-6">
 			<p class="text-sm text-muted-foreground">
 				Review and clean up orphaned resources. No cleanup happens automatically on server restart — use these tools to manage resources manually.
 			</p>
+
+			<!-- Search Index -->
+			<div class="flex flex-col gap-2 rounded-md border border-border p-4" data-section="search-index">
+				<div class="flex items-center gap-2">
+					<h3 class="text-sm font-semibold text-foreground">Search Index</h3>
+					<search-status-dot></search-status-dot>
+				</div>
+				<p class="text-xs text-muted-foreground">
+					Semantic + lexical search over goals, sessions, messages, and staff. Rebuild after upgrading or if results look stale.
+				</p>
+				${searchIndexStats ? html`
+					<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-1 text-xs">
+						<div class="flex justify-between gap-2"><span class="text-muted-foreground">State</span><span class="text-foreground font-medium" data-search-state="${searchIndexStats.state}">${searchIndexStats.state}</span></div>
+						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Last rebuild</span><span class="text-foreground">${formatTimestamp(searchIndexStats.lastRebuildAt)}</span></div>
+						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Embedder</span><span class="text-foreground font-mono truncate" title="${searchIndexStats.embedderId}">${searchIndexStats.embedderId} (${searchIndexStats.embedderDim})</span></div>
+						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Dataset size</span><span class="text-foreground">${formatBytes(searchIndexStats.datasetBytes)}</span></div>
+					</div>
+					${Object.keys(searchIndexStats.rowCountsBySource || {}).length > 0 ? html`
+						<div class="flex flex-wrap gap-1.5 mt-1">
+							${Object.entries(searchIndexStats.rowCountsBySource).map(([src, n]) => html`
+								<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground font-mono">${src}: ${n}</span>
+							`)}
+						</div>
+					` : ""}
+				` : searchIndexStatsLoaded ? html`
+					<p class="text-xs text-muted-foreground italic mt-1">Stats unavailable.</p>
+				` : html`
+					<p class="text-xs text-muted-foreground italic mt-1">Loading stats…</p>
+				`}
+				${searchIndexProgress ? html`
+					<div class="mt-2" data-search-progress>
+						<div class="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+							<span>Rebuilding…</span>
+							<span>${searchIndexProgress.total > 0 ? `${searchIndexProgress.completed} / ${searchIndexProgress.total}` : `${searchIndexProgress.completed} items`}</span>
+						</div>
+						<div class="h-1.5 w-full rounded-full bg-secondary overflow-hidden">
+							${progressPct === 0 ? html`
+								<div class="h-full w-1/3 bg-amber-500 animate-pulse"></div>
+							` : html`
+								<div class="h-full bg-amber-500 transition-all" style="width: ${progressPct}%"></div>
+							`}
+						</div>
+					</div>
+				` : ""}
+				${searchIndexError ? html`
+					<p class="text-xs text-destructive mt-1" data-search-error>${searchIndexError}</p>
+				` : ""}
+				<div class="flex items-center gap-2 mt-2">
+					<button
+						class="${scanBtnClass}"
+						?disabled=${maintenanceLoading === "search"}
+						@click=${loadSearchStats}
+						data-action="refresh-search-stats"
+					>Refresh</button>
+					<button
+						class="${actionBtnClass}"
+						?disabled=${maintenanceLoading === "search" || !!searchIndexProgress}
+						@click=${rebuildSearchIndex}
+						data-action="rebuild-search-index"
+					>Rebuild Index</button>
+					<button
+						class="${scanBtnClass}"
+						?disabled=${maintenanceLoading === "search" || !!searchIndexProgress}
+						@click=${compactSearchIndex}
+						data-action="compact-search-index"
+					>Compact Dataset</button>
+				</div>
+			</div>
 
 			<!-- Orphaned Worktrees -->
 			<div class="flex flex-col gap-2 rounded-md border border-border p-4">
@@ -2524,6 +2732,43 @@ function renderMaintenanceTab() {
 						?disabled=${maintenanceLoading === "archives" || !maintenanceArchives || maintenanceArchives.count === 0}
 						@click=${purgeArchives}
 					>${maintenanceLoading === "archives" && maintenanceArchives !== null ? "Purging..." : `Purge${maintenanceArchives && maintenanceArchives.count > 0 ? ` (${maintenanceArchives.count})` : ""}`}</button>
+				</div>
+			</div>
+
+			<!-- Orphaned Search-Index Rows -->
+			<div class="flex flex-col gap-2 rounded-md border border-border p-4" data-section="orphaned-index-rows">
+				<h3 class="text-sm font-semibold text-foreground">Orphaned Index Rows</h3>
+				<p class="text-xs text-muted-foreground">
+					Search-index rows whose source entity (goal, session, staff, or message) no longer exists.
+				</p>
+				${orphanIndexRows !== null && orphanIndexRows.count > 0 ? html`
+					<p class="text-sm text-foreground mt-1">${orphanIndexRows.count} orphaned row${orphanIndexRows.count !== 1 ? "s" : ""}.</p>
+					${orphanIndexRows.sample.length > 0 ? html`
+						<div class="flex flex-col gap-1 mt-1 max-h-40 overflow-y-auto">
+							${orphanIndexRows.sample.map(row => html`
+								<div class="flex items-center gap-2 text-xs font-mono text-muted-foreground px-2 py-1 rounded bg-secondary/30">
+									<span class="truncate flex-1">${row.id}</span>
+									<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground shrink-0">${row.source_id}</span>
+								</div>
+							`)}
+						</div>
+					` : ""}
+				` : orphanIndexRows !== null ? html`
+					<p class="text-xs text-muted-foreground italic mt-1">No orphaned rows found.</p>
+				` : ""}
+				<div class="flex items-center gap-2 mt-2">
+					<button
+						class="${scanBtnClass}"
+						?disabled=${maintenanceLoading === "orphanRows"}
+						@click=${scanOrphanIndexRows}
+						data-action="scan-orphan-index-rows"
+					>${maintenanceLoading === "orphanRows" && orphanIndexRows === null ? "Scanning..." : "Scan"}</button>
+					<button
+						class="${actionBtnClass}"
+						?disabled=${maintenanceLoading === "orphanRows" || !orphanIndexRows || orphanIndexRows.count === 0}
+						@click=${cleanupOrphanRows}
+						data-action="cleanup-orphan-index-rows"
+					>${maintenanceLoading === "orphanRows" && orphanIndexRows !== null ? "Cleaning..." : `Remove Orphan Rows${orphanIndexRows && orphanIndexRows.count > 0 ? ` (${orphanIndexRows.count})` : ""}`}</button>
 				</div>
 			</div>
 		</div>

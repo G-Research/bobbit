@@ -4,6 +4,7 @@ import { Archive, Bot, ChevronDown, Drama, FolderOpen, Goal as GoalIcon, List, M
 // Register search web components (self-registering via @customElement)
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
+import "./components/search-status-dot.js";
 import {
 	state,
 	renderApp,
@@ -942,13 +943,18 @@ export function renderSidebar() {
 				</div>
 			</div>
 			${renderSetupBanner()}
-			<search-box
-				.query=${state.searchQuery}
-				.showControls=${!!state.searchQuery}
-				@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
-				@search-clear=${() => { _handleSearchClear(); }}
-				@full-search-click=${(e: CustomEvent) => { _handleFullSearchClick(e.detail.query); }}
-			></search-box>
+			<div class="flex items-center gap-2">
+				<div class="flex-1 min-w-0">
+					<search-box
+						.query=${state.searchQuery}
+						.showControls=${!!state.searchQuery}
+						@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
+						@search-clear=${() => { _handleSearchClear(); }}
+						@full-search-click=${(e: CustomEvent) => { _handleFullSearchClick(e.detail.query); }}
+					></search-box>
+				</div>
+				<search-status-dot></search-status-dot>
+			</div>
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground text-xs">Loading…</div>`

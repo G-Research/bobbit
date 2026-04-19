@@ -298,6 +298,87 @@ export async function searchApi(query: string, type?: string, limit?: number, of
 }
 
 // ============================================================================
+// SEARCH INDEX MAINTENANCE API
+// ============================================================================
+
+export interface SearchStats {
+	lastRebuildAt: number | null;
+	rowCountsBySource: Record<string, number>;
+	datasetBytes: number;
+	embedderId: string;
+	embedderDim: number;
+	state: "ready" | "rebuilding" | "disabled-no-native" | "disabled-no-model" | "error" | string;
+}
+
+export async function searchStats(projectId?: string): Promise<SearchStats | null> {
+	try {
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/search/stats${qs}`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
+		return null;
+	}
+}
+
+export async function searchRebuild(projectId?: string): Promise<{ ok: boolean; status: number; error?: string }> {
+	try {
+		const res = await gatewayFetch("/api/search/rebuild", {
+			method: "POST",
+			body: JSON.stringify(projectId ? { projectId } : {}),
+		});
+		if (res.ok) return { ok: true, status: res.status };
+		let error: string | undefined;
+		try { error = (await res.json()).error; } catch { /* ignore */ }
+		return { ok: false, status: res.status, error };
+	} catch (err) {
+		return { ok: false, status: 0, error: (err as Error).message };
+	}
+}
+
+export async function searchCompact(projectId?: string): Promise<boolean> {
+	try {
+		const res = await gatewayFetch("/api/search/compact", {
+			method: "POST",
+			body: JSON.stringify(projectId ? { projectId } : {}),
+		});
+		return res.ok;
+	} catch {
+		return false;
+	}
+}
+
+export interface OrphanedIndexRows {
+	count: number;
+	sample: Array<{ id: string; source_id: string; parent_id?: string | null }>;
+}
+
+export async function orphanedIndexRows(projectId?: string): Promise<OrphanedIndexRows> {
+	try {
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/maintenance/orphaned-index-rows${qs}`);
+		if (!res.ok) return { count: 0, sample: [] };
+		return await res.json();
+	} catch {
+		return { count: 0, sample: [] };
+	}
+}
+
+export async function cleanupOrphanedIndexRows(projectId?: string): Promise<number> {
+	try {
+		const res = await gatewayFetch("/api/maintenance/cleanup-index-rows", {
+			method: "POST",
+			body: JSON.stringify(projectId ? { projectId } : {}),
+		});
+		if (!res.ok) return 0;
+		const data = await res.json();
+		return data?.deleted ?? 0;
+	} catch {
+		return 0;
+	}
+}
+
+// ============================================================================
 // PROJECT API
 // ============================================================================
 
