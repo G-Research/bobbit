@@ -943,16 +943,14 @@ export function renderSidebar() {
 				</div>
 			</div>
 			${renderSetupBanner()}
-			<div class="flex items-center gap-2">
-				<div class="flex-1 min-w-0">
-					<search-box
-						.query=${state.searchQuery}
-						.showControls=${!!state.searchQuery}
-						@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
-						@search-clear=${() => { _handleSearchClear(); }}
-						@full-search-click=${(e: CustomEvent) => { _handleFullSearchClick(e.detail.query); }}
-					></search-box>
-				</div>
+			<div class="flex flex-col gap-1">
+				<search-box
+					.query=${state.searchQuery}
+					.showControls=${!!state.searchQuery}
+					@search-input=${(e: CustomEvent) => { _handleSearchInput(e.detail.query); }}
+					@search-clear=${() => { _handleSearchClear(); }}
+					@full-search-click=${(e: CustomEvent) => { _handleFullSearchClick(e.detail.query); }}
+				></search-box>
 				<search-status-dot></search-status-dot>
 			</div>
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
