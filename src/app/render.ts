@@ -32,7 +32,7 @@ import "../ui/components/review/ReviewPane.js";
 import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
-import { renderGoalGroup, renderSessionRow, renderArchivedSessionRow, renderArchivedDelegates, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -225,6 +225,10 @@ function renderMobileLanding() {
 											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
 											bucket.staff.push(s);
 										}
+										// Bucket archived goals + standalone archived sessions per project.
+										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+										const filteredStandaloneArchivedAll = filterArchivedSessionsByQuery(allStandaloneArchivedAll, state.searchQuery);
+										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, state.projects);
 										return html`${state.projects.map((project, i) => {
 											const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
 											const expanded = isProjectExpanded(project.id);
@@ -289,41 +293,21 @@ function renderMobileLanding() {
 														` : ""}
 													</div>`; })()}
 													${renderStaffSidebarSection(data.staff, project.id)}
+													${(() => {
+														const ab = archivedByProject.get(project.id);
+														if (!ab) return "";
+														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");
+													})()}
 												</div>` : ""}
 											`;
-										})}`;
-								})()}
-								${(() => {
-									const allStandaloneArchived = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
-									const standaloneArchived = filterArchivedSessionsByQuery(allStandaloneArchived, state.searchQuery);
-									return state.showArchived ? html`
-										<div class="border-t border-border/30 my-1 mx-2"></div>
-										<div class="flex flex-col gap-0.5">
-											<div class="flex items-center gap-1.5 pl-1 pr-2 py-1.5">
-												<span class="shrink-0 text-muted-foreground opacity-60">${icon(Archive, "sm")}</span>
-												<span class="flex-1 text-sm text-muted-foreground uppercase tracking-wider font-medium opacity-60">Archived</span>
+										})}
+										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
+											<div class="border-t border-border/30 my-1 mx-2"></div>
+											<div class="flex flex-col gap-0.5 px-2">
+												${state.archivedGoalsHasMore ? html`<button class="text-xs text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>` : ""}
+												${state.archivedSessionsHasMore ? html`<button class="text-xs text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>` : ""}
 											</div>
-											${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
-												${archivedGoals.map(goal => html`
-													<div class="opacity-60">${renderGoalGroup(goal)}</div>
-												`)}
-											</div>
-											${state.archivedGoalsHasMore ? html`
-												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more goals…</button>
-											` : ""}
-											${archivedGoals.length > 0 && standaloneArchived.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-50">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-											<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-												${standaloneArchived.map(s => html`
-													${renderArchivedSessionRow(s)}
-													${renderArchivedDelegates(s.id)}
-												`)}
-											</div>
-											${state.archivedSessionsHasMore ? html`
-												<button class="text-xs text-primary hover:underline px-2 py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more sessions…</button>
-											` : ""}
-										</div>
-									` : "";
+										` : ""}`;
 								})()}
 							`}
 			</div>
