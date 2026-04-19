@@ -27,6 +27,7 @@ toolPolicies:
   preview_open: allow
   edit: allow
   bash_bg: allow
+  mcp__playwright: never  # Belt-and-braces: native browser_* tools only; no headed Chromium.
 createdAt: 1775146326827
 updatedAt: 1775146382164
 promptTemplate: |-

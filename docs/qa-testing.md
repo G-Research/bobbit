@@ -172,6 +172,33 @@ The `.bobbit-qa/` directory is gitignored and scoped per session. It is deleted 
 
 Earlier versions of the tool returned the full `data:image/png;base64,...` URI as a text block so the agent could copy-paste it into the report. That payload then stayed in the agent transcript and was re-cached on every subsequent turn, costing tens of thousands of tokens per screenshot. The file-spill + server-inline flow replaces that path — agents should never embed base64 image data as literal text in their HTML or in their chat output.
 
+## Browser automation
+
+QA agents drive browsers **only** through the native `browser_*` tools (`browser_navigate`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_eval`, `browser_wait`, `browser_snapshot`, etc.). These are always headless and per-session isolated.
+
+### What's blocked
+
+The `mcp__playwright__*` tool group (from `@playwright/mcp`) is **denied by default for every role** via `defaults/tool-group-policies.yaml` (`mcp__playwright: never`). The `qa-tester` role additionally sets the same policy in its own `toolPolicies` as a belt-and-braces block. Attempting to call `mcp__playwright__browser_navigate` (or any sibling) returns a policy-denied error without launching the MCP server.
+
+### Why
+
+- `@playwright/mcp` defaults to **headed** Chromium — it pops a visible window on the host, steals focus, and resizes tiled windows. This is disruptive on developer desktops and causes flakiness when the OS minimises or resizes the window mid-interaction.
+- Even with `--headless` set, the MCP Playwright browser is a single shared instance across all sessions; concurrent agents hijack each other's pages.
+- The native `browser_*` extension launches Chromium with `headless: true` plus explicit hardening args: `--headless=new`, `--disable-gpu`, and (on Windows/macOS, or Linux when not running as root) `--no-sandbox`. Each session gets its own browser context.
+- `.claude/.mcp.json` passes `--headless --isolated` to `@playwright/mcp` so that even if a role overrides the policy, the MCP-launched browser stays invisible and per-session.
+
+### Overriding (if you actually want MCP Playwright)
+
+If a project legitimately needs `mcp__playwright__*` (e.g. driving a real headed browser for manual inspection), allow it at the project layer:
+
+1. Create `.bobbit/config/tool-group-policies.yaml` with:
+   ```yaml
+   mcp__playwright: allow
+   ```
+2. Optionally override `.mcp.json` in the project to drop `--headless` (e.g. `.bobbit/config/mcp.json` or `.claude/.mcp.json` — see [internals.md — MCP servers](internals.md#mcp-servers) for precedence).
+
+Per-role overrides in a role YAML's `toolPolicies` also work for scoping the allowance to a single role.
+
 ## Budget enforcement
 
 Two budgets prevent runaway validation:
@@ -200,7 +227,7 @@ The production dev server is completely unaffected throughout the validation pro
 
 - **"No QA testing configured"** — The project's `project.yaml` is missing `qa_start_command`. Add `qa_*` keys as described above.
 - **Health check never passes** — Verify `qa_health_check` URL uses `$PORT` placeholder. Check `bash_bg` logs for server startup errors.
-- **Screenshots missing from report** — The agent needs Playwright MCP tools available. Check that the browser tools are in the session's tool set.
+- **Screenshots missing from report** — The agent drives the browser via the native `browser_*` tools, not `mcp__playwright__*`. Check that the session's role allows the `browser` tool group (the `qa-tester` role does by default) and that the agent called `browser_screenshot({ includeBase64: true })`. Spilled files live under `<session-cwd>/.bobbit-qa/screenshots/` and must be referenced in the report as `<img src="file:///<absolute-path>">` so the server can inline them on submit via `report_html_file`.
 - **QA step skipped unexpectedly** — Check that the goal has QA testing enabled (`enabledOptionalSteps` includes `agent-qa`). Check `gate_status` for the implementation gate verification results.
 - **Temp directory not cleaned up** — If the agent crashes mid-protocol, the temp dir may remain. These are in the system temp directory (`$TMPDIR`) and can be manually cleaned.
 

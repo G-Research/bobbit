@@ -50,7 +50,22 @@ async function ensurePage(): Promise<import("playwright").Page> {
 	if (!playwrightMod) throw new Error("playwright is not available");
 
 	if (!browser || !browser.isConnected()) {
-		browser = await playwrightMod.chromium.launch({ headless: true });
+		// Explicit headless-hardening args — see goal: enforce headless QA browsers.
+		// --headless=new forces the new headless mode (belt-and-braces vs headless: true);
+		// --disable-gpu avoids GPU-related visible-window flashes on Windows.
+		// --no-sandbox is safe on Windows/macOS; on Linux only add when not running as root.
+		browser = await playwrightMod.chromium.launch({
+			headless: true,
+			args: [
+				"--headless=new",
+				"--disable-gpu",
+				...((process.platform === "win32" || process.platform === "darwin")
+					? ["--no-sandbox"]
+					: (process.platform === "linux" && typeof process.getuid === "function" && process.getuid() !== 0)
+						? ["--no-sandbox"]
+						: []),
+			],
+		});
 	}
 	const context = await browser.newContext({
 		viewport: { width: 960, height: 540 },
