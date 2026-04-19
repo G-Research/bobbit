@@ -234,6 +234,9 @@ export class Indexer {
 			let buffer: Indexable[] = [];
 			const FLUSH_AT = EMBED_BATCH_SIZE;
 
+			const yieldToLoop = () =>
+				new Promise<void>((resolve) => setImmediate(resolve));
+
 			const flush = async () => {
 				if (buffer.length === 0) return;
 				const expanded = this._expandWithChunks(buffer);
@@ -251,6 +254,11 @@ export class Indexer {
 						await this.lance.upsert(rows.slice(k, k + UPSERT_BATCH_SIZE));
 					}
 					rowsWritten += rows.length;
+					// Yield between batches so REST + WS traffic can interleave
+					// during a long rebuild. ONNX inference is CPU-bound on the
+					// main thread; without this the event loop stalls for seconds
+					// at a time.
+					await yieldToLoop();
 				}
 				this._pendingCompleted += buffer.length;
 				this._scheduleProgress();
