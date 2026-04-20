@@ -305,9 +305,9 @@ export interface SearchStats {
 	lastRebuildAt: number | null;
 	rowCountsBySource: Record<string, number>;
 	datasetBytes: number;
-	embedderId: string;
-	embedderDim: number;
-	state: "ready" | "rebuilding" | "disabled-no-native" | "disabled-no-model" | "error" | string;
+	engine: string;
+	engineVersion: string;
+	state: "ready" | "rebuilding" | "disabled" | "error" | "initializing" | "closed" | string;
 }
 
 export async function searchStats(projectId?: string): Promise<SearchStats | null> {

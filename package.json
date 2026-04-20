@@ -33,8 +33,6 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.1.0",
-    "@lancedb/lancedb": "^0.27.2",
     "@lmstudio/sdk": "^1.5.0",
     "@mariozechner/mini-lit": "^0.2.0",
     "@mariozechner/pi-agent-core": "^0.67.5",
@@ -43,6 +41,7 @@
     "@recogito/text-annotator": "^3.4.9",
     "acme-client": "^5.4.0",
     "docx-preview": "^0.3.7",
+    "flexsearch": "0.8.158",
     "jszip": "^3.10.1",
     "lit": "^3.3.1",
     "lucide": "^0.544.0",

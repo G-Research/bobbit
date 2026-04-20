@@ -1,27 +1,23 @@
 /**
  * Core type definitions for the semantic search subsystem.
  *
- * These are the stable interfaces other modules (embedder, lance-store,
- * indexer, hybrid-query, sources, search-service) build on top of. Keeping
- * them in one place makes the v2 path (file indexing) a drop-in: add a new
- * `IndexSource` with `sourceId: "files"` and `file_path`/`start_line`/
- * `end_line` on `display`, and nothing else in the system changes.
+ * These are the stable interfaces other modules (flex-store, indexer,
+ * sources, search-service) build on top of. Keeping them in one place
+ * makes the v2 path (file indexing) a drop-in: add a new `IndexSource`
+ * with `sourceId: "files"` and `file_path`/`start_line`/`end_line` on
+ * `display`, and nothing else in the system changes.
  *
- * See docs/design/semantic-search.md §3 for the authoritative blueprint.
+ * See docs/design/portable-search.md for the authoritative blueprint.
  */
 
 // ── Versioning ───────────────────────────────────────────────────────
 
 /**
- * Bump when the LanceDB content-table Arrow schema changes in a way that
- * existing rows cannot be read under. A version mismatch in `search_meta`
- * triggers a full rebuild on next open.
+ * Bump when the FlexSearch document schema or on-disk layout changes
+ * in a way that existing rows cannot be read under. A version mismatch
+ * in `search_meta` triggers a full rebuild on next open.
  */
-export const SCHEMA_VERSION = 1;
-
-// TODO: move CONTENT_POLICY_VERSION to content-policy.ts in T3. For now the
-// meta-row expects a value here; lance-store / search-service will import
-// it from content-policy.ts once that module lands.
+export const SCHEMA_VERSION = 2;
 
 // ── Roles ────────────────────────────────────────────────────────────
 
@@ -34,32 +30,13 @@ export type Role =
 	| "spec"
 	| "profile";
 
-// ── Embedder ─────────────────────────────────────────────────────────
-
-export interface Embedder {
-	/** Stable id, e.g. "nomic-embed-text-v1.5". Persisted in search_meta. */
-	readonly id: string;
-	/** Output dimension, e.g. 768. */
-	readonly dim: number;
-	/**
-	 * Embed a batch of texts. `kind` controls the nomic prefix convention
-	 * (`search_document: ` vs `search_query: `) — implementations are free
-	 * to ignore for models that don't use task prefixes.
-	 */
-	embed(texts: string[], kind: "document" | "query"): Promise<Float32Array[]>;
-	/** Token count using the embedder's own tokenizer. Cheap; reused by chunker. */
-	countTokens(text: string): number;
-	/** Resolves once the model is loaded and ready to embed. */
-	ready(): Promise<void>;
-}
-
 // ── Indexable ────────────────────────────────────────────────────────
 
 export interface Indexable {
 	/** Stable key, e.g. "message:<sid>:<msgIdx>:chunk:<n>". */
 	id: string;
 	sourceId: "goals" | "sessions" | "messages" | "staff" | "files";
-	/** Text to embed and FTS-index. */
+	/** Text to index. */
 	text: string;
 	metadata: Record<string, string | number | boolean>;
 	/**
