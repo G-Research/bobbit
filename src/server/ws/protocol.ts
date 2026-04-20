@@ -76,8 +76,6 @@ export type ServerMessage =
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "pr_status_changed"; goalId: string }
 	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string }
-	| { type: "user_question_pending"; sessionId: string; toolUseId: string; questions: Array<{ question: string; options: string[]; allow_other?: boolean }> }
-	| { type: "user_question_answered"; sessionId: string; toolUseId: string; answers: Array<{ question: string; selected: string; other_text: string | null }> }
 	| { type: "index:progress"; projectId: string; phase: "rebuild" | "incremental"; total: number; completed: number; backlog: number }
 	| { type: "index:complete"; projectId: string; phase: "rebuild" | "incremental"; durationMs: number; rowsWritten: number }
 	| { type: "index:error"; projectId: string; message: string; recoverable: boolean };

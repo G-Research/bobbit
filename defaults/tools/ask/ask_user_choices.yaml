@@ -1,13 +1,17 @@
 name: ask_user_choices
-description: "Ask the user 1–5 multiple-choice questions via an interactive inline widget. Blocks until the user submits; returns { answers: [...] }."
-summary: "Ask the user multiple-choice questions and wait for their answers."
+description: "Post 1–5 multiple-choice questions to the user as an inline widget. Non-blocking: the tool returns immediately; the user's answers arrive later as a separate user message. Calling this tool ends your current turn."
+summary: "Post multiple-choice questions to the user as an inline widget (non-blocking; ends your turn)."
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Ask
 docs: |
-  Ask the user 1–5 multiple-choice questions via an inline interactive widget.
-  The tool call blocks until the user submits answers; returns `{ answers: [...] }`.
+  Post 1–5 multiple-choice questions to the user as an inline interactive widget.
+
+  **This tool is non-blocking.** It returns immediately with `{ status: "posted",
+  tool_use_id: "<id>" }` and your current turn ends. The user's answers arrive
+  later as a separate user message (see the "Non-blocking contract" section in
+  detail_docs for the envelope format).
 detail_docs: |
   ## Input
 
@@ -31,7 +35,35 @@ detail_docs: |
     - **multi** (boolean) — allow multiple selections; `selected` is returned as an array.
     - **min** / **max** (integers) — min/max selections when `multi` is true (defaults: 1 and options.length).
 
-  ## Output
+  ## Non-blocking contract
+
+  Calling `ask_user_choices` returns immediately with:
+
+  ```json
+  { "status": "posted", "tool_use_id": "<id>" }
+  ```
+
+  This ends your turn. **Do not emit further reasoning or tool calls in the
+  same turn after posting** — the user has nothing to react to yet.
+
+  The user's answers arrive in a LATER turn as a user message whose text is
+  exactly:
+
+  ```
+  [ask_user_choices_response tool_use_id=<same id as above>]
+  {"answers":[{"question":"...","selected":"...","other_text":null}, ...]}
+  ```
+
+  When you see a user message starting with `[ask_user_choices_response
+  tool_use_id=...]`, parse the JSON on the following line(s) to get the
+  answers. Match `tool_use_id` to the tool call you previously made. If the
+  user sends an unrelated message instead, they chose not to answer — proceed
+  without the answers (or re-ask by calling the tool again).
+
+  **Never emit the `[ask_user_choices_response ...]` marker yourself** — it is
+  reserved for the user/UI layer.
+
+  ## Answer shape
 
   Single-select (default):
 
@@ -54,6 +86,3 @@ detail_docs: |
     ]
   }
   ```
-
-  The tool blocks until the user submits all answers in the UI. If the session is terminated
-  while the question is pending, the tool returns an error.

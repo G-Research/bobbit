@@ -18,7 +18,9 @@ export function isSandboxAllowed(
 	// MCP calls are blocked — sandbox agents must not trigger host-side execution.
 	// if (pathname === "/api/internal/mcp-call" && m === "POST") return true;
 	if (pathname === "/api/internal/verification-result" && m === "POST") return true;
-	if (pathname === "/api/internal/user-question" && m === "POST") return true;
+	// /api/internal/user-question/submit is called from UI widgets (not the
+	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
+	// blocking tool extension has been removed.
 	if (pathname === "/api/preview" && m === "POST") return true;
 	if (pathname === "/api/personalities" && (m === "GET" || m === "POST")) return true;
 

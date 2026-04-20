@@ -8,11 +8,10 @@
  *  - Submit enables only when every question answered.
  *  - After Submit, widget is read-only and the tool result lands in chat.
  *  - Cross-client finalization: a second tab showing the same session flips
- *    to read-only when the first tab submits (via the user_question_answered
- *    WS broadcast forwarded by remote-agent.ts).
+ *    to read-only when the first tab submits (via the envelope user message
+ *    arriving through the normal message_end stream).
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 test.describe("ask_user_choices widget (full-stack UI)", () => {
@@ -103,11 +102,6 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(widget).toBeVisible({ timeout: 20_000 });
 		const pendingUrl = page.url();
 
-		// Look up the pending toolUseId + sessionId on the server.
-		const urlObj = new URL(pendingUrl);
-		const sessionId = decodeURIComponent((urlObj.hash.match(/\/session\/([^/?]+)/) || [])[1] || "");
-		expect(sessionId).not.toBe("");
-
 		// Open a second tab pointed at the same session.
 		const page2 = await context.newPage();
 		await page2.goto(pendingUrl);
@@ -115,15 +109,6 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(widget2).toBeVisible({ timeout: 20_000 });
 		// Second tab still has the Submit button (not yet answered).
 		await expect(widget2.locator(".ask-submit")).toBeVisible();
-
-		// Find the pending toolUseId via the REST endpoint.
-		const pendingResp = await apiFetch(
-			`/api/internal/user-question/pending?sessionId=${encodeURIComponent(sessionId)}`
-		);
-		expect(pendingResp.ok).toBe(true);
-		const pendingJson = await pendingResp.json();
-		expect(pendingJson.pending.length).toBe(1);
-		const toolUseId: string = pendingJson.pending[0].toolUseId;
 
 		// Submit from the first tab.
 		await widget.locator('label:has(input[value="blue"])').click();
@@ -133,13 +118,11 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await widget.locator(".ask-submit").click();
 		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
 
-		// Second tab should also flip to read-only via the
-		// user_question_answered broadcast (even though it didn't submit).
+		// Second tab should also flip to read-only — the envelope user message
+		// appended by /submit is broadcast via the normal message_end stream,
+		// and the tool_use card's renderer scans the transcript for it.
 		await expect(widget2.locator(".ask-submit")).toHaveCount(0, { timeout: 15_000 });
 		await expect(widget2.locator('input[type="radio"]').first()).toBeDisabled();
-
-		// Keep toolUseId referenced to satisfy the unused-var lint (not strictly needed).
-		expect(toolUseId).toBeTruthy();
 
 		await page2.close();
 	});

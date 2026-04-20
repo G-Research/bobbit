@@ -1,77 +1,44 @@
 /**
  * Ask tool extension for Bobbit.
  *
- * Registers `ask_user_choices` — asks the user 1–5 multiple-choice questions via
- * an interactive inline widget. Blocks until the user submits.
+ * Registers `ask_user_choices` — posts 1–5 multiple-choice questions to the
+ * user as an inline widget. This tool is **non-blocking**: the tool call
+ * returns immediately with a stub result and the current assistant turn ends.
  *
- * Mirrors the `verification_result` round-trip pattern (see tasks/extension.ts).
+ * The user's answers arrive later as a separate user message whose text is the
+ * envelope:
+ *
+ *     [ask_user_choices_response tool_use_id=<id>]
+ *     {"answers":[{"question":"...","selected":"...","other_text":null}, ...]}
+ *
+ * See src/shared/ask-envelope.ts for the canonical format. The envelope is
+ * appended to the transcript by `POST /api/internal/user-question/submit`
+ * (called by the UI widget).
  */
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import fs from "node:fs";
-import path from "node:path";
-import { homedir } from "node:os";
 
 export default function (pi: ExtensionAPI) {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	if (!sessionId) return;
 
-	let token: string;
-	let baseUrl: string;
-	const envToken = process.env.BOBBIT_TOKEN;
-	const envUrl = process.env.BOBBIT_GATEWAY_URL;
-	if (envToken && envUrl) {
-		token = envToken;
-		baseUrl = envUrl.replace(/\/+$/, "");
-	} else {
-		try {
-			const stateDir = process.env.BOBBIT_DIR
-				? path.join(process.env.BOBBIT_DIR, "state")
-				: path.join(homedir(), ".pi");
-			const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-			const urlFile = process.env.BOBBIT_DIR ? "gateway-url" : "gateway-url";
-			token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
-			baseUrl = fs.readFileSync(path.join(stateDir, urlFile), "utf-8").trim().replace(/\/+$/, "");
-		} catch {
-			console.error("[ask-tools] Cannot read gateway credentials — tool not registered");
-			return;
-		}
-	}
-
-	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {
-		const resp = await fetch(`${baseUrl}${urlPath}`, {
-			method,
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-			body: body !== undefined ? JSON.stringify(body) : undefined,
-		});
-		const text = await resp.text();
-		let data: unknown;
-		try { data = JSON.parse(text); } catch { data = text; }
-		if (!resp.ok) {
-			const msg = typeof data === "object" && data !== null && "error" in data
-				? String((data as Record<string, unknown>).error)
-				: `HTTP ${resp.status}: ${text}`;
-			throw new Error(msg);
-		}
-		return data;
-	}
-
 	function ok(data: unknown) {
-		return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], details: undefined };
-	}
-	function err(msg: string) {
-		return { content: [{ type: "text" as const, text: msg }], details: undefined, isError: true };
+		return { content: [{ type: "text" as const, text: JSON.stringify(data) }], details: undefined };
 	}
 
 	pi.registerTool({
 		name: "ask_user_choices",
 		label: "Ask User Choices",
 		description: [
-			"Ask the user 1–5 multiple-choice questions via an inline interactive widget.",
-			"Blocks until the user submits their answers.",
-			"Returns { answers: [{ question, selected, other_text }] }.",
+			"Post 1–5 multiple-choice questions to the user as an inline widget.",
+			"Non-blocking: the tool returns immediately; the user's answers arrive later as a separate user message.",
+			"Calling this tool ends your current turn.",
 		].join(" "),
-		promptSnippet: "Ask the user multiple-choice questions and wait for answers.",
+		promptSnippet: [
+			"Post multiple-choice questions to the user. The tool returns immediately and ends your turn.",
+			"Answers arrive later as a user message prefixed with `[ask_user_choices_response tool_use_id=<id>]`",
+			"followed by a JSON body `{\"answers\":[...]}`. Match tool_use_id to your tool call.",
+		].join(" "),
 		parameters: Type.Object({
 			questions: Type.Array(
 				Type.Object({
@@ -99,14 +66,13 @@ export default function (pi: ExtensionAPI) {
 				{ minItems: 1, maxItems: 5, description: "1–5 multiple-choice questions" },
 			),
 		}),
-		async execute(toolUseId, params) {
-			try {
-				const body = { sessionId, toolUseId, questions: params.questions };
-				const resp = await api("POST", "/api/internal/user-question", body);
-				return ok(resp);
-			} catch (e: any) {
-				return err(e.message);
-			}
+		async execute(toolUseId, _params) {
+			// Non-blocking: return the stub immediately. The tool_use event flowing
+			// through the agent's stdout → pi-coding-agent → our WS broadcast is
+			// what tells the UI to render the widget. When the user submits, the
+			// server appends a `[ask_user_choices_response ...]` envelope to the
+			// transcript as a normal user message, which wakes the agent.
+			return ok({ status: "posted", tool_use_id: toolUseId });
 		},
 	});
 

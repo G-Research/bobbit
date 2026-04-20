@@ -393,6 +393,15 @@ export class ToolMessage extends LitElement {
 
 	private _onPreviewReady = () => { this.requestUpdate(); };
 
+	// For the non-blocking ask_user_choices widget: when a new message arrives,
+	// the tool_use card may need to flip to Answered mode because the transcript
+	// now contains a matching `[ask_user_choices_response ...]` envelope.
+	// ToolMessage's reactive properties (toolCall, result) don't change on new
+	// messages, so we listen explicitly and requestUpdate.
+	private _onTranscriptMessage = () => {
+		if (this.toolCall?.name === "ask_user_choices") this.requestUpdate();
+	};
+
 	private _onLoadFullContent = (e: Event) => {
 		e.stopPropagation();
 		this._loadFullContent();
@@ -441,12 +450,14 @@ export class ToolMessage extends LitElement {
 		super.connectedCallback();
 		this.style.display = "block";
 		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
+		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		this.addEventListener("load-full-content", this._onLoadFullContent);
 	}
 
 	override disconnectedCallback(): void {
 		super.disconnectedCallback();
 		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
+		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 
@@ -473,12 +484,13 @@ export class ToolMessage extends LitElement {
 			} as ToolResultMessageType<any>;
 		}
 		const sessionIdCtx = appState.remoteAgent?.gatewaySessionId;
+		const getAskResponseAnswers = appState.remoteAgent?.findAskResponseAnswers?.bind(appState.remoteAgent);
 		const renderResult = renderTool(
 			toolName,
 			this.toolCall.arguments,
 			result,
 			!this.aborted && (this.isStreaming || this.pending),
-			{ toolUseId: this.toolCall.id, sessionId: sessionIdCtx },
+			{ toolUseId: this.toolCall.id, sessionId: sessionIdCtx, getAskResponseAnswers },
 		);
 
 		// Handle custom rendering (no card wrapper)
