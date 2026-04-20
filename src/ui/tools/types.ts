@@ -12,6 +12,16 @@ export interface ToolRenderContext {
 	toolUseId?: string;
 	/** The gateway session ID that issued the tool call. */
 	sessionId?: string;
+	/**
+	 * Look up answers for a posted `ask_user_choices` tool_use by scanning the
+	 * current session's transcript for a matching response envelope.
+	 * Returns the parsed answers array, or null if the user hasn't submitted.
+	 */
+	getAskResponseAnswers?: (toolUseId: string) => Array<{
+		question: string;
+		selected: string | string[];
+		other_text: string | null;
+	}> | null;
 }
 
 export interface ToolRenderer<TParams = any, TDetails = any> {

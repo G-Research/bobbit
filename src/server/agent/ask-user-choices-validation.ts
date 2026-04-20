@@ -1,14 +1,10 @@
 /**
- * In-memory harness for the `ask_user_choices` tool.
+ * Validation helpers for the `ask_user_choices` tool.
  *
- * The tool extension POSTs to `/api/internal/user-question` and blocks.
- * The server calls `register()` to park a Promise keyed by (sessionId, toolUseId).
- * The UI widget POSTs answers to `/api/internal/user-question/submit`, which
- * calls `submit()` to resolve the parked Promise — the HTTP response to the
- * tool extension then carries the answers back to the agent.
- *
- * Not persisted across restarts: if the server restarts while a question is
- * pending, the extension's HTTP call is severed and the tool returns an error.
+ * Shapes and cross-validation used by the `/api/internal/user-question/submit`
+ * endpoint. The previous in-memory promise-parking harness has been removed —
+ * the widget flow is now transcript-driven (see docs/blocking-tools.md and the
+ * "non-blocking ask widget" design doc).
  */
 
 export interface UserQuestion {
@@ -32,15 +28,6 @@ export interface UserQuestionAnswer {
 	selected: string | string[];
 	/** Free-text content when "Other" was picked, otherwise null. */
 	other_text: string | null;
-}
-
-export interface PendingUserQuestion {
-	sessionId: string;
-	toolUseId: string;
-	questions: UserQuestion[];
-	createdAt: number;
-	resolve: (answers: UserQuestionAnswer[]) => void;
-	reject: (err: Error) => void;
 }
 
 /**
@@ -95,15 +82,13 @@ export function validateQuestions(questions: unknown): string | null {
 		if (qq.min !== undefined && qq.max !== undefined && (qq.min as number) > (qq.max as number)) {
 			return `questions[${i}].min (${qq.min}) must be <= max (${qq.max})`;
 		}
-		// min/max only meaningful when multi:true — but we don't reject if
-		// they're set without multi; they're silently ignored.
 	}
 	return null;
 }
 
 /**
  * Validate the raw shape of `answers` submitted by the UI (no cross-check
- * against questions — that happens inside submit()).
+ * against questions — use `crossValidate()` for that).
  */
 export function validateAnswers(answers: unknown): string | null {
 	if (!Array.isArray(answers)) return "answers must be an array";
@@ -130,10 +115,11 @@ export function validateAnswers(answers: unknown): string | null {
 }
 
 /**
- * Cross-check submitted answers against the registered question shape.
+ * Cross-check submitted answers against the original question shape captured
+ * in the assistant's `ask_user_choices` tool_use input.
  * Returns null on success, or a human-readable error message on failure.
  */
-function crossValidate(
+export function crossValidate(
 	questions: UserQuestion[],
 	answers: UserQuestionAnswer[],
 ): string | null {
@@ -178,98 +164,4 @@ function crossValidate(
 		}
 	}
 	return null;
-}
-
-export type SubmitResult =
-	| { ok: true }
-	| { ok: false; code: "not_found" | "invalid"; error: string };
-
-export class UserQuestionHarness {
-	/** keyed by `${sessionId}:${toolUseId}` — allows concurrent questions per session */
-	private pending = new Map<string, PendingUserQuestion>();
-
-	private key(sessionId: string, toolUseId: string): string {
-		return `${sessionId}:${toolUseId}`;
-	}
-
-	/**
-	 * Register a pending question and return a Promise that resolves when the
-	 * user submits, or rejects if the session is terminated.
-	 *
-	 * Idempotent: if the same (sessionId, toolUseId) registers twice (e.g. agent
-	 * replay), the second call receives the same resolution as the first.
-	 */
-	register(
-		sessionId: string,
-		toolUseId: string,
-		questions: UserQuestion[],
-	): Promise<UserQuestionAnswer[]> {
-		const key = this.key(sessionId, toolUseId);
-		const existing = this.pending.get(key);
-		if (existing) {
-			return new Promise<UserQuestionAnswer[]>((res, rej) => {
-				const origResolve = existing.resolve;
-				const origReject = existing.reject;
-				existing.resolve = (a) => { origResolve(a); res(a); };
-				existing.reject = (e) => { origReject(e); rej(e); };
-			});
-		}
-		return new Promise<UserQuestionAnswer[]>((resolve, reject) => {
-			this.pending.set(key, {
-				sessionId,
-				toolUseId,
-				questions,
-				createdAt: Date.now(),
-				resolve,
-				reject,
-			});
-		});
-	}
-
-	/**
-	 * Resolve a pending question with the user's answers.
-	 * Cross-validates the answers against the registered question shape.
-	 */
-	submit(
-		sessionId: string,
-		toolUseId: string,
-		answers: UserQuestionAnswer[],
-	): SubmitResult {
-		const key = this.key(sessionId, toolUseId);
-		const p = this.pending.get(key);
-		if (!p) return { ok: false, code: "not_found", error: "No pending question for this session/toolUseId" };
-		const crossErr = crossValidate(p.questions, answers);
-		if (crossErr) return { ok: false, code: "invalid", error: crossErr };
-		this.pending.delete(key);
-		p.resolve(answers);
-		return { ok: true };
-	}
-
-	/**
-	 * Reject all pending questions for a given session — called on session
-	 * termination or abort.
-	 */
-	rejectAllForSession(sessionId: string, reason = "Session terminated"): void {
-		for (const [k, p] of this.pending) {
-			if (p.sessionId === sessionId) {
-				this.pending.delete(k);
-				p.reject(new Error(reason));
-			}
-		}
-	}
-
-	/** Inspection helper — list pending questions for a session (UI rehydrate). */
-	listForSession(sessionId: string): PendingUserQuestion[] {
-		return [...this.pending.values()].filter(p => p.sessionId === sessionId);
-	}
-
-	/** Test-only: clear all pending. */
-	clear(): void {
-		this.pending.clear();
-	}
-
-	/** Total number of pending questions (for diagnostics). */
-	size(): number {
-		return this.pending.size;
-	}
 }

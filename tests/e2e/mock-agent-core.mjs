@@ -200,6 +200,22 @@ export class MockAgentCore {
 
 		await this.tick(5);
 
+		// Non-blocking ask_user_choices: if this prompt is the envelope user
+		// message carrying answers, echo them as an assistant text reply so E2E
+		// tests can observe the round-trip, then end the turn.
+		if (/^\[ask_user_choices_response tool_use_id=/.test(text)) {
+			await this._handleAskResponseEnvelope(text);
+			await this.tick(5);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
 		const toolAction = MockAgentCore.respondToPrompt(text);
 
 		if (toolAction && toolAction.toolDenied) {
@@ -272,18 +288,11 @@ export class MockAgentCore {
 	}
 
 	async _handleAskUserChoices(multi = false) {
-		// Call the ask_user_choices tool via its REST endpoint directly, mirroring
-		// how the real extension posts to /api/internal/user-question and blocks
-		// until the UI submits. The mock agent waits for the response, then emits
-		// the toolCall + toolResult events.
+		// Non-blocking model: the ask_user_choices tool returns immediately with
+		// a `{status:"posted", tool_use_id}` stub and the turn ends. The user's
+		// answers arrive in a *later* prompt as an envelope user message — see
+		// `_handleAskResponseEnvelope` below.
 		const toolId = `tool_ask_${Date.now()}`;
-		const sessionId = this.env.BOBBIT_SESSION_ID;
-		const bobbitDir = this.env.BOBBIT_DIR || path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
-		let gwUrl, token;
-		try {
-			gwUrl = (this.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
-			token = (this.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
-		} catch {}
 
 		const questions = multi
 			? [
@@ -297,57 +306,49 @@ export class MockAgentCore {
 
 		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
 
-		// Emit the assistant toolCall message FIRST so the UI renders the widget
-		// while the tool blocks server-side waiting for the user's answer.
 		const assistantMsg = {
 			role: "assistant",
 			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
 		};
 		this.conversationMessages.push(assistantMsg);
-		// Prime the streaming container via message_update so the widget renders
-		// immediately (message_end alone defers until the next stream event,
-		// which never comes because the tool blocks).
-		// Emit TWICE: the StreamingMessageContainer's _immediateUpdate flag may
-		// still be set from the prior user-echo clear, dropping the first RAF.
-		// A second message_update scheduled on the next frame lands cleanly.
 		this.emit({ type: "message_update", message: assistantMsg });
-		await this.tick(50);
+		await this.tick(20);
 		this.emit({ type: "message_update", message: assistantMsg });
-		await this.tick(50);
+		await this.tick(20);
 		this.emit({ type: "message_end", message: assistantMsg });
 
-		let resultText = "";
-		let isError = false;
-		try {
-			const resp = await fetch(`${gwUrl}/api/internal/user-question`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-				body: JSON.stringify({ sessionId, toolUseId: toolId, questions }),
-			});
-			const data = await resp.json();
-			if (!resp.ok) {
-				isError = true;
-				resultText = data?.error || `HTTP ${resp.status}`;
-			} else {
-				resultText = JSON.stringify(data);
-			}
-		} catch (err) {
-			isError = true;
-			resultText = err.message;
-		}
-
-		this.emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: isError ? "error" : "complete", output: resultText });
-		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError });
+		// Stub tool_result — ends the turn immediately.
+		const stub = { status: "posted", tool_use_id: toolId };
+		const resultText = JSON.stringify(stub);
+		this.emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: "complete", output: resultText });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError: false });
 
 		const toolResultMsg = {
 			role: "toolResult",
 			toolCallId: toolId,
 			toolName: "ask_user_choices",
-			isError,
+			isError: false,
 			content: [{ type: "text", text: resultText }],
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Handle a `[ask_user_choices_response tool_use_id=...]` envelope user
+	 * message. Parse the JSON body and echo the answers back as an assistant
+	 * text message so E2E tests can observe the round-trip.
+	 */
+	async _handleAskResponseEnvelope(text) {
+		const m = /^\[ask_user_choices_response tool_use_id=([A-Za-z0-9_-]+)\]\n([\s\S]+)$/.exec(text);
+		if (!m) return;
+		const toolUseId = m[1];
+		let answers = null;
+		try { answers = JSON.parse(m[2]).answers; } catch { /* ignore */ }
+		const echo = JSON.stringify({ gotAnswersFor: toolUseId, answers });
+		const assistantMsg = { role: "assistant", content: [{ type: "text", text: echo }] };
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
 	}
 
 	async _handleToolDenied(deniedTool) {

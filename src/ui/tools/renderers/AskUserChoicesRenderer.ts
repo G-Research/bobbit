@@ -1,7 +1,12 @@
 /**
  * Renderer for the `ask_user_choices` tool.
- * Renders <ask-user-choices-widget> with the question params and — once the
- * tool has returned — the finalized answers (read-only).
+ *
+ * Non-blocking model: the tool returns synchronously with a stub
+ * `{ status: "posted", tool_use_id }` result. The user's answers (if any)
+ * live in a *later* user message with an envelope prefix
+ * `[ask_user_choices_response tool_use_id=<id>]` — we look those up via
+ * `ctx.getAskResponseAnswers(toolUseId)` and flip the widget to read-only
+ * "Answered mode" when found.
  */
 import { icon } from "@mariozechner/mini-lit";
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
@@ -12,13 +17,31 @@ import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types
 import "../../components/AskUserChoicesWidget.js"; // auto-registers <ask-user-choices-widget>
 import type { AskAnswer } from "../../components/AskUserChoicesWidget.js";
 
-/** Extract { answers: [...] } from the tool result's content text. */
-function extractAnswers(result: ToolResultMessage | undefined): AskAnswer[] | null {
-	if (!result || result.isError) return null;
-	const text = result.content
+/** Read the tool_result's content as a string. */
+function getResultText(result: ToolResultMessage | undefined): string {
+	if (!result) return "";
+	return result.content
 		?.filter((c: any) => c.type === "text")
 		.map((c: any) => c.text)
 		.join("\n") || "";
+}
+
+/** True when the tool_result is the `{ status: "posted" }` stub (non-blocking flow). */
+function isPostedStub(result: ToolResultMessage | undefined): boolean {
+	if (!result || result.isError) return false;
+	const text = getResultText(result);
+	if (!text) return false;
+	try {
+		const data = JSON.parse(text);
+		return data && typeof data === "object" && data.status === "posted";
+	} catch { return false; }
+}
+
+/** Legacy fallback: extract `{ answers: [...] }` from the tool_result content.
+ *  Retained for sessions that predate the non-blocking flow (stub has no answers). */
+function extractLegacyAnswers(result: ToolResultMessage | undefined): AskAnswer[] | null {
+	if (!result || result.isError) return null;
+	const text = getResultText(result);
 	if (!text) return null;
 	try {
 		const data = JSON.parse(text);
@@ -36,18 +59,14 @@ function extractAnswers(result: ToolResultMessage | undefined): AskAnswer[] | nu
 }
 
 function getErrorText(result: ToolResultMessage | undefined): string {
-	if (!result) return "";
-	const text = result.content
-		?.filter((c: any) => c.type === "text")
-		.map((c: any) => c.text)
-		.join("\n") || "";
+	const text = getResultText(result);
 	return text || "ask_user_choices failed.";
 }
 
 /**
- * Header variant for `ask_user_choices` in progress. Instead of a spinning
- * loader (which implies the agent is working), shows a slowly pulsing filled
- * circle — a heartbeat indicating the tool is waiting for user input.
+ * Header variant for `ask_user_choices` awaiting a response. Shows a slowly
+ * pulsing filled circle rather than a spinning loader — indicates the tool
+ * posted and is waiting for user input (the agent itself is idle).
  */
 function renderAskHeader(state: ToolHeaderState, text: string | TemplateResult): TemplateResult {
 	if (state !== "inprogress") {
@@ -85,16 +104,27 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 			};
 		}
 
-		const answers = extractAnswers(result);
 		const errored = Boolean(result?.isError);
-		// Once we have answers or an error, fall back to the standard header.
-		const awaitingAnswer = state === "inprogress" && !answers && !errored;
+		const posted = isPostedStub(result);
+		// Preferred path: the tool returned the `{status:"posted"}` stub and the
+		// user has submitted; answers live in a later envelope user message.
+		const fromTranscript = posted && ctx?.toolUseId && ctx?.getAskResponseAnswers
+			? ctx.getAskResponseAnswers(ctx.toolUseId) as AskAnswer[] | null
+			: null;
+		// Legacy path: pre-redesign sessions where the tool_result itself carried answers.
+		const legacy = posted ? null : extractLegacyAnswers(result);
+		const answers: AskAnswer[] | null = fromTranscript ?? legacy;
+
+		// Interactive mode: tool posted, no envelope yet, not errored.
+		//   - If `posted` is false but the tool has produced a non-stub result,
+		//     the card is effectively complete (legacy path with answers or an error).
+		const showHeaderInProgress = state === "inprogress" || (posted && !answers && !errored);
 
 		return {
 			content: html`
 				<div class="space-y-2">
-					${awaitingAnswer
-						? renderAskHeader(state, "Multiple-choice question")
+					${showHeaderInProgress && !answers && !errored
+						? renderAskHeader("inprogress" as ToolHeaderState, "Multiple-choice question")
 						: renderHeader(state, HelpCircle, "Multiple-choice question")}
 					<ask-user-choices-widget
 						.questions=${params.questions}
