@@ -85,9 +85,6 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Skip outbound network probes and per-prompt title-generation calls.
 		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
 		process.env.BOBBIT_SKIP_TITLE_GEN = "1";
-		// Swap in a deterministic fake embedder so the search stack doesn't
-		// attempt the ~140MB ONNX model download during tests.
-		process.env.BOBBIT_FAKE_EMBEDDER = "1";
 		// Skip worktree pool pre-fill by default — git worktree + setup commands
 		// are expensive and most tests don't exercise the pool path. Specs that
 		// exercise the pool opt in with `test.use({ enableWorktreePool: true })`.

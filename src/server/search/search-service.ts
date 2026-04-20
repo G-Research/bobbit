@@ -1,34 +1,27 @@
 /**
- * `SearchService` — per-project facade over the LanceDB-backed semantic
- * search stack.
+ * `SearchService` — per-project facade over the FlexSearch-backed
+ * lexical search stack.
  *
- * Wraps the `LanceStore`, `Indexer`, `HybridQuery`, and four core
- * `IndexSource`s behind the same public surface the legacy
- * `SearchIndex` exposed (open/close/rebuildFromStores/indexX/removeX/
- * search) so the rest of the codebase migrates 1:1.
+ * Wraps `FlexSearchStore`, `Indexer`, and four core `IndexSource`s
+ * behind the same public surface the legacy `SearchIndex` exposed
+ * (open/close/rebuildFromStores/indexX/removeX/search) so the rest of
+ * the codebase migrates 1:1.
  *
- * State machine (design §11):
- *   "initializing"          -- open() kicked off, not ready
- *   "ready"                 -- LanceStore + Embedder OK
- *   "disabled-no-native"    -- LanceDB native binary failed to load
- *   "disabled-no-model"     -- Embedding model failed to load
- *   "closed"                -- close() called
- *
- * When state !== "ready" all index*\/remove* methods no-op (graceful
- * degradation); `search()` throws.
+ * State machine (design §10.3):
+ *   "initializing" -- open() kicked off, not ready
+ *   "ready"        -- FlexSearchStore open
+ *   "disabled"     -- store failed to open (rare — dir unwritable)
+ *   "closed"       -- close() called
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { PersistedGoal, GoalStore } from "../agent/goal-store.js";
 import type { PersistedSession, SessionStore } from "../agent/session-store.js";
 import type { PersistedStaff, StaffStore } from "../agent/staff-store.js";
-import type { Embedder, IndexSource, IndexSourceContext, SearchResults } from "./types.js";
-import { LanceStore } from "./lance-store.js";
+import type { IndexSource, IndexSourceContext, SearchResults } from "./types.js";
+import { FlexSearchStore, FLEX_VERSION } from "./flex-store.js";
 import { Indexer } from "./indexer.js";
-import { HybridQuery } from "./hybrid-query.js";
-import { NomicEmbedder, createFakeEmbedder } from "./embedder.js";
 import { GoalIndexSource } from "./sources/goal-source.js";
 import { SessionIndexSource } from "./sources/session-source.js";
 import { MessageIndexSource } from "./sources/message-source.js";
@@ -40,16 +33,6 @@ import { CONTENT_POLICY_VERSION, extractForIndexing } from "./content-policy.js"
 
 // ── Module-level rebuild queue ───────────────────────────────────────
 
-/**
- * Rebuilds are serialized across all `SearchService` instances. On startup
- * with N projects, meta-mismatch triggers a rebuild per project; running
- * them in parallel loads N embedder pipelines + scans N sets of sessions
- * at once, which pegs CPU and balloons RAM. Queuing means one project at
- * a time — progress events still flow so the UI stays informative.
- *
- * Incremental index updates (indexGoal, indexSession, indexMessage,
- * removeX) bypass the queue and run immediately — they're cheap.
- */
 let _rebuildQueue: Promise<unknown> = Promise.resolve();
 
 function enqueueRebuild<T>(task: () => Promise<T>): Promise<T> {
@@ -63,73 +46,45 @@ function enqueueRebuild<T>(task: () => Promise<T>): Promise<T> {
 export type SearchServiceState =
 	| "initializing"
 	| "ready"
-	| "disabled-no-native"
-	| "disabled-no-model"
+	| "disabled"
 	| "closed";
 
 export interface SearchServiceOptions {
 	stateDir: string;
 	projectId: string;
-	/** Override embedder. Defaults to `NomicEmbedder` with `<stateDir>/../models` as the cache dir. */
-	embedder?: Embedder;
 	/** Override progress bus (tests). Defaults to the shared singleton. */
 	progressBus?: ProgressBus;
 	/** Override staff store for rebuilds. Optional — can also be supplied to rebuildFromStores. */
 	staffStore?: StaffStore;
 }
 
-// ── SearchService ───────────────────────────────────────────────────
+// ── SearchService ────────────────────────────────────────────────────
 
 export class SearchService {
 	readonly stateDir: string;
 	readonly projectId: string;
 	readonly dataDir: string;
 
-	private readonly embedder: Embedder;
 	private readonly progressBus: ProgressBus;
 
 	private _state: SearchServiceState = "initializing";
-	private _store: LanceStore | null = null;
+	private _store: FlexSearchStore | null = null;
 	private _indexer: Indexer | null = null;
-	private _hybrid: HybridQuery | null = null;
 
-	/** Optional staff store for rebuilds (matches legacy API). */
+	/** Optional staff store for rebuilds. */
 	staffStore?: StaffStore;
 
-	/** Promise that resolves when open() finishes (for tests/callers that want to await). */
 	private _openPromise: Promise<void> | null = null;
 
-	// Sources (stateless — created once)
 	private readonly _goalSource = new GoalIndexSource();
 	private readonly _sessionSource = new SessionIndexSource();
 	private readonly _messageSource = new MessageIndexSource();
 	private readonly _staffSource = new StaffIndexSource();
 
-	/**
-	 * Shared model cache directory across all projects AND all Bobbit
-	 * installs on this machine. Nomic's ~140MB ONNX files get downloaded
-	 * once and reused everywhere. Respects $BOBBIT_MODEL_CACHE_DIR for
-	 * tests / advanced users.
-	 */
-	static sharedModelCacheDir(): string {
-		const override = process.env.BOBBIT_MODEL_CACHE_DIR;
-		if (override && override.length > 0) return override;
-		return path.join(os.homedir(), ".bobbit", "models");
-	}
-
-	/** Interval handle for the daily dataset-compaction timer. */
-	private _compactTimer: ReturnType<typeof setInterval> | null = null;
-
 	constructor(opts: SearchServiceOptions) {
 		this.stateDir = opts.stateDir;
 		this.projectId = opts.projectId;
-		this.dataDir = path.join(opts.stateDir, "search.lance");
-		this.embedder = opts.embedder
-			?? (process.env.BOBBIT_FAKE_EMBEDDER === "1"
-				? createFakeEmbedder()
-				: new NomicEmbedder({
-						modelCacheDir: SearchService.sharedModelCacheDir(),
-					}));
+		this.dataDir = path.join(opts.stateDir, "search.flex");
 		this.progressBus = opts.progressBus ?? sharedProgressBus;
 		this.staffStore = opts.staffStore;
 	}
@@ -139,33 +94,29 @@ export class SearchService {
 	}
 
 	/** Internal access for admin/maintenance REST endpoints. */
-	getLanceStore(): LanceStore | null {
+	getStore(): FlexSearchStore | null {
 		return this._store;
 	}
 
-	/** Embedder identity for stats endpoint. */
-	getEmbedderInfo(): { id: string; dim: number } {
-		return { id: this.embedder.id, dim: this.embedder.dim };
+	/** Engine identity for stats endpoint. */
+	getEngineInfo(): { engine: string; engineVersion: string } {
+		return { engine: "flexsearch", engineVersion: FLEX_VERSION };
 	}
 
-	/**
-	 * Per-source row counts + last rebuild timestamp for the stats endpoint.
-	 * Returns `null` for fields that are unavailable in the current state.
-	 */
 	async getStats(): Promise<{
 		state: SearchServiceState;
-		embedderId: string;
-		embedderDim: number;
+		engine: string;
+		engineVersion: string;
 		lastRebuildAt: number | null;
-		rowCountsBySource: { goals: number; sessions: number; messages: number; staff: number };
+		rowCountsBySource: { goals: number; sessions: number; messages: number; staff: number; files: number };
 		datasetBytes: number;
 	}> {
-		const info = this.getEmbedderInfo();
-		const empty = { goals: 0, sessions: 0, messages: 0, staff: 0 };
+		const info = this.getEngineInfo();
+		const empty = { goals: 0, sessions: 0, messages: 0, staff: 0, files: 0 };
 		const base = {
 			state: this._state,
-			embedderId: info.id,
-			embedderDim: info.dim,
+			engine: info.engine,
+			engineVersion: info.engineVersion,
 			lastRebuildAt: null as number | null,
 			rowCountsBySource: empty,
 			datasetBytes: dirSizeBytes(this.dataDir),
@@ -174,57 +125,24 @@ export class SearchService {
 		try {
 			const meta = await this._store.readMeta();
 			const rowCountsBySource = {
-				goals: await this._store.count("source_id = 'goals'"),
-				sessions: await this._store.count("source_id = 'sessions'"),
-				messages: await this._store.count("source_id = 'messages'"),
-				staff: await this._store.count("source_id = 'staff'"),
+				goals: this._store.count({ source_id: "goals" }),
+				sessions: this._store.count({ source_id: "sessions" }),
+				messages: this._store.count({ source_id: "messages" }),
+				staff: this._store.count({ source_id: "staff" }),
+				files: this._store.count({ source_id: "files" }),
 			};
-			return {
-				...base,
-				lastRebuildAt: meta?.createdAt ?? null,
-				rowCountsBySource,
-			};
+			return { ...base, lastRebuildAt: meta?.createdAt ?? null, rowCountsBySource };
 		} catch {
 			return base;
 		}
 	}
 
-	/** Compact the Lance dataset (passthrough). No-op when not ready. */
+	/** No-op compaction (kept for facade compatibility). */
 	async compact(): Promise<void> {
 		if (!this._store) return;
 		await this._store.compact();
 	}
 
-	/** Interval in ms between scheduled dataset compactions. 24 hours. */
-	private static readonly COMPACT_INTERVAL_MS = 24 * 60 * 60 * 1000;
-
-	/**
-	 * Kick off a background `setInterval` that compacts the dataset every
-	 * 24 hours. `.unref()`'d so the timer never keeps the event loop alive.
-	 * Exposed for tests via `getCompactIntervalMs()`.
-	 */
-	private _startScheduledCompaction(): void {
-		if (this._compactTimer) return;
-		this._compactTimer = setInterval(() => {
-			void this.compact().catch((err) => {
-				console.error("[search] Scheduled compact failed:", err);
-			});
-		}, SearchService.COMPACT_INTERVAL_MS);
-		if (typeof this._compactTimer.unref === "function") {
-			this._compactTimer.unref();
-		}
-	}
-
-	/**
-	 * Kick off async initialization. Returns synchronously — callers that
-	 * want to wait can `await service.whenReady()`.
-	 *
-	 * Behavior (design §10, §11):
-	 *   1. Try to open LanceStore. On failure → "disabled-no-native".
-	 *   2. Try `embedder.ready()`. On failure → "disabled-no-model".
-	 *   3. Read meta; if mismatched/missing, kick off background rebuild.
-	 *   4. State becomes "ready".
-	 */
 	open(
 		context?: { goalStore?: GoalStore; sessionStore?: SessionStore; staffStore?: StaffStore },
 	): void {
@@ -232,37 +150,22 @@ export class SearchService {
 		this._openPromise = this._doOpen(context);
 	}
 
-	/** Await the in-flight open() (or previous completion). */
 	async whenReady(): Promise<void> {
 		if (this._openPromise) await this._openPromise;
 	}
 
-	/**
-	 * Legacy-compat check — always returns false. The new stack handles
-	 * rebuild decisions internally via meta mismatch; callers do not need
-	 * to call `rebuildFromStores` explicitly after open().
-	 */
 	needsRebuild(): boolean {
 		return false;
 	}
 
-	/** Close — idempotent, safe to call from shutdown paths. */
 	async close(): Promise<void> {
 		this._state = "closed";
-		if (this._compactTimer) {
-			clearInterval(this._compactTimer);
-			this._compactTimer = null;
-		}
 		if (this._store) {
-			try {
-				await this._store.close();
-			} catch (err) {
-				console.error("[search] LanceStore.close failed:", err);
-			}
+			try { await this._store.close(); }
+			catch (err) { console.error("[search] FlexSearchStore.close failed:", err); }
 			this._store = null;
 		}
 		this._indexer = null;
-		this._hybrid = null;
 	}
 
 	// ── Public API — index mutations ─────────────────────────────────
@@ -284,10 +187,7 @@ export class SearchService {
 					id: `goal:${goal.id}`,
 					sourceId: "goals",
 					text,
-					metadata: {
-						goalId: goal.id,
-						state: goal.state ?? "",
-					},
+					metadata: { goalId: goal.id, state: goal.state ?? "" },
 					contentHash: contentHashOf(text, weight, role, timestamp),
 					timestamp,
 					projectId: pid,
@@ -342,7 +242,6 @@ export class SearchService {
 	removeSession(sessionId: string): void {
 		if (!this._indexer) return;
 		const indexer = this._indexer;
-		// Remove session row + all its messages.
 		indexer.removeEntries([`session:${sessionId}`]).catch((err) =>
 			console.error("[search] removeSession failed:", err),
 		);
@@ -351,23 +250,11 @@ export class SearchService {
 
 	removeMessagesForSession(sessionId: string): void {
 		if (!this._indexer) return;
-		const escaped = sessionId.replace(/'/g, "''");
 		this._indexer
-			.removeByFilter(
-				`session_id = '${escaped}' AND source_id = 'messages'`,
-			)
+			.removeByFilter({ session_id: sessionId, source_id: "messages" })
 			.catch((err) => console.error("[search] removeMessagesForSession failed:", err));
 	}
 
-	/**
-	 * Index a single agent message. Legacy signature kept for 1:1
-	 * migration — the service runs `content-policy.extractForIndexing`
-	 * internally and upserts one row per emitted block.
-	 *
-	 * Overloaded to preserve the old (sessionId, sessionTitle, text,
-	 * toolNames, timestamp, projectId) signature: if called that way,
-	 * treat the raw text as a single assistant-text block.
-	 */
 	indexMessage(arg: {
 		sessionId: string;
 		sessionTitle: string;
@@ -407,9 +294,6 @@ export class SearchService {
 		const indexer = this._indexer;
 
 		if (typeof arg1 === "string") {
-			// Legacy signature: synthesise an assistant message from the
-			// flat text and hand off to the content policy (which will
-			// tag it "assistant", 1.0).
 			const sessionId = arg1;
 			const title = sessionTitle ?? "";
 			const ts = timestamp ?? 0;
@@ -438,7 +322,6 @@ export class SearchService {
 			return;
 		}
 
-		// Preferred signature.
 		const { sessionId, sessionTitle: st, message, timestamp: ts, projectId: pid, msgIdx, goalId } = arg1;
 		const hit = extractForIndexing(message);
 		if (hit.entries.length === 0) return;
@@ -511,14 +394,6 @@ export class SearchService {
 
 	// ── Public API — search ──────────────────────────────────────────
 
-	/**
-	 * Legacy-compat search. Translates the old options shape (type filter
-	 * as singular string) into a `SearchQuery` and runs the hybrid query.
-	 *
-	 * `includeArchived` is implied by the old API only when `type` is
-	 * not specified — matches pre-existing behaviour where archived rows
-	 * were included iff `archived` was not filtered out server-side.
-	 */
 	search(
 		query: string,
 		opts: {
@@ -530,9 +405,7 @@ export class SearchService {
 			includeArchived?: boolean;
 		} = {},
 	): SearchResults | Promise<SearchResults> {
-		if (this._state !== "ready" || !this._hybrid) {
-			// Return empty results rather than throwing, to match the
-			// pre-existing "search never crashes the request" contract.
+		if (this._state !== "ready" || !this._store) {
 			return { results: [], total: 0 };
 		}
 
@@ -542,18 +415,15 @@ export class SearchService {
 				? undefined
 				: ([type] as Array<"goals" | "sessions" | "messages" | "staff">);
 
-		const promise = this._hybrid.search({
+		const promise = this._store.search({
 			q: query,
 			limit: opts.limit,
 			offset: opts.offset,
 			projectId: opts.projectId,
 			types,
-			// Legacy FTS behaviour: archived surface only when no project filter
-			// is applied or explicitly requested.
 			includeArchived: opts.includeArchived ?? true,
 		});
 
-		// Attach project names if requested.
 		if (opts.projectNames) {
 			const names = opts.projectNames;
 			return promise.then((r) => {
@@ -568,10 +438,6 @@ export class SearchService {
 
 	// ── Rebuilds ─────────────────────────────────────────────────────
 
-	/**
-	 * Full rebuild from the legacy store triple. Maps onto the new
-	 * `rebuildFromSources` under the hood.
-	 */
 	async rebuildFromStores(
 		goalStore: GoalStore,
 		sessionStore: SessionStore,
@@ -580,8 +446,6 @@ export class SearchService {
 	): Promise<void> {
 		const effectiveStaff = staffStore ?? this.staffStore;
 		if (!effectiveStaff) {
-			// Historical contract accepted missing staff store (returned
-			// empty staff set). Build a minimal shim.
 			return this.rebuildFromSources(goalStore, sessionStore, emptyStaffStore());
 		}
 		return this.rebuildFromSources(goalStore, sessionStore, effectiveStaff);
@@ -593,10 +457,7 @@ export class SearchService {
 		staffStore: StaffStore,
 		sources?: IndexSource[],
 	): Promise<void> {
-		if (!this._indexer) {
-			// Service not ready — best-effort no-op so callers don't crash.
-			return;
-		}
+		if (!this._indexer) return;
 		const ctx: IndexSourceContext = {
 			projectId: this.projectId,
 			goalStore,
@@ -618,42 +479,24 @@ export class SearchService {
 	private async _doOpen(
 		context?: { goalStore?: GoalStore; sessionStore?: SessionStore; staffStore?: StaffStore },
 	): Promise<void> {
-		// 1. Open LanceStore.
-		let store: LanceStore;
-		try {
-			store = await LanceStore.open({
-				dataDir: this.dataDir,
-				embedDim: this.embedder.dim,
-			});
-		} catch (err) {
-			console.error(
-				`[search] LanceStore failed to open at ${this.dataDir} — search disabled (no-native):`,
-				err,
-			);
-			this._state = "disabled-no-native";
-			this.progressBus.emit("index:error", {
-				projectId: this.projectId,
-				message: `LanceDB native binary unavailable: ${(err as Error).message}`,
-				recoverable: false,
-			});
-			return;
+		// One-shot legacy cleanup: drop any pre-existing LanceDB dataset.
+		const lanceDir = path.join(this.stateDir, "search.lance");
+		if (fs.existsSync(lanceDir)) {
+			try {
+				await fs.promises.rm(lanceDir, { recursive: true, force: true });
+				console.log(`[search] Removed legacy ${lanceDir}`);
+			} catch (err) {
+				console.warn(`[search] Could not remove legacy search.lance:`, err);
+			}
 		}
-		this._store = store;
-
-		// Legacy FTS5 cleanup: now that LanceDB is open, remove any stale
-		// search.db files in this project's state dir. One-shot migration per
-		// the design doc §10. Wrapped in try/catch — never fatal.
+		// Legacy FTS5 cleanup: search.db* siblings.
 		try {
 			for (const suffix of ["", "-wal", "-shm"]) {
 				const legacy = path.join(this.stateDir, `search.db${suffix}`);
 				if (fs.existsSync(legacy)) {
 					try {
 						fs.unlinkSync(legacy);
-						console.log(`[search] Removed legacy ${path.basename(legacy)}`);
 					} catch (err) {
-						// EBUSY on Windows = another process still holds the file open
-						// (common when a previous harness is still shutting down). Silently
-						// skip — we'll retry on the next open().
 						const code = (err as NodeJS.ErrnoException)?.code;
 						if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOENT") {
 							console.warn(`[search] Could not remove legacy ${legacy}:`, err);
@@ -661,85 +504,66 @@ export class SearchService {
 					}
 				}
 			}
-		} catch {
-			/* non-fatal */
-		}
+		} catch { /* non-fatal */ }
 
-		// 2. Warm up embedder. Failure → disabled-no-model but LanceStore
-		// stays open so future retries (e.g. after model download) can
-		// succeed without re-opening the dataset.
+		// Open FlexSearchStore.
+		let store: FlexSearchStore;
 		try {
-			await this.embedder.ready();
+			store = await FlexSearchStore.open({ dataDir: this.dataDir });
 		} catch (err) {
 			console.error(
-				`[search] Embedder failed to load — search disabled (no-model):`,
+				`[search] FlexSearchStore failed to open at ${this.dataDir} — search disabled:`,
 				err,
 			);
-			this._state = "disabled-no-model";
+			this._state = "disabled";
 			this.progressBus.emit("index:error", {
 				projectId: this.projectId,
-				message: `Embedding model failed to load: ${(err as Error).message}`,
-				recoverable: true,
+				message: `FlexSearch store unavailable: ${(err as Error).message}`,
+				recoverable: false,
 			});
 			return;
 		}
+		this._store = store;
 
-		// 3. Instantiate indexer + hybrid.
 		this._indexer = new Indexer({
-			lance: store,
-			embedder: this.embedder,
+			store,
 			progressBus: this.progressBus,
 			projectId: this.projectId,
 		});
-		this._hybrid = new HybridQuery({ lance: store, embedder: this.embedder });
 
-		// 4. Meta check. Mismatch → background rebuild (do NOT block).
+		// Meta check. Mismatch → background rebuild.
 		try {
 			const stored = await store.readMeta();
 			const current = buildCurrentMeta({
-				embedderId: this.embedder.id,
-				dim: this.embedder.dim,
+				engine: "flexsearch",
+				engineVersion: FLEX_VERSION,
 				contentPolicyVersion: CONTENT_POLICY_VERSION,
 			});
-			if (metaNeedsRebuild(stored, current)) {
+			// Also consider a stored-but-empty index corrupt.
+			const corrupt = stored !== null && store.count() === 0;
+			if (metaNeedsRebuild(stored, current) || corrupt) {
 				if (
 					context?.goalStore &&
 					context?.sessionStore &&
 					(context?.staffStore || this.staffStore)
 				) {
 					const staff = (context.staffStore ?? this.staffStore) as StaffStore;
-					// Defer the rebuild so initial REST traffic (/api/projects,
-					// /api/sessions, /api/goals) lands before the embedder
-					// starts hammering the event loop. Rebuild still runs in
-					// the background, serialized with other projects via the
-					// module-level queue.
 					const delayMs = Number(process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS ?? 5000);
 					const timer = setTimeout(() => {
 						this.rebuildFromSources(
 							context.goalStore!,
 							context.sessionStore!,
 							staff,
-						)
-							.then(() => {
-								// No-op — progress events already emitted.
-							})
-							.catch((err) => {
-								console.error("[search] Background rebuild failed:", err);
-							});
+						).catch((err) => console.error("[search] Background rebuild failed:", err));
 					}, delayMs);
 					if (typeof timer.unref === "function") timer.unref();
 				}
-				// If no stores provided, caller is responsible for invoking
-				// rebuildFromStores explicitly once wiring is up.
 			}
 		} catch (err) {
 			console.error("[search] Meta read failed (non-fatal):", err);
 		}
 
 		this._state = "ready";
-		// Schedule daily compaction once the service is up. Timer is
-		// .unref()'d so it never keeps the process alive on shutdown.
-		this._startScheduledCompaction();
 	}
 }
 
@@ -753,18 +577,10 @@ function dirSizeBytes(dir: string): number {
 		while (stack.length) {
 			const p = stack.pop()!;
 			let stat: fs.Stats;
-			try {
-				stat = fs.lstatSync(p);
-			} catch {
-				continue;
-			}
+			try { stat = fs.lstatSync(p); } catch { continue; }
 			if (stat.isDirectory()) {
 				let entries: string[] = [];
-				try {
-					entries = fs.readdirSync(p);
-				} catch {
-					continue;
-				}
+				try { entries = fs.readdirSync(p); } catch { continue; }
 				for (const e of entries) stack.push(path.join(p, e));
 			} else if (stat.isFile()) {
 				total += stat.size;
@@ -777,8 +593,6 @@ function dirSizeBytes(dir: string): number {
 }
 
 function emptyStaffStore(): StaffStore {
-	// Minimal shim for the staff-less rebuild path. Only `getAll()` is
-	// exercised by `StaffIndexSource`.
 	return {
 		getAll: () => [],
 	} as unknown as StaffStore;

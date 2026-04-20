@@ -12,8 +12,22 @@ export interface ChunkOptions {
   maxTokens?: number;
   /** Number of tokens of overlap between consecutive chunks. Default 200. */
   overlap?: number;
-  /** Token counter injected by caller (e.g. nomic tokenizer). */
-  countTokens: (text: string) => number;
+  /**
+   * Token counter. Optional — defaults to `approxTokenCount` (~4 chars
+   * per token). Tests that want deterministic sizing can inject.
+   */
+  countTokens?: (text: string) => number;
+}
+
+/**
+ * Cheap, deterministic token counter. ~4 chars per token matches the
+ * industry rule-of-thumb used when no real tokenizer is available. We
+ * don't need precision here — chunk boundaries are coarse, and no
+ * downstream consumer depends on the exact count.
+ */
+export function approxTokenCount(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
 }
 
 export interface Chunk {
@@ -47,11 +61,11 @@ const DEFAULT_OVERLAP = 200;
 export function chunkText(
   text: string,
   parentId: string,
-  opts: ChunkOptions,
+  opts: ChunkOptions = {},
 ): Chunk[] {
   const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
   const overlap = opts.overlap ?? DEFAULT_OVERLAP;
-  const countTokens = opts.countTokens;
+  const countTokens = opts.countTokens ?? approxTokenCount;
 
   if (maxTokens <= 0) {
     throw new Error("chunkText: maxTokens must be > 0");
