@@ -45,6 +45,10 @@ const DEFAULT_LIMIT = 20;
 /** Fetch multiplier before parent_id collapse — gives dedupe headroom. */
 const PRE_COLLAPSE_MULTIPLIER = 3;
 
+/** RRF-style constant. Keeps the rank-gap small so weight + recency can
+ * re-order closely-ranked hits. */
+const RANK_K = 100;
+
 /** Field-level score boosts (higher = ranks first when tied on rank). */
 const FIELD_BOOST = {
 	identifier_text: 2.0,
@@ -349,12 +353,18 @@ export class FlexSearchStore {
 				(FIELD_BOOST as Record<string, number>)[group.field] ?? 1.0;
 			let rank = 0;
 			for (const hit of group.result ?? []) {
-				const doc = hit.doc ?? this._docs.get(String(hit.id));
+				// Always use our mirror map for the authoritative doc —
+				// FlexSearch's `enrich` doc can return values re-encoded
+				// through field encoders (numeric weight coerced etc.).
+				const doc = this._docs.get(String(hit.id));
 				if (!doc) { rank++; continue; }
 				// Apply tag filters defensively — FlexSearch honours them,
 				// but we guard against unknown encodings.
 				if (!this._matchesTagFilter(doc, q)) { rank++; continue; }
-				const contribution = boost / (rank + 1);
+				// RRF-style `1/(rank + k)` with `k=10` so the boost between
+				// rank 0 and rank 1 is ~10%, letting per-doc weight and
+				// recency dominate ordering ties.
+				const contribution = boost / (rank + RANK_K);
 				const existing = scored.get(doc.id);
 				if (existing) {
 					existing._score += contribution;
