@@ -439,63 +439,95 @@ interface GoalFormConfig {
 }
 
 function renderGoalForm(config: GoalFormConfig) {
+	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
+	const worktreePath = linkedProject
+		? worktreePreviewPath(linkedProject.rootPath, config.title)
+		: worktreePreviewPath(config.cwd, config.title);
+	const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
+	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
+	const optionalSteps: Array<{name: string; label: string; description?: string; type?: string}> = [];
+	if (wf) {
+		for (const gate of wf.gates) {
+			if (gate.verify) {
+				for (const step of gate.verify) {
+					if (step.optional) {
+						optionalSteps.push({ name: step.name, label: step.label || step.name, description: step.description, type: step.type });
+					}
+				}
+			}
+		}
+	}
+	const sandboxConfigured = !!state.sandboxStatus?.configured;
+	const sandboxAvailable = !!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists);
+	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
+
 	return html`
-		<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-			<div>
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Title</label>
-				${Input({
-					type: "text",
-					value: config.title,
-					placeholder: "Goal title",
-					onInput: config.onTitleChange,
-				})}
-			</div>
-			${(() => {
-				const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
-				if (linkedProject) {
-					return html`
-				<div class="flex gap-4">
-					<div class="min-w-0" style="width:30%;">
-						<label class="text-xs text-muted-foreground mb-1 block font-medium">Project</label>
-						<div class="text-sm text-foreground/80 truncate">${linkedProject.name}</div>
-					</div>
-					<div class="min-w-0" style="width:70%;">
-						<label class="text-xs text-muted-foreground mb-1 block font-medium">Working Directory</label>
-						<div class="text-sm text-foreground/80 truncate font-mono" title=${linkedProject.rootPath}>${linkedProject.rootPath}</div>
+		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5">
+			<div class="flex flex-col md:flex-row gap-2.5 md:items-center">
+				<div class="flex items-center gap-2 flex-1 min-w-0">
+					<label class="${lblCls} w-20 md:w-16">Title</label>
+					<div class="flex-1 min-w-0">
+						${Input({
+							type: "text",
+							value: config.title,
+							placeholder: "Goal title",
+							onInput: config.onTitleChange,
+						})}
 					</div>
 				</div>
-				<p class="text-[11px] text-muted-foreground opacity-70 -mt-2">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(linkedProject.rootPath, config.title)}</code></p>`;
-				}
-				return html`
-			<div>
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
-				${cwdCombobox({
-					value: config.cwd,
-					onInput: config.onCwdChange,
-					onSelect: config.onCwdSelect,
-					dropdownOpen: config.cwdDropdownOpen,
-					onToggle: config.onCwdToggle,
-					highlightedIndex: config.cwdHighlightIndex,
-					onHighlight: config.onCwdHighlight,
-				})}
-				<p class="text-[11px] text-muted-foreground mt-1 opacity-70">Agents will work in a git worktree at <code class="text-[10px]">${worktreePreviewPath(config.cwd, config.title)}</code></p>
-			</div>`;
-			})()}
-			${state.sandboxStatus?.configured ? html`
-			<div>
-				<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
-					<input type="checkbox" class="toggle-switch" .checked=${config.sandboxed}
-						?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
-						@change=${config.onSandboxChange} />
-					<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
-					<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
-						? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-						: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
-						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-				</label>
+				${_cachedWorkflows.length > 0 ? html`
+					<div class="flex items-center gap-2 md:shrink-0">
+						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
+						<select
+							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+							.value=${config.workflowId}
+							@change=${config.onWorkflowChange}
+						>
+							${_cachedWorkflows.map((w) => html`
+								<option value=${w.id} ?selected=${config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							`)}
+						</select>
+					</div>
+				` : ""}
 			</div>
-			` : ""}
-			<div>
+			${linkedProject ? html`
+				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
+					<span class="${lblCls} w-20 md:w-16">Worktree</span>
+					<span class="truncate flex-1 min-w-0" title=${linkedProject.rootPath + ' → ' + worktreePath}>
+						<span class="font-medium text-foreground/80">${linkedProject.name}</span>
+						<code class="text-[10px] font-mono opacity-80 ml-1">${worktreePath}</code>
+					</span>
+				</div>
+			` : html`
+				<div class="flex items-start gap-2">
+					<label class="${lblCls} w-20 md:w-16 mt-2">Directory</label>
+					<div class="flex-1 min-w-0">
+						${cwdCombobox({
+							value: config.cwd,
+							onInput: config.onCwdChange,
+							onSelect: config.onCwdSelect,
+							dropdownOpen: config.cwdDropdownOpen,
+							onToggle: config.onCwdToggle,
+							highlightedIndex: config.cwdHighlightIndex,
+							onHighlight: config.onCwdHighlight,
+						})}
+						<p class="text-[11px] text-muted-foreground mt-0.5 opacity-70 truncate" title=${worktreePath}>Worktree: <code class="text-[10px]">${worktreePath}</code></p>
+					</div>
+				</div>
+			`}
+			<div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-0.5">
+				${sandboxConfigured ? html`
+					<label class="flex items-center gap-1.5 cursor-pointer ${!sandboxAvailable ? "opacity-40 pointer-events-none" : ""}">
+						<input type="checkbox" class="toggle-switch" .checked=${config.sandboxed}
+							?disabled=${!sandboxAvailable}
+							@change=${config.onSandboxChange} />
+						<span class="text-xs text-muted-foreground font-medium">Sandbox</span>
+						<span title=${!sandboxAvailable
+							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
+							: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
+							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+					</label>
+				` : ""}
 				<label class="flex items-center gap-1.5 cursor-pointer">
 					<input type="checkbox" class="toggle-switch" .checked=${config.autoStartTeam}
 						@change=${config.onAutoStartTeamChange} />
@@ -503,68 +535,31 @@ function renderGoalForm(config: GoalFormConfig) {
 					<span title="Automatically start the team lead when the worktree is ready"
 						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 				</label>
+				${optionalSteps.map(os => {
+					const qaDisabled = os.type === 'agent-qa' && !!config.linkedProjectId && _qaConfigCache.has(config.linkedProjectId) && !_qaConfigCache.get(config.linkedProjectId);
+					return html`
+					<label class="flex items-center gap-1.5 cursor-pointer ${qaDisabled ? 'opacity-40 pointer-events-none' : ''}">
+						<input type="checkbox" class="toggle-switch"
+							.checked=${config.enabledOptionalSteps.includes(os.name)}
+							?disabled=${qaDisabled}
+							@change=${(e: Event) => {
+								const checked = (e.target as HTMLInputElement).checked;
+								const updated = checked
+									? (config.enabledOptionalSteps.includes(os.name) ? config.enabledOptionalSteps : [...config.enabledOptionalSteps, os.name])
+									: config.enabledOptionalSteps.filter(n => n !== os.name);
+								config.onOptionalStepsChange(updated);
+							}}
+						/>
+						<span class="text-xs text-muted-foreground font-medium">${os.label}</span>
+						${os.description ? html`
+							<span title=${qaDisabled
+								? 'Configure qa_start_command in project settings to enable QA testing'
+								: os.description}
+								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+						` : ''}
+					</label>
+				`;})}
 			</div>
-			${_cachedWorkflows.length > 0 ? html`
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Workflow</label>
-					<select
-						class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground"
-						.value=${config.workflowId}
-						@change=${config.onWorkflowChange}
-					>
-						${_cachedWorkflows.map((wf) => html`
-							<option value=${wf.id} ?selected=${config.workflowId === wf.id}>${wf.name} (${wf.gates.length} gates)</option>
-						`)}
-					</select>
-				</div>
-			` : ""}
-			${(() => {
-				const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
-				if (!wf) return "";
-				if (config.linkedProjectId) {
-					ensureQaConfigLoaded(config.linkedProjectId);
-				}
-				const optionalSteps: Array<{name: string; label: string; description?: string; type?: string}> = [];
-				for (const gate of wf.gates) {
-					if (gate.verify) {
-						for (const step of gate.verify) {
-							if (step.optional) {
-								optionalSteps.push({ name: step.name, label: step.label || step.name, description: step.description, type: step.type });
-							}
-						}
-					}
-				}
-				if (optionalSteps.length === 0) return "";
-				return html`
-					<div class="flex flex-col gap-2">
-						<label class="text-xs text-muted-foreground font-medium">Optional Steps</label>
-						${optionalSteps.map(os => {
-							const qaDisabled = os.type === 'agent-qa' && !!config.linkedProjectId && _qaConfigCache.has(config.linkedProjectId) && !_qaConfigCache.get(config.linkedProjectId);
-							return html`
-							<label class="flex items-center gap-2 text-sm cursor-pointer ${qaDisabled ? 'opacity-40 pointer-events-none' : ''}">
-								<input type="checkbox" class="toggle-switch"
-									.checked=${config.enabledOptionalSteps.includes(os.name)}
-									?disabled=${qaDisabled}
-									@change=${(e: Event) => {
-										const checked = (e.target as HTMLInputElement).checked;
-										const updated = checked
-											? (config.enabledOptionalSteps.includes(os.name) ? config.enabledOptionalSteps : [...config.enabledOptionalSteps, os.name])
-											: config.enabledOptionalSteps.filter(n => n !== os.name);
-										config.onOptionalStepsChange(updated);
-									}}
-								/>
-								<span>${os.label}</span>
-								${os.description ? html`
-									<span title=${qaDisabled
-										? 'Configure qa_start_command in project settings to enable QA testing'
-										: os.description}
-										class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-								` : ''}
-							</label>
-						`;})}
-					</div>
-				`;
-			})()}
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
 					<label class="text-xs text-muted-foreground font-medium">Spec</label>
@@ -2986,7 +2981,7 @@ export function doRenderApp(): void {
 			const headerEl = document.getElementById("app-header");
 			if (headerEl) {
 				const h = headerEl.offsetHeight;
-				document.documentElement.style.setProperty("--mobile-header-height", `${h + 16}px`);
+				document.documentElement.style.setProperty("--mobile-header-height", `${h + 8}px`);
 			}
 		});
 	} else {
