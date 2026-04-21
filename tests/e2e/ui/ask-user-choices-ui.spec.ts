@@ -126,4 +126,49 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 
 		await page2.close();
 	});
+
+	test("keyboard-only multi-question submission", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "please use ask_user_choices");
+
+		const widget = page.locator("ask-user-choices-widget").first();
+		await expect(widget).toBeVisible({ timeout: 20_000 });
+
+		// Tab strip uses lettered tab_label.
+		const letters = widget.locator('[role="tab"] .ask-tab-letter');
+		await expect(letters.first()).toHaveText("A.");
+		await expect(letters.nth(1)).toHaveText("B.");
+
+		// Focus the first tab so keyboard input targets the widget.
+		await widget.locator('[role="tab"][data-tab-index="0"]').focus();
+
+		// Press '1' → picks option 1 on Q1 ("red") and auto-advances to Q2.
+		await page.keyboard.press("1");
+		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
+			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+
+		// Re-focus for keyboard targeting on the new tab panel.
+		await widget.locator('[role="tab"][data-tab-index="1"]').focus();
+
+		// Press '2' → picks option 2 on Q2 ("medium"). Last tab → no advance.
+		await page.keyboard.press("2");
+		await expect(widget.locator('input[type="radio"][value="medium"]')).toBeChecked();
+
+		// Primary button should now be Submit (last tab) and enabled.
+		const submit = widget.locator(".ask-submit");
+		await expect(submit).toHaveText("Submit");
+		await expect(submit).toBeEnabled();
+
+		// Press Enter → submits. Focus the Submit button first so Enter targets it.
+		await submit.focus();
+		await page.keyboard.press("Enter");
+		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(widget.locator('input[type="radio"]').first()).toBeDisabled();
+
+		// Confirm Q1 "red" survived as the recorded answer.
+		await widget.locator('[role="tab"][data-tab-index="0"]').click();
+		await expect(widget.locator('input[type="radio"][value="red"]')).toBeChecked();
+	});
 });

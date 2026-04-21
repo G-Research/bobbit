@@ -9,12 +9,16 @@
   [role="tablist"] { display: flex; gap: 4px; border-bottom: 1px solid #444; margin-bottom: 12px; flex-wrap: wrap; }
   .ask-tab { padding: 4px 8px; font-size: 12px; border: 1px solid transparent; border-radius: 4px 4px 0 0; background: transparent; color: #aaa; cursor: pointer; }
   .ask-tab[aria-selected="true"] { background: #1a1a2e; border-color: #444; border-bottom-color: transparent; color: #fff; font-weight: 500; }
+  .ask-tab-letter { font-family: ui-monospace, monospace; }
+  .ask-tab-label { margin-left: 4px; }
   .ask-tab-check { color: #22c55e; margin-left: 4px; }
   .ask-question { font-size: 14px; font-weight: 500; margin-bottom: 8px; }
   .ask-options { display: flex; flex-direction: column; gap: 6px; }
   .ask-option { display: flex; align-items: center; gap: 8px; padding: 8px; font-size: 14px; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
   .ask-option.checked { border-color: #3b82f6; background: rgba(59,130,246,0.1); }
+  .ask-option.ask-option-focused { box-shadow: 0 0 0 2px rgba(59,130,246,0.4); }
   .ask-option[data-disabled="true"] { cursor: default; opacity: 0.9; }
+  .ask-option-index { font-family: ui-monospace, monospace; font-size: 11px; color: #888; width: 18px; text-align: right; user-select: none; }
   .ask-option-check { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid #444; font-size: 10px; line-height: 1; color: transparent; pointer-events: none; }
   .ask-option.checked .ask-option-check { border-color: #3b82f6; background: #3b82f6; color: #fff; }
   .ask-other-input { margin-left: 8px; flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid #444; border-radius: 4px; background: #1a1a2e; color: #eee; }
@@ -51,9 +55,15 @@
 
 const OTHER_SENTINEL = "__OTHER__";
 
+function tabLetter(idx) { return String.fromCharCode(65 + idx); }
+
 class AskWidget {
   constructor(mount, opts) {
     this.mount = mount;
+    // Attach keydown on the stable mount element so focus survives re-renders
+    // of the inner `.ask-widget` subtree. Mirrors Lit's template-stable root
+    // behaviour in AskUserChoicesWidget.ts.
+    mount.addEventListener("keydown", (e) => this.onKeydown(e));
     this.questions = opts.questions;
     this.answers = opts.answers || null;
     this.sessionId = opts.sessionId || "";
@@ -63,6 +73,7 @@ class AskWidget {
     this.submitUrl = opts.submitUrl || "/api/internal/user-question/submit";
     this.submitFetch = opts.submitFetch || window.fetch.bind(window);
     this.activeTab = 0;
+    this.focusedOption = 0;
     this.draft = this.questions.map(q => ({
       selected: q.multi ? [] : null,
       other_text: "",
@@ -74,28 +85,52 @@ class AskWidget {
 
   isReadOnly() { return Array.isArray(this.answers) || this.errored; }
 
+  optionCount(qIdx) {
+    const q = this.questions[qIdx];
+    if (!q) return 0;
+    return q.options.length + (q.allow_other ? 1 : 0);
+  }
+
+  optionValueAt(qIdx, optIdx) {
+    const q = this.questions[qIdx];
+    if (!q || optIdx < 0) return null;
+    if (optIdx < q.options.length) return q.options[optIdx];
+    if (q.allow_other && optIdx === q.options.length) return OTHER_SENTINEL;
+    return null;
+  }
+
+  isQuestionValid(qIdx) {
+    const q = this.questions[qIdx];
+    const d = this.draft[qIdx];
+    if (!q || !d) return false;
+    if (q.multi) {
+      const arr = Array.isArray(d.selected) ? d.selected : [];
+      const maxOptionCount = q.options.length + (q.allow_other ? 1 : 0);
+      const min = q.min != null ? q.min : 1;
+      const max = q.max != null ? q.max : maxOptionCount;
+      if (arr.length < min || arr.length > max) return false;
+      if (arr.includes(OTHER_SENTINEL) && !d.other_text.trim()) return false;
+      return true;
+    }
+    if (!d.selected || Array.isArray(d.selected)) return false;
+    if (d.selected === OTHER_SENTINEL && !d.other_text.trim()) return false;
+    return true;
+  }
+
   canSubmit() {
     if (this.draft.length !== this.questions.length) return false;
-    return this.draft.every((d, i) => {
-      const q = this.questions[i];
-      if (q.multi) {
-        const arr = Array.isArray(d.selected) ? d.selected : [];
-        const maxOptionCount = q.options.length + (q.allow_other ? 1 : 0);
-        const min = q.min != null ? q.min : 1;
-        const max = q.max != null ? q.max : maxOptionCount;
-        if (arr.length < min || arr.length > max) return false;
-        if (arr.includes(OTHER_SENTINEL) && !d.other_text.trim()) return false;
-        return true;
-      }
-      if (!d.selected || Array.isArray(d.selected)) return false;
-      if (d.selected === OTHER_SENTINEL && !d.other_text.trim()) return false;
-      return true;
-    });
+    return this.draft.every((_d, i) => this.isQuestionValid(i));
   }
+
+  isLastTab() { return this.activeTab === this.questions.length - 1; }
+  showNext() { return this.questions.length > 1 && !this.isLastTab(); }
 
   selectTab(idx) {
     if (idx < 0 || idx >= this.questions.length) return;
-    this.activeTab = idx;
+    if (this.activeTab !== idx) {
+      this.activeTab = idx;
+      this.focusedOption = 0;
+    }
     this.render();
   }
 
@@ -118,8 +153,34 @@ class AskWidget {
     }
     if (option !== OTHER_SENTINEL && qIdx < this.questions.length - 1) {
       this.activeTab = qIdx + 1;
+      this.focusedOption = 0;
     }
     setTimeout(() => this.render(), 0);
+  }
+
+  clickPrimary() {
+    if (this.isReadOnly()) return;
+    if (this.showNext()) {
+      if (this.isQuestionValid(this.activeTab)) {
+        this.activeTab = this.activeTab + 1;
+        this.focusedOption = 0;
+        this.render();
+      }
+      return;
+    }
+    this.submit();
+  }
+
+  clearActive() {
+    if (this.isReadOnly()) return;
+    const q = this.questions[this.activeTab];
+    if (!q) return;
+    this.draft[this.activeTab] = {
+      selected: q.multi ? [] : null,
+      other_text: "",
+    };
+    this.submitError = "";
+    this.render();
   }
 
   shouldHideSubmit() {
@@ -199,12 +260,113 @@ class AskWidget {
     return d.selected === value;
   }
 
+  isTextInputFocused() {
+    const el = document.activeElement;
+    if (!el) return false;
+    if (el.tagName === "TEXTAREA") return true;
+    if (el.tagName === "INPUT") {
+      const t = (el.type || "text").toLowerCase();
+      return !(t === "radio" || t === "checkbox" || t === "button" || t === "submit");
+    }
+    return false;
+  }
+
+  onKeydown(e) {
+    if (this.isReadOnly()) return;
+    const key = e.key;
+    const textFocused = this.isTextInputFocused();
+
+    if (textFocused) {
+      if (key === "Escape") { e.preventDefault(); this.clearActive(); return; }
+      if (key === "Enter") {
+        if (this.isQuestionValid(this.activeTab)) { e.preventDefault(); this.clickPrimary(); }
+        return;
+      }
+      return;
+    }
+
+    const target = e.target;
+    const onTab = !!(target && target.closest && target.closest('[role="tab"]'));
+
+    if (key === "ArrowLeft" || key === "ArrowRight") {
+      if (onTab && this.questions.length > 1) {
+        e.preventDefault();
+        const dir = key === "ArrowRight" ? 1 : -1;
+        const next = (this.activeTab + dir + this.questions.length) % this.questions.length;
+        this.selectTab(next);
+        setTimeout(() => {
+          const btn = this.mount.querySelector(`[role="tab"][data-tab-index="${next}"]`);
+          if (btn) btn.focus();
+        }, 0);
+      }
+      return;
+    }
+
+    const count = this.optionCount(this.activeTab);
+    if (key === "ArrowDown") {
+      if (count > 0) { e.preventDefault(); this.focusedOption = (this.focusedOption + 1) % count; this.render(); }
+      return;
+    }
+    if (key === "ArrowUp") {
+      if (count > 0) { e.preventDefault(); this.focusedOption = (this.focusedOption - 1 + count) % count; this.render(); }
+      return;
+    }
+
+    if (key === "Escape") { e.preventDefault(); this.clearActive(); return; }
+
+    if (key === "Enter") {
+      if (target && target.closest && target.closest(".ask-submit")) return;
+      const q = this.questions[this.activeTab];
+      if (q && !q.multi && this.questions.length === 1) {
+        const value = this.optionValueAt(this.activeTab, this.focusedOption);
+        if (value !== null) {
+          e.preventDefault();
+          this.selectOption(this.activeTab, value);
+          return;
+        }
+      }
+      const canAct = this.showNext()
+        ? this.isQuestionValid(this.activeTab)
+        : (this.canSubmit() && !this.submitting);
+      if (canAct) { e.preventDefault(); this.clickPrimary(); }
+      return;
+    }
+
+    if (/^[1-9]$/.test(key)) {
+      const idx = parseInt(key, 10) - 1;
+      const value = this.optionValueAt(this.activeTab, idx);
+      if (value === null) return;
+      e.preventDefault();
+      const q = this.questions[this.activeTab];
+      this.focusedOption = idx;
+      if (q && q.multi) { this.selectOption(this.activeTab, value); return; }
+      this.selectOption(this.activeTab, value);
+      return;
+    }
+
+    if (this.questions.length > 1 && /^[A-Za-z]$/.test(key)) {
+      const idx = key.toUpperCase().charCodeAt(0) - 65;
+      if (idx >= 0 && idx < this.questions.length) {
+        e.preventDefault();
+        this.selectTab(idx);
+        setTimeout(() => {
+          const btn = this.mount.querySelector(`[role="tab"][data-tab-index="${idx}"]`);
+          if (btn) btn.focus();
+        }, 0);
+      }
+      return;
+    }
+  }
+
   render() {
     const root = document.createElement("div");
     root.className = "ask-widget";
 
     if (this.errored) {
-      root.innerHTML = `<div class="ask-error">${this.errorText || "ask_user_choices failed."}</div>`;
+      const err = document.createElement("div");
+      err.className = "ask-error";
+      err.textContent = this.errorText || "ask_user_choices failed.";
+      root.appendChild(err);
       this.mount.replaceChildren(root);
       return;
     }
@@ -220,7 +382,10 @@ class AskWidget {
       btn.type = "button";
       btn.setAttribute("role", "tab");
       btn.setAttribute("aria-selected", String(i === this.activeTab));
+      btn.setAttribute("aria-controls", `ask-panel-${this.toolUseId}-${i}`);
+      btn.id = `ask-tab-${this.toolUseId}-${i}`;
       btn.setAttribute("data-tab-index", String(i));
+      btn.setAttribute("tabindex", i === this.activeTab ? "0" : "-1");
       btn.className = "ask-tab";
       let answered;
       if (readOnly) {
@@ -229,7 +394,9 @@ class AskWidget {
         const d = this.draft[i];
         answered = Array.isArray(d.selected) ? d.selected.length > 0 : !!d.selected;
       }
-      btn.innerHTML = `<span>${i + 1}.</span> <span>${escapeHtml(q.question.slice(0, 40))}</span>${answered ? '<span class="ask-tab-check">✓</span>' : ""}`;
+      const raw = (q.tab_label && q.tab_label.trim()) || q.question || `Q${i + 1}`;
+      const label = raw.slice(0, 40);
+      btn.innerHTML = `<span class="ask-tab-letter">${tabLetter(i)}.</span><span class="ask-tab-label">${escapeHtml(label)}</span>${answered ? '<span class="ask-tab-check">✓</span>' : ""}`;
       btn.addEventListener("click", () => this.selectTab(i));
       tablist.appendChild(btn);
     });
@@ -246,34 +413,49 @@ class AskWidget {
 
     const panel = document.createElement("div");
     panel.setAttribute("role", "tabpanel");
+    panel.id = `ask-panel-${this.toolUseId}-${this.activeTab}`;
+    panel.setAttribute("aria-labelledby", `ask-tab-${this.toolUseId}-${this.activeTab}`);
     panel.setAttribute("data-panel-index", String(this.activeTab));
     panel.innerHTML = `<div class="ask-question">${escapeHtml(q.question)}</div>`;
 
     const optsDiv = document.createElement("div");
     optsDiv.className = "ask-options";
+    optsDiv.setAttribute("role", q.multi ? "group" : "radiogroup");
+    optsDiv.setAttribute("aria-label", q.question);
     const inputType = q.multi ? "checkbox" : "radio";
-    const renderOpt = (value, label, isOther) => {
+    const renderOpt = (value, label, optIdx, isOther) => {
       const checked = this.isOptionChecked(this.activeTab, value, readOnly);
+      const isFocused = !readOnly && this.focusedOption === optIdx;
       const lbl = document.createElement("label");
-      lbl.className = "ask-option" + (checked ? " checked" : "") + (isOther ? " ask-option-other" : "");
+      const classes = ["ask-option"];
+      if (checked) classes.push("checked");
+      if (isFocused) classes.push("ask-option-focused");
+      if (isOther) classes.push("ask-option-other");
+      lbl.className = classes.join(" ");
+      lbl.setAttribute("role", q.multi ? "checkbox" : "radio");
+      lbl.setAttribute("aria-checked", checked ? "true" : "false");
+      lbl.setAttribute("data-option-index", String(optIdx));
+      lbl.setAttribute("tabindex", readOnly ? "-1" : (isFocused ? "0" : "-1"));
       if (readOnly) lbl.setAttribute("data-disabled", "true");
       const nameAttr = q.multi ? "" : ` name="q-${this.activeTab}"`;
       lbl.innerHTML = `
         <input type="${inputType}" class="sr-only"${nameAttr} value="${escapeHtml(value)}" ${checked ? "checked" : ""} ${readOnly ? "disabled" : ""}>
+        <span class="ask-option-index" aria-hidden="true">${optIdx + 1}.</span>
         <span class="ask-option-check" aria-hidden="true">${checked ? "✓" : ""}</span>
         <span class="ask-option-text">${escapeHtml(label)}</span>
         ${isOther && checked ? `<input type="text" class="ask-other-input" value="${escapeHtml(otherText)}" ${readOnly ? "disabled" : ""}>` : ""}
       `;
       const input = lbl.querySelector(`input[type=${inputType}]`);
       input.addEventListener("change", () => this.selectOption(this.activeTab, value));
+      lbl.addEventListener("focus", () => { if (!readOnly) { this.focusedOption = optIdx; } });
       const txt = lbl.querySelector("input[type=text]");
       if (txt) {
         txt.addEventListener("input", (e) => this.setOtherText(this.activeTab, e.target.value));
       }
       return lbl;
     };
-    for (const opt of q.options) optsDiv.appendChild(renderOpt(opt, opt, false));
-    if (q.allow_other) optsDiv.appendChild(renderOpt(OTHER_SENTINEL, "Other", true));
+    q.options.forEach((opt, i) => optsDiv.appendChild(renderOpt(opt, opt, i, false)));
+    if (q.allow_other) optsDiv.appendChild(renderOpt(OTHER_SENTINEL, "Other", q.options.length, true));
     panel.appendChild(optsDiv);
     root.appendChild(panel);
 
@@ -290,14 +472,54 @@ class AskWidget {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "ask-submit";
-      btn.textContent = this.submitting ? "Submitting…" : "Submit";
-      btn.disabled = !this.canSubmit() || this.submitting;
-      btn.addEventListener("click", () => this.submit());
+      const showNext = this.showNext();
+      const primaryDisabled = showNext
+        ? !this.isQuestionValid(this.activeTab)
+        : (!this.canSubmit() || this.submitting);
+      btn.textContent = this.submitting ? "Submitting…" : (showNext ? "Next" : "Submit");
+      btn.disabled = primaryDisabled;
+      btn.addEventListener("click", () => this.clickPrimary());
       row.appendChild(btn);
       root.appendChild(row);
     }
 
+    // Capture what was focused before we blow the DOM away so we can restore
+    // focus to the equivalent element after replaceChildren(). Lit-based
+    // renders keep DOM stable across updates, so the source widget doesn't
+    // need this dance — but the fixture rebuilds the whole subtree.
+    const prev = document.activeElement;
+    let restore = null;
+    if (prev && this.mount.contains(prev)) {
+      const tabIdx = prev.getAttribute && prev.getAttribute("data-tab-index");
+      const optIdx = prev.getAttribute && prev.getAttribute("data-option-index");
+      if (tabIdx != null) {
+        restore = () => {
+          const t = this.mount.querySelector(`[role="tab"][data-tab-index="${tabIdx}"]`);
+          if (t) t.focus();
+        };
+      } else if (optIdx != null) {
+        // Restore focus to the focused option (per `this.focusedOption`) so the
+        // keydown listener on mount still receives keys after re-render. Use the
+        // state-tracked index rather than the prior DOM index to avoid bouncing
+        // through the label's focus handler (which would reset focusedOption).
+        const targetIdx = this.focusedOption;
+        restore = () => {
+          const o = this.mount.querySelector(`.ask-option[data-option-index="${targetIdx}"]`);
+          if (o) {
+            // Temporarily suppress the focus listener side-effect by focusing
+            // while the current state already matches targetIdx.
+            o.focus();
+          }
+        };
+      } else if (prev.classList && prev.classList.contains("ask-other-input")) {
+        restore = () => {
+          const i = this.mount.querySelector(".ask-other-input");
+          if (i) { i.focus(); i.selectionStart = i.selectionEnd = i.value.length; }
+        };
+      }
+    }
     this.mount.replaceChildren(root);
+    if (restore) restore();
   }
 }
 

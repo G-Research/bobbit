@@ -189,4 +189,4 @@ Staff agent worktrees are automatically refreshed on each wake cycle — the bra
 - [docs/dev-workflow.md](docs/dev-workflow.md) — running modes, restart workflow, safe change process
 - [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) — goal/workflow/gate data model and lifecycle
 - [docs/blocking-tools.md](docs/blocking-tools.md) — blocking-tool pattern (`verification_result`): harness + REST + UI widget round-trip
-- [docs/non-blocking-ask.md](docs/non-blocking-ask.md) — non-blocking `ask_user_choices` flow: stub tool_result, envelope user message, multi-tab/restart semantics
+- [docs/non-blocking-ask.md](docs/non-blocking-ask.md) — non-blocking `ask_user_choices` flow: stub tool_result, envelope user message, multi-tab/restart semantics, widget UX (required `tab_label` on multi-question asks, numbered option badges, keyboard shortcuts)
