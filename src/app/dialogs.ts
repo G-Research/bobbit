@@ -448,7 +448,7 @@ export async function showQrCodeDialog(): Promise<void> {
 	let sessionQr = "";
 	let certQr = "";
 	let error = "";
-	let showFirstTime = false;
+	let firstTimeOs: null | "ios" | "android" = null;
 
 	try {
 		[sessionQr, certQr] = await Promise.all([
@@ -473,7 +473,7 @@ export async function showQrCodeDialog(): Promise<void> {
 						<div class="flex flex-col items-center gap-3 mt-3">
 							${error
 								? html`<p class="text-sm text-red-500">${error}</p>`
-								: showFirstTime
+								: firstTimeOs === "ios"
 									? html`
 											<div class="rounded-lg overflow-hidden bg-white p-2">
 												<img src="${certQr}" alt="CA Certificate QR" width="280" height="280" />
@@ -502,26 +502,71 @@ export async function showQrCodeDialog(): Promise<void> {
 											<button
 												type="button"
 												class="w-full text-sm mt-2 border-t border-border pt-3 cursor-pointer text-foreground font-medium text-left hover:text-primary"
-												@click=${() => { showFirstTime = false; renderDialog(); }}
+												@click=${() => { firstTimeOs = null; renderDialog(); }}
 											>
 												▴ Hide first-time setup
 											</button>
 										`
-									: html`
-											<div class="rounded-lg overflow-hidden bg-white p-2">
-												<img src="${sessionQr}" alt="Session QR" width="280" height="280" />
-											</div>
-											<p class="text-xs text-muted-foreground text-center max-w-[260px]">
-												Scan with your phone camera to open this session in your mobile browser.
-											</p>
-											<button
-												type="button"
-												class="w-full text-sm mt-2 border-t border-border pt-3 cursor-pointer text-foreground font-medium text-left hover:text-primary"
-												@click=${() => { showFirstTime = true; renderDialog(); }}
-											>
-												▾ First time on this device? (iPhone / iPad)
-											</button>
-										`}
+									: firstTimeOs === "android"
+										? html`
+												<div class="rounded-lg overflow-hidden bg-white p-2">
+													<img src="${certQr}" alt="CA Certificate QR" width="280" height="280" />
+												</div>
+												<p class="text-xs text-muted-foreground text-center max-w-[300px]">
+													Scan with your phone camera and download the certificate.
+												</p>
+												<div class="text-xs text-muted-foreground w-full space-y-2 leading-relaxed mt-1">
+													<p>Then on your phone:</p>
+													<ol class="list-decimal list-inside space-y-1 pl-1">
+														<li>
+															Open <strong>Settings → Security &amp; privacy → More security settings →
+															Encryption &amp; credentials → Install a certificate → CA certificate</strong>.
+															(Menu names vary by vendor — on Pixel it's
+															<strong>Security → More security &amp; privacy → Encryption &amp; credentials</strong>.)
+														</li>
+														<li>Acknowledge the warning, then pick the downloaded <code>bobbit-ca.crt</code>.</li>
+														<li>Give it a name (e.g. <strong>Bobbit Local CA</strong>) and confirm.</li>
+														<li>
+															Come back here, collapse this section, scan the session QR, then in Chrome tap
+															the ⋮ menu → <strong>Install app</strong> (or <strong>Add to Home screen</strong>).
+														</li>
+													</ol>
+													<p class="italic">
+														Note: user-installed CAs are only trusted by browsers and user apps. System trust requires a rooted device.
+													</p>
+												</div>
+												<button
+													type="button"
+													class="w-full text-sm mt-2 border-t border-border pt-3 cursor-pointer text-foreground font-medium text-left hover:text-primary"
+													@click=${() => { firstTimeOs = null; renderDialog(); }}
+												>
+													▴ Hide first-time setup
+												</button>
+											`
+										: html`
+												<div class="rounded-lg overflow-hidden bg-white p-2">
+													<img src="${sessionQr}" alt="Session QR" width="280" height="280" />
+												</div>
+												<p class="text-xs text-muted-foreground text-center max-w-[260px]">
+													Scan with your phone camera to open this session in your mobile browser.
+												</p>
+												<div class="w-full mt-2 border-t border-border pt-3 flex flex-col">
+													<button
+														type="button"
+														class="text-sm py-1.5 cursor-pointer text-foreground font-medium text-left hover:text-primary"
+														@click=${() => { firstTimeOs = "ios"; renderDialog(); }}
+													>
+														▾ First time on this device? (iPhone / iPad)
+													</button>
+													<button
+														type="button"
+														class="text-sm py-1.5 cursor-pointer text-foreground font-medium text-left hover:text-primary"
+														@click=${() => { firstTimeOs = "android"; renderDialog(); }}
+													>
+														▾ First time on this device? (Android)
+													</button>
+												</div>
+											`}
 						</div>
 					`,
 				})}
