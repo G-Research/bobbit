@@ -445,20 +445,21 @@ export async function showQrCodeDialog(): Promise<void> {
 	const mobileUrl = `${window.location.origin}?token=${encodeURIComponent(token)}`;
 	const caCertUrl = `${window.location.origin}/api/ca-cert`;
 
-	let dataUrl = "";
+	let sessionQr = "";
+	let certQr = "";
 	let error = "";
+	let showFirstTime = false;
 
 	try {
-		dataUrl = await QRCode.toDataURL(mobileUrl, {
-			width: 280,
-			margin: 2,
-			color: { dark: "#000000", light: "#ffffff" },
-		});
+		[sessionQr, certQr] = await Promise.all([
+			QRCode.toDataURL(mobileUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
+			QRCode.toDataURL(caCertUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
+		]);
 	} catch (err) {
 		error = err instanceof Error ? err.message : String(err);
 	}
 
-	render(
+	const renderDialog = () => render(
 		Dialog({
 			isOpen: true,
 			onClose: cleanup,
@@ -472,32 +473,18 @@ export async function showQrCodeDialog(): Promise<void> {
 						<div class="flex flex-col items-center gap-3 mt-3">
 							${error
 								? html`<p class="text-sm text-red-500">${error}</p>`
-								: html`
-										<div class="rounded-lg overflow-hidden bg-white p-2">
-											<img src="${dataUrl}" alt="QR Code" width="280" height="280" />
-										</div>
-										<p class="text-xs text-muted-foreground text-center max-w-[260px]">
-											Scan with your phone camera to open this session in your mobile browser.
-										</p>
-										<details class="w-full text-sm mt-2 border-t border-border pt-3">
-											<summary class="cursor-pointer text-foreground font-medium select-none">
-												First time on this device? (iPhone / iPad)
-											</summary>
-											<div class="text-xs text-muted-foreground mt-2 space-y-2 leading-relaxed">
-												<p>
-													Bobbit uses a local certificate authority. Install it once so iOS trusts the connection:
-												</p>
+								: showFirstTime
+									? html`
+											<div class="rounded-lg overflow-hidden bg-white p-2">
+												<img src="${certQr}" alt="CA Certificate QR" width="280" height="280" />
+											</div>
+											<p class="text-xs text-muted-foreground text-center max-w-[300px]">
+												Scan with your phone camera and open the link in <strong>Safari</strong>.
+											</p>
+											<div class="text-xs text-muted-foreground w-full space-y-2 leading-relaxed mt-1">
+												<p>Then on your phone:</p>
 												<ol class="list-decimal list-inside space-y-1 pl-1">
-													<li>
-														In <strong>Safari</strong> (must be Safari), open:
-														<a
-															class="text-primary underline break-all"
-															href="${caCertUrl}"
-															target="_blank"
-															rel="noopener"
-														>${caCertUrl}</a>
-														and tap <strong>Allow</strong> when prompted to download a profile.
-													</li>
+													<li>Tap <strong>Allow</strong> when prompted to download a profile.</li>
 													<li>
 														Open <strong>Settings → General → VPN &amp; Device Management</strong>,
 														tap <strong>Bobbit Local CA</strong>, then <strong>Install</strong>.
@@ -507,13 +494,34 @@ export async function showQrCodeDialog(): Promise<void> {
 														and enable full trust for <strong>Bobbit Local CA</strong>.
 													</li>
 													<li>
-														Scan the QR code above, then in Safari tap
-														<strong>Share → Add to Home Screen</strong> to install the PWA.
+														Come back here, collapse this section, scan the session QR, then in Safari tap
+														<strong>Share → Add to Home Screen</strong>.
 													</li>
 												</ol>
 											</div>
-										</details>
-									`}
+											<button
+												type="button"
+												class="w-full text-sm mt-2 border-t border-border pt-3 cursor-pointer text-foreground font-medium text-left hover:text-primary"
+												@click=${() => { showFirstTime = false; renderDialog(); }}
+											>
+												▴ Hide first-time setup
+											</button>
+										`
+									: html`
+											<div class="rounded-lg overflow-hidden bg-white p-2">
+												<img src="${sessionQr}" alt="Session QR" width="280" height="280" />
+											</div>
+											<p class="text-xs text-muted-foreground text-center max-w-[260px]">
+												Scan with your phone camera to open this session in your mobile browser.
+											</p>
+											<button
+												type="button"
+												class="w-full text-sm mt-2 border-t border-border pt-3 cursor-pointer text-foreground font-medium text-left hover:text-primary"
+												@click=${() => { showFirstTime = true; renderDialog(); }}
+											>
+												▾ First time on this device? (iPhone / iPad)
+											</button>
+										`}
 						</div>
 					`,
 				})}
@@ -529,6 +537,8 @@ export async function showQrCodeDialog(): Promise<void> {
 		}),
 		container,
 	);
+
+	renderDialog();
 }
 
 // ============================================================================
