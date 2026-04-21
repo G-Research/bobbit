@@ -106,6 +106,8 @@ export interface SessionInfo {
 	allowedTools?: string[];
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
+	/** Error message captured when restoreSession() failed; cleared on successful revive. */
+	restoreError?: string;
 	/** In-flight persistSessionMetadata promise (awaited before terminate) */
 	pendingMetadataPersist?: Promise<void>;
 	/** True if the last agent turn ended due to a model/API error */
@@ -1845,17 +1847,19 @@ export class SessionManager {
 			await this.restoreSession(ps);
 			console.log(`[session-manager] Restored: "${ps.title}" (${ps.id})`);
 		} catch (err) {
+			const msg = err instanceof Error ? (err.stack || err.message) : String(err);
 			console.error(`[session-manager] Failed to restore "${ps.title}" (${ps.id}), will retry next restart:`, err);
-			this.addDormantSession(ps);
+			this.addDormantSession(ps, msg);
 		}
 	}
 
-	private addDormantSession(ps: PersistedSession): void {
+	private addDormantSession(ps: PersistedSession, restoreError?: string): void {
 		this.sessions.set(ps.id, {
 			id: ps.id,
 			title: ps.title,
 			cwd: ps.cwd,
 			status: "terminated",
+			restoreError,
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
@@ -1979,15 +1983,17 @@ export class SessionManager {
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 				for (const extPath of mcpExtPaths) {
-					bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+					bridgeOptions.args.push("--extension", extPath);
 				}
 			}
 		} else if (!ps.role && this.mcpManager) {
 			// Roleless sessions still need MCP extensions (e.g. playwright tools)
 			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+				bridgeOptions.args.push("--extension", extPath);
 			}
 		}
 
@@ -3036,8 +3042,9 @@ export class SessionManager {
 			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
 			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+				bridgeOptions.args.push("--extension", extPath);
 			}
 		}
 
@@ -3189,8 +3196,9 @@ export class SessionManager {
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 				for (const extPath of mcpExtPaths) {
-					bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+					bridgeOptions.args.push("--extension", extPath);
 				}
 			}
 		}
@@ -4044,8 +4052,9 @@ export class SessionManager {
 					bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 				} else if (this.mcpManager) {
 					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+					bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 					for (const extPath of mcpExtPaths) {
-						bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+						bridgeOptions.args.push("--extension", extPath);
 					}
 				}
 			}
