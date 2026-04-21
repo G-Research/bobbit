@@ -619,9 +619,18 @@ export function toSearchResult(doc: FlexDoc, query: string, finalScore: number):
 	const title = doc.title && doc.title.length > 0 ? doc.title : titleFromText(doc.text ?? "");
 	const snippet = highlight(doc.text ?? "", query);
 	const hasHighlight = /<b>/i.test(snippet);
+	// FlexDoc row ids carry a source prefix ("goal:<uuid>", "session:<uuid>",
+	// "staff:<uuid>") so the index can disambiguate a goal and session that
+	// happen to share a uuid. Client-side routes expect bare ids, so strip
+	// the prefix here for goal/session/staff. Message ids are chunk-scoped
+	// and are not navigated to directly — leave them alone.
+	const bareId =
+		type === "goal" || type === "session" || type === "staff"
+			? doc.id.replace(/^(goal|session|staff):/, "")
+			: doc.id;
 	const result: SearchResult = {
 		type,
-		id: doc.id,
+		id: bareId,
 		title,
 		snippet,
 		timestamp: doc.timestamp,

@@ -186,27 +186,23 @@ export class ProjectContextManager {
     const ctx = hit.projectId ? this.contexts.get(hit.projectId) : undefined;
     if (!ctx) return false;
 
-    // SearchResult.id is the FlexDoc row id and is prefixed ("goal:<id>",
-    // "session:<id>", "staff:<id>"). Strip the prefix to recover the
-    // backing entity id for store lookups. For messages, the parent
-    // session id is carried separately on hit.sessionId.
-    const stripPrefix = (id: string, prefix: string): string =>
-      id.startsWith(prefix) ? id.slice(prefix.length) : id;
+    // SearchResult.id is now emitted as a bare entity id (the source
+    // prefix is stripped in toSearchResult for goal/session/staff). For
+    // messages, the parent session id is carried separately on hit.sessionId.
     switch (hit.type) {
       case "goal": {
-        const goalId = hit.goalId ?? stripPrefix(hit.id, "goal:");
+        const goalId = hit.goalId ?? hit.id;
         return ctx.goalStore.get(goalId) !== undefined;
       }
       case "session": {
-        const sessionId = hit.sessionId ?? stripPrefix(hit.id, "session:");
+        const sessionId = hit.sessionId ?? hit.id;
         return this.sessionResolver?.getPersistedSession(sessionId) !== undefined;
       }
       case "message":
         if (!hit.sessionId) return false;
         return this.sessionResolver?.getPersistedSession(hit.sessionId) !== undefined;
       case "staff": {
-        const staffId = stripPrefix(hit.id, "staff:");
-        return ctx.staffStore.get(staffId) !== undefined;
+        return ctx.staffStore.get(hit.id) !== undefined;
       }
       case "file":
         return true; // files source not in scope
@@ -227,15 +223,16 @@ export class ProjectContextManager {
       const ctx = hit.projectId ? this.contexts.get(hit.projectId) : undefined;
       const idx = ctx?.searchIndex;
       if (!idx) continue;
-      const stripPrefix = (id: string, prefix: string): string =>
-        id.startsWith(prefix) ? id.slice(prefix.length) : id;
+      // hit.id is the bare entity id (prefix stripped in toSearchResult).
+      // The remove* methods re-apply the goal:/session:/staff: prefix
+      // internally when addressing the FlexSearch index.
       try {
         switch (hit.type) {
           case "goal":
-            idx.removeGoal(hit.goalId ?? stripPrefix(hit.id, "goal:"));
+            idx.removeGoal(hit.goalId ?? hit.id);
             break;
           case "session":
-            idx.removeSession(hit.sessionId ?? stripPrefix(hit.id, "session:"));
+            idx.removeSession(hit.sessionId ?? hit.id);
             break;
           case "message":
             if (hit.sessionId && !messageSessionsPurged.has(hit.sessionId)) {
@@ -244,7 +241,7 @@ export class ProjectContextManager {
             }
             break;
           case "staff":
-            idx.removeStaff(stripPrefix(hit.id, "staff:"));
+            idx.removeStaff(hit.id);
             break;
         }
       } catch (err) {
