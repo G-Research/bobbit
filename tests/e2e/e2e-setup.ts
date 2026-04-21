@@ -139,11 +139,53 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 	throw new Error("apiFetch: unreachable");
 }
 
+/**
+ * Look up the harness-registered "default" project id.
+ *
+ * The gateway harness (see gateway-harness.ts / in-process-harness.ts) registers
+ * a single project named "default" at the server CWD after startup. The server
+ * no longer auto-resolves a default, so API callers that omit projectId must
+ * pass one explicitly. This helper fetches and caches the id per-port.
+ */
+const _defaultProjectIdCache: Record<string, string> = {};
+export async function defaultProjectId(): Promise<string | undefined> {
+	const p = port();
+	if (_defaultProjectIdCache[p]) return _defaultProjectIdCache[p];
+	try {
+		const resp = await apiFetch("/api/projects");
+		if (!resp.ok) return undefined;
+		const list = await resp.json() as Array<{ id: string; name: string }>;
+		const match = Array.isArray(list)
+			? (list.find(pr => pr.name === "default") ?? list[0])
+			: undefined;
+		if (match?.id) {
+			_defaultProjectIdCache[p] = match.id;
+			return match.id;
+		}
+	} catch { /* zero-project harnesses are a valid state (see GR-09) */ }
+	return undefined;
+}
+
 /** Create a session via REST, return its ID. Defaults cwd to a non-git temp dir. */
-export async function createSession(opts?: { cwd?: string; goalId?: string }): Promise<string> {
+export async function createSession(opts?: { cwd?: string; goalId?: string; projectId?: string }): Promise<string> {
+	const body: Record<string, unknown> = {
+		cwd: opts?.cwd || nonGitCwd(),
+		goalId: opts?.goalId,
+	};
+	if (opts?.projectId) {
+		body.projectId = opts.projectId;
+	} else {
+		// Server requires an explicit project (or cwd matching a registered
+		// project). Auto-inject the harness default projectId whenever the
+		// caller didn't specify one — safe because the server prefers
+		// projectId over cwd. Tests that deliberately exercise the 400 path
+		// call apiFetch("/api/sessions", ...) directly and bypass this helper.
+		const pid = await defaultProjectId();
+		if (pid) body.projectId = pid;
+	}
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
-		body: JSON.stringify({ cwd: opts?.cwd || nonGitCwd(), goalId: opts?.goalId }),
+		body: JSON.stringify(body),
 	});
 	expect(resp.status).toBe(201);
 	return (await resp.json()).id;
@@ -163,10 +205,19 @@ export async function createGoal(opts: {
 	worktree?: boolean;
 	workflowId?: string;
 	autoStartTeam?: boolean;
+	projectId?: string;
 }): Promise<{ id: string; [k: string]: unknown }> {
+	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, ...opts };
+	if (!body.projectId) {
+		// Auto-inject harness default projectId when caller didn't specify one.
+		// Server prefers projectId over cwd. Tests that exercise the 400 path
+		// call apiFetch("/api/goals", ...) directly and bypass this helper.
+		const pid = await defaultProjectId();
+		if (pid) body.projectId = pid;
+	}
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
-		body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, ...opts }),
+		body: JSON.stringify(body),
 	});
 	expect(resp.status).toBe(201);
 	return resp.json();
