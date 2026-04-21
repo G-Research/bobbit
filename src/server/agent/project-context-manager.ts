@@ -22,6 +22,7 @@ export class ProjectContextManager {
   private contexts = new Map<string, ProjectContext>();
   private registry: ProjectRegistry;
   private sessionResolver: SessionResolver | null = null;
+  private _sessionResolverWarned = false;
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
@@ -195,12 +196,23 @@ export class ProjectContextManager {
         return ctx.goalStore.get(goalId) !== undefined;
       }
       case "session": {
+        // Fail-open when session resolver isn't wired (e.g. unit tests or
+        // alternate bootstraps that skip setDependencies). Silently dropping
+        // every session/message hit is worse than returning a stale row.
+        if (!this.sessionResolver) {
+          this._warnSessionResolverMissing();
+          return true;
+        }
         const sessionId = hit.sessionId ?? hit.id;
-        return this.sessionResolver?.getPersistedSession(sessionId) !== undefined;
+        return this.sessionResolver.getPersistedSession(sessionId) !== undefined;
       }
       case "message":
+        if (!this.sessionResolver) {
+          this._warnSessionResolverMissing();
+          return true;
+        }
         if (!hit.sessionId) return false;
-        return this.sessionResolver?.getPersistedSession(hit.sessionId) !== undefined;
+        return this.sessionResolver.getPersistedSession(hit.sessionId) !== undefined;
       case "staff": {
         return ctx.staffStore.get(hit.id) !== undefined;
       }
@@ -216,6 +228,13 @@ export class ProjectContextManager {
    * from the owning project's search index so subsequent queries don't
    * return the same orphan row. Not awaited.
    */
+  /** One-time warning when the session resolver wiring is missing. */
+  private _warnSessionResolverMissing(): void {
+    if (this._sessionResolverWarned) return;
+    this._sessionResolverWarned = true;
+    console.warn("[search] orphan filter disabled: sessionManager not wired");
+  }
+
   private _scheduleOpportunisticCleanup(dropped: SearchResult[]): void {
     // De-dupe session-level message purges — one op per session is enough.
     const messageSessionsPurged = new Set<string>();

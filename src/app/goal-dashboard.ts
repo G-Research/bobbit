@@ -191,6 +191,20 @@ function disconnectDashboardWs(): void {
 // ============================================================================
 
 export async function loadDashboardData(goalId: string): Promise<void> {
+	// Snapshot whether we were navigating *from* the search page BEFORE the
+	// router mutates the hash to #/goal/<id>. By the time the 404 catch block
+	// runs, window.location.hash is already the goal-dashboard hash, so we
+	// must capture this up front or the check can never be true. We also
+	// accept a transient window flag that search-page.ts sets on click, which
+	// survives an intervening history.replaceState race.
+	let fromSearch = false;
+	try {
+		const hash = typeof window !== "undefined" ? window.location.hash : "";
+		const flag = typeof window !== "undefined" && (window as any).__bobbitFromSearch === true;
+		fromSearch = hash.startsWith("#/search") || flag;
+		if (flag) (window as any).__bobbitFromSearch = false;
+	} catch { /* ignore */ }
+
 	disconnectDashboardWs();
 	currentGoalId = goalId;
 	loading = true;
@@ -287,7 +301,6 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		// and mark the row stale.
 		try {
 			const isMissing = /not found|\b404\b/i.test(error);
-			const fromSearch = typeof window !== "undefined" && window.location.hash.startsWith("#/search");
 			if (isMissing && fromSearch) {
 				window.dispatchEvent(new CustomEvent("search-result-stale", {
 					detail: { kind: "goal", id: goalId },

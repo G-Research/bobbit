@@ -168,10 +168,9 @@ test.describe("Search result navigation & grouping", () => {
 			const sessionCard = page.locator(`[data-role="result-group"][data-kind="session"]`).filter({ hasText: `${token} NavSession` });
 			await expect(sessionCard).toBeVisible({ timeout: 10_000 });
 			await sessionCard.locator("button").first().click();
-			// Note: server returns prefixed ids (`session:<uuid>`) so the hash may be
-			// `#/session/session:<uuid>` — we only care that navigation happened and
-			// the session id appears. The modal-suppression check below is the real
-			// UX contract per acceptance criterion (a).
+			// The hash should contain the bare session id (source prefix is
+			// stripped server-side in toSearchResult). The modal-suppression
+			// check below is the real UX contract per acceptance criterion (a).
 			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 })
 				.toContain(sessionId);
 			await expect(page.locator('[role="dialog"]')).toHaveCount(0);
