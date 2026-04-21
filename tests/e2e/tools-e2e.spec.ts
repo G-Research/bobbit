@@ -13,7 +13,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import WebSocket from "ws";
-import { readE2EToken, base, wsBase, waitForHealth, nonGitCwd } from "./e2e-setup.js";
+import { readE2EToken, base, wsBase, waitForHealth, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Config — agent tool tests need much longer timeouts
@@ -26,10 +26,16 @@ test.setTimeout(30_000);
 
 let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 
-/** Authenticated REST helper */
-function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+/** Authenticated REST helper. Auto-injects harness default projectId on POST /api/{sessions,goals,staff}. */
+async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const method = (opts.method || "GET").toUpperCase();
+	let body = opts.body;
+	if (method === "POST" && /^\/api\/(sessions|goals|staff)(\?|$|\/)/.test(path)) {
+		body = await injectDefaultProjectId(body) as BodyInit;
+	}
 	return fetch(`${base()}${path}`, {
 		...opts,
+		body,
 		headers: {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${TOKEN()}`,

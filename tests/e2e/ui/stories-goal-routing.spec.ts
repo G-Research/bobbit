@@ -15,7 +15,7 @@
  * Phase annotations: setup (not tracked), act, assert, cleanup.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, waitForHealth } from "../e2e-setup.js";
+import { apiFetch, rawApiFetch, waitForHealth } from "../e2e-setup.js";
 import { SpecContext } from "./spec-framework.js";
 import {
 	STORY_GR01,
@@ -359,7 +359,9 @@ test.describe("CT-18: Multi-project goal/session routing", () => {
 		const subCwd = join(projB.rootPath, "sub");
 		mkdirSync(subCwd, { recursive: true });
 
-		const resp = await apiFetch("/api/goals", {
+		// Use rawApiFetch so the harness default-projectId injection doesn't
+		// short-circuit the cwd-only resolution we're exercising.
+		const resp = await rawApiFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify({ title: "GR-06 cwd-only", cwd: subCwd, worktree: false }),
 		});
@@ -382,7 +384,7 @@ test.describe("CT-18: Multi-project goal/session routing", () => {
 		const bogusCwd = join(tmpdir(), `bobbit-gr07-bogus-${Date.now()}`);
 		mkdirSync(bogusCwd, { recursive: true });
 
-		const resp = await apiFetch("/api/goals", {
+		const resp = await rawApiFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify({ title: "GR-07 unmatched", cwd: bogusCwd, worktree: false }),
 		});
@@ -407,7 +409,7 @@ test.describe("CT-18: Multi-project goal/session routing", () => {
 		const bogusCwd = join(tmpdir(), `bobbit-gr08-bogus-${Date.now()}`);
 		mkdirSync(bogusCwd, { recursive: true });
 
-		const resp = await apiFetch("/api/sessions", {
+		const resp = await rawApiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: bogusCwd }),
 		});
@@ -486,7 +488,7 @@ test.describe("CT-19: First-run and single-project UX", () => {
 		).toBeDisabled({ timeout: 5_000 });
 
 		// API also enforces: POST /api/goals fails with 400
-		const resp = await apiFetch("/api/goals", {
+		const resp = await rawApiFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify({ title: "GR-09 should fail", worktree: false }),
 		});
