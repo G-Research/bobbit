@@ -72,6 +72,14 @@ export default defineConfig({
 				"**/sandbox-recovery-docker*",
 			],
 			workers: 3,
+			// M5: serialise browser specs within the project. Each browser worker
+			// is gateway + Chromium + UI static serve — even at workers=3, cross-
+			// worker contention on Windows FS / Defender still produced 3–4 flakes
+			// per run. fullyParallel=false confines parallelism to the 3 workers
+			// (one spec per worker, sequential within-spec), which empirically
+			// eliminates the remaining flake cluster. API project stays
+			// fullyParallel: true (inherited from top-level).
+			fullyParallel: false,
 		},
 	],
 });
