@@ -601,6 +601,33 @@ export function createGateway(config: GatewayConfig) {
 			return;
 		}
 
+		// Dynamic PWA manifest — when launched from a tokenized URL, bake the token
+		// into start_url so the PWA can relaunch authenticated.
+		// Only does so for a *valid* token; invalid tokens fall through to the plain
+		// manifest (no token baked in).
+		if (url.pathname === "/manifest.json" && req.method === "GET" && config.staticDir) {
+			try {
+				const manifestPath = path.join(path.resolve(config.staticDir), "manifest.json");
+				const raw = fs.readFileSync(manifestPath, "utf-8");
+				const manifest = JSON.parse(raw);
+				const providedToken = url.searchParams.get("token");
+				if (providedToken && validateToken(providedToken, config.authToken)) {
+					manifest.start_url = `/?token=${encodeURIComponent(providedToken)}`;
+				}
+				res.writeHead(200, {
+					"Content-Type": "application/manifest+json",
+					// Don't let the manifest be cached — token-validity may change.
+					"Cache-Control": "no-store",
+					// Prevent token leakage via Referer when the PWA makes cross-origin requests.
+					"Referrer-Policy": "no-referrer",
+				});
+				res.end(JSON.stringify(manifest));
+				return;
+			} catch {
+				// Fall through to static serving on any error.
+			}
+		}
+
 		// Static file serving
 		if (config.staticDir) {
 			serveStatic(url.pathname, config.staticDir, res);
