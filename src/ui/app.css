@@ -975,6 +975,10 @@ html {
 	margin-bottom: -28px;
 	overflow: visible;
 	filter: hue-rotate(var(--bobbit-hue-rotate, 0deg));
+	/* Own stacking context so hand-held accessories with z-index:-1 (magnifier,
+	   palette, pencil, shield, set-square, flask) go behind the body but stay
+	   in front of the chat bubble background — not behind it. */
+	isolation: isolate;
 }
 /* When chat shares space with a side panel, nudge bobbit right to avoid clipping */
 .goal-chat-panel .bobbit-blob {
@@ -1537,8 +1541,9 @@ html {
 		7px 4px 0 #000, 8px 4px 0 #b0e0f0, 9px 4px 0 #e0f4ff, 10px 4px 0 #87ceeb, 11px 4px 0 #000,
 		7px 5px 0 #000, 8px 5px 0 #87ceeb, 9px 5px 0 #b0e0f0, 10px 5px 0 #87ceeb, 11px 5px 0 #000,
 		7px 6px 0 #000, 8px 6px 0 #000, 9px 6px 0 #000, 10px 6px 0 #000,
-		6px 7px 0 #000, 7px 7px 0 #8b4513,
-		5px 8px 0 #000, 6px 8px 0 #8b4513;
+		6px 7px 0 #000, 7px 7px 0 #8b4513, 8px 7px 0 #000,
+		5px 8px 0 #000, 6px 8px 0 #8b4513, 7px 8px 0 #000,
+		6px 9px 0 #000;
 	animation:
 		blob-busy-move-rigid 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,
 		magnifier-depth-busy 10s steps(1) infinite;

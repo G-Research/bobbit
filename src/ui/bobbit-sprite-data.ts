@@ -222,9 +222,11 @@ export const ACCESSORY_MAGNIFIER: AccessorySpriteData = {
     // Row 6: lens bottom outline
     [7, 6, '#000'], [8, 6, '#000'], [9, 6, '#000'], [10, 6, '#000'],
     // Row 7: handle upper
-    [6, 7, '#000'], [7, 7, '#8b4513'],
+    [6, 7, '#000'], [7, 7, '#8b4513'], [8, 7, '#000'],
     // Row 8: handle lower
-    [5, 8, '#000'], [6, 8, '#8b4513'],
+    [5, 8, '#000'], [6, 8, '#8b4513'], [7, 8, '#000'],
+    // Row 9: handle bottom outline
+    [6, 9, '#000'],
   ],
 };
 
