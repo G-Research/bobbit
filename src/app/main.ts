@@ -615,7 +615,10 @@ async function initApp() {
 		id: "new-goal", label: "New goal", category: "Goals",
 		defaultBindings: [{ key: "g", ctrlOrMeta: false, shift: false, alt: true }],
 		handler: () => {
-			import("./dialogs.js").then(({ showGoalDialog }) => showGoalDialog());
+			import("./goal-entry.js").then(({ startNewGoalFlow }) => {
+				const anchor = document.querySelector("[data-new-goal-trigger]") as HTMLElement | null;
+				startNewGoalFlow(anchor);
+			});
 		},
 	});
 
