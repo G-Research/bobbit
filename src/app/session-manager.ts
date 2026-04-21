@@ -675,7 +675,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // CONNECT TO SESSION (select + hydrate)
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; workflowEditContext?: { id: string; name: string }; projectDirPath?: string }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; workflowEditContext?: { id: string; name: string }; projectDirPath?: string; onMissing?: "toast" | "modal" }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
 	const replaceHistory = startingRoute.view === "goal-dashboard";
@@ -1601,7 +1601,17 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Clear the early ChatPanel so the UI doesn't show a stuck "Connecting…" spinner
 			state.chatPanel = null;
 			const msg = err instanceof Error ? err.message : String(err);
-			showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
+			// If the caller opted into toast-on-missing (typically search-page
+			// navigation), suppress the blocking modal when the session is gone
+			// and dispatch a page-local event instead.
+			const missing = /session not found|SESSION_NOT_FOUND|code\s*4005/i.test(msg);
+			if (options?.onMissing === "toast" && missing) {
+				window.dispatchEvent(new CustomEvent("search-result-stale", {
+					detail: { kind: "session", id: sessionId },
+				}));
+			} else {
+				showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
+			}
 		}
 	} finally {
 		// Always clear connectingSessionId for our session — even if stale.
