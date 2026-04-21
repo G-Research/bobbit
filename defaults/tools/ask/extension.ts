@@ -48,6 +48,11 @@ export default function (pi: ExtensionAPI) {
 						maxItems: 8,
 						description: "2–8 answer options",
 					}),
+					tab_label: Type.Optional(Type.String({
+						minLength: 1,
+						maxLength: 24,
+						description: "Short 2–4 word tab label (≤24 chars) summarizing the question. REQUIRED when posting more than one question — used as the tab title so users can jump between questions without reading full prompts.",
+					})),
 					allow_other: Type.Optional(Type.Boolean({
 						description: "If true, render an 'Other' option with a free-text input",
 					})),
@@ -66,7 +71,27 @@ export default function (pi: ExtensionAPI) {
 				{ minItems: 1, maxItems: 5, description: "1–5 multiple-choice questions" },
 			),
 		}),
-		async execute(toolUseId, _params) {
+		async execute(toolUseId, params) {
+			// Enforce `tab_label` on multi-question asks before the UI renders.
+			// Mirrors src/server/agent/ask-user-choices-validation.ts — we can't
+			// import it here (agent sub-process), so the checks are duplicated.
+			const questions = (params as any)?.questions;
+			if (Array.isArray(questions) && questions.length > 1) {
+				for (let i = 0; i < questions.length; i++) {
+					const q = questions[i];
+					const label = q?.tab_label;
+					if (typeof label !== "string" || label.trim().length === 0) {
+						return ok({
+							error: `ask_user_choices: questions[${i}].tab_label is required for multi-question asks (2–4 words, ≤24 chars).`,
+						});
+					}
+					if (label.length > 24) {
+						return ok({
+							error: `ask_user_choices: questions[${i}].tab_label exceeds 24 chars (got ${label.length}).`,
+						});
+					}
+				}
+			}
 			// Non-blocking: return the stub immediately. The tool_use event flowing
 			// through the agent's stdout → pi-coding-agent → our WS broadcast is
 			// what tells the UI to render the widget. When the user submits, the

@@ -149,6 +149,12 @@ export class TeamManager {
 	private static readonly MAX_IDLE_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
 	/** Delay before nudging the idle team lead when no workers remain (ms). */
 	private static readonly NO_WORKERS_NUDGE_DELAY_MS = 300_000;
+	/**
+	 * If any team member is actively streaming, suppress the workers-nudge unless at
+	 * least one has been streaming longer than this threshold. Prevents nagging the
+	 * team lead while workers are making real progress.
+	 */
+	private static readonly LONG_STREAMING_THRESHOLD_MS = 30 * 60 * 1000; // 30m
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
@@ -455,6 +461,30 @@ export class TeamManager {
 				// No workers — handled by the other timer. Don't increment backoff.
 				this.scheduleWorkersNudge(goalId);
 				return;
+			}
+
+			// If any workers are actively streaming, only nudge when at least one has
+			// been streaming for longer than LONG_STREAMING_THRESHOLD_MS. Workers that
+			// are streaming quickly are making progress — don't interrupt the lead
+			// to nag about them.
+			const streamingWorkers = activeWorkers
+				.map((a) => this.sessionManager.getSession(a.sessionId))
+				.filter((s): s is NonNullable<typeof s> => !!s && s.status === "streaming");
+			if (streamingWorkers.length > 0) {
+				const now = Date.now();
+				const anyLongRunning = streamingWorkers.some((s) => {
+					const since = s.streamingStartedAt;
+					return typeof since === "number" && now - since > TeamManager.LONG_STREAMING_THRESHOLD_MS;
+				});
+				if (!anyLongRunning) {
+					console.log(
+						`[team-manager] Skipping workers-nudge for goal ${goalId} — ` +
+						`${streamingWorkers.length} worker(s) streaming, none beyond threshold`,
+					);
+					// Don't increment backoff — the workers are making progress.
+					this.scheduleWorkersNudge(goalId);
+					return;
+				}
 			}
 
 			const entry = this.teams.get(goalId)!;

@@ -130,6 +130,18 @@ If you can say it in one sentence, don't use three. Prefer short, direct sentenc
 
 For clear communication, avoid using emojis.
 
+## Output is rendered as Markdown
+
+Your chat output is rendered as GitHub-Flavored Markdown. This has a few consequences worth knowing:
+
+- **Single newlines are collapsed into a space.** To produce a visible line break, either leave a blank line between paragraphs, or end a line with two trailing spaces. For a list of items, use a real Markdown list (`- item` on each line) rather than relying on newlines between plain sentences — otherwise the items will run together on one line.
+- **`~~text~~` renders as strikethrough.** A pair of surrounding tildes (or any construct the renderer parses as strikethrough) will visually cross the text out. If you want literal tildes or dashes, escape them (`\~\~`) or wrap them in backticks (`` `--flag` ``).
+- **`*`, `_`, `` ` ``, `#`, `>`, `|`, `[`** and similar characters are markdown-active. Escape with a backslash or use code spans when you mean them literally (e.g. file globs, CLI flags, regex).
+- **Code and commands belong in fenced code blocks** (triple backticks) with a language tag where useful. This preserves whitespace and prevents accidental formatting.
+- **Tables, task lists, and headings** all render — use them when they aid scanning, not for decoration.
+
+When in doubt, preview mentally: if a character would change meaning in Markdown, escape it or wrap it in backticks.
+
 # Long-running commands — use bash_bg
 
 **Default to `bash_bg` over `bash`** for any command that might take longer than 2 minutes or produce large output you may not need in full. This includes: builds, full test suites, Docker operations, package installs, CI pipelines, dev servers, file watchers, and anything with uncertain duration.
