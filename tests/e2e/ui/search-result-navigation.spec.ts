@@ -353,6 +353,155 @@ test.describe("Search result navigation & grouping", () => {
 	});
 
 	/**
+	 * AC #5 — Type filter pills still work across the grouped layout.
+	 *
+	 * Filters start all-on (goals, sessions, staff, messages). Clicking an
+	 * active pill deactivates that type (unless it is the last remaining —
+	 * the UI forbids deselecting everything). There is no "All" pill.
+	 *
+	 * The design (§4.7) runs the filter over the flat `_results` array
+	 * BEFORE grouping: a group survives iff at least one child hit survives.
+	 */
+	test("filter = messages only hides goal cards but keeps session groups with message-only children", async ({ page }) => {
+		const token = `FiltMsg${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+		const goal = await createGoal({ title: `${token} FiltGoal` });
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		try {
+			for (let i = 0; i < 3; i++) {
+				await sendWsMessage(sessionId, `${token} filter-test message ${i}`);
+			}
+
+			// Wait for index to carry both the goal-title hit AND >=3 message hits.
+			await waitForSearchHit(token, (results) => {
+				const hasGoal = results.some((r: any) => r.type === "goal");
+				const msgHits = results.filter((r: any) => r.type === "message" && r.sessionId === sessionId);
+				return hasGoal && msgHits.length >= 3;
+			}, 30_000);
+
+			await openSearchPage(page, token);
+
+			const goalCards = page.locator(`[data-role="result-group"][data-kind="goal"]`);
+			const sessionCards = page.locator(
+				`[data-role="result-group"][data-kind="session"][data-key="session:${sessionId}"]`,
+			);
+
+			// Sanity: both visible before filtering.
+			await expect(goalCards.filter({ hasText: `${token} FiltGoal` })).toHaveCount(1, { timeout: 10_000 });
+			await expect(sessionCards).toHaveCount(1, { timeout: 10_000 });
+
+			// Deactivate every pill except "Messages" so only message hits remain.
+			// (The UI has no explicit "only" affordance — toggle off the others.)
+			for (const label of ["Goals", "Sessions", "Staff"]) {
+				await page.getByRole("button", { name: label, exact: true }).click();
+			}
+
+			// Goal card (no message children) disappears; session with message-only
+			// children survives since its message hits pass the filter.
+			await expect(goalCards).toHaveCount(0, { timeout: 5_000 });
+			await expect(sessionCards).toHaveCount(1, { timeout: 5_000 });
+
+			// The match-count pill now reflects messages-only: "N matches" (no
+			// "in title" segment because the title hit is filtered out).
+			const pill = sessionCards.first().locator("span").filter({ hasText: /in messages|matches/i }).first();
+			await expect(pill).toHaveText(/3\s*(in messages|matches)/i, { timeout: 5_000 });
+		} finally {
+			await deleteGoal(goal.id);
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("filter = goals only hides session cards that have only message hits", async ({ page }) => {
+		const token = `FiltGoalOnly${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+		const goal = await createGoal({ title: `${token} FiltGoal` });
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		try {
+			for (let i = 0; i < 2; i++) {
+				await sendWsMessage(sessionId, `${token} goals-only message ${i}`);
+			}
+
+			await waitForSearchHit(token, (results) => {
+				const hasGoal = results.some((r: any) => r.type === "goal");
+				const msgHits = results.filter((r: any) => r.type === "message" && r.sessionId === sessionId);
+				return hasGoal && msgHits.length >= 2;
+			}, 30_000);
+
+			await openSearchPage(page, token);
+
+			const goalCards = page.locator(`[data-role="result-group"][data-kind="goal"]`)
+				.filter({ hasText: `${token} FiltGoal` });
+			const sessionCards = page.locator(
+				`[data-role="result-group"][data-kind="session"][data-key="session:${sessionId}"]`,
+			);
+
+			await expect(goalCards).toHaveCount(1, { timeout: 10_000 });
+			await expect(sessionCards).toHaveCount(1, { timeout: 10_000 });
+
+			// Deactivate all pills except "Goals".
+			for (const label of ["Sessions", "Staff", "Messages"]) {
+				await page.getByRole("button", { name: label, exact: true }).click();
+			}
+
+			// Session group (message-only children) disappears; goal card remains.
+			await expect(sessionCards).toHaveCount(0, { timeout: 5_000 });
+			await expect(goalCards).toHaveCount(1, { timeout: 5_000 });
+		} finally {
+			await deleteGoal(goal.id);
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("re-activating deactivated filter pills restores hidden groups", async ({ page }) => {
+		// The UI has no single "All" / "clear" affordance — filters are
+		// independent toggles. "Clearing" means re-selecting pills that were
+		// previously deactivated. This test exercises that round-trip to
+		// confirm group visibility is recomputed on every filter change.
+		const token = `FiltRestore${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+		const goal = await createGoal({ title: `${token} FiltGoal` });
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		try {
+			for (let i = 0; i < 2; i++) {
+				await sendWsMessage(sessionId, `${token} restore message ${i}`);
+			}
+
+			await waitForSearchHit(token, (results) => {
+				const hasGoal = results.some((r: any) => r.type === "goal");
+				const msgHits = results.filter((r: any) => r.type === "message" && r.sessionId === sessionId);
+				return hasGoal && msgHits.length >= 2;
+			}, 30_000);
+
+			await openSearchPage(page, token);
+
+			const goalCards = page.locator(`[data-role="result-group"][data-kind="goal"]`)
+				.filter({ hasText: `${token} FiltGoal` });
+			const sessionCards = page.locator(
+				`[data-role="result-group"][data-kind="session"][data-key="session:${sessionId}"]`,
+			);
+
+			await expect(goalCards).toHaveCount(1, { timeout: 10_000 });
+			await expect(sessionCards).toHaveCount(1, { timeout: 10_000 });
+
+			// Deactivate Messages → session group (message-only) disappears.
+			await page.getByRole("button", { name: "Messages", exact: true }).click();
+			await expect(sessionCards).toHaveCount(0, { timeout: 5_000 });
+			await expect(goalCards).toHaveCount(1, { timeout: 5_000 });
+
+			// Re-activate Messages → session group reappears.
+			await page.getByRole("button", { name: "Messages", exact: true }).click();
+			await expect(sessionCards).toHaveCount(1, { timeout: 5_000 });
+			await expect(goalCards).toHaveCount(1, { timeout: 5_000 });
+		} finally {
+			await deleteGoal(goal.id);
+			await deleteSession(sessionId);
+		}
+	});
+
+	/**
 	 * T2 — server-side orphan filter. Full coverage (each type + weak-match
 	 * behavior) lives in the API E2E `tests/e2e/search-orphan-filter.spec.ts`.
 	 * Goals deleted via `DELETE /api/goals/:id` are *archived*, not purged,
