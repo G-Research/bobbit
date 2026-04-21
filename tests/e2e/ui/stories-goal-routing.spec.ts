@@ -56,8 +56,18 @@ async function registerProject(name: string, rootPath: string): Promise<TestProj
 	return { id: body.id, name: body.name, rootPath };
 }
 
-async function deleteProject(id: string): Promise<void> {
-	await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+async function deleteProject(id: string, opts: { force?: boolean } = {}): Promise<void> {
+	const qs = opts.force ? "?force=1" : "";
+	await apiFetch(`/api/projects/${id}${qs}`, { method: "DELETE" }).catch(() => {});
+}
+
+/**
+ * Force-delete every registered project. Uses the BOBBIT_E2E=1 ?force=1 bypass
+ * so it can also remove the last remaining project (needed for GR-09).
+ */
+async function forceDeleteAllProjects(): Promise<void> {
+	const projects = await listProjects();
+	for (const p of projects) await deleteProject(p.id, { force: true });
 }
 
 async function listProjects(): Promise<Array<{ id: string; name: string; rootPath: string }>> {
@@ -433,20 +443,16 @@ test.describe("CT-19: First-run and single-project UX", () => {
 
 	test.afterEach(async () => {
 		await s.cleanup();
-		for (const id of createdProjects.splice(0)) {
-			await deleteProject(id);
-		}
-		// Best-effort: re-register anything we nuked so subsequent tests are not
-		// starved. On current master we cannot delete the server-cwd project at
-		// all, so initialProjects is preserved anyway.
+		// Wipe everything (including the lone project and any leftover harness
+		// projects) with the force-delete bypass, then restore initialProjects
+		// so later tests/workers see the pre-test state.
+		await forceDeleteAllProjects();
+		createdProjects.splice(0);
 		for (const p of initialProjects) {
-			const existing = (await listProjects()).find(q => q.id === p.id);
-			if (!existing) {
-				await apiFetch("/api/projects", {
-					method: "POST",
-					body: JSON.stringify({ name: p.name, rootPath: p.rootPath }),
-				}).catch(() => {});
-			}
+			await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: p.name, rootPath: p.rootPath, upsert: true }),
+			}).catch(() => {});
 		}
 		for (const d of tempDirs.splice(0)) {
 			try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -460,11 +466,9 @@ test.describe("CT-19: First-run and single-project UX", () => {
 	test("GR-09: First-run zero-project UX disables New Goal", async () => {
 		s.begin(STORY_GR09);
 
-		// Attempt to reach zero-project state. Current master will refuse to
-		// delete the server-cwd default project (400), leaving at least one
-		// project registered. That is exactly how this characterization test
-		// fails against master.
-		await deleteAllProjects();
+		// Force-delete every project (uses BOBBIT_E2E=1 ?force=1 bypass) so we
+		// can exercise the literal zero-project state.
+		await forceDeleteAllProjects();
 
 		s.act();
 		await s.open();
@@ -496,11 +500,9 @@ test.describe("CT-19: First-run and single-project UX", () => {
 	test("GR-10: Single-project install skips the picker", async () => {
 		s.begin(STORY_GR10);
 
-		// Target state: exactly one project registered. On current master we
-		// cannot guarantee "exactly one" (we can't delete the default), so
-		// this test asserts the target behavior and fails against master if
-		// there are 0 or >1 projects OR if the popover is shown.
-		await deleteAllProjects();
+		// Target state: exactly one project registered. Force-delete everything,
+		// then register the single lone project.
+		await forceDeleteAllProjects();
 
 		const lone = await registerProject(`lone-${Date.now()}`, mkTempDir("lone"));
 		createdProjects.push(lone.id);

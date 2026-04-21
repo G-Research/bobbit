@@ -1607,7 +1607,10 @@ async function handleApiRoute(
 	if (projectGetMatch && req.method === "DELETE") {
 		const projectId = projectGetMatch[1];
 		const project = projectRegistry.get(projectId);
-		if (project && projectRegistry.list().length === 1) {
+		// Test-only bypass: BOBBIT_E2E=1 + ?force=1 allows deleting the last
+		// project so GR-09 (zero-project first-run UX) can exercise the empty state.
+		const forceDelete = process.env.BOBBIT_E2E === "1" && url.searchParams.get("force") === "1";
+		if (project && projectRegistry.list().length === 1 && !forceDelete) {
 			json({ error: "Cannot delete the last remaining project — add another project first" }, 400);
 			return;
 		}
