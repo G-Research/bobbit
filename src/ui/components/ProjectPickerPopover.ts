@@ -47,6 +47,15 @@ export class ProjectPickerPopover extends LitElement {
 		return this;
 	}
 
+	override connectedCallback(): void {
+		super.connectedCallback();
+		// Light-DOM host would default to `display: inline` with zero dimensions
+		// (all positioning happens inside a fixed-positioned child), so Playwright's
+		// visibility check treats the host as hidden. `display: contents` makes the
+		// host transparent in the flow while keeping it as a real rendered element.
+		this.style.display = "contents";
+	}
+
 	override disconnectedCallback(): void {
 		super.disconnectedCallback();
 		this._unbindListeners();
