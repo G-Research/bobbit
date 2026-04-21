@@ -315,7 +315,60 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
 5. **Restore**: After a restart, existing session worktrees are reused — the server reconnects to the worktree on disk without recreating it.
 
+**Session creation modes:** The session-setup pipeline (`src/server/agent/session-setup.ts`) handles four modes, all routed through the same plan/execute structure:
+
+| Mode | Triggered by | Worktree? | Seed context? |
+|---|---|---|---|
+| Normal (assistant) | `POST /api/sessions` for assistant types (goal/project/tool) | No | No |
+| Worktree | `POST /api/sessions` for non-goal, non-assistant sessions in a git repo | Yes (auto) | No |
+| Delegate | Parent session spawns a child via the `delegate` tool | Inherits parent cwd | No |
+| Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | Yes — archived transcript |
+
+Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
+
 **Staff agent worktrees:** Staff agents get a permanent worktree at creation time. Because staff sessions are long-lived (they persist across wake/sleep cycles rather than being recreated), their worktrees can become stale over time. To address this, `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff: it rebases the worktree branch onto the primary branch and re-runs the project's `worktree_setup_command` (e.g. `npm ci`). Sandboxed staff agents skip the host-side refresh — their container-internal worktrees are managed via `sandboxBranch`, which is passed to `createSession()` during staff creation and legacy migration so the container creates the worktree properly.
+
+### Continue-Archived sessions
+
+Archived, non-goal, non-delegate sessions render a "Continue in New Session" button below their transcript. Clicking it creates a brand-new session that inherits the archived session's **settings** but none of its **runtime state**.
+
+**Why split settings from runtime state**: Users reopening an archived session usually want to resume the task, not resurrect the exact environment. The old worktree may be gone, the sandbox container may have been pruned, and the branch may be merged or abandoned. Continue-Archived gives them the same tools (model, role, personality, sandbox/worktree flags) in a fresh runtime, with the prior conversation available as context only.
+
+**What is copied:**
+
+- `projectId`
+- `modelProvider`, `modelId` (applied post-create via `setModel` + persisted immediately; worktree sessions set the model once the agent is ready)
+- `role` (resolved via `roleManager.getRole()`, so prompt/accessory/tool policies are re-applied fresh)
+- `personalities` (re-resolved through `personalityManager`)
+- `sandboxed` flag (new container state per normal per-project sandbox rules)
+- `worktreePath` presence — if the source had a worktree, the new session gets one via the standard pipeline (pool claim or `git worktree add`)
+
+**What is explicitly NOT copied:**
+
+- Working directory, worktree path, branch, uncommitted changes
+- Sandbox container identity or in-container state (the new session joins the project's container per normal semantics)
+- `goalId`, `teamGoalId`, `teamLeadSessionId`, `delegateOf` — guaranteed absent because the scope gate rejects those source types up front
+- Task/gate signals, streaming state, tool state
+
+**Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, no `assistantType`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. See [docs/rest-api.md — Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table.
+
+**Seed context**: The archived transcript (loaded via `sessionManager.getArchivedMessages()`) is rendered by `buildSeedContext()` in `src/server/agent/continue-archived.ts`:
+
+- **Full mode**: `renderMessagesAsText()` flattens each message to `### <role>\n\n<body>`, rendering tool calls/results inline, dropping internal thinking blocks and base64 images. The output is capped at 128 KB (`SEED_TOTAL_BUDGET`).
+- **Summary mode**: The transcript (capped at 60 KB input for the model call) is sent to the configured naming model with a bullet-point prompt covering goal, decisions, files touched, open threads. On model failure the helper falls back to full mode — users never get an empty seed.
+
+The resulting string is passed to `createSession()` as `opts.seedContext` (with `seedContextSourceId` for attribution) and flows through `SessionSetupPlan.seedContext` → `PromptParts.seedContext` → `assembleSystemPrompt()` in `src/server/agent/system-prompt.ts`, which emits it under a `## Prior Session Transcript` heading with an instruction telling the agent the text is context-only and not an implicit request to act. The same content appears in the system-prompt tokens view (labeled `Prior Session Transcript` with a `Continued from archived session <id>` source) so users can see token cost impact.
+
+**Title**: The new session is titled `Continued: <original title>` and the title is marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
+
+**Key files:**
+
+- `src/server/agent/continue-archived.ts` — seed-context builder (rendering + summarization + budgets)
+- `src/server/server.ts` — `POST /api/sessions/:archivedId/continue` handler (scope gate, settings extraction, session creation)
+- `src/server/agent/session-setup.ts` — `SessionSetupPlan.seedContext` + `seedContextSourceId` fields
+- `src/server/agent/system-prompt.ts` — `Prior Session Transcript` section assembly
+- `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`
+- `src/ui/components/ContinueSessionChooser.ts` — mode chooser dialog (Summary vs Full, with large-transcript warning)
 
 ### Sidebar grouping
 
