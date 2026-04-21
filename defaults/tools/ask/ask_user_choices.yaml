@@ -31,9 +31,31 @@ detail_docs: |
   - **questions**: 1–5 questions
   - Each question has a **question** string, an **options** array (2–8 items), and these
     optional fields:
+    - **tab_label** (string, 2–4 words, ≤24 chars) — short topical summary shown as the tab title when there are multiple questions. **Required** when `questions.length > 1`; ignored for single-question asks. Example: `"User behavior"`, `"Follow-up timing"`.
     - **allow_other** (boolean) — adds an "Other" free-text choice.
     - **multi** (boolean) — allow multiple selections; `selected` is returned as an array.
     - **min** / **max** (integers) — min/max selections when `multi` is true (defaults: 1 and options.length).
+
+  ## Tab labels (multi-question asks)
+
+  When you post **more than one question**, every question MUST include a
+  `tab_label` field. The widget renders the tab strip as
+  `A. <tab_label>`, `B. <tab_label>`, … so the user can jump between
+  questions without re-reading the full prompt.
+
+  Keep it to **2–4 words, ≤24 characters**, topical and question-scoped
+  — not the full question.
+
+  ```json
+  {
+    "questions": [
+      { "question": "How often do users retry failed logins?", "tab_label": "User behavior", "options": ["Rarely", "Sometimes", "Often"] },
+      { "question": "Should we show a CAPTCHA after 3 failures?",  "tab_label": "CAPTCHA policy", "options": ["Yes", "No", "Only for flagged IPs"] }
+    ]
+  }
+  ```
+
+  Single-question asks do not need `tab_label` (the tab strip is hidden).
 
   ## Non-blocking contract
 

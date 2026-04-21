@@ -10,6 +10,12 @@
 export interface UserQuestion {
 	question: string;
 	options: string[];
+	/**
+	 * Short tab label (2–4 words, ≤24 chars). Required when the ask contains
+	 * more than one question; ignored for single-question asks. Rendered on the
+	 * tab strip as `A. <tab_label>`, `B. <tab_label>`, …
+	 */
+	tab_label?: string;
 	allow_other?: boolean;
 	/** When true, the UI renders checkboxes and `selected` is an array. */
 	multi?: boolean;
@@ -39,12 +45,24 @@ export function validateQuestions(questions: unknown): string | null {
 	if (questions.length < 1 || questions.length > 5) {
 		return `questions must contain 1-5 items (got ${questions.length})`;
 	}
+	const isMulti = questions.length > 1;
 	for (let i = 0; i < questions.length; i++) {
 		const q = questions[i];
 		if (!q || typeof q !== "object") return `questions[${i}] must be an object`;
 		const qq = q as Record<string, unknown>;
 		if (typeof qq.question !== "string" || qq.question.trim().length === 0) {
 			return `questions[${i}].question must be a non-empty string`;
+		}
+		if (qq.tab_label !== undefined) {
+			if (typeof qq.tab_label !== "string" || qq.tab_label.trim().length === 0) {
+				return `questions[${i}].tab_label must be a non-empty string if present`;
+			}
+			if (qq.tab_label.length > 24) {
+				return `questions[${i}].tab_label must be ≤24 characters (got ${qq.tab_label.length})`;
+			}
+		}
+		if (isMulti && (typeof qq.tab_label !== "string" || qq.tab_label.trim().length === 0)) {
+			return `questions[${i}].tab_label is required when posting more than one question (2–4 words, ≤24 chars)`;
 		}
 		if (!Array.isArray(qq.options)) return `questions[${i}].options must be an array`;
 		if (qq.options.length < 2 || qq.options.length > 8) {

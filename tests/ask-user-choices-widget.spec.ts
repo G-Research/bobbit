@@ -30,9 +30,9 @@ test.describe("ask_user_choices widget", () => {
 	test("renders N tabs for N questions", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"] },
-				{ question: "Q2", options: ["c", "d"] },
-				{ question: "Q3", options: ["e", "f"] },
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
+				{ question: "Q3", options: ["e", "f"], tab_label: "Third" },
 			],
 		}));
 		await expect(page.locator('[role="tab"]')).toHaveCount(3);
@@ -41,8 +41,8 @@ test.describe("ask_user_choices widget", () => {
 	test("selecting a non-Other option auto-advances to the next tab", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"] },
-				{ question: "Q2", options: ["c", "d"] },
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
 			],
 		}));
 		// Click first option on tab 0.
@@ -54,9 +54,9 @@ test.describe("ask_user_choices widget", () => {
 	test("clicking a tab manually jumps without reordering", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"] },
-				{ question: "Q2", options: ["c", "d"] },
-				{ question: "Q3", options: ["e", "f"] },
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
+				{ question: "Q3", options: ["e", "f"], tab_label: "Third" },
 			],
 		}));
 		await page.locator('[role="tab"][data-tab-index="2"]').click();
@@ -69,8 +69,8 @@ test.describe("ask_user_choices widget", () => {
 	test("Submit button disabled until every question has a selection", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"] },
-				{ question: "Q2", options: ["c", "d"] },
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
 			],
 		}));
 		// Initially disabled
@@ -80,14 +80,16 @@ test.describe("ask_user_choices widget", () => {
 		await expect(page.locator(".ask-submit")).toBeDisabled();
 		// Answer Q2 → enabled
 		await page.locator('[role="tabpanel"] input[type=radio][value="c"]').click({ force: true });
+		// Second-tab selection → Submit button on last tab. Active tab is still Q2 after picking 'c' (last tab).
 		await expect(page.locator(".ask-submit")).toBeEnabled();
+		await expect(page.locator(".ask-submit")).toHaveText(/Submit/);
 	});
 
 	test("allow_other: selecting Other does NOT auto-advance; Submit requires other_text", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"], allow_other: true },
-				{ question: "Q2", options: ["c", "d"] },
+				{ question: "Q1", options: ["a", "b"], allow_other: true, tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
 			],
 		}));
 		// Select Other on Q1
@@ -114,8 +116,8 @@ test.describe("ask_user_choices widget", () => {
 		// Install a submitFetch mock that returns 200.
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"] },
-				{ question: "Q2", options: ["c", "d"] },
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
 			],
 			submitFetch: async (_url: string, init: any) => {
 				(window as any)._lastSubmitBody = JSON.parse(init.body);
@@ -161,8 +163,8 @@ test.describe("ask_user_choices widget", () => {
 	test("initial answers prop renders read-only (replay scenario)", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"] },
-				{ question: "Q2", options: ["c", "d"], allow_other: true },
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], allow_other: true, tab_label: "Second" },
 			],
 			answers: [
 				{ question: "Q1", selected: "b", other_text: null },
@@ -254,8 +256,8 @@ test.describe("ask_user_choices widget", () => {
 	test("multi: auto-advance is suppressed", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"], multi: true },
-				{ question: "Q2", options: ["c", "d"] },
+				{ question: "Q1", options: ["a", "b"], multi: true, tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
 			],
 		}));
 		await page.locator('label:has(input[value="a"])').click();
@@ -370,8 +372,8 @@ test.describe("ask_user_choices widget", () => {
 		// (single-question mode auto-submits, which is covered separately).
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [
-				{ question: "Q1", options: ["a", "b"] },
-				{ question: "Q2", options: ["c", "d"] },
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
 			],
 			submitFetch: async () =>
 				new Response(JSON.stringify({ error: "No pending question for this session/toolUseId" }), { status: 404, headers: { "Content-Type": "application/json" } }),
@@ -382,5 +384,246 @@ test.describe("ask_user_choices widget", () => {
 		// Submit button remains visible (not read-only); error surfaces.
 		await expect(page.locator(".ask-submit-error")).toHaveText(/No pending question/);
 		await expect(page.locator(".ask-submit")).toBeVisible();
+	});
+
+	// ── Label polish ───────────────────────────────────────────────────────
+
+	test("multi-question: tabs render as 'A. <tab_label>', 'B. <tab_label>'", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "How often?",    options: ["rare", "often"], tab_label: "User behavior" },
+				{ question: "Which scope?",  options: ["small", "big"],   tab_label: "Design scope" },
+				{ question: "When to follow up?", options: ["now", "later"], tab_label: "Follow-up" },
+			],
+		}));
+		const letters = await page.locator('[role="tab"] .ask-tab-letter').allTextContents();
+		expect(letters).toEqual(["A.", "B.", "C."]);
+		const labels = await page.locator('[role="tab"] .ask-tab-label').allTextContents();
+		expect(labels).toEqual(["User behavior", "Design scope", "Follow-up"]);
+	});
+
+	test("options render with 1-based numeric prefix, including Other", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Pick", options: ["red", "green", "blue"], allow_other: true }],
+		}));
+		const idxs = await page.locator(".ask-option-index").allTextContents();
+		expect(idxs).toEqual(["1.", "2.", "3.", "4."]);
+	});
+
+	// ── Next / Submit ────────────────────────────────────────────────
+
+	test("multi-question: non-last tab shows Next (disabled until valid), last tab shows Submit", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"], allow_other: true, tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
+			],
+		}));
+		// On tab 0 without selection: Next disabled.
+		await expect(page.locator(".ask-submit")).toHaveText("Next");
+		await expect(page.locator(".ask-submit")).toBeDisabled();
+		// Select 'Other' (no auto-advance) and then type text → Next enables.
+		await page.locator('input[type=radio][value="__OTHER__"]').click({ force: true });
+		await expect(page.locator(".ask-submit")).toBeDisabled();
+		await page.locator('.ask-other-input').fill('freeform');
+		await expect(page.locator(".ask-submit")).toBeEnabled();
+		// Click Next → goes to tab 1.
+		await page.locator('.ask-submit').click();
+		await expect(page.locator('[role="tab"][data-tab-index="1"]')).toHaveAttribute("aria-selected", "true");
+		// Last tab → button is Submit.
+		await expect(page.locator(".ask-submit")).toHaveText("Submit");
+	});
+
+	// ── Keyboard ─────────────────────────────────────────────────────────────
+
+	test("ArrowDown/Up move focused option with wrap", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Pick", options: ["a", "b", "c"] }],
+		}));
+		await page.locator('.ask-option').first().focus();
+		await page.keyboard.press("ArrowDown");
+		await expect(page.locator('.ask-option[data-option-index="1"]')).toHaveClass(/ask-option-focused/);
+		await page.keyboard.press("ArrowDown");
+		await expect(page.locator('.ask-option[data-option-index="2"]')).toHaveClass(/ask-option-focused/);
+		// Wrap forward.
+		await page.keyboard.press("ArrowDown");
+		await expect(page.locator('.ask-option[data-option-index="0"]')).toHaveClass(/ask-option-focused/);
+		// Wrap backward.
+		await page.keyboard.press("ArrowUp");
+		await expect(page.locator('.ask-option[data-option-index="2"]')).toHaveClass(/ask-option-focused/);
+	});
+
+	test("ArrowLeft/Right on a tab button moves between tabs", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
+				{ question: "Q3", options: ["e", "f"], tab_label: "Third" },
+			],
+		}));
+		const tab0 = page.locator('[role="tab"][data-tab-index="0"]');
+		await tab0.focus();
+		await tab0.press("ArrowRight");
+		await expect(page.locator('[role="tab"][data-tab-index="1"]')).toHaveAttribute("aria-selected", "true");
+		await page.locator('[role="tab"][data-tab-index="1"]').press("ArrowRight");
+		await expect(page.locator('[role="tab"][data-tab-index="2"]')).toHaveAttribute("aria-selected", "true");
+		// Wraps.
+		await page.locator('[role="tab"][data-tab-index="2"]').press("ArrowRight");
+		await expect(page.locator('[role="tab"][data-tab-index="0"]')).toHaveAttribute("aria-selected", "true");
+	});
+
+	test("Enter on focused option (single-question single-select) selects + auto-submits", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Q1", options: ["a", "b", "c"] }],
+			submitFetch: async (_u: string, init: any) => {
+				(window as any)._lastSubmitBody = JSON.parse(init.body);
+				return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+			},
+		}));
+		await page.locator('.ask-option').first().focus();
+		await page.keyboard.press("ArrowDown"); // focus option 1 ('b')
+		await page.keyboard.press("Enter");
+		await expect.poll(() => page.evaluate(() => (window as any)._lastSubmitBody)).toBeTruthy();
+		const body = await page.evaluate(() => (window as any)._lastSubmitBody);
+		expect(body.answers[0].selected).toBe("b");
+	});
+
+	test("Enter on primary button clicks Next/Submit", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
+			],
+		}));
+		// Select 'a' by number key on Q1 → auto-advance to Q2.
+		await page.locator('.ask-option').first().focus();
+		await page.keyboard.press("1");
+		await expect(page.locator('[role="tab"][data-tab-index="1"]')).toHaveAttribute("aria-selected", "true");
+		// On Q2, pick 'c' with number key.
+		await page.locator('.ask-option').first().focus();
+		await page.keyboard.press("1");
+		// Submit enabled.
+		await expect(page.locator(".ask-submit")).toBeEnabled();
+		await expect(page.locator(".ask-submit")).toHaveText("Submit");
+	});
+
+	test("Escape clears the active question (single-select → null; multi-select → [])", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"], allow_other: true, tab_label: "First" },
+				{ question: "Q2", options: ["c", "d", "e"], multi: true, tab_label: "Second" },
+			],
+		}));
+		// Q1 single-select + Other with text.
+		await page.locator('input[type=radio][value="__OTHER__"]').click({ force: true });
+		await page.locator('.ask-other-input').fill('typed');
+		await expect(page.locator('.ask-other-input')).toHaveValue('typed');
+		// Escape outside the text input → clears.
+		await page.locator('[role="tab"][data-tab-index="0"]').focus();
+		await page.keyboard.press("Escape");
+		await expect(page.locator('.ask-other-input')).toHaveCount(0);
+		await expect(page.locator('input[type=radio][value="__OTHER__"]')).not.toBeChecked();
+		// Q2 multi-select → clears array.
+		await page.locator('[role="tab"][data-tab-index="1"]').click();
+		await page.locator('label:has(input[value="c"])').click();
+		await page.locator('label:has(input[value="d"])').click();
+		await expect(page.locator('input[value="c"]')).toBeChecked();
+		await page.locator('[role="tab"][data-tab-index="1"]').focus();
+		await page.keyboard.press("Escape");
+		await expect(page.locator('input[value="c"]')).not.toBeChecked();
+		await expect(page.locator('input[value="d"]')).not.toBeChecked();
+	});
+
+	test("Number keys: auto-advance on non-last, toggle on multi, no-op on out-of-range", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d", "e"], multi: true, tab_label: "Second" },
+			],
+		}));
+		await page.locator('[role="tab"][data-tab-index="0"]').focus();
+		// '9' on Q1 (only 2 options) → no-op.
+		await page.keyboard.press("9");
+		await expect(page.locator('[role="tab"][data-tab-index="0"]')).toHaveAttribute("aria-selected", "true");
+		// '2' → picks 'b' and auto-advances to Q2.
+		await page.keyboard.press("2");
+		await expect(page.locator('[role="tab"][data-tab-index="1"]')).toHaveAttribute("aria-selected", "true");
+		// On Q2 (multi): '1' toggles 'c' on; '3' toggles 'e' on; '1' again toggles 'c' off.
+		await page.keyboard.press("1");
+		await page.keyboard.press("3");
+		await expect(page.locator('input[value="c"]')).toBeChecked();
+		await expect(page.locator('input[value="e"]')).toBeChecked();
+		await page.keyboard.press("1");
+		await expect(page.locator('input[value="c"]')).not.toBeChecked();
+		await expect(page.locator('input[value="e"]')).toBeChecked();
+		// Still on Q2 (no auto-advance for multi).
+		await expect(page.locator('[role="tab"][data-tab-index="1"]')).toHaveAttribute("aria-selected", "true");
+	});
+
+	test("Letter keys jump tabs; out-of-range and single-question ignored", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
+				{ question: "Q3", options: ["e", "f"], tab_label: "Third" },
+			],
+		}));
+		await page.locator('[role="tab"][data-tab-index="0"]').focus();
+		await page.keyboard.press("c"); // lowercase works
+		await expect(page.locator('[role="tab"][data-tab-index="2"]')).toHaveAttribute("aria-selected", "true");
+		await page.keyboard.press("A");
+		await expect(page.locator('[role="tab"][data-tab-index="0"]')).toHaveAttribute("aria-selected", "true");
+		// Out-of-range (e.g. 'Z') → no-op.
+		await page.keyboard.press("Z");
+		await expect(page.locator('[role="tab"][data-tab-index="0"]')).toHaveAttribute("aria-selected", "true");
+	});
+
+	test("single-question: letter keys are ignored (no tabs)", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Only", options: ["a", "b"] }],
+		}));
+		await page.locator('.ask-option').first().focus();
+		await page.keyboard.press("B");
+		await expect(page.locator('[role="tab"]')).toHaveCount(0);
+		// No option selected by letter key.
+		await expect(page.locator('input[type=radio][value="b"]')).not.toBeChecked();
+	});
+
+	test("No hijack while typing in Other: digits/letters reach the input; Enter still submits", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Only", options: ["a", "b"], allow_other: true }],
+			submitFetch: async (_u: string, init: any) => {
+				(window as any)._lastSubmitBody = JSON.parse(init.body);
+				return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+			},
+		}));
+		await page.locator('input[type=radio][value="__OTHER__"]').click({ force: true });
+		const input = page.locator('.ask-other-input');
+		// fill() sets value directly (no per-key re-render focus loss in the fixture).
+		await input.fill("3b");
+		await expect(input).toHaveValue("3b");
+		// Verify that while the text input has focus, shortcuts are NOT hijacked:
+		// typing more chars would be intercepted if the widget were listening.
+		await input.focus();
+		// With focus in Other, letter keys must not switch tabs or clear selection.
+		await input.press("a"); // should append 'a'
+		await expect(input).toHaveValue("3ba");
+		// Enter while focused in Other submits (valid).
+		await input.press("Enter");
+		await expect.poll(() => page.evaluate(() => (window as any)._lastSubmitBody)).toBeTruthy();
+	});
+
+	test("Other numbering = options.length + 1; number key selects Other", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Pick", options: ["a", "b"], allow_other: true }],
+		}));
+		// Other's prefix should be '3.'
+		const idxs = await page.locator(".ask-option-index").allTextContents();
+		expect(idxs).toEqual(["1.", "2.", "3."]);
+		// Press '3' → selects Other (single-question, Other → does NOT auto-submit).
+		await page.locator('.ask-option').first().focus();
+		await page.keyboard.press("3");
+		await expect(page.locator('input[type=radio][value="__OTHER__"]')).toBeChecked();
+		await expect(page.locator('.ask-other-input')).toBeVisible();
 	});
 });
