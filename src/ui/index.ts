@@ -38,6 +38,7 @@ export {
 	registerMessageRenderer,
 	renderMessage,
 } from "./components/message-renderer-registry.js";
+export { ProjectPickerPopover, type ProjectPickerItem } from "./components/ProjectPickerPopover.js";
 export { ProviderKeyInput } from "./components/ProviderKeyInput.js";
 export {
 	type SandboxFile,
