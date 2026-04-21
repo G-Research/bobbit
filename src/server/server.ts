@@ -328,12 +328,27 @@ async function runBatchGitStatus(
 		const { stdout } = await execAsync(batchScript, { cwd, encoding: "utf-8", timeout: TIMEOUT_MS, shell: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh" });
 		return stdout;
 	};
-	// On Windows under CPU load, spawning Git Bash + running the batch script
-	// can legitimately exceed the timeout and be SIGTERM'd. Retry with backoff
-	// — transient CPU pressure is a real-world condition, not flake.
+	// On Windows (and under CPU load anywhere) spawning Git Bash + running the
+	// batch script can legitimately exceed the timeout or fail with transient
+	// spawn errors (EAGAIN, ENOBUFS, EBUSY, etc). Retry broadly — transient
+	// contention is a real-world condition, not a flake. Only genuine git
+	// errors (non-empty stderr, exit code from git itself) are thrown on the
+	// final attempt.
 	let rawOutput: string | undefined;
 	let lastErr: any;
-	const backoffs = [0, 250, 750, 1500];
+	const backoffs = [0, 250, 500, 1000, 2000, 4000];
+	const isTransient = (err: any): boolean => {
+		if (!err) return false;
+		if (err?.killed === true) return true;
+		if (err?.signal === "SIGTERM" || err?.signal === "SIGKILL") return true;
+		const code = err?.code;
+		if (code === "ETIMEDOUT" || code === "EAGAIN" || code === "ENOBUFS" ||
+			code === "EBUSY" || code === "EMFILE" || code === "ENFILE") return true;
+		// Windows: spawn can fail with ENOENT temporarily when /dev/null-style
+		// redirection in the batch script is interrupted under load.
+		if (code === "ENOENT" && typeof err?.path === "string") return true;
+		return false;
+	};
 	for (const delay of backoffs) {
 		if (delay > 0) await new Promise((r) => setTimeout(r, delay));
 		try {
@@ -342,8 +357,7 @@ async function runBatchGitStatus(
 			break;
 		} catch (err: any) {
 			lastErr = err;
-			const isTimeout = err?.killed === true || err?.signal === "SIGTERM" || err?.code === "ETIMEDOUT";
-			if (!isTimeout) throw err;
+			if (!isTransient(err)) throw err;
 		}
 	}
 	if (rawOutput === undefined) throw lastErr;
