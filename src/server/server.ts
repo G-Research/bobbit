@@ -318,16 +318,35 @@ async function runBatchGitStatus(
 	].join('\n');
 
 	const TIMEOUT_MS = 15000;
-	let rawOutput: string;
-	if (containerId) {
-		const { stdout } = await execFileAsync("docker", [
-			"exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript,
-		], { encoding: "utf-8", timeout: TIMEOUT_MS, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-		rawOutput = stdout;
-	} else {
+	const runOnce = async (): Promise<string> => {
+		if (containerId) {
+			const { stdout } = await execFileAsync("docker", [
+				"exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript,
+			], { encoding: "utf-8", timeout: TIMEOUT_MS, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+			return stdout;
+		}
 		const { stdout } = await execAsync(batchScript, { cwd, encoding: "utf-8", timeout: TIMEOUT_MS, shell: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh" });
-		rawOutput = stdout;
+		return stdout;
+	};
+	// On Windows under CPU load, spawning Git Bash + running the batch script
+	// can legitimately exceed the timeout and be SIGTERM'd. Retry with backoff
+	// — transient CPU pressure is a real-world condition, not flake.
+	let rawOutput: string | undefined;
+	let lastErr: any;
+	const backoffs = [0, 250, 750, 1500];
+	for (const delay of backoffs) {
+		if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+		try {
+			rawOutput = await runOnce();
+			lastErr = undefined;
+			break;
+		} catch (err: any) {
+			lastErr = err;
+			const isTimeout = err?.killed === true || err?.signal === "SIGTERM" || err?.code === "ETIMEDOUT";
+			if (!isTimeout) throw err;
+		}
 	}
+	if (rawOutput === undefined) throw lastErr;
 
 	const sections = rawOutput.split('\0').map(s => s.replace(/\s+$/, ''));
 
@@ -5163,6 +5182,7 @@ async function handleApiRoute(
 				}
 			}
 		} catch (err: any) {
+			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
 			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
 		}
 		return;
