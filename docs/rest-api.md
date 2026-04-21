@@ -163,6 +163,32 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/staff/:id/wake` | Manually trigger a staff agent's wake cycle |
 | `GET` | `/api/staff/:id/sessions` | **Deprecated (410)**. Use `GET /api/staff/:id` instead. |
 
+### Projects
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/projects` | List all registered projects. |
+| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. |
+| `GET` | `/api/projects/:id` | Get a single project. |
+| `PUT` | `/api/projects/:id` | Update name/color. |
+| `DELETE` | `/api/projects/:id` | Unregister (does not delete files). Returns **400** `{"error":"Cannot delete the last remaining project — add another project first"}` when deleting would leave zero projects. Under `BOBBIT_E2E=1`, `?force=1` bypasses the guard for tests that need to exercise the zero-project UX. |
+
+### Project resolution contract
+
+`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` all require a caller-identified project. Resolution order (no silent fallback):
+
+1. If `body.projectId` is a non-empty string matching a registered project → use it.
+2. Else if `body.cwd` is a string and some registered project's `rootPath` matches it → use that project.
+3. Else → **400 Bad Request**.
+
+| Condition | Status | Body |
+|---|---|---|
+| No `projectId`, no `cwd` | 400 | `{"error":"projectId required: no projectId was provided and cwd (\"\") does not match any registered project"}` |
+| `cwd` provided, no matching project `rootPath` | 400 | `{"error":"projectId required: no projectId was provided and cwd (\"<cwd>\") does not match any registered project"}` |
+| `projectId` provided, unknown id | 400 | `{"error":"Invalid project"}` |
+
+The helper implementing this is `resolveProjectForRequest` in `src/server/agent/resolve-project.ts`. Callers in new handlers should invoke it at the top of the handler and return the 400 directly when `ok === false`.
+
 ### Project Config
 
 | Method | Path | Description |

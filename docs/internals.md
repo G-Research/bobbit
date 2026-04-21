@@ -25,10 +25,11 @@ interface RegisteredProject {
 ```
 
 Key behaviors:
-- On startup, the server auto-registers the CWD as the "default" project via `ensureDefaultProject()` — but **only if `projects.json` already exists** in the state directory (i.e. not a fresh install). A truly fresh folder starts with zero projects; the user adds one explicitly via the "Add Project" flow. This prevents Bobbit from assuming every directory it runs in is a project.
+- **No default project.** Bobbit has no "default" project concept. On startup, the registry loads `projects.json` as-is — whatever is on disk, including zero projects. A fresh install is a valid state: the sidebar shows an Add Project CTA, and the toolbar **+ New Goal** button is disabled with tooltip "Add a project first" until at least one project is registered. Bobbit never implicitly registers a project based on the server CWD. `ProjectRegistry.ensureDefaultProject()` has been removed.
 - `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed. `POST /api/projects` supports `upsert: true` — if a project already exists at the same `rootPath`, the existing project is returned (200) instead of a 400 error. This makes project registration idempotent.
-- `remove()` only unregisters — it does not delete files. Callers guard against removing the default project.
-- The per-project settings page General tab exposes a "Remove Project" button in a Danger Zone section (hidden for the default project). On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
+- `remove()` only unregisters — it does not delete files.
+- **Delete protection:** `DELETE /api/projects/:id` returns `400 {"error":"Cannot delete the last remaining project — add another project first"}` when deleting would leave zero projects. There is no hidden carve-out for a "first" or "CWD" project — every project can be removed as long as at least one other project remains. Under `BOBBIT_E2E=1`, `?force=1` bypasses the last-project guard for tests that need to exercise the zero-project UX.
+- The per-project settings page General tab exposes a "Remove Project" button in a Danger Zone section for every registered project. On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
 - Persistence is atomic (write to `.tmp` then rename).
 
 ### Per-project state isolation
@@ -92,9 +93,21 @@ Store resolution **never falls back to a default project**. Every operation reso
 
 1. **Entity-based resolution** — `getContextForGoal(goalId)`, `getContextForSession(sessionId)`: scans all project contexts to find the owning project. Returns `null` if not found; callers throw or return 404.
 2. **Explicit projectId** — `getOrCreate(projectId)`: used when the caller already knows the target project (e.g. from a session's `projectId` field).
-3. **Creation-time defaulting** — API endpoints for creating sessions, goals, and staff agents default to the server CWD project when no `projectId` is provided. This is the API contract for creation, not a store-resolution fallback — once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2.
+3. **Explicit-required on creation** — `POST /api/sessions`, `POST /api/goals`, and `POST /api/staff` resolve the target project at the top of the handler via the `resolveProjectForRequest` helper in `src/server/agent/resolve-project.ts`. Resolution order: explicit `body.projectId` → `body.cwd` matching a registered project's `rootPath` → **400 Bad Request**. There is no creation-time default. Once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2.
 
-The `getDefault()` and `getDefaultProjectId()` methods are **deprecated**. They exist only for bootstrapping (constructing managers at startup) and the creation-time defaulting described above. New code must not use them for runtime store resolution. Null-safe alternatives `getDefaultOrNull()` and `getDefaultProjectIdOrNull()` are available for code paths that must handle zero-project environments gracefully (e.g. API creation endpoints return 400 "No projects configured" instead of crashing).
+`ProjectContextManager` no longer exposes `getDefault()`, `getDefaultOrNull()`, `getDefaultProjectId()`, or `getDefaultProjectIdOrNull()`; `ProjectRegistry` no longer exposes `ensureDefaultProject()`. Any code path that needs a project must either resolve it explicitly (via `resolveProjectForRequest`, an entity lookup, or a threaded `projectId` parameter) or return 400. The only remaining reference to a "first registered project" is in `state-migration.ts`, and it is migration-only — see the block comment on `migrateToPerProjectState()` and the State migration section below.
+
+##### Project selection contract
+
+`POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` share the following 400 contract:
+
+| Condition | Body |
+|---|---|
+| Neither `projectId` nor `cwd` provided | `{"error":"projectId required: no projectId was provided and cwd (\"\") does not match any registered project"}` |
+| `cwd` provided but no registered project has that `rootPath` | `{"error":"projectId required: no projectId was provided and cwd (\"<cwd>\") does not match any registered project"}` |
+| `projectId` provided but unknown | `{"error":"Invalid project"}` (pre-existing) |
+
+Callers should always pass an explicit `projectId` when one is available. `cwd`-only resolution exists to support agent tools and external scripts that only know a filesystem path.
 
 `SessionManager` does not hold default store fields (`this.store`, `this.costTracker`, etc.). All store access goes through PCM resolution. `TeamManager`, `StaffManager`, and `VerificationHarness` follow the same pattern — they resolve stores per-goal or per-entity via PCM, with no fallback store references. `resolveStoreForId()` returns `null` instead of falling back, and callers use optional chaining.
 
@@ -109,7 +122,7 @@ On first startup after upgrading to per-project state, `migrateToPerProjectState
 1. Reads central `goals.json`, `sessions.json`, `tasks.json`, `team-state.json`, `gates.json`, `staff.json`
 2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
 3. Merges into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
-4. Staff agents without a `projectId` go to the default project
+4. Staff agents without a `projectId` are anchored to the migration target project (`projectRegistry.getByPath(serverCwd)` if registered, else `projects[0]`). This is **migration-only** behavior — it runs once, is guarded by `.migrated-to-per-project`, and does not imply a runtime default. The block comment on `migrateToPerProjectState()` explains why this anchor is safe and why it must not be reused elsewhere.
 5. Renames central files with `.pre-migration` suffix (not deleted)
 6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
 
@@ -169,11 +182,13 @@ Each returned item is a `ResolvedItem<T>` with:
 
 #### Resolution rules
 
-For each config type, items are merged by a unique key (roles by `name`, workflows by `id`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server). With `projectId`, adds the project layer. If `projectId` equals the default project ID, the project layer is skipped (it _is_ the server layer). Hidden workflows (e.g. `test-fast`) are filtered out at the cascade level.
+For each config type, items are merged by a unique key (roles by `name`, workflows by `id`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top. Hidden workflows (e.g. `test-fast`) are filtered out at the cascade level.
+
+**System-scope writes** (role / personality / workflow customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `personalityStore`, `workflowStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles, personalities, and workflows because the server stores are independent of `ProjectContextManager`.
 
 #### Server stores decoupling
 
-`ConfigCascade` accepts explicit `ServerStores` accessors rather than reading from `projectContextManager.getDefault()`. This matters because the standalone stores in `server.ts` may be backed by a different directory than the default project's stores (e.g. when `BOBBIT_DIR` is set in E2E tests). Using explicit accessors ensures PUT and GET use the same underlying stores.
+`ConfigCascade` accepts explicit `ServerStores` accessors rather than reading from any project's stores. The standalone stores in `server.ts` are backed by `<server-cwd>/.bobbit/config/` (or `$BOBBIT_DIR/.bobbit/config/` in E2E tests). Using explicit accessors ensures PUT and GET use the same underlying stores and decouples the server layer from whether any project is registered.
 
 #### Builtin seeding
 
@@ -319,13 +334,23 @@ The sidebar always groups sessions and goals under collapsible project folder ro
 
 When only one project is registered, its folder row defaults to expanded so there is no extra click required. Each project row shows a folder icon, project name, settings gear, and new-goal button. When no projects are registered (fresh install), the sidebar shows a "No projects configured" empty state with an "Add Project" button.
 
+**Toolbar "+ New Goal" behavior** depends on how many projects are registered:
+
+| # projects | Click behavior |
+|---|---|
+| 0 | Button disabled with tooltip "Add a project first". Empty-state Add Project CTA is the primary action. |
+| 1 | Skips the picker entirely and opens the goal creation dialog directly, scoped to the one project. |
+| 2+ | Opens `<project-picker-popover>` (`src/ui/components/ProjectPickerPopover.ts`) anchored beneath the button, listing every registered project with its color dot. Clicking a project starts goal creation scoped to it; Esc / click-outside closes; arrow keys + Enter navigate. On mobile (viewport < 640px) the popover renders as a centered sheet. |
+
+The per-project "+ goal" button on each project row bypasses the popover — the project is already unambiguous. Goal creation is centralized in `startNewGoalFlow(anchorEl)` in `src/app/goal-entry.ts` so every call site (toolbar button, mobile nav, empty-state CTA, `Alt+G` shortcut) stays in sync.
+
 **Collapse state is per-project**: The Sessions and Staff section collapse toggles are stored per-project, not globally. Collapsing Sessions in Project A does not affect Project B. State is persisted as collapsed-project-ID sets in localStorage (`bobbit-collapsed-ungrouped`, `bobbit-collapsed-staff`). Default state is expanded for all projects. Access via `isUngroupedExpanded(projectId)` / `setUngroupedExpanded(projectId, value)` and `isStaffExpanded(projectId)` / `setStaffSectionExpanded(projectId, value)` in `state.ts`.
 
 **Per-project Archived subsections**: Each project group ends with its own collapsible Archived subsection (rendered by `renderProjectArchivedSection` in `src/app/render-helpers.ts`, shared between desktop `renderSidebar` (`src/app/sidebar.ts`) and mobile `renderMobileLanding` (`src/app/render.ts`) so both breakpoints render identically). Bucketing is currently split: desktop uses an inline loop in `sidebar.ts` that emits `console.warn` for orphaned items, while mobile uses the `bucketArchivedByProject` helper in `render-helpers.ts` which silently drops unmatched items. The global Archived block that used to sit at the bottom of the sidebar is gone.
 
 - **Global visibility toggle**: The bottom-bar "See Archived" button (localStorage `bobbit-show-archived`, state `state.showArchived`) still controls whether any archived content is rendered at all. It is global, not per-project — one toggle flips every per-project Archived subsection at once. This keeps the user-visible UX contract of the pre-existing toggle unchanged.
 - **Per-project collapse state**: Each project's Archived subsection defaults to **expanded** when `showArchived` is on; users can collapse individual projects' subsections independently. Collapsed project IDs are persisted in localStorage `bobbit-archived-collapsed-projects` (mirrors `bobbit-collapsed-ungrouped` / `bobbit-collapsed-staff`). Access via `isArchivedSectionExpanded(projectId)` / `setArchivedSectionExpanded(projectId, value)` in `state.ts`. Default-expanded is deliberate: before the per-project split there was no intermediate "collapsed but visible" state, so expanded-by-default preserves the old behaviour of "See Archived on = archived items are visible".
-- **Default-project fallback**: Archived goals or sessions whose `projectId` is missing or does not resolve to a registered project are bucketed into the default (first) project's Archived subsection. On desktop the fallback emits a `console.warn` to make the data inconsistency debuggable; on mobile (via `bucketArchivedByProject` in `render-helpers.ts`) the fallback is silent. This prevents orphaned items from silently disappearing from the UI when project metadata is inconsistent.
+- **Orphaned-item fallback**: Archived goals or sessions whose `projectId` is missing or does not resolve to a registered project are bucketed into the first project's Archived subsection so they remain visible to the user rather than silently disappearing. This is a UI rendering fallback for data inconsistencies — it does not imply a runtime default project on the server side. On desktop the fallback emits a `console.warn` to make the inconsistency debuggable; on mobile (via `bucketArchivedByProject` in `render-helpers.ts`) the fallback is silent.
 - **Pagination (v1)**: Archived goals and sessions are still fetched globally (not per-project) via `GET /api/goals?archived=true` and `GET /api/sessions?include=archived`. The "Load more archived goals…" / "Load more archived sessions…" buttons are rendered **once**, below the project list, not per project. Per-project pagination would require server-side `projectId` filters on those endpoints and is intentionally deferred. On mobile the pagination buttons are additionally hidden while a search query is active, since search results collapse the per-project layout.
 - **Search**: The `_archivedBySearch` / `_ensureArchivedForSearch` auto-open behaviour is unchanged — a search match inside any archived item still forces `state.showArchived` on globally. When a search query is active, each project's subsection only renders matching items; projects with no matches render no Archived subsection at all.
 - **Collapsed sidebar**: `renderCollapsedSidebar` is unchanged — archived goals continue to render inline with live goals in the icon-only rail.
@@ -338,7 +363,7 @@ When only one project is registered, its folder row defaults to expanded so ther
 | `POST` | `/api/projects` | Register a project (body: `name`, `rootPath`, optional `color`) |
 | `GET` | `/api/projects/:id` | Get a single project |
 | `PUT` | `/api/projects/:id` | Update name/color |
-| `DELETE` | `/api/projects/:id` | Unregister (blocked for default project) |
+| `DELETE` | `/api/projects/:id` | Unregister (blocked when it would leave zero projects; `?force=1` under `BOBBIT_E2E=1` bypasses) |
 | `GET` | `/api/projects/:id/config` | Raw project-level config overrides |
 | `GET` | `/api/projects/:id/config/defaults` | Built-in defaults |
 | `PUT` | `/api/projects/:id/config` | Set/clear project config fields |
@@ -580,7 +605,7 @@ config_directories: '[{"path":"~/my-config","types":["skills","mcp"]}]'
 
 Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority.
 
-**Per-project scoping:** Config directories are resolved per-project. Each project's `config_directories` in its `project.yaml` affects only that project's sessions — a session in project B uses project B's custom directories for skill, MCP, and agent file discovery. This prevents non-default projects from inheriting the default project's custom config directories, which would be incorrect in multi-project setups. The API endpoints (`/api/config-directories`, `/api/slash-skills`, `/api/slash-skills/details`) accept a `?projectId=` query parameter to resolve directories for a specific project.
+**Per-project scoping:** Config directories are resolved per-project. Each project's `config_directories` in its `project.yaml` affects only that project's sessions — a session in project B uses project B's custom directories for skill, MCP, and agent file discovery. Projects never inherit each other's config directories. The API endpoints (`/api/config-directories`, `/api/slash-skills`, `/api/slash-skills/details`) accept a `?projectId=` query parameter to resolve directories for a specific project.
 
 **Built-in directories:**
 
@@ -688,7 +713,15 @@ Auto-built on startup if image missing but `docker/Dockerfile` exists (120s time
 
 **Container lifecycle** is managed by `ProjectSandbox` (one instance per project) and `SandboxManager` (registry mapping projectId → ProjectSandbox).
 
-**Startup sequence:**
+**Lazy per-project init:** Bobbit does not initialize any sandbox at server startup. `SandboxManager` is constructed bare and each project's sandbox is brought up the first time it is actually needed, via the idempotent `SandboxManager.ensureForProject(projectId)`. Concurrent callers for the same project share a single in-flight init (`Map<projectId, Promise<void>>`). This replaces the previous behavior of initializing one sandbox for the default project at startup. `ensureForProject` is called from:
+
+- Session setup (`session-setup.ts` plan phase) when the plan is `sandboxed`.
+- `POST /api/goals` when the request body has `sandboxed: true`, after project resolution succeeds.
+- `StaffManager` wake, for sandboxed staff agents.
+
+A sandbox is never created for a project that has not asked for one. The image build is shared across projects (same Docker image tag). Failure to init project B's sandbox does not affect project A.
+
+**Startup sequence (on first `ensureForProject` call for a project):**
 
 1. `SandboxManager.initForProject(projectId, config)` creates a `ProjectSandbox` instance
 2. `ProjectSandbox.init()` searches for an existing container by label (`bobbit-project=<projectId>`):

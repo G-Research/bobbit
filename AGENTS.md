@@ -79,9 +79,9 @@ Each recipe gives the entry point and key files. For detailed walkthroughs, see 
 
 **Add a REST endpoint**: Add handler in `handleApiRoute()` in `src/server/server.ts`. See `git-diff`/`git-status` for the pattern. See [docs/rest-api.md](docs/rest-api.md).
 
-**Add a project**: `POST /api/projects` (programmatic) or "Add Project" sidebar button (smart flow with Path A/B/C detection). Key files: `project-registry.ts`, `project-context.ts`. See [docs/internals.md — Project assistant](docs/internals.md#project-assistant) for the full flow.
+**Add a project**: `POST /api/projects` (programmatic) or "Add Project" sidebar button (smart flow with Path A/B/C detection). Key files: `project-registry.ts`, `project-context.ts`. See [docs/internals.md — Project assistant](docs/internals.md#project-assistant) for the full flow. Fresh installs have zero projects — the toolbar **+ New Goal** button is disabled with tooltip "Add a project first" until one is added. Single-project installs skip the project-picker popover; multi-project installs open `<project-picker-popover>` (`src/ui/components/ProjectPickerPopover.ts`) beneath the button.
 
-**Remove a project**: Per-project settings → General → "Remove Project". Calls `DELETE /api/projects/:id` (unregisters only, no files deleted).
+**Remove a project**: Per-project settings → General → "Remove Project". Calls `DELETE /api/projects/:id` (unregisters only, no files deleted). Refuses with **400** `"Cannot delete the last remaining project — add another project first"` when it would leave zero projects; `?force=1` under `BOBBIT_E2E=1` bypasses for tests.
 
 **Add a WebSocket command**: Add to `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, add `RpcBridge` method if needed.
 
@@ -144,6 +144,7 @@ Key quick checks:
 - **Auto-nudge flooding**: If a team lead receives duplicate nudges after sleep/wake, check `nudgePending` state in TeamManager. The guard prevents re-enqueuing while a nudge is already pending — cleared on `agent_start`.
 - **Large file writes freezing system**: Content >32KB is truncated in broadcasts via `truncateLargeToolContent()`. If UI shows truncated content but "Load full content" fails, check the `.jsonl` file exists. See [docs/debugging.md — Large file writes](docs/debugging.md#large-file-writes-agent-writes-32kb).
 - **Stale draft resurrection**: `SessionStore.setDraft()` rejects writes where the incoming `gen` is older than the stored `gen`. This prevents out-of-order HTTP requests (e.g., a delayed debounced save arriving after the send-tombstone) from resurrecting a cleared draft. If drafts reappear after sending, check that the client increments `gen` on every draft change and that the tombstone (empty content) carries the highest `gen`.
+- **400 from POST /api/goals, /api/sessions, or /api/staff with `"projectId required: ..."`**: the caller omitted `projectId` and `cwd` did not match any registered project's `rootPath`. Pass `projectId` explicitly, or a `cwd` that lives inside a registered project. There is no default-project fallback — see [docs/rest-api.md — Project resolution contract](docs/rest-api.md#project-resolution-contract).
 
 ## Git conventions
 
