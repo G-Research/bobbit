@@ -112,6 +112,11 @@ export interface SessionSetupPlan {
 	// Delegate-specific
 	instructions?: string;
 	context?: Record<string, string>;
+
+	// Continue-Archived: seed context injected into the system prompt, plus
+	// the source archived session ID for prompt-section provenance.
+	seedContext?: string;
+	seedContextSourceId?: string;
 }
 
 /**
@@ -360,6 +365,8 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 			allowedTools: plan.effectiveAllowedTools,
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			seedContext: plan.seedContext,
+			seedContextSource: plan.seedContextSourceId,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}
