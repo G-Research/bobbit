@@ -39,23 +39,6 @@ export class ProjectContextManager {
     return ctx;
   }
 
-  /**
-   * @deprecated Returns null unconditionally. Preserved as a no-op stub while
-   * Task 2 rewrites the remaining system-scope config handlers to write to the
-   * standalone server stores. Callers should use explicit projectId resolution
-   * via resolveProjectForRequest. Remove once no call sites remain.
-   */
-  getDefaultOrNull(): ProjectContext | null {
-    return null;
-  }
-
-  /**
-   * @deprecated Returns null unconditionally. See getDefaultOrNull().
-   */
-  getDefaultProjectIdOrNull(): string | null {
-    return null;
-  }
-
   /** Get the underlying project registry. */
   getRegistry(): ProjectRegistry {
     return this.registry;
