@@ -530,6 +530,8 @@ export class FlexSearchStore {
 		let entries: string[] = [];
 		try { entries = await fs.promises.readdir(dir); } catch { return; }
 
+		const yieldToLoop = () => new Promise<void>((r) => setImmediate(r));
+
 		// First, reload our mirror docs map (source of truth for
 		// `count()`, `list()`, `deleteWhere`).
 		const docsFile = path.join(dir, "__docs__.json");
@@ -543,8 +545,15 @@ export class FlexSearchStore {
 			// Missing / corrupt — caller detects via needsRebuild when meta
 			// has content but count() is 0.
 		}
+		await yieldToLoop();
 
-		// Then replay FlexSearch's own per-key exports.
+		// Then replay FlexSearch's own per-key exports. Yield the loop
+		// between files — each import is a synchronous CPU-bound tree
+		// rebuild, and with a ~100MB map.json file it stalls the event
+		// loop for multiple seconds. Yielding lets REST/WS requests slip
+		// through during startup.
+		let importFailures = 0;
+		let importSuccesses = 0;
 		for (const file of entries) {
 			if (!file.endsWith(".json")) continue;
 			if (file.endsWith(".tmp")) continue;
@@ -554,21 +563,29 @@ export class FlexSearchStore {
 				const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
 				const data = safeParse(raw);
 				this._idx.import(key, data as never);
+				importSuccesses++;
 			} catch (err) {
+				importFailures++;
 				console.warn(`[search] Skipping corrupt index file ${file}:`, err);
 			}
+			await yieldToLoop();
 		}
 
-		// If FlexSearch's replayed index is empty but we have docs in the
-		// mirror, rebuild the in-memory index from the mirror. This also
-		// handles the "export format drifted across minor versions" case.
-		if (this._docs.size > 0) {
-			// Cheaper check — try a search for one known id. If the index
-			// has been replayed, the doc is there. If not, re-add.
-			// We simply re-add unconditionally: FlexSearch `update` is
-			// cheap for already-present docs.
+		// If the replay files were all present and parsed cleanly, trust
+		// the in-memory index. Re-adding every mirror doc on the happy path
+		// used to freeze the event loop for many seconds on large indexes.
+		// Only fall back when nothing imported — that covers the missing /
+		// corrupt / format-drift cases the old unconditional re-add handled.
+		if (importSuccesses === 0 && importFailures > 0 && this._docs.size > 0) {
+			console.warn(
+				`[search] Rebuilding in-memory index from mirror (${this._docs.size} docs) — on-disk exports missing or incompatible`,
+			);
+			let n = 0;
 			for (const d of this._docs.values()) {
 				try { (this._idx.update as unknown as (id: string, d: unknown) => void)(d.id, d); } catch { /* non-fatal */ }
+				// Yield every 500 docs so the event loop isn't monopolized
+				// during a worst-case rebuild.
+				if (++n % 500 === 0) await yieldToLoop();
 			}
 		}
 	}
