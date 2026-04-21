@@ -5868,12 +5868,12 @@ async function handleApiRoute(
 			return;
 		}
 		const cwd = body.cwd || config.defaultCwd;
-		const defaultPid = projectContextManager.getDefaultProjectIdOrNull();
-		const projectId = (typeof body.projectId === "string") ? body.projectId : defaultPid;
-		if (!projectId) {
-			json({ error: "No projects configured — add a project first" }, 400);
+		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
+		if (!resolved.ok) {
+			json({ error: resolved.error }, resolved.status);
 			return;
 		}
+		const projectId = resolved.projectId;
 		try {
 			const staff = await staffManager.createStaff(
 				body.name,
