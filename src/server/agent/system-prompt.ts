@@ -18,6 +18,10 @@ export function initPromptDirs(stateDir: string): void {
 
 function getPromptsDir(): string {
 	if (!_promptsDir) throw new Error("system-prompt: initPromptDirs() not called");
+	// Defensive recreate: the dir is created once at startup but may be removed
+	// mid-run by external cleanup (test teardown, maintenance, AV quirks).
+	// Recreating on access keeps writes robust without masking real errors.
+	if (!fs.existsSync(_promptsDir)) fs.mkdirSync(_promptsDir, { recursive: true });
 	return _promptsDir;
 }
 
