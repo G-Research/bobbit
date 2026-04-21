@@ -282,6 +282,18 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	} catch (err) {
 		error = err instanceof Error ? err.message : String(err);
 		loading = false;
+		// If we came from the search page and the goal is missing, dispatch a
+		// page-local event so the search page can show a non-blocking toast
+		// and mark the row stale.
+		try {
+			const isMissing = /not found|\b404\b/i.test(error);
+			const fromSearch = typeof window !== "undefined" && window.location.hash.startsWith("#/search");
+			if (isMissing && fromSearch) {
+				window.dispatchEvent(new CustomEvent("search-result-stale", {
+					detail: { kind: "goal", id: goalId },
+				}));
+			}
+		} catch { /* ignore */ }
 	}
 
 	renderApp();
