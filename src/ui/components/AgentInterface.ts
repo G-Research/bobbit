@@ -776,7 +776,7 @@ export class AgentInterface extends LitElement {
 		const supportsThinking = (state.model as any)?.reasoning === true;
 
 		const thinkingSelect = supportsThinking && this.enableThinkingSelector
-			? Select({
+			? html`<span class="thinking-select-compact [&_button]:!gap-1 [&_button]:!px-1.5 [&_button>span]:!gap-1">${Select({
 				value: state.thinkingLevel,
 				placeholder: i18n("Off"),
 				options: [
@@ -790,11 +790,11 @@ export class AgentInterface extends LitElement {
 					if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(value);
 					else session.state.thinkingLevel = value as any;
 				},
-				width: "80px",
+				width: "70px",
 				size: "sm",
 				variant: "ghost",
 				fitContent: true,
-			})
+			})}</span>`
 			: "";
 
 		const modelButton = this.enableModelSelector && state.model
@@ -809,7 +809,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-1.5">${state.model.id}</span>
+					<span class="ml-1">${state.model.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
@@ -919,7 +919,7 @@ export class AgentInterface extends LitElement {
 		};
 
 		return html`
-			<div class="text-xs text-muted-foreground flex justify-between items-center mt-0.5">
+			<div class="text-xs text-muted-foreground flex justify-between items-center mt-0.5 pl-2 pr-2 sm:pl-0 sm:pr-0">
 				<div class="flex items-center">
 					${this.showThemeToggle ? html`<theme-toggle></theme-toggle>` : html``}
 					${thinkingSelect}
