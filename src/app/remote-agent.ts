@@ -5,6 +5,7 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
@@ -664,6 +665,15 @@ export class RemoteAgent {
 		this._state.messages = msgs.map(enrichUserMessage);
 	}
 
+	/**
+	 * Lookup answers for a posted ask_user_choices tool_use by scanning the
+	 * transcript for a matching `[ask_user_choices_response ...]` envelope user
+	 * message. Returns the parsed answers array, or null if not yet submitted.
+	 */
+	findAskResponseAnswers(toolUseId: string): AskResponseAnswer[] | null {
+		return _findAskResponseAnswers(this._state.messages, toolUseId);
+	}
+
 	appendMessage(msg: any): void {
 		this._state.messages = [...this._state.messages, msg];
 	}
@@ -972,24 +982,6 @@ export class RemoteAgent {
 			case "pr_status_changed":
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
-
-			case "user_question_pending":
-			case "user_question_answered": {
-				// Forward to the ask_user_choices widget via a DOM event.
-				// Widgets listen on window and cross-match sessionId + toolUseId.
-				const q = msg as any;
-				const detail = {
-					sessionId: q.sessionId,
-					toolUseId: q.toolUseId,
-					questions: q.questions,
-					answers: q.answers,
-				};
-				const eventName = msg.type === "user_question_pending"
-					? "user-question-pending"
-					: "user-question-answered";
-				window.dispatchEvent(new CustomEvent(eventName, { detail }));
-				break;
-			}
 
 			case "tool_permission_needed": {
 				const perm = msg as any;
@@ -1414,6 +1406,11 @@ export class RemoteAgent {
 						// a wholesale messages refresh (reconnect, compaction).
 						if (msg.role === "user" || msg.role === "user-with-attachments") {
 							this._liveEventMessages.push(msg);
+							// Notify tool_use cards (e.g. ask_user_choices) that the
+							// transcript changed so they can re-scan for response envelopes.
+							if (typeof document !== "undefined") {
+								document.dispatchEvent(new CustomEvent("bobbit-transcript-message"));
+							}
 						}
 					}
 				}

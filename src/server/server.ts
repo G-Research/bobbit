@@ -36,7 +36,8 @@ import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, stripTokenFromGitUrl, shouldSkipRemotePush } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
-import { UserQuestionHarness, validateQuestions, validateAnswers } from "./agent/user-question-harness.js";
+import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
+import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -532,9 +533,6 @@ export function createGateway(config: GatewayConfig) {
 	// Verification harness — assigned after wss is created (closure captures the reference)
 	let verificationHarness: VerificationHarness;
 
-	// User-question harness (ask_user_choices) — in-memory only; not persisted.
-	const userQuestionHarness = new UserQuestionHarness();
-
 	// Sandbox manager — assigned in start() when sandbox=docker
 	let sandboxManager: SandboxManager | null = null;
 
@@ -597,7 +595,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, userQuestionHarness, broadcastToSession);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession);
 
 			return;
 		}
@@ -733,11 +731,6 @@ export function createGateway(config: GatewayConfig) {
 			if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
 		}
 	}
-
-	// Wire session-termination cleanup for pending user-questions.
-	sessionManager.addTerminationListener((sessionId) => {
-		userQuestionHarness.rejectAllForSession(sessionId);
-	});
 
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
 	teamManager.setVerificationHarness(verificationHarness);
@@ -1182,8 +1175,7 @@ async function handleApiRoute(
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
 	reviewAnnotationStore?: ReviewAnnotationStore,
-	userQuestionHarness?: UserQuestionHarness,
-	broadcastToSession?: (sessionId: string, event: any) => void,
+	_broadcastToSession?: (sessionId: string, event: any) => void,
 ) {
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -6246,37 +6238,13 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/internal/user-question  — called by the ask_user_choices tool extension.
-	// Blocks until the UI submits answers, then resolves with { answers: [...] }.
-	if (url.pathname === "/api/internal/user-question" && req.method === "POST") {
-		if (!userQuestionHarness) { json({ error: "user-question harness not configured" }, 500); return; }
-		const body = await readBody(req);
-		const { sessionId, toolUseId, questions } = body || {};
-		if (typeof sessionId !== "string" || typeof toolUseId !== "string" || !Array.isArray(questions)) {
-			json({ error: "Missing required fields: sessionId, toolUseId, questions" }, 400);
-			return;
-		}
-		const validationErr = validateQuestions(questions);
-		if (validationErr) { json({ error: validationErr }, 400); return; }
-		if (!sessionManager.getSession(sessionId)) {
-			json({ error: "Unknown session" }, 404);
-			return;
-		}
-		try {
-			if (broadcastToSession) {
-				broadcastToSession(sessionId, { type: "user_question_pending", sessionId, toolUseId, questions });
-			}
-			const answers = await userQuestionHarness.register(sessionId, toolUseId, questions);
-			json({ answers });
-		} catch (e: any) {
-			json({ error: e?.message || String(e) }, 500);
-		}
-		return;
-	}
-
 	// POST /api/internal/user-question/submit  — called by the UI widget with answers.
+	// Non-blocking model: appends a tagged user message to the session transcript
+	// via `enqueuePrompt` (the normal user-prompt path), which persists to .jsonl,
+	// broadcasts, and wakes the agent. Idempotent: duplicate submits for the same
+	// tool_use_id are a no-op (the second tab's submit is swallowed).
+	// See src/shared/ask-envelope.ts for the envelope format.
 	if (url.pathname === "/api/internal/user-question/submit" && req.method === "POST") {
-		if (!userQuestionHarness) { json({ error: "user-question harness not configured" }, 500); return; }
 		const body = await readBody(req);
 		const { sessionId, toolUseId, answers } = body || {};
 		if (typeof sessionId !== "string" || typeof toolUseId !== "string" || !Array.isArray(answers)) {
@@ -6285,29 +6253,59 @@ async function handleApiRoute(
 		}
 		const answerErr = validateAnswers(answers);
 		if (answerErr) { json({ error: answerErr }, 400); return; }
-		const result = userQuestionHarness.submit(sessionId, toolUseId, answers);
-		if (!result.ok) {
-			const status = result.code === "not_found" ? 404 : 400;
-			json({ error: result.error }, status);
+		const session = sessionManager.getSession(sessionId);
+		if (!session) { json({ error: "Unknown session" }, 404); return; }
+
+		// Pull the transcript to locate the original tool_use (for cross-validation)
+		// and to detect duplicate submits (multi-tab / network retry).
+		let messages: any[] = [];
+		try {
+			const msgsResp = await session.rpcClient.getMessages();
+			const raw = msgsResp?.data?.messages || msgsResp?.data;
+			if (Array.isArray(raw)) messages = raw;
+		} catch (e: any) {
+			json({ error: `Could not load transcript: ${e?.message || String(e)}` }, 500);
 			return;
 		}
-		if (broadcastToSession) {
-			broadcastToSession(sessionId, { type: "user_question_answered", sessionId, toolUseId, answers });
+
+		// Idempotency: if a response envelope for this toolUseId already exists,
+		// return success without appending again.
+		const existing = findAskResponseAnswers(messages, toolUseId);
+		if (existing) { json({ ok: true, alreadySubmitted: true }); return; }
+
+		// Locate the ask_user_choices tool_use block; use its input to cross-validate.
+		let matchedQuestions: UserQuestion[] | null = null;
+		for (const m of messages) {
+			if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
+			for (const b of m.content) {
+				if (!b) continue;
+				const isToolUse = b.type === "toolCall" || b.type === "tool_use";
+				if (!isToolUse) continue;
+				if (b.name !== "ask_user_choices") continue;
+				if (b.id !== toolUseId) continue;
+				const args = b.arguments ?? b.input;
+				if (args && Array.isArray(args.questions)) {
+					matchedQuestions = args.questions as UserQuestion[];
+				}
+				break;
+			}
+			if (matchedQuestions) break;
+		}
+		if (!matchedQuestions) {
+			json({ error: "No matching ask_user_choices tool call in transcript" }, 404);
+			return;
+		}
+		const crossErr = crossValidate(matchedQuestions, answers);
+		if (crossErr) { json({ error: crossErr }, 400); return; }
+
+		const envelope = buildAskResponseEnvelope(toolUseId, answers);
+		try {
+			await sessionManager.enqueuePrompt(sessionId, envelope);
+		} catch (e: any) {
+			json({ error: `Failed to enqueue response: ${e?.message || String(e)}` }, 500);
+			return;
 		}
 		json({ ok: true });
-		return;
-	}
-
-	// GET /api/internal/user-question/pending?sessionId=...  — rehydrate pending list after reconnect.
-	if (url.pathname === "/api/internal/user-question/pending" && req.method === "GET") {
-		if (!userQuestionHarness) { json({ error: "user-question harness not configured" }, 500); return; }
-		const sessionId = url.searchParams.get("sessionId") || "";
-		const list = userQuestionHarness.listForSession(sessionId).map(p => ({
-			toolUseId: p.toolUseId,
-			questions: p.questions,
-			createdAt: p.createdAt,
-		}));
-		json({ pending: list });
 		return;
 	}
 

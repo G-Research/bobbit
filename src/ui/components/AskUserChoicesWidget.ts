@@ -74,12 +74,6 @@ export class AskUserChoicesWidget extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this._ensureDraft();
-		window.addEventListener("user-question-answered", this._onExternalAnswer as EventListener);
-	}
-
-	override disconnectedCallback(): void {
-		super.disconnectedCallback();
-		window.removeEventListener("user-question-answered", this._onExternalAnswer as EventListener);
 	}
 
 	override willUpdate(changed: Map<string, unknown>): void {
@@ -98,14 +92,6 @@ export class AskUserChoicesWidget extends LitElement {
 			this._activeTab = Math.min(this._activeTab, Math.max(0, this.questions.length - 1));
 		}
 	}
-
-	private _onExternalAnswer = (e: Event) => {
-		const detail = (e as CustomEvent).detail as { sessionId?: string; toolUseId?: string; answers?: AskAnswer[] } | undefined;
-		if (!detail) return;
-		if (detail.sessionId === this.sessionId && detail.toolUseId === this.toolUseId && Array.isArray(detail.answers)) {
-			this.answers = detail.answers;
-		}
-	};
 
 	private _selectTab(idx: number): void {
 		if (idx < 0 || idx >= this.questions.length) return;

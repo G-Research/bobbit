@@ -1,4 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
+import { isAskResponseEnvelope } from "../../shared/ask-envelope.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { streamSimple, type ToolResultMessage, type Usage } from "@mariozechner/pi-ai";
@@ -539,11 +540,18 @@ export class AgentInterface extends LitElement {
 
 		// Build a map of tool results to allow inline rendering in assistant messages
 		const toolResultsById = this._getToolResultsById();
+		// Hide `[ask_user_choices_response tool_use_id=...]` user messages from the
+		// rendered transcript — the matching tool_use card renders the user's
+		// answers inline via the widget's Answered mode. The envelope message must
+		// still reach the LLM (convertToLlm) so do NOT strip it from state.messages.
+		const visibleMessages = (this.session.state.messages || []).filter(
+			(m: any) => !isAskResponseEnvelope(m),
+		);
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
-					.messages=${this.session.state.messages}
+					.messages=${visibleMessages}
 					.tools=${state.tools}
 					.pendingToolCalls=${this.session ? this.session.state.pendingToolCalls : new Set<string>()}
 					.isStreaming=${state.isStreaming}
