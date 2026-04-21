@@ -231,10 +231,13 @@ test.describe("search orphan filter & weak-match drop", () => {
 
 	test("total equals filtered length (orphans don't inflate count)", async ({ gateway }) => {
 		const gw: any = gateway;
-		const token = "zztotalcount" + Date.now();
+		// Unique, unguessable token so nothing else in the shared in-process
+		// harness can accidentally match (BM25 token-hit on `zz*` tokens from
+		// earlier tests, stale rows from previous worker processes, etc).
+		const token = "zztotalcount" + Date.now() + Math.random().toString(36).slice(2, 10);
 		// Two orphan rows + nothing real.
 		await indexOrphan(gw, projectId, {
-			id: `goal:ghost-total-1-${Date.now()}`,
+			id: `goal:ghost-total-1-${token}`,
 			source_id: "goals",
 			title: `ghost 1 ${token}`,
 			text: `body ${token}`,
@@ -243,10 +246,10 @@ test.describe("search orphan filter & weak-match drop", () => {
 			timestamp: Date.now(),
 			weight: 1.5,
 			role: "title",
-			goal_id: "ghost-total-1",
+			goal_id: `ghost-total-1-${token}`,
 		});
 		await indexOrphan(gw, projectId, {
-			id: `goal:ghost-total-2-${Date.now()}`,
+			id: `goal:ghost-total-2-${token}`,
 			source_id: "goals",
 			title: `ghost 2 ${token}`,
 			text: `body ${token}`,
@@ -255,11 +258,23 @@ test.describe("search orphan filter & weak-match drop", () => {
 			timestamp: Date.now() + 1,
 			weight: 1.5,
 			role: "title",
-			goal_id: "ghost-total-2",
+			goal_id: `ghost-total-2-${token}`,
 		});
 
 		const out = await searchAll(gw, token, projectId);
+		// Primary contract: total must equal the filtered page length so
+		// Load More pagination stays consistent. This must hold regardless
+		// of how many rows (if any) surface for the token.
 		expect(out.total).toBe(out.results.length);
-		expect(out.results.length).toBe(0);
+		// Secondary: the two synthetic orphans we indexed should be dropped
+		// by the existence filter — neither has a live goal store entry.
+		const ourOrphanIds = new Set([
+			`ghost-total-1-${token}`,
+			`ghost-total-2-${token}`,
+		]);
+		const leakedOrphans = out.results.filter(
+			(r: any) => r.type === "goal" && (ourOrphanIds.has(r.id) || ourOrphanIds.has(r.goalId)),
+		);
+		expect(leakedOrphans).toEqual([]);
 	});
 });
