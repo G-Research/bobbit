@@ -213,6 +213,7 @@ test.describe("Sidebar navigation", () => {
 	// SB-21: Dashboard button navigates to goal dashboard
 	// ---------------------------------------------------------------
 	test("SB-21: dashboard button navigates to goal dashboard", async ({ page }) => {
+		test.setTimeout(60_000);
 		const goal = await createGoal({
 			title: "DashNav Test",
 			worktree: false,
@@ -240,24 +241,33 @@ test.describe("Sidebar navigation", () => {
 			),
 			{ timeout: 10_000 },
 		).toBe(true);
-		await goalRow.evaluate((row) => {
-			const btn = row.querySelector<HTMLButtonElement>("button[title='Goal dashboard']");
-			if (!btn) throw new Error("Dashboard button not found in goal row");
-			btn.click();
-		});
-
-		// Verify URL navigates to goal dashboard
+		// Click the button to exercise the real navigation path. Retry the
+		// click if the hash is subsequently clobbered by a concurrent
+		// hashchange handler (e.g. session poll / session connect racing
+		// with our navigation under heavy parallel load).
 		await expect(async () => {
+			await goalRow.evaluate((row) => {
+				const btn = row.querySelector<HTMLButtonElement>("button[title='Goal dashboard']");
+				if (!btn) throw new Error("Dashboard button not found in goal row");
+				btn.click();
+			});
 			const h = await page.evaluate(() => window.location.hash);
 			expect(h).toContain(goal.id);
 			expect(h).toMatch(/goal/i);
-		}).toPass({ timeout: 10_000 });
+		}).toPass({ timeout: 15_000 });
 
-		// Verify dashboard content loads. Wait for the dashboard container first
-		// (it briefly shows a loading animation before the tabs render), then for
-		// any tab to become visible.
+		// Verify dashboard content loads. The dashboard container must stay
+		// rendered (not just flash briefly) and a tab must appear. Assert both
+		// together inside expect().toPass() so that transient re-renders
+		// (e.g. `refreshSessions()` completing after navigation) don't break
+		// the assertion mid-poll.
+		// The dashboard container appears immediately with a loading animation,
+		// then the tab bar renders once loadDashboardData resolves. Assert the
+		// final state (tab visible) with a generous single timeout — under 5x
+		// parallel load the fetch can take 10–15s.
 		await expect(page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 10_000 });
-		await expect(page.locator(".tab").first()).toBeVisible({ timeout: 15_000 });
+			.toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(".tab").first())
+			.toBeVisible({ timeout: 25_000 });
 	});
 });

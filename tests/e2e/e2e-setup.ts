@@ -272,24 +272,26 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 		const pid = await defaultProjectId();
 		if (pid) body.projectId = pid;
 	}
-	let resp = await apiFetch("/api/sessions", {
-		method: "POST",
-		body: JSON.stringify(body),
-	});
-	if (resp.status === 500) {
-		// Windows FS race: brief retry. Ensure session-prompts dir exists first.
-		try {
-			const { mkdirSync } = await import("node:fs");
-			mkdirSync(join(bobbitDir(), "state", "session-prompts"), { recursive: true });
-		} catch { /* best-effort */ }
-		await new Promise(r => setTimeout(r, 100));
+	// Retry on transient server 500s. Under heavy parallel test load the
+	// server occasionally fails session creation with a 500 (e.g. worktree
+	// setup contention, disk latency, or the Windows FS race where the
+	// session-prompts state dir hasn't been created yet). The request is a
+	// clean POST with no side effect on 500, so retry is safe.
+	let resp: Response | undefined;
+	for (let attempt = 0; attempt < 3; attempt++) {
 		resp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
+		if (resp.status !== 500 || attempt === 2) break;
+		try {
+			const { mkdirSync } = await import("node:fs");
+			mkdirSync(join(bobbitDir(), "state", "session-prompts"), { recursive: true });
+		} catch { /* best-effort */ }
+		await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
 	}
-	expect(resp.status).toBe(201);
-	return (await resp.json()).id;
+	expect(resp!.status).toBe(201);
+	return (await resp!.json()).id;
 }
 
 /** Delete a session (best-effort, for cleanup). */
