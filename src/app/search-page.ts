@@ -186,6 +186,11 @@ function _handleResultClick(result: SearchResultItem): void {
 	if (_staleToast) _dismissToast();
 
 	if (result.type === "goal") {
+		// Mark the navigation so goal-dashboard.loadDashboardData can detect
+		// that this click came from the search page even after the hash has
+		// already been rewritten to #/goal/<id>. Cleared by loadDashboardData
+		// once read.
+		try { (window as any).__bobbitFromSearch = true; } catch { /* ignore */ }
 		setHashRoute("goal-dashboard", result.id);
 	} else if (result.type === "session") {
 		connectToSession(result.id, true, { onMissing: "toast" });
@@ -494,7 +499,10 @@ function _renderGroupCard(group: ResultGroup) {
 	};
 
 	const fragments = expanded ? [] : _collapsedSnippetFragments(group);
-	const metadataOnly = parent?.matchedOn === "metadata" && fragments.length === 0;
+	// Only render the muted "matched on title/metadata" note in the header
+	// when the card is *collapsed* — the expanded body renders its own copy,
+	// so otherwise the note appears twice.
+	const metadataOnly = !expanded && parent?.matchedOn === "metadata" && fragments.length === 0;
 
 	return html`
 		<div
