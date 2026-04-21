@@ -245,12 +245,21 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 		const pid = await defaultProjectId();
 		if (pid) body.projectId = pid;
 	}
-	const resp = await apiFetch("/api/sessions", {
-		method: "POST",
-		body: JSON.stringify(body),
-	});
-	expect(resp.status).toBe(201);
-	return (await resp.json()).id;
+	// Retry on transient server 500s. Under heavy parallel test load the
+	// server occasionally fails session creation with a 500 (e.g. worktree
+	// setup contention, disk latency). The request is a clean POST with no
+	// side effect on 500, so retry is safe.
+	let resp: Response | undefined;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		resp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+		if (resp.status !== 500 || attempt === 2) break;
+		await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+	}
+	expect(resp!.status).toBe(201);
+	return (await resp!.json()).id;
 }
 
 /** Delete a session (best-effort, for cleanup). */
