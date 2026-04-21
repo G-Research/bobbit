@@ -159,7 +159,9 @@ export class MockAgentCore {
 			return { askUserChoices: "multi" };
 		}
 		if (lower.includes("ask_user_choices") || lower.includes("ask user choices")) {
-			// Signals the mock agent to hit the blocking /api/internal/user-question endpoint.
+			// Signals the mock agent to emit a non-blocking ask_user_choices tool_use.
+			// The tool returns {status:"posted", tool_use_id} synchronously; answers arrive
+			// later as a tagged user message via POST /api/internal/user-question/submit.
 			return { askUserChoices: true };
 		}
 		return null;
