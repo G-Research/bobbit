@@ -90,6 +90,12 @@ export class StaffManager {
 			// Per-staff sandbox preference: opts.sandboxed overrides the
 			// project-level default. Undefined means "inherit project setting".
 			const effectiveSandboxed = opts?.sandboxed ?? sessionManager.isSandboxEnabled;
+			// Lazy per-project sandbox init — surfaces bootstrap errors up-front
+			// instead of mid-session-spawn. Idempotent; safe if already initialised.
+			if (effectiveSandboxed) {
+				const sm = sessionManager.getSandboxManager?.();
+				if (sm) await sm.ensureForProject(projectId);
+			}
 			const session = await sessionManager.createSession(worktreeResult.worktreePath, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
 				env: { BOBBIT_STAFF_ID: id },
@@ -312,6 +318,21 @@ export class StaffManager {
 				store.update(staffId, { currentSessionId: undefined as any });
 				staff.currentSessionId = undefined as any;
 				return this.wake(staffId, prompt, sessionManager);
+			}
+		}
+
+		// Lazy per-project sandbox init before waking. Idempotent; no-op for
+		// non-sandboxed staff. Errors are per-project — waking staff in
+		// project A will not be blocked by a broken sandbox in project B.
+		if (sessionManager.isSandboxEnabled) {
+			const sm = sessionManager.getSandboxManager?.();
+			if (sm) {
+				try {
+					await sm.ensureForProject(found.projectId);
+				} catch (err) {
+					console.error(`[staff-manager] Sandbox ensure failed for project ${found.projectId}:`, err);
+					throw err;
+				}
 			}
 		}
 

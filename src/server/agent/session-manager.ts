@@ -654,6 +654,10 @@ export class SessionManager {
 		if (!this.sandboxManager) {
 			throw new Error("Sandbox mode requires SandboxManager — not initialized");
 		}
+		// Lazy per-project init — idempotent. Handles restore paths and any call site
+		// that reached wiring without going through the explicit session-setup /
+		// goals / staff entry points.
+		await this.sandboxManager.ensureForProject(projectId);
 		const sandbox = this.sandboxManager.get(projectId);
 		if (!sandbox) {
 			throw new Error(`No sandbox initialized for project ${projectId}`);

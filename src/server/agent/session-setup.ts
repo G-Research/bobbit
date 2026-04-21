@@ -457,6 +457,10 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 
 	// Step 6: sandbox wiring (needs final CWD)
 	if (plan.sandboxed) {
+		// Lazy per-project sandbox init (idempotent; deduped by SandboxManager).
+		if (ctx.sandboxManager && plan.projectId) {
+			await ctx.sandboxManager.ensureForProject(plan.projectId);
+		}
 		const preSandboxCwd = plan.bridgeOptions.cwd;
 		await withRetry(
 			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
@@ -552,6 +556,10 @@ export async function executeWorktreeAsync(
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
+		// Lazy per-project sandbox init (idempotent; deduped by SandboxManager).
+		if (ctx.sandboxManager && plan.projectId) {
+			await ctx.sandboxManager.ensureForProject(plan.projectId);
+		}
 		const preSandboxCwd = plan.bridgeOptions.cwd;
 		await withRetry(
 			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),

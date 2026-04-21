@@ -34,7 +34,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
@@ -45,8 +45,9 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
-import { SandboxManager } from "./agent/sandbox-manager.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
+import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
+import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
@@ -58,7 +59,7 @@ import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { detectHostTokens } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { PersistedTeamEntry } from "./agent/team-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
@@ -797,8 +798,87 @@ export function createGateway(config: GatewayConfig) {
 
 			// ── Sandbox manager ──
 			// Sandboxes are initialized lazily per-project on first sandbox use
-			// (see SandboxManager.ensureForProject, added by Task 3).
-			sandboxManager = new SandboxManager();
+			// (see SandboxManager.ensureForProject). The bootstrap closure below
+			// runs the host-side plumbing (image build/version check, mounts,
+			// credentials, sandbox network, GitHub token) the first time each
+			// project's sandbox is requested by session/goal/staff creation.
+			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
+				const project = projectRegistry.get(projectId);
+				if (!project) {
+					throw new Error(`[sandbox] bootstrap: project ${projectId} not registered`);
+				}
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!ctx) {
+					throw new Error(`[sandbox] bootstrap: cannot resolve context for project ${projectId}`);
+				}
+				const cfg = ctx.projectConfigStore;
+				const sandboxCfg = cfg.get("sandbox") || "none";
+				if (sandboxCfg !== "docker") return null;
+
+				const projectDir = project.rootPath;
+				const imageName = cfg.get("sandbox_image") || "bobbit-agent";
+
+				// Auto-build or rebuild image if missing or stale. Images are
+				// shared across projects (Docker image tags) so the first project
+				// to request a sandbox pays the build cost.
+				const imageStatus = await checkDockerAvailability(imageName);
+				if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
+					const buildResult = await buildSandboxImage(imageName, projectDir);
+					if (!buildResult.success) {
+						console.error(`[sandbox] Auto-build failed for project ${projectId}; proceeding will likely error`);
+					}
+				} else if (imageStatus.imageExists === true) {
+					await ensureImageAgentVersion(imageName, projectDir);
+				}
+
+				const isRepo = await isGitRepo(projectDir);
+				if (!isRepo) {
+					console.log(`[sandbox] Project ${projectId} is not a git repo — sandbox disabled (worktrees require git)`);
+					return null;
+				}
+				const repoPath = await getRepoRoot(projectDir);
+
+				// Repo URL for cloning inside the container. Strip embedded tokens so
+				// they don't leak into .git/config; the container's credential helper
+				// reads GITHUB_TOKEN from env instead.
+				let repoUrl: string;
+				try {
+					const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoPath, timeout: 5000 });
+					repoUrl = stripTokenFromGitUrl(stdout.trim());
+				} catch {
+					repoUrl = repoPath;
+				}
+
+				let poolMounts: string[] = [];
+				try {
+					const mountsRaw = cfg.get("sandbox_mounts") || "";
+					poolMounts = mountsRaw ? validateSandboxMounts(JSON.parse(mountsRaw), "[sandbox]") : [];
+				} catch (err) { console.warn(`[sandbox] Invalid sandbox_mounts JSON for project ${projectId}, ignoring: ${err}`); }
+
+				let poolCredentials: Record<string, string> = {};
+				try {
+					const credsRaw = cfg.get("sandbox_credentials") || "";
+					poolCredentials = credsRaw ? JSON.parse(credsRaw) : {};
+				} catch (err) { console.warn(`[sandbox] Invalid sandbox_credentials JSON for project ${projectId}, ignoring: ${err}`); }
+
+				const sandboxNetwork = await sessionManager.ensureSandboxNetwork();
+
+				const githubTokenEnabled = cfg.get("sandbox_github_token") !== "false";
+				const githubToken = githubTokenEnabled ? resolveHostTokenValue("GITHUB_TOKEN") : undefined;
+
+				return {
+					projectId,
+					projectDir,
+					repoUrl,
+					image: imageName,
+					sandboxNetwork,
+					sandboxMounts: poolMounts,
+					sandboxCredentials: poolCredentials,
+					githubToken,
+					toolManager: ctx.toolManager,
+				};
+			};
+			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -2246,6 +2326,15 @@ async function handleApiRoute(
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
 				return;
+			}
+			// Lazy per-project sandbox init — idempotent, deduped by SandboxManager.
+			if (sandboxed && sandboxManager) {
+				try {
+					await sandboxManager.ensureForProject(targetProjectId);
+				} catch (err) {
+					json({ error: `Sandbox init failed: ${(err as Error).message || err}` }, 500);
+					return;
+				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
 			// Resolve workflow through the config cascade (builtin → server → project)

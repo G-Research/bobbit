@@ -16,12 +16,52 @@ export interface SandboxManagerStats {
 	containers: ContainerState[];
 }
 
+/**
+ * Resolves the per-project sandbox configuration for `ensureForProject`. Returns:
+ * - a fully-resolved `ProjectSandboxOptions` → proceed with init,
+ * - `null` → sandbox is not applicable for this project (disabled, not a git repo, etc.);
+ *   `ensureForProject` returns without throwing in that case.
+ *
+ * Implementations are expected to encapsulate all cross-cutting plumbing (reading
+ * project config, image build/version check, mounts/credentials parsing,
+ * sandbox network creation, GitHub-token resolution) — keeping SandboxManager
+ * itself decoupled from ProjectRegistry, ProjectContextManager, SessionManager, etc.
+ */
+export type SandboxBootstrap = (projectId: string) => Promise<ProjectSandboxOptions | null>;
+
+export interface SandboxManagerOptions {
+	/**
+	 * Called by `ensureForProject(projectId)` the first time a project's sandbox
+	 * is requested. The wiring for host-side state (registry, config store,
+	 * image build, network, credentials) lives in the caller — SandboxManager
+	 * just coordinates lifecycle.
+	 */
+	bootstrap?: SandboxBootstrap;
+}
+
 // ── SandboxManager ─────────────────────────────────────────────────────────
 
 export class SandboxManager {
 	private sandboxes = new Map<string, ProjectSandbox>();
 	private _recoveryListeners: Array<(projectId: string, containerId: string) => void> = [];
 	private _healthUnsubscribes = new Map<string, () => void>();
+	/**
+	 * Dedupes concurrent calls to `ensureForProject(projectId)`: while one init
+	 * is in-flight, later callers await the same Promise. On failure the entry
+	 * is cleared so the next caller can retry; on success it is left populated
+	 * so later calls resolve immediately (idempotent).
+	 */
+	private _ensureInFlight = new Map<string, Promise<void>>();
+	private _bootstrap: SandboxBootstrap | null;
+
+	constructor(opts: SandboxManagerOptions = {}) {
+		this._bootstrap = opts.bootstrap ?? null;
+	}
+
+	/** Set or replace the bootstrap function post-construction. */
+	setBootstrap(bootstrap: SandboxBootstrap | null): void {
+		this._bootstrap = bootstrap;
+	}
 
 	/** Subscribe to container recovery events across all projects. Returns unsubscribe function. */
 	onContainerRecovered(listener: (projectId: string, containerId: string) => void): () => void {
@@ -30,6 +70,54 @@ export class SandboxManager {
 			const idx = this._recoveryListeners.indexOf(listener);
 			if (idx >= 0) this._recoveryListeners.splice(idx, 1);
 		};
+	}
+
+	/**
+	 * Idempotent lazy per-project init. Safe to call concurrently — in-flight
+	 * inits are deduped via a Promise map (see §3.3 of the design). On success,
+	 * later calls short-circuit immediately. On failure the in-flight entry is
+	 * cleared so the next call can retry, and the error propagates to the caller
+	 * that triggered the failed init (callers for other projects are unaffected).
+	 *
+	 * If the bootstrap returns `null` (sandbox disabled / not a git repo) the
+	 * call resolves without registering anything; subsequent calls will retry
+	 * the bootstrap in case config has changed.
+	 */
+	async ensureForProject(projectId: string): Promise<void> {
+		// Already fully initialized — fast path.
+		const existing = this.sandboxes.get(projectId);
+		if (existing && existing.getStatus().status === "ready") return;
+
+		// Join an in-flight init for the same project.
+		const inFlight = this._ensureInFlight.get(projectId);
+		if (inFlight) return inFlight;
+
+		if (!this._bootstrap) {
+			throw new Error(`[sandbox-manager] ensureForProject(${projectId}) called but no bootstrap was provided`);
+		}
+		const bootstrap = this._bootstrap;
+
+		const p = (async () => {
+			const opts = await bootstrap(projectId);
+			if (!opts) {
+				// Sandbox not applicable (disabled, not a git repo). Not an error.
+				return;
+			}
+			await this.initForProject(projectId, opts);
+		})();
+
+		this._ensureInFlight.set(projectId, p);
+		try {
+			await p;
+		} finally {
+			// Clear so a subsequent failing call can retry. Ready sandboxes are
+			// detected via `sandboxes.get(...).getStatus().status === "ready"`
+			// on the fast path above, so we don't need to keep the resolved
+			// promise around.
+			if (this._ensureInFlight.get(projectId) === p) {
+				this._ensureInFlight.delete(projectId);
+			}
+		}
 	}
 
 	/**
