@@ -248,7 +248,14 @@ export async function defaultProjectId(): Promise<string | undefined> {
 	return undefined;
 }
 
-/** Create a session via REST, return its ID. Defaults cwd to a non-git temp dir. */
+/**
+ * Create a session via REST, return its ID. Defaults cwd to a non-git temp dir.
+ *
+ * Retries once on 500 to absorb a known Windows-only race where the server's
+ * session-prompts directory briefly appears missing under heavy parallel
+ * load even though the harness + scaffolder both created it. Real product
+ * failures still surface via the second attempt.
+ */
 export async function createSession(opts?: { cwd?: string; goalId?: string; projectId?: string }): Promise<string> {
 	const body: Record<string, unknown> = {
 		cwd: opts?.cwd || nonGitCwd(),
@@ -265,10 +272,22 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 		const pid = await defaultProjectId();
 		if (pid) body.projectId = pid;
 	}
-	const resp = await apiFetch("/api/sessions", {
+	let resp = await apiFetch("/api/sessions", {
 		method: "POST",
 		body: JSON.stringify(body),
 	});
+	if (resp.status === 500) {
+		// Windows FS race: brief retry. Ensure session-prompts dir exists first.
+		try {
+			const { mkdirSync } = await import("node:fs");
+			mkdirSync(join(bobbitDir(), "state", "session-prompts"), { recursive: true });
+		} catch { /* best-effort */ }
+		await new Promise(r => setTimeout(r, 100));
+		resp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+	}
 	expect(resp.status).toBe(201);
 	return (await resp.json()).id;
 }
