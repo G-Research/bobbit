@@ -1,7 +1,13 @@
 # Semantic Search — Design Document
 
-**Status:** Authoritative design for goal `semantic-s-9423e666`.
-**Audience:** Implementing coders. This document is complete — you should not need to re-read the goal spec.
+> ⚠️ **Historical — superseded.** This document describes the **previous** semantic-search architecture (Nomic embeddings + LanceDB) that was replaced for portability reasons. The current engine is FlexSearch (pure-JS, BM25-style lexical ranking, no native binaries, no model downloads).
+>
+> For the current design, see **[docs/design/portable-search.md](portable-search.md)**. For the runtime quick reference, see **[docs/internals.md — Semantic search](../internals.md#semantic-search)**.
+>
+> The `IndexSource` / `Indexable` / `SearchQuery` / `SearchResult` abstractions described below are still authoritative — only the storage/ranking backend changed.
+
+**Status:** Historical — originally the authoritative design for goal `semantic-s-9423e666`, superseded by `goal-portable-s-ee9008c4`.
+**Audience:** Readers researching the pre-FlexSearch architecture or the evolution of the search subsystem.
 **Scope:** v1 = replace SQLite/FTS5 with LanceDB over existing entities (goals, sessions, messages, staff). v2 = file indexing (out of scope, but enabled by the abstractions below).
 
 ---
