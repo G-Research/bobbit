@@ -1797,7 +1797,10 @@ export async function acceptProjectProposal(): Promise<void> {
 			state.remoteAgent?.disconnect();
 			state.remoteAgent = null;
 		}
-		await gatewayFetch(`/api/sessions/${propSessionId}/terminate`, { method: "POST" });
+		const termRes = await gatewayFetch(`/api/sessions/${propSessionId}`, { method: "DELETE" });
+		if (!termRes.ok && termRes.status !== 404) {
+			console.warn(`[project-proposal] Terminate returned ${termRes.status}`);
+		}
 		// Clean up drafts and navigate away
 		deleteGoalDraft(propSessionId);
 		deleteRoleDraft(propSessionId);
