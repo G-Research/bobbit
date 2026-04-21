@@ -216,20 +216,22 @@ function renderMobileLanding() {
 									}
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
-										const defaultId = state.projects[0]?.id || "";
 										for (const g of liveGoals) {
-											const pid = g.projectId || defaultId;
-											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
+											const bucket = projectMap.get(g.projectId);
+											if (!bucket) { console.warn("[mobile] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 											bucket.goals.push(g);
 										}
 										for (const s of ungroupedSessions) {
-											const pid = s.projectId || defaultId;
-											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+											if (!s.projectId) { console.warn("[mobile] orphaned session with no projectId — skipping", s.id); continue; }
+											const bucket = projectMap.get(s.projectId);
+											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.sessions.push(s);
 										}
 										for (const s of staffList) {
-											const pid = s.projectId || defaultId;
-											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+											if (!s.projectId) { console.warn("[mobile] orphaned staff with no projectId — skipping", s.id); continue; }
+											const bucket = projectMap.get(s.projectId);
+											if (!bucket) { console.warn("[mobile] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.staff.push(s);
 										}
 										// Bucket archived goals + standalone archived sessions per project.

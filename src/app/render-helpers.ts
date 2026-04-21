@@ -318,8 +318,9 @@ export interface ArchivedBucket {
 
 /**
  * Bucket filtered archived goals + standalone archived sessions by project id.
- * Items without a projectId fall back to the first project as a default bucket,
- * matching existing desktop behaviour. Returns a Map keyed by project id.
+ * Items without a projectId, or with a projectId that doesn't match any registered
+ * project, are skipped with a console.warn — there is no silent fallback bucket.
+ * Returns a Map keyed by project id.
  */
 export function bucketArchivedByProject(
 	archivedGoals: Goal[],
@@ -328,17 +329,16 @@ export function bucketArchivedByProject(
 ): Map<string, ArchivedBucket> {
 	const map = new Map<string, ArchivedBucket>();
 	for (const p of projects) map.set(p.id, { archivedGoals: [], standaloneArchivedSessions: [] });
-	const defaultId = projects[0]?.id || "";
 	for (const g of archivedGoals) {
-		const pid = g.projectId || defaultId;
-		const bucket = map.get(pid) || (defaultId ? map.get(defaultId) : undefined);
-		if (!bucket) continue;
+		if (!g.projectId) { console.warn("[sidebar] archived goal with no projectId — skipping", g.id); continue; }
+		const bucket = map.get(g.projectId);
+		if (!bucket) { console.warn("[sidebar] archived goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 		bucket.archivedGoals.push(g);
 	}
 	for (const s of standaloneArchivedSessions) {
-		const pid = s.projectId || defaultId;
-		const bucket = map.get(pid) || (defaultId ? map.get(defaultId) : undefined);
-		if (!bucket) continue;
+		if (!s.projectId) { console.warn("[sidebar] archived session with no projectId — skipping", s.id); continue; }
+		const bucket = map.get(s.projectId);
+		if (!bucket) { console.warn("[sidebar] archived session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 		bucket.standaloneArchivedSessions.push(s);
 	}
 	return map;
