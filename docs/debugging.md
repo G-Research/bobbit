@@ -157,34 +157,30 @@ When a sandbox container is killed or removed, sessions auto-recover. Use this c
 
 ## Search index
 
-LanceDB-backed semantic + lexical search. Dataset per project at `<project-root>/.bobbit/state/search.lance/`. Shared embedding-model cache at `~/.bobbit/models/`. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/semantic-search.md](design/semantic-search.md) for the full design.
+FlexSearch-backed lexical search (pure-JS, BM25-style ranking). Index per project at `<project-root>/.bobbit/state/search.flex/` (`index/*.json` + `meta.json`). No native binaries, no model downloads, no runtime network. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md) for the full design.
 
-- Force a full rebuild: delete `<project-root>/.bobbit/state/search.lance/` and restart, or `POST /api/search/rebuild?projectId=<id>`. Status dot goes yellow during rebuild.
-- Meta mismatch auto-rebuilds: `embedder_id`, `dim`, `schema_version`, or `content_policy_version` bumps in `search_meta` → server drops the `content` table and rebuilds on next open. Log line at info level on startup.
-- `ProjectContextManager.searchAll()` aggregates results across all project datasets.
+- Force a full rebuild: delete `<project-root>/.bobbit/state/search.flex/` and restart, or `POST /api/search/rebuild?projectId=<id>`. Status dot goes yellow during rebuild.
+- Meta mismatch auto-rebuilds: `engine`, `engineVersion`, `schemaVersion`, or `contentPolicyVersion` bumps in `meta.json` → server rebuilds on next open. Log line at info level on startup.
+- Legacy `search.lance/` directories from the previous Nomic+LanceDB backend are deleted automatically on first open. The shared model cache at `~/.bobbit/models/` is unused by the current engine — safe to `rm -rf` to reclaim disk. Bobbit does not delete it automatically.
+- `ProjectContextManager.searchAll()` aggregates results across all project indexes.
 - Purged sessions still showing? `purgeOneSession()` must call `SearchService.removeMessagesForSession` + `removeSession`. Alternatively run the orphaned-index-rows maintenance scan (Settings → Maintenance → Search Index) to clean up rows whose parent entity is gone.
 
 ### Search unavailable (red dot)
 
-Two independent failure classes. Both surface as the **red status dot** + "Search unavailable"; `/api/search` returns **503** with `{ error: "search-unavailable", reason: "native-binary" | "embedding-model", message }`.
+One failure path: the FlexSearch store failed to open (usually because `<project-root>/.bobbit/state/search.flex/` is unwritable or the on-disk index files are corrupt beyond partial-load recovery). Surfaces as the **red status dot** + "Search unavailable"; `/api/search` returns **503** with `{ error: "search-unavailable", reason, state }`. The Settings → Maintenance → Search Index panel exposes **Rebuild Index**, which clears the index and rebuilds from the source stores.
 
-**Offline / air-gapped installs:** The embedding model is downloaded on first use to `~/.bobbit/models/` by default. Override the location with the `BOBBIT_MODEL_CACHE_DIR` env var — useful for pre-staging model files in restricted environments. Pre-place the `nomic-embed-text-v1.5/` directory at the configured path before first startup to avoid the first-run download (~140MB).
-
-- **Native binary missing (`disabled-no-native`)**: `@lancedb/lancedb` failed to load for the current platform. Check server logs for the platform tuple (e.g. `linux-x64-gnu`, `win32-x64-msvc`, `darwin-arm64`). Inside the sandbox container, confirm the matching `@lancedb/lancedb-<triple>` prebuilt is present in `node_modules/@lancedb/`. Not recoverable without a reinstall — `index:error { recoverable: false }` broadcast.
-- **Embedding model unavailable (`disabled-no-model`)**: first-run model download (~140MB) failed, or the cached model under `~/.bobbit/models/nomic-embed-text-v1.5/` is corrupt. Settings → Maintenance → Search Index has a **Retry Download** button; this clears the partial cache and re-runs `embedder.ready()`. For offline installs, pre-place the model files at that path. `index:error { recoverable: true }` broadcast.
-- Disk corruption: LanceDB fails to open a previously-healthy dataset. The service renames it to `search.lance.corrupt-<ts>` and rebuilds from the source stores. Check for that directory and the startup log line if you see unexpected rebuilds.
+Corrupt per-key files are tolerated on open — the loader logs a warning, skips the bad file, and the meta check triggers a background rebuild. Crash-mid-flush leaves `.tmp` files that are ignored on next open.
 
 ### Stats endpoint didn't return
 
-- `GET /api/search/stats?projectId=<id>` returns `{ state, rowCountsBySource, datasetSizeBytes, embedderId, dim, lastRebuildAt }`. **400** if `projectId` is missing; **503** if the service is disabled (body carries `reason`).
-- Stuck in `state: "rebuilding"`? Check WS `index:progress` events are arriving; the service debounces to 500ms. A stalled rebuild usually means the embedder is still loading the model (first-run download) or the indexer queue is starved — check server logs for `[search]` lines.
+- `GET /api/search/stats?projectId=<id>` returns `{ state, engine, engineVersion, rowCountsBySource, datasetBytes, lastRebuildAt }`. **400** if `projectId` is missing; **503** if the service is disabled (body carries `reason`).
+- Stuck in `state: "rebuilding"`? Check WS `index:progress` events are arriving; the service debounces to 500ms. A stalled rebuild usually means the indexer queue is starved — check server logs for `[search]` lines.
 - Row counts all zero after a rebuild? The rebuild ran against an empty store set — verify `ProjectContext` has the expected `goalStore`/`sessionStore`/`staffStore` wired and that sessions have their `.jsonl` message files on disk (the message source streams from them).
 
 ### Performance
 
-- Row count ≤ 10 000 → brute-force vector scan, no ANN index. Expected p95 < 300ms.
-- Row count > 10 000 → IVF_PQ index built at the end of a full rebuild and opportunistically rebuilt once per hour when rows have grown >10% since the last build.
-- Slow search at scale? Check `GET /api/search/stats` for `annIndexBuiltAt`; if missing past 10K rows, trigger `POST /api/search/rebuild` or wait for the opportunistic rebuild.
+- FlexSearch builds posting lists at upsert time; there is no separate "build ANN index" phase.
+- Slow search? Check `GET /api/search/stats` for row counts per source and `datasetBytes`. Expected p95 < 100ms for typical Bobbit corpora (< 100K rows). If the in-memory index has grown very large, trigger a rebuild — orphaned rows accumulated from deletes can inflate posting lists.
 - Staff not appearing in search? Staff are indexed via a dedicated hook — `StaffManager` calls `searchIndex.indexStaff(staff)` (on `SearchService`) whenever a staff record is created or updated. `SearchService.indexStaff` builds an `Indexable` via `StaffIndexSource.toIndexable` and hands it to `Indexer.upsertEntries`. Staff are **not** walked by `rebuildFromStores` under normal operation (only on a full rebuild). If a staff entry is missing, check in order: (1) the project's `SearchService.getState()` is `"ready"` (not `"disabled"` / `"rebuilding"`); (2) `indexStaff` was called with the correct staff object (add a log in `StaffManager` or watch `[search]` log lines); (3) the `Indexer` progress emission shows the row was upserted (`index:progress` with a non-zero `completed` for the `incremental` phase).
 - Sidebar filter not working? The sidebar uses client-side filtering only (no API calls). It matches goal titles, session titles, session agent roles, and staff names. Check `_applySearchFilter()` in `Sidebar.ts`
 - Mobile sidebar showing every archived goal when a query is typed? `renderMobileLanding` in `src/app/render.ts` must route archived goals through `filterArchivedGoalsByQuery` and standalone archived sessions through `filterArchivedSessionsByQuery` (both in `src/app/render-helpers.ts`) — the same helpers desktop's `renderSidebar` uses. If mobile skips the filter, every archived goal leaks through regardless of the query.
@@ -233,7 +229,7 @@ Debugging checklist:
 - Sessions/goals not appearing? Check `projectId` field matches the expected project. Verify the correct project's `sessions.json` / `goals.json` contains the record
 - Sidebar not grouping? Project folder rows are always shown — check that `state.projects` is populated and `renderProjectHeader()` is being called
 - Project registration failing? `rootPath` must be absolute and exist on disk; duplicate paths are rejected
-- Search not filtering by project? Verify `?projectId=` query param is passed; each project has its own `search.lance/` dataset
+- Search not filtering by project? Verify `?projectId=` query param is passed; each project has its own `search.flex/` index
 - Config not cascading? Check all three `.bobbit/config/` directories (global, server, project) and verify `resolveScalarConfig()` / `resolveEntities()` return expected scope
 - **State migration**: On first startup after upgrade, central state is distributed to per-project dirs. Check for `.bobbit/state/.migrated-to-per-project` marker. Central files renamed with `.pre-migration` suffix (not deleted). If migration didn't run, check that projects are registered before migration runs
 - **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`

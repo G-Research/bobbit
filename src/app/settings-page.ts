@@ -20,7 +20,7 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp, setProjects, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
-import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, searchCompact, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
@@ -2439,16 +2439,6 @@ async function rebuildSearchIndex(): Promise<void> {
 	renderApp();
 }
 
-async function compactSearchIndex(): Promise<void> {
-	maintenanceLoading = "search";
-	renderApp();
-	try {
-		await searchCompact(currentProjectIdForSearch());
-	} catch { /* ignore */ }
-	maintenanceLoading = null;
-	await loadSearchStats();
-}
-
 async function scanOrphanIndexRows(): Promise<void> {
 	maintenanceLoading = "orphanRows";
 	renderApp();
@@ -2589,7 +2579,7 @@ function renderMaintenanceTab() {
 					<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-1 text-xs">
 						<div class="flex justify-between gap-2"><span class="text-muted-foreground">State</span><span class="text-foreground font-medium" data-search-state="${searchIndexStats.state}">${searchIndexStats.state}</span></div>
 						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Last rebuild</span><span class="text-foreground">${formatTimestamp(searchIndexStats.lastRebuildAt)}</span></div>
-						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Embedder</span><span class="text-foreground font-mono truncate" title="${searchIndexStats.embedderId}">${searchIndexStats.embedderId} (${searchIndexStats.embedderDim})</span></div>
+						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Engine</span><span class="text-foreground font-mono truncate" title="${searchIndexStats.engine}">${searchIndexStats.engine} (${searchIndexStats.engineVersion})</span></div>
 						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Dataset size</span><span class="text-foreground">${formatBytes(searchIndexStats.datasetBytes)}</span></div>
 					</div>
 					${Object.keys(searchIndexStats.rowCountsBySource || {}).length > 0 ? html`
@@ -2635,12 +2625,6 @@ function renderMaintenanceTab() {
 						@click=${rebuildSearchIndex}
 						data-action="rebuild-search-index"
 					>Rebuild Index</button>
-					<button
-						class="${scanBtnClass}"
-						?disabled=${maintenanceLoading === "search" || !!searchIndexProgress}
-						@click=${compactSearchIndex}
-						data-action="compact-search-index"
-					>Compact Dataset</button>
 				</div>
 			</div>
 

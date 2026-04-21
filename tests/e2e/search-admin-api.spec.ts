@@ -1,8 +1,5 @@
 /**
- * E2E tests for the search admin + maintenance REST endpoints added in T11.
- *
- * Uses BOBBIT_FAKE_EMBEDDER=1 (set by the in-process harness) so the tests
- * never attempt the ~140MB ONNX model download.
+ * E2E tests for the search admin + maintenance REST endpoints.
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, apiFetch } from "./e2e-setup.js";
@@ -27,8 +24,9 @@ test("GET /api/search/stats returns expected shape", async () => {
 	expect(resp.status).toBe(200);
 	const body = await resp.json();
 	expect(body).toHaveProperty("state");
-	expect(body).toHaveProperty("embedderId");
-	expect(body).toHaveProperty("embedderDim");
+	expect(body).toHaveProperty("engine");
+	expect(body).toHaveProperty("engineVersion");
+	expect(body.engine).toBe("flexsearch");
 	expect(body).toHaveProperty("lastRebuildAt");
 	expect(body).toHaveProperty("rowCountsBySource");
 	expect(body).toHaveProperty("datasetBytes");
@@ -53,8 +51,7 @@ test("POST /api/search/rebuild returns 202", async () => {
 		method: "POST",
 		body: JSON.stringify({ projectId }),
 	});
-	// 202 on success; 503 only if LanceDB/embedder failed to load — which
-	// shouldn't happen with the fake embedder + native lancedb binary.
+	// 202 on success; 503 only if the search stack is unavailable.
 	expect([202, 503]).toContain(resp.status);
 	if (resp.status === 202) {
 		const body = await resp.json();

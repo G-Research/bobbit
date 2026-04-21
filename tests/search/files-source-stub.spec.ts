@@ -2,16 +2,14 @@
  * V2-readiness smoke test.
  *
  * Flows a fixture directory end-to-end through:
- *   FilesIndexSourceStub → (toy indexer) → LanceStore → query-by-source
+ *   FilesIndexSourceStub → (inline toy mapper) → FlexSearchStore → query-by-source
  *
- * The "toy indexer" here is intentionally inline — we are NOT allowed to
- * touch `indexer.ts` (T5's scope) to prove this. The point is to show
- * that the `IndexSource`/`Indexable` surface is sufficient: adding a new
- * source for files requires zero changes to LanceStore, the Arrow schema,
- * or any other core module.
+ * The mapper is intentionally inline — we are NOT allowed to touch
+ * `indexer.ts` to prove this. The point is to show that the
+ * `IndexSource`/`Indexable` surface is sufficient: adding a new source
+ * for files requires zero changes to the store.
  *
- * Design reference: docs/design/semantic-search.md §12 (v2-readiness test),
- * §15 T6.
+ * Design reference: docs/design/portable-search.md §12.
  */
 
 import { test, expect } from "@playwright/test";
@@ -20,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { FilesIndexSourceStub } from "../../src/server/search/sources/files-source.stub.ts";
-import { LanceStore, EMBED_DIM, type ContentRow } from "../../src/server/search/lance-store.ts";
+import { FlexSearchStore, type FlexDoc } from "../../src/server/search/flex-store.ts";
 import type { Indexable, IndexSourceContext } from "../../src/server/search/types.ts";
 import type { GoalStore } from "../../src/server/agent/goal-store.ts";
 import type { SessionStore } from "../../src/server/agent/session-store.ts";
@@ -37,16 +35,7 @@ function fakeCtx(projectId: string): IndexSourceContext {
 	};
 }
 
-function zeroEmbedding(): Float32Array {
-	return new Float32Array(EMBED_DIM);
-}
-
-/**
- * Convert an `Indexable` into a `ContentRow` with a placeholder embedding.
- * Mirrors what the real Indexer will do in T5 — inlined here for the
- * stub so we don't depend on indexer.ts existing yet.
- */
-function toRow(i: Indexable): ContentRow {
+function toDoc(i: Indexable): FlexDoc {
 	const display = i.display ?? {};
 	return {
 		id: i.id,
@@ -55,23 +44,24 @@ function toRow(i: Indexable): ContentRow {
 		entity_type: entityTypeOf(i.sourceId),
 		parent_id: null,
 		archived: i.archived === true,
+		archived_tag: i.archived ? "true" : "false",
 		timestamp: i.timestamp,
 		content_hash: i.contentHash,
 		weight: i.weight,
 		role: i.role ?? null,
 		title: display.title ?? null,
 		text: i.text,
+		identifier_text: "",
 		goal_id: typeof i.metadata.goalId === "string" ? i.metadata.goalId : null,
 		session_id: typeof i.metadata.sessionId === "string" ? i.metadata.sessionId : null,
 		session_title: null,
 		file_path: display.filePath ?? null,
 		start_line: typeof display.startLine === "number" ? display.startLine : null,
 		end_line: typeof display.endLine === "number" ? display.endLine : null,
-		embedding: zeroEmbedding(),
 	};
 }
 
-function entityTypeOf(sourceId: Indexable["sourceId"]): string {
+function entityTypeOf(sourceId: Indexable["sourceId"]): FlexDoc["entity_type"] {
 	switch (sourceId) {
 		case "goals": return "goal";
 		case "sessions": return "session";
@@ -81,8 +71,7 @@ function entityTypeOf(sourceId: Indexable["sourceId"]): string {
 	}
 }
 
-test("files-source → LanceStore end-to-end without touching core modules", async () => {
-	// ── Arrange: fixture directory with a small tree of files ────────
+test("files-source → FlexSearchStore end-to-end without touching core modules", async () => {
 	const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "files-stub-fixture-"));
 	fs.writeFileSync(path.join(fixtureDir, "readme.md"), "# Project\n\nHello.\n");
 	fs.mkdirSync(path.join(fixtureDir, "src"));
@@ -90,37 +79,26 @@ test("files-source → LanceStore end-to-end without touching core modules", asy
 	fs.writeFileSync(path.join(fixtureDir, "src", "b.ts"), "export const b = 2;\n");
 	fs.writeFileSync(path.join(fixtureDir, "empty"), "");
 
-	// ── LanceStore in a separate tmp dir ─────────────────────────────
 	const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "files-stub-store-"));
-	const dataDir = path.join(storeDir, "search.lance");
-	const store = await LanceStore.open({ dataDir, embedDim: EMBED_DIM });
+	const dataDir = path.join(storeDir, "search.flex");
+	const store = await FlexSearchStore.open({ dataDir });
 
 	try {
 		const src = new FilesIndexSourceStub({ fixtureDir });
 		const ctx = fakeCtx("proj-v2");
 
-		// ── Act: drain source → rows → upsert ───────────────────────
-		const rows: ContentRow[] = [];
+		const docs: FlexDoc[] = [];
 		for await (const indexable of src.iterate(ctx)) {
-			rows.push(toRow(indexable));
+			docs.push(toDoc(indexable));
 		}
-		expect(rows.length).toBe(3); // empty file filtered; 3 real files
+		expect(docs.length).toBe(3);
 
-		await store.upsert(rows);
+		await store.upsert(docs);
 
-		// ── Assert: rows land in the content table with file_path set
-		const totalFiles = await store.count("source_id = 'files'");
-		expect(totalFiles).toBe(3);
+		expect(store.count({ source_id: "files" })).toBe(3);
+		expect(store.count()).toBe(3);
 
-		const allFiles = await store.count();
-		expect(allFiles).toBe(3);
-
-		// Query by source_id and verify file_path + display line ranges
-		const results = (await store
-			.query()
-			.where("source_id = 'files'")
-			.limit(10)
-			.toArray()) as unknown as Array<Record<string, unknown>>;
+		const results = store.list({ source_id: "files", limit: 10 });
 		expect(results.length).toBe(3);
 		for (const r of results) {
 			expect(typeof r.file_path).toBe("string");

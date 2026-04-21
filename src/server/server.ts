@@ -6418,8 +6418,7 @@ async function handleApiRoute(
 
 	function searchUnavailableResponse(state: string) {
 		const reasonMap: Record<string, string> = {
-			"disabled-no-native": "native-binary",
-			"disabled-no-model": "embedding-model",
+			"disabled": "disabled",
 			"closed": "closed",
 			"initializing": "initializing",
 		};
@@ -6495,13 +6494,13 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getLanceStore();
+		const store = ctx.searchIndex.getStore();
 		if (!store) {
 			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
 			return;
 		}
 		try {
-			const rows = (await store.query().select(["id", "source_id", "parent_id", "goal_id", "session_id"]).limit(100000).toArray()) as Array<Record<string, unknown>>;
+			const rows = store.list({ limit: 100000 });
 			const orphans: Array<{ id: string; source_id: string; parent_id: string | null }> = [];
 			for (const row of rows) {
 				const sourceId = String(row.source_id ?? "");
@@ -6546,13 +6545,13 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getLanceStore();
+		const store = ctx.searchIndex.getStore();
 		if (!store) {
 			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
 			return;
 		}
 		try {
-			const rows = (await store.query().select(["id", "source_id", "session_id"]).limit(100000).toArray()) as Array<Record<string, unknown>>;
+			const rows = store.list({ limit: 100000 });
 			const toDelete: string[] = [];
 			for (const row of rows) {
 				const sourceId = String(row.source_id ?? "");

@@ -13,8 +13,8 @@ async function mockSearchApis(page: import("@playwright/test").Page, stats: {
 	lastRebuildAt?: number | null;
 	rowCountsBySource?: Record<string, number>;
 	datasetBytes?: number;
-	embedderId?: string;
-	embedderDim?: number;
+	engine?: string;
+	engineVersion?: string;
 	state?: string;
 } = {}) {
 	await page.route("**/api/search/stats*", async (route) => {
@@ -25,8 +25,8 @@ async function mockSearchApis(page: import("@playwright/test").Page, stats: {
 				lastRebuildAt: stats.lastRebuildAt ?? Date.now() - 60_000,
 				rowCountsBySource: stats.rowCountsBySource ?? { goals: 3, sessions: 5, messages: 42, staff: 1 },
 				datasetBytes: stats.datasetBytes ?? 12345678,
-				embedderId: stats.embedderId ?? "nomic-embed-text-v1.5",
-				embedderDim: stats.embedderDim ?? 768,
+				engine: stats.engine ?? "flexsearch",
+				engineVersion: stats.engineVersion ?? "0.8.158",
 				state: stats.state ?? "ready",
 			}),
 		});
@@ -61,12 +61,13 @@ test.describe("Search Index maintenance panel", () => {
 		await expect(page.getByRole("heading", { name: "Orphaned Index Rows" })).toBeVisible();
 		// Stats rendered
 		await expect(page.locator("[data-search-state]")).toHaveAttribute("data-search-state", "ready");
-		await expect(page.getByText("nomic-embed-text-v1.5 (768)")).toBeVisible();
+		await expect(page.getByText("flexsearch (0.8.158)")).toBeVisible();
 		// Row count chips
 		await expect(page.getByText("goals: 3")).toBeVisible();
 		// Buttons
 		await expect(page.getByRole("button", { name: "Rebuild Index" })).toBeEnabled();
-		await expect(page.getByRole("button", { name: "Compact Dataset" })).toBeEnabled();
+		// Compact Dataset button removed with the FlexSearch migration.
+		await expect(page.getByRole("button", { name: "Compact Dataset" })).toHaveCount(0);
 	});
 
 	test("Rebuild Index triggers yellow progress UI then green on complete", async ({ page }) => {
