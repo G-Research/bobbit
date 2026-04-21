@@ -23,6 +23,7 @@ import {
 	buildStepCache,
 	computeAllPassed,
 	canSkipAllSteps,
+	detectJsonValidationError,
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 
@@ -55,7 +56,40 @@ export const VERIFICATION_RESULT_REMINDER =
  */
 
 // Re-export transient error detection from verification-logic.ts for backward compatibility.
-export { isTransientReviewError, isTransientQaError } from "./verification-logic.js";
+export { isTransientReviewError, isTransientQaError, detectJsonValidationError } from "./verification-logic.js";
+
+/**
+ * Build a targeted retry prompt that quotes the validation error back to the
+ * model. Keeps the generic `VERIFICATION_RESULT_REMINDER` wording as fallback
+ * context so the agent still knows *what* to call.
+ */
+/** Best-effort extract of a readable string from an agent tool result. */
+function extractToolResultText(result: any): string {
+	if (!result) return "";
+	if (typeof result === "string") return result;
+	try {
+		const content = result.content;
+		if (Array.isArray(content)) {
+			return content
+				.map((c: any) => (typeof c === "string" ? c : typeof c?.text === "string" ? c.text : ""))
+				.join("\n");
+		}
+		if (typeof content === "string") return content;
+	} catch { /* ignore */ }
+	try { return JSON.stringify(result); } catch { return String(result); }
+}
+
+function buildJsonRetryPrompt(quotedError: string): string {
+	return (
+		`Your previous tool call failed with a JSON / argument validation error:\n\n` +
+		`    ${quotedError}\n\n` +
+		`This is almost certainly a streaming glitch in your previous attempt, not a real problem with your analysis. ` +
+		`Re-emit the \`verification_result\` tool call now with well-formed JSON: ` +
+		`ensure every property name is double-quoted, every string value is properly escaped, ` +
+		`and the arguments match the tool's schema (\`verdict\`: "pass"|"fail", \`summary\`: string). ` +
+		`Do not re-run any analysis — just submit your verdict.`
+	);
+}
 
 /** In-flight verification state for REST bootstrapping */
 export interface ActiveVerification {
@@ -382,6 +416,15 @@ export class VerificationHarness {
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		this.pendingResults.set(step.sessionId, resultResolver);
 
+		// Watch for errored tool_results so we can send a targeted JSON-retry
+		// prompt if the agent gives up after a streaming/arg-validation glitch.
+		let lastErroredToolOutput: string | null = null;
+		const errListenerUnsub = session.rpcClient.onEvent((event: any) => {
+			if (event.type === "tool_execution_end" && event.isError) {
+				lastErroredToolOutput = extractToolResultText(event.result);
+			}
+		});
+
 		try {
 			// Wait for the agent to finish if it was mid-turn
 			const idleResult = await Promise.race([
@@ -399,9 +442,13 @@ export class VerificationHarness {
 				};
 			}
 
-			// Agent went idle without calling verification_result — send reminder
-			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending reminder...`);
-			await session.rpcClient.prompt(VERIFICATION_RESULT_REMINDER);
+			// Agent went idle without calling verification_result — inspect whether
+			// the previous turn hit a JSON / tool-argument validation glitch, and
+			// send a targeted nudge if so. Falls back to the generic reminder.
+			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
+			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
+			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder...`);
+			await session.rpcClient.prompt(reminderPrompt);
 
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
@@ -424,6 +471,7 @@ export class VerificationHarness {
 				duration_ms: Date.now() - step.startedAt,
 			};
 		} finally {
+			try { errListenerUnsub(); } catch { /* ignore */ }
 			this.pendingResults.delete(step.sessionId);
 			// Terminate and unregister reviewer session
 			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
@@ -1379,6 +1427,9 @@ export class VerificationHarness {
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		this.pendingResults.set(sessionId, resultResolver);
 
+		let lastErroredToolOutput: string | null = null;
+		let errListenerUnsub: (() => void) | undefined;
+
 		try {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
@@ -1450,6 +1501,14 @@ export class VerificationHarness {
 				}
 			}
 
+			// Watch for errored tool_results so we can send a targeted JSON-retry
+			// prompt if the agent gives up after a streaming/arg-validation glitch.
+			errListenerUnsub = session.rpcClient.onEvent((event: any) => {
+				if (event.type === "tool_execution_end" && event.isError) {
+					lastErroredToolOutput = extractToolResultText(event.result);
+				}
+			});
+
 			// Send kickoff prompt
 			await session.rpcClient.prompt(kickoff);
 
@@ -1465,9 +1524,13 @@ export class VerificationHarness {
 				return { passed: result.verdict, output: result.summary, sessionId };
 			}
 
-			// Agent went idle without calling the tool — send reminder
-			console.log(`[verification] No verification_result from ${sessionId}, sending reminder`);
-			await session.rpcClient.prompt(VERIFICATION_RESULT_REMINDER);
+			// Agent went idle without calling the tool — if the last turn hit a
+			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
+			// fall back to the generic reminder.
+			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
+			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
+			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder`);
+			await session.rpcClient.prompt(reminderPrompt);
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
 				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
@@ -1490,6 +1553,7 @@ export class VerificationHarness {
 			}
 			return { passed: false, output: errOutput, sessionId };
 		} finally {
+			try { errListenerUnsub?.(); } catch { /* ignore */ }
 			// Always clean up pending results, extension file, terminate, and unregister
 			if (sessionId) {
 				this.pendingResults.delete(sessionId);
@@ -1573,6 +1637,8 @@ export class VerificationHarness {
 		].join("\n");
 
 		let qaSessionId: string | undefined;
+		let qaLastErroredToolOutput: string | null = null;
+		let qaErrListenerUnsub: (() => void) | undefined;
 		try {
 			// Create session via SessionManager
 			const qaRoleName = role.name || step.role || "qa-tester";
@@ -1648,6 +1714,14 @@ export class VerificationHarness {
 				}
 			}
 
+			// Watch for errored tool_results so we can send a targeted JSON-retry
+			// prompt if the agent gives up after a streaming/arg-validation glitch.
+			qaErrListenerUnsub = session.rpcClient.onEvent((event: any) => {
+				if (event.type === "tool_execution_end" && event.isError) {
+					qaLastErroredToolOutput = extractToolResultText(event.result);
+				}
+			});
+
 			// Send kickoff prompt
 			await session.rpcClient.prompt(kickoff);
 
@@ -1666,9 +1740,13 @@ export class VerificationHarness {
 				return { passed: result.verdict, output: result.summary, sessionId: qaSessionId, artifact };
 			}
 
-			// Agent went idle without calling the tool — send reminder
-			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending reminder`);
-			await session.rpcClient.prompt(VERIFICATION_RESULT_REMINDER);
+			// Agent went idle without calling the tool — if the last turn hit a
+			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
+			// fall back to the generic reminder.
+			const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
+			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
+			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder`);
+			await session.rpcClient.prompt(qaReminderPrompt);
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
 				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
@@ -1694,6 +1772,7 @@ export class VerificationHarness {
 			}
 			return { passed: false, output: errOutput, sessionId: qaSessionId };
 		} finally {
+			try { qaErrListenerUnsub?.(); } catch { /* ignore */ }
 			if (qaSessionId) {
 				this.pendingResults.delete(qaSessionId);
 				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
@@ -1744,9 +1823,17 @@ export class VerificationHarness {
 
 		const rpc = new RpcBridge(bridgeOptions);
 		let unregisterSession: (() => void) | undefined;
+		let legacyLastErroredToolOutput: string | null = null;
+		let legacyErrListenerUnsub: (() => void) | undefined;
 
 		try {
 			await rpc.start();
+
+			legacyErrListenerUnsub = rpc.onEvent((event: any) => {
+				if (event.type === "tool_execution_end" && event.isError) {
+					legacyLastErroredToolOutput = extractToolResultText(event.result);
+				}
+			});
 
 			// Register as a viewable session so users can watch the review live
 			if (this.sessionManager) {
@@ -1835,7 +1922,12 @@ export class VerificationHarness {
 				});
 			});
 
-			await rpc.prompt(VERIFICATION_RESULT_REMINDER);
+			const legacyJsonErr = legacyLastErroredToolOutput ? detectJsonValidationError(legacyLastErroredToolOutput) : null;
+			const legacyReminderPrompt = legacyJsonErr ? buildJsonRetryPrompt(legacyJsonErr) : VERIFICATION_RESULT_REMINDER;
+			if (legacyJsonErr) {
+				console.log(`[verification] Detected JSON/arg-validation glitch in ${subSessionId}, sending targeted retry prompt`);
+			}
+			await rpc.prompt(legacyReminderPrompt);
 
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
@@ -1858,6 +1950,7 @@ export class VerificationHarness {
 			}
 			return { passed: false, output: errOutput, sessionId: subSessionId };
 		} finally {
+			try { legacyErrListenerUnsub?.(); } catch { /* ignore */ }
 			this.pendingResults.delete(subSessionId);
 			await rpc.stop().catch(() => {});
 			// Unregister the session (archives it so chat history remains viewable)

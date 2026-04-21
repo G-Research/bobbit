@@ -19,6 +19,8 @@ import {
 	computeAllPassed,
 	TRANSIENT_ERROR_PATTERNS,
 	QA_NON_TRANSIENT_PATTERNS,
+	detectJsonValidationError,
+	JSON_VALIDATION_ERROR_PATTERNS,
 } from "../dist/server/agent/verification-logic.js";
 
 // ---------------------------------------------------------------------------
@@ -161,11 +163,31 @@ describe("isTransientReviewError", () => {
 	});
 
 	it("returns false for non-transient error", () => {
-		assert.equal(isTransientReviewError("Syntax error in code at line 42"), false);
+		// Note: "Unexpected token" is NOT present here — a bare "Syntax error" alone shouldn't trip.
+		assert.equal(isTransientReviewError("TypeError: cannot read properties of null"), false);
 	});
 
 	it("returns false for empty string", () => {
 		assert.equal(isTransientReviewError(""), false);
+	});
+
+	it("matches LLM JSON glitch 'Expected double-quoted property name'", () => {
+		assert.equal(
+			isTransientReviewError("Error: Expected double-quoted property name in JSON at position 42 (line 1 column 43)"),
+			true,
+		);
+	});
+
+	it("matches 'Validation failed for tool'", () => {
+		assert.equal(isTransientReviewError("Validation failed for tool \"verification_result\": ..."), true);
+	});
+
+	it("matches 'Unexpected token'", () => {
+		assert.equal(isTransientReviewError("SyntaxError: Unexpected token 'x' in JSON"), true);
+	});
+
+	it("matches 'Unexpected end of JSON'", () => {
+		assert.equal(isTransientReviewError("Unexpected end of JSON input"), true);
 	});
 
 	it("detects every TRANSIENT_ERROR_PATTERNS entry", () => {
@@ -210,6 +232,71 @@ describe("isTransientQaError", () => {
 
 	it("returns false for empty string", () => {
 		assert.equal(isTransientQaError(""), false);
+	});
+
+	it("matches JSON validation glitch for QA too", () => {
+		assert.equal(
+			isTransientQaError("Error: Expected double-quoted property name in JSON at position 42"),
+			true,
+		);
+		assert.equal(isTransientQaError("Validation failed for tool 'verification_result': ..."), true);
+	});
+
+	it("QA non-transient still wins over JSON glitch", () => {
+		// If the reviewer exhausted its budget AND produced a JSON glitch, treat as non-transient.
+		assert.equal(
+			isTransientQaError("Agent did not call verification_result. Also: Unexpected token"),
+			false,
+		);
+	});
+});
+
+// ===================================================================
+// detectJsonValidationError
+// ===================================================================
+
+describe("detectJsonValidationError", () => {
+	it("returns null for empty input", () => {
+		assert.equal(detectJsonValidationError(""), null);
+		assert.equal(detectJsonValidationError(null as unknown as string), null);
+	});
+
+	it("returns null for non-matching output", () => {
+		assert.equal(detectJsonValidationError("some ordinary error"), null);
+	});
+
+	it("extracts the line containing the JSON parse error", () => {
+		const out =
+			"Tool execution failed\n" +
+			"Error: Expected double-quoted property name in JSON at position 42 (line 1 column 43)\n" +
+			"More noise below";
+		const detected = detectJsonValidationError(out);
+		assert.ok(detected);
+		assert.ok(detected!.includes("Expected double-quoted property name"));
+		assert.ok(!detected!.includes("Tool execution failed"));
+		assert.ok(!detected!.includes("More noise below"));
+	});
+
+	it("extracts validation failure lines", () => {
+		const detected = detectJsonValidationError('Validation failed for tool "verification_result":\n  - verdict: must be equal to one of the allowed values');
+		assert.ok(detected);
+		assert.ok(detected!.includes("Validation failed for tool"));
+	});
+
+	it("trims to a reasonable length", () => {
+		const longLine = "Unexpected token " + "x".repeat(10_000);
+		const detected = detectJsonValidationError(longLine);
+		assert.ok(detected);
+		assert.ok(detected!.length <= 400);
+	});
+
+	it("detects every JSON_VALIDATION_ERROR_PATTERNS entry", () => {
+		for (const pattern of JSON_VALIDATION_ERROR_PATTERNS) {
+			assert.ok(
+				detectJsonValidationError(`context... ${pattern} ...more context`),
+				`Expected '${pattern}' to be detected`,
+			);
+		}
 	});
 });
 
