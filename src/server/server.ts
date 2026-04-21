@@ -34,7 +34,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
-import { isGitRepo, getRepoRoot, stripTokenFromGitUrl, shouldSkipRemotePush } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
@@ -45,9 +45,8 @@ import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage } from "./agent/sandbox-status.js";
 import { SandboxManager } from "./agent/sandbox-manager.js";
-import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
@@ -57,8 +56,9 @@ import { getAvailableModels, discoverModelsForConfig } from "./agent/model-regis
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
+import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
+import { detectHostTokens } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { PersistedTeamEntry } from "./agent/team-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
@@ -401,16 +401,11 @@ export function createGateway(config: GatewayConfig) {
 	initPromptDirs(stateDir);
 	initAssistantRegistry(configDir);
 
-	// Project registry — persisted at server level
+	// Project registry — persisted at server level.
+	// Zero projects is a valid state: a fresh install has no projects.json and the
+	// UI forces the user through "Add Project" before any goal/session work. Bobbit
+	// never registers a project implicitly.
 	const projectRegistry = new ProjectRegistry(stateDir);
-	// Only auto-register a default project if projects.json exists (not a fresh install).
-	// This respects BOBBIT_DIR overrides (test harnesses, custom deployments) where .bobbit/
-	// may not exist at the project root. A truly fresh folder has no projects.json and starts
-	// with zero projects — the user creates one explicitly via the "Add Project" flow.
-	const projectsFile = path.join(stateDir, "projects.json");
-	if (fs.existsSync(projectsFile)) {
-		projectRegistry.ensureDefaultProject(getProjectRoot());
-	}
 
 	// Run one-time migration from centralized to per-project state
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
@@ -506,10 +501,12 @@ export function createGateway(config: GatewayConfig) {
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
-	// When no projects exist (fresh folder), use server stateDir for a placeholder task store.
-	// Once a project is registered, goals/tasks will use per-project stores.
-	const defaultCtxForInit = projectContextManager.getDefaultOrNull();
-	const taskStore = defaultCtxForInit ? defaultCtxForInit.taskStore : new TaskStore(stateDir);
+	// Placeholder task store for TeamManager construction. Real goal/task operations
+	// route through the per-project context (see TeamManager.getTasksForSession). The
+	// first registered project's store is used when available, otherwise a server-
+	// scoped store is instantiated solely so construction doesn't require a project.
+	const firstCtxForInit = projectContextManager.all().next().value as import("./agent/project-context.js").ProjectContext | undefined;
+	const taskStore = firstCtxForInit ? firstCtxForInit.taskStore : new TaskStore(stateDir);
 	const teamManager = new TeamManager(sessionManager, {
 		colorStore,
 		taskManager: new TaskManager(taskStore),
@@ -798,94 +795,10 @@ export function createGateway(config: GatewayConfig) {
 			// Wire verification harness before session restore so orphan cleanup can skip resuming sessions
 			sessionManager.setVerificationHarness(verificationHarness);
 
-			// ── Sandbox initialization (per-project container) ──
-			const sandboxCfg = projectConfigStore.get("sandbox") || "none";
-			if (sandboxCfg === "docker") {
-				try {
-					const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-
-					// Auto-build or rebuild image if missing or stale
-					const imageStatus = await checkDockerAvailability(imageName);
-					if (imageStatus.imageExists === false && imageStatus.dockerfileExists === true) {
-						const buildResult = await buildSandboxImage(imageName, config.defaultCwd);
-						if (!buildResult.success) {
-							console.error(`[sandbox] Auto-build failed, continuing without sandbox`);
-						}
-					} else if (imageStatus.imageExists === true) {
-						// Ensure baked-in pi-coding-agent version matches host
-						await ensureImageAgentVersion(imageName, config.defaultCwd);
-					}
-
-					const { getRepoRoot, isGitRepo: isGitRepoFn } = await import("./skills/git.js");
-					const isRepo = await isGitRepoFn(config.defaultCwd);
-					if (isRepo) {
-						const repoPath = await getRepoRoot(config.defaultCwd);
-
-						// Get repo URL for cloning inside the container.
-						// Strip any embedded token (e.g. https://ghp_xxx@github.com/...)
-						// so it doesn't leak into .git/config inside the container.
-						// The container's credential helper reads GITHUB_TOKEN from env instead.
-						let repoUrl: string;
-						try {
-							const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoPath, timeout: 5000 });
-							repoUrl = stripTokenFromGitUrl(stdout.trim());
-						} catch {
-							repoUrl = repoPath; // fallback to local path
-						}
-
-						// Parse mounts/credentials for the sandbox container
-						let poolMounts: string[] = [];
-						try {
-							const mountsRaw = projectConfigStore.get("sandbox_mounts") || "";
-							poolMounts = mountsRaw ? validateSandboxMounts(JSON.parse(mountsRaw), "[sandbox]") : [];
-						} catch (err) { console.warn(`[sandbox] Invalid sandbox_mounts JSON, ignoring: ${err}`); }
-
-						let poolCredentials: Record<string, string> = {};
-						try {
-							const credsRaw = projectConfigStore.get("sandbox_credentials") || "";
-							poolCredentials = credsRaw ? JSON.parse(credsRaw) : {};
-						} catch (err) { console.warn(`[sandbox] Invalid sandbox_credentials JSON, ignoring: ${err}`); }
-
-						// Ensure the restricted Docker network exists
-						let sandboxNetwork: string | undefined;
-						try {
-							sandboxNetwork = await sessionManager.ensureSandboxNetwork();
-						} catch (err) {
-							console.error("[sandbox] Cannot create sandbox network — sandbox disabled:", err);
-						}
-
-						const defaultProjectId = projectContextManager.getDefaultProjectIdOrNull();
-						if (sandboxNetwork && defaultProjectId) {
-
-							// Resolve GitHub token for git push inside container
-							const githubTokenEnabled = projectConfigStore.get("sandbox_github_token") !== "false";
-							let githubToken: string | undefined;
-							if (githubTokenEnabled) {
-								githubToken = resolveHostTokenValue("GITHUB_TOKEN");
-							}
-
-							sandboxManager = new SandboxManager();
-							await sandboxManager.initForProject(defaultProjectId, {
-								projectId: defaultProjectId,
-								projectDir: config.defaultCwd,
-								repoUrl,
-								image: imageName,
-								sandboxNetwork,
-								sandboxMounts: poolMounts,
-								sandboxCredentials: poolCredentials,
-								githubToken,
-								toolManager,
-							});
-							console.log(`[sandbox] Initialized per-project sandbox for default project`);
-						}
-					} else {
-						console.log("[sandbox] Not a git repo — sandbox disabled (worktrees require git)");
-					}
-				} catch (err) {
-					console.error("[sandbox] Failed to initialize:", err);
-					sandboxManager = null;
-				}
-			}
+			// ── Sandbox manager ──
+			// Sandboxes are initialized lazily per-project on first sandbox use
+			// (see SandboxManager.ensureForProject, added by Task 3).
+			sandboxManager = new SandboxManager();
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -1614,8 +1527,8 @@ async function handleApiRoute(
 	if (projectGetMatch && req.method === "DELETE") {
 		const projectId = projectGetMatch[1];
 		const project = projectRegistry.get(projectId);
-		if (project && project.rootPath === getProjectRoot()) {
-			json({ error: "Cannot delete the default project" }, 400);
+		if (project && projectRegistry.list().length === 1) {
+			json({ error: "Cannot delete the last remaining project — add another project first" }, 400);
 			return;
 		}
 		try {
@@ -2167,19 +2080,13 @@ async function handleApiRoute(
 			}
 		}
 
-		if (!resolvedProjectId && cwd) {
-			const matched = projectRegistry.findByCwd(cwd);
-			if (matched) resolvedProjectId = matched.id;
-		}
-		// Default to the server's own project when no project could be resolved from CWD or explicit param.
-		// This is the correct API contract: sessions created without a project context belong to the default project.
+		// Project must be resolvable explicitly or from cwd — no silent default fallback.
+		// (Provisional-project handling above may already have set resolvedProjectId;
+		// if so, skip the resolver.)
 		if (!resolvedProjectId) {
-			const defaultId = projectContextManager.getDefaultProjectIdOrNull();
-			if (!defaultId) {
-				json({ error: "No projects configured — add a project first" }, 400);
-				return;
-			}
-			resolvedProjectId = defaultId;
+			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			resolvedProjectId = resolved.projectId;
 		}
 
 		// ── Sandbox auto-branch ──
@@ -2329,22 +2236,12 @@ async function handleApiRoute(
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
 			}
-			// Resolve target project context for goal creation (explicit > cwd-match > default)
-			let targetProjectId = (body.projectId && typeof body.projectId === "string") ? body.projectId : undefined;
-			if (!targetProjectId && cwd) {
-				const matched = projectRegistry.findByCwd(cwd);
-				if (matched) targetProjectId = matched.id;
-			}
-			// Default to the server's own project when no project could be resolved.
-			// This is the correct API contract: goals created without explicit project belong to the default project.
-			if (!targetProjectId) {
-				const defaultId = projectContextManager.getDefaultProjectIdOrNull();
-				if (!defaultId) {
-					json({ error: "No projects configured — add a project first" }, 400);
-					return;
-				}
-				targetProjectId = defaultId;
-			}
+			// Resolve target project — explicit projectId or cwd-match. No fallback.
+			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			const targetProjectId = resolved.projectId;
+			// If caller passed a projectId but no cwd, use the project's rootPath.
+			if (!body?.cwd) cwd = resolved.project.rootPath;
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);

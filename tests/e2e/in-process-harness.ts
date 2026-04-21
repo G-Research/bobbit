@@ -69,7 +69,9 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
-		// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)
+		// Seed projects.json. The server no longer auto-registers a default project,
+		// so we register one explicitly via the API after startup (see below) to
+		// preserve the pre-existing test harness contract ("projects[0] == server CWD").
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
@@ -124,6 +126,20 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		});
 
 		const port = await gw.start();
+
+		// Register the server CWD as a project via REST so existing tests that
+		// rely on a pre-existing "default" project at projects[0] keep working.
+		// The server no longer auto-registers one — see server.ts startup block.
+		try {
+			await fetch(`http://127.0.0.1:${port}/api/projects`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Authorization": `Bearer ${token}`,
+				},
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+			});
+		} catch { /* best-effort */ }
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can
 		// read it for callbacks to internal endpoints.

@@ -32,9 +32,9 @@ export interface ResolvedPolicy {
 /**
  * Explicit server-level store accessors.
  *
- * These decouple the cascade's server layer from the default project's stores,
- * ensuring the cascade reads from the same stores that PUT/POST endpoints
- * write to (which matters when BOBBIT_DIR differs from rootPath/.bobbit/).
+ * These wire the cascade's server layer to the standalone server stores
+ * (backed by <server-cwd>/.bobbit/config/), independent of any project.
+ * Zero-project installs still resolve system-scope config this way.
  */
 export interface ServerStores {
 	getRoles(): Role[];
@@ -122,9 +122,9 @@ export class ConfigCascade {
 			});
 		}
 
-		// Layer 3: project-level (if specified and different from default)
-		const defaultId = this.projectContextManager.getDefaultProjectIdOrNull();
-		if (projectId && projectId !== defaultId) {
+		// Layer 3: project-level (when a projectId is specified).
+		// Without projectId, only builtins + server stores are used (system scope).
+		if (projectId) {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);
 			if (projectCtx) {
 				for (const [group, policy] of Object.entries(projectCtx.toolGroupPolicyStore.getAll())) {
@@ -147,8 +147,8 @@ export class ConfigCascade {
 	 * Merge three layers of config items by a unique key.
 	 *
 	 * 1. Builtins (origin "builtin")
-	 * 2. Server-level = default project's store (origin "server")
-	 * 3. Project-level = specified project's store, if different from default (origin "project")
+	 * 2. Server-level = standalone server stores (origin "server")
+	 * 3. Project-level = specified project's store, if a projectId was given (origin "project")
 	 *
 	 * Later layers shadow earlier ones. The `overrides` field records what was shadowed.
 	 */
@@ -177,9 +177,9 @@ export class ConfigCascade {
 			});
 		}
 
-		// Layer 3: project-level (only if projectId differs from default)
-		const defaultId = this.projectContextManager.getDefaultProjectIdOrNull();
-		if (projectId && projectId !== defaultId) {
+		// Layer 3: project-level (when a projectId is specified).
+		// Without projectId, only builtins + server stores are used (system scope).
+		if (projectId) {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);
 			if (projectCtx) {
 				for (const item of getProjectItems(projectCtx)) {
