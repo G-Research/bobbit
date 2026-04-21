@@ -603,13 +603,12 @@ export function createGateway(config: GatewayConfig) {
 
 		// Dynamic PWA manifest — when launched from a tokenized URL, bake the token
 		// into start_url so the PWA can relaunch authenticated.
-		// Only does so for a *valid* token; invalid tokens fall through to the plain
-		// manifest (no token baked in).
-		if (url.pathname === "/manifest.json" && req.method === "GET" && config.staticDir) {
+		// Only does so for a *valid* token; invalid tokens fall through to a plain
+		// manifest (no token baked in). Works in both dev mode (Vite proxies
+		// /manifest.json to us) and prod (staticDir serves public/).
+		if (url.pathname === "/manifest.json" && req.method === "GET") {
 			try {
-				const manifestPath = path.join(path.resolve(config.staticDir), "manifest.json");
-				const raw = fs.readFileSync(manifestPath, "utf-8");
-				const manifest = JSON.parse(raw);
+				const manifest = loadManifest(config.staticDir);
 				const providedToken = url.searchParams.get("token");
 				if (providedToken && validateToken(providedToken, config.authToken)) {
 					manifest.start_url = `/?token=${encodeURIComponent(providedToken)}`;
@@ -6770,6 +6769,20 @@ const MIME_TYPES: Record<string, string> = {
 	".ttf": "font/ttf",
 	".wasm": "application/wasm",
 };
+
+/**
+ * Load the PWA manifest JSON. In prod the UI is embedded under `staticDir`;
+ * in dev mode (--no-ui) the Vite public/ folder is used instead.
+ */
+function loadManifest(staticDir: string | undefined): { start_url?: string;[k: string]: unknown } {
+	const candidates: string[] = [];
+	if (staticDir) candidates.push(path.join(path.resolve(staticDir), "manifest.json"));
+	candidates.push(path.resolve(process.cwd(), "public", "manifest.json"));
+	for (const p of candidates) {
+		if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf-8"));
+	}
+	throw new Error("manifest.json not found");
+}
 
 function serveStatic(pathname: string, staticDir: string, res: http.ServerResponse) {
 	const resolvedStaticDir = path.resolve(staticDir);
