@@ -4,7 +4,7 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="manifest" href="/manifest.json" id="pwa-manifest" />
+
 		<meta name="theme-color" content="#2b2d2b" />
 		<meta name="apple-mobile-web-app-capable" content="yes" />
 		<link rel="apple-touch-icon" href="/icons/icon-192.png" />
@@ -16,16 +16,24 @@
 			(function() {
 				var p = localStorage.getItem('palette');
 				if (p && p !== 'forest') document.documentElement.dataset.palette = p;
-				// Bake the auth token into the PWA manifest URL so iOS installs a
-				// tokenized start_url. The server validates the token before
-				// embedding it; invalid tokens are silently ignored.
+				// Inject the PWA manifest link with the auth token baked in so iOS
+				// installs a tokenized start_url. Done via JS (rather than a static
+				// <link> tag) to guarantee the href includes the token BEFORE Safari
+				// fetches the manifest — otherwise there's a race where the browser
+				// starts fetching /manifest.json (untokenized) during HTML parsing.
+				// The server validates the token before embedding; invalid tokens
+				// fall through to a plain manifest with start_url="/".
 				try {
 					var params = new URLSearchParams(window.location.search);
 					var token = params.get('token') || localStorage.getItem('gateway.token');
-					if (token && token !== 'localhost') {
-						var link = document.getElementById('pwa-manifest');
-						if (link) link.href = '/manifest.json?token=' + encodeURIComponent(token);
-					}
+					var href = (token && token !== 'localhost')
+						? '/manifest.json?token=' + encodeURIComponent(token)
+						: '/manifest.json';
+					var link = document.createElement('link');
+					link.rel = 'manifest';
+					link.id = 'pwa-manifest';
+					link.href = href;
+					document.head.appendChild(link);
 				} catch (e) { /* ignore */ }
 			})();
 		</script>
