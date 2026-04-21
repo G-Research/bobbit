@@ -114,10 +114,12 @@ async function generateMkcertCert(_host: string, allDomains: string[]): Promise<
 
 	// Generate a cert for all required domains signed by our CA
 	console.log(`  Generating mkcert TLS certificate for: ${allDomains.join(", ")}`);
+	// iOS/Safari rejects leaf certs with validity > 825 days (CERT_VALIDITY_TOO_LONG).
+	// Keep the CA long-lived (3650d) but the leaf short (397d, under the 398 public-CA limit too).
 	const cert = await createCert({
 		ca: { cert: caCert, key: caKey },
 		domains: allDomains,
-		validity: 3650,
+		validity: 397,
 	});
 
 	fs.writeFileSync(CERT_PATH, cert.cert);
@@ -151,7 +153,7 @@ function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
 				"-newkey", "ec",
 				"-pkeyopt", "ec_paramgen_curve:prime256v1",
 				"-nodes",
-				"-days", "3650",
+				"-days", "397",
 				"-subj", `"/CN=bobbit"`,
 				"-addext", `"${san}"`,
 				"-keyout", `"${KEY_PATH}"`,
@@ -184,7 +186,7 @@ function generateSelfSignedCert(_host: string, allDomains: string[]): TlsFiles {
 					"-newkey", "ec",
 					"-pkeyopt", "ec_paramgen_curve:prime256v1",
 					"-nodes",
-					"-days", "3650",
+					"-days", "397",
 					"-config", `"${cnfPath}"`,
 					"-keyout", `"${KEY_PATH}"`,
 					"-out", `"${CERT_PATH}"`,

@@ -555,9 +555,12 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
+			// Public endpoints — no auth required (CA cert is inherently public).
+			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
+
 			// Auth check — skipped in localhost mode (only local processes can connect)
 			let sandboxScope: SandboxScope | undefined;
-			if (!isLocalhostMode) {
+			if (!isLocalhostMode && !isPublicEndpoint) {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
 					: url.searchParams.get("token"); // Allow token in query param for links opened in new tabs
@@ -1331,7 +1334,8 @@ async function handleApiRoute(
 		}
 		const certData = fs.readFileSync(caCertPath);
 		res.writeHead(200, {
-			"Content-Type": "application/x-pem-file",
+			// iOS Safari needs this MIME type to offer the profile-install flow.
+			"Content-Type": "application/x-x509-ca-cert",
 			"Content-Disposition": "attachment; filename=\"bobbit-ca.crt\"",
 			"Content-Length": certData.length,
 		});
