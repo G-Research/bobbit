@@ -1,6 +1,26 @@
 /* Import Claude theme from mini-lit */
 @import "@mariozechner/mini-lit/styles/themes/default.css";
 
+/* ── iOS PWA safe-area + dvh app shell ──
+   Used on the top-level app container(s) in src/app/render.ts.
+   - `100dvh` avoids iOS Safari/PWA 100vh paint-gap bugs (falls back to 100vh).
+   - `env(safe-area-inset-*)` reserves space for the Dynamic Island / home-bar
+     region when the PWA runs with viewport-fit=cover + status-bar-style=black-translucent.
+   Desktop and Android browsers report 0 insets, so this is a no-op there. */
+.h-screen-dvh {
+	height: 100vh;
+	height: 100dvh;
+}
+.app-shell {
+	height: 100vh;
+	height: 100dvh;
+	padding-top: env(safe-area-inset-top);
+	padding-right: env(safe-area-inset-right);
+	padding-bottom: env(safe-area-inset-bottom);
+	padding-left: env(safe-area-inset-left);
+	box-sizing: border-box;
+}
+
 /* Tell Tailwind to scan mini-lit components */
 /* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
 @source "../../node_modules/@mariozechner/mini-lit/dist";
