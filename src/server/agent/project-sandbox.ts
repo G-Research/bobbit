@@ -126,7 +126,11 @@ export class ProjectSandbox {
 	private _recovering = false;
 
 
-	constructor(private options: ProjectSandboxOptions) {}
+	constructor(private options: ProjectSandboxOptions) {
+		if (!options || typeof options !== "object" || typeof options.projectId !== "string" || !options.projectId) {
+			throw new Error("[project-sandbox] ProjectSandbox constructor requires ProjectSandboxOptions with a non-empty projectId");
+		}
+	}
 
 	// ── Public API ─────────────────────────────────────────────────────
 

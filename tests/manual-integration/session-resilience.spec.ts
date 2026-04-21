@@ -46,7 +46,11 @@ const HAS_DOCKER = hasDocker();
 interface GW {
 	proc: ChildProcess; port: number; dir: string;
 	token: string; base: string;
+	defaultProjectId?: string;
 }
+
+/** Endpoints that now require a projectId post-eliminate-default-project. */
+const PROJECT_REQUIRED_POST = new Set(["/api/sessions", "/api/goals", "/api/staff"]);
 
 async function freePort(): Promise<number> {
 	return new Promise((res, rej) => {
@@ -103,6 +107,16 @@ async function stopGW(gw: GW): Promise<void> {
 // API helpers (read-only queries + session creation with flags not in UI)
 // ---------------------------------------------------------------------------
 function api(gw: GW, path: string, opts: RequestInit = {}) {
+	// Auto-inject projectId for endpoints that now require it (eliminate-default-project).
+	if ((opts.method || "GET").toUpperCase() === "POST" && PROJECT_REQUIRED_POST.has(path) && gw.defaultProjectId) {
+		try {
+			const body = typeof opts.body === "string" && opts.body ? JSON.parse(opts.body) : {};
+			if (body && typeof body === "object" && !body.projectId) {
+				body.projectId = gw.defaultProjectId;
+				opts = { ...opts, body: JSON.stringify(body) };
+			}
+		} catch { /* non-JSON body — leave alone */ }
+	}
 	return fetch(`${gw.base}${path}`, { ...opts, headers: { "Content-Type": "application/json", Authorization: `Bearer ${gw.token}`, ...(opts.headers as Record<string, string> || {}) } });
 }
 
@@ -270,10 +284,25 @@ async function createGoalViaBrowser(
 	// Wait for sidebar to fully load
 	await page.waitForSelector("button", { timeout: 15_000 });
 
-	// Click "New Goal" — opens goal assistant with the form panel on the right
-	const newGoalBtn = page.locator("button[title*='New goal']").first();
-	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-	await newGoalBtn.click();
+	// Click "New Goal". Prefer the per-project "+ goal" button (title `New goal in <name>`) —
+	// unambiguous in multi-project installs. Fall back to toolbar "+ New Goal" + picker for
+	// single-project runs where the per-project button may not exist.
+	const perProjectBtn = page.locator("button[title^='New goal in']").first();
+	if (await perProjectBtn.count() > 0) {
+		await expect(perProjectBtn).toBeVisible({ timeout: 10_000 });
+		await perProjectBtn.click();
+	} else {
+		const toolbarBtn = page.locator("button[title='New goal (Alt+G)']").first();
+		await expect(toolbarBtn).toBeVisible({ timeout: 10_000 });
+		await toolbarBtn.click();
+		// If the project-picker popover opened (multi-project install), pick the first project.
+		const popover = page.locator("project-picker-popover");
+		if (await popover.count() > 0) {
+			const firstRow = popover.locator(".bobbit-project-picker-row").first();
+			await expect(firstRow).toBeVisible({ timeout: 5_000 });
+			await firstRow.click();
+		}
+	}
 
 	// Wait for the goal assistant form to render (title input + Create Goal button)
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
@@ -520,11 +549,21 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			HAS_DOCKER ? 'sandbox: "docker"' : "",
 		].filter(Boolean).join("\n") + "\n";
 		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), yaml);
-		// Create empty projects.json so the gateway auto-registers the default project
+		// Start with empty projects.json — server no longer auto-registers a default.
 		writeFileSync(join(dir, ".bobbit", "state", "projects.json"), "[]");
 
 		gw = await startGW(dir, port);
 		console.log(`  Gateway :${port}  cwd=${dir}  docker=${HAS_DOCKER}`);
+
+		// Register a project at the gateway cwd — replaces the old auto-registration.
+		const regRes = await api(gw, "/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "default", rootPath: dir, upsert: true }),
+		});
+		if (regRes.status !== 201 && regRes.status !== 200) {
+			throw new Error(`Failed to register default project: ${regRes.status}`);
+		}
+		gw.defaultProjectId = (await regRes.json()).id;
 
 		if (HAS_DOCKER) {
 			const ss = await (await api(gw, "/api/sandbox-status")).json();

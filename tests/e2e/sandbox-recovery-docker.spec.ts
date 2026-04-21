@@ -20,6 +20,7 @@ import {
 	connectWs,
 	waitForSessionStatus,
 	agentEndPredicate,
+	defaultProjectId,
 } from "./e2e-setup.js";
 
 function isDockerAvailable(): boolean {
@@ -62,9 +63,9 @@ test.describe("sandbox container recovery", () => {
 		expect(configResp.status).toBe(200);
 
 		// 3. Initialize sandbox for the default project
-		const projectId = (sm as any).pcm?.getDefaultProjectId?.() || "default";
+		const projectId = await defaultProjectId();
 		try {
-			await sandboxManager.initForProject(projectId);
+			await sandboxManager.ensureForProject(projectId);
 		} catch (err) {
 			// If init fails (e.g., no git remote configured for sandbox), skip
 			test.skip();
@@ -147,9 +148,9 @@ test.describe("sandbox container recovery", () => {
 			body: JSON.stringify({ sandbox: "docker" }),
 		});
 
-		const projectId = (sm as any).pcm?.getDefaultProjectId?.() || "default";
+		const projectId = await defaultProjectId();
 		try {
-			await sandboxManager.initForProject(projectId);
+			await sandboxManager.ensureForProject(projectId);
 		} catch {
 			test.skip();
 			return;
@@ -247,9 +248,9 @@ test.describe("sandbox container recovery", () => {
 			body: JSON.stringify({ sandbox: "docker" }),
 		});
 
-		const projectId = (sm as any).pcm?.getDefaultProjectId?.() || "default";
+		const projectId = await defaultProjectId();
 		try {
-			await sandboxManager.initForProject(projectId);
+			await sandboxManager.ensureForProject(projectId);
 		} catch { test.skip(); return; }
 
 		const sandbox = sandboxManager.get(projectId);
@@ -344,9 +345,9 @@ test.describe("sandbox container recovery", () => {
 			body: JSON.stringify({ sandbox: "docker" }),
 		});
 
-		const projectId = (sm as any).pcm?.getDefaultProjectId?.() || "default";
+		const projectId = await defaultProjectId();
 		try {
-			await sandboxManager.initForProject(projectId);
+			await sandboxManager.ensureForProject(projectId);
 		} catch { test.skip(); return; }
 
 		const sandbox = sandboxManager.get(projectId);
@@ -431,9 +432,10 @@ test.describe("BgProcess Sandbox Guard (Docker)", () => {
 		test.skip(!isDockerAvailable(), "Docker not available");
 
 		// Create a normal session
+		const projectId = await defaultProjectId();
 		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ cwd: nonGitCwd() }),
+			body: JSON.stringify({ cwd: nonGitCwd(), projectId }),
 		});
 		expect(res.status).toBe(201);
 		const { id } = await res.json();
