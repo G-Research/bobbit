@@ -68,6 +68,11 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Pre-create subdirectories that the server writes into. Under heavy
+		// parallel load on Windows, concurrent first-use of these dirs races
+		// with scaffolding and produces spurious ENOENT — creating them up
+		// front makes the server's writes idempotent.
+		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 		// Seed projects.json. The server no longer auto-registers a default project;
 		// we register one via REST after startup (see below) so existing tests keep working.
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");

@@ -95,9 +95,29 @@ export function gitCwd(): string {
 	return _gitCwd;
 }
 
-/** Read the auth token that the test server auto-created on startup. */
+/**
+ * Read the auth token that the test server auto-created on startup.
+ *
+ * Retries briefly on ENOENT because Windows filesystem under heavy parallel
+ * load occasionally returns ENOENT for files that exist — the token is
+ * written once per worker by the gateway fixture and then never removed
+ * until worker teardown, so any ENOENT mid-run is spurious.
+ */
 export function readE2EToken(): string {
-	return readFileSync(join(bobbitDir(), "state", "token"), "utf-8").trim();
+	const p = join(bobbitDir(), "state", "token");
+	let lastErr: unknown;
+	for (let attempt = 0; attempt < 10; attempt++) {
+		try {
+			return readFileSync(p, "utf-8").trim();
+		} catch (err: any) {
+			lastErr = err;
+			if (err?.code !== "ENOENT") throw err;
+			// Busy-wait briefly — 10×50ms = 500ms worst case.
+			const until = Date.now() + 50;
+			while (Date.now() < until) { /* spin */ }
+		}
+	}
+	throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 // ---------------------------------------------------------------------------
