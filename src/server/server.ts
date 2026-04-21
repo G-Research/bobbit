@@ -5180,24 +5180,39 @@ async function handleApiRoute(
 			invalidateGitStatusCache(cwd, cid);
 		}
 
-		try {
-			const result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
-			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-
-			json(result);
-
-			// Auto-push: for feature branches with unpushed commits, push in background
-			if (!shouldSkipRemotePush()) {
-				if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
-					execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
-				} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-					// Session branches without upstream: set up tracking and push
-					execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
-				}
+		// Belt-and-braces: even with spawn-level retry inside runBatchGitStatus,
+		// rare transient errors (e.g. fs contention, git index lock) can still
+		// surface. Retry the whole cached call once after 250ms before returning
+		// 500 — errors are not cached so a second call will re-run fresh.
+		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
+		let handlerErr: any;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
+				handlerErr = undefined;
+				break;
+			} catch (err: any) {
+				handlerErr = err;
+				if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
 			}
-		} catch (err: any) {
-			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
-			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
+		}
+		if (handlerErr) {
+			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", handlerErr?.code, "signal=", handlerErr?.signal, "killed=", handlerErr?.killed, "stderr=", handlerErr?.stderr, "message=", handlerErr?.message);
+			json({ error: handlerErr.stderr?.trim() || handlerErr.message || "git status failed" }, 500);
+			return;
+		}
+		if (!result) { json({ error: "Not a git repository" }, 400); return; }
+
+		json(result);
+
+		// Auto-push: for feature branches with unpushed commits, push in background
+		if (!shouldSkipRemotePush()) {
+			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
+				execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
+				// Session branches without upstream: set up tracking and push
+				execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			}
 		}
 		return;
 	}

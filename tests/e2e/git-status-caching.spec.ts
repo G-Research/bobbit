@@ -99,6 +99,21 @@ test.describe("git-status server cache + single-flight", () => {
 		serverModule.__resetGitStatusInvocationCount();
 	});
 
+	// Helper: fetch git-status and, if the server returns 500 (transient spawn
+	// failure under CI load), log the failure body so we can see what's
+	// happening. The real client has its own retry loop for 500s — but these
+	// tests need deterministic invocation-count assertions, so we surface the
+	// body and fail loudly rather than silently retrying here.
+	async function statusOrFail(path: string) {
+		const r = await apiFetch(path);
+		if (r.status !== 200) {
+			const body = await r.text().catch(() => "<no body>");
+			throw new Error(`git-status ${path} returned ${r.status}: ${body}`);
+		}
+		return r;
+	}
+	void statusOrFail; // silence unused-var if not referenced below
+
 	test("5 concurrent calls coalesce into 1 underlying git invocation", async () => {
 		const calls = await Promise.all(
 			Array.from({ length: 5 }, () =>
